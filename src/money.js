@@ -24,6 +24,11 @@ export function roundCurrency(amount, currency) {
   return Number((Math.sign(value) * Math.round(units * (1 + Number.EPSILON)) * step).toPrecision(15)) || 0;
 }
 
+/** Return whether `amount` rounds to zero in `currency`'s monetary increment. */
+export function isCurrencyZero(amount, currency) {
+  return roundCurrency(amount, currency) === 0;
+}
+
 /** Decimal digits necessary to display a currency's increment. */
 export function currencyDecimalPlaces(currency) {
   const step = Number(currency?.rounding ?? 0.01);

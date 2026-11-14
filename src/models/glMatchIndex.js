@@ -1,6 +1,6 @@
 // Index and residual/matching-group derivation for general-ledger partial matchings (account.partial.reconcile).
 import { read } from '../orm.js';
-import { findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { sameCommercialPartner } from './common.js';
 
 const DOCUMENT_TYPES = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'];
@@ -67,15 +67,15 @@ export function entryMatchedAmounts(db, move, index) {
     let legacyMatched = 0;
     const account = read(db, 'account.account', line.account_id);
     const isArAp = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
-    if (isArAp && leftCap > 0) {
+    if (isArAp && !isCurrencyZero(leftCap, ownCurrency)) {
       for (const item of legacyRemaining) {
-        if (!(item.left > 0) || !item.accountIds.has(line.account_id)) continue;
+        if (isCurrencyZero(item.left, ownCurrency) || !item.accountIds.has(line.account_id)) continue;
         if (!(item.invoice.partner_id === line.partner_id || sameCommercialPartner(db, item.invoice.partner_id, line.partner_id))) continue;
         const take = Math.min(leftCap, item.left);
         legacyMatched = roundOwn(legacyMatched + take);
         item.left = roundOwn(item.left - take);
         leftCap = roundOwn(leftCap - take);
-        if (leftCap <= 0) break;
+        if (isCurrencyZero(leftCap, ownCurrency)) break;
       }
     }
     return {

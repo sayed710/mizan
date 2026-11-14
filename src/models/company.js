@@ -270,7 +270,7 @@ export function withCompany(models) {
       ...model,
       fields: { ...model.fields, ...link, company_id: { ...companyField, ...model.fields.company_id, ...(sharedScoped.has(name) ? {} : { default: currentCompany }) } },
       defaults: sharedScoped.has(name) ? model.defaults : (id, db) => ({ ...model.defaults?.(id, db), company_id: db ? currentCompany(db) : 1 }),
-      guard: (db, before, r, ctx) => model.guard?.(db, before, r, ctx) ?? checkCompany(db, model.fields, r, r.company_id),
+      guard: (db, before, r, ctx, vals) => model.guard?.(db, before, r, ctx, vals) ?? checkCompany(db, model.fields, r, r.company_id),
     }];
   }));
 }

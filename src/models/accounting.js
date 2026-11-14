@@ -1922,6 +1922,12 @@ export const accountingModels = {
       if (linkedOnlineAccount) {
         if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
         if (after.company_id && after.company_id !== (linkedOnlineAccount.company_id ?? 1)) return 'Cannot change the company of a journal linked to an online account';
+        if (before?.bank_statements_source === 'online_sync' && after.bank_statements_source !== 'online_sync') {
+          return 'Cannot change the bank feeds source of a journal linked to an online account';
+        }
+      }
+      if (after.previous_bank_statements_source != null && after.bank_statements_source !== 'online_sync') {
+        return 'Previous bank feeds source can only be stored while online synchronization is active';
       }
       const checkAccount = (field, label, allowedTypes = null) => {
         if (!after[field]) return null;
@@ -2010,6 +2016,15 @@ export const accountingModels = {
           ['online_sync', 'Online Synchronization'],
         ],
         required: (r) => r?.type === 'bank',
+      },
+      previous_bank_statements_source: {
+        type: 'selection', label: 'Previous Bank Feeds', hidden: true,
+        options: [
+          ['none', 'Not Set'],
+          ['undefined', 'Undefined Yet'],
+          ['file_import', 'Manual (or import CAMT, CSV, JPEG, OFX, PDF, PNG, XLS, XLSX)'],
+          ['online_sync', 'Online Synchronization'],
+        ],
       },
       restrict_mode_hash_table: { type: 'boolean', label: 'Secure Posted Entries with Hash' },
       invoice_reference_type: {

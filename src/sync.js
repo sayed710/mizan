@@ -601,6 +601,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   let growth = 0;
   /** @type {[string, any][]} */
   const changed = [];
+  const submittedByRecord = new Map();
   const requestedGeneratedMoves = new Set();
   // Models that point at other records (guardLast) are validated after those records of the same change set.
   const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[b]?.guardFirst ? 1 : 0) - (models[a]?.guardFirst ? 1 : 0) || (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
@@ -650,6 +651,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       if (position.has(rec.id)) list[position.get(rec.id)] = rec;
       else position.set(rec.id, list.push(rec) - 1);
       changed.push([model, rec]);
+      submittedByRecord.set(`${model}:${rec.id}`, submitted);
     }
     records = { ...records, [model]: list.sort((a, b) => a.id - b.id) };
   }
@@ -763,7 +765,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec, seen, !before, before) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets });
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets }, submittedByRecord.get(`${model}:${rec.id}`));
     if (err) throw new Error(err);
     if (model === 'account.move') {
       const generated = generatedMoves.has(rec.id);

@@ -1542,6 +1542,31 @@ MIGRATIONS.push({ version: 53, name: 'qodo-117-upgrade-fixes', up(db) {
     : next;
 } });
 
+// v54: backfill explicit previous_bank_statements_source on journals already using online_sync
+MIGRATIONS.push({ version: 54, name: 'online-sync-previous-bank-source', up: (db) => {
+  const journals = db?.records?.['account.journal'];
+  if (!Array.isArray(journals)) return db;
+  let changed = false;
+  const nextJournals = journals.map((journal) => {
+    if (!journal) return journal;
+    if (journal.bank_statements_source === 'online_sync' && !journal.previous_bank_statements_source) {
+      changed = true;
+      return {
+        ...journal,
+        previous_bank_statements_source: journal.type === 'bank' ? 'undefined' : 'none',
+      };
+    }
+    if (journal.bank_statements_source !== 'online_sync' && journal.previous_bank_statements_source) {
+      changed = true;
+      return { ...journal, previous_bank_statements_source: null };
+    }
+    return journal;
+  });
+  return changed
+    ? { ...db, records: { ...db.records, 'account.journal': nextJournals } }
+    : db;
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

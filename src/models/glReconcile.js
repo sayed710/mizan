@@ -1,6 +1,6 @@
 // General-ledger reconciliation: account.partial.reconcile model, FIFO matching, write-off, and non-reversing unreconcile.
 import { create, read, write } from '../orm.js';
-import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { sameCommercialPartner, today, validDate } from './common.js';
 import {
   installmentSettlementState,
@@ -60,11 +60,11 @@ function partialReconcileStructureError(db, rec) {
   const roundOwn = (v) => (ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   const debitBal = roundOwn((Number(debitLine.debit) || 0) - (Number(debitLine.credit) || 0));
   const creditBal = roundOwn((Number(creditLine.credit) || 0) - (Number(creditLine.debit) || 0));
-  if (!(debitBal > 0) || !(creditBal > 0)) {
+  if (!(debitBal > 0) || isCurrencyZero(debitBal, ownCurrency) || !(creditBal > 0) || isCurrencyZero(creditBal, ownCurrency)) {
     return 'Partial reconciliation requires a debit balance on the debit line and a credit balance on the credit line';
   }
   const amount = Number(rec.amount);
-  if (!Number.isFinite(amount) || !(roundOwn(amount) > 0)) {
+  if (!Number.isFinite(amount) || !(roundOwn(amount) > 0) || isCurrencyZero(amount, ownCurrency)) {
     return 'Partial reconciliation amount must be greater than zero';
   }
   if (!validDate(rec.date)) return 'Partial reconciliation requires a valid date';
@@ -252,8 +252,8 @@ function delegatesToJournalItems(db, items) {
 }
 
 /** Validate write-off parameters and return resolved journal, account, date, label, and partner. */
-function validateWriteoffOptions(db, writeoff, { companyId, accountId, net, step, groupPartnerId, defaultDate }) {
-  if (Math.abs(net) <= step) throw new Error('Selected items already net to zero; no write-off is needed');
+function validateWriteoffOptions(db, writeoff, { companyId, accountId, net, ownCurrency, groupPartnerId, defaultDate }) {
+  if (isCurrencyZero(net, ownCurrency)) throw new Error('Selected items already net to zero; no write-off is needed');
   const woDate = writeoff.date || defaultDate;
   if (!validDate(woDate)) throw new Error('Enter a valid write-off date');
   const companyLock = recordLockDate(db, { company_id: companyId, date: woDate, invoice_date: woDate });
@@ -291,7 +291,6 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
   if (companies.size > 1) throw new Error('Selected journal items must belong to the same company');
   const companyId = [...companies][0];
   const ownCurrency = companyCurrencyRecord(db, companyId);
-  const step = Number(ownCurrency?.rounding ?? 0.01);
   const roundOwn = (v) => (ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
 
   const accounts = new Set(items.map((it) => it.line.account_id));
@@ -299,7 +298,7 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
   const account = items[0].account;
   if (!isReconcilableAccount(account)) throw new Error('Selected journal items must be on a reconcilable account');
 
-  if (items.some((it) => it.reconciledLine?.reconciled === true || Math.abs(Number(it.reconciledLine?.amount_residual) || 0) <= step)) {
+  if (items.some((it) => it.reconciledLine?.reconciled === true || isCurrencyZero(Number(it.reconciledLine?.amount_residual) || 0, ownCurrency))) {
     throw new Error('Selected journal items must not already be fully reconciled');
   }
 
@@ -338,14 +337,20 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
       companyId,
       accountId: account.id,
       net,
-      step,
+      ownCurrency,
       groupPartnerId,
       defaultDate: date,
     });
   } else {
     if (items.length < 2) throw new Error('Select at least two journal items to reconcile');
-    const hasDebit = items.some((it) => Number(it.reconciledLine.amount_residual) > step);
-    const hasCredit = items.some((it) => Number(it.reconciledLine.amount_residual) < -step);
+    const hasDebit = items.some((it) => {
+      const r = Number(it.reconciledLine.amount_residual) || 0;
+      return r > 0 && !isCurrencyZero(r, ownCurrency);
+    });
+    const hasCredit = items.some((it) => {
+      const r = Number(it.reconciledLine.amount_residual) || 0;
+      return r < 0 && !isCurrencyZero(r, ownCurrency);
+    });
     if (!hasDebit || !hasCredit) throw new Error('Select at least one debit item and one credit item to reconcile');
   }
 
@@ -354,10 +359,10 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
     const num = Number(amount);
     if (!Number.isFinite(num) || !(num > 0)) throw new Error('The applied amount must be a positive number');
     requestedAmount = roundOwn(num);
-    if (!(requestedAmount > 0)) throw new Error('The applied amount must be a positive number');
+    if (!(requestedAmount > 0) || isCurrencyZero(requestedAmount, ownCurrency)) throw new Error('The applied amount must be a positive number');
   }
 
-  return { companyId, step, roundOwn, account, net, groupPartnerId, validatedWriteoff, requestedAmount };
+  return { companyId, ownCurrency, roundOwn, account, net, groupPartnerId, validatedWriteoff, requestedAmount };
 }
 
 /** Post the balancing write-off journal entry and append its counterpart item to the working selection. */
@@ -414,13 +419,19 @@ function settleDocumentSide(db, docItem, otherItem, { matchAmt, pairDate, partia
 }
 
 /** Match debits against credits oldest first, creating `account.partial.reconcile` links and document settlements. */
-function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate, requestedAmount, step, roundOwn }) {
+function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate, requestedAmount, ownCurrency, roundOwn }) {
   const debits = workingItems
-    .filter((it) => Number(it.reconciledLine.amount_residual) > step)
+    .filter((it) => {
+      const r = Number(it.reconciledLine.amount_residual) || 0;
+      return r > 0 && !isCurrencyZero(r, ownCurrency);
+    })
     .map((it) => ({ ...it, remaining: roundOwn(Number(it.reconciledLine.amount_residual)) }))
     .sort(compareOldestFirst);
   const credits = workingItems
-    .filter((it) => Number(it.reconciledLine.amount_residual) < -step)
+    .filter((it) => {
+      const r = Number(it.reconciledLine.amount_residual) || 0;
+      return r < 0 && !isCurrencyZero(r, ownCurrency);
+    })
     .map((it) => ({ ...it, remaining: roundOwn(-Number(it.reconciledLine.amount_residual)) }))
     .sort(compareOldestFirst);
 
@@ -433,11 +444,11 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
   let ci = 0;
   let budget = requestedAmount;
   while (di < debits.length && ci < credits.length) {
-    if (budget != null && budget <= step) break;
+    if (budget != null && (budget <= 0 || isCurrencyZero(budget, ownCurrency))) break;
     const d = debits[di];
     const c = credits[ci];
     const matchAmt = roundOwn(Math.min(d.remaining, c.remaining, ...(budget != null ? [budget] : [])));
-    if (matchAmt > step / 10) {
+    if (matchAmt > 0 && !isCurrencyZero(matchAmt, ownCurrency)) {
       const pairDate = [matchDate, d.moveDate, c.moveDate].sort().at(-1);
       const created = create(next, 'account.partial.reconcile', {
         debit_move_id: d.move.id,
@@ -457,8 +468,8 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
       c.remaining = roundOwn(c.remaining - matchAmt);
       if (budget != null) budget = roundOwn(budget - matchAmt);
     }
-    if (d.remaining <= step) di += 1;
-    if (c.remaining <= step) ci += 1;
+    if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency)) di += 1;
+    if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency)) ci += 1;
   }
   return next;
 }

@@ -4,7 +4,7 @@ import { create, read, search } from '../orm.js';
 import { amounts, appliedCashRounding, companyRoundingMethod, nextName, shiftMonth, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
-import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { discountTaxComputation, earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
@@ -1028,7 +1028,6 @@ function computeReconciledItems(db, move, index) {
   // Targeted installment rows settle their specific line; untargeted payments settle earliest due date first.
   const { docResidual, docLineTotal, remainingByIndex, fullyReconciledByIndex } = installmentSettlementState(db, move);
   const entryMatched = !document && posted ? entryMatchedAmounts(db, move, index) : [];
-  const step = Number(ownCurrency?.rounding ?? 0.01);
   const roundOwn = (v) => cleanSignedZero(ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   /** Scale a line's residuals by the share still open, rounded in each amount's own currency. */
   const scaleResidual = (line, residual, residualCurrency, ratio) => {
@@ -1056,14 +1055,20 @@ function computeReconciledItems(db, move, index) {
             && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
             && (row.reversed || !payment?.unapplied));
         } else if (matchedInfo?.hasAnyLink) {
-          reconciled = matchedInfo.absBal > 1e-9 && matchedInfo.matchedTotal >= matchedInfo.absBal - step;
+          reconciled = !isCurrencyZero(matchedInfo.absBal, ownCurrency)
+            && (matchedInfo.matchedTotal >= matchedInfo.absBal || isCurrencyZero(matchedInfo.absBal - matchedInfo.matchedTotal, ownCurrency));
         }
       } else if (account?.reconcile === true && !document && matchedInfo?.hasAnyLink) {
-        reconciled = matchedInfo.absBal > 1e-9 && matchedInfo.matchedTotal >= matchedInfo.absBal - step;
+        reconciled = !isCurrencyZero(matchedInfo.absBal, ownCurrency)
+          && (matchedInfo.matchedTotal >= matchedInfo.absBal || isCurrencyZero(matchedInfo.absBal - matchedInfo.matchedTotal, ownCurrency));
       }
       if (payment?.outstanding_account_id === line.account_id) {
         reconciled = matchedPaymentMoves.has(move.id)
-          || Boolean(matchedInfo?.hasAnyLink && matchedInfo.absBal > 1e-9 && matchedInfo.matchedTotal >= matchedInfo.absBal - step);
+          || Boolean(
+            matchedInfo?.hasAnyLink
+            && !isCurrencyZero(matchedInfo.absBal, ownCurrency)
+            && (matchedInfo.matchedTotal >= matchedInfo.absBal || isCurrencyZero(matchedInfo.absBal - matchedInfo.matchedTotal, ownCurrency))
+          );
       }
       if ((settledSuspense.get(move.id) ?? []).includes(line.account_id)) reconciled = true;
     }

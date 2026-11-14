@@ -58,9 +58,9 @@ export function withLocks(models) {
     if (!locked) return [name, model];
     return [name, {
       ...model,
-      guard: (db, before, r, ctx) => {
+      guard: (db, before, r, ctx, vals) => {
         // The model's own rule speaks first (it gives the more specific message, e.g. "Reopen the fiscal year…").
-        const own = model.guard?.(db, before, r, ctx);
+        const own = model.guard?.(db, before, r, ctx, vals);
         if (own) return own;
         // Enforced for non-admin users on the server (applyDiff passes ctx); administrators may correct records.
         if (ctx?.isAdmin !== false || !before || !locked(before, db)) return null;

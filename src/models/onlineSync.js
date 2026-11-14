@@ -92,7 +92,10 @@ export function journalStatementBalance(db, journalId) {
 }
 
 /** Validate an `account.online.account` record against its connection, company, journal type, and 1-to-1 uniqueness. */
-export function onlineAccountGuard(db, _before, after) {
+export function onlineAccountGuard(db, before, after) {
+  if (before && after.link_id !== before.link_id) {
+    return 'Online account cannot be moved to another connection';
+  }
   const link = after.link_id ? read(db, LINK_MODEL, after.link_id) : null;
   if (!link) return 'Select an existing online connection';
   const companyId = after.company_id ?? link.company_id ?? 1;
@@ -110,19 +113,36 @@ export function onlineAccountGuard(db, _before, after) {
   return null;
 }
 
+/** Resolve the `bank_statements_source` value to restore when the last online account leaves `journal`. */
+function restoredJournalStatementSource(journal) {
+  const prev = journal.previous_bank_statements_source;
+  if (prev === 'none' || !prev) return journal.type === 'bank' ? 'undefined' : undefined;
+  return prev;
+}
+
 /** Keep `journal.bank_statements_source` synchronized with an online account link write/create/unlink. */
 function syncJournalStatementSource(db, before, after) {
   let next = db;
-  if (before?.journal_id && before.journal_id !== after?.journal_id) {
+  const leavingBeforeJournal = before?.journal_id
+    && before.active !== false
+    && (before.journal_id !== after?.journal_id || after?.active === false);
+  if (leavingBeforeJournal) {
     const prevJournal = read(next, 'account.journal', before.journal_id);
     if (prevJournal && prevJournal.bank_statements_source === 'online_sync' && !onlineAccountForJournal(next, before.journal_id)) {
-      next = write(next, 'account.journal', before.journal_id, { bank_statements_source: 'undefined' });
+      next = write(next, 'account.journal', before.journal_id, {
+        bank_statements_source: restoredJournalStatementSource(prevJournal),
+        previous_bank_statements_source: null,
+      });
     }
   }
   if (after?.journal_id && after.active !== false) {
     const journal = read(next, 'account.journal', after.journal_id);
-    if (journal && journal.bank_statements_source !== 'online_sync') {
-      next = write(next, 'account.journal', after.journal_id, { bank_statements_source: 'online_sync' });
+    const newlyLinked = !before || before.journal_id !== after.journal_id || before.active === false;
+    if (journal && (journal.bank_statements_source !== 'online_sync' || (newlyLinked && !journal.previous_bank_statements_source))) {
+      next = write(next, 'account.journal', after.journal_id, {
+        previous_bank_statements_source: journal.previous_bank_statements_source ?? (journal.bank_statements_source || 'none'),
+        bank_statements_source: 'online_sync',
+      });
     }
   }
   return next;
@@ -145,10 +165,33 @@ const stripAccountIdsField = (db, linkId) => ({
   },
 });
 
+/** Validate that inline `account_ids` rows only reference existing `account.online.account` IDs owned by `linkId`. */
+function linkAccountLinesError(db, linkId, accountLines) {
+  if (accountLines == null) return null;
+  if (!Array.isArray(accountLines)) return 'Invalid online accounts payload';
+  const existingIds = new Set(
+    (db.records?.[ACCOUNT_MODEL] ?? []).filter((a) => a.link_id === linkId).map((a) => a.id),
+  );
+  const seenIds = new Set();
+  for (const line of accountLines) {
+    if (!line || typeof line !== 'object' || Array.isArray(line)) return 'Invalid online account row';
+    if (line.id != null && line.id !== '' && line.id !== false) {
+      if (!Number.isInteger(line.id) || line.id < 1 || !existingIds.has(line.id)) {
+        return 'Online account does not belong to this connection';
+      }
+      if (seenIds.has(line.id)) return 'Duplicate online account in connection';
+      seenIds.add(line.id);
+    }
+  }
+  return null;
+}
+
 /** Synchronize `account.online.account` child records when editing `account_ids` on an `account.online.link` form. */
 function syncLinkAccounts(db, link, accountLines) {
   let next = stripAccountIdsField(db, link.id);
   if (!Array.isArray(accountLines)) return next;
+  const err = linkAccountLinesError(next, link.id, accountLines);
+  if (err) throw new Error(err);
   const existing = (next.records?.[ACCOUNT_MODEL] ?? []).filter((a) => a.link_id === link.id);
   const keepIds = new Set(accountLines.map((l) => l.id).filter(Boolean));
   const removeIds = existing.filter((a) => !keepIds.has(a.id)).map((a) => a.id);
@@ -170,11 +213,14 @@ function linkGuard(db, before, after, _ctx, vals) {
   if (!after.provider || !hasOnlineSyncProvider(after.provider)) {
     return 'Unknown online synchronization provider';
   }
-  if (Array.isArray(vals?.account_ids)) {
+  const accountLines = vals && Object.hasOwn(vals, 'account_ids') ? vals.account_ids : after?.account_ids;
+  const linesErr = linkAccountLinesError(db, after.id, accountLines);
+  if (linesErr) return linesErr;
+  if (Array.isArray(accountLines)) {
     const companyId = after.company_id ?? 1;
     const seenJournals = new Set();
     const otherAccounts = (db.records?.[ACCOUNT_MODEL] ?? []).filter((a) => a.link_id !== after.id && a.active !== false);
-    for (const line of vals.account_ids) {
+    for (const line of accountLines) {
       if (line.journal_id) {
         if (seenJournals.has(line.journal_id)) return 'This journal is already linked to another online account';
         seenJournals.add(line.journal_id);
