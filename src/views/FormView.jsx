@@ -655,6 +655,7 @@ export function FormView({ leaf, id, base, params }) {
                         {model === 'account.return' && activeTab.label === 'Tax Report' ? (
                           <TaxReportTable
                             db={db}
+                            returnRecord={current}
                             period={{
                               from: current.date_from,
                               to: current.date_to,

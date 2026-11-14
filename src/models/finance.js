@@ -1327,6 +1327,13 @@ const reminderSource = (f) => ({ model: 'account.move', id: f.invoices[0].id, co
 /**
  * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
  * invoice is logged on the contact once (the contact remembers the last level sent).
+ *
+ * Mail transport contract for `deliver(message)`:
+ * - Resolves to `{ status: 'sent' }` on delivery.
+ * - Resolves to `{ status: 'outbox_only', reason }` when automatic mail is unconfigured (reminder stays unsent).
+ * - Rejects/throws on delivery failure.
+ * - Legacy void/`Array.prototype.push` callbacks returning `undefined` or a non-negative integer count are accepted as sent.
+ * - Any other return value is treated as a failure (`delivery_state: 'failed'`) and never marked sent.
  */
 export function partnerFollowUp(partner, companyId = 1) {
   if (!partner) return null;
@@ -1417,7 +1424,10 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
     const detail = `${levelName}: ${summaryAmount} ${dueWord} — ${invoices}. ${level?.message ?? ''}`.trim();
     const channelText = channel ? `sent by ${channel}` : 'processed';
     const noteBody = `Payment reminder ${channelText}${level ? ` (${levelName})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
-    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
+    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part), {
+      ...(channel ? { delivery_channel: channel } : {}),
+      delivery_state: 'sent',
+    });
     nextDb = ensureFollowUpActivity(nextDb, partnerId, part, level, at);
 
     const partner = read(nextDb, 'res.partner', partnerId);
@@ -1446,6 +1456,13 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
 /**
  * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
  * invoice is logged on the contact once (the contact remembers the last level sent).
+ *
+ * Mail transport contract for `deliver(message)`:
+ * - Resolves to `{ status: 'sent' }` on delivery.
+ * - Resolves to `{ status: 'outbox_only', reason }` when automatic mail is unconfigured (reminder stays unsent).
+ * - Rejects/throws on delivery failure.
+ * - Legacy void/`Array.prototype.push` callbacks returning `undefined` or a non-negative integer count are accepted as sent.
+ * - Any other return value is treated as a failure (`delivery_state: 'failed'`) and never marked sent.
  */
 export function runFollowUps(db, at = today(), deliver = null) {
   const levels = search(db, 'account.followup.level').sort((a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0));
@@ -1499,12 +1516,18 @@ export function runFollowUps(db, at = today(), deliver = null) {
     if (!canDeliverEmail && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
 
     const dueWord = f.upcoming || (f.oldest && f.oldest >= at) ? 'due' : 'overdue';
-    const recordFailure = (reason) => {
+    const recordFailure = (reason, meta = { delivery_state: 'outbox_only', delivery_error: reason }) => {
       nextDb = ensureFollowUpActivity(nextDb, partner.id, f, level, at);
       const deliveryState = channel ? 'not_sent' : 'not_configured';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
-      nextDb = postNote(nextDb, 'res.partner', partner.id,
-        `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
+      nextDb = postNote(
+        nextDb,
+        'res.partner',
+        partner.id,
+        `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${reason} The follow-up level was not advanced.`,
+        reminderSource(f),
+        { ...(channel ? { delivery_channel: channel } : {}), ...meta },
+      );
       const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
       const updated = updatePartnerFollowUp(current, companyId, {
         followup_date: at,
@@ -1519,12 +1542,31 @@ export function runFollowUps(db, at = today(), deliver = null) {
       const message = { to: partner.email.trim(), subject: levelName, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
       // Validate the bookkeeping before attempting an irreversible delivery.
       const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
+      /** Interpret mail-transport outcome strictly per the single delivery contract. */
+      const settleDelivery = (result) => {
+        if (result === undefined || (typeof result === 'number' && Number.isInteger(result) && result >= 0)) return sent;
+        if (result && typeof result === 'object') {
+          if (result.status === 'sent') return sent;
+          if (result.status === 'outbox_only' && typeof result.reason === 'string' && result.reason.trim()) {
+            const reason = result.reason.trim();
+            return recordFailure(reason, { delivery_state: 'outbox_only', delivery_error: reason });
+          }
+        }
+        const msg = 'Mail transport returned an invalid delivery result';
+        return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+      };
       try {
         const result = deliver(message);
-        if (result && typeof result.then === 'function') return result.then(() => sent, (error) => recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`));
-        return sent;
+        if (result && typeof result.then === 'function') {
+          return result.then(settleDelivery, (error) => {
+            const msg = error?.message ?? String(error);
+            return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+          });
+        }
+        return settleDelivery(result);
       } catch (error) {
-        return recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`);
+        const msg = error?.message ?? String(error);
+        return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
       }
     }
     if (!channel && level.create_activity) {

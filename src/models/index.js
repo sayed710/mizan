@@ -753,9 +753,11 @@ export const leavesOf = (app) => {
 };
 
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
-/** Accounting, HR and company records: only an app that shows them in its menus may change them. */
+/** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
-  'account.bank.statement.line', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+  'account.bank.statement.line', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+/** Protected models without their own menu, explicitly owned by an app. */
+const OWNED_PROTECTED = { accounting: ['payment.transaction'] };
 const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
 /** Private employee fields, and the menu models whose users may see them. */
 const PRIVATE_FIELDS = {
@@ -788,7 +790,8 @@ export function menuModelsForApps(appIds) {
 /** Models a user restricted to `appIds` may write: the readable ones, minus accounting, HR and company records their apps don't show. */
 export function writableModelsForApps(appIds) {
   const base = menuModelsForApps(appIds);
-  return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || !PROTECTED.includes(m)));
+  const owned = new Set(appIds.flatMap((id) => OWNED_PROTECTED[id] ?? []));
+  return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || owned.has(m) || !PROTECTED.includes(m)));
 }
 
 /** `db` without the private employee fields the apps in `appIds` may not see. */
@@ -809,6 +812,7 @@ export function modelsForApps(appIds) {
   const out = new Set(base);
   // Barcode counts update located stock through the same quantity path as inventory operations.
   if (appIds.includes('barcode')) out.add('stock.quant');
+  for (const id of appIds) for (const m of OWNED_PROTECTED[id] ?? []) out.add(m);
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {
       if (f.relation) out.add(f.relation);

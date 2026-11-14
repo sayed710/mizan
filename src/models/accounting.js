@@ -1355,6 +1355,7 @@ function registerPayment(db, r, values = {}) {
   return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id }) };
 }
 
+export { registerPayment };
 export { isOutstandingCreditFor, isOutstandingCreditNoteFor, outstandingCreditNotes, outstandingCredits, outstandingPaymentCredits };
 
 /** A posted payment with unapplied credit that can settle `r`: same company, same commercial partner, matching direction. */
@@ -1719,16 +1720,17 @@ export const purchaseInvoiceView = {
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
+    auditDelete: true,
     fields: {
-      code: { type: 'char', label: 'Code', required: true },
-      name: { type: 'char', label: 'Account Name', required: true },
+      code: { type: 'char', label: 'Code', required: true, tracking: true },
+      name: { type: 'char', label: 'Account Name', required: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
-      account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES },
-      tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
-      fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category' },
+      account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES, tracking: true },
+      tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', tracking: true, domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
+      fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category', tracking: true },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
-      reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
-      active: { type: 'boolean', label: 'Active' },
+      reconcile: { type: 'boolean', label: 'Allow Reconciliation', tracking: true },
+      active: { type: 'boolean', label: 'Active', tracking: true },
       is_deferred: {
         type: 'boolean',
         label: 'Deferred',
@@ -2022,6 +2024,7 @@ export const accountingModels = {
 
   'account.move': {
     label: 'Invoices',
+    auditDelete: true,
     actions: { postAutoPostMoves },
     guard: (db, before, after, ctx) => {
       const roundingTarget = (m) => ({ id: m.invoice_cash_rounding_id, companyId: m.company_id ?? 1, currencyId: m.currency_id ?? findCompanyCurrencyRecord(db, m.company_id ?? 1)?.id });
@@ -2091,25 +2094,26 @@ export const accountingModels = {
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
     },
     fields: {
-      name: { type: 'char', label: 'Number', readonly: true },
+      name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
       journal_id: {
         type: 'many2one',
         relation: 'account.journal',
         label: 'Journal',
+        tracking: true,
         domain: (j, r, db) => (!j.company_id || j.company_id === (r?.company_id ?? db?.settings?.current_company_id ?? 1)) && (r?.move_type === 'entry' ? true : isPurchase(r) ? j.type === 'purchase' : j.type === 'sale'),
       },
-      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       ref: { type: 'char', label: 'Reference' },
-      date: { type: 'date', label: 'Accounting Date' },
+      date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
-      invoice_date: { type: 'date', label: 'Date' },
-      invoice_date_due: { type: 'date', label: 'Due Date' },
+      invoice_date: { type: 'date', label: 'Date', tracking: true },
+      invoice_date_due: { type: 'date', label: 'Due Date', tracking: true },
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
-      payment_reference: { type: 'char', label: 'Payment Reference' },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      payment_reference: { type: 'char', label: 'Payment Reference', tracking: true },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', tracking: true },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       invoice_cash_rounding_id: {
         type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding',

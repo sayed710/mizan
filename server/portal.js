@@ -4,6 +4,8 @@ import { postNote, read, search, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
 import { documentCurrency, formatCurrency } from '../src/money.js';
 import * as quotePlus from '../src/models/quoteplus.js';
+import { residual } from '../src/models/accounting.js';
+import { createInvoiceCheckout, PAYMENT_ADAPTERS } from '../src/models/paymentAdapter.js';
 import { demoPaymentsAllowed } from './api.js';
 
 const ORDER = 'sale.order';
@@ -72,6 +74,19 @@ body{margin:0;background:#f5f6f7;color:#20252b;font:1rem/1.6 system-ui,sans-seri
 </style></head><body><main>${content}</main></body></html>`;
 const form = (url, action, token, content) => `<form method="post" action="${escape(url.split('?')[0] + '/' + action)}"><input type="hidden" name="access_token" value="${escape(token)}">${content}</form>`;
 
+/** Enabled online payment providers offered for a posted, unpaid customer invoice. */
+function offeredInvoiceProviders(db, invoice, env) {
+  if (!invoice || invoice.state !== 'posted' || invoice.move_type !== 'out_invoice' || !(residual(invoice, db) > 0)) return [];
+  const companyId = invoice.company_id ?? 1;
+  return search(db, 'payment.provider').filter((p) => p.state === 'enabled'
+    && Boolean(PAYMENT_ADAPTERS[p.code])
+    && (!p.company_id || p.company_id === companyId)
+    && (p.code !== 'demo' || demoPaymentsAllowed(env)));
+}
+
+/** Append a `message` query parameter to `back` using `?` or `&` as appropriate. */
+const redirectWithMessage = (back, message) => `${back}${back.includes('?') ? '&' : '?'}message=${encodeURIComponent(message)}`;
+
 function documentPage(db, model, r, url, query, env) {
   const isOrder = model === ORDER;
   const title = isOrder ? r.state === 'sale' ? 'Sales Order' : 'Quotation' : 'Invoice';
@@ -92,6 +107,15 @@ function documentPage(db, model, r, url, query, env) {
     if (r.require_payment && r.payment_state !== 'paid') {
       controls += `<h2>Payment required</h2><p>Prepayment: ${documentMoney(portalPrepaymentAmount(r, db))}</p>`;
       controls += demoPaymentsAllowed(env) ? form(url, 'pay', token, '<p>Demo only: no real money is transferred.</p><button type="submit">Pay with demo provider</button>') : `<p>Pay by bank transfer. ${escape(search(db, 'payment.provider').find((p) => p.code === 'wire' && p.state === 'enabled')?.pending_msg || 'Contact us for bank details and use the document number as your payment reference.')}</p>`;
+    }
+  }
+  if (!isOrder && !printing) {
+    const onlineProviders = offeredInvoiceProviders(db, r, env);
+    if (onlineProviders.length) {
+      const picker = onlineProviders.length === 1
+        ? `<input type="hidden" name="provider_id" value="${onlineProviders[0].id}"><p>Pay online via ${escape(onlineProviders[0].name)}.</p>`
+        : `<label>Payment provider <select name="provider_id">${onlineProviders.map((p) => `<option value="${p.id}">${escape(p.name)}</option>`).join('')}</select></label>`;
+      controls += form(url, 'pay', token, `<h2>Online payment</h2>${picker}<button type="submit">Pay online</button>`);
     }
   }
   return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(compName)} · ${escape(docCurrency)}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${isOrder ? 'Valid until' : 'Due date'}: ${escape(isOrder ? r.validity_date : r.invoice_date_due)}</p>
@@ -152,8 +176,13 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, ca
     if (url.pathname !== '/my' && !url.pathname.startsWith('/my/')) return false;
     if (!['GET', 'POST'].includes(req.method)) return error(res, 405, 'Method not allowed');
     if (req.method === 'GET' && url.pathname === '/my') return send(res, 200, homePage(getDb(), sessionUser(req), urlFor));
-    const route = /^\/my\/(orders|invoices)\/(\d{1,9})(?:\/(sign|pay|option))?$/.exec(url.pathname);
-    if (!route || (req.method === 'GET' && route[3]) || (req.method === 'POST' && (route[1] !== 'orders' || !route[3]))) return error(res, 404, 'Document not found');
+    const route = /^\/my\/(orders|invoices)\/(\d{1,9})(?:\/(sign|pay|option)(?:\/(demo))?)?$/.exec(url.pathname);
+    const isDemoCheckoutLanding = Boolean(route && req.method === 'GET' && route[1] === 'invoices' && route[3] === 'pay' && route[4] === 'demo');
+    const isOrderPost = Boolean(route && req.method === 'POST' && route[1] === 'orders' && route[3] && !route[4]);
+    const isInvoicePayPost = Boolean(route && req.method === 'POST' && route[1] === 'invoices' && route[3] === 'pay' && !route[4]);
+    if (!route || (req.method === 'GET' && route[3] && !isDemoCheckoutLanding) || (req.method === 'POST' && !isOrderPost && !isInvoicePayPost)) {
+      return error(res, 404, 'Document not found');
+    }
     let input = url.searchParams;
     if (req.method === 'POST') {
       if (limited(req, res, 'portalpost')) return true;
@@ -172,7 +201,33 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, ca
       return error(res, 404, 'Document not found');
     }
     const back = urlFor(model, r);
+    if (isDemoCheckoutLanding) {
+      if (!demoPaymentsAllowed(env)) return error(res, 404, 'Document not found');
+      const txRef = url.searchParams.get('reference') ?? '';
+      const tx = txRef ? search(db, 'payment.transaction').find((t) => t.reference === txRef && t.move_id === r.id && t.provider_code === 'demo') : null;
+      if (!tx) return error(res, 404, 'Checkout session not found');
+      return send(res, 200, page(`Demo Payment ${tx.reference}`, `<h1>Demo Payment Checkout</h1><p>Reference: ${escape(tx.reference)}</p><p>Amount: ${escape(tx.amount)}</p><p>Status: ${escape(tx.state)}</p><p><a href="${escape(back)}">Back to invoice</a></p>`));
+    }
     if (req.method === 'GET') return send(res, 200, documentPage(db, model, r, back, url.searchParams, env), url.searchParams.has('download') ? { 'Content-Disposition': `attachment; filename="${paths[model]}-${r.id}.html"` } : {});
+    if (isInvoicePayPost) {
+      try {
+        const rawProviderId = String(input.get('provider_id') ?? '').trim();
+        const providerId = /^\d+$/.test(rawProviderId) ? Number(rawProviderId) : NaN;
+        const selected = Number.isSafeInteger(providerId) ? offeredInvoiceProviders(db, r, env).find((p) => p.id === providerId) : null;
+        if (!selected) throw new Error('Selected payment provider is not available');
+        const checkout = createInvoiceCheckout(db, r.id, selected.id, { returnUrl: back });
+        commitDb(checkout.db, { actor: 'portal' });
+        let location = checkout.redirectUrl;
+        if (location.startsWith('/my/')) {
+          const u = new URL(location, 'http://x');
+          u.searchParams.set('access_token', String(input.get('access_token') ?? ''));
+          location = `${u.pathname}${u.search}`;
+        }
+        return send(res, 303, '', { Location: location });
+      } catch (e) {
+        return send(res, 303, '', { Location: redirectWithMessage(back, e.message) });
+      }
+    }
     let message;
     try {
       const next = route[3] === 'sign' ? portalSignQuote(db, r, { name: input.get('name'), signature: input.get('signature') })
@@ -180,7 +235,7 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, ca
       commitDb(next, { actor: 'portal' });
       message = 'Your quotation has been updated';
     } catch (e) { message = e.message; }
-    return send(res, 303, '', { Location: `${back}&message=${encodeURIComponent(message)}` });
+    return send(res, 303, '', { Location: redirectWithMessage(back, message) });
   };
   return { handle, portalUrl: urlFor };
 }

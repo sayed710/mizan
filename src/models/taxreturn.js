@@ -5,6 +5,7 @@ import { addDays, today } from './common.js';
 import { postPayment } from './pay.js';
 import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
+import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 
 /**
  * Submitting a return raises the company tax lock to its period end; resetting it lowers the lock only when that return set it.
@@ -602,6 +603,7 @@ export const taxReturnModels = {
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Payment', readonly: true },
       payment_ids: { type: 'many2many', relation: 'account.payment', label: 'Payments', readonly: true },
       is_completed: { type: 'boolean', label: 'Completed', readonly: true },
+      tax_return_template: { type: 'selection', label: 'Tax Return Template', options: TAX_RETURN_TEMPLATE_OPTIONS },
       attachment_ids: { type: 'many2many', relation: 'documents.document', label: 'Attachments' },
       audit_status: {
         type: 'selection',
@@ -690,7 +692,7 @@ export const taxReturnModels = {
         ['type_id', 'date_from', 'date_to', 'company_id'],
         ['audit_status', 'date_deadline'],
       ] : [
-        ['type_id', 'date_from', 'date_to', 'company_id', 'tax_unit_id'],
+        ['type_id', 'date_from', 'date_to', 'company_id', 'tax_unit_id', 'tax_return_template'],
         ['date_deadline', 'date_lock', 'date_submission', 'total_amount_to_pay', 'is_completed'],
       ]),
       tabs: (r, db, context) => (auditForm(r, db, context) ? [
