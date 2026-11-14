@@ -4,6 +4,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { documentCurrency, roundCurrency } from '../money.js';
 import { paymentJournal } from './ledger.js';
 import { registerPayment, residual } from './accounting.js';
+import { postPayment } from './pay.js';
 import { today, validDate } from './common.js';
 
 /** Error thrown by webhook signature, payload or settlement validation with an explicit HTTP status and code. */
@@ -206,41 +207,58 @@ export function processPaymentWebhook(db, { providerCode = null, rawBody = null,
   }
 
   const due = residual(move, db);
-  if (!(due > 0)) throw new WebhookError('Invoice is already paid', 400, 'ALREADY_PAID');
-
   const payloadAmount = Number(webhook.amount);
   const expectedAmount = roundCurrency(tx.amount, docCurrency);
-  if (!Number.isFinite(payloadAmount) || roundCurrency(payloadAmount, docCurrency) !== expectedAmount || expectedAmount !== due) {
-    throw new WebhookError('Payment amount does not match the invoice amount due', 400, 'AMOUNT_MISMATCH');
+  if (!Number.isFinite(payloadAmount) || !(expectedAmount > 0) || roundCurrency(payloadAmount, docCurrency) !== expectedAmount) {
+    throw new WebhookError('Payment amount does not match the transaction amount', 400, 'AMOUNT_MISMATCH');
   }
 
   const paymentDate = date ?? (validDate(webhook.date) ? webhook.date : today());
   const provider = read(db, 'payment.provider', tx.provider_id);
   const resolvedJournal = paymentJournal(db, journalId ?? provider?.journal_id ?? null, move.company_id ?? 1);
-  const priorPaymentIds = new Set((db.records['account.payment'] ?? []).map((p) => p.id));
-  const registered = registerPayment(db, move, { amount: expectedAmount, date: paymentDate, journal_id: resolvedJournal.id });
-  const createdPayment = (registered.db.records['account.payment'] ?? []).find(
-    (p) => !priorPaymentIds.has(p.id) && p.state === 'posted' && (p.company_id ?? 1) === (move.company_id ?? 1),
-  );
+  let settledDb;
+  let createdPayment;
+  if (due > 0) {
+    const priorPaymentIds = new Set((db.records['account.payment'] ?? []).map((p) => p.id));
+    settledDb = registerPayment(db, move, { amount: expectedAmount, date: paymentDate, journal_id: resolvedJournal.id }).db;
+    createdPayment = (settledDb.records['account.payment'] ?? []).find(
+      (p) => !priorPaymentIds.has(p.id) && p.state === 'posted' && (p.company_id ?? 1) === (move.company_id ?? 1),
+    );
+  } else {
+    // Invoice already settled: book an unallocated customer credit without auto-allocating to unrelated invoices.
+    const draft = create(db, 'account.payment', {
+      partner_id: move.partner_id,
+      partner_type: 'customer',
+      payment_type: 'inbound',
+      amount: expectedAmount,
+      currency_id: docCurrency.id,
+      date: paymentDate,
+      journal_id: resolvedJournal.id,
+      company_id: move.company_id ?? 1,
+      memo: `${move.name} (${tx.reference})`,
+    });
+    settledDb = postPayment(draft.db, read(draft.db, 'account.payment', draft.id), { autoAllocate: false });
+    const posted = read(settledDb, 'account.payment', draft.id);
+    if (posted?.state === 'posted') createdPayment = posted;
+  }
   if (!createdPayment) {
     throw new WebhookError('Failed to record posted payment for transaction', 500, 'PAYMENT_NOT_CREATED');
   }
 
-  const updatedTx = write(registered.db, 'payment.transaction', tx.id, {
+  const updatedTx = write(settledDb, 'payment.transaction', tx.id, {
     state: 'done',
     payment_id: createdPayment.id,
     provider_reference: webhook.providerReference ?? (tx.provider_reference || tx.reference),
   });
-  const noted = postNote(
-    updatedTx,
-    'account.move',
-    move.id,
-    `Online payment settled via ${tx.provider_code} (${tx.reference}).`,
-  );
+  const overpaid = due < expectedAmount;
+  const noteBody = overpaid
+    ? `Online payment of ${expectedAmount} ${docCurrency.name} via ${tx.provider_code} (${tx.reference}) arrived for an amount above the open balance (${due} ${docCurrency.name}); the excess stays as unapplied customer credit.`
+    : `Online payment settled via ${tx.provider_code} (${tx.reference}).`;
+  const noted = postNote(updatedTx, 'account.move', move.id, noteBody);
   return {
     db: noted,
     transaction: read(noted, 'payment.transaction', tx.id),
     alreadyProcessed: false,
-    status: 'settled',
+    status: overpaid ? 'unapplied_credit' : 'settled',
   };
 }

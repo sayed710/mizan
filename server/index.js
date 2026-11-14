@@ -64,7 +64,8 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
+import { menuModelsForApps, models, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
+const MAX_AUDIT_MODELS = 20;
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, scopeAuditChanges, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
@@ -838,8 +839,16 @@ async function api(req, res, path) {
     const granted = companiesFor(user);
     const selected = q.get('selected') === '1' ? selectionFor(user).allowed_company_ids.filter((company) => !granted || granted.has(company)) : user.companies;
     const filterCompanies = granted ? (selected ? new Set(selected) : granted) : null;
-    const modelList = q.get('models') ? q.get('models').split(',').map((m) => m.trim()).filter(Boolean) : [];
-    const modelClause = modelList.length ? `AND model IN (${modelList.map(() => '?').join(',')})` : '';
+    let modelList = [];
+    if (q.has('models')) {
+      const parts = q.get('models').split(',').map((m) => m.trim());
+      if (!parts.length || parts.some((m) => !m)) return send(res, 400, { error: 'models must be a non-empty comma-separated list' });
+      if (parts.length > MAX_AUDIT_MODELS) return send(res, 400, { error: `At most ${MAX_AUDIT_MODELS} models allowed` });
+      const unknown = parts.find((m) => !Object.hasOwn(models, m));
+      if (unknown) return send(res, 400, { error: `Unknown audit model: ${unknown}` });
+      modelList = [...new Set(parts)];
+    }
+    const modelClause = modelList.length ? `AND model IN (${modelList.map((_, i) => `?${i + 6}`).join(',')})` : '';
     const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log
       WHERE (?1 IS NULL OR model = ?1) ${modelClause} AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
         AND audit_visible(company_id, model, res_id, changes, ?5) = 1 ORDER BY id DESC LIMIT ?3`)

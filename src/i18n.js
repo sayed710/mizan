@@ -1891,6 +1891,15 @@ const ar = {
   'Payment provider belongs to another company': 'مزوّد الدفع يتبع شركة أخرى',
   'Configure a currency on the invoice before starting online payment': 'يرجى تحديد عملة الفاتورة قبل بدء الدفع الإلكتروني',
   'Payment transaction reference already exists': 'مرجع معاملة الدفع موجود بالفعل',
+  'Delivery Outcome': 'نتيجة التسليم',
+  'Outbox Only': 'الصندوق الصادر فقط',
+  'Payment amount does not match the transaction amount': 'مبلغ الدفع لا يطابق مبلغ المعاملة',
+  'Only completed payment transactions can link a payment': 'يمكن ربط الدفعة بمعاملات الدفع المكتملة فقط',
+  'Completed payment transactions require an inbound customer payment': 'تتطلب معاملات الدفع المكتملة دفعة عميل واردة',
+  'Completed payment transaction payment must belong to the invoice partner': 'يجب أن تنتمي دفعة معاملة الدفع المكتملة إلى شريك الفاتورة',
+  'Completed payment transaction payment cannot belong to another invoice': 'لا يمكن أن تنتمي دفعة معاملة الدفع المكتملة إلى فاتورة أخرى',
+  'Payment is already linked to another payment transaction': 'الدفعة مرتبطة بالفعل بمعاملة دفع أخرى',
+  'Completed payment transaction payment must match the transaction currency and amount': 'يجب أن تطابق دفعة معاملة الدفع المكتملة عملة المعاملة ومبلغها',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

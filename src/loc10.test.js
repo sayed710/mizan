@@ -639,7 +639,7 @@ test('payment webhook registers payment once on valid signature, replays idempot
   assert.equal(replayed.db, settled.db);
   assert.equal((read(replayed.db, 'account.move', inv.id).payments ?? []).length, 1);
 
-  // Already-paid invoice for a second pending transaction is rejected without double-paying.
+  // Already-paid invoice for a second pending transaction captures payment as unapplied customer credit without double-settling.
   const paidInv = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: 1,
@@ -653,7 +653,16 @@ test('payment webhook registers payment once on valid signature, replays idempot
   const bankJournal = search(dbPaid, 'account.journal').find((j) => j.default_for_payments === true && (j.company_id ?? 1) === 1);
   dbPaid = registerPayment(dbPaid, read(dbPaid, 'account.move', paidInv.id), { amount: 80, date: '2026-04-11', journal_id: bankJournal.id }).db;
   const paidAgainBody = JSON.stringify({ reference: 'TXN-ALREADY-PAID', amount: 80, currency: 'USD', status: 'paid', date: '2026-04-11' });
-  assert.throws(() => processPaymentWebhook(dbPaid, { providerCode: 'demo', rawBody: paidAgainBody, signature: signWebhookPayload(paidAgainBody, secret), secret }), /already paid/i);
+  const overpaidRes = processPaymentWebhook(dbPaid, { providerCode: 'demo', rawBody: paidAgainBody, signature: signWebhookPayload(paidAgainBody, secret), secret });
+  assert.equal(overpaidRes.alreadyProcessed, false);
+  assert.equal(residual(read(overpaidRes.db, 'account.move', paidInv.id), overpaidRes.db), 0);
+  const overpaidTx = read(overpaidRes.db, 'payment.transaction', txPaid.transaction.id);
+  assert.equal(overpaidTx.state, 'done');
+  assert.ok(overpaidTx.payment_id);
+  const overpaidPay = read(overpaidRes.db, 'account.payment', overpaidTx.payment_id);
+  assert.equal(overpaidPay.state, 'posted');
+  assert.equal(overpaidPay.amount, 80);
+  assert.equal(overpaidPay.unapplied, 80);
 });
 
 test('server portal invoice checkout redirects to demo provider and server webhook endpoint rejects/settles safely', async () => {
