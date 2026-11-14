@@ -1170,6 +1170,31 @@ function resolveFollowUpActivityUser(db, partner, companyId, part, responsibleTy
 
 const oldestOverdueDate = (invoices) => invoices.filter((m) => Number(m.amount_residual) > 0).map((m) => m.invoice_date_due).sort()[0];
 
+/** Allocate company-currency credits to overdue and then upcoming debits without changing the inputs. */
+function applyCreditsOldestFirst(overdueAmount, upcomingAmount, upcomingDebits, credits, currency) {
+  const totalCredit = credits.reduce((sum, credit) => sum - credit.companyAmount, 0);
+  const overdueNet = overdueAmount - totalCredit;
+  if (roundCurrency(overdueNet, currency) > 0) return { overdueNet, upcomingNet: upcomingAmount, upcomingDebits, remainingCredits: credits };
+
+  let absorbed = Math.min(overdueAmount, totalCredit);
+  let available = totalCredit - absorbed;
+  const upcomingNet = upcomingAmount - available;
+  const remainingDebits = [];
+  for (const debit of [...upcomingDebits].sort((a, b) => a.invoice_date_due.localeCompare(b.invoice_date_due))) {
+    if (roundCurrency(available - debit.followup_company_amount, currency) >= 0) {
+      available -= debit.followup_company_amount;
+      absorbed += debit.followup_company_amount;
+    } else remainingDebits.push(debit);
+  }
+  const remainingCredits = [];
+  for (const credit of credits) {
+    const used = Math.min(absorbed, -credit.companyAmount);
+    absorbed -= used;
+    remainingCredits.push({ ...credit, companyAmount: credit.companyAmount + used });
+  }
+  return { overdueNet, upcomingNet, upcomingDebits: remainingDebits, remainingCredits };
+}
+
 /** Partners with overdue invoices (or upcoming invoices matching a "before" reminder), netted by open receivable credits. */
 export function followUps(db, at = today(), { ignoreNextActionDate = false, companyId = null } = {}) {
   const levels = search(db, 'account.followup.level');
@@ -1208,7 +1233,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
       if (!bucket) continue;
       const group = ensureGroup(m.partner_id, compId);
       const companyAmount = Number(m.amount_residual);
-      const row = { ...m, followup_currency: documentCurrency(db, m), ...(bucket === 'upcoming' ? { upcoming: true } : {}) };
+      const row = { ...m, followup_currency: documentCurrency(db, m), ...(bucket === 'upcoming' ? { upcoming: true, followup_company_amount: companyAmount } : {}) };
       if (bucket === 'overdue') { group.overdueDebits.push(row); group.overdueNet += companyAmount; }
       else { group.upcomingDebits.push(row); group.upcomingNet += companyAmount; }
       continue;
@@ -1229,7 +1254,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
     }
     if (upcomingDues.length) {
       const companyAmount = upcomingDues.reduce((sum, due) => sum + due.amount, 0);
-      group.upcomingDebits.push({ ...m, invoice_date_due: upcomingDues[0].date, amount_residual: scaleAmount(companyAmount), followup_currency: docCurr, upcoming: true });
+      group.upcomingDebits.push({ ...m, invoice_date_due: upcomingDues[0].date, amount_residual: scaleAmount(companyAmount), followup_currency: docCurr, upcoming: true, followup_company_amount: companyAmount });
       group.upcomingNet += companyAmount;
     }
   }
@@ -1241,8 +1266,6 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
       const cId = document.company_id ?? 1;
       const group = groups.get(`${partner}:${cId}`);
       if (!group) return;
-      if (group.overdueDebits.length) group.overdueNet += amount;
-      else group.upcomingNet += amount;
       const prev = group.credits.get(document.id) ?? { document, date, companyAmount: 0 };
       prev.companyAmount += amount;
       group.credits.set(document.id, prev);
@@ -1254,9 +1277,10 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
   const by = new Map();
   for (const group of groups.values()) {
     const compCurr = companyCurrencyRecord(db, group.companyId);
-    const hasOverdue = group.overdueDebits.length > 0;
-    const debits = hasOverdue ? group.overdueDebits : group.upcomingDebits;
-    const companyNet = hasOverdue ? group.overdueNet : group.upcomingNet;
+    const allocation = applyCreditsOldestFirst(group.overdueNet, group.upcomingNet, group.upcomingDebits, [...group.credits.values()], compCurr);
+    const hasOverdue = group.overdueDebits.length > 0 && roundCurrency(allocation.overdueNet, compCurr) > 0;
+    const debits = hasOverdue ? group.overdueDebits : allocation.upcomingDebits;
+    const companyNet = hasOverdue ? allocation.overdueNet : allocation.upcomingNet;
     if (!debits.length || !(roundCurrency(companyNet, compCurr) > 0)) continue;
     if (!hasOverdue) {
       const oldestUpcoming = debits.map((d) => d.invoice_date_due).sort()[0];
@@ -1265,7 +1289,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
         && days >= (Number(l.delay) || 0));
       if (!hasBeforeLevel) continue;
     }
-    const creditRows = [...group.credits.values()].map(({ document, date, companyAmount }) => {
+    const creditRows = allocation.remainingCredits.map(({ document, date, companyAmount }) => {
       const creditAbs = -companyAmount;
       if (document.move_type === 'out_refund') {
         const docCurr = documentCurrency(db, document);
@@ -1274,7 +1298,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
         return { ...document, invoice_date_due: document.invoice_date_due ?? date, amount_residual: -amount, followup_currency: docCurr };
       }
       return { ...document, partner_id: group.partnerId, company_id: group.companyId, invoice_date_due: date, amount_residual: -roundCurrency(creditAbs, compCurr), followup_currency: compCurr };
-    });
+    }).filter((row) => row.amount_residual < 0);
     (by.get(group.partnerId) ?? by.set(group.partnerId, []).get(group.partnerId)).push(...debits, ...creditRows);
   }
   return [...by].map(([partner_id, invoices]) => {

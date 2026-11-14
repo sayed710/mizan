@@ -29,7 +29,6 @@ export function categoryProperty(db, categoryId, key, companyId = null) {
   for (let c = read(db, 'product.category', categoryId); c && !seen.has(c.id); c = read(db, 'product.category', c.parent_id)) {
     seen.add(c.id);
     if (companyId == null || c.company_id == null || c.company_id === companyId) {
-      // Preserve a conflicting legacy account kept during upgrade until the category is reconciled explicitly.
       if (categoryKey !== key && c[key] != null && c[key] !== '') return c[key];
       if (c[categoryKey] != null && c[categoryKey] !== '') return c[categoryKey];
     }

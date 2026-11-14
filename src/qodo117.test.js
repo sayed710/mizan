@@ -50,7 +50,7 @@ import {
 } from './models/finance.js';
 import { postAnalytic } from './models/analyticplus.js';
 import { deliver, receive } from './models/valuation.js';
-import { menusFor } from './models/index.js';
+import { menusFor, models } from './models/index.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -497,8 +497,11 @@ test('Finding 7: category upgrade preserves conflicting legacy income/expense ac
   assert.equal(cat.property_account_expense_categ_id, cogsAcc.id);
   assert.equal(cat.property_account_income_id, legacyInc.id);
   assert.equal(cat.property_account_income_categ_id, categInc.id);
+  const otherCompany = createCompany(migrated, { name: 'Other category company' });
+  const companyCategory = create(otherCompany.db, 'product.category', { name: 'Scoped legacy', company_id: 1, property_account_expense_id: legacyExp.id });
+  assert.throws(() => write(companyCategory.db, 'product.category', companyCategory.id, { company_id: otherCompany.id }), /Legacy Expense Account.*another company/);
 
-  // Periodic vendor bill uses preserved legacy expense account, while real-time perpetual delivery still uses COGS
+  // Periodic vendor bills use the retained legacy expense; perpetual delivery uses COGS.
   const vendor = create(migrated, 'res.partner', { name: 'Vendor 7', supplier: true });
   const bill = create(vendor.db, 'account.move', {
     move_type: 'in_invoice',
@@ -509,7 +512,18 @@ test('Finding 7: category upgrade preserves conflicting legacy income/expense ac
   const postedBillDb = postMove(bill.db, bill.id);
   assert.ok(read(postedBillDb, 'account.move', bill.id).line_ids.some((l) => l.account_id === legacyExp.id && l.debit === 40));
 
-  const received = receive(postedBillDb, 971, 2, 40, { date: '2026-06-02' });
+  const renamedDb = write(postedBillDb, 'product.category', 972, { name: 'Renamed Periodic Category' });
+  assert.equal(read(renamedDb, 'product.category', 972).property_account_expense_id, legacyExp.id);
+  const renamedBill = create(renamedDb, 'account.move', { move_type: 'in_invoice', partner_id: vendor.id, invoice_date: '2026-06-01', invoice_line_ids: [{ product_id: 973, qty: 1, price_unit: 40, tax: 0 }] });
+  const renamedPosted = postMove(renamedBill.db, renamedBill.id);
+  assert.ok(read(renamedPosted, 'account.move', renamedBill.id).line_ids.some((l) => l.account_id === legacyExp.id && l.debit === 40));
+  const clear = models['product.category'].form.buttons.find((b) => b.label === 'Clear Legacy Expense Account');
+  const clearedDb = write(renamedPosted, 'product.category', 972, clear.vals);
+  const clearedBill = create(clearedDb, 'account.move', { move_type: 'in_invoice', partner_id: vendor.id, invoice_date: '2026-06-01', invoice_line_ids: [{ product_id: 973, qty: 1, price_unit: 40, tax: 0 }] });
+  const clearedPosted = postMove(clearedBill.db, clearedBill.id);
+  assert.ok(read(clearedPosted, 'account.move', clearedBill.id).line_ids.some((l) => l.account_id === cogsAcc.id && l.debit === 40));
+
+  const received = receive(clearedPosted, 971, 2, 40, { date: '2026-06-02' });
   const delivered = deliver(received, 971, 1, { date: '2026-06-03' });
   const outLayer = search(delivered.db, 'stock.valuation.layer').find((l) => l.product_id === 971 && l.kind === 'out');
   assert.ok(read(delivered.db, 'account.move', outLayer.move_id).line_ids.some((l) => l.account_id === cogsAcc.id && l.debit === 40));
@@ -520,6 +534,11 @@ test('Finding 7: category upgrade preserves conflicting legacy income/expense ac
   assert.equal((migrate(migrated).messages ?? []).filter((m) => m.model === 'product.category' && m.res_id === 970).length, 1);
   const tAr = await arabicTranslator();
   assert.notEqual(tAr(notes[0].body), notes[0].body);
+  for (const field of ['property_account_income_id', 'property_account_expense_id']) {
+    const spec = models['product.category'].fields[field];
+    assert.notEqual(tAr(spec.label), spec.label);
+    assert.notEqual(tAr(spec.help), spec.help);
+  }
 });
 
 test('Finding 8: before follow-up levels do not mix upcoming invoices into overdue reminders or use overdue wording', () => {

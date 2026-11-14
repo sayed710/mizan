@@ -33,6 +33,8 @@ const categoryFields = {
   property_account_expense_categ_id: account('Expense Account', {
     help: 'The expense is accounted for when a vendor bill is validated, except in anglo-saxon accounting with perpetual inventory valuation in which case the expense (Cost of Goods Sold account) is recognized at the customer invoice validation.',
   }),
+  property_account_income_id: account('Legacy Income Account', { readonly: true, hideWhen: (r) => !r?.property_account_income_id, help: 'Kept by the upgrade and used for posting instead of the Income Account above until cleared.' }),
+  property_account_expense_id: account('Legacy Expense Account', { readonly: true, hideWhen: (r) => !r?.property_account_expense_id, help: 'Kept by the upgrade and used for posting instead of the Expense Account above until cleared.' }),
   account_invoices_to_be_issued_id: account('Invoices to be Issued Account', {
     help: 'Account holding the accrued value of the goods delivered but not invoiced yet. With perpetual valuation, it counterbalances the stock valuation account at closing.',
   }),
@@ -54,11 +56,6 @@ const categoryFields = {
 
 const CATEGORY_ACCOUNT_FIELDS = Object.entries(categoryFields).filter(([, f]) => f.relation === 'account.account');
 
-const LEGACY_CATEGORY_ACCOUNT_FIELDS = [
-  ['property_account_income_id', 'Income Account'],
-  ['property_account_expense_id', 'Expense Account'],
-];
-
 /**
  * Validate `product.category` writes: forbid parent hierarchy cycles and ensure configured
  * accounts belong to the category's company when scoped to one.
@@ -75,9 +72,6 @@ function guardProductCategory(db, before, r) {
     const owner = r.name || 'this category';
     for (const [key, field] of CATEGORY_ACCOUNT_FIELDS) {
       if (r[key] != null && r[key] !== '') configuredAccount(db, r[key], r.company_id, field.label, owner);
-    }
-    for (const [key, label] of LEGACY_CATEGORY_ACCOUNT_FIELDS) {
-      if (r[key] != null && r[key] !== '') configuredAccount(db, r[key], r.company_id, label, owner);
     }
   }
   return null;
@@ -98,6 +92,10 @@ export const productConfigModels = {
     form: {
       title: 'name',
       titleLabel: 'Category',
+      buttons: [
+        { label: 'Clear Legacy Income Account', when: (r) => !!r.property_account_income_id, vals: { property_account_income_id: null } },
+        { label: 'Clear Legacy Expense Account', when: (r) => !!r.property_account_expense_id, vals: { property_account_expense_id: null } },
+      ],
       smart: [{ label: 'Products', model: 'product', field: 'categ_id', target: 'inventory/products' }],
       groups: [['parent_id']],
       tabs: [
@@ -107,6 +105,8 @@ export const productConfigModels = {
             [
               'property_account_income_categ_id',
               'property_account_expense_categ_id',
+              'property_account_income_id',
+              'property_account_expense_id',
               'account_invoices_to_be_issued_id',
               'account_invoiced_not_delivered_id',
             ],
