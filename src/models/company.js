@@ -1,6 +1,6 @@
 import { create, read, updateSettings, write } from '../orm.js';
 import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
-import { postCompanyDeferrals } from './deferred.js';
+import { DEFERRED_COMPUTATION_OPTIONS, DEFERRED_EXPENSE_GENERATION_OPTIONS, DEFERRED_PERIODICITY_OPTIONS, DEFERRED_REVENUE_GENERATION_OPTIONS, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod, postCompanyDeferrals } from './deferred.js';
 import { companyRoundingMethod, today, validDate } from './common.js';
 import { companyCurrencyRecord, documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
@@ -278,6 +278,11 @@ const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
   'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method',
+  'deferred_revenue_journal_id', 'deferred_expense_journal_id',
+  'deferred_revenue_account_id', 'deferred_expense_account_id',
+  'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
+  'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
+  'deferred_revenue_periodicity', 'deferred_expense_periodicity',
 ];
 const LOCK_DATE_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date'];
 
@@ -322,11 +327,29 @@ function companyGuard(db, before, r, ctx) {
     ['default_sale_journal_id', 'sale', 'Default Sales Journal'],
     ['default_purchase_journal_id', 'purchase', 'Default Purchase Journal'],
     ['default_general_journal_id', 'general', 'Default General Journal'],
+    ['deferred_revenue_journal_id', 'general', 'Deferred Revenue Journal'],
+    ['deferred_expense_journal_id', 'general', 'Deferred Expense Journal'],
   ]) {
     if (!r[field]) continue;
     const journal = record(db, 'account.journal', r[field]);
-    if (!journal || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
-      return `${label} must be a ${type} journal shared with or belonging to this company`;
+    const isDeferredJournal = field.startsWith('deferred_');
+    if (!journal || (isDeferredJournal && journal.active === false) || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
+      return `${label} must be ${isDeferredJournal ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
+    }
+  }
+  for (const field of ['generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method']) {
+    if (r[field] != null && r[field] !== '' && !['on_validation', 'manual'].includes(r[field])) {
+      return `Select a valid ${companyModels['res.company'].fields[field]?.label ?? field}`;
+    }
+  }
+  for (const field of ['deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method']) {
+    if (r[field] != null && r[field] !== '' && !['day', 'month', 'full_months'].includes(r[field])) {
+      return `Select a valid ${companyModels['res.company'].fields[field]?.label ?? field}`;
+    }
+  }
+  for (const field of ['deferred_revenue_periodicity', 'deferred_expense_periodicity']) {
+    if (r[field] != null && r[field] !== '' && !['month', 'year'].includes(r[field])) {
+      return `Select a valid ${companyModels['res.company'].fields[field]?.label ?? field}`;
     }
   }
   for (const [field, use, label] of [
@@ -368,6 +391,34 @@ function companyGuard(db, before, r, ctx) {
   return null;
 }
 
+/** Build per-kind deferred field overrides when legacy shared deferred fields are provided without explicit per-kind values. */
+function legacyDeferredFieldPatch(after, vals = {}) {
+  const patch = {};
+  if ('deferred_generation_method' in vals) {
+    const mapped = mapLegacyDeferredGenerationMethod(after.deferred_generation_method);
+    for (const field of ['generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method']) {
+      if (!(field in vals) && (after[field] ?? null) !== mapped) patch[field] = mapped;
+    }
+  }
+  if ('deferred_amount_computation_method' in vals) {
+    const mapped = normalizeDeferredComputationMethod(after.deferred_amount_computation_method);
+    for (const field of ['deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method']) {
+      if (!(field in vals) && (after[field] ?? null) !== mapped) patch[field] = mapped;
+    }
+  }
+  return patch;
+}
+
+/** Sync legacy shared deferred fields and tax return types after writing `res.company`. */
+function onCompanyWrite(db, after, _before, vals) {
+  let next = vals && (vals.tax_periodicity !== undefined || vals.tax_start_date !== undefined) ? ensureReturnTypes(db) : db;
+  if (vals) {
+    const patch = legacyDeferredFieldPatch(after, vals);
+    if (Object.keys(patch).length) next = write(next, 'res.company', after.id, patch);
+  }
+  return next;
+}
+
 /** Create a company and its shared contact, inheriting the parent's currency. */
 export function createCompany(db, vals) {
   if (!vals.name?.trim()) throw new Error('Company name is required');
@@ -382,7 +433,9 @@ export function createCompany(db, vals) {
     }
   }
   if (!currencyId) throw new Error('Configure the company currency before creating a company');
-  const values = { ...vals, currency_id: currencyId };
+  const baseValues = { ...vals, currency_id: currencyId };
+  const legacyPatch = legacyDeferredFieldPatch(baseValues, vals);
+  const values = { ...baseValues, ...legacyPatch };
   if (!values.partner_id) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
@@ -550,10 +603,18 @@ export const companyModels = {
       loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Loss Account' },
       rental_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Rental Deposit Liability Account' },
       rental_withheld_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Withheld Deposit Income Account' },
+      deferred_revenue_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Deferred Revenue Journal' },
+      deferred_expense_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Deferred Expense Journal' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
-      deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual'], ['manual_grouped', 'Manually & Grouped']] },
-      deferred_amount_computation_method: { type: 'selection', label: 'Based on', options: [['months', 'Months'], ['full_months', 'Full Months'], ['days', 'Days']] },
+      generate_deferred_revenue_entries_method: { type: 'selection', label: 'Generate Revenue Entries', options: DEFERRED_REVENUE_GENERATION_OPTIONS },
+      generate_deferred_expense_entries_method: { type: 'selection', label: 'Generate Expense Entries', options: DEFERRED_EXPENSE_GENERATION_OPTIONS },
+      deferred_revenue_amount_computation_method: { type: 'selection', label: 'Revenue Amount Computation', options: DEFERRED_COMPUTATION_OPTIONS },
+      deferred_expense_amount_computation_method: { type: 'selection', label: 'Expense Amount Computation', options: DEFERRED_COMPUTATION_OPTIONS },
+      deferred_revenue_periodicity: { type: 'selection', label: 'Revenue Periodicity', options: DEFERRED_PERIODICITY_OPTIONS },
+      deferred_expense_periodicity: { type: 'selection', label: 'Expense Periodicity', options: DEFERRED_PERIODICITY_OPTIONS },
+      deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', hidden: true, options: [['on_validation', 'On Validation'], ['manual', 'Manual'], ['manual_grouped', 'Manually & Grouped']] },
+      deferred_amount_computation_method: { type: 'selection', label: 'Based on', hidden: true, options: [['months', 'Months'], ['full_months', 'Full Months'], ['days', 'Days']] },
       income_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Gain Account' },
       expense_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Loss Account' },
       expense_early_payment_discount_account_id: { type: 'many2one', relation: 'account.account', label: 'Early Payment Discount Expense Account' },
@@ -578,9 +639,20 @@ export const companyModels = {
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
     },
-    defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly', deferred_amount_computation_method: 'days' }),
+    defaults: () => ({
+      active: true,
+      intercompany_rule: 'none',
+      tax_periodicity: 'monthly',
+      deferred_amount_computation_method: 'days',
+      generate_deferred_revenue_entries_method: 'on_validation',
+      generate_deferred_expense_entries_method: 'on_validation',
+      deferred_revenue_amount_computation_method: 'day',
+      deferred_expense_amount_computation_method: 'day',
+      deferred_revenue_periodicity: 'month',
+      deferred_expense_periodicity: 'month',
+    }),
     guard: companyGuard,
-    onWrite: (db, after, before, vals) => (vals && (vals.tax_periodicity !== undefined || vals.tax_start_date !== undefined) ? ensureReturnTypes(db) : db),
+    onWrite: onCompanyWrite,
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },
@@ -592,7 +664,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_journal_id', 'deferred_revenue_account_id', 'generate_deferred_revenue_entries_method', 'deferred_revenue_amount_computation_method', 'deferred_revenue_periodicity', 'deferred_expense_journal_id', 'deferred_expense_account_id', 'generate_deferred_expense_entries_method', 'deferred_expense_amount_computation_method', 'deferred_expense_periodicity'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule', 'intercompany_journal_id'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

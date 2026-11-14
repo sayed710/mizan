@@ -9,6 +9,78 @@ import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency }
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const DAY = 86400000;
 
+export const DEFERRED_REVENUE_GENERATION_OPTIONS = [['on_validation', 'On invoice validation'], ['manual', 'Manually & Grouped']];
+export const DEFERRED_EXPENSE_GENERATION_OPTIONS = [['on_validation', 'On bill validation'], ['manual', 'Manually & Grouped']];
+export const DEFERRED_COMPUTATION_OPTIONS = [['day', 'By Days'], ['month', 'By Months'], ['full_months', 'By Full Months']];
+export const DEFERRED_PERIODICITY_OPTIONS = [['month', 'Monthly'], ['year', 'Yearly']];
+
+/** Normalize legacy and Odoo-20 deferral computation method keys to `day`, `month`, or `full_months`. */
+export function normalizeDeferredComputationMethod(method) {
+  if (method === 'full_months') return 'full_months';
+  if (method === 'month' || method === 'months') return 'month';
+  return 'day';
+}
+
+/** Map legacy company `deferred_generation_method` to Odoo-20 `generate_deferred_*_entries_method`. */
+export function mapLegacyDeferredGenerationMethod(method) {
+  if (method === 'on_validation') return 'on_validation';
+  if (method === 'manual_grouped') return 'manual';
+  return null;
+}
+
+/** Canonical `account.move.deferred_entry_type` value for a deferral schedule kind. */
+export function deferredEntryTypeForKind(kind) {
+  if (kind === 'revenue') return 'revenue';
+  if (kind === 'expense') return 'expense';
+  return 'misc';
+}
+
+/** Resolve and validate per-kind deferred accounting settings for a company. */
+export function deferredSettings(db, companyId, kind) {
+  const company = read(db, 'res.company', companyId ?? 1);
+  const k = kind === 'expense' ? 'expense' : 'revenue';
+  const perKindGen = company?.[k === 'revenue' ? 'generate_deferred_revenue_entries_method' : 'generate_deferred_expense_entries_method'];
+  const perKindComp = company?.[k === 'revenue' ? 'deferred_revenue_amount_computation_method' : 'deferred_expense_amount_computation_method'];
+  const perKindPeriodicity = company?.[k === 'revenue' ? 'deferred_revenue_periodicity' : 'deferred_expense_periodicity'];
+  const legacyGen = company?.deferred_generation_method;
+  const legacyComp = company?.deferred_amount_computation_method;
+  const generationMethod = perKindGen || (legacyGen === 'manual_grouped' ? 'manual' : legacyGen === 'manual' ? 'manual_individual' : 'on_validation');
+  const computationMethod = normalizeDeferredComputationMethod(perKindComp || legacyComp || 'day');
+  const periodicity = perKindPeriodicity === 'year' ? 'year' : 'month';
+  const journalId = company?.[k === 'revenue' ? 'deferred_revenue_journal_id' : 'deferred_expense_journal_id'] ?? null;
+  const accountId = company?.[k === 'revenue' ? 'deferred_revenue_account_id' : 'deferred_expense_account_id'] ?? null;
+  return {
+    kind: k,
+    generationMethod,
+    computationMethod,
+    periodicity,
+    journalId,
+    accountId,
+    isGrouped: generationMethod === 'manual',
+    isOnValidation: generationMethod === 'on_validation',
+    isIndividualManual: generationMethod === 'manual_individual',
+  };
+}
+
+/** Resolve and validate the journal spec to pass to `postEntry` for a company's deferral entries. */
+export function deferredJournalSpec(db, companyId, kind) {
+  const cid = companyId ?? 1;
+  const company = read(db, 'res.company', cid);
+  const settings = deferredSettings(db, cid, kind);
+  if (settings.journalId) {
+    const j = read(db, 'account.journal', settings.journalId);
+    if (!j || j.active === false) throw new Error(`Configure an active deferred ${settings.kind} journal on the company`);
+    if (j.company_id && j.company_id !== cid) throw new Error(`Deferred ${settings.kind} journal must belong to the company`);
+    if (j.type !== 'general') throw new Error(`Deferred ${settings.kind} journal must be a Miscellaneous journal`);
+    return { journal: j.id, journal_id: j.id };
+  }
+  const defaultGeneral = company?.default_general_journal_id && read(db, 'account.journal', company.default_general_journal_id);
+  if (defaultGeneral && defaultGeneral.active !== false && defaultGeneral.type === 'general' && defaultGeneral.company_id === cid) {
+    return { journal: defaultGeneral.id, journal_id: defaultGeneral.id };
+  }
+  return { journal: 'MISC', journal_id: null };
+}
+
 /** Whether deferral schedule `d` links directly to journal entry `moveId`. */
 export const deferralLinksMove = (d, moveId) => Boolean(d && moveId) && (
   d.source_move_id === moveId
@@ -65,8 +137,11 @@ function adjustedRecognitionOutstanding(line, currency) {
 
 function scheduleAccounts(db, schedule) {
   const company = schedule.company_id ?? 1;
-  const deferred = schedule.deferred_account_id ?? read(db, 'res.company', company)?.[schedule.kind === 'expense' ? 'deferred_expense_account_id' : 'deferred_revenue_account_id'];
   const recognition = schedule.recognition_account_id;
+  const recognitionAccount = read(db, 'account.account', recognition);
+  const deferred = schedule.deferred_account_id
+    ?? recognitionAccount?.deferred_account_id
+    ?? read(db, 'res.company', company)?.[schedule.kind === 'expense' ? 'deferred_expense_account_id' : 'deferred_revenue_account_id'];
   for (const [id, label] of [[deferred, `deferred ${schedule.kind} account on the company`], [recognition, 'recognition account on the source line']]) {
     const account = read(db, 'account.account', id);
     if (!account || account.active === false || (account.company_id && account.company_id !== company)) throw new Error(`Configure the ${label}`);
@@ -74,19 +149,22 @@ function scheduleAccounts(db, schedule) {
   return { deferred, recognition };
 }
 
-/** Allocate company currency over inclusive monthly periods. */
-function datedBoard(amount, start, end, method = 'days', currency = null) {
+/** Allocate company currency over inclusive monthly or yearly periods. */
+function datedBoard(amount, start, end, method = 'day', currency = null, periodicity = 'month') {
   const valid = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
   if (!valid(start) || !valid(end) || start > end) throw new Error('Set valid deferred start and end dates');
+  const normMethod = normalizeDeferredComputationMethod(method);
   const rows = [];
   let cursor = start;
   while (cursor <= end) {
     const [year, month] = cursor.split('-').map(Number);
-    const last = monthEnd(year, month);
+    const last = periodicity === 'year' ? `${year}-12-31` : monthEnd(year, month);
     const through = last < end ? last : end;
     const days = (Date.parse(through) - Date.parse(cursor)) / DAY + 1;
-    const monthDays = Number(last.slice(-2));
-    rows.push({ date: last, weight: method === 'full_months' ? 1 : method === 'months' ? days / monthDays : days });
+    const periodDays = periodicity === 'year'
+      ? (Date.parse(`${year}-12-31`) - Date.parse(`${year}-01-01`)) / DAY + 1
+      : Number(last.slice(-2));
+    rows.push({ date: last, weight: normMethod === 'full_months' ? 1 : normMethod === 'month' ? days / periodDays : days });
     cursor = new Date(Date.parse(through) + DAY).toISOString().slice(0, 10);
   }
   const amounts = allocateCents(amount, rows.map((row) => row.weight), currency);
@@ -95,12 +173,13 @@ function datedBoard(amount, start, end, method = 'days', currency = null) {
 
 /** Cumulative recognition for one board period through an inclusive cut-off date. */
 function recognitionTargetThroughDate(schedule, index, date, method, currency) {
+  const normMethod = normalizeDeferredComputationMethod(method);
   const line = schedule.board[index];
   const start = index === 0 ? (schedule.start_date ?? line.date) : addDays(schedule.board[index - 1].date, 1);
   const end = schedule.end_date && schedule.end_date < line.date ? schedule.end_date : line.date;
   if (date < start) return 0;
   const elapsedThrough = date < end ? date : end;
-  if (method === 'full_months' && elapsedThrough < end) return 0;
+  if (normMethod === 'full_months' && elapsedThrough < end) return 0;
   const elapsedDays = Math.floor((Date.parse(elapsedThrough) - Date.parse(start)) / DAY) + 1;
   const periodDays = Math.floor((Date.parse(end) - Date.parse(start)) / DAY) + 1;
   if (periodDays <= 0) throw new Error(`Invalid deferred service period on ${schedule.name}`);
@@ -122,7 +201,6 @@ function correctionDate(db, move) {
 /** Make schedules from the protected posted company amounts, once per source line. */
 export function createInvoiceDeferrals(db, move) {
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return db;
-  const company = read(db, 'res.company', move.company_id ?? 1);
   const refund = isRefund(move);
   const sourceInvoice = refund && move.reversed_entry_id ? read(db, 'account.move', move.reversed_entry_id) : null;
   let next = db;
@@ -140,10 +218,12 @@ export function createInvoiceDeferrals(db, move) {
     if (matches.length !== 1) throw new Error('Deferred invoice line needs one explicit posted journal source');
     const [{ entryLine, sourceLine: source }] = matches;
     if (!source.original_account_id || !(source.amount > 0)) throw new Error('Deferred line needs a positive posted amount and recognition account');
-    const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date, company?.deferred_amount_computation_method, companyCurrencyRecord(db, move.company_id));
-    const created = create(next, 'account.deferral', { name: `${move.name} ${line.line_id}`, kind: move.move_type.startsWith('out') ? 'revenue' : 'expense', amount: refund ? -source.amount : source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board: refund ? board.map((r) => ({ ...r, amount: -r.amount })) : board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line_id: line.line_id, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
+    const kind = move.move_type.startsWith('out') ? 'revenue' : 'expense';
+    const settings = deferredSettings(next, move.company_id, kind);
+    const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date, settings.computationMethod, companyCurrencyRecord(db, move.company_id), settings.periodicity);
+    const created = create(next, 'account.deferral', { name: `${move.name} ${line.line_id}`, kind, amount: refund ? -source.amount : source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board: refund ? board.map((r) => ({ ...r, amount: -r.amount })) : board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line_id: line.line_id, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
     next = created.db;
-    if (company?.deferred_generation_method === 'on_validation') next = postDueEntries(next, read(next, 'account.deferral', created.id), '9999-12-31');
+    if (settings.isOnValidation) next = postDueEntries(next, read(next, 'account.deferral', created.id), '9999-12-31');
   }
   return next;
 }
@@ -257,6 +337,7 @@ function postRecognitionCorrection(db, schedule, sourceMove, amount, date, note,
     ref: `Deferred recognition adjustment for ${note.name}`,
     lines: recognitionCorrectionLines(schedule, value, reverse),
     deferred_adjustment_of_id: sourceMove.id,
+    deferred_entry_type: deferredEntryTypeForKind(schedule.kind),
     archivedOriginIds: [sourceMove.id],
   });
   return { db: postAnalytic(posted.db, posted.id), id: posted.id };
@@ -350,7 +431,9 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       const share = item.full || remainingInvoiceAmount <= 0 ? 1 : item.currentAmount / remainingInvoiceAmount;
       const adjustmentAmount = roundCurrency(contributedAmount * share, currency);
       if (!adjustmentAmount) continue;
-      const sourceCorrection = postRecognitionCorrection(next, schedule, sourceMove, adjustmentAmount, noteDate, note, true);
+      const sourceMoveDate = sourceMove.invoice_date ?? sourceMove.date ?? noteDate;
+      const sourceCorrectionDate = noteDate < sourceMoveDate ? sourceMoveDate : noteDate;
+      const sourceCorrection = postRecognitionCorrection(next, schedule, sourceMove, adjustmentAmount, sourceCorrectionDate, note, true);
       next = sourceCorrection.db;
       if (sourceCorrection.id) adjustmentMoveIds.push(sourceCorrection.id);
 
@@ -363,7 +446,9 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       if (roundCurrency(reversedAmount * share, currency) !== adjustmentAmount) {
         throw new Error('The grouped deferral reversal no longer matches its source contribution');
       }
-      const revCorrection = postRecognitionCorrection(next, schedule, reversal, adjustmentAmount, noteDate, note, false);
+      const revMoveDate = reversal.invoice_date ?? reversal.date ?? noteDate;
+      const revCorrectionDate = noteDate < revMoveDate ? revMoveDate : noteDate;
+      const revCorrection = postRecognitionCorrection(next, schedule, reversal, adjustmentAmount, revCorrectionDate, note, false);
       next = revCorrection.db;
       if (revCorrection.id) adjustmentMoveIds.push(revCorrection.id);
     }
@@ -463,7 +548,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       }
     }
 
-    const method = read(next, 'res.company', schedule.company_id)?.deferred_amount_computation_method ?? 'days';
+    const { computationMethod: method } = deferredSettings(next, schedule.company_id, schedule.kind);
     for (const sourceMove of groupedMoves) {
       const newBoardLines = groupedBoardLines({ ...schedule, board: updatedBoard }, sourceMove.deferral_date, method, currency);
       const updateContributions = (contributions) => {
@@ -587,6 +672,7 @@ export function reverseInvoiceDeferrals(db, source) {
       const correction = postEntry(next, {
         journal: move.journal_id, company: move.company_id, date: correctionDate(db, move),
         ref: `Grouped deferral adjustment ${move.name}`,
+        deferred_entry_type: move.deferred_entry_type ?? deferredEntryTypeForKind(move.deferral_kind),
         lines: lines.map((line) => reverse ? { ...line, debit: line.credit, credit: line.debit } : line),
         archivedOriginIds: [move.id],
       });
@@ -598,7 +684,7 @@ export function reverseInvoiceDeferrals(db, source) {
     for (const line of schedule.board ?? []) {
       if (!line.move_id || line.reversal_move_id) { board.push(line); continue; }
       const original = read(next, 'account.move', line.move_id);
-      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, archivedOriginIds: [original.id], lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
+      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, deferred_entry_type: original.deferred_entry_type ?? deferredEntryTypeForKind(schedule.kind), archivedOriginIds: [original.id], lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
       next = postAnalytic(write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id }), reversal.id);
       board.push({ ...line, reversal_move_id: reversal.id });
     }
@@ -607,12 +693,14 @@ export function reverseInvoiceDeferrals(db, source) {
   return next;
 }
 
-/** One line per month, dated at month end from `startDate`'s month. */
-export function deferralBoard(amount, startDate, months, currency = null) {
+/** One line per period (`month` or `year`), dated at period end from `startDate`. */
+export function deferralBoard(amount, startDate, months, currency = null, periodicity = 'month') {
   const [y, m] = startDate.split('-').map(Number);
   const shares = allocateCents(amount, Array(months).fill(1), currency);
   return Array.from({ length: months }, (_, i) => ({
-    date: monthEnd(y + Math.floor((m - 1 + i) / 12), ((m - 1 + i) % 12) + 1),
+    date: periodicity === 'year'
+      ? `${y + i}-12-31`
+      : monthEnd(y + Math.floor((m - 1 + i) / 12), ((m - 1 + i) % 12) + 1),
     amount: shares[i],
   }));
 }
@@ -622,28 +710,38 @@ export function computeBoard(db, d) {
   if (!(Number(d.amount) > 0)) throw new Error('The amount must be positive');
   if (!d.end_date && (!Number.isInteger(Number(d.months)) || Number(d.months) < 1)) throw new Error('The number of months must be at least 1');
   if (!d.start_date) throw new Error('Set a start date');
-  const company = read(db, 'res.company', d.company_id ?? 1);
-  const end = d.end_date || deferralBoard(d.amount, d.start_date, Number(d.months)).at(-1).date;
-  const board = datedBoard(d.amount, d.start_date, end, company?.deferred_amount_computation_method, companyCurrencyRecord(db, d.company_id));
+  const settings = deferredSettings(db, d.company_id ?? 1, d.kind);
+  const end = d.end_date || deferralBoard(d.amount, d.start_date, Number(d.months), null, settings.periodicity).at(-1).date;
+  const board = datedBoard(d.amount, d.start_date, end, settings.computationMethod, companyCurrencyRecord(db, d.company_id), settings.periodicity);
   return write(db, 'account.deferral', d.id, { board, months: board.length, state: 'running' });
 }
 
 /** Post every unposted board line dated on or before `upTo`; the schedule is done once all are posted. */
 export function postDueEntries(db, d, upTo = today()) {
   d = read(db, 'account.deferral', d.id) ?? d;
-  if (read(db, 'res.company', d.company_id ?? 1)?.deferred_generation_method === 'manual_grouped') {
+  if (deferredSettings(db, d.company_id, d.kind).isGrouped) {
     throw new Error('Individual posting is unavailable for grouped deferrals');
   }
   if (d.state === 'cancel') return db;
   const { deferred, recognition } = scheduleAccounts(db, d);
+  const journalSpec = deferredJournalSpec(db, d.company_id, d.kind);
+  const entryType = deferredEntryTypeForKind(d.kind);
   const debit = d.kind === 'expense' ? recognition : deferred;
   const credit = d.kind === 'expense' ? deferred : recognition;
   const { db: next, board } = (d.board ?? []).reduce((acc, l) => {
     if (l.posted || l.cancelled || l.date > upTo) return { ...acc, board: [...acc.board, l] };
     if (!l.amount) return { ...acc, board: [...acc.board, { ...l, posted: true, move_id: null }] };
+    const absAmount = Math.abs(l.amount);
+    const positive = l.amount >= 0;
+    const lineDebit = positive ? debit : credit;
+    const lineCredit = positive ? credit : debit;
     const { db: booked, id } = postEntry(acc.db, {
-      journal: 'MISC', company: d.company_id, date: l.date, ref: `${d.name} ${l.date.slice(0, 7)}`,
-      lines: [{ account: debit, debit: l.amount, partner_id: d.partner_id ?? undefined, ...(d.kind === 'expense' ? { analytic_distribution: d.analytic_distribution } : {}) }, { account: credit, credit: l.amount, partner_id: d.partner_id ?? undefined, ...(d.kind === 'revenue' ? { analytic_distribution: d.analytic_distribution } : {}) }],
+      ...journalSpec, company: d.company_id, date: l.date, ref: `${d.name} ${l.date.slice(0, 7)}`,
+      deferred_entry_type: entryType,
+      lines: [
+        { account: lineDebit, debit: absAmount, partner_id: d.partner_id ?? undefined, ...(lineDebit === recognition ? { analytic_distribution: d.analytic_distribution } : {}) },
+        { account: lineCredit, credit: absAmount, partner_id: d.partner_id ?? undefined, ...(lineCredit === recognition ? { analytic_distribution: d.analytic_distribution } : {}) },
+      ],
     });
     return { db: postAnalytic(booked, id), board: [...acc.board, { ...l, posted: true, move_id: id }] };
   }, { db, board: [] });
@@ -658,27 +756,47 @@ export function postDueEntries(db, d, upTo = today()) {
  */
 export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
   const companyId = company_id ?? db.settings?.current_company_id ?? 1;
-  if (read(db, 'res.company', companyId)?.deferred_generation_method !== 'manual_grouped') {
-    throw new Error('Grouped deferral generation requires a company configured for grouped posting');
-  }
-
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) {
     throw new Error('Set a valid period end date');
   }
 
   const currency = companyCurrencyRecord(db, companyId);
-  const method = read(db, 'res.company', companyId)?.deferred_amount_computation_method ?? 'days';
   const kindsToProcess = kind ? [kind] : ['revenue', 'expense'];
+  for (const k of kindsToProcess) {
+    if (!deferredSettings(db, companyId, k).isGrouped) {
+      throw new Error('Grouped deferral generation requires a company configured for grouped posting');
+    }
+  }
   let currentDb = db;
 
   for (const k of kindsToProcess) {
-    const existing = (currentDb.records['account.move'] ?? []).find((m) =>
+    const settings = deferredSettings(currentDb, companyId, k);
+    const method = settings.computationMethod;
+    const entryType = deferredEntryTypeForKind(k);
+    const journalSpec = deferredJournalSpec(currentDb, companyId, k);
+
+    const existingMoves = (currentDb.records['account.move'] ?? []).filter((m) =>
+      m.state === 'posted' &&
       m.is_deferred_grouped &&
       !m.reversed_entry_id &&
       m.deferral_kind === k &&
       m.deferral_date === date &&
       (m.company_id ?? 1) === companyId
     );
+    const alreadyBySchedule = new Map();
+    for (const m of existingMoves) {
+      for (const c of m.deferred_contributions ?? []) {
+        let schedMap = alreadyBySchedule.get(c.schedule_id);
+        if (!schedMap) {
+          schedMap = new Map();
+          alreadyBySchedule.set(c.schedule_id, schedMap);
+        }
+        for (const bl of c.board_lines ?? []) {
+          schedMap.set(bl.index, roundCurrency((schedMap.get(bl.index) ?? 0) + (Number(bl.amount) || 0), currency));
+        }
+      }
+    }
+
     const schedules = (currentDb.records['account.deferral'] ?? []).filter((d) =>
       d.state !== 'cancel' &&
       (d.company_id ?? 1) === companyId &&
@@ -688,19 +806,32 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
 
     const recognizedItems = [];
     for (const s of schedules) {
-      const boardLines = (s.board ?? []).map((line, index) => ({ line, index }))
-        .map(({ line, index }) => {
-          const target = line.posted || line.cancelled ? 0 : recognitionTargetThroughDate(s, index, date, method, currency);
-          return { line, index, amount: target };
-        })
-        .filter(({ amount }) => amount !== 0);
-      const recognized = roundCurrency(boardLines.reduce((sum, { amount }) => sum + amount, 0), currency);
-      if (recognized !== 0) {
+      const targetByIndex = new Map();
+      (s.board ?? []).forEach((line, index) => {
+        const target = line.posted || line.cancelled ? 0 : recognitionTargetThroughDate(s, index, date, method, currency);
+        if (target !== 0) targetByIndex.set(index, { date: line.date, amount: target });
+      });
+      const alreadyMap = alreadyBySchedule.get(s.id) ?? new Map();
+      const allIndices = new Set([...targetByIndex.keys(), ...alreadyMap.keys()]);
+      const deltaBoardLines = [];
+      for (const index of [...allIndices].sort((a, b) => a - b)) {
+        const targetEntry = targetByIndex.get(index);
+        const deltaAmt = roundCurrency((targetEntry?.amount ?? 0) - (alreadyMap.get(index) ?? 0), currency);
+        if (deltaAmt !== 0) {
+          deltaBoardLines.push({
+            index,
+            date: targetEntry?.date ?? s.board?.[index]?.date ?? date,
+            amount: deltaAmt,
+          });
+        }
+      }
+      const deltaTotal = roundCurrency(deltaBoardLines.reduce((sum, bl) => sum + bl.amount, 0), currency);
+      if (deltaTotal !== 0) {
         const { deferred: deferredAcc, recognition: recognitionAcc } = scheduleAccounts(currentDb, s);
         recognizedItems.push({
           schedule: s,
-          boardLines: boardLines.map(({ line, index, amount }) => ({ index, date: line.date, amount })),
-          amount: recognized,
+          boardLines: deltaBoardLines,
+          amount: deltaTotal,
           recognition_account_id: recognitionAcc,
           deferred_account_id: deferredAcc,
           analytic_distribution: s.analytic_distribution,
@@ -710,49 +841,57 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
       }
     }
 
-    if (existing) {
-      const contributions = existing.deferred_contributions ?? [];
-      const unchanged = contributions.length === recognizedItems.length && recognizedItems.every((item) => {
-        const old = contributions.find((c) => c.schedule_id === item.schedule.id);
-        return old && JSON.stringify(old.board_lines) === JSON.stringify(item.boardLines)
-          && existing.line_ids?.[old.deferred_line_index]?.account_id === item.deferred_account_id
-          && existing.line_ids?.[old.recognition_line_index]?.account_id === item.recognition_account_id
-          && (existing.line_ids?.[old.recognition_line_index]?.partner_id ?? null) === (item.partner_id ?? null)
-          && JSON.stringify(existing.line_ids?.[old.recognition_line_index]?.analytic_distribution ?? null) === JSON.stringify(item.analytic_distribution ?? null);
-      });
-      if (!unchanged) throw new Error('Grouped deferral contributions changed; reverse and replace the existing entries before regenerating');
-      continue;
-    }
     if (!recognizedItems.length) continue;
 
     const isRev = k === 'revenue';
-    const deferredTotals = new Map();
+    const deferredBuckets = new Map();
     for (const item of recognizedItems) {
-      deferredTotals.set(item.deferred_account_id, roundCurrency((deferredTotals.get(item.deferred_account_id) ?? 0) + item.amount, currency));
+      const sign = item.amount >= 0 ? 'pos' : 'neg';
+      const key = `${item.deferred_account_id}:${sign}`;
+      const prev = deferredBuckets.get(key) ?? {
+        key,
+        deferred_account_id: item.deferred_account_id,
+        positive: item.amount >= 0,
+        absTotal: 0,
+      };
+      prev.absTotal = roundCurrency(prev.absTotal + Math.abs(item.amount), currency);
+      deferredBuckets.set(key, prev);
     }
 
+    const bucketList = [...deferredBuckets.values()];
+    const bucketKeys = bucketList.map((b) => b.key);
+
     const lines = [
-      ...[...deferredTotals.entries()].map(([defAcc, totalAmt]) => ({
-        account_id: defAcc,
-        debit: isRev ? totalAmt : 0,
-        credit: isRev ? 0 : totalAmt,
-        name: `Deferred ${isRev ? 'Revenues' : 'Expenses'} ${date}`,
-      })),
-      ...recognizedItems.map((item) => ({
-        account_id: item.recognition_account_id,
-        debit: isRev ? 0 : item.amount,
-        credit: isRev ? item.amount : 0,
-        analytic_distribution: item.analytic_distribution,
-        partner_id: item.partner_id ?? null,
-        name: item.name,
-      })),
+      ...bucketList.map((bucket) => {
+        const debitSide = isRev ? bucket.positive : !bucket.positive;
+        return {
+          account_id: bucket.deferred_account_id,
+          debit: debitSide ? bucket.absTotal : 0,
+          credit: debitSide ? 0 : bucket.absTotal,
+          name: `Deferred ${isRev ? 'Revenues' : 'Expenses'} ${date}`,
+        };
+      }),
+      ...recognizedItems.map((item) => {
+        const positive = item.amount >= 0;
+        const absAmt = Math.abs(item.amount);
+        const creditSide = isRev ? positive : !positive;
+        return {
+          account_id: item.recognition_account_id,
+          debit: creditSide ? 0 : absAmt,
+          credit: creditSide ? absAmt : 0,
+          analytic_distribution: item.analytic_distribution,
+          partner_id: item.partner_id ?? null,
+          name: item.name,
+        };
+      }),
     ];
 
     const ref = `Deferred ${isRev ? 'Revenues' : 'Expenses'}: ${date}`;
     const entryRes = postEntry(currentDb, {
-      journal: 'MISC',
+      ...journalSpec,
       date,
       ref,
+      deferred_entry_type: entryType,
       lines,
       company: companyId,
     });
@@ -769,25 +908,27 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
       name: l.name,
     }));
     const revRes = postEntry(currentDb, {
-      journal: 'MISC',
+      ...journalSpec,
       date: revDate,
       ref: revRef,
+      deferred_entry_type: entryType,
       lines: revLines,
       company: companyId,
     });
     currentDb = postAnalytic(revRes.db, revRes.id);
 
-    const deferredAccounts = [...deferredTotals.keys()];
     const contributions = recognizedItems.map((item, index) => ({
-      schedule_id: item.schedule.id, board_lines: item.boardLines,
-      deferred_line_index: deferredAccounts.indexOf(item.deferred_account_id),
-      recognition_line_index: deferredAccounts.length + index,
+      schedule_id: item.schedule.id,
+      board_lines: item.boardLines,
+      deferred_line_index: bucketKeys.indexOf(`${item.deferred_account_id}:${item.amount >= 0 ? 'pos' : 'neg'}`),
+      recognition_line_index: bucketList.length + index,
     }));
     currentDb = write(currentDb, 'account.move', entryRes.id, {
       deferred_contributions: contributions,
       reversal_move_id: revRes.id,
       deferral_date: date,
       deferral_kind: k,
+      deferred_entry_type: entryType,
       is_deferred_grouped: true,
     });
     currentDb = write(currentDb, 'account.move', revRes.id, {
@@ -795,6 +936,7 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
       reversed_entry_id: entryRes.id,
       deferral_date: revDate,
       deferral_kind: k,
+      deferred_entry_type: entryType,
       is_deferred_grouped: true,
     });
   }
@@ -804,12 +946,18 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
 
 /** Generate all due schedules of one company for a chosen period end. */
 export function postCompanyDeferrals(db, companyId, upTo = today()) {
-  const company = read(db, 'res.company', companyId);
-  if (company?.deferred_generation_method === 'manual_grouped') {
-    return generateGroupedEntries(db, { company_id: companyId, date: upTo });
+  let current = db;
+  for (const k of ['revenue', 'expense']) {
+    const settings = deferredSettings(current, companyId, k);
+    if (settings.isGrouped) {
+      current = generateGroupedEntries(current, { company_id: companyId, kind: k, date: upTo });
+    } else {
+      current = (current.records['account.deferral'] ?? [])
+        .filter((d) => d.state === 'running' && (d.company_id ?? 1) === companyId && d.kind === k)
+        .reduce((next, schedule) => postDueEntries(next, schedule, upTo), current);
+    }
   }
-  return (db.records['account.deferral'] ?? []).filter((d) => d.state === 'running' && (d.company_id ?? 1) === companyId)
-    .reduce((next, schedule) => postDueEntries(next, schedule, upTo), db);
+  return current;
 }
 
 /**

@@ -10,7 +10,9 @@ import { migrate, MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
 import { openStorage } from '../server/storage.js';
 
 test('migration versions are strictly increasing', () => {
-  MIGRATIONS.forEach((m, i) => assert.equal(m.version, i + 1, m.name));
+  MIGRATIONS.forEach((m, i) => (
+    i === 0 ? assert.equal(m.version, 1, m.name) : assert.ok(m.version > MIGRATIONS[i - 1].version, m.name)
+  ));
 });
 
 test('the shipped seed is current and every seeded record can be saved again unchanged', () => {

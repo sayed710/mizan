@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
@@ -387,7 +387,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'fx_payment_move_id', 'fx_invoice_id', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'debit_origin_id',
   'inalterable_hash', 'inalterable_hash_version', 'secure_sequence_number', 'auto_post_origin_id',
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
-  'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
+  'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
 ]);
 function recurringReversalDate(origin, nextDate) {
@@ -1709,6 +1709,20 @@ export const accountingModels = {
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
       active: { type: 'boolean', label: 'Active' },
+      is_deferred: {
+        type: 'boolean',
+        label: 'Deferred',
+        help: 'Check to enable deferred accounting, deferred dates will be required on invoice / bill',
+        hideWhen: (r) => !isIncomeOrExpenseAccount(r),
+      },
+      deferred_account_id: {
+        type: 'many2one',
+        relation: 'account.account',
+        label: 'Deferred Account',
+        help: 'Account automatically used for deferred entries on this account.',
+        domain: (candidate, acc) => candidate.active !== false && candidate.id !== acc?.id && (!acc?.company_id || !candidate.company_id || candidate.company_id === acc.company_id),
+        hideWhen: (r) => !isIncomeOrExpenseAccount(r),
+      },
       asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
       description: { type: 'text', label: 'Description' },
       current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
@@ -1735,6 +1749,12 @@ export const accountingModels = {
         if (!model) return 'Select an existing asset model';
         if (model.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
       }
+      if (after.deferred_account_id) {
+        const defAcc = read(db, 'account.account', after.deferred_account_id);
+        if (!defAcc || defAcc.active === false) return 'Select an active deferred account';
+        if (after.id && defAcc.id === after.id) return 'An account cannot defer to itself';
+        if (after.company_id && defAcc.company_id && defAcc.company_id !== after.company_id) return 'Deferred account must belong to the account company';
+      }
       return null;
     },
     protectDelete: accountDeleteGuard,
@@ -1753,7 +1773,7 @@ export const accountingModels = {
           label: 'Accounting',
           groups: [
             ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
-            ['asset_model_id'],
+            ['is_deferred', 'deferred_account_id', 'asset_model_id'],
             ['description'],
           ],
         },
@@ -2165,6 +2185,7 @@ export const accountingModels = {
       revaluation_date: { type: 'date', label: 'Revaluation Date', readonly: true },
       deferral_date: { type: 'date', label: 'Deferral Date', readonly: true },
       deferral_kind: { type: 'selection', label: 'Deferral Kind', readonly: true, options: [['revenue', 'Deferred Revenue'], ['expense', 'Deferred Expense']] },
+      deferred_entry_type: { type: 'selection', label: 'Deferred Entry Type', readonly: true, hidden: true, options: [['expense', 'Expense'], ['revenue', 'Revenue'], ['misc', 'Misc']] },
       is_deferred_grouped: { type: 'boolean', label: 'Grouped Deferral Entry', readonly: true, hidden: true },
       reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
       auto_reverse: { type: 'boolean', label: 'Reverse Automatically' },

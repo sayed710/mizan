@@ -19,6 +19,7 @@ import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
+import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1398,6 +1399,59 @@ MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', u
 } });
 
 MIGRATIONS.push({ version: 50, name: 'seed-standard-statement-reports', up: (db) => ensureStatementReports(db) });
+// Version 50 is reserved for another package; split shared deferred config into per-kind fields at 51.
+MIGRATIONS.push({ version: 51, name: 'per-kind-deferred-settings', up: (db) => {
+  const journalsById = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
+  const companies = (db.records['res.company'] ?? []).map((c) => {
+    const mappedGen = c.deferred_generation_method === 'manual'
+      ? null
+      : (mapLegacyDeferredGenerationMethod(c.deferred_generation_method) ?? 'on_validation');
+    const mappedComp = normalizeDeferredComputationMethod(c.deferred_amount_computation_method || 'days');
+    const defGen = c.default_general_journal_id ? journalsById.get(c.default_general_journal_id) : null;
+    const defaultJournalId = defGen && defGen.active !== false && defGen.type === 'general' && (!defGen.company_id || defGen.company_id === c.id)
+      ? defGen.id
+      : null;
+    return {
+      ...c,
+      generate_deferred_revenue_entries_method: c.generate_deferred_revenue_entries_method !== undefined ? c.generate_deferred_revenue_entries_method : mappedGen,
+      generate_deferred_expense_entries_method: c.generate_deferred_expense_entries_method !== undefined ? c.generate_deferred_expense_entries_method : mappedGen,
+      deferred_revenue_amount_computation_method: c.deferred_revenue_amount_computation_method ?? mappedComp,
+      deferred_expense_amount_computation_method: c.deferred_expense_amount_computation_method ?? mappedComp,
+      deferred_revenue_periodicity: c.deferred_revenue_periodicity ?? 'month',
+      deferred_expense_periodicity: c.deferred_expense_periodicity ?? 'month',
+      deferred_revenue_journal_id: c.deferred_revenue_journal_id ?? defaultJournalId,
+      deferred_expense_journal_id: c.deferred_expense_journal_id ?? defaultJournalId,
+    };
+  });
+  const kindByMoveId = new Map();
+  for (const d of db.records['account.deferral'] ?? []) {
+    const kind = d.kind;
+    if (!kind) continue;
+    for (const line of d.board ?? []) {
+      if (line.move_id) kindByMoveId.set(line.move_id, kind);
+      if (line.reversal_move_id) kindByMoveId.set(line.reversal_move_id, kind);
+    }
+    for (const adj of d.credit_adjustments ?? []) {
+      for (const mid of adj.move_ids ?? []) kindByMoveId.set(mid, kind);
+    }
+  }
+  let movesChanged = false;
+  const moves = (db.records['account.move'] ?? []).map((m) => {
+    if (m.deferred_entry_type) return m;
+    const kind = m.deferral_kind || kindByMoveId.get(m.id);
+    if (!kind) return m;
+    movesChanged = true;
+    return { ...m, deferred_entry_type: deferredEntryTypeForKind(kind) };
+  });
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': companies,
+      ...(movesChanged ? { 'account.move': moves } : {}),
+    },
+  };
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

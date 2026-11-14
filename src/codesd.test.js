@@ -146,7 +146,7 @@ test('codesd migration 33 maps installer roles only on a unique company-owned co
   const company = read(db, 'res.company', 1);
   const old = { ...db, schema_version: 32, records: { ...db.records, 'res.company': [{ ...company, current_year_earnings_account_id: null }], 'account.tax': [{ id: 999, name: 'Cash', company_id: 1, type_tax_use: 'sale', tax_exigibility: 'on_payment' }] } };
   const migrated = migrate(old);
-  assert.equal(migrated.schema_version, 50);
+  assert.equal(migrated.schema_version, 51);
   const transition = read(migrated, 'account.tax', 999).cash_basis_transition_account_id;
   assert.equal(read(migrated, 'account.account', transition).code, '251100');
   const renamed = { ...old, records: { ...old.records, 'account.account': old.records['account.account'].map((a) => ({ ...a, code: `CUSTOM-${a.id}` })) } };
