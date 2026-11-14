@@ -1521,6 +1521,8 @@ MIGRATIONS.push({ version: 52, name: 'repair-tax-group-company-splits', up(db) {
     },
     seq: { ...(db.seq ?? {}), 'account.tax.group': nextGroupId },
   };
+} });
+
 /** Single-company journal scoping, conflicting legacy category notes, and in_refund analytic category alignment. */
 MIGRATIONS.push({ version: 53, name: 'qodo-117-upgrade-fixes', up(db) {
   let next = migrateCategoryAccounts(db);
