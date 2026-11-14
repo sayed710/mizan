@@ -147,7 +147,10 @@ function JournalCard({ card, companyId }) {
             </dl>
             <RateNote count={card.unratedCount} />
             {isStatement && card.toReconcile > 0 && (
-              <a className="btn primary sm" href={list}>{card.toReconcile} {t('To Reconcile')}</a>
+              <>
+                <a className="btn primary sm" href={list}>{card.toReconcile} {t('To Reconcile')}</a>
+                <a className="btn sm" href={`#/accounting/reconcile?journal=${card.journal.id}`}>{t('Reconcile')}</a>
+              </>
             )}
           </>
         )}
