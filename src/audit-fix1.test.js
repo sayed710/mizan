@@ -140,7 +140,7 @@ test('PKG-01: migration 49 infers journal company_id only when provable and logs
 
   const migrated = migrate(synthetic);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 51);
+  assert.equal(SCHEMA_VERSION, 52);
 
   assert.equal(read(migrated, 'account.journal', 901).company_id, co2.id);
   assert.equal(read(migrated, 'account.journal', 902).company_id, co2.id);

@@ -165,7 +165,7 @@ test('res.company splits revenue and expense deferred settings independently and
 });
 
 test('migration 51 splits legacy shared deferred settings per kind and backfills deferred_entry_type structurally', () => {
-  assert.equal(SCHEMA_VERSION, 51);
+  assert.equal(SCHEMA_VERSION, 52);
 
   const base = seed();
   // Simulate a schema_version 49 database with legacy settings and a pre-51 grouped deferral move.
@@ -203,7 +203,7 @@ test('migration 51 splits legacy shared deferred settings per kind and backfills
   };
 
   const upgraded = migrate(oldDb);
-  assert.equal(upgraded.schema_version, 51);
+  assert.equal(upgraded.schema_version, 52);
 
   const c1 = read(upgraded, 'res.company', 1);
   assert.equal(c1.generate_deferred_revenue_entries_method, 'manual');

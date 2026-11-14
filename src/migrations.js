@@ -1230,7 +1230,7 @@ MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(d
   const nextGroups = groups.flatMap((g) => {
     const sequence = g.sequence ?? (nextGroupSeq += 10);
     if (g.company_id != null) return [{ ...g, sequence }];
-    const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id && t.company_id != null).map((t) => t.company_id))];
+    const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id).map((t) => t.company_id ?? 1))];
     if (owners.length <= 1) return [{ ...g, company_id: owners[0] ?? mainCompanyId, sequence }];
     const [keep, ...rest] = owners.includes(mainCompanyId) ? [mainCompanyId, ...owners.filter((c) => c !== mainCompanyId)] : owners;
     return [{ ...g, company_id: keep, sequence }, ...rest.map((companyId) => {
@@ -1240,7 +1240,7 @@ MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(d
     })];
   });
   const nextTaxes = taxes.map((t) => {
-    const id = taxGroupFor.get(`${t.tax_group_id}:${t.company_id}`);
+    const id = taxGroupFor.get(`${t.tax_group_id}:${t.company_id ?? 1}`);
     return id ? { ...t, tax_group_id: id } : t;
   });
 
@@ -1449,6 +1449,46 @@ MIGRATIONS.push({ version: 51, name: 'per-kind-deferred-settings', up: (db) => {
       'res.company': companies,
       ...(movesChanged ? { 'account.move': moves } : {}),
     },
+  };
+} });
+
+/** Copy tax groups for any tax whose tax_group_id points to another company's group after an older v45 migration. */
+MIGRATIONS.push({ version: 52, name: 'repair-tax-group-company-splits', up(db) {
+  const taxes = db.records['account.tax'] ?? [];
+  const groups = db.records['account.tax.group'] ?? [];
+  if (!taxes.length || !groups.length) return db;
+  const groupById = new Map(groups.map((g) => [g.id, g]));
+  let nextGroupId = Math.max(0, db.seq?.['account.tax.group'] ?? 0, ...groups.map((g) => g.id ?? 0));
+  let nextGroupSeq = Math.max(0, ...groups.map((g) => Number(g.sequence) || 0));
+  const copyFor = new Map();
+  const extraGroups = [];
+  const nextTaxes = taxes.map((t) => {
+    const group = t.tax_group_id ? groupById.get(t.tax_group_id) : null;
+    const taxCompanyId = t.company_id ?? 1;
+    if (!group?.company_id || group.company_id === taxCompanyId) return t;
+    const key = `${group.id}:${taxCompanyId}`;
+    let copyId = copyFor.get(key);
+    if (!copyId) {
+      copyId = ++nextGroupId;
+      copyFor.set(key, copyId);
+      extraGroups.push({
+        ...group,
+        id: copyId,
+        company_id: taxCompanyId,
+        sequence: group.sequence ?? (nextGroupSeq += 10),
+      });
+    }
+    return { ...t, tax_group_id: copyId };
+  });
+  if (!copyFor.size) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.tax.group': [...groups, ...extraGroups],
+      'account.tax': nextTaxes,
+    },
+    seq: { ...(db.seq ?? {}), 'account.tax.group': nextGroupId },
   };
 } });
 

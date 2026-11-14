@@ -231,10 +231,30 @@ const untaxedAmount = (r, db) => {
   return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id), side }).untaxed;
 };
 
-/** Sign a document-currency amount: credit notes and vendor refunds show as negative, avoiding -0. */
+/** Sign a document-currency amount with the same inbound/outbound convention as signedCompanyTotal, avoiding -0. */
 const signedDocumentAmount = (r, value) => {
   if (value == null) return null;
-  return value === 0 ? 0 : (isRefund(r) ? -1 : 1) * value;
+  if (value === 0) return 0;
+  if (!r || r.move_type === 'entry' || !r.move_type) return value;
+  return (isInbound(r) ? 1 : -1) * value;
+};
+
+const moveByIdCache = new WeakMap();
+const paymentByMoveCache = new WeakMap();
+
+/** Build and cache a Map over an immutable records array once per array instance. */
+const recordIndex = (cache, records, keyOf) => {
+  if (!records?.length) return null;
+  let index = cache.get(records);
+  if (!index) {
+    index = new Map();
+    for (const rec of records) {
+      const key = keyOf(rec);
+      if (key != null) index.set(key, rec);
+    }
+    cache.set(records, index);
+  }
+  return index;
 };
 
 /**
@@ -251,15 +271,15 @@ export const statusInPayment = (r, db) => {
   if (payState === 'paid') {
     const active = (r.payments ?? []).filter((p) => !p.reversed);
     if (db && active.length) {
-      const moveById = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-      const paymentByMove = new Map((db.records['account.payment'] ?? []).filter((p) => p.move_id).map((p) => [p.move_id, p]));
+      const moveById = recordIndex(moveByIdCache, db.records?.['account.move'], (m) => m.id);
+      const paymentByMove = recordIndex(paymentByMoveCache, db.records?.['account.payment'], (p) => p.move_id || null);
       const allReversals = active.every((p) => {
-        const m = moveById.get(p.move_id);
+        const m = moveById?.get(p.move_id);
         return m && isRefund(m) && m.reversed_entry_id === r.id;
       });
       if (allReversals) return 'reversed';
       const hasOutstanding = active.some((p) => {
-        const payment = paymentByMove.get(p.payment_move_id ?? p.move_id);
+        const payment = paymentByMove?.get(p.payment_move_id ?? p.move_id);
         return payment && payment.state === 'posted' && payment.outstanding_account_id && !isPaymentMatched(db, payment);
       });
       if (hasOutstanding) return 'in_payment';
