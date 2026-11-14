@@ -5,16 +5,13 @@ import { leaveAuthorization } from './timeoff.js';
 import { paymentJournal, partnerAccount } from './ledger.js';
 import { expenseDebits, expenseReportJournal } from './expense-accounts.js';
 
-let actor = null;
-/** The signed-in user ({ login, name }) on the client; null in local mode. */
-export const setActor = (value) => { actor = value?.login ? { login: value.login, name: value.name ?? value.login } : null; };
-export const currentActor = () => actor;
+import { employeeFor } from './actor.js';
+
+export { setActor, currentActor, employeeFor } from './actor.js';
 
 const employees = (db) => db.records['hr.employee'] ?? [];
 const employee = (db, id) => employees(db).find((e) => e.id === id) ?? null;
 
-/** The employee linked to a user login, or null. */
-export const employeeFor = (db, login) => (login ? employees(db).find((e) => e.user_login === login) ?? null : null);
 
 /** Whether `managerId` is `employeeId`'s manager, directly or further up the chain. */
 export function manages(db, managerId, employeeId) {

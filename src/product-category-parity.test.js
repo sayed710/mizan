@@ -241,7 +241,7 @@ test('valuation and costing options, required constraint, defaults, and inherita
   );
 });
 
-test('canonical income/expense accounts resolve invoice lines and COGS after migration 53', () => {
+test('canonical income/expense accounts resolve invoice lines and COGS after migration 48', () => {
   let db = seed();
   const income = create(db, 'account.account', { code: '409100', name: 'Category Income', account_type: 'income', company_id: 1 });
   const expense = create(income.db, 'account.account', { code: '609100', name: 'Category Expense', account_type: 'expense', company_id: 1 });
@@ -250,7 +250,7 @@ test('canonical income/expense accounts resolve invoice lines and COGS after mig
   // Legacy un-migrated category using property_account_income_id / property_account_expense_id
   const legacyDb = {
     ...db,
-    schema_version: 51,
+    schema_version: 47,
     records: {
       ...db.records,
       'product.category': [
@@ -280,9 +280,9 @@ test('canonical income/expense accounts resolve invoice lines and COGS after mig
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(SCHEMA_VERSION, 53);
-  assert.equal(migrated.schema_version, 53);
-  assert.equal(migrate(migrated), migrated, 'migration 53 is idempotent');
+  assert.equal(SCHEMA_VERSION, 49);
+  assert.equal(migrated.schema_version, 49);
+  assert.equal(migrate(migrated), migrated, 'migration 48 is idempotent');
 
   const cat = read(migrated, 'product.category', 950);
   assert.equal(cat.property_account_income_categ_id, income.id);

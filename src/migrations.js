@@ -12,7 +12,7 @@ import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today, validDate } from './models/common.js';
-import { CHART, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
+import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
@@ -1301,18 +1301,6 @@ MIGRATIONS.push({ version: 47, name: 'followup-levels-parity', up(db) {
   };
 } });
 
-export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
-
-/** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
-export function migrate(db, toVersion = SCHEMA_VERSION) {
-  if (!db?.records) return db;
-  const from = db.schema_version ?? 0;
-  if (from > toVersion) throw new Error(`Database schema ${from} is newer than this version of Mizan (${toVersion})`);
-  const pending = MIGRATIONS.filter((m) => m.version > from && m.version <= toVersion);
-  if (!pending.length) return db;
-  return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: toVersion };
-}
-
 MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up(db) {
   const categories = db.records['product.category'] ?? [];
   if (!categories.length) return db;
@@ -1344,6 +1332,38 @@ MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up(d
   };
 } });
 
+const JOURNAL_ACCOUNT_FIELDS = [
+  'default_account_id',
+  'suspense_account_id',
+  'non_deductible_account_id',
+  'profit_account_id',
+  'loss_account_id',
+  'outstanding_receipts_account_id',
+  'outstanding_payments_account_id',
+];
+
+const UNRESOLVED_JOURNAL_COMPANY_NOTE = 'Upgrade: this journal\'s company could not be proved from its accounts or posted entries; set the company on the journal.';
+
+/** Derive a unique owning company for an unscoped journal from its accounts and posted moves, or null if ambiguous. */
+function provableJournalCompany(journal, accountById, postedMoves, companyIds) {
+  const accountCompanies = new Set();
+  for (const field of JOURNAL_ACCOUNT_FIELDS) {
+    const acc = accountById.get(journal[field]);
+    if (acc?.company_id != null) accountCompanies.add(acc.company_id);
+  }
+  if (accountCompanies.size > 1) return null;
+  const hasUnscopedMove = postedMoves.some((m) => m.company_id == null);
+  const moveCompanies = new Set(postedMoves.map((m) => m.company_id).filter((id) => id != null));
+  if (postedMoves.length && (hasUnscopedMove || moveCompanies.size !== 1)) return null;
+  const fromAccounts = accountCompanies.size === 1 ? [...accountCompanies][0] : null;
+  const fromMoves = postedMoves.length ? [...moveCompanies][0] : null;
+  if (fromAccounts != null && fromMoves != null && fromAccounts !== fromMoves) return null;
+  const resolved = fromAccounts ?? fromMoves;
+  if (resolved == null) return null;
+  return !companyIds.size || companyIds.has(resolved) ? resolved : null;
+}
+
+/** Bank, cash and credit journals belong to one company; shared document journals stay shared. */
 MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', up(db) {
   const journals = db.records['account.journal'] ?? [];
   if (!journals.length) return db;
@@ -1359,7 +1379,7 @@ MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', u
   const unresolvedIds = [];
   let changed = false;
   const nextJournals = journals.map((j) => {
-    if (j.company_id != null) return j;
+    if (j.company_id != null || !isLiquidityJournal(j)) return j;
     const resolved = provableJournalCompany(j, accountById, postedMovesByJournal.get(j.id) ?? [], companyIds);
     if (resolved == null) {
       unresolvedIds.push(j.id);
@@ -1375,3 +1395,15 @@ MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', u
   }
   return next;
 } });
+
+export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
+
+/** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
+export function migrate(db, toVersion = SCHEMA_VERSION) {
+  if (!db?.records) return db;
+  const from = db.schema_version ?? 0;
+  if (from > toVersion) throw new Error(`Database schema ${from} is newer than this version of Mizan (${toVersion})`);
+  const pending = MIGRATIONS.filter((m) => m.version > from && m.version <= toVersion);
+  if (!pending.length) return db;
+  return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: toVersion };
+}

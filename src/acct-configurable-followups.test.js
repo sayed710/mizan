@@ -47,7 +47,7 @@ test('bank match uses each company exchange account for payment and write-off', 
     const invoice = create(currency.db, 'account.move', { move_type: 'out_invoice', company_id: company, partner_id: 1, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
     db = press(invoice.db, 'account.move', invoice.id, 'Confirm');
     const expense = create(db, 'account.account', { name: 'Write off', code: `WO${company}`, account_type: 'expense', company_id: company });
-    const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+    const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && j.company_id === company);
     const line = create(expense.db, 'account.bank.statement.line', { journal_id: bankJournal.id, company_id: company, payment_ref: 'Bank receipt', date: '2026-02-01', amount: 90, move_id: invoice.id, writeoff_account_id: expense.id, writeoff_amount: 10, writeoff_label: 'Adjustment' });
     db = press(line.db, 'account.bank.statement.line', line.id, 'Match');
     const statement = read(db, 'account.bank.statement.line', line.id);

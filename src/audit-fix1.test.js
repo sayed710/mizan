@@ -103,7 +103,7 @@ test('PKG-01: Company 2 payment requires its own default payment journal and nev
   assert.equal(payMoveRec.line_ids.some((l) => l.account_id === bnk1AccountId), false);
 });
 
-test('PKG-01: migration 47 infers journal company_id only when provable and logs chatter note otherwise', async () => {
+test('PKG-01: migration 49 infers journal company_id only when provable and logs chatter note otherwise', async () => {
   let db = seed();
   const co2 = createCompany(db, { name: 'Second Co' });
   db = co2.db;
@@ -115,7 +115,7 @@ test('PKG-01: migration 47 infers journal company_id only when provable and logs
 
   const synthetic = {
     ...db,
-    schema_version: 46,
+    schema_version: 48,
     records: {
       ...db.records,
       'account.journal': [
@@ -140,7 +140,7 @@ test('PKG-01: migration 47 infers journal company_id only when provable and logs
 
   const migrated = migrate(synthetic);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 47);
+  assert.equal(SCHEMA_VERSION, 49);
 
   assert.equal(read(migrated, 'account.journal', 901).company_id, co2.id);
   assert.equal(read(migrated, 'account.journal', 902).company_id, co2.id);

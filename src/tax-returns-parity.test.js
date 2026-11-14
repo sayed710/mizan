@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { createCompanyWithDefaultInvoiceJournals, withDefaultBankJournal } from './test-support/accounting-company.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { today, addDays } from './models/common.js';
@@ -1123,7 +1123,7 @@ test('outbound payment actions allow no recipient bank and persist a chosen bill
 test('outbound payment actions reject another company’s recipient bank and allow own or shared banks', () => {
   const initial = seed();
   const company = createCompany(initial, { name: 'Other paying company' });
-  const vendor = create(company.db, 'res.partner', { name: 'Company-aware vendor' });
+  const vendor = create(withDefaultBankJournal(company.db, company.id), 'res.partner', { name: 'Company-aware vendor' });
   const foreign = create(vendor.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-TWO', company_id: company.id, allow_out_payment: true });
   const own = create(foreign.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-ONE', company_id: 1, allow_out_payment: true });
   const shared = create(own.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SHARED', allow_out_payment: true });

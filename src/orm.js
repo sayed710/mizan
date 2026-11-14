@@ -30,7 +30,7 @@ const withComputed = (fields, r, db) => {
 };
 
 /** Source records for a model, computing virtual report rows when declared by `models[model].records`. */
-const rawRecords = (db, model) => (models[model]?.records ? models[model].records(db) : (db.records[model] ?? []));
+const rawRecords = (db, model, def = models[model]) => (def?.records ? def.records(db) : (db.records[model] ?? []));
 
 /** Guard write operations against read-only virtual models. */
 function assertWritable(model) {
@@ -39,8 +39,9 @@ function assertWritable(model) {
 
 /** Records of a model in the active company, with computed fields. Archived (active === false) hidden by default. */
 export function search(db, model, { includeArchived = false } = {}) {
-  const fields = models[model].fields;
-  return rawRecords(db, model)
+  const def = models[model];
+  const fields = def.fields;
+  return rawRecords(db, model, def)
     .filter((r) => (includeArchived || r.active !== false) && inCompany(model, r))
     .map((r) => withComputed(fields, r, db));
 }
@@ -63,8 +64,9 @@ function locate(list, id) {
 
 /** One record by id regardless of company (cross-company links still display). */
 export function read(db, model, id) {
-  const r = locate(rawRecords(db, model), id);
-  return r && withComputed(models[model].fields, r, db);
+  const def = models[model];
+  const r = locate(rawRecords(db, model, def), id);
+  return r && withComputed(def.fields, r, db);
 }
 
 const isEmpty = (v) => v == null || v === '';

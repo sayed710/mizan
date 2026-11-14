@@ -265,7 +265,7 @@ test('invoice reminders form sentence, tabs, conditional activity fields, and va
   assert.throws(() => write(db, 'account.followup.level', firstLevel.id, { create_activity: true }), /Activity Type and Summary are required/);
 });
 
-test('signed delay derivation, display name, groupLabel, and migration 52', async () => {
+test('signed delay derivation, display name, groupLabel, and migration 47', async () => {
   const { display } = await import('./ui.jsx');
   assert.equal(followUpSignedDelay(15, 'after'), 15);
   assert.equal(followUpSignedDelay(5, 'before'), -5);
@@ -294,7 +294,7 @@ test('signed delay derivation, display name, groupLabel, and migration 52', asyn
   assert.equal(followUpLevelName({ display_delay: 0, reminder_timing: 'after' }), '0 days after');
 
   const legacy = {
-    schema_version: 51,
+    schema_version: 46,
     records: {
       'account.followup.level': [
         { id: 1, name: 'Early', delay: -4, channel: 'letter', message: 'Soon due' },
@@ -303,9 +303,9 @@ test('signed delay derivation, display name, groupLabel, and migration 52', asyn
       ],
     },
   };
-  assert.equal(SCHEMA_VERSION, 52);
+  assert.equal(SCHEMA_VERSION, 49);
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 52);
+  assert.equal(migrated.schema_version, 49);
   const mLevels = search(migrated, 'account.followup.level');
   assert.deepEqual(mLevels.map((l) => ({
     id: l.id,

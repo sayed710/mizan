@@ -13,9 +13,18 @@ export function invoiceJournalDefaults(db, sourceCompanyId = 1) {
   return { default_sale_journal_id: sales.id, default_purchase_journal_id: purchases.id, default_general_journal_id: general.id };
 }
 
-/** A fixture company with the explicitly configured sales and purchase journals copied from company 1. */
+/** Give a fixture company its own default payment journal, copied from company 1's default bank journal. */
+export function withDefaultBankJournal(db, companyId) {
+  const source = db.records['account.journal'].find((j) => j.company_id === 1 && j.default_for_payments === true);
+  if (!source) throw new Error('Configure a default payment journal on company 1 before creating this fixture');
+  const { id: _id, ...vals } = source;
+  return create(db, 'account.journal', { ...vals, code: `BNK${companyId}`, company_id: companyId }).db;
+}
+
+/** A fixture company with the explicitly configured sales and purchase journals copied from company 1 and its own bank journal. */
 export function createCompanyWithDefaultInvoiceJournals(db, vals) {
-  return createCompany(db, { ...invoiceJournalDefaults(db), ...vals });
+  const made = createCompany(db, { ...invoiceJournalDefaults(db), ...vals });
+  return { ...made, db: withDefaultBankJournal(made.db, made.id) };
 }
 
 /** A second company with its own copies of selected accounts and journals. */
