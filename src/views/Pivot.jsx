@@ -32,7 +32,7 @@ export function Pivot({ db, model, records, groupBy }) {
   const exportCsv = () => {
     const head = [t(models[model].fields[rowField]?.label ?? ''), ...cols.map((c) => t(c.label)), t('Total')];
     const body = rows.map((r) => [t(r.label), ...cols.map((c) => aggregate(inCol(r.records, c), measure, model)), aggregate(r.records, measure, model)]);
-    const csv = [head, ...body].map((line) => line.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const csv = [head, ...body].map((line) => line.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
     a.download = `${model}-pivot.csv`;

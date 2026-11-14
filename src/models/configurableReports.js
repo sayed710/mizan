@@ -18,6 +18,7 @@ import {
   STANDARD_BALANCE_LINES,
   STANDARD_PNL_LINES,
   STATEMENT_REPORT_SPECS,
+  statementReportGuard,
 } from './statementReports.js';
 import { round } from '../money.js';
 
@@ -59,9 +60,12 @@ function parseFormula(formula) {
   return { terms };
 }
 
-function reportError(db, _before, report) {
+/** Validate an account.report create or write, enforcing formula integrity and statement report retention. */
+function reportError(db, before, report) {
+  if (!read(db, 'res.company', report.company_id)) return 'Select an existing report company';
+  const statementErr = statementReportGuard(db, before, report);
+  if (statementErr) return statementErr;
   try {
-    if (!read(db, 'res.company', report.company_id)) throw new Error('Select an existing report company');
     if (!Array.isArray(report.line_ids)) throw new Error('Report lines must be a list');
     const lines = new Map();
     for (const line of report.line_ids) {
@@ -209,20 +213,21 @@ function computeEarningsSummary(db, report, period, weight, companies, { analyti
   return { current_year: currentYear, prior_years: priorYears };
 }
 
-function collectAccountContributions(db, definitions, lineCode, accountRows, factor = 1) {
+/** Collect signed balance and debit/credit factors for every account contributing to a report line. */
+function collectAccountContributions(db, definitions, lineCode, accountRows, factor = 1, dcFactor = 1) {
   const def = definitions.get(lineCode);
   const lineFactor = factor * (Number(def.sign) || 1);
   const contributions = [];
   if (def.parsed.terms) {
     for (const term of def.parsed.terms) {
-      contributions.push(...collectAccountContributions(db, definitions, term.code, accountRows, lineFactor * term.sign));
+      contributions.push(...collectAccountContributions(db, definitions, term.code, accountRows, lineFactor * term.sign, dcFactor * term.sign));
     }
     return contributions;
   }
   if (!def.parsed.selectors) return contributions;
   for (const row of accountRows) {
     if (matches(db, row.account, def.parsed.selectors)) {
-      contributions.push({ account: row.account, amount: lineFactor * row.balance });
+      contributions.push({ account: row.account, amount: lineFactor * row.balance, dcFactor });
     }
   }
   return contributions;
@@ -307,24 +312,25 @@ export function configurableReport(db, report, period, group = null, options = {
       if (!line.foldable) return [];
       const accountMap = new Map();
       const totalCols = buckets.length * columns.length;
+      const dIdx = columns.indexOf('debit');
+      const cIdx = columns.indexOf('credit');
       bucketState.forEach((state, stateIdx) => {
         const balIdx = stateIdx * columns.length;
-        for (const { account, amount } of collectAccountContributions(db, definitions, line.code, state.accountRows)) {
+        for (const { account, amount, dcFactor } of collectAccountContributions(db, definitions, line.code, state.accountRows)) {
           const entry = accountMap.get(account.id) ?? { account, values: new Array(totalCols).fill(0) };
-          entry.values[balIdx] = round(entry.values[balIdx] + amount);
-          if (columns.includes('debit') || columns.includes('credit')) {
+          entry.values[balIdx] += amount;
+          if (dIdx >= 0 || cIdx >= 0) {
             const dc = state.debitCreditByAccount.get(account.id);
             if (dc) {
-              const dIdx = columns.indexOf('debit');
-              const cIdx = columns.indexOf('credit');
-              if (dIdx >= 0) entry.values[balIdx + dIdx] = round(dc.debit);
-              if (cIdx >= 0) entry.values[balIdx + cIdx] = round(dc.credit);
+              if (dIdx >= 0) entry.values[balIdx + dIdx] += dcFactor * dc.debit;
+              if (cIdx >= 0) entry.values[balIdx + cIdx] += dcFactor * dc.credit;
             }
           }
           accountMap.set(account.id, entry);
         }
       });
       return [...accountMap.values()]
+        .map((entry) => ({ ...entry, values: entry.values.map((v) => round(v)) }))
         .filter((entry) => entry.values.some((v) => v !== 0))
         .sort((a, b) => String(a.account.code ?? '').localeCompare(String(b.account.code ?? '')));
     })();
@@ -390,7 +396,14 @@ export const configurableReportModels = {
     },
     defaults: () => ({ active: true, kind: '', date_scope: 'range', exclude_closing: false, sequence: 10, show_debit: false, show_credit: false, line_ids: [] }),
     createDefaults: (db) => ({ company_id: currentCompanyId(db) }),
-    guard: reportError, list: ['name', 'sequence', 'company_id'],
+    guard: reportError,
+    protectDelete: (db, report) => statementReportGuard(db, report),
+    onUnlink: (db, report) => {
+      const err = statementReportGuard(db, report);
+      if (err) throw new Error(err);
+      return db;
+    },
+    list: ['name', 'sequence', 'company_id'],
     form: { title: 'name', groups: [['sequence', 'company_id', 'active'], ['kind', 'date_scope', 'exclude_closing'], ['show_debit', 'show_credit']], tabs: [{ label: 'Report Lines', fields: ['line_ids'] }], buttons: [{ label: 'Open Report', run: (db, report) => ({ db, go: `#/accounting/configurable-report-view/${report.id}` }) }] },
   },
   'account.report.horizontal.group': {

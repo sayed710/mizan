@@ -56,10 +56,10 @@ export function invoiceReportLines(db) {
       const quantity = qtyRaw === 0 ? 0 : qtyRaw;
       const lineTaxes = computeLineTaxes(line, { currency: docCurr, roundingMethod, side });
       const bookedLine = booked.get(index);
-      const rawSubtotal = bookedLine ? bookedLine.amount : toCompanyOrNull(lineTaxes.excluded);
+      const rawSubtotal = bookedLine ? bookedLine.amount : toCompanyOrNull(lineTaxes.untaxed);
       const price_subtotal = rawSubtotal == null ? null : (rawSubtotal === 0 ? 0 : sign * rawSubtotal);
-      const rawTotal = lineTaxes.total === lineTaxes.excluded ? rawSubtotal : toCompanyOrNull(lineTaxes.total);
-      const price_total = rawTotal == null ? null : (lineTaxes.total === lineTaxes.excluded ? price_subtotal : (rawTotal === 0 ? 0 : sign * rawTotal));
+      const rawTotal = lineTaxes.total === lineTaxes.untaxed ? rawSubtotal : toCompanyOrNull(lineTaxes.total);
+      const price_total = rawTotal == null ? null : (lineTaxes.total === lineTaxes.untaxed ? price_subtotal : (rawTotal === 0 ? 0 : sign * rawTotal));
       const price_average = price_subtotal == null ? null : (quantity ? price_subtotal / quantity : 0);
 
       rows.push({

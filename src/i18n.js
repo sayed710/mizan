@@ -1706,6 +1706,7 @@ const ar = {
   'Email Message': 'نص رسالة البريد الإلكتروني',
   'Optional email reminder message': 'رسالة تذكير اختيارية بالبريد الإلكتروني',
   'Upgrade: both legacy and canonical income/expense accounts were set on this category; both values were kept so you can choose which account to retain.': 'الترقية: تم تعيين حسابات دخل أو مصروفات قديمة وأساسية معاً لهذه الفئة؛ تم الاحتفاظ بالقيمتين لتتمكن من اختيار الحساب المطلوب الإبقاء عليه.',
+  'Each company must keep at least one report for each standard financial statement kind': 'يجب أن تحتفظ كل شركة بتقرير واحد على الأقل لكل نوع من أنواع القوائم المالية القياسية',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

@@ -379,14 +379,16 @@ export function groupRecords(db, model, records, name, context = {}) {
   return groups.sort((a, b) => rank(a).localeCompare(rank(b)));
 }
 
-/** Aggregate a numeric field (sum, or mean when `groupOperator: 'avg'`), or the record count for "__count". */
+/** Aggregate a numeric field (sum, or mean of available numeric values when `groupOperator: 'avg'`), or the record count for "__count". */
 export function aggregate(records, measure, model = null) {
   if (measure === '__count') return records.length;
-  const total = records.reduce((s, r) => s + (Number(r[measure]) || 0), 0);
   if (model && models[model]?.fields?.[measure]?.groupOperator === 'avg') {
-    return records.length ? total / records.length : 0;
+    const values = records
+      .map((r) => r[measure])
+      .filter((v) => v != null && v !== '' && typeof v !== 'boolean' && Number.isFinite(Number(v)));
+    return values.length ? values.reduce((s, v) => s + Number(v), 0) / values.length : null;
   }
-  return total;
+  return records.reduce((s, r) => s + (Number(r[measure]) || 0), 0);
 }
 
 /** Filters in the same group are OR-ed, groups are AND-ed (search-panel semantics). */
