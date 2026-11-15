@@ -8,7 +8,8 @@ import { capTable } from '../models/apps4.js';
 import { today } from '../models/common.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
-import { Avatar, Icon } from '../ui.jsx';
+import { Avatar } from '../ui.jsx';
+import { AppIcon } from '../AppIcon.jsx';
 
 const CORE = new Set(['settings', 'apps']);
 
@@ -46,7 +47,7 @@ export function AppStore() {
             const installed = !uninstalled.has(a.id);
             return (
               <article key={a.id} className="app-card">
-                <span className="app-icon small" style={{ background: `linear-gradient(135deg, ${a.color[0]}, ${a.color[1]})` }}><Icon name={a.id} size={26} /></span>
+                <span className="app-icon small"><AppIcon id={a.id} size={30} /></span>
                 <div className="grow">
                   <h2>{t(a.name)}</h2>
                   <p className="muted">{t(APP_INFO[a.id]?.[1] ?? '')}</p>

@@ -17,7 +17,13 @@
   --shadow: 0 1px 2px rgb(0 0 0 / 40%);
 }
 :root[data-theme='dark'] body { background: var(--bg); }
-:root[data-theme='dark'] .home { background: radial-gradient(circle, #252a37 1px, transparent 1px) 0 0 / 18px 18px, linear-gradient(160deg, #14161d, #191c25); }
+:root[data-theme='dark'] .home, :root[data-theme='dark'] .appstore-grid {
+  --app-tile: #22252f; --app-tile-edge: #323747;
+  --i-t: #2fc2b1; --i-b: #5b95e6; --i-p: #a970c0; --i-c: #f58270; --i-a: #f7c257; --i-g: #6cc48b;
+  --i-s: #8fd0f2; --i-r: #ee7391; --i-n: #d6dcea; --i-k: #7d869b;
+}
+:root[data-theme='dark'] .home { background: radial-gradient(1100px 520px at 50% -140px, #1e212b, transparent 70%), #14161c; }
+:root[data-theme='dark'] .app-icon { box-shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 10px 18px -12px rgb(0 0 0 / 70%); }
 :root[data-theme='dark'] .btn { background: var(--surface); color: var(--text); }
 :root[data-theme='dark'] .btn:hover { background: #262a36; border-color: #3a4052; }
 :root[data-theme='dark'] .btn.primary { background: #4a63d8; border-color: #4a63d8; color: #fff; }
