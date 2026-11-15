@@ -265,8 +265,17 @@ const validateTransaction = (tx) => {
   if (typeof tx.amount !== 'number' || !Number.isFinite(tx.amount) || tx.amount === 0) {
     throw new Error('Provider transaction amount must be a finite non-zero number');
   }
-  if (tx.payment_ref !== undefined && tx.payment_ref !== null && typeof tx.payment_ref !== 'string') {
-    throw new Error('Provider transaction payment_ref must be a string');
+  for (const [field, msg] of [
+    ['payment_ref', 'Provider transaction payment_ref must be a string'],
+    ['narration', 'Provider transaction narration must be a string'],
+    ['ref', 'Provider transaction ref must be a string'],
+  ]) {
+    if (tx[field] !== undefined && tx[field] !== null && typeof tx[field] !== 'string') {
+      throw new Error(msg);
+    }
+  }
+  if (tx.partner_id !== undefined && tx.partner_id !== null && (!Number.isSafeInteger(tx.partner_id) || tx.partner_id < 1)) {
+    throw new Error('Provider transaction partner_id must be a positive integer');
   }
 };
 
@@ -280,7 +289,18 @@ const validateProviderResult = (result) => {
   if (typeof result.nextCursor !== 'string') {
     throw new Error('Provider response is missing nextCursor');
   }
-  for (const tx of result.transactions) validateTransaction(tx);
+  // Both undefined and null denote an absent optional balance; any supplied value must be a finite number.
+  if (result.balance !== undefined && result.balance !== null && (typeof result.balance !== 'number' || !Number.isFinite(result.balance))) {
+    throw new Error('Provider response balance must be a finite number');
+  }
+  const seenImportIds = new Set();
+  for (const tx of result.transactions) {
+    validateTransaction(tx);
+    if (seenImportIds.has(tx.unique_import_id)) {
+      throw new Error('Provider batch contains duplicate unique_import_id');
+    }
+    seenImportIds.add(tx.unique_import_id);
+  }
 };
 
 const normalizeTransaction = (tx, account) => ({
@@ -289,9 +309,9 @@ const normalizeTransaction = (tx, account) => ({
   amount: tx.amount,
   payment_ref: tx.payment_ref || '/',
   ...(account.account_number ? { account_number: String(account.account_number) } : {}),
-  ...(tx.partner_id ? { partner_id: tx.partner_id } : {}),
-  ...(tx.narration != null && tx.narration !== '' ? { narration: String(tx.narration) } : {}),
-  ...(tx.ref != null && tx.ref !== '' ? { ref: String(tx.ref) } : {}),
+  ...(tx.partner_id != null ? { partner_id: tx.partner_id } : {}),
+  ...(tx.narration != null && tx.narration !== '' ? { narration: tx.narration } : {}),
+  ...(tx.ref != null && tx.ref !== '' ? { ref: tx.ref } : {}),
 });
 
 const failConnection = (db, linkId, message) => ({
@@ -326,8 +346,8 @@ function runSyncForAccounts(db, link, accounts, { now = new Date().toISOString()
       stagedDb = imported.db;
       totalCreated += imported.count;
 
-      const nextBalance = result.balance != null && Number.isFinite(Number(result.balance))
-        ? Number(result.balance)
+      const nextBalance = result.balance != null
+        ? result.balance
         : journalStatementBalance(stagedDb, account.journal_id);
       stagedDb = write(stagedDb, ACCOUNT_MODEL, account.id, {
         balance: nextBalance,

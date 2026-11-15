@@ -16,8 +16,11 @@ import {
   statementCompanyAmount,
 } from '../models/bank.js';
 import { t } from '../i18n.js';
-import { documentCurrency } from '../money.js';
+import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { money } from '../ui.jsx';
+
+/** Format `amount` using `currency` (falling back to the active company currency when null). */
+const formatInCurrency = (amount, currency) => money(amount, currency?.name ?? null, currency ?? null);
 
 const TABS = [
   { id: 'candidates', label: 'Counterpart Candidates' },
@@ -207,7 +210,7 @@ export function BankReconcile() {
                   >
                     <div className="bank-reconcile-line-top">
                       <strong>{line.payment_ref || t('Statement Line')}</strong>
-                      <span>{money(openBalance(line))}</span>
+                      <span>{formatInCurrency(openBalance(line), findCompanyCurrencyRecord(db, line.company_id ?? null))}</span>
                     </div>
                     <div className="bank-reconcile-line-meta muted">
                       <span>{line.date}</span>
@@ -235,8 +238,8 @@ export function BankReconcile() {
                   </p>
                 </div>
                 <div className="bank-reconcile-amounts">
-                  <span>{t('Statement Amount')}: <strong>{money(selectedLine.amount, selectedLineCurrency?.name ?? null, selectedLineCurrency)}</strong></span>
-                  <span>{t('Open Balance')}: <strong>{money(openBalance(selectedLine))}</strong></span>
+                  <span>{t('Statement Amount')}: <strong>{formatInCurrency(selectedLine.amount, selectedLineCurrency)}</strong></span>
+                  <span>{t('Open Balance')}: <strong>{formatInCurrency(openBalance(selectedLine), findCompanyCurrencyRecord(db, selectedLine.company_id ?? null))}</strong></span>
                 </div>
               </header>
 
@@ -275,7 +278,7 @@ export function BankReconcile() {
                             >
                               <div className="bank-reconcile-line-top">
                                 <strong>{move.name}</strong>
-                                <span>{money(move.amount_residual)}</span>
+                                <span>{formatInCurrency(move.amount_residual, documentCurrency(db, move))}</span>
                               </div>
                               <div className="bank-reconcile-line-meta muted">
                                 <span>{move.invoice_date}</span>
@@ -322,7 +325,7 @@ export function BankReconcile() {
                             >
                               <div className="bank-reconcile-line-top">
                                 <strong>{payment.name}</strong>
-                                <span>{money(payment.amount)}</span>
+                                <span>{formatInCurrency(payment.amount, documentCurrency(db, payment))}</span>
                               </div>
                               <div className="bank-reconcile-line-meta muted">
                                 <span>{payment.date}</span>
