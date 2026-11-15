@@ -22,6 +22,7 @@ import {
 
 const DOCUMENT_TYPES = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'];
 const RECEIVABLE_PAYABLE = ['asset_receivable', 'liability_payable'];
+const EXCEEDED_AMOUNT_ERROR = 'The applied amount cannot exceed the open balance available to reconcile';
 const IMMUTABLE_LINK_FIELDS = [
   'debit_move_id',
   'debit_line_index',
@@ -308,6 +309,19 @@ function documentSettledByCounterSide(move, line) {
     || (['in_invoice', 'out_refund'].includes(move.move_type) && lineNet < 0);
 }
 
+/** Partition open items into debit and credit lists with rounded positive remaining balances. */
+function splitDebitCreditItems(items, ownCurrency, roundOwn) {
+  const debits = [];
+  const credits = [];
+  for (const it of items) {
+    const r = Number(it.reconciledLine.amount_residual) || 0;
+    if (isCurrencyZero(r, ownCurrency)) continue;
+    if (r > 0) debits.push({ ...it, remaining: roundOwn(r) });
+    else if (r < 0) credits.push({ ...it, remaining: roundOwn(-r) });
+  }
+  return { debits, credits };
+}
+
 /** Validate selection consistency, currency, partners, locks, write-off options, and explicit amount. */
 function validateReconcileSelection(db, items, { date, amount, writeoff }) {
   const companies = new Set(items.map((it) => it.move.company_id ?? 1));
@@ -340,6 +354,8 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
     ? (items[0].line.partner_id ?? null)
     : (distinctPartners.size === 1 ? [...distinctPartners][0] : null);
 
+  const { debits, credits } = splitDebitCreditItems(items, ownCurrency, roundOwn);
+
   let validatedWriteoff = null;
   if (writeoff) {
     if (amount != null) {
@@ -355,15 +371,7 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
     });
   } else {
     if (items.length < 2) throw new Error('Select at least two journal items to reconcile');
-    const hasDebit = items.some((it) => {
-      const r = Number(it.reconciledLine.amount_residual) || 0;
-      return r > 0 && !isCurrencyZero(r, ownCurrency);
-    });
-    const hasCredit = items.some((it) => {
-      const r = Number(it.reconciledLine.amount_residual) || 0;
-      return r < 0 && !isCurrencyZero(r, ownCurrency);
-    });
-    if (!hasDebit || !hasCredit) throw new Error('Select at least one debit item and one credit item to reconcile');
+    if (!debits.length || !credits.length) throw new Error('Select at least one debit item and one credit item to reconcile');
   }
 
   let requestedAmount = null;
@@ -372,6 +380,14 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
     if (!Number.isFinite(num) || !(num > 0)) throw new Error('The applied amount must be a positive number');
     requestedAmount = roundOwn(num);
     if (!(requestedAmount > 0) || isCurrencyZero(requestedAmount, ownCurrency)) throw new Error('The applied amount must be a positive number');
+    if (debits.length !== 1 || credits.length !== 1) {
+      throw new Error('An explicit reconciliation amount is only supported when reconciling one debit item with one credit item');
+    }
+    const maxAbsorbable = roundOwn(Math.min(debits[0].remaining, credits[0].remaining));
+    const excess = roundOwn(requestedAmount - maxAbsorbable);
+    if (excess > 0 && !isCurrencyZero(excess, ownCurrency)) {
+      throw new Error(EXCEEDED_AMOUNT_ERROR);
+    }
   }
 
   return { companyId, ownCurrency, roundOwn, account, net, groupPartnerId, validatedWriteoff, requestedAmount };
@@ -432,20 +448,9 @@ function settleDocumentSide(db, docItem, otherItem, { matchAmt, pairDate, partia
 
 /** Match debits against credits oldest first, creating `account.partial.reconcile` links and document settlements. */
 function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate, requestedAmount, ownCurrency, roundOwn }) {
-  const debits = workingItems
-    .filter((it) => {
-      const r = Number(it.reconciledLine.amount_residual) || 0;
-      return r > 0 && !isCurrencyZero(r, ownCurrency);
-    })
-    .map((it) => ({ ...it, remaining: roundOwn(Number(it.reconciledLine.amount_residual)) }))
-    .sort(compareOldestFirst);
-  const credits = workingItems
-    .filter((it) => {
-      const r = Number(it.reconciledLine.amount_residual) || 0;
-      return r < 0 && !isCurrencyZero(r, ownCurrency);
-    })
-    .map((it) => ({ ...it, remaining: roundOwn(-Number(it.reconciledLine.amount_residual)) }))
-    .sort(compareOldestFirst);
+  const { debits, credits } = splitDebitCreditItems(workingItems, ownCurrency, roundOwn);
+  debits.sort(compareOldestFirst);
+  credits.sort(compareOldestFirst);
 
   if (requestedAmount != null && (debits.length !== 1 || credits.length !== 1)) {
     throw new Error('An explicit reconciliation amount is only supported when reconciling one debit item with one credit item');
@@ -482,6 +487,9 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
     }
     if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency)) di += 1;
     if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency)) ci += 1;
+  }
+  if (budget != null && budget > 0 && !isCurrencyZero(budget, ownCurrency)) {
+    throw new Error(EXCEEDED_AMOUNT_ERROR);
   }
   return next;
 }

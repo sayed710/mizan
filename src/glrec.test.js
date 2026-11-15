@@ -693,7 +693,7 @@ test('PKG-08(B): server-side applyDiff rejects forged account.partial.reconcile 
   assert.throws(() => applyDiff(partial150, diffDb(partial150, forgedNewRowDb), { isAdmin: true }), /partial reconciliation/i);
 });
 
-test('PKG-08(C): Reconcile passes Amount in Invoice Currency via UI and reconcileLedgerItems, delegates payment/credit note, caps 1:1 general, rejects >2 with amount', async () => {
+test('PKG-08(C): Reconcile passes Amount in Invoice Currency via UI and reconcileLedgerItems, delegates payment/credit note, rejects 1:1 general amount exceeding open balance, rejects >2 with amount', async () => {
   const { reconcileLedgerItems } = await import('./models/glReconcile.js');
   const { makeEl } = setupDom();
   const React = await import('react');
@@ -766,7 +766,7 @@ test('PKG-08(C): Reconcile passes Amount in Invoice Currency via UI and reconcil
   assert.equal(read(partialNoteDb, 'account.move', standaloneNote.id).amount_residual, 180);
   assert.equal((partialNoteDb.records['account.partial.reconcile'] ?? []).length, 0);
 
-  // 3. General 1 debit + 1 credit supports partial amount and caps at smaller residual
+  // 3. General 1 debit + 1 credit supports partial amount and rejects amount above smaller residual
   const inv3 = makePostedInvoice(db, { partnerId: partner.id, price: 1000, date: '2026-03-01' });
   const mCredit600 = postEntry(inv3.db, {
     journal: misc.code, journal_id: misc.id, company: 1, date: '2026-03-02', ref: 'MISC 600',
@@ -780,11 +780,22 @@ test('PKG-08(C): Reconcile passes Amount in Invoice Currency via UI and reconcil
   assert.equal(read(partialGen, 'account.move', inv3.id).amount_residual, 750);
   assert.equal(reconciledJournalItems(partialGen, read(partialGen, 'account.move', mCredit600.id)).find((l) => l.account_id === ar).amount_residual, -350);
 
-  // Capped at smaller residual (remaining 350 vs requested 900)
+  // Rejects explicit amount exceeding smaller residual (remaining 350 vs requested 900), leaving both items unchanged
+  assert.throws(
+    () => reconcileLedgerItems(
+      partialGen,
+      [itemSelection(partialGen, inv3.id, ar), itemSelection(partialGen, mCredit600.id, ar)],
+      { date: '2026-03-02', amount: 900 },
+    ),
+    /cannot exceed the open balance available to reconcile/i,
+  );
+  assert.equal(read(partialGen, 'account.move', inv3.id).amount_residual, 750);
+  assert.equal(reconciledJournalItems(partialGen, read(partialGen, 'account.move', mCredit600.id)).find((l) => l.account_id === ar).amount_residual, -350);
+
   const cappedGen = reconcileLedgerItems(
     partialGen,
     [itemSelection(partialGen, inv3.id, ar), itemSelection(partialGen, mCredit600.id, ar)],
-    { date: '2026-03-02', amount: 900 },
+    { date: '2026-03-02', amount: 350 },
   );
   assert.equal(read(cappedGen, 'account.move', inv3.id).amount_residual, 400);
   assert.equal(reconciledJournalItems(cappedGen, read(cappedGen, 'account.move', mCredit600.id)).find((l) => l.account_id === ar).reconciled, true);

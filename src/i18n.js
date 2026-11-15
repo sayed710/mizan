@@ -1783,6 +1783,7 @@ const ar = {
   'An explicit reconciliation amount is only supported when reconciling one debit item with one credit item': 'يدعم تحديد مبلغ مطابقة صريح فقط عند مطابقة بند مدين واحد مع بند دائن واحد',
   'The selected journal item is missing, ambiguous or no longer posted; refresh the list': 'بند اليومية المحدد غير موجود أو غامض أو لم يعد مرحّلاً؛ حدّث القائمة',
   'The applied amount must be a positive number': 'يجب أن يكون المبلغ المطبق رقماً موجباً',
+  'The applied amount cannot exceed the open balance available to reconcile': 'لا يجوز أن يتجاوز المبلغ المطبق الرصيد المفتوح المتاح للتسوية',
   'Partial reconciliation requires posted debit and credit journal entries': 'تتطلب التسوية الجزئية قيود يومية مرحّلة للمدين والدائن',
   'Partial reconciliation entries must belong to the same company': 'يجب أن تنتمي قيود التسوية الجزئية إلى نفس الشركة',
   'Partial reconciliation requires valid debit and credit line indexes': 'تتطلب التسوية الجزئية فهارس أسطر صحيحة للمدين والدائن',
