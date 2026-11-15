@@ -4,7 +4,7 @@ import { currentCompany, getUser, useDb } from './store.js';
 import { appOpen } from './access.js';
 import { UserMenu } from './Navbar.jsx';
 import { t } from './i18n.js';
-import { Icon } from './ui.jsx';
+import { AppIcon } from './AppIcon.jsx';
 
 export function Home() {
   const db = useDb();
@@ -31,9 +31,7 @@ export function Home() {
       <nav className="app-grid" aria-label={t('Applications')}>
         {shown.map((a) => (
           <a key={a.id} className="app-tile" href={`#/${a.id}`}>
-            <span className="app-icon" style={{ background: `linear-gradient(135deg, ${a.color[0]}, ${a.color[1]})` }}>
-              <Icon name={a.id} size={34} />
-            </span>
+            <span className="app-icon"><AppIcon id={a.id} /></span>
             <span>{t(a.name)}</span>
           </a>
         ))}
