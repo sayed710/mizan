@@ -16,24 +16,24 @@ const GLYPHS = {
     <circle className="f-c" cx="37" cy="35" r="4.5" />
   </>,
   sales: <>
-    <rect className="f-a" x="7" y="27" width="9" height="14" rx="3" />
-    <rect className="f-c" x="19.5" y="19" width="9" height="22" rx="3" />
-    <rect className="f-p" x="32" y="10" width="9" height="31" rx="3" />
-    <path className="s-n" strokeWidth="3" d="M8 19l9-7 6 3 9-8" />
+    <path className="f-c" d="M6 9a3 3 0 013-3h14.500a4 4 0 012.800 1.200l15.500 15.500a4 4 0 010 5.600L27.300 42.800a4 4 0 01-5.600 0L7.200 28.300A4 4 0 016 25.500z" />
+    <circle className="f-w" cx="15" cy="15" r="3.600" />
+    <rect className="f-w" x="17" y="25" width="15" height="3.400" rx="1.700" transform="rotate(45 24.500 26.700)" />
   </>,
   accounting: <>
-    <rect className="f-n" x="22.4" y="9" width="3.2" height="27" rx="1.6" />
-    <rect className="f-n" x="7" y="12.5" width="34" height="3.2" rx="1.6" />
-    <rect className="f-n" x="15" y="35.5" width="18" height="4.5" rx="2.25" />
-    <path className="f-p" d="M5 22h16a8 8 0 01-16 0z" />
-    <path className="f-t" d="M27 22h16a8 8 0 01-16 0z" />
-    <circle className="f-a" cx="24" cy="9" r="3.6" />
+    <rect className="f-p" x="7" y="5" width="29" height="37" rx="5" />
+    <path className="f-n" d="M12 5h2.500v37H12a5 5 0 01-5-5V10a5 5 0 015-5z" />
+    <rect className="f-w" x="19" y="12" width="12" height="3.200" rx="1.600" />
+    <rect className="f-w" x="19" y="19" width="8" height="3.200" rx="1.600" />
+    <path className="f-a" d="M24 37L39.500 15.500a3.600 3.600 0 016 4.200L30 41z" />
+    <path className="f-n" d="M24 37l6 4-8.500 3z" />
   </>,
   purchase: <>
-    <path className="s-n" strokeWidth="3.2" d="M17 18v-3a7 7 0 0114 0v3" />
-    <rect className="f-s" x="9" y="17" width="30" height="24" rx="6" />
-    <rect className="f-b" x="9" y="31" width="30" height="10" rx="5" />
-    <circle className="f-a" cx="34" cy="24" r="3" />
+    <rect className="f-a" x="20" y="6" width="11" height="11" rx="2.500" />
+    <path className="f-s" d="M11 13h30a2 2 0 011.900 2.600l-3.400 11a3 3 0 01-2.900 2.100H17a3 3 0 01-2.900-2.300z" />
+    <path className="s-n" strokeWidth="3.200" d="M4 8h4.500l5.500 23h23" />
+    <circle className="f-n" cx="18" cy="38.500" r="3.600" />
+    <circle className="f-n" cx="34" cy="38.500" r="3.600" />
   </>,
   inventory: <>
     <rect className="f-t" x="16" y="6" width="16" height="16" rx="4" />
@@ -64,8 +64,11 @@ const GLYPHS = {
     <rect className="f-c" x="32" y="8" width="10" height="26" rx="4" />
   </>,
   helpdesk: <>
-    <circle className="s-r" strokeWidth="9" cx="24" cy="24" r="13.5" />
-    <circle className="s-w butt" strokeWidth="10" strokeDasharray="10.6 10.6" strokeDashoffset="5.3" cx="24" cy="24" r="13.5" />
+    <path className="s-r" strokeWidth="4.600" d="M9.500 27v-4a14.500 14.500 0 0129 0v4" />
+    <rect className="f-r" x="5" y="23" width="9.500" height="15" rx="4.700" />
+    <rect className="f-r" x="33.500" y="23" width="9.500" height="15" rx="4.700" />
+    <path className="s-n" strokeWidth="3" d="M38.500 37v1a4.500 4.500 0 01-4.500 4.500h-6" />
+    <rect className="f-a" x="19.500" y="39.600" width="9" height="5.800" rx="2.900" />
   </>,
   employees: <>
     <circle className="f-s" cx="11" cy="18" r="5" />
@@ -83,11 +86,14 @@ const GLYPHS = {
     <circle className="f-k" cx="41" cy="8" r="3.5" />
   </>,
   kitchen: <>
-    <rect className="f-n" x="5" y="8" width="38" height="26" rx="6" />
-    <rect className="f-a" x="10" y="13" width="8" height="15" rx="2" />
-    <rect className="f-c" x="20" y="13" width="8" height="10" rx="2" />
-    <rect className="f-t" x="30" y="13" width="8" height="13" rx="2" />
-    <rect className="f-k" x="16" y="37" width="16" height="3.6" rx="1.8" />
+    <circle className="f-s" cx="14" cy="17" r="8" />
+    <circle className="f-s" cx="34" cy="17" r="8" />
+    <circle className="f-s" cx="24" cy="13" r="9" />
+    <rect className="f-s" x="12" y="17" width="24" height="16" />
+    <rect className="f-n" x="12" y="31" width="24" height="7" rx="2.500" />
+    <rect className="f-c" x="29" y="26" width="14" height="17" rx="3.500" />
+    <rect className="f-w" x="32.500" y="31" width="7" height="2.800" rx="1.400" />
+    <rect className="f-w" x="32.500" y="36" width="5" height="2.800" rx="1.400" />
   </>,
   pos: <>
     <rect className="f-t" x="13" y="6" width="22" height="14" rx="4" />
@@ -224,10 +230,12 @@ const GLYPHS = {
     <circle className="f-w" cx="34" cy="33" r="1.800" />
   </>,
   attendances: <>
-    <rect className="f-t" x="10" y="9" width="28" height="33" rx="7" />
-    <rect className="f-n" x="19" y="5" width="10" height="8" rx="3" />
-    <circle className="f-w" cx="24" cy="22" r="5" />
-    <path className="f-w" d="M15.500 36a8.500 8.500 0 0117 0z" />
+    <rect className="f-t" x="6" y="9" width="27" height="33" rx="7" />
+    <rect className="f-n" x="14.500" y="5" width="10" height="8" rx="3" />
+    <circle className="f-w" cx="19.500" cy="22" r="5" />
+    <path className="f-w" d="M11 36a8.500 8.500 0 0117 0z" />
+    <circle className="f-a" cx="35" cy="34" r="10" />
+    <path className="s-n" strokeWidth="3" d="M35 28.500V34l4 2.500" />
   </>,
   appraisals: <>
     <path className="f-c" d="M14 26l-5 15 8-3 4.500 6 4-14z" />
@@ -307,9 +315,11 @@ const GLYPHS = {
     <circle className="f-p" cx="36" cy="34.500" r="7.500" />
   </>,
   plm: <>
-    <path className="f-b" d="M24 22l19 9-19 9L5 31z" />
-    <path className="f-s" d="M24 15l19 9-19 9L5 24z" />
-    <path className="f-t" d="M24 8l19 9-19 9L5 17z" />
+    <path className="s-t" strokeWidth="4.400" d="M35.600 10.200A18 18 0 1041.700 21" />
+    <path className="f-t" d="M35 23h13l-6.500-9z" />
+    <path className="f-s" d="M24 14l9 5-9 5-9-5z" />
+    <path className="f-b" d="M15 19l9 5v10l-9-5z" />
+    <path className="f-p" d="M33 19l-9 5v10l9-5z" />
   </>,
   rooms: <>
     <rect className="f-s" x="18" y="4" width="12" height="7" rx="3.500" />
@@ -325,9 +335,10 @@ const GLYPHS = {
     <path className="s-n" strokeWidth="3.200" d="M35 21.500v9M30.500 26h9" />
   </>,
   skills: <>
-    <path className="f-s" d="M24 4l19.500 14.200-7.500 23H12l-7.500-23z" />
-    <path className="f-p" d="M24 11l10.500 9-6 15.500h-10L13 22z" />
-    <circle className="f-w" cx="24" cy="24" r="2.600" />
+    <rect className="f-t" x="7" y="31" width="9" height="11" rx="3" />
+    <rect className="f-s" x="19.500" y="23" width="9" height="19" rx="3" />
+    <rect className="f-p" x="32" y="14" width="9" height="28" rx="3" />
+    <path className="f-a" d="M13 4.500l2.300 4.800 5.200.700-3.800 3.600.900 5.200L13 16.300l-4.600 2.500.900-5.200-3.800-3.600 5.200-.700z" />
   </>,
   esg: <>
     <path className="f-g" d="M8 40C6 21 16 7 42 6c1 22-9 34-27 33z" />
