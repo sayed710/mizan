@@ -869,17 +869,26 @@ test('webhook contract requires rawBody, strict demo parseWebhook status, explic
     (e) => e instanceof WebhookError && e.status === 400 && e.code === 'RAW_BODY_REQUIRED',
   );
 
-  // Adapter parseWebhook rejects missing status and guessed synonyms.
+  // Adapter parseWebhook rejects missing status and never treats guessed synonyms as paid.
   assert.deepEqual(
     PAYMENT_ADAPTERS.demo.parseWebhook({ reference: 'TX-CONTRACT-1', status: 'paid', amount: 75, currency: 'usd', provider_reference: 'GW-1', date: '2026-04-12' }),
-    { reference: 'TX-CONTRACT-1', paid: true, amount: 75, currency: 'USD', providerReference: 'GW-1', date: '2026-04-12' },
+    { reference: 'TX-CONTRACT-1', paid: true, status: 'paid', amount: 75, currency: 'USD', providerReference: 'GW-1', date: '2026-04-12' },
   );
-  for (const badStatus of [undefined, '', 'succeeded', 'complete', 'completed', 'unknown']) {
-    const raw = JSON.stringify({ reference: 'TX-CONTRACT-1', ...(badStatus !== undefined ? { status: badStatus } : {}), amount: 75, currency: 'USD' });
+  for (const missingStatus of [undefined, '']) {
+    const raw = JSON.stringify({ reference: 'TX-CONTRACT-1', ...(missingStatus !== undefined ? { status: missingStatus } : {}), amount: 75, currency: 'USD' });
     assert.throws(
       () => processPaymentWebhook(db, { providerCode: 'demo', rawBody: raw, signature: signWebhookPayload(raw, secret), secret }),
       (e) => e instanceof WebhookError && e.status === 400 && e.code === 'UNSUPPORTED_STATUS',
     );
+  }
+  for (const nonPaidStatus of ['succeeded', 'complete', 'completed', 'unknown']) {
+    const parsed = PAYMENT_ADAPTERS.demo.parseWebhook({ reference: 'TX-CONTRACT-1', status: nonPaidStatus, amount: 75, currency: 'USD' });
+    assert.equal(parsed.paid, false);
+    assert.equal(parsed.status, nonPaidStatus);
+    const raw = JSON.stringify({ reference: 'TX-CONTRACT-1', status: nonPaidStatus, amount: 75, currency: 'USD' });
+    const res = processPaymentWebhook(db, { providerCode: 'demo', rawBody: raw, signature: signWebhookPayload(raw, secret), secret });
+    assert.equal(res.ignored, true);
+    assert.equal(res.db, db);
   }
 
   const makeRes = () => {

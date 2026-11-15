@@ -210,27 +210,28 @@ test('2a: createInvoiceCheckout reuses matching pending tx, cancels stale on res
   assert.equal(residual(read(db, 'account.move', inv.id), db), 200);
   const third = createInvoiceCheckout(db, inv.id, demo.id, { baseUrl: 'https://p.test', returnUrl: '/ret' });
   assert.notEqual(third.transaction.id, first.transaction.id);
-  assert.equal(read(third.db, 'payment.transaction', first.transaction.id).state, 'cancel');
+  assert.equal(read(third.db, 'payment.transaction', first.transaction.id).state, 'superseded');
   assert.equal(third.transaction.state, 'pending');
   assert.equal(third.transaction.amount, 200);
   assert.equal(search(third.db, 'payment.transaction').filter((tx) => tx.move_id === inv.id && tx.state === 'pending').length, 1);
 
-  // Different provider -> previous cancelled, one new pending.
+  // Different provider -> previous superseded, one new pending.
   const fourth = createInvoiceCheckout(third.db, inv.id, altProvider.id, { baseUrl: 'https://p.test', returnUrl: '/ret' });
   assert.notEqual(fourth.transaction.id, third.transaction.id);
-  assert.equal(read(fourth.db, 'payment.transaction', third.transaction.id).state, 'cancel');
+  assert.equal(read(fourth.db, 'payment.transaction', third.transaction.id).state, 'superseded');
   assert.equal(search(fourth.db, 'payment.transaction').filter((tx) => tx.move_id === inv.id && tx.state === 'pending').length, 1);
 
   // Webhook for cancelled transaction stays rejected without mutating db.
+  const cancelledDb = write(fourth.db, 'payment.transaction', fourth.transaction.id, { state: 'cancel' });
   const secret = 'test-secret-q119c';
-  const staleBody = JSON.stringify({
-    reference: first.transaction.reference,
-    amount: first.transaction.amount,
+  const cancelledBody = JSON.stringify({
+    reference: fourth.transaction.reference,
+    amount: fourth.transaction.amount,
     currency: 'USD',
     status: 'paid',
   });
   assert.throws(
-    () => processPaymentWebhook(fourth.db, { providerCode: 'demo', rawBody: staleBody, signature: signWebhookPayload(staleBody, secret), secret }),
+    () => processPaymentWebhook(cancelledDb, { providerCode: 'demo', rawBody: cancelledBody, signature: signWebhookPayload(cancelledBody, secret), secret }),
     (err) => err instanceof WebhookError && err.code === 'INVALID_TRANSACTION_STATE' && err.status === 400,
   );
 });
