@@ -5,7 +5,8 @@ import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
 import { RateNote } from './RateNote.jsx';
 import { read } from '../orm.js';
 import { commit, companiesOf, getDb, useDb } from '../store.js';
-import { reconcileJournalItems, unreconcileJournalItems, writeoffJournalItem } from '../models/pay.js';
+import { writeoffJournalItem } from '../models/pay.js';
+import { reconcileLedgerItems, unreconcileLedgerItems } from '../models/glReconcile.js';
 import { monthFilters, parseAmount, today } from '../models/common.js';
 import { money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
 import { t } from '../i18n.js';
@@ -197,7 +198,15 @@ export function JournalItems({ leaf = {} } = {}) {
     try {
       const visible = new Set(journalItems(companyViewDb(getDb())).map(keyOf));
       if (selected.some((item) => !visible.has(keyOf(item)))) throw new Error('The selected items are no longer visible; refresh the selection');
-      const execute = { Reconcile: reconcileJournalItems, Unreconcile: unreconcileJournalItems, 'Write Off': writeoffJournalItem }[action];
+      const execute = {
+        Reconcile: (d, sel, opts) => reconcileLedgerItems(d, sel, { date: opts.date, amount: opts.amount }),
+        'Reconcile with write-off': (d, sel, opts) => reconcileLedgerItems(d, sel, {
+          date: opts.date,
+          writeoff: { journalId: opts.journalId, accountId: opts.accountId, date: opts.date, label: opts.label },
+        }),
+        Unreconcile: (d, sel, opts) => unreconcileLedgerItems(d, sel, { date: opts.date }),
+        'Write Off': writeoffJournalItem,
+      }[action];
       const result = execute(getDb(), selected, { date, amount: amount === '' ? null : Number(amount), journalId: Number(journalId), accountId: Number(accountId), label });
       if ((await commit(result)).ok) { setSelected([]); setAction(''); }
     } catch (e) { setError(e.message); }
@@ -337,15 +346,15 @@ export function JournalItems({ leaf = {} } = {}) {
     </div>
     {mode !== 'draft' && <div className="control-panel">
       <span>{t('{n} selected', { n: selected.length })}</span>
-      {['Reconcile', 'Unreconcile', 'Write Off'].map((btn) => <button type="button" className="btn" key={btn} disabled={!selected.length || busy} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>)}
+      {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off'].map((btn) => <button type="button" className="btn" key={btn} disabled={!selected.length || busy} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>)}
     </div>}
     {action && <form onSubmit={run} className="control-panel" aria-label={t(action)}>
       <h2>{t(action)}</h2>
-      {action === 'Unreconcile' && <p>{t('This removes the matching: payments stay posted and their credit becomes available again. Write-offs and direct bank matches are reversed on the selected date.')}</p>}
+      {action === 'Unreconcile' && <p>{t('This removes the matching: payments stay posted with their credit available again, and GL entries (including write-offs created by Reconcile with write-off) stay posted with their open balance restored. Standalone Write Off entries and direct bank matches are reversed on the selected date.')}</p>}
       <label>{t('Date')} <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
-      {action !== 'Unreconcile' && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
-      {action === 'Write Off' && <>
-        <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => isLiquidityJournal(j)).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
+      {(action === 'Reconcile' || action === 'Write Off') && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
+      {(action === 'Write Off' || action === 'Reconcile with write-off') && <>
+        <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => action === 'Write Off' ? isLiquidityJournal(j) : (j.active !== false && ['general', 'bank', 'cash', 'credit'].includes(j.type))).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
         <label>{t('Write-off Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => a.active !== false && !a.deprecated && !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
         <label>{t('Write-off Label')} <input required value={label} onChange={(e) => setLabel(e.target.value)} /></label>
       </>}

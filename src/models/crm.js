@@ -139,6 +139,7 @@ export const crmModels = {
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },
           followup_delivery_state: { type: 'selection', label: 'Delivery State', options: [['sent', 'Sent'], ['not_sent', 'Not Sent'], ['not_configured', 'Not Configured']], hidden: true },
+          followup_delivery_outcome: { type: 'selection', label: 'Delivery Outcome', options: [['sent', 'Sent'], ['outbox_only', 'Outbox Only'], ['failed', 'Failed']], hidden: true },
           followup_next_action_date: { type: 'date', label: 'Next Action Date', hidden: true },
           followup_status: { type: 'selection', label: 'Status', options: [['in_need_of_action', 'In need of action'], ['with_overdue_invoices', 'With overdue invoices'], ['no_action_needed', 'No action needed']], hidden: true },
           followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible', hidden: true },

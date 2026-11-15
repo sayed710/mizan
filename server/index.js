@@ -24,7 +24,8 @@ import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
-import { smtpConfig, sendMail } from './smtp.js';
+import { smtpConfig } from './smtp.js';
+import { createMailTransport } from './mailTransport.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { recordSent, sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
@@ -35,6 +36,7 @@ import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/we
 import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
+import { routePaymentWebhook } from './paymentWebhook.js';
 import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
 import { sharePage, smsInbound, SMS_PATH, SMS_WRITE } from './inbound.js';
 
@@ -62,7 +64,8 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
+import { menuModelsForApps, models, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
+const MAX_AUDIT_MODELS = 20;
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, scopeAuditChanges, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
@@ -435,6 +438,7 @@ const CHAT_MESSAGES_PER_WINDOW = 30;
 const TRACKING_HITS_PER_WINDOW = 300;
 const CART_PRICINGS_PER_WINDOW = 120;
 const WHATSAPP_HOOKS_PER_WINDOW = 600;
+const PAYMENT_WEBHOOKS_PER_WINDOW = 600;
 const ACCOUNT_FAILURES_PER_WINDOW = 50;
 const hits = (k) => sql.prepare('SELECT COUNT(*) AS n FROM rate_events WHERE key = ? AND at > ?').get(k, Date.now() - WINDOW).n;
 const tooMany = (k) => hits(k) >= 10;
@@ -691,6 +695,25 @@ async function api(req, res, path) {
     if (out.denied) recordFailure(`orderstatus:${ip}`);
     return send(res, out.status, out.body);
   }
+  const payWebhook = /^\/api\/payment\/webhook\/([a-z0-9_-]{1,32})$/.exec(path);
+  if (payWebhook) {
+    return routePaymentWebhook({
+      req,
+      res,
+      providerCode: payWebhook[1],
+      ip,
+      hits,
+      tooMany,
+      recordFailure,
+      maxPerWindow: PAYMENT_WEBHOOKS_PER_WINDOW,
+      send,
+      getDb: () => db,
+      commitDb,
+      readRaw,
+      env: ENV,
+      log,
+    });
+  }
   if (path.startsWith('/api/v1/')) {
     // Bearer-token API: no cookies involved, so no CSRF exposure; rate-limit failed keys like logins.
     if (tooMany(`key:${ip}`)) return send(res, 429, { error: 'Too many attempts, try again later' });
@@ -831,10 +854,20 @@ async function api(req, res, path) {
     const granted = companiesFor(user);
     const selected = q.get('selected') === '1' ? selectionFor(user).allowed_company_ids.filter((company) => !granted || granted.has(company)) : user.companies;
     const filterCompanies = granted ? (selected ? new Set(selected) : granted) : null;
+    let modelList = [];
+    if (q.has('models')) {
+      const parts = q.get('models').split(',').map((m) => m.trim());
+      if (!parts.length || parts.some((m) => !m)) return send(res, 400, { error: 'models must be a non-empty comma-separated list' });
+      if (parts.length > MAX_AUDIT_MODELS) return send(res, 400, { error: `At most ${MAX_AUDIT_MODELS} models allowed` });
+      const unknown = parts.find((m) => !Object.hasOwn(models, m));
+      if (unknown) return send(res, 400, { error: `Unknown audit model: ${unknown}` });
+      modelList = [...new Set(parts)];
+    }
+    const modelClause = modelList.length ? `AND model IN (${modelList.map((_, i) => `?${i + 6}`).join(',')})` : '';
     const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log
-      WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
+      WHERE (?1 IS NULL OR model = ?1) ${modelClause} AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
         AND audit_visible(company_id, model, res_id, changes, ?5) = 1 ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), id, limit, before, selected === null ? null : JSON.stringify(selected));
+      .all(q.get('model'), id, limit, before, selected === null ? null : JSON.stringify(selected), ...modelList);
     return send(res, 200, rows.map((r) => {
       const parsed = JSON.parse(r.changes);
       const changes = filterCompanies ? scopeAuditChanges(r.model, parsed, filterCompanies) : parsed;
@@ -1107,7 +1140,7 @@ const runJobs = async () => {
       base = db;
       return db;
     };
-    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: SMTP ? (message) => sendMail(SMTP, message) : null, commitFollowUps });
+    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP }), commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });

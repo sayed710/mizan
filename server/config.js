@@ -12,6 +12,7 @@ export const CONFIG = [
   { name: 'MIZAN_PUBLIC_URL', kind: 'url', about: 'Public origin of the site (links in emails, sitemap, Twilio signatures).' },
   { name: 'MIZAN_LOG_REQUESTS', kind: 'flag', default: '1', about: '`0` turns off the per-request JSON access log.' },
   { name: 'MIZAN_DEMO_PAYMENTS', kind: 'flag', about: '`1` lets the shop confirm orders without a payment (ignored in production).' },
+  { name: 'MIZAN_PAYMENT_WEBHOOK_SECRET', kind: 'secret', about: 'HMAC-SHA256 shared secret used to sign and verify payment provider webhooks.' },
   { name: 'MIZAN_SMTP_HOST', kind: 'text', about: 'SMTP server; email is sent only when set.' },
   { name: 'MIZAN_SMTP_PORT', kind: 'port', default: '587', about: 'SMTP port.' },
   { name: 'MIZAN_SMTP_USER', kind: 'text', about: 'SMTP user.' },

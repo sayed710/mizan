@@ -1,6 +1,7 @@
 // @ts-check
 // Type checks for untrusted record values, so one bad write can't break rendering for every user.
 import { models } from './registry.js';
+import { messageKind } from './models/auditRules.js';
 
 const MAX_TEXT = 20000;
 const MAX_ITEMS = 500;
@@ -110,11 +111,28 @@ export function cleanRecord(model, rec) {
   return out;
 }
 
-export const cleanMessage = (m) => (isPlain(m) && typeof m.id === 'string' && models[m.model] && Number.isInteger(m.res_id) ? {
-  id: m.id.slice(0, 64), model: m.model, res_id: m.res_id, body: String(m.body ?? '').slice(0, 10000),
-  kind: m.kind === 'note' ? 'note' : 'tracking', author: String(m.author ?? '').slice(0, 100), date: String(m.date ?? '').slice(0, 40),
-  ...(m.source_model === 'account.move' && Number.isSafeInteger(m.source_id) && m.source_id > 0 ? { source_model: m.source_model, source_id: m.source_id } : {}),
-} : null);
+const DELIVERY_STATES = new Set(['sent', 'failed', 'outbox_only']);
+
+/** Sanitize an incoming chatter/tracking message, preserving tracked field metadata only on declared fields of tracking messages. */
+export const cleanMessage = (m) => {
+  if (!isPlain(m) || typeof m.id !== 'string' || !models[m.model] || !Number.isInteger(m.res_id)) return null;
+  const kind = messageKind(m.kind);
+  const validField = kind === 'tracking' && typeof m.field === 'string' && m.field.length > 0 && m.field.length <= 100
+    && Object.hasOwn(models[m.model].fields ?? {}, m.field);
+  return {
+    id: m.id.slice(0, 64), model: m.model, res_id: m.res_id, body: String(m.body ?? '').slice(0, 10000),
+    kind, author: String(m.author ?? '').slice(0, 100), date: String(m.date ?? '').slice(0, 40),
+    ...(m.source_model === 'account.move' && Number.isSafeInteger(m.source_id) && m.source_id > 0 ? { source_model: m.source_model, source_id: m.source_id } : {}),
+    ...(validField ? {
+      field: m.field,
+      ...(typeof m.old_value === 'string' ? { old_value: m.old_value.slice(0, 1000) } : {}),
+      ...(typeof m.new_value === 'string' ? { new_value: m.new_value.slice(0, 1000) } : {}),
+    } : {}),
+    ...(DELIVERY_STATES.has(m.delivery_state) ? { delivery_state: m.delivery_state } : {}),
+    ...(typeof m.delivery_channel === 'string' && m.delivery_channel ? { delivery_channel: m.delivery_channel.slice(0, 32) } : {}),
+    ...(typeof m.delivery_error === 'string' && m.delivery_error ? { delivery_error: m.delivery_error.slice(0, 1000) } : {}),
+  };
+};
 
 /** favorites: { model: [{ name, search }] } with bounded size. */
 export function cleanFavorites(v, fallback) {

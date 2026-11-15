@@ -128,13 +128,12 @@ export function tableToRows(table) {
   return rows;
 }
 
-/** Downloads RFC 4180 CSV via a dynamic link in browser, returns CSV text. */
-export function downloadCsv(filename, rows) {
-  const text = typeof rows === 'string' ? rows : toCsv(rows);
+/** Downloads text content as a file via a dynamic link in browser, returns the text. */
+export function downloadBlob(filename, text, mime = 'text/plain;charset=utf-8') {
   if (typeof document !== 'undefined') {
     const a = document.createElement('a');
     if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && typeof Blob !== 'undefined') {
-      a.href = URL.createObjectURL(new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' }));
+      a.href = URL.createObjectURL(new Blob([text], { type: mime }));
       a.download = filename;
       a.click?.();
       if (typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(a.href);
@@ -144,4 +143,16 @@ export function downloadCsv(filename, rows) {
     }
   }
   return text;
+}
+
+/** Downloads RFC 4180 CSV via a dynamic link in browser, returns CSV text. */
+export function downloadCsv(filename, rows) {
+  const text = typeof rows === 'string' ? rows : toCsv(rows);
+  downloadBlob(filename, '\ufeff' + text, 'text/csv;charset=utf-8');
+  return text;
+}
+
+/** Downloads XML text via a dynamic link in browser, returns XML text. */
+export function downloadXml(filename, xml) {
+  return downloadBlob(filename, String(xml ?? ''), 'application/xml;charset=utf-8');
 }

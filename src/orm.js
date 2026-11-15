@@ -115,7 +115,7 @@ let author = 'Admin';
 /** Name stamped on chatter messages created by this client/process. */
 export const setAuthor = (name) => { author = name; };
 
-const message = (model, resId, body, kind, record, source) => ({
+const message = (model, resId, body, kind, record, source, meta = null) => ({
   id: crypto.randomUUID(),
   model,
   res_id: resId,
@@ -124,6 +124,7 @@ const message = (model, resId, body, kind, record, source) => ({
   author,
   date: new Date().toISOString(),
   ...(source ? { source_model: source.model, source_id: source.id, company_id: source.company_id ?? 1 } : record && !SHARED_MODELS.has(model) ? { company_id: record.company_id || 1 } : {}),
+  ...(meta && typeof meta === 'object' ? meta : {}),
 });
 
 export function create(db, model, vals, ctx = undefined) {
@@ -150,25 +151,49 @@ export function create(db, model, vals, ctx = undefined) {
     },
     id,
   };
-  return model === 'res.partner' ? { ...res, db: models[model].onWrite?.(res.db, rec, null, vals) ?? res.db } : res;
+  return (models[model].onCreate || model === 'res.partner')
+    ? { ...res, db: (models[model].onCreate ?? models[model].onWrite)?.(res.db, rec, null, vals) ?? res.db }
+    : res;
 }
 
+/** Format a tracked field transition using the same display rules as `write()` tracking messages. */
+export function formatTrackingChange(oldDb, model, fieldKey, oldVal, newVal, newDb = oldDb) {
+  const field = models[model]?.fields?.[fieldKey];
+  if (!field) return null;
+  if (typeof newVal === 'object' && newVal !== null) {
+    return { body: `${field.label}: updated`, old_value: '', new_value: 'updated' };
+  }
+  const label = (x, sourceDb) => {
+    if (x === null || x === undefined || x === '') return '—';
+    if (field.options) return field.options.find((o) => o[0] === x)?.[1] ?? x;
+    if (field.type === 'many2one' && field.relation) {
+      const relRec = (sourceDb.records?.[field.relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
+      if (relRec?.name) return relRec.name;
+    }
+    return x;
+  };
+  const oldValue = String(label(oldVal, oldDb));
+  const newValue = String(label(newVal, newDb));
+  return {
+    body: `${field.label}: ${oldValue} → ${newValue}`,
+    old_value: oldValue,
+    new_value: newValue,
+  };
+}
+
+/** Build tracking messages for changed tracked fields, stamping structural field/old_value/new_value metadata. */
 function trackingMessages(db, model, before, after, vals) {
   const fields = models[model].fields;
   const audited = models[model].audited?.(db, before) || models[model].audited?.(db, after);
   return Object.entries(vals)
     .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {
-      if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking', after);
-      const label = (x) => {
-        if (fields[k].options) return fields[k].options.find((o) => o[0] === x)?.[1] ?? x;
-        if (fields[k].type === 'many2one' && fields[k].relation) {
-          const relRec = (db.records[fields[k].relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
-          if (relRec?.name) return relRec.name;
-        }
-        return x;
-      };
-      return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking', after);
+      const { body, old_value, new_value } = formatTrackingChange(db, model, k, before[k], v, db);
+      return message(model, before.id, body, 'tracking', after, null, {
+        field: k,
+        old_value,
+        new_value,
+      });
     });
 }
 
@@ -284,10 +309,11 @@ export function unlink(db, model, ids) {
   const blocked = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
   if (blocked) throw new Error(blocked);
   const removed = (db.records[model] ?? []).filter((r) => drop.has(r.id));
+  const retainAuditOnDelete = Boolean(models[model].auditDelete);
   const next = {
     ...db,
     records: { ...db.records, [model]: (db.records[model] ?? []).filter((r) => !drop.has(r.id)) },
-    messages: model === 'account.move' ? [...db.messages, ...removed.map((r) => message(model, r.id, 'Record deleted', 'tracking', r))] : db.messages.filter((m) => !(m.model === model && drop.has(m.res_id))),
+    messages: retainAuditOnDelete ? [...db.messages, ...removed.map((r) => message(model, r.id, 'Record deleted', 'tracking', r))] : db.messages.filter((m) => !(m.model === model && drop.has(m.res_id))),
   };
   const result = removed.reduce((acc, r) => models[model].onUnlink?.(acc, r) ?? acc, next);
   // Checked after onUnlink, so records it removes along with these don't block the delete.
@@ -296,9 +322,15 @@ export function unlink(db, model, ids) {
   return result;
 }
 
+const noteMeta = (meta) => {
+  if (!meta || typeof meta !== 'object') return null;
+  const { kind, field, old_value, new_value, ...rest } = meta;
+  return rest;
+};
+
 /** A tracking (audit) message, as `write` posts for a changed tracked field. */
 export const postTracking = (db, model, id, body, by = author) => ({ ...db, messages: [...db.messages, { ...message(model, id, body, 'tracking', (db.records[model] ?? []).find((r) => r.id === id)), author: by }] });
-export const postNote = (db, model, id, body, source) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note', (db.records[model] ?? []).find((r) => r.id === id), source)] });
+export const postNote = (db, model, id, body, source, meta = null) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note', (db.records[model] ?? []).find((r) => r.id === id), source, noteMeta(meta))] });
 
 export const messagesOf = (db, model, id) =>
   db.messages.filter((m) => m.model === model && m.res_id === id).sort((a, b) => b.date.localeCompare(a.date));

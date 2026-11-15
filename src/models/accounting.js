@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
@@ -23,6 +23,7 @@ import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
+import { onlineAccountForJournal } from './onlineSync.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
@@ -294,9 +295,11 @@ const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'U
 /** Ids of the entries that settle invoices (payments, early-payment discounts, and reconciliation exchange entries). */
 export const settlingEntries = (db) => {
   const moves = db.records['account.move'] ?? [];
+  const partials = db.records['account.partial.reconcile'] ?? [];
   const fromPayments = moves.flatMap((m) => (m.payments ?? []).flatMap((p) => [p.move_id, p.payment_fx_move_id]));
+  const fromGl = partials.filter((g) => g && g.active !== false && !g.reversed).flatMap((g) => [g.debit_move_id, g.credit_move_id]);
   const fromFx = moves.filter((m) => m.move_type === 'entry' && m.fx_payment_move_id && m.fx_invoice_id).map((m) => m.id);
-  return new Set([...fromPayments, ...fromFx].filter(Boolean));
+  return new Set([...fromPayments, ...fromGl, ...fromFx].filter(Boolean));
 };
 
 /**
@@ -783,12 +786,8 @@ export function applyCreditNote(db, noteId, invoiceId, date = null, amount = nul
   if (!(value > 0)) return db;
   const invoicePortion = settlementCompanyAmount(db, invoice, value);
   const notePortion = settlementCompanyAmount(db, note, value);
-  const invRelease = releaseCashBasis(db, invoice, value / total(invoice, db), appDate, { final: value >= invResidual });
-  const noteRelease = releaseCashBasis(invRelease.db, note, value / total(note, invRelease.db), appDate, { final: value >= noteResidual });
-  const settle = (next, r, other, cashBasisMoveId, targetIndex = null) => write(next, 'account.move', r.id, {
-    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: appDate, payments: [...(r.payments ?? []), { date: appDate, amount: value, move_id: other.id, cash_basis_move_id: cashBasisMoveId, ...(Number.isInteger(targetIndex) ? { line_index: targetIndex } : {}) }],
-  });
-  let next = settle(settle(noteRelease.db, invoice, note, invRelease.id, lineIndex), note, invoice, noteRelease.id);
+  let next = appendDocumentSettlement(db, invoice.id, { amount: value, moveId: note.id, date: appDate, lineIndex }).db;
+  next = appendDocumentSettlement(next, note.id, { amount: value, moveId: invoice.id, date: appDate }).db;
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
   const sale = !isPurchase(invoice);
   const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
@@ -952,11 +951,91 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const withPayment = paymentId
     ? write(withEntry, 'account.payment', paymentId, { ...record, name })
     : create(withEntry, 'account.payment', { ...record, name }).db;
-  const release = releaseCashBasis(withPayment, r, value / total(r, db), date, { final });
-  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open, payment_company_amount: bank, cash_basis_move_id: release.id }];
-  const next = write(release.db, 'account.move', id, { amount_paid: docRound((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
-  const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
-  return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
+  const next = appendDocumentSettlement(withPayment, id, {
+    amount: value,
+    moveId: paymentMove,
+    date,
+    companyAmount: open,
+    paymentCompanyAmount: bank,
+    final,
+    note: `Payment of ${money(value)} registered`,
+  }).db;
+  return excess > 0 ? postNote(next, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : next;
+}
+
+/**
+ * Append a settlement row onto a posted document (`account.move`), releasing cash-basis taxes,
+ * updating `amount_paid` and `payment_date`, and optionally consuming an unapplied payment credit.
+ */
+export function appendDocumentSettlement(db, docId, {
+  amount,
+  moveId,
+  date,
+  companyAmount,
+  paymentCompanyAmount = null,
+  paymentMoveId = null,
+  paymentFxMoveId = null,
+  lineIndex = null,
+  partialReconcileId = null,
+  partnerBankId = null,
+  discount = false,
+  final = null,
+  releaseCashBasisTaxes = true,
+  consumePayment = false,
+  note = null,
+} = {}) {
+  const doc = read(db, 'account.move', docId);
+  const docCurr = documentCurrency(db, doc);
+  const docRound = (n) => roundCurrency(n, docCurr);
+  const value = docRound(amount);
+  const openDoc = residual(doc, db);
+  const docTotal = total(doc, db);
+  const isFinal = final ?? (value >= openDoc);
+  let next = db;
+  let cashBasisMoveId = null;
+  if (releaseCashBasisTaxes) {
+    const release = releaseCashBasis(next, doc, docTotal ? value / docTotal : 0, date, { final: isFinal });
+    next = release.db;
+    cashBasisMoveId = release.id;
+  }
+  const resolvedCompanyAmount = companyAmount !== undefined && companyAmount !== null
+    ? companyAmount
+    : (consumePayment ? settlementCompanyAmount(next, doc, value) : undefined);
+  let resolvedPayCompanyAmount = paymentCompanyAmount;
+  if (consumePayment) {
+    const linkedPay = search(next, 'account.payment').find((p) => p.move_id === moveId && p.state === 'posted');
+    if (linkedPay && Number(linkedPay.unapplied) > 0) {
+      const ownCurr = companyCurrencyRecord(next, doc.company_id);
+      const roundOwn = (n) => roundCurrency(n, ownCurr);
+      const taken = Math.min(roundOwn(Number(linkedPay.unapplied)), roundOwn(resolvedCompanyAmount));
+      if (resolvedPayCompanyAmount == null) resolvedPayCompanyAmount = taken;
+      next = write(next, 'account.payment', linkedPay.id, {
+        unapplied: Math.max(0, roundOwn(Number(linkedPay.unapplied) - taken)),
+      });
+    }
+  }
+  const freshDoc = read(next, 'account.move', docId);
+  const row = {
+    date,
+    amount: value,
+    move_id: moveId,
+    ...(paymentMoveId != null ? { payment_move_id: paymentMoveId } : {}),
+    ...(resolvedCompanyAmount !== undefined ? { company_amount: resolvedCompanyAmount } : {}),
+    ...(resolvedPayCompanyAmount != null ? { payment_company_amount: resolvedPayCompanyAmount } : {}),
+    ...(paymentFxMoveId != null ? { payment_fx_move_id: paymentFxMoveId } : {}),
+    cash_basis_move_id: cashBasisMoveId,
+    ...(Number.isInteger(lineIndex) ? { line_index: lineIndex } : {}),
+    ...(partialReconcileId != null ? { partial_reconcile_id: partialReconcileId } : {}),
+    ...(discount ? { discount: true } : {}),
+  };
+  next = write(next, 'account.move', docId, {
+    amount_paid: docRound((Number(freshDoc.amount_paid) || 0) + value),
+    payment_date: date,
+    payments: [...(freshDoc.payments ?? []), row],
+    ...(!freshDoc.partner_bank_id && partnerBankId ? { partner_bank_id: partnerBankId } : {}),
+  });
+  if (note) next = postNote(next, 'account.move', docId, note);
+  return { db: next, cashBasisMoveId };
 }
 
 /** Settle a document with an explicitly chosen company-currency write-off. */
@@ -982,9 +1061,14 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
     lines: incoming
       ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
       : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });
-  const release = releaseCashBasis(booked.db, invoice, amount / total(invoice, db), date, { final: amount >= residual(invoice, db) });
-  const payments = [...(invoice.payments ?? []), { date, amount, move_id: booked.id, company_amount: open, cash_basis_move_id: release.id, ...(Number.isInteger(lineIndex) ? { line_index: lineIndex } : {}) }];
-  return { db: write(release.db, 'account.move', invoiceId, { amount_paid: docRound((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
+  const settled = appendDocumentSettlement(booked.db, invoiceId, {
+    amount,
+    moveId: booked.id,
+    date,
+    companyAmount: open,
+    lineIndex,
+  });
+  return { db: settled.db, id: booked.id };
 }
 
 const releasedTaxKey = (account, taxId, name, tags = []) => taxId != null
@@ -1339,8 +1423,16 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   const after = read(booked, 'account.move', id);
   // Recorded like a payment (dated, pointing at its entry), so locked-period checks can verify it.
   const paymentMove = after.payments.at(-1).move_id;
-  const payments = [...(after.payments ?? []), { date, amount: discount, move_id: discountMove, payment_move_id: paymentMove, company_amount: value, cash_basis_move_id: null, discount: true }];
-  return postNote(write(booked, 'account.move', id, { amount_paid: docRound((Number(after.amount_paid) || 0) + discount), payment_date: date, payments }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
+  return appendDocumentSettlement(booked, id, {
+    amount: discount,
+    moveId: discountMove,
+    date,
+    companyAmount: value,
+    paymentMoveId: paymentMove,
+    discount: true,
+    releaseCashBasisTaxes: false,
+    note: `Early payment discount of ${money(discount)} applied`,
+  }).db;
 }
 
 function registerPayment(db, r, values = {}) {
@@ -1355,6 +1447,7 @@ function registerPayment(db, r, values = {}) {
   return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id }) };
 }
 
+export { registerPayment };
 export { isOutstandingCreditFor, isOutstandingCreditNoteFor, outstandingCreditNotes, outstandingCredits, outstandingPaymentCredits };
 
 /** A posted payment with unapplied credit that can settle `r`: same company, same commercial partner, matching direction. */
@@ -1719,16 +1812,17 @@ export const purchaseInvoiceView = {
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
+    auditDelete: true,
     fields: {
-      code: { type: 'char', label: 'Code', required: true },
-      name: { type: 'char', label: 'Account Name', required: true },
+      code: { type: 'char', label: 'Code', required: true, tracking: true },
+      name: { type: 'char', label: 'Account Name', required: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
-      account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES },
-      tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
-      fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category' },
+      account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES, tracking: true },
+      tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', tracking: true, domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
+      fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category', tracking: true },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
-      reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
-      active: { type: 'boolean', label: 'Active' },
+      reconcile: { type: 'boolean', label: 'Allow Reconciliation', tracking: true },
+      active: { type: 'boolean', label: 'Active', tracking: true },
       is_deferred: {
         type: 'boolean',
         label: 'Deferred',
@@ -1824,6 +1918,17 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after) => {
       const companyId = after.company_id ?? 1;
+      const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
+      if (linkedOnlineAccount) {
+        if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
+        if (after.company_id && after.company_id !== (linkedOnlineAccount.company_id ?? 1)) return 'Cannot change the company of a journal linked to an online account';
+        if (before?.bank_statements_source === 'online_sync' && after.bank_statements_source !== 'online_sync') {
+          return 'Cannot change the bank feeds source of a journal linked to an online account';
+        }
+      }
+      if (after.previous_bank_statements_source != null && after.bank_statements_source !== 'online_sync') {
+        return 'Previous bank feeds source can only be stored while online synchronization is active';
+      }
       const checkAccount = (field, label, allowedTypes = null) => {
         if (!after[field]) return null;
         if (allowedTypes && !allowedTypes.includes(after.type)) {
@@ -1911,6 +2016,15 @@ export const accountingModels = {
           ['online_sync', 'Online Synchronization'],
         ],
         required: (r) => r?.type === 'bank',
+      },
+      previous_bank_statements_source: {
+        type: 'selection', label: 'Previous Bank Feeds', hidden: true,
+        options: [
+          ['none', 'Not Set'],
+          ['undefined', 'Undefined Yet'],
+          ['file_import', 'Manual (or import CAMT, CSV, JPEG, OFX, PDF, PNG, XLS, XLSX)'],
+          ['online_sync', 'Online Synchronization'],
+        ],
       },
       restrict_mode_hash_table: { type: 'boolean', label: 'Secure Posted Entries with Hash' },
       invoice_reference_type: {
@@ -2022,6 +2136,7 @@ export const accountingModels = {
 
   'account.move': {
     label: 'Invoices',
+    auditDelete: true,
     actions: { postAutoPostMoves },
     guard: (db, before, after, ctx) => {
       const roundingTarget = (m) => ({ id: m.invoice_cash_rounding_id, companyId: m.company_id ?? 1, currencyId: m.currency_id ?? findCompanyCurrencyRecord(db, m.company_id ?? 1)?.id });
@@ -2091,25 +2206,26 @@ export const accountingModels = {
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
     },
     fields: {
-      name: { type: 'char', label: 'Number', readonly: true },
+      name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
       journal_id: {
         type: 'many2one',
         relation: 'account.journal',
         label: 'Journal',
+        tracking: true,
         domain: (j, r, db) => (!j.company_id || j.company_id === (r?.company_id ?? db?.settings?.current_company_id ?? 1)) && (r?.move_type === 'entry' ? true : isPurchase(r) ? j.type === 'purchase' : j.type === 'sale'),
       },
-      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       ref: { type: 'char', label: 'Reference' },
-      date: { type: 'date', label: 'Accounting Date' },
+      date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
-      invoice_date: { type: 'date', label: 'Date' },
-      invoice_date_due: { type: 'date', label: 'Due Date' },
+      invoice_date: { type: 'date', label: 'Date', tracking: true },
+      invoice_date_due: { type: 'date', label: 'Due Date', tracking: true },
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
-      payment_reference: { type: 'char', label: 'Payment Reference' },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      payment_reference: { type: 'char', label: 'Payment Reference', tracking: true },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', tracking: true },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       invoice_cash_rounding_id: {
         type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding',
@@ -2123,7 +2239,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount', currency: 'company' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount', currency: 'company' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, unapplied: { type: 'boolean', label: 'Unreconciled' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount', currency: 'company' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount', currency: 'company' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, partial_reconcile_id: { type: 'many2one', relation: 'account.partial.reconcile', label: 'Partial Reconcile', hidden: true }, reversed: { type: 'boolean', label: 'Reversed' }, unapplied: { type: 'boolean', label: 'Unreconciled' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
