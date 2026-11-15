@@ -652,13 +652,13 @@ export const Icon = ({ name, size = 18 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS[ALIAS[name]] ?? ICONS.grid}</svg>
 );
 
-/** Keeps one broken screen from blanking the whole app; resets when the route (key) changes. React needs a class for this. */
-/** Placeholder while the data or a screen's code is loading. */
 /** One button per other interface language, each labelled in its own language. */
 export const LanguageSwitch = ({ className, role }) => LANGUAGES.filter(([code]) => code !== lang).map(([code, label]) => (
   <button key={code} type="button" role={role} className={className} lang={code} onClick={() => setLang(code)}>{label}</button>
 ));
 
+/** Keeps one broken screen from blanking the whole app; resets when the route (key) changes. React needs a class for this. */
+/** Placeholder while the data or a screen's code is loading. */
 export const Loading = () => <div className="boot" role="status" aria-live="polite">{t('Loading…')}</div>;
 
 export class ErrorBoundary extends Component {

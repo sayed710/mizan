@@ -47,8 +47,29 @@ function uiStrings() {
   return [...keys].filter((k) => /[A-Za-z]/.test(k));
 }
 
+/** Messages a screen can show after a failed action: literal errors and browser dialogs outside tests. */
+function messageStrings() {
+  const dir = fileURLToPath(new URL('.', import.meta.url));
+  const walk = (d) => readdirSync(d).flatMap((n) => {
+    const p = join(d, n);
+    if (statSync(p).isDirectory()) return n === 'test-support' ? [] : walk(p);
+    return /\.jsx?$/.test(n) && !n.includes('.test.') && !['seed.js', 'migrations.js', 'i18n.js'].includes(n) ? [p] : [];
+  });
+  const keys = new Set();
+  for (const file of walk(dir)) {
+    for (const m of readFileSync(file, 'utf8').matchAll(/\b(?:new Error|alert|confirm|prompt)\(\s*'((?:\\.|[^'\\\n])*)'/g)) keys.add(m[1].replace(/\\'/g, "'"));
+  }
+  // Spreadsheet error codes such as #VALUE! are not prose.
+  return [...keys].filter((k) => /[A-Za-z]{3}/.test(k) && !k.startsWith('#'));
+}
+
 test('every UI string, field label and selection option has an Arabic translation', () => {
   const missing = uiStrings().filter((k) => !BRANDS.has(k) && t(k) === k);
+  assert.deepEqual(missing, []);
+});
+
+test('every literal error and dialog message has an Arabic translation', () => {
+  const missing = messageStrings().filter((k) => t(k) === k);
   assert.deepEqual(missing, []);
 });
 

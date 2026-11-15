@@ -56,7 +56,7 @@ export function UserMenu() {
     <div className="nav-group user-menu" ref={ref}>
       <button type="button" aria-expanded={open} aria-label={`${t('User menu')}: ${name}`} onClick={() => setOpen(!open)}><Avatar name={name} /></button>
       {open && (
-        <div className="nav-dropdown" role="menu">
+        <div className="nav-dropdown" role="menu" onKeyDown={menuKeys}>
           <span className="muted user-menu-name">{name}{user?.login ? ` (${user.login})` : ''}</span>
           <a role="menuitem" href="#/settings/general" onClick={() => setOpen(false)}>{t('Settings')}</a>
           <LanguageSwitch role="menuitem" />
