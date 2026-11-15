@@ -241,8 +241,14 @@ export const payrollModels = {
   'hr.payslip.input.type': {
     label: 'Other Input Types',
     fields: {
-      code: { type: 'char', label: 'Code' },
-      name: { type: 'char', label: 'Name' },
+      code: { type: 'char', label: 'Code', required: true },
+      name: { type: 'char', label: 'Name', required: true },
+    },
+    views: ['list'],
+    list: ['name', 'code'],
+    form: {
+      title: 'name',
+      groups: [['code']],
     },
   },
 

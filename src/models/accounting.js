@@ -2885,7 +2885,8 @@ Object.assign(accountingModels, {
     defaults: () => ({ move_to_hash_ids: [], not_hashable_unlocked_move_ids: [] }),
     list: ['company', 'hash_date', 'max_hash_date', 'chains_to_hash_with_gaps'],
     form: {
-      title: 'Secure Entries',
+      title: 'hash_date',
+      hideTitle: true,
       buttons: [
         {
           label: 'Confirm',
