@@ -33,7 +33,25 @@ const IMMUTABLE_LINK_FIELDS = [
   'date',
 ];
 
-/** Validate structural fields, posted moves, reconcilable account, sign direction, and amount on a partial link. */
+/** Return the error message when reconciled items violate currency or receivable/payable partner rules. */
+function reconcileItemsCompatibilityError(db, items, account, ownCurrency) {
+  const isForeignItem = (it) => Boolean(
+    ownCurrency && (
+      (it.line.currency_id && it.line.currency_id !== ownCurrency.id)
+      || (DOCUMENT_TYPES.includes(it.move.move_type) && it.move.currency_id && it.move.currency_id !== ownCurrency.id)
+    ),
+  );
+  if (items.some(isForeignItem)) {
+    return 'General-ledger reconciliation requires items in the company currency; reconcile foreign-currency documents from their payment or credit-note workflow';
+  }
+  const isArAp = RECEIVABLE_PAYABLE.includes(account?.account_type);
+  if (isArAp && items.some((it) => !partnersCompatible(db, items[0].line.partner_id, it.line.partner_id))) {
+    return 'Selected receivable or payable items must have the same partner';
+  }
+  return null;
+}
+
+/** Validate structural fields, posted moves, reconcilable account, currency, partner compatibility, sign direction, and amount on a partial link. */
 function partialReconcileStructureError(db, rec) {
   const debitMove = read(db, 'account.move', rec.debit_move_id);
   const creditMove = read(db, 'account.move', rec.credit_move_id);
@@ -57,6 +75,11 @@ function partialReconcileStructureError(db, rec) {
   const account = read(db, 'account.account', rec.account_id);
   if (!isReconcilableAccount(account)) return 'Partial reconciliation requires a reconcilable account';
   const ownCurrency = companyCurrencyRecord(db, companyId);
+  const compatError = reconcileItemsCompatibilityError(db, [
+    { move: debitMove, line: debitLine },
+    { move: creditMove, line: creditLine },
+  ], account, ownCurrency);
+  if (compatError) return compatError;
   const roundOwn = (v) => (ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   const debitBal = roundOwn((Number(debitLine.debit) || 0) - (Number(debitLine.credit) || 0));
   const creditBal = roundOwn((Number(creditLine.credit) || 0) - (Number(creditLine.debit) || 0));
@@ -302,20 +325,8 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
     throw new Error('Selected journal items must not already be fully reconciled');
   }
 
-  const isForeignItem = (it) => Boolean(
-    ownCurrency && (
-      (it.line.currency_id && it.line.currency_id !== ownCurrency.id)
-      || (DOCUMENT_TYPES.includes(it.move.move_type) && it.move.currency_id && it.move.currency_id !== ownCurrency.id)
-    ),
-  );
-  if (items.some(isForeignItem)) {
-    throw new Error('General-ledger reconciliation requires items in the company currency; reconcile foreign-currency documents from their payment or credit-note workflow');
-  }
-
-  const isArAp = RECEIVABLE_PAYABLE.includes(account.account_type);
-  if (isArAp && items.some((it) => !partnersCompatible(db, items[0].line.partner_id, it.line.partner_id))) {
-    throw new Error('Selected receivable or payable items must have the same partner');
-  }
+  const compatError = reconcileItemsCompatibilityError(db, items, account, ownCurrency);
+  if (compatError) throw new Error(compatError);
 
   for (const it of items) {
     const lock = recordLockDate(db, it.move);
@@ -324,6 +335,7 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
 
   const net = roundOwn(items.reduce((s, it) => s + Number(it.reconciledLine.amount_residual), 0));
   const distinctPartners = new Set(items.map((it) => it.line.partner_id ?? null));
+  const isArAp = RECEIVABLE_PAYABLE.includes(account.account_type);
   const groupPartnerId = isArAp
     ? (items[0].line.partner_id ?? null)
     : (distinctPartners.size === 1 ? [...distinctPartners][0] : null);

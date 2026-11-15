@@ -8,6 +8,7 @@ import { currentActor, employeeFor } from './actor.js';
 import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
+import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency, round, roundCurrency } from '../money.js';
 import { paymentCompanyAmount, settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
@@ -702,6 +703,11 @@ export function taxReport(db, period) {
   return { output, input, payable: round(output - input) };
 }
 
+/** Deduplicated taxable base across posted tax items matching `matchItem` for the period. */
+export function taxBaseTotal(db, period = {}, matchItem = null) {
+  return deduplicatedTaxBase(db, taxItems(db, period), matchItem);
+}
+
 
 export function validateTaxReturnPeriod(db, ret) {
   if (ret.tax_unit_id) {
@@ -878,8 +884,7 @@ export function taxesByTax(db, period = {}) {
     const name = l.tax_name || 'Untagged';
     const key = JSON.stringify([l.side, l.tax_id ?? null, l.tax_id == null ? name : null]);
     const row = rows.get(key) ?? { side: l.side, tax_id: l.tax_id ?? null, name, base: 0, tax: 0 };
-    const base = l.invoiceBase ?? (l.tax_base_signed ? (Number(l.tax_base) || 0) : (l.tax ? Math.sign(l.tax) : 1) * (Number(l.tax_base) || 0));
-    rows.set(key, { ...row, base: round(row.base + base), tax: round(row.tax + l.tax) });
+    rows.set(key, { ...row, base: round(row.base + taxItemBase(l)), tax: round(row.tax + l.tax) });
   }
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
 }

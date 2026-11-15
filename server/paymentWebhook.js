@@ -62,19 +62,46 @@ export async function handlePaymentWebhook({
       signature,
       secret,
     });
-    if (!out.alreadyProcessed && out.db) {
+    if (!out.alreadyProcessed && !out.ignored && out.db) {
       commitDb(out.db, { actor: `webhook:${providerCode}` });
     }
     return sendJson(res, 200, {
       ok: true,
       alreadyProcessed: out.alreadyProcessed,
+      ...(out.ignored ? { ignored: true, providerStatus: out.providerStatus, reason: out.reason } : {}),
       status: out.status,
-      reference: out.transaction.reference,
+      reference: out.transaction?.reference ?? out.reference ?? null,
     });
   } catch (e) {
     const msg = e?.message ?? 'Invalid payment webhook';
     const status = Number.isInteger(e?.status) ? e.status : 400;
     log('warn', 'payment webhook rejected', { providerCode, status, code: e?.code, reason: msg });
-    return reject(status, msg);
+    if (e?.signatureVerified !== true) onRejected();
+    return sendJson(res, status, { error: msg });
   }
+}
+
+/** Apply pre-signature failure limiting and per-window webhook traffic budgeting before calling `handlePaymentWebhook`. */
+export function routePaymentWebhook({
+  req,
+  res,
+  providerCode,
+  ip,
+  hits,
+  tooMany,
+  recordFailure,
+  maxPerWindow = 600,
+  send = sendJson,
+  ...rest
+}) {
+  if (tooMany(`payhook:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
+  if (hits(`payhook_hits:${ip}`) >= maxPerWindow) return send(res, 429, { error: 'Too many requests' });
+  recordFailure(`payhook_hits:${ip}`);
+  return handlePaymentWebhook({
+    req,
+    res,
+    providerCode,
+    ...rest,
+    onRejected: () => recordFailure(`payhook:${ip}`),
+  });
 }

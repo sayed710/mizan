@@ -9,11 +9,12 @@ import { today, validDate } from './common.js';
 
 /** Error thrown by webhook signature, payload or settlement validation with an explicit HTTP status and code. */
 export class WebhookError extends Error {
-  constructor(message, status = 400, code = 'PAYMENT_WEBHOOK_ERROR') {
+  constructor(message, status = 400, code = 'PAYMENT_WEBHOOK_ERROR', { signatureVerified = false } = {}) {
     super(message);
     this.name = 'WebhookError';
     this.status = status;
     this.code = code;
+    this.signatureVerified = signatureVerified;
   }
 }
 
@@ -36,18 +37,19 @@ export const PAYMENT_ADAPTERS = {
     },
     /**
      * Parse and validate a verified demo provider webhook payload.
-     * Expected JSON contract: `{ reference: string, status: 'paid', amount: number, currency: string, provider_reference?: string, date?: string }`.
-     * Rejects missing or non-'paid' status values without guessing synonyms.
-     * @returns {{ reference: string, paid: boolean, amount: unknown, currency: string, providerReference: string | null, date: unknown }}
+     * Expected JSON contract: `{ reference: string, status: string, amount?: number, currency?: string, provider_reference?: string, date?: string }`.
+     * Returns explicit `{ paid: boolean, status: string }` without guessing synonyms; rejects missing status with 400.
+     * @returns {{ reference: string, paid: boolean, status: string, amount: unknown, currency: string, providerReference: string | null, date: unknown }}
      */
     parseWebhook(parsed) {
       const reference = typeof parsed?.reference === 'string' ? parsed.reference.trim() : '';
       if (!reference) throw new WebhookError('Unknown payment transaction reference', 400, 'MISSING_REFERENCE');
       const status = typeof parsed?.status === 'string' ? parsed.status.trim() : '';
-      if (status !== 'paid') throw new WebhookError('Unsupported payment status in webhook', 400, 'UNSUPPORTED_STATUS');
+      if (!status) throw new WebhookError('Missing payment status in webhook', 400, 'UNSUPPORTED_STATUS');
       return {
         reference,
-        paid: true,
+        paid: status === 'paid',
+        status,
         amount: parsed.amount,
         currency: typeof parsed.currency === 'string' ? parsed.currency.trim().toUpperCase() : '',
         providerReference: typeof parsed.provider_reference === 'string' && parsed.provider_reference.trim()
@@ -85,6 +87,22 @@ export function verifyWebhookSignature(rawBody, signature, secret) {
   return expected.length === provided.length && timingSafeEqual(expected, provided);
 }
 
+/** Resolve the liquidity journal used to settle payments for a payment provider and company. */
+export function providerPaymentJournal(db, provider, companyId, journalId = null) {
+  return paymentJournal(db, journalId ?? provider?.journal_id ?? null, companyId ?? 1);
+}
+
+/** Return true when `provider` resolves a valid payment journal for `companyId`. */
+export function canSettleInvoiceProvider(db, provider, companyId) {
+  try {
+    providerPaymentJournal(db, provider, companyId);
+    return true;
+  } catch (err) {
+    if (err?.constructor !== Error) throw err;
+    return false;
+  }
+}
+
 /**
  * Create a checkout session and pending `payment.transaction` for a posted, unpaid customer invoice.
  * Returns `{ db, transaction, redirectUrl }` immutably.
@@ -109,6 +127,13 @@ export function createInvoiceCheckout(db, moveId, providerId, { baseUrl = '', re
   const currency = documentCurrency(db, move);
   if (!currency) throw new Error('Configure a currency on the invoice before starting online payment');
 
+  try {
+    providerPaymentJournal(db, provider, companyId);
+  } catch (err) {
+    if (err?.constructor !== Error) throw err;
+    throw new Error('Selected payment provider does not have a valid payment journal configured', { cause: err });
+  }
+
   const expectedAmount = roundCurrency(due, currency);
   const pending = search(db, 'payment.transaction').filter((t) => t.move_id === move.id && t.state === 'pending');
   const reusable = pending.find(
@@ -120,7 +145,7 @@ export function createInvoiceCheckout(db, moveId, providerId, { baseUrl = '', re
   let nextDb = db;
   for (const stale of pending) {
     if (stale !== reusable) {
-      nextDb = write(nextDb, 'payment.transaction', stale.id, { state: 'cancel' });
+      nextDb = write(nextDb, 'payment.transaction', stale.id, { state: 'superseded' });
     }
   }
   if (reusable) {
@@ -200,97 +225,115 @@ export function processPaymentWebhook(db, { providerCode = null, rawBody = null,
     throw new WebhookError('Invalid payment webhook signature', 401, 'INVALID_SIGNATURE');
   }
 
-  let parsed;
+  // Signature is now verified; any error raised from here on carries signatureVerified: true.
   try {
-    parsed = JSON.parse(rawBody);
-  } catch {
-    throw new WebhookError('Malformed JSON payment webhook payload', 400, 'MALFORMED_JSON');
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new WebhookError('Payment webhook payload must be a JSON object', 400, 'INVALID_PAYLOAD');
-  }
+    let parsed;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new WebhookError('Malformed JSON payment webhook payload', 400, 'MALFORMED_JSON', { signatureVerified: true });
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new WebhookError('Payment webhook payload must be a JSON object', 400, 'INVALID_PAYLOAD', { signatureVerified: true });
+    }
 
-  const webhook = adapter.parseWebhook(parsed);
-  if (!webhook.paid) {
-    throw new WebhookError('Unsupported payment status in webhook', 400, 'UNSUPPORTED_STATUS');
-  }
+    const webhook = adapter.parseWebhook(parsed);
+    const tx = search(db, 'payment.transaction').find((t) => t.reference === webhook.reference) ?? null;
+    if (!webhook.paid) {
+      return {
+        db,
+        transaction: tx,
+        reference: webhook.reference,
+        alreadyProcessed: false,
+        ignored: true,
+        status: 'ignored',
+        providerStatus: webhook.status,
+        reason: `Payment notification ignored: provider status is '${webhook.status}', not 'paid'`,
+      };
+    }
 
-  const tx = search(db, 'payment.transaction').find((t) => t.reference === webhook.reference);
-  if (!tx) throw new WebhookError('Unknown payment transaction reference', 400, 'UNKNOWN_REFERENCE');
-  if (tx.provider_code !== providerCode) throw new WebhookError('Payment provider mismatch for transaction', 400, 'PROVIDER_MISMATCH');
+    if (!tx) throw new WebhookError('Unknown payment transaction reference', 400, 'UNKNOWN_REFERENCE', { signatureVerified: true });
+    if (tx.provider_code !== providerCode) throw new WebhookError('Payment provider mismatch for transaction', 400, 'PROVIDER_MISMATCH', { signatureVerified: true });
 
-  if (tx.state === 'done') {
-    return { db, transaction: tx, alreadyProcessed: true, status: 'idempotent' };
-  }
-  if (tx.state === 'cancel' || tx.state === 'error') {
-    throw new WebhookError('Payment transaction is not awaiting settlement', 400, 'INVALID_TRANSACTION_STATE');
-  }
+    if (tx.state === 'done') {
+      return { db, transaction: tx, alreadyProcessed: true, status: 'idempotent' };
+    }
+    if (tx.state !== 'pending' && tx.state !== 'superseded') {
+      throw new WebhookError('Payment transaction is not awaiting settlement', 400, 'INVALID_TRANSACTION_STATE', { signatureVerified: true });
+    }
 
-  const move = read(db, 'account.move', tx.move_id);
-  if (!move || move.active === false) throw new WebhookError('Invoice not found for payment transaction', 400, 'INVOICE_NOT_FOUND');
-  if (move.state !== 'posted' || move.move_type !== 'out_invoice') {
-    throw new WebhookError('Invoice is not in a payable posted state', 400, 'INVOICE_NOT_PAYABLE');
-  }
+    const move = read(db, 'account.move', tx.move_id);
+    if (!move || move.active === false) throw new WebhookError('Invoice not found for payment transaction', 400, 'INVOICE_NOT_FOUND', { signatureVerified: true });
+    if (move.state !== 'posted' || move.move_type !== 'out_invoice') {
+      throw new WebhookError('Invoice is not in a payable posted state', 400, 'INVOICE_NOT_PAYABLE', { signatureVerified: true });
+    }
 
-  const docCurrency = documentCurrency(db, move);
-  const txCurrency = read(db, 'res.currency', tx.currency_id) ?? docCurrency;
-  if (!docCurrency || !txCurrency || !webhook.currency || webhook.currency !== docCurrency.name || webhook.currency !== txCurrency.name) {
-    throw new WebhookError('Payment currency does not match the invoice currency', 400, 'CURRENCY_MISMATCH');
-  }
+    const docCurrency = documentCurrency(db, move);
+    const txCurrency = read(db, 'res.currency', tx.currency_id) ?? docCurrency;
+    if (!docCurrency || !txCurrency || !webhook.currency || webhook.currency !== docCurrency.name || webhook.currency !== txCurrency.name) {
+      throw new WebhookError('Payment currency does not match the invoice currency', 400, 'CURRENCY_MISMATCH', { signatureVerified: true });
+    }
 
-  const due = residual(move, db);
-  const payloadAmount = Number(webhook.amount);
-  const expectedAmount = roundCurrency(tx.amount, docCurrency);
-  if (!Number.isFinite(payloadAmount) || !(expectedAmount > 0) || roundCurrency(payloadAmount, docCurrency) !== expectedAmount) {
-    throw new WebhookError('Payment amount does not match the transaction amount', 400, 'AMOUNT_MISMATCH');
-  }
+    const due = residual(move, db);
+    const payloadAmount = Number(webhook.amount);
+    const expectedAmount = roundCurrency(tx.amount, docCurrency);
+    if (!Number.isFinite(payloadAmount) || !(expectedAmount > 0) || roundCurrency(payloadAmount, docCurrency) !== expectedAmount) {
+      throw new WebhookError('Payment amount does not match the transaction amount', 400, 'AMOUNT_MISMATCH', { signatureVerified: true });
+    }
 
-  const paymentDate = date ?? (validDate(webhook.date) ? webhook.date : today());
-  const provider = read(db, 'payment.provider', tx.provider_id);
-  const resolvedJournal = paymentJournal(db, journalId ?? provider?.journal_id ?? null, move.company_id ?? 1);
-  let settledDb;
-  let createdPayment;
-  if (due > 0) {
-    const priorPaymentIds = new Set((db.records['account.payment'] ?? []).map((p) => p.id));
-    settledDb = registerPayment(db, move, { amount: expectedAmount, date: paymentDate, journal_id: resolvedJournal.id }).db;
-    createdPayment = (settledDb.records['account.payment'] ?? []).find(
-      (p) => !priorPaymentIds.has(p.id) && p.state === 'posted' && (p.company_id ?? 1) === (move.company_id ?? 1),
-    );
-  } else {
-    // Invoice already settled: book an unallocated customer credit without auto-allocating to unrelated invoices.
-    const draft = create(db, 'account.payment', {
-      partner_id: move.partner_id,
-      partner_type: 'customer',
-      payment_type: 'inbound',
-      amount: expectedAmount,
-      currency_id: docCurrency.id,
-      date: paymentDate,
-      journal_id: resolvedJournal.id,
-      company_id: move.company_id ?? 1,
-      memo: `${move.name} (${tx.reference})`,
+    const paymentDate = date ?? (validDate(webhook.date) ? webhook.date : today());
+    const provider = read(db, 'payment.provider', tx.provider_id);
+    const resolvedJournal = providerPaymentJournal(db, provider, move.company_id ?? 1, journalId);
+    let settledDb;
+    let createdPayment;
+    if (due > 0) {
+      const priorPaymentIds = new Set((db.records['account.payment'] ?? []).map((p) => p.id));
+      settledDb = registerPayment(db, move, { amount: expectedAmount, date: paymentDate, journal_id: resolvedJournal.id }).db;
+      createdPayment = (settledDb.records['account.payment'] ?? []).find(
+        (p) => !priorPaymentIds.has(p.id) && p.state === 'posted' && (p.company_id ?? 1) === (move.company_id ?? 1),
+      );
+    } else {
+      // Invoice already settled: book an unallocated customer credit without auto-allocating to unrelated invoices.
+      const draft = create(db, 'account.payment', {
+        partner_id: move.partner_id,
+        partner_type: 'customer',
+        payment_type: 'inbound',
+        amount: expectedAmount,
+        currency_id: docCurrency.id,
+        date: paymentDate,
+        journal_id: resolvedJournal.id,
+        company_id: move.company_id ?? 1,
+        memo: `${move.name} (${tx.reference})`,
+      });
+      settledDb = postPayment(draft.db, read(draft.db, 'account.payment', draft.id), { autoAllocate: false });
+      const posted = read(settledDb, 'account.payment', draft.id);
+      if (posted?.state === 'posted') createdPayment = posted;
+    }
+    if (!createdPayment) {
+      throw new WebhookError('Failed to record posted payment for transaction', 500, 'PAYMENT_NOT_CREATED', { signatureVerified: true });
+    }
+
+    const updatedTx = write(settledDb, 'payment.transaction', tx.id, {
+      state: 'done',
+      payment_id: createdPayment.id,
+      provider_reference: webhook.providerReference ?? (tx.provider_reference || tx.reference),
     });
-    settledDb = postPayment(draft.db, read(draft.db, 'account.payment', draft.id), { autoAllocate: false });
-    const posted = read(settledDb, 'account.payment', draft.id);
-    if (posted?.state === 'posted') createdPayment = posted;
+    const wasSuperseded = tx.state === 'superseded';
+    const overpaid = due < expectedAmount;
+    const noteBody = overpaid
+      ? `Online payment of ${expectedAmount} ${docCurrency.name} via ${tx.provider_code} (${tx.reference}) ${wasSuperseded ? 'arrived on a superseded checkout ' : 'arrived '}for an amount above the open balance (${due} ${docCurrency.name}); the excess stays as unapplied customer credit.`
+      : (wasSuperseded
+        ? `Online payment via ${tx.provider_code} (${tx.reference}) arrived on a superseded checkout and was settled.`
+        : `Online payment settled via ${tx.provider_code} (${tx.reference}).`);
+    const noted = postNote(updatedTx, 'account.move', move.id, noteBody);
+    return {
+      db: noted,
+      transaction: read(noted, 'payment.transaction', tx.id),
+      alreadyProcessed: false,
+      status: overpaid ? 'unapplied_credit' : 'settled',
+    };
+  } catch (err) {
+    if (err && typeof err === 'object') err.signatureVerified = true;
+    throw err;
   }
-  if (!createdPayment) {
-    throw new WebhookError('Failed to record posted payment for transaction', 500, 'PAYMENT_NOT_CREATED');
-  }
-
-  const updatedTx = write(settledDb, 'payment.transaction', tx.id, {
-    state: 'done',
-    payment_id: createdPayment.id,
-    provider_reference: webhook.providerReference ?? (tx.provider_reference || tx.reference),
-  });
-  const overpaid = due < expectedAmount;
-  const noteBody = overpaid
-    ? `Online payment of ${expectedAmount} ${docCurrency.name} via ${tx.provider_code} (${tx.reference}) arrived for an amount above the open balance (${due} ${docCurrency.name}); the excess stays as unapplied customer credit.`
-    : `Online payment settled via ${tx.provider_code} (${tx.reference}).`;
-  const noted = postNote(updatedTx, 'account.move', move.id, noteBody);
-  return {
-    db: noted,
-    transaction: read(noted, 'payment.transaction', tx.id),
-    alreadyProcessed: false,
-    status: overpaid ? 'unapplied_credit' : 'settled',
-  };
 }

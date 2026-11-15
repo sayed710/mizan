@@ -36,7 +36,7 @@ import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/we
 import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
-import { handlePaymentWebhook } from './paymentWebhook.js';
+import { routePaymentWebhook } from './paymentWebhook.js';
 import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
 import { sharePage, smsInbound, SMS_PATH, SMS_WRITE } from './inbound.js';
 
@@ -438,6 +438,7 @@ const CHAT_MESSAGES_PER_WINDOW = 30;
 const TRACKING_HITS_PER_WINDOW = 300;
 const CART_PRICINGS_PER_WINDOW = 120;
 const WHATSAPP_HOOKS_PER_WINDOW = 600;
+const PAYMENT_WEBHOOKS_PER_WINDOW = 600;
 const ACCOUNT_FAILURES_PER_WINDOW = 50;
 const hits = (k) => sql.prepare('SELECT COUNT(*) AS n FROM rate_events WHERE key = ? AND at > ?').get(k, Date.now() - WINDOW).n;
 const tooMany = (k) => hits(k) >= 10;
@@ -696,8 +697,22 @@ async function api(req, res, path) {
   }
   const payWebhook = /^\/api\/payment\/webhook\/([a-z0-9_-]{1,32})$/.exec(path);
   if (payWebhook) {
-    if (tooMany(`payhook:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
-    return handlePaymentWebhook({ req, res, providerCode: payWebhook[1], getDb: () => db, commitDb, readRaw, env: ENV, log, onRejected: () => recordFailure(`payhook:${ip}`) });
+    return routePaymentWebhook({
+      req,
+      res,
+      providerCode: payWebhook[1],
+      ip,
+      hits,
+      tooMany,
+      recordFailure,
+      maxPerWindow: PAYMENT_WEBHOOKS_PER_WINDOW,
+      send,
+      getDb: () => db,
+      commitDb,
+      readRaw,
+      env: ENV,
+      log,
+    });
   }
   if (path.startsWith('/api/v1/')) {
     // Bearer-token API: no cookies involved, so no CSRF exposure; rate-limit failed keys like logins.

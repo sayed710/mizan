@@ -5,7 +5,7 @@ import { subtotal, today } from '../src/models/common.js';
 import { documentCurrency, formatCurrency } from '../src/money.js';
 import * as quotePlus from '../src/models/quoteplus.js';
 import { residual } from '../src/models/accounting.js';
-import { createInvoiceCheckout, PAYMENT_ADAPTERS } from '../src/models/paymentAdapter.js';
+import { canSettleInvoiceProvider, createInvoiceCheckout, PAYMENT_ADAPTERS } from '../src/models/paymentAdapter.js';
 import { demoPaymentsAllowed } from './api.js';
 
 const ORDER = 'sale.order';
@@ -81,7 +81,8 @@ function offeredInvoiceProviders(db, invoice, env) {
   return search(db, 'payment.provider').filter((p) => p.state === 'enabled'
     && Boolean(PAYMENT_ADAPTERS[p.code])
     && (!p.company_id || p.company_id === companyId)
-    && (p.code !== 'demo' || demoPaymentsAllowed(env)));
+    && (p.code !== 'demo' || demoPaymentsAllowed(env))
+    && canSettleInvoiceProvider(db, p, companyId));
 }
 
 /** Append a `message` query parameter to `back` using `?` or `&` as appropriate. */

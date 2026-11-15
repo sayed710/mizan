@@ -1910,6 +1910,9 @@ const ar = {
   'Payment is already linked to another payment transaction': 'الدفعة مرتبطة بالفعل بمعاملة دفع أخرى',
   'Completed payment transaction payment must match the transaction currency and amount': 'يجب أن تطابق دفعة معاملة الدفع المكتملة عملة المعاملة ومبلغها',
   'An active pending payment transaction already exists for this invoice': 'توجد بالفعل معاملة دفع نشطة قيد الانتظار لهذه الفاتورة',
+  Superseded: 'مُستبدلة',
+  'Selected payment provider does not have a valid payment journal configured': 'مزوّد الدفع المحدد لا يملك دفتر دفع صالحاً مُعدّاً',
+  'Missing payment status in webhook': 'حالة الدفع مفقودة في إشعار الدفع',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

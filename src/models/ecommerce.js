@@ -11,6 +11,10 @@ import { billControlModels } from './billcontrol.js';
 const RIBBONS = [['', 'None'], ['sale', 'Sale'], ['new', 'New'], ['sold_out', 'Sold out']];
 export const PAYMENT_PROVIDERS = [['wire', 'Wire Transfer'], ['cod', 'Cash on Delivery'], ['demo', 'Demo']];
 const IMMUTABLE_TX_FIELDS = ['reference', 'move_id', 'provider_id', 'provider_code', 'amount', 'currency_id', 'company_id'];
+const ALLOWED_TX_TRANSITIONS = {
+  pending: new Set(['done', 'cancel', 'error', 'superseded']),
+  superseded: new Set(['done']),
+};
 
 /** Validate `payment.transaction` integrity, immutability, state transitions and settlement linkage. */
 function paymentTransactionGuard(db, before, rec) {
@@ -36,7 +40,7 @@ function paymentTransactionGuard(db, before, rec) {
   }
   if (!before) {
     if (rec.state !== 'pending') return 'New payment transactions must start in Pending state';
-  } else if (rec.state !== before.state && !(before.state === 'pending' && ['done', 'cancel', 'error'].includes(rec.state))) {
+  } else if (rec.state !== before.state && !ALLOWED_TX_TRANSITIONS[before.state]?.has(rec.state)) {
     return 'Invalid payment transaction status transition';
   }
   if (rec.state === 'pending' && (db.records['payment.transaction'] ?? []).some(
@@ -191,7 +195,7 @@ export const ecommerceModels = {
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Payment', readonly: true },
       amount: { type: 'monetary', label: 'Amount', required: true },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', required: true },
-      state: { type: 'selection', label: 'Status', tracking: true, options: [['pending', 'Pending'], ['done', 'Done'], ['cancel', 'Cancelled'], ['error', 'Error']] },
+      state: { type: 'selection', label: 'Status', tracking: true, options: [['pending', 'Pending'], ['superseded', 'Superseded'], ['done', 'Done'], ['cancel', 'Cancelled'], ['error', 'Error']] },
       redirect_url: { type: 'char', label: 'Redirect URL', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', default: 1 },
     },
