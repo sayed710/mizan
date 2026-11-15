@@ -45,6 +45,12 @@ test('a value that is a smaller message is translated too', () => {
   assert.equal(translatePattern('Configure the debit account on salary rule Basic', noLookup), 'حدّد حساب المدين على قاعدة الراتب Basic');
 });
 
+test('a name is put back exactly as written even when it is also a known word or label', () => {
+  const lookup = (value) => (value === 'Bank' ? 'البنك' : undefined);
+  assert.equal(translatePattern('Journal Bank belongs to another company', lookup), 'دفتر اليومية Bank يتبع شركة أخرى');
+  assert.equal(translatePattern('Type your full name to sign (signer: gain)', lookup), 'اكتب اسمك الكامل للتوقيع (الموقّع: gain)');
+});
+
 test('a value named like a built-in object member stays as written', () => {
   assert.equal(translatePattern('Currency constructor not found', noLookup), 'العملة constructor غير موجودة');
 });
@@ -69,7 +75,7 @@ test('every pattern keeps exactly the values of its English message', () => {
     const arabic = translatePattern(sample, noLookup);
     assert.match(arabic ?? '', ARABIC, key);
     for (const [, n] of key.matchAll(/\{(\d+)\}/g)) assert.ok(arabic.includes(`v${n}`), `${key} loses value ${n}`);
-    assert.doesNotMatch(arabic, /\{\d+\}/, key);
+    assert.doesNotMatch(arabic, /\{\d+\*?\}/, key);
   }
 });
 
@@ -79,9 +85,8 @@ test('a message whose last value is empty is still translated', () => {
 });
 
 test('messages nested inside a value stop being translated after a few levels', () => {
-  const deep = `${'Journal '.repeat(5000)}X${' belongs to another company'.repeat(5000)}`;
-  const arabic = t(deep);
-  assert.ok(arabic.startsWith('دفتر اليومية دفتر اليومية دفتر اليومية Journal '));
+  const arabic = t(`${'Configure the '.repeat(5000)}journal`);
+  assert.ok(arabic.startsWith('حدّد حدّد حدّد Configure the Configure the '), arabic.slice(0, 60));
 });
 
 test('browser dialogs show their message in Arabic and pass other arguments through', async () => {
