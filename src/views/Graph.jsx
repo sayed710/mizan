@@ -52,7 +52,7 @@ function Cartesian({ data, kind, fmt, onPick, compact = false }) {
   const barW = Math.min(compact ? 20 : 64, step * 0.6);
   return (
     <div className="chart-box">
-      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="chart" className="chart">
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={t('Chart')} className="chart">
         {ticks.map((v) => (
           <g key={v}>
             <line x1={L} x2={W - 10} y1={y(v)} y2={y(v)} className="grid" />
@@ -108,7 +108,7 @@ function Pie({ data, fmt }) {
   const pt = (a, r) => [150 + r * Math.cos(a), 150 + r * Math.sin(a)];
   return (
     <div className="pie-box">
-      <svg viewBox="0 0 300 300" className="pie" role="img" aria-label="pie chart">
+      <svg viewBox="0 0 300 300" className="pie" role="img" aria-label={t('Pie chart')}>
         {arcs.map((s, i) => {
           const [x0, y0] = pt(s.a0, 130);
           const [x1, y1] = pt(s.a1, 130);

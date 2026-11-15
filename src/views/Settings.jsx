@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { updateSettings, write } from '../orm.js';
 import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, changePassword, revokeOtherSessions, revokeUser, useDb } from '../store.js';
-import { lang, setLang, setTheme, t, theme } from '../i18n.js';
+import { LANGUAGES, lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 import { createCompany, ensureCurrencyRecord, renameCompany, setCompanyCurrency } from '../models/company.js';
 import { models } from '../models/index.js';
@@ -587,8 +587,7 @@ export function Settings() {
           <label htmlFor="lang">{t('Language')}</label>
           <div className="field-value">
             <select id="lang" value={lang} onChange={(e) => setLang(e.target.value)}>
-              <option value="en">English</option>
-              <option value="ar">العربية</option>
+              {LANGUAGES.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
             </select>
           </div>
         </div>

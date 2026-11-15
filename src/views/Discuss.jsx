@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { create, messagesOf, postNote, search } from '../orm.js';
 import { commit, getDb, useDb } from '../store.js';
-import { t } from '../i18n.js';
+import { forwardArrow, t } from '../i18n.js';
 import { Avatar } from '../ui.jsx';
 
 /** Team chat: channels are records, messages reuse the chatter store (newest last). */
@@ -42,7 +42,7 @@ export function Discuss() {
             </li>
           ))}
         </ul>
-        <a className="link" href="#/discuss/activities">{t('Activities')} →</a>
+        <a className="link" href="#/discuss/activities">{t('Activities')} {forwardArrow}</a>
       </aside>
       <section className="discuss-thread" aria-label={channel?.name}>
         <header><h1># {channel?.name}</h1><span className="muted">{channel?.description}</span></header>

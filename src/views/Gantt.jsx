@@ -108,8 +108,8 @@ export function Gantt({ db, model, records, open }) {
   return (
     <div className="gantt-view">
       <div className="view-toolbar">
-        <button type="button" className="btn sm" aria-label="Previous" onClick={() => move(-1)}>‹</button>
-        <button type="button" className="btn sm" aria-label="Next" onClick={() => move(1)}>›</button>
+        <button type="button" className="btn sm" aria-label={t('Previous')} onClick={() => move(-1)}>‹</button>
+        <button type="button" className="btn sm" aria-label={t('Next')} onClick={() => move(1)}>›</button>
         <div className="seg" role="group">
           {['week', 'month'].map((s) => <button key={s} type="button" aria-pressed={scale === s} onClick={() => setScale(s)}>{t(s === 'week' ? 'Week' : 'Month')}</button>)}
         </div>

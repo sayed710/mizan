@@ -1,6 +1,6 @@
 // Public Blog (#/shop/blog, #/shop/blog/<id>) and Forum (#/shop/forum, #/shop/forum/<id>, #/shop/forum/ask).
 import { useEffect, useState } from 'react';
-import { t } from '../i18n.js';
+import { backArrow, t } from '../i18n.js';
 import { filterPosts, sortThreads } from '../models/blog.js';
 
 const post = (path, body) => fetch(path, {
@@ -87,7 +87,7 @@ function BlogPost({ site, id }) {
   const more = site.posts.filter((p) => p.id !== data.id).slice(0, 3);
   return (
     <article className="blog blog-post">
-      <p><a href="#/shop/blog">← {t('All posts')}</a></p>
+      <p><a href="#/shop/blog">{backArrow} {t('All posts')}</a></p>
       {data.cover && <img className="blog-cover" src={data.cover} alt="" />}
       <h1>{data.name}</h1>
       {data.subtitle && <p className="blog-subtitle">{data.subtitle}</p>}
@@ -196,7 +196,7 @@ function ForumThread({ id }) {
   if (!data) return <p className="muted">…</p>;
   return (
     <article className="forum">
-      <p><a href={`#/shop/forum?forum=${data.forum.id}`}>← {data.forum.name}</a></p>
+      <p><a href={`#/shop/forum?forum=${data.forum.id}`}>{backArrow} {data.forum.name}</a></p>
       <div className="forum-post">
         <Votes id={data.id} votes={data.votes} />
         <div>
@@ -234,7 +234,7 @@ export function Forum({ site, route }) {
     if (!forum) return <p className="muted">{t('Nothing here yet.')}</p>;
     return (
       <section className="forum">
-        <p><a href={`#/shop/forum?forum=${forum.id}`}>← {forum.name}</a></p>
+        <p><a href={`#/shop/forum?forum=${forum.id}`}>{backArrow} {forum.name}</a></p>
         <h1>{t('Ask a question')}</h1>
         <VisitorPost path="/api/public/forum/ask" extra={{ forum_id: forum.id }} title action={t('Post your question')} />
       </section>

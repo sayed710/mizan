@@ -1,12 +1,28 @@
 // Minimal i18n: English source strings are the keys. Missing keys fall back to English.
 const KEY = 'mizan-lang';
 
+/** Interface languages as [code, name in that language]. */
+export const LANGUAGES = [['en', 'English'], ['ar', 'العربية']];
+const supported = (code) => LANGUAGES.some(([c]) => c === code);
+
+/** First supported language among the browser's preferred ones; English otherwise. */
+const browserLang = () => {
+  const preferred = globalThis.navigator?.languages ?? [globalThis.navigator?.language];
+  return preferred.map((l) => String(l ?? '').slice(0, 2).toLowerCase()).find(supported) ?? 'en';
+};
+
+// A stored choice wins; a first visit follows the browser.
 const read = () => {
-  try { return localStorage.getItem(KEY) || 'en'; } catch { return 'en'; }
+  let stored = null;
+  try { stored = localStorage.getItem(KEY); } catch { /* storage blocked: follow the browser */ }
+  return supported(stored) ? stored : browserLang();
 };
 
 export const lang = typeof localStorage === 'undefined' ? 'en' : read();
 export const isRtl = lang === 'ar';
+/** Arrows that point "back" and "forward" in the reading direction. */
+export const backArrow = isRtl ? '→' : '←';
+export const forwardArrow = isRtl ? '←' : '→';
 
 const THEME_KEY = 'mizan-theme';
 /** 'light' | 'dark' | 'auto' (follows the OS); a per-browser preference. */
@@ -23,6 +39,9 @@ export function setLang(next) {
 }
 
 const ar = {
+  'Previous month': 'الشهر السابق', 'Next month': 'الشهر التالي', Previous: 'السابق',
+  Chatter: 'سجل المراسلات', Chart: 'رسم بياني', 'Pie chart': 'رسم دائري', 'Select all': 'تحديد الكل',
+  'Login failed': 'تعذّر تسجيل الدخول',
   '{n} selected': 'تم تحديد {n}',
   'This removes the matching: payments stay posted and their credit becomes available again. Write-offs and direct bank matches are reversed on the selected date.': 'يزيل هذا المطابقة: تبقى المدفوعات مرحّلة ويعود رصيدها متاحاً. تُعكس عمليات الشطب والمطابقات البنكية المباشرة في التاريخ المحدد.',
   'Amount in Invoice Currency': 'المبلغ بعملة الفاتورة',

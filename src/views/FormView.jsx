@@ -283,7 +283,7 @@ function Chatter({ db, model, id, name }) {
     setNote('');
   };
   return (
-    <aside className="chatter" aria-label="Chatter">
+    <aside className="chatter" aria-label={t('Chatter')}>
       <Activities db={db} model={model} id={id} name={name} />
       <div className="chatter-compose">
         <textarea value={note} placeholder={t('Log an internal note…')} onChange={(e) => setNote(e.target.value)}
@@ -524,7 +524,7 @@ export function FormView({ leaf, id, base, params }) {
       <div className="control-panel">
         <div className="cp-left">
           <button type="button" className="btn" onClick={() => leave(`${base}/new${query}`)}>{t('New')}</button>
-          <nav className="breadcrumb" aria-label="Breadcrumb">
+          <nav className="breadcrumb" aria-label={t('Breadcrumb')}>
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : current[def.form.title]}</span>
           </nav>

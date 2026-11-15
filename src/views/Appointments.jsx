@@ -1,6 +1,6 @@
 // Public appointment booking: #/shop/appointments (list with search) and #/shop/appointments/<id> (staff, day, time, details, confirmation).
 import { useEffect, useState } from 'react';
-import { t } from '../i18n.js';
+import { backArrow, t } from '../i18n.js';
 import { formatDate, money } from '../ui.jsx';
 
 const post = (path, body) => fetch(path, {
@@ -135,7 +135,7 @@ function AppointmentPage({ type }) {
   return (
     <section className="appt appt-page">
       <div className="appt-main">
-        <a href="#/shop/appointments" className="muted">← {t('All appointments')}</a>
+        <a href="#/shop/appointments" className="muted">{backArrow} {t('All appointments')}</a>
         <h1>{type.name}</h1>
         {step === 'details' && slot ? (
           <DetailsForm type={type} slot={slot} staff={staff} onDone={setDone} onBack={() => { setStep('pick'); setVersion((v) => v + 1); }} />
