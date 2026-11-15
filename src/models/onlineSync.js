@@ -322,7 +322,7 @@ function runSyncForAccounts(db, link, accounts, { now = new Date().toISOString()
       const imported = importStatementLines(stagedDb, txs, {
         journal_id: account.journal_id,
         company_id: link.company_id ?? 1,
-      });
+      }, { exactJournalOnly: true });
       stagedDb = imported.db;
       totalCreated += imported.count;
 

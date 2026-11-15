@@ -7,14 +7,32 @@ import { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES } from './taxTemplate
 
 export { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES };
 
-/** Escape XML special characters safely for attributes and element text. */
-export function escapeXml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+const XML_CHAR_ESCAPE = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&apos;',
+};
+
+const isXml10CharCodePoint = (cp) => cp === 0x09 || cp === 0x0A || cp === 0x0D
+  || (cp >= 0x20 && cp <= 0xD7FF)
+  || (cp >= 0xE000 && cp <= 0xFFFD)
+  || (cp >= 0x10000 && cp <= 0x10FFFF);
+
+/** Escape XML 1.0 text safely, dropping invalid code points and normalizing attribute whitespace controls. */
+export function escapeXml(value, { attribute = false } = {}) {
+  let out = '';
+  for (const ch of String(value ?? '')) {
+    const cp = ch.codePointAt(0);
+    if (cp === undefined || !isXml10CharCodePoint(cp)) continue;
+    if (attribute && (cp === 0x09 || cp === 0x0A || cp === 0x0D)) {
+      out += `&#x${cp.toString(16).toUpperCase()};`;
+    } else {
+      out += XML_CHAR_ESCAPE[ch] ?? ch;
+    }
+  }
+  return out;
 }
 
 /** Derive the tax report period object from an account.return record (or period). */
@@ -130,11 +148,11 @@ export function taxReturnToXml(db, ret) {
   const { template, period, company_id: companyId, boxes, totals } = taxReturnBoxes(db, ret);
   const returnName = ret?.name ?? 'Tax Return';
   const boxXml = boxes.map((b) => (
-    `    <box code="${escapeXml(b.code)}" label="${escapeXml(b.label)}" base="${round(b.base).toFixed(2)}" tax="${round(b.tax).toFixed(2)}" kind="${escapeXml(b.kind)}"/>`
+    `    <box code="${escapeXml(b.code, { attribute: true })}" label="${escapeXml(b.label, { attribute: true })}" base="${round(b.base).toFixed(2)}" tax="${round(b.tax).toFixed(2)}" kind="${escapeXml(b.kind, { attribute: true })}"/>`
   )).join('\n');
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    `<taxReturn name="${escapeXml(returnName)}" template="${escapeXml(template)}" companyId="${escapeXml(companyId)}" dateFrom="${escapeXml(period.from ?? '')}" dateTo="${escapeXml(period.to ?? '')}" output="${round(totals.output).toFixed(2)}" input="${round(totals.input).toFixed(2)}" payable="${round(totals.payable).toFixed(2)}">`,
+    `<taxReturn name="${escapeXml(returnName, { attribute: true })}" template="${escapeXml(template, { attribute: true })}" companyId="${escapeXml(companyId, { attribute: true })}" dateFrom="${escapeXml(period.from ?? '', { attribute: true })}" dateTo="${escapeXml(period.to ?? '', { attribute: true })}" output="${round(totals.output).toFixed(2)}" input="${round(totals.input).toFixed(2)}" payable="${round(totals.payable).toFixed(2)}">`,
     '  <boxes>',
     boxXml,
     '  </boxes>',

@@ -3,7 +3,7 @@
 // to different records don't overwrite each other.
 import { models } from './registry.js';
 import { analyticAccountKey } from './analytic_distribution.js';
-import { postTracking, referenceTo, validate, SHARED_MODELS } from './orm.js';
+import { formatTrackingChange, postTracking, referenceTo, validate, SHARED_MODELS } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
@@ -575,6 +575,22 @@ function mirrorsOriginOnArchived(db, rec, originId, opposite) {
   return journalOk && (rec.invoice_line_ids ?? []).filter((l) => archived(l.account_id)).every((l) => originInvoiceAccounts.has(l.account_id));
 }
 
+/** Strip structured tracking fields unless the same diff really changes that tracked field from old_value to new_value. */
+function stripUnverifiedTrackingFields(m, db, afterDb, finalRec, storedRec, wasUpserted) {
+  if (!m.field) return m;
+  const { field, old_value: oldValue, new_value: newValue, ...rest } = m;
+  if (m.kind !== 'tracking' || !wasUpserted || !storedRec || !finalRec) return rest;
+  const fieldDef = models[m.model]?.fields?.[field];
+  const audited = Boolean(models[m.model]?.audited?.(db, storedRec) || models[m.model]?.audited?.(afterDb, finalRec));
+  if (!fieldDef || !(fieldDef.tracking || audited)) return rest;
+  if (JSON.stringify(storedRec[field]) === JSON.stringify(finalRec[field])) return rest;
+  const formatted = formatTrackingChange(db, m.model, field, storedRec[field], finalRec[field], afterDb);
+  if (!formatted || formatted.old_value.slice(0, 1000) !== oldValue || formatted.new_value.slice(0, 1000) !== newValue) {
+    return rest;
+  }
+  return m;
+}
+
 /**
  * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
  * `author` (their name) by the approval rules in authority.js.
@@ -845,6 +861,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const hiddenMessages = new Set(db.messages.filter((m) => !onVisibleRecord(m) && !removedVisibleRecord(m)).map((m) => m.id));
   if (companies) for (const m of db.messages) if (m.company_id && !companies.has(m.company_id)) hiddenMessages.add(m.id);
   const modelOf = new Map(db.messages.map((m) => [m.id, m.model]));
+  const afterDb = { ...db, records };
   const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : [])
     .filter((id) => !kept.has(id) && !hiddenMessages.has(id) && (!allowed || allowed.has(modelOf.get(id)))));
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
@@ -852,10 +869,14 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)) && (onVisibleRecord(m) || removedVisibleRecord(m)))
     // Who and when come from the server: a client cannot backdate a chatter entry or sign it as someone else.
     .map((m) => {
-      const record = (records[m.model] ?? []).find((r) => r.id === m.res_id) ?? storedRecord(m.model, m.res_id);
+      const storedRec = storedRecord(m.model, m.res_id);
+      const finalRec = (records[m.model] ?? []).find((r) => r.id === m.res_id);
+      const record = finalRec ?? storedRec;
       const source = m.source_model && (records[m.source_model] ?? []).find((r) => r.id === m.source_id);
       if (m.source_model && (!source || m.model !== 'res.partner' || source.partner_id !== m.res_id || companyError(m.source_model, storedRecord(m.source_model, m.source_id), source))) throw new Error('Invalid message source');
-      return { ...m, ...(source ? { company_id: source.company_id ?? 1 } : record && !SHARED_MODELS.has(m.model) ? { company_id: record.company_id || 1 } : {}), author: author ?? m.author, date: author ? new Date().toISOString() : m.date };
+      const wasUpserted = Boolean((d.upserts?.[m.model] ?? []).some((u) => u.id === m.res_id));
+      const verified = stripUnverifiedTrackingFields(m, db, afterDb, finalRec, storedRec, wasUpserted);
+      return { ...verified, ...(source ? { company_id: source.company_id ?? 1 } : record && !SHARED_MODELS.has(m.model) ? { company_id: record.company_id || 1 } : {}), author: author ?? m.author, date: author ? new Date().toISOString() : m.date };
     });
   // Company details, installed apps and Studio fields are admin-only; selections and favorites are not.
   const s = d.settings && typeof d.settings === 'object' ? d.settings : null;

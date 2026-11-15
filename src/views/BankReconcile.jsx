@@ -16,6 +16,7 @@ import {
   statementCompanyAmount,
 } from '../models/bank.js';
 import { t } from '../i18n.js';
+import { documentCurrency } from '../money.js';
 import { money } from '../ui.jsx';
 
 const TABS = [
@@ -166,6 +167,12 @@ export function BankReconcile() {
   const partnerName = (id) => (id ? read(db, 'res.partner', id)?.name ?? '' : '');
   const journalName = (id) => (id ? read(db, 'account.journal', id)?.name ?? '' : '');
   const openBalance = (line) => line.open_amount ?? statementCompanyAmount(db, line);
+  const selectedLineCurrency = selectedLine
+    ? documentCurrency(db, {
+      ...selectedLine,
+      currency_id: read(db, 'account.journal', selectedLine.journal_id)?.currency_id ?? selectedLine.currency_id,
+    })
+    : null;
 
   return (
     <div className="page bank-reconcile-page">
@@ -228,7 +235,7 @@ export function BankReconcile() {
                   </p>
                 </div>
                 <div className="bank-reconcile-amounts">
-                  <span>{t('Statement Amount')}: <strong>{money(selectedLine.amount)}</strong></span>
+                  <span>{t('Statement Amount')}: <strong>{money(selectedLine.amount, selectedLineCurrency?.name ?? null, selectedLineCurrency)}</strong></span>
                   <span>{t('Open Balance')}: <strong>{money(openBalance(selectedLine))}</strong></span>
                 </div>
               </header>

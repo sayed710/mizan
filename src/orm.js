@@ -156,6 +156,31 @@ export function create(db, model, vals, ctx = undefined) {
     : res;
 }
 
+/** Format a tracked field transition using the same display rules as `write()` tracking messages. */
+export function formatTrackingChange(oldDb, model, fieldKey, oldVal, newVal, newDb = oldDb) {
+  const field = models[model]?.fields?.[fieldKey];
+  if (!field) return null;
+  if (typeof newVal === 'object' && newVal !== null) {
+    return { body: `${field.label}: updated`, old_value: '', new_value: 'updated' };
+  }
+  const label = (x, sourceDb) => {
+    if (x === null || x === undefined || x === '') return '—';
+    if (field.options) return field.options.find((o) => o[0] === x)?.[1] ?? x;
+    if (field.type === 'many2one' && field.relation) {
+      const relRec = (sourceDb.records?.[field.relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
+      if (relRec?.name) return relRec.name;
+    }
+    return x;
+  };
+  const oldValue = String(label(oldVal, oldDb));
+  const newValue = String(label(newVal, newDb));
+  return {
+    body: `${field.label}: ${oldValue} → ${newValue}`,
+    old_value: oldValue,
+    new_value: newValue,
+  };
+}
+
 /** Build tracking messages for changed tracked fields, stamping structural field/old_value/new_value metadata. */
 function trackingMessages(db, model, before, after, vals) {
   const fields = models[model].fields;
@@ -163,28 +188,11 @@ function trackingMessages(db, model, before, after, vals) {
   return Object.entries(vals)
     .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {
-      if (typeof v === 'object' && v !== null) {
-        return message(model, before.id, `${fields[k].label}: updated`, 'tracking', after, null, {
-          field: k,
-          old_value: '',
-          new_value: 'updated',
-        });
-      }
-      const label = (x) => {
-        if (x === null || x === undefined || x === '') return '—';
-        if (fields[k].options) return fields[k].options.find((o) => o[0] === x)?.[1] ?? x;
-        if (fields[k].type === 'many2one' && fields[k].relation) {
-          const relRec = (db.records[fields[k].relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
-          if (relRec?.name) return relRec.name;
-        }
-        return x;
-      };
-      const oldValue = String(label(before[k]));
-      const newValue = String(label(v));
-      return message(model, before.id, `${fields[k].label}: ${oldValue} → ${newValue}`, 'tracking', after, null, {
+      const { body, old_value, new_value } = formatTrackingChange(db, model, k, before[k], v, db);
+      return message(model, before.id, body, 'tracking', after, null, {
         field: k,
-        old_value: oldValue,
-        new_value: newValue,
+        old_value,
+        new_value,
       });
     });
 }
@@ -314,9 +322,15 @@ export function unlink(db, model, ids) {
   return result;
 }
 
+const noteMeta = (meta) => {
+  if (!meta || typeof meta !== 'object') return null;
+  const { kind, field, old_value, new_value, ...rest } = meta;
+  return rest;
+};
+
 /** A tracking (audit) message, as `write` posts for a changed tracked field. */
 export const postTracking = (db, model, id, body, by = author) => ({ ...db, messages: [...db.messages, { ...message(model, id, body, 'tracking', (db.records[model] ?? []).find((r) => r.id === id)), author: by }] });
-export const postNote = (db, model, id, body, source, meta = null) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note', (db.records[model] ?? []).find((r) => r.id === id), source, meta)] });
+export const postNote = (db, model, id, body, source, meta = null) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note', (db.records[model] ?? []).find((r) => r.id === id), source, noteMeta(meta))] });
 
 export const messagesOf = (db, model, id) =>
   db.messages.filter((m) => m.model === model && m.res_id === id).sort((a, b) => b.date.localeCompare(a.date));

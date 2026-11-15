@@ -112,9 +112,17 @@ export function statementImportDefaults(journal, defaults = {}) {
 
 /**
  * Validate the target liquidity journal and create deduplicated `account.bank.statement.line` records.
- * Deduplicates by `unique_import_id` within `(journal_id, company_id)`; returns `{ db, count }`.
+ * Deduplicates by `unique_import_id` within `(journal_id, company_id)` (including journal-less same-company
+ * legacy lines unless `exactJournalOnly` is `true`); returns `{ db, count }`.
+ *
+ * @param {object} db
+ * @param {object[]} lines
+ * @param {object} [defaults]
+ * @param {{ camt?: boolean, exactJournalOnly?: boolean }} [options]
+ *   `exactJournalOnly` restricts duplicate detection to lines whose `journal_id` equals the target journal
+ *   (used by online sync so provider IDs do not collide with journal-less legacy file imports).
  */
-export function importStatementLines(db, lines, defaults = {}, { camt = false } = {}) {
+export function importStatementLines(db, lines, defaults = {}, { camt = false, exactJournalOnly = false } = {}) {
   if (!defaults.journal_id) throw new Error('Bank Journal is required');
   const journal = read(db, 'account.journal', defaults.journal_id);
   if (!journal) throw new Error('The bank journal does not exist');
@@ -126,7 +134,7 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false } 
   if (camt && lines.some((l) => !l.currency || l.currency !== currency?.name)) throw new Error(`Statement currency does not match journal currency ${currency?.name ?? ''}`);
   const journalId = defaults.journal_id ?? null;
   const known = new Set(search(db, 'account.bank.statement.line')
-    .filter((l) => (l.journal_id == null || l.journal_id === journalId) && (l.company_id ?? 1) === company)
+    .filter((l) => (exactJournalOnly ? l.journal_id === journalId : (l.journal_id == null || l.journal_id === journalId)) && (l.company_id ?? 1) === company)
     .map((l) => l.unique_import_id).filter(Boolean));
   const fresh = lines.filter((l) => {
     if (!l.unique_import_id) return true;

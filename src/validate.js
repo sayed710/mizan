@@ -113,14 +113,15 @@ export function cleanRecord(model, rec) {
 
 const DELIVERY_STATES = new Set(['sent', 'failed', 'outbox_only']);
 
-/** Sanitize an incoming chatter/tracking message, preserving tracked field metadata only for declared model fields. */
+/** Sanitize an incoming chatter/tracking message, preserving tracked field metadata only on declared fields of tracking messages. */
 export const cleanMessage = (m) => {
   if (!isPlain(m) || typeof m.id !== 'string' || !models[m.model] || !Number.isInteger(m.res_id)) return null;
-  const validField = typeof m.field === 'string' && m.field.length > 0 && m.field.length <= 100
+  const kind = messageKind(m.kind);
+  const validField = kind === 'tracking' && typeof m.field === 'string' && m.field.length > 0 && m.field.length <= 100
     && Object.hasOwn(models[m.model].fields ?? {}, m.field);
   return {
     id: m.id.slice(0, 64), model: m.model, res_id: m.res_id, body: String(m.body ?? '').slice(0, 10000),
-    kind: messageKind(m.kind), author: String(m.author ?? '').slice(0, 100), date: String(m.date ?? '').slice(0, 40),
+    kind, author: String(m.author ?? '').slice(0, 100), date: String(m.date ?? '').slice(0, 40),
     ...(m.source_model === 'account.move' && Number.isSafeInteger(m.source_id) && m.source_id > 0 ? { source_model: m.source_model, source_id: m.source_id } : {}),
     ...(validField ? {
       field: m.field,
