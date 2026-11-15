@@ -327,6 +327,9 @@ function runSyncForAccounts(db, link, accounts, { now = new Date().toISOString()
   if (!provider) return failConnection(db, link.id, 'Unknown online synchronization provider');
 
   const linkedAccounts = accounts.filter((a) => a.active !== false && a.journal_id);
+  if (!linkedAccounts.length) {
+    throw new Error('Link an online account to a bank journal first');
+  }
   let stagedDb = db;
   let totalCreated = 0;
 
@@ -415,8 +418,13 @@ export const onlineSyncModels = {
         label: 'Status',
         readonly: true,
         tracking: true,
-        badge: { connected: 'success', error: 'danger', disconnected: 'muted' },
-        options: [['connected', 'Connected'], ['error', 'Error'], ['disconnected', 'Disconnected']],
+        badge: { not_synchronized: 'muted', connected: 'success', error: 'danger', disconnected: 'muted' },
+        options: [
+          ['not_synchronized', 'Not Synchronized'],
+          ['connected', 'Connected'],
+          ['error', 'Error'],
+          ['disconnected', 'Disconnected'],
+        ],
       },
       last_refresh: { type: 'datetime', label: 'Last Refresh', readonly: true },
       error_message: { type: 'text', label: 'Error Message', readonly: true },
@@ -425,6 +433,7 @@ export const onlineSyncModels = {
         type: 'one2many',
         relation: ACCOUNT_MODEL,
         label: 'Online Accounts',
+        editable: true,
         compute: computeLinkAccounts,
         fields: {
           id: { type: 'integer', label: 'ID', hidden: true },
@@ -445,7 +454,7 @@ export const onlineSyncModels = {
     defaults: () => ({
       name: 'Demo Bank',
       provider: 'demo',
-      state: 'connected',
+      state: 'not_synchronized',
       last_refresh: null,
       error_message: '',
       demo_transactions: null,
@@ -458,6 +467,7 @@ export const onlineSyncModels = {
       return childIds.length ? unlink(db, ACCOUNT_MODEL, childIds) : db;
     },
     filters: [[
+      { id: 'not_synchronized', label: 'Not Synchronized', fn: (r) => r.state === 'not_synchronized' },
       { id: 'connected', label: 'Connected', fn: (r) => r.state === 'connected' },
       { id: 'error', label: 'Error', fn: (r) => r.state === 'error' },
       { id: 'disconnected', label: 'Disconnected', fn: (r) => r.state === 'disconnected' },
@@ -468,9 +478,9 @@ export const onlineSyncModels = {
       title: 'name',
       statusbar: 'state',
       buttons: [
-        { label: 'Fetch Transactions', primary: true, when: (r) => r.state !== 'disconnected', run: (db, r) => ({ db: syncOnlineConnection(db, r.id).db }) },
-        { label: 'Disconnect', when: (r) => r.state !== 'disconnected', vals: { state: 'disconnected' } },
-        { label: 'Reconnect', when: (r) => r.state === 'disconnected', vals: { state: 'connected', error_message: '' } },
+        { label: 'Fetch Transactions', primary: true, when: (r) => Boolean(r?.id) && r.state !== 'disconnected', run: (db, r) => ({ db: syncOnlineConnection(db, r.id).db }) },
+        { label: 'Disconnect', when: (r) => Boolean(r?.id) && r.state !== 'disconnected', vals: { state: 'disconnected' } },
+        { label: 'Reconnect', when: (r) => Boolean(r?.id) && r.state === 'disconnected', vals: { state: 'connected', error_message: '' } },
       ],
       groups: [['name', 'provider'], ['last_refresh', 'error_message']],
       tabs: [{ label: 'Online Accounts', fields: ['account_ids'] }],
@@ -506,7 +516,7 @@ export const onlineSyncModels = {
     form: {
       title: 'name',
       buttons: [
-        { label: 'Fetch Transactions', primary: true, when: (r) => Boolean(r.journal_id), run: (db, r) => ({ db: syncOnlineAccount(db, r.id).db }) },
+        { label: 'Fetch Transactions', primary: true, when: (r) => Boolean(r?.id) && Boolean(r.journal_id), run: (db, r) => ({ db: syncOnlineAccount(db, r.id).db }) },
       ],
       groups: [['name', 'link_id', 'account_number'], ['journal_id', 'balance', 'last_sync_cursor']],
     },

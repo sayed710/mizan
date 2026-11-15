@@ -169,7 +169,13 @@ export function BankReconcile() {
 
   const partnerName = (id) => (id ? read(db, 'res.partner', id)?.name ?? '' : '');
   const journalName = (id) => (id ? read(db, 'account.journal', id)?.name ?? '' : '');
-  const openBalance = (line) => line.open_amount ?? statementCompanyAmount(db, line);
+  const openBalance = (line) => (Number(line.amount) < 0 ? -1 : 1) * (line.open_amount ?? statementCompanyAmount(db, line));
+
+  /** Accessible name for a bank reconciliation line item. */
+  const lineAriaLabel = (label, partner, amount) => (partner
+    ? t('{label}, {partner}, {amount}', { label, partner, amount })
+    : t('{label}, {amount}', { label, amount }));
+
   const selectedLineCurrency = selectedLine
     ? documentCurrency(db, {
       ...selectedLine,
@@ -181,7 +187,7 @@ export function BankReconcile() {
     <div className="page bank-reconcile-page">
       <div className="control-panel">
         <h1>{t('Bank Reconciliation')}</h1>
-        <label>
+        <label className="inline-select">
           {t('Journal')}
           <select aria-label={t('Journal')} value={journalFilter} onChange={(e) => { setJournalFilter(e.target.value); setSelectedLineId(null); }}>
             <option value="">{t('All Journals')}</option>
@@ -206,6 +212,7 @@ export function BankReconcile() {
                     type="button"
                     className={`bank-reconcile-line-item${isSelected ? ' active' : ''}`}
                     aria-pressed={isSelected}
+                    aria-label={lineAriaLabel(line.payment_ref || t('Statement Line'), partnerName(line.partner_id), formatInCurrency(openBalance(line), findCompanyCurrencyRecord(db, line.company_id ?? null)))}
                     onClick={() => selectLine(line)}
                   >
                     <div className="bank-reconcile-line-top">
@@ -274,6 +281,7 @@ export function BankReconcile() {
                               className={`bank-reconcile-line-item${isSelected ? ' active' : ''}`}
                               aria-pressed={isSelected}
                               disabled={Boolean(err)}
+                              aria-label={lineAriaLabel(move.name, partnerName(move.partner_id), formatInCurrency(move.amount_residual, documentCurrency(db, move)))}
                               onClick={() => setSelectedCandidateId(move.id)}
                             >
                               <div className="bank-reconcile-line-top">
@@ -292,12 +300,11 @@ export function BankReconcile() {
                     )}
                     {candidateMoves.length > 0 && (
                       <div className="bank-reconcile-writeoff-fields">
-                        <label>{t('Write-off Account')}
-                          <select aria-label={t('Write-off Account')} value={writeoffAccountId} onChange={(e) => setWriteoffAccountId(e.target.value)}>
-                            <option value="">{t('None')}</option>
-                            {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
-                          </select>
-                        </label>
+                        <label htmlFor={`writeoff-account-${activeTab}`}>{t('Write-off Account')}</label>
+                        <select id={`writeoff-account-${activeTab}`} aria-label={t('Write-off Account')} value={writeoffAccountId} onChange={(e) => setWriteoffAccountId(e.target.value)}>
+                          <option value="">{t('None')}</option>
+                          {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
+                        </select>
                         {writeoffAccountId && <>
                           <label>{t('Write-off Label')} <input aria-label={t('Write-off Label')} value={writeoffLabel} onChange={(e) => setWriteoffLabel(e.target.value)} /></label>
                           <label>{t('Write-off Amount')} <input aria-label={t('Write-off Amount')} type="number" step="any" min="0" value={writeoffAmount} onChange={(e) => setWriteoffAmount(e.target.value)} /></label>
@@ -321,6 +328,7 @@ export function BankReconcile() {
                               type="button"
                               className={`bank-reconcile-line-item${isSelected ? ' active' : ''}`}
                               aria-pressed={isSelected}
+                              aria-label={lineAriaLabel(payment.name, partnerName(payment.partner_id), formatInCurrency(payment.amount, documentCurrency(db, payment)))}
                               onClick={() => togglePaymentSelection(payment.id)}
                             >
                               <div className="bank-reconcile-line-top">
@@ -338,12 +346,11 @@ export function BankReconcile() {
                     )}
                     {outstandingPayments.length > 0 && (
                       <div className="bank-reconcile-writeoff-fields">
-                        <label>{t('Write-off Account')}
-                          <select aria-label={t('Write-off Account')} value={writeoffAccountId} onChange={(e) => setWriteoffAccountId(e.target.value)}>
-                            <option value="">{t('None')}</option>
-                            {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
-                          </select>
-                        </label>
+                        <label htmlFor={`writeoff-account-${activeTab}`}>{t('Write-off Account')}</label>
+                        <select id={`writeoff-account-${activeTab}`} aria-label={t('Write-off Account')} value={writeoffAccountId} onChange={(e) => setWriteoffAccountId(e.target.value)}>
+                          <option value="">{t('None')}</option>
+                          {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
+                        </select>
                         {writeoffAccountId && <>
                           <label>{t('Write-off Label')} <input aria-label={t('Write-off Label')} value={writeoffLabel} onChange={(e) => setWriteoffLabel(e.target.value)} /></label>
                           <label>{t('Write-off Amount')} <input aria-label={t('Write-off Amount')} type="number" step="any" min="0" value={writeoffAmount} onChange={(e) => setWriteoffAmount(e.target.value)} /></label>

@@ -24,7 +24,6 @@ const syncTaxLockDate = (db, ret, excludeId = null) => {
   return next;
 };
 
-/** Determine if a return is an audit working file rather than a standard tax return. */
 /** A working file being created or edited: audit by status, category or type. */
 const isNewAudit = (db, vals) => (vals?.type_id ? isAuditReturn(vals, db) : Boolean(vals?.audit_status || vals?.category === 'audit'));
 const returnCompany = (db, vals) => Number(vals?.company_id ?? getActiveCompany() ?? db.settings?.current_company_id ?? 1);
@@ -32,6 +31,9 @@ const returnCompany = (db, vals) => Number(vals?.company_id ?? getActiveCompany(
 export function isAuditReturn(r, db) {
   return !!(r?.type_id && db && read(db, 'account.return.type', r.type_id)?.category === 'audit');
 }
+
+/** Resolve whether the tax return name is required (audit working files and returns without full type and dates). */
+const isReturnNameRequired = (r, db) => Boolean(isNewAudit(db, r) || !r?.type_id || !r?.date_from || !r?.date_to);
 
 // A new working-file form has no persisted type until its first save.
 const auditForm = (r, db, context) => isAuditReturn(r, db)
@@ -221,14 +223,31 @@ function uncoveredPeriods(period, covered) {
   return gaps;
 }
 
+/** Build the canonical tax return name from return type name, date from, and date to. */
+export function formatTaxReturnName(typeName, dateFrom, dateTo) {
+  if (typeName && dateFrom && dateTo) return `${typeName} (${dateFrom} - ${dateTo})`;
+  return typeName || '';
+}
+
+/**
+ * Run generateReturns for every active periodic return type of every company.
+ * Idempotent; skips periods already covered.
+ */
+export function generateAllReturns(db, at = today()) {
+  let next = ensureReturnTypes(db);
+  const types = (next.records?.['account.return.type'] ?? []).filter((t) => t.active !== false && t.auto_generate !== false);
+  for (const type of types) next = generateReturns(next, type.id, at).db;
+  return next;
+}
+
 /** Create missing returns for each period up to today for return type `typeId`. */
-export function generateReturns(db, typeId) {
+export function generateReturns(db, typeId, at = today()) {
   let nextDb = ensureReturnTypes(db);
   const type = read(nextDb, 'account.return.type', typeId);
   if (!type) throw new Error('Return type not found');
   const companyId = type.company_id ?? 1;
   const periodicity = type.deadline_periodicity || 'monthly';
-  const atDate = today();
+  const atDate = at || today();
   const start = type.deadline_start_date || historicalStart(nextDb, companyId, periodicity, atDate);
   const periods = periodsUpTo(periodicity, start, atDate);
 
@@ -240,15 +259,15 @@ export function generateReturns(db, typeId) {
 
   const created = [];
   for (const p of missing) {
-
     const isAudit = type.category === 'audit';
     const rep = isAudit ? { payable: 0 } : taxReport(nextDb, { from: p.from, to: p.to, company_id: companyId });
     const toPay = rep.payable;
     const deadline = addDays(p.to, type.deadline_days_delay ?? 0);
-    const name = `${type.name} (${p.from} - ${p.to})`;
+    const name = formatTaxReturnName(type.name, p.from, p.to);
 
     const res = create(nextDb, 'account.return', {
       name,
+      name_auto: true,
       type_id: typeId,
       date_from: p.from,
       date_to: p.to,
@@ -285,7 +304,6 @@ export function reviewReturn(db, returnId) {
     total_amount_to_pay: rep.payable,
   });
 }
-
 
 /** Submit a tax return: posts closing move, locks period, updates date_lock. */
 export function submitReturn(db, returnId) {
@@ -568,8 +586,13 @@ export const taxReturnModels = {
     guard: returnGuard,
     prepareCreate: (db, vals) => {
       const companyId = returnCompany(db, vals);
-      if (isAuditReturn(vals, db)) {
-        vals = { ...vals, audit_status: vals?.audit_status || 'ongoing', company_id: companyId };
+      if (isAuditReturn(vals, db)) vals = { ...vals, audit_status: vals?.audit_status || 'ongoing', company_id: companyId };
+      if (!isNewAudit(db, vals) && !vals?.name && vals?.type_id && vals?.date_from && vals?.date_to) {
+        const type = read(db, 'account.return.type', vals.type_id);
+        const autoName = formatTaxReturnName(type?.name, vals.date_from, vals.date_to);
+        if (autoName) vals = { ...vals, name: autoName, name_auto: true };
+      } else if (vals?.name && vals.name_auto == null) {
+        vals = { ...vals, name_auto: false };
       }
       if (!isNewAudit(db, vals)) return { db, vals };
       if (vals.type_id) return { db, vals: { ...vals, company_id: companyId } };
@@ -577,7 +600,8 @@ export const taxReturnModels = {
       return { db: ensured.db, vals: { ...vals, company_id: companyId, type_id: ensured.typeId } };
     },
     fields: {
-      name: { type: 'char', label: 'Return', required: true },
+      name: { type: 'char', label: 'Return', required: isReturnNameRequired },
+      name_auto: { type: 'boolean', label: 'Automatic Name', hidden: true },
       // Working files (audit_status set) pick audit types, tax returns pick tax types, both in the record's company.
       type_id: { type: 'many2one', relation: 'account.return.type', label: 'Return Type', required: true, domain: (type, r) => (type.company_id ?? 1) === (r?.company_id ?? 1) && (type.category === 'audit') === Boolean(r?.audit_status) },
       date_from: { type: 'date', label: 'Start Date', required: true },
@@ -627,13 +651,7 @@ export const taxReturnModels = {
         newLine: () => ({ name: '', status: 'pending', message: '' }),
       },
     },
-    defaults: () => ({
-      state: 'new',
-      is_completed: false,
-      closing_move_ids: [],
-      payment_ids: [],
-      attachment_ids: [],
-    }),
+    defaults: () => ({ name_auto: true, state: 'new', is_completed: false, closing_move_ids: [], payment_ids: [], attachment_ids: [] }),
     createDefaults: (db, vals) => {
       const companyId = returnCompany(db, vals);
       if (isNewAudit(db, vals)) {
@@ -655,11 +673,21 @@ export const taxReturnModels = {
     },
     // Audit checks follow the working file's period and company.
     onchange: (r, key, db) => {
+      const next = {};
+      if (key === 'name') next.name_auto = false;
+      if (!isNewAudit(db, r) && ['type_id', 'date_from', 'date_to'].includes(key) && (!r.name || r.name_auto)) {
+        const type = r.type_id ? read(db, 'account.return.type', r.type_id) : null;
+        if (type && r.date_from && r.date_to) {
+          next.name = formatTaxReturnName(type.name, r.date_from, r.date_to);
+          next.name_auto = true;
+        }
+      }
       if (key === 'type_id') {
         const isAudit = isAuditReturn(r, db);
-        return isAudit ? { audit_status: r.audit_status || 'ongoing' } : { audit_status: null };
+        return { ...next, ...(isAudit ? { audit_status: r.audit_status || 'ongoing' } : { audit_status: null }) };
       }
-      const next = ['date_from', 'date_to', 'company_id'].includes(key) && isNewAudit(db, r) ? { checks: computeAuditChecks(db, r) } : {};
+      const auditUpdates = ['date_from', 'date_to', 'company_id'].includes(key) && isNewAudit(db, r) ? { checks: computeAuditChecks(db, r) } : {};
+      Object.assign(next, auditUpdates);
       if (key === 'company_id' && r.tax_unit_id && (!r.id || read(db, 'res.company', r.company_id))) {
         const unit = read(db, 'account.tax.unit', r.tax_unit_id);
         if (!unit || !(unit.company_ids ?? []).includes(r.company_id ?? 1)) next.tax_unit_id = null;

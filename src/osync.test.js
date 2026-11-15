@@ -129,6 +129,7 @@ test('all labels, options, buttons, and error messages of onlineSync models have
       'Online synchronization connection not found',
       'Online bank account not found',
       'No online account is linked to this journal',
+      'Link an online account to a bank journal first',
       'A journal linked to an online account must remain a bank or credit card journal',
       'Cannot change the company of a journal linked to an online account',
       'A bank transaction with this Import ID already exists on this journal',
@@ -281,7 +282,8 @@ test('b: dashboard bank card shows sync status, error state, and triggers an inc
     await React.act(async () => root.render(React.createElement(Dashboard)));
     const card = find(host, (n) => n.tagName === 'SECTION' && n.textContent.includes('Dashboard Sync Bank'));
     assert.ok(card, 'dashboard renders the linked bank journal card');
-    assert.ok(card.textContent.includes('2026-06-10'), 'bank card displays last sync time');
+    const { display } = await import('./ui.jsx');
+    assert.ok(card.textContent.includes(display(null, { type: 'datetime' }, '2026-06-10T09:15:00Z')), 'bank card displays last sync time in the shared local format');
     const fetchBtn = find(card, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Fetch Transactions'));
     assert.ok(fetchBtn, 'bank card shows Fetch Transactions action when linked');
 
@@ -524,7 +526,10 @@ test('connection form renders Fetch Transactions button and online accounts tab,
       base: '#/accounting/online-sync',
       params: new URLSearchParams('view=form'),
     })));
-    assert.ok(host.textContent.includes('Form Account 1'), 'connection form shows linked online account');
+    assert.ok(
+      host.textContent.includes('Form Account 1') || find(host, (n) => n.tagName === 'INPUT' && reactProps(n)?.value === 'Form Account 1'),
+      'connection form shows linked online account',
+    );
     const fetchBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Fetch Transactions'));
     assert.ok(fetchBtn, 'connection form shows Fetch Transactions button');
     await React.act(async () => reactProps(fetchBtn).onClick());

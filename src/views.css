@@ -631,3 +631,4 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .user-menu .nav-dropdown a, .user-menu .nav-dropdown button { padding: 7px 10px; border-radius: 6px; background: none; border: 0; text-align: start; cursor: pointer; color: inherit; font: inherit; }
 .user-menu .nav-dropdown a:hover, .user-menu .nav-dropdown button:hover { background: var(--brand-soft); }
 .user-menu-name { padding: 6px 10px; font-size: 12px; }
+.empty-state { padding: 16px; margin: 0; }
