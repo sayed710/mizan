@@ -50,3 +50,30 @@ test('switching with blocked storage carries the choice in the address; with sto
   (await fresh()).setLang('ar');
   assert.deepEqual(visited, ['http://localhost/?lang=ar#/accounting', 'http://localhost/#/accounting', 'reload']);
 });
+
+test('the sign-in page follows the language of the page it returns to', async () => {
+  assert.equal(await langFor(null, ['en-US'], { search: '?return=%2Fshop%3Flang%3Dar' }), 'ar');
+  assert.equal(await langFor(null, ['en-US'], { search: '?lang=en&return=%2Fshop%3Flang%3Dar' }), 'en');
+  assert.equal(await langFor(null, ['en-US'], { search: '?return=%2F%2Fother.example%3Flang%3Dar' }), 'ar');
+  assert.equal(await langFor(null, ['en-US'], { search: '?return=https%3A%2F%2Fother.example%2F%3Flang%3Dar' }), 'en');
+});
+
+test('switching on the sign-in page also changes the language of the page it returns to', async () => {
+  const visited = [];
+  const page = (href, setItem) => {
+    globalThis.document = {};
+    globalThis.localStorage = { getItem: () => null, setItem };
+    globalThis.location = { href, search: new URL(href).search, replace: (to) => visited.push(to), reload: () => visited.push('reload') };
+  };
+  page('http://localhost/?return=%2Fshop%3Flang%3Dar%26page%3D2#/', () => {});
+  (await fresh()).setLang('en');
+  page('http://localhost/?return=%2Fshop%3Fpage%3D2#/', () => { throw new Error('blocked'); });
+  (await fresh()).setLang('ar');
+  page('http://localhost/?return=%2Fshop%3Fpage%3D2#/', () => {});
+  (await fresh()).setLang('ar');
+  assert.deepEqual(visited, [
+    'http://localhost/?return=%2Fshop%3Fpage%3D2#/',
+    'http://localhost/?return=%2Fshop%3Fpage%3D2%26lang%3Dar&lang=ar#/',
+    'reload',
+  ]);
+});

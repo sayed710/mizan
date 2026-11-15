@@ -1,6 +1,9 @@
 // Minimal i18n: English source strings are the keys. Missing keys fall back to English.
+import { translatePattern } from './i18n-patterns.js';
+
 const KEY = 'mizan-lang';
 const URL_PARAM = 'lang';
+const RETURN_PARAM = 'return';
 
 /** Interface languages as [code, name in that language]. */
 export const LANGUAGES = [['en', 'English'], ['ar', 'العربية']];
@@ -13,9 +16,19 @@ const browserLang = () => {
   return preferred.map((l) => String(l ?? '').slice(0, 2).toLowerCase()).find(supported) ?? 'en';
 };
 
-/** Language named by `?lang=` in the address: how a choice survives a reload when storage is blocked. */
+/** The page a sign-in address returns to (`?return=/shop?lang=ar`), as a URL; null when the address has none. */
+const returnTarget = (params) => {
+  const back = params.get(RETURN_PARAM);
+  return back?.startsWith('/') && URL.canParse(back, 'http://local') ? new URL(back, 'http://local') : null;
+};
+
+/**
+ * Language named by `?lang=` in the address: how a choice survives a reload when storage is blocked.
+ * On the sign-in page the language of the page being returned to counts too.
+ */
 const urlLang = () => {
-  try { return new URLSearchParams(globalThis.location?.search ?? '').get(URL_PARAM); } catch { return null; }
+  const params = new URLSearchParams(globalThis.location?.search ?? '');
+  return [params.get(URL_PARAM), returnTarget(params)?.searchParams.get(URL_PARAM)].find(supported);
 };
 
 // The address wins, then the stored choice; a first visit follows the browser.
@@ -42,18 +55,129 @@ export function setTheme(next) {
   location.reload();
 }
 
-/** Switch the interface language and reload. A saved choice needs no `?lang=`; without storage the address carries it. */
+/**
+ * Switch the interface language and reload. A saved choice needs no `?lang=`; without storage the address carries it.
+ * The page a sign-in address returns to follows the same choice, so an older `?lang=` there cannot undo it.
+ */
 export function setLang(next) {
   let saved = true;
   try { localStorage.setItem(KEY, next); } catch { saved = false; }
+  const carry = (params) => { if (saved) params.delete(URL_PARAM); else params.set(URL_PARAM, next); };
   const url = new URL(location.href);
-  if (saved) url.searchParams.delete(URL_PARAM); else url.searchParams.set(URL_PARAM, next);
+  carry(url.searchParams);
+  const back = returnTarget(url.searchParams);
+  if (back) {
+    const before = back.search;
+    carry(back.searchParams);
+    if (back.search !== before) url.searchParams.set(RETURN_PARAM, back.pathname + back.search + back.hash);
+  }
   if (url.href === location.href) location.reload(); else location.replace(url.href);
 }
 
 const ar = {
+  'Batch invoices must use the same currency; a mixed-currency total is unavailable': 'فواتير الدفعة يجب أن تكون بعملة واحدة؛ لا يمكن حساب إجمالي بعملات مختلفة',
+  'Configure a company currency before adding invoices to the batch': 'حدّد عملة الشركة قبل إضافة فواتير إلى الدفعة',
+  'Configure a currency for every company before adding invoices to the batch': 'حدّد عملة لكل شركة قبل إضافة فواتير إلى الدفعة',
+  'Select an existing invoice or payment on every batch line': 'اختر فاتورة أو دفعة موجودة في كل بند من بنود الدفعة',
+  'Set only one tax return type for each member company': 'حدّد نوع إقرار ضريبي واحداً فقط لكل شركة عضو',
+  'Tax return type lines must use member companies in the tax unit': 'بنود نوع الإقرار الضريبي يجب أن تستخدم الشركات الأعضاء في الوحدة الضريبية',
+  // Messages the server answers with.
+  'Registrations for this event are closed': 'التسجيل في هذه الفعالية مغلق',
+  'Choose a ticket': 'اختر تذكرة',
+  'You are already registered for this event': 'أنت مسجَّل بالفعل في هذه الفعالية',
+  'This position is not open': 'هذه الوظيفة غير متاحة للتقديم',
+  'Invalid id': 'معرّف غير صالح',
+  'JSON object expected': 'المطلوب كائن JSON',
+  'Method not allowed': 'طريقة الطلب غير مسموح بها',
+  'The snapshot failed its integrity check': 'النسخة لم تجتز فحص السلامة',
+  'A finite observed quantity is required': 'الكمية المرصودة يجب أن تكون رقماً محدداً',
+  'Select an existing active company': 'اختر شركة موجودة ونشطة',
+  'Password must be at least 8 characters': 'كلمة المرور يجب ألا تقل عن 8 أحرف',
+  'Login must be 3-64 letters, digits or . @ - _': 'اسم الدخول يجب أن يكون من 3 إلى 64 حرفاً أو رقماً أو أحد الرموز . @ - _',
+  'Allowed companies: select existing companies': 'الشركات المسموح بها: اختر شركات موجودة',
+  'Not found': 'غير موجود',
+  'Request too large': 'الطلب أكبر من المسموح',
+  'Invalid JSON': 'JSON غير صالح',
+  'Forbidden': 'غير مسموح',
+  'Too many requests': 'طلبات كثيرة جداً',
+  'Missing CSRF header': 'ترويسة CSRF مفقودة',
+  'Too many requests, try again later': 'طلبات كثيرة جداً، حاول مرة أخرى لاحقاً',
+  'Too many failed attempts': 'محاولات فاشلة كثيرة جداً',
+  'Unknown device token': 'رمز الجهاز غير معروف',
+  'Too many applications, try again later': 'طلبات توظيف كثيرة جداً، حاول مرة أخرى لاحقاً',
+  'You are sending messages too fast, please wait a moment': 'أنت ترسل الرسائل بسرعة كبيرة، انتظر لحظة من فضلك',
+  'Too many orders, try again later': 'طلبات شراء كثيرة جداً، حاول مرة أخرى لاحقاً',
+  'Too many attempts, try again later': 'محاولات كثيرة جداً، حاول مرة أخرى لاحقاً',
+  'Invalid or missing API key': 'مفتاح API غير صالح أو مفقود',
+  'Idempotency-Key is too long': 'قيمة Idempotency-Key أطول من المسموح',
+  'Idempotency-Key requires a collection create route': 'Idempotency-Key يُستخدم مع طلبات الإنشاء فقط',
+  'Idempotency-Key was already used for another model': 'قيمة Idempotency-Key استُخدمت من قبل مع نموذج آخر',
+  'Not logged in': 'لم تسجّل الدخول',
+  'Admins only': 'للمديرين فقط',
+  'Inventory or Barcode access is required': 'تحتاج صلاحية المخزون أو الباركود',
+  'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)': 'البريد الإلكتروني غير مُعدّ (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)',
+  'The email was sent, but the data was restored meanwhile, so the send was not recorded': 'أُرسل البريد، لكن البيانات استُعيدت في الأثناء فلم يُسجَّل الإرسال',
+  'Current password is wrong': 'كلمة المرور الحالية غير صحيحة',
+  'before must be an audit entry id': 'قيمة before يجب أن تكون معرّف قيد في سجل التدقيق',
+  'id must be a nonnegative record id': 'قيمة id يجب أن تكون معرّف سجل غير سالب',
+  'models must be a non-empty comma-separated list': 'قيمة models يجب أن تكون قائمة غير فارغة مفصولة بفواصل',
+  'The data was restored by an administrator; your unsaved edits were discarded': 'استعاد أحد المديرين البيانات؛ تم تجاهل تعديلاتك غير المحفوظة',
+  'Send a JSON object': 'أرسل كائن JSON',
+  'Reset is disabled on this server (set MIZAN_ALLOW_RESET=1 to allow it)': 'إعادة الضبط معطّلة على هذا الخادم (اضبط MIZAN_ALLOW_RESET=1 للسماح بها)',
+  'Type RESET to confirm': 'اكتب RESET للتأكيد',
+  'User not found': 'المستخدم غير موجود',
+  'Invalid URL': 'رابط غير صالح',
+  'Cross-site request refused': 'تم رفض طلب من موقع آخر',
+  'Submit the password form': 'أرسل نموذج كلمة المرور',
+  'Server error': 'خطأ في الخادم',
+  'URLs pointing to private networks are not allowed': 'الروابط التي تشير إلى شبكات خاصة غير مسموح بها',
+  'Only https URLs are allowed': 'المسموح روابط https فقط',
+  'The response is too large': 'الرد أكبر من المسموح',
+  'The service did not return JSON': 'الخدمة لم تُرجع JSON',
+  'The AI declined this request.': 'رفض الذكاء الاصطناعي هذا الطلب.',
+  'AI credentials are invalid (ANTHROPIC_API_KEY).': 'بيانات اعتماد الذكاء الاصطناعي غير صالحة (ANTHROPIC_API_KEY).',
+  'The AI is busy, try again in a moment.': 'الذكاء الاصطناعي مشغول، حاول مرة أخرى بعد لحظة.',
+  'The AI returned no text.': 'لم يُرجع الذكاء الاصطناعي أي نص.',
+  'Open a draft vendor bill to digitize a document': 'افتح فاتورة مورد مسودة لرقمنة مستند',
+  'Upload a PDF or an image (JPEG, PNG, GIF, WebP)': 'ارفع ملف PDF أو صورة (JPEG أو PNG أو GIF أو WebP)',
+  'The document is too large (3 MB maximum)': 'المستند أكبر من المسموح (الحد الأقصى 3 ميجابايت)',
+  'The document could not be read as a bill.': 'تعذّرت قراءة المستند كفاتورة.',
+  'Campaign not found': 'الحملة غير موجودة',
+  'SMS delivery is already in progress': 'إرسال الرسائل النصية جارٍ بالفعل',
+  'Delivery status unknown after interruption; verify with the provider before resending': 'حالة الإرسال غير معروفة بعد الانقطاع؛ تحقق من مزوّد الخدمة قبل إعادة الإرسال',
+  'Choose a delivery method first': 'اختر طريقة التوصيل أولاً',
+  'The carrier did not return a valid price': 'شركة الشحن لم تُرجع سعراً صالحاً',
+  'Set the orders feed URL': 'حدّد رابط تغذية الطلبات',
+  'The feed must be a JSON array of orders': 'التغذية يجب أن تكون مصفوفة JSON من الطلبات',
+  'Device not found': 'الجهاز غير موجود',
+  'value must be a number': 'القيمة يجب أن تكون رقماً',
+  'This document cannot be emailed': 'لا يمكن إرسال هذا المستند بالبريد',
+  'The customer has no email address': 'العميل ليس له بريد إلكتروني',
+  'Mailing not found': 'الحملة البريدية غير موجودة',
+  'Already sent': 'أُرسل بالفعل',
+  'This document cannot be shared': 'لا يمكن مشاركة هذا المستند',
+  'This quotation is closed or expired': 'عرض السعر هذا مغلق أو منتهي الصلاحية',
+  'Invalid quotation prepayment amount': 'مبلغ الدفعة المقدمة لعرض السعر غير صالح',
+  'This quotation is already signed': 'عرض السعر هذا موقَّع بالفعل',
+  'Enter your name and typed signature': 'أدخل اسمك وتوقيعك المكتوب',
+  'Online demo payments are not available; please use bank transfer': 'الدفع الإلكتروني التجريبي غير متاح؛ استخدم التحويل البنكي من فضلك',
+  'This quotation does not require online payment': 'عرض السعر هذا لا يتطلب دفعاً إلكترونياً',
+  'Sign the quotation before paying': 'وقّع عرض السعر قبل الدفع',
+  'This quotation is already paid': 'عرض السعر هذا مدفوع بالفعل',
+  'A signed or paid quotation cannot be changed': 'لا يمكن تعديل عرض سعر موقَّع أو مدفوع',
+  'Choose an available optional product': 'اختر منتجاً اختيارياً متاحاً',
+  'This optional product is not configured correctly': 'هذا المنتج الاختياري غير مُعدّ بشكل صحيح',
+  'This action is not available': 'هذا الإجراء غير متاح',
+  'Set MIZAN_PUBLIC_URL (the address signers open, e.g. https://erp.example.com) before emailing signing links': 'اضبط MIZAN_PUBLIC_URL (العنوان الذي يفتحه الموقّعون، مثل https://erp.example.com) قبل إرسال روابط التوقيع بالبريد',
+  'Only requests waiting for signatures get reminders': 'التذكيرات تُرسل فقط للطلبات التي تنتظر التوقيع',
+  'The signature deadline has passed; extend it before sending reminders': 'انتهى موعد التوقيع؛ مدّده قبل إرسال التذكيرات',
+  'No unsigned signer has an email address': 'لا يوجد موقّع لم يوقّع بعد وله بريد إلكتروني',
+  'Type your full name and accept the electronic signature': 'اكتب اسمك الكامل ووافق على التوقيع الإلكتروني',
+  'SMTP timeout': 'انتهت مهلة خادم البريد',
+  'Invalid signature': 'توقيع غير صالح',
   // Validation and error messages raised by the models.
   'Select a valid analytic account': 'اختر حساباً تحليلياً صالحاً',
+  'A credit note line linked to a deferred invoice must book against the source schedule\'s deferred account': 'بند الإشعار الدائن المرتبط بفاتورة مؤجلة يجب أن يُقيَّد على الحساب المؤجل لجدول المصدر',
   'Analytic distribution must be an object': 'يجب أن يكون التوزيع التحليلي كائناً',
   'Analytic percentages must be non-negative numbers': 'يجب أن تكون النسب التحليلية أرقاماً غير سالبة',
   'Analytic account not found': 'الحساب التحليلي غير موجود',
@@ -2963,9 +3087,13 @@ const ar = {
   'Missing payment status in webhook': 'حالة الدفع مفقودة في إشعار الدفع',
 };
 
+/** Arabic for a label, never an inherited object member such as `constructor`. */
+const ownArabic = (label) => (Object.hasOwn(ar, label) ? ar[label] : undefined);
+
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
 export function t(s, vars) {
   if (s == null) return '';
-  const out = (lang === 'ar' && ar[s]) || s;
+  const arabic = lang === 'ar' && typeof s === 'string' ? ownArabic(s) ?? translatePattern(s, ownArabic) : null;
+  const out = arabic ?? s;
   return vars ? out.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '') : out;
 }
