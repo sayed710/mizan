@@ -4,6 +4,7 @@
 import { models } from './registry.js';
 import { distributionError } from './analytic_distribution.js';
 import { fieldRequired } from './field-metadata.js';
+import { dateLocale } from './i18n.js';
 
 export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD', currency_unit: 'Dollars', currency_unit_currency: 'USD' } });
 
@@ -357,7 +358,7 @@ const groupKey = (field, v) => {
 export function groupLabel(db, field, key) {
   if (key === false || key == null || key === '') return field.type === 'boolean' ? 'No' : 'None';
   switch (field.type) {
-    case 'date': case 'datetime': return new Date(key + '-01T00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    case 'date': case 'datetime': return new Date(key + '-01T00:00').toLocaleDateString(dateLocale, { month: 'long', year: 'numeric' });
     case 'selection': return field.options.find((o) => o[0] === key)?.[1] ?? key;
     case 'many2one': {
       const rec = read(db, field.relation, key);

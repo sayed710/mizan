@@ -6,7 +6,7 @@ import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { myEmployeeId } from '../access.js';
-import { t } from '../i18n.js';
+import { dateLocale, t } from '../i18n.js';
 import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
 import { companyCurrencyRecord } from '../money.js';
@@ -312,7 +312,7 @@ function Chatter({ db, model, id, name }) {
           <li key={m.id} className={m.kind}>
             <Avatar name={m.author} size={30} />
             <div>
-              <div className="msg-meta"><b>{m.author}</b> <time dateTime={m.date}>{new Date(m.date).toLocaleString()}</time></div>
+              <div className="msg-meta"><b>{m.author}</b> <time dateTime={m.date}>{new Date(m.date).toLocaleString(dateLocale)}</time></div>
               <div className="msg-body">{m.body}</div>
             </div>
           </li>

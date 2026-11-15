@@ -3,7 +3,7 @@ import { Component, useEffect, useRef, useState } from 'react';
 import { models, targetOf } from './models/index.js';
 import { isMultiCompany, read } from './orm.js';
 import { relationCandidates } from './companyView.js';
-import { LANGUAGES, lang, setLang, t } from './i18n.js';
+import { LANGUAGES, dateLocale, lang, setLang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency, roundCurrency } from './money.js';
 import { parseAmount, today } from './models/common.js';
@@ -14,7 +14,6 @@ import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
 export { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
-const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
 let moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 let activeCurrency = null;

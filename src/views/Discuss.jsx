@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { create, messagesOf, postNote, search } from '../orm.js';
 import { commit, getDb, useDb } from '../store.js';
-import { forwardArrow, t } from '../i18n.js';
+import { dateLocale, forwardArrow, t } from '../i18n.js';
 import { Avatar } from '../ui.jsx';
 
 /** Team chat: channels are records, messages reuse the chatter store (newest last). */
@@ -51,7 +51,7 @@ export function Discuss() {
             <li key={m.id} className={m.kind}>
               <Avatar name={m.author} size={34} />
               <div>
-                <div className="msg-meta"><b>{m.author}</b> <time dateTime={m.date}>{new Date(m.date).toLocaleString()}</time></div>
+                <div className="msg-meta"><b>{m.author}</b> <time dateTime={m.date}>{new Date(m.date).toLocaleString(dateLocale)}</time></div>
                 <div className="msg-body">{m.body}</div>
               </div>
             </li>

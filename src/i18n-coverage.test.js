@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 // Arabic must be active before i18n.js reads the language at import time.
 globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem() {} };
 const { t } = await import('./i18n.js');
-const { models, apps } = await import('./models/index.js');
+const { models, apps, APP_INFO } = await import('./models/index.js');
 
 // Product and platform names stay in their original spelling.
 const BRANDS = new Set(['Amazon', 'Noon', 'Shopee', 'Lazada', 'TikTok Shop', 'Jumia', 'Facebook', 'Instagram', 'X', 'YouTube']);
@@ -24,6 +24,7 @@ function uiStrings() {
     if (m.label) keys.add(m.label);
     for (const c of m.children ?? []) addMenu(c);
   };
+  for (const [category, summary] of Object.values(APP_INFO)) keys.add(category).add(summary);
   for (const app of apps ?? []) {
     if (app.name) keys.add(app.name);
     for (const m of app.menus ?? []) addMenu(m);
