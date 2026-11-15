@@ -100,6 +100,7 @@ const patterns = {
   'Account {1} belongs to another company': 'الحساب {1} يتبع شركة أخرى',
   'Account not found: {1}': 'الحساب غير موجود: {1}',
   'Configure the suspense account on journal {1}': 'حدّد الحساب المعلّق على دفتر اليومية {1}',
+  'This payment was booked directly on journal {1}; match it from that journal\'s statement': 'تم قيد هذه الدفعة مباشرة في دفتر اليومية {1}؛ طابقها من كشف حساب ذلك الدفتر',
   'Fiscal years overlap for company {1} on {2}': 'السنوات المالية للشركة {1} تتداخل في {2}',
   'Messages are limited to {1} characters': 'الحد الأقصى لطول الرسالة {1} حرفاً',
   'Configure the loan {1}': 'حدّد {1*} للقرض',
