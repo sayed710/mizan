@@ -17,6 +17,9 @@ test('a first visit follows the first supported browser language', async () => {
   assert.equal(await langFor(null, ['fr-FR', 'ar']), 'ar');
   assert.equal(await langFor(null, ['en-US', 'ar']), 'en');
   assert.equal(await langFor(null, ['fr-FR']), 'en');
+  // Mapudungun (arn) is not Arabic: the whole language part is compared.
+  assert.equal(await langFor(null, ['arn-CL']), 'en');
+  assert.equal(await langFor(null, ['AR_eg']), 'ar');
 });
 
 test('a stored language wins over the browser, and an unknown stored value is ignored', async () => {

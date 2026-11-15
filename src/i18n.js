@@ -13,7 +13,7 @@ const supported = (code) => LANGUAGES.some(([c]) => c === code);
 const browserLang = () => {
   if (typeof document === 'undefined') return 'en';
   const preferred = globalThis.navigator?.languages ?? [globalThis.navigator?.language];
-  return preferred.map((l) => String(l ?? '').slice(0, 2).toLowerCase()).find(supported) ?? 'en';
+  return preferred.map((l) => String(l ?? '').split(/[-_]/)[0].toLowerCase()).find(supported) ?? 'en';
 };
 
 /** The page a sign-in address returns to (`?return=/shop?lang=ar`), as a URL; null when the address has none. */
