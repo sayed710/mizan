@@ -1,7 +1,7 @@
 import { StrictMode, lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { initStore } from './store.js';
-import { isRtl, lang, resolvedTheme, t } from './i18n.js';
+import { isRtl, lang, resolvedTheme, t, translateDialogs } from './i18n.js';
 import { ErrorBoundary, Loading } from './ui.jsx';
 import './styles.css';
 import './views.css';
@@ -15,6 +15,7 @@ const PublicSite = lazy(() => import('./views/PublicSite.jsx').then((m) => ({ de
 document.documentElement.lang = lang;
 document.documentElement.dir = isRtl ? 'rtl' : 'ltr';
 document.documentElement.dataset.theme = resolvedTheme();
+translateDialogs();
 
 function StartupError({ error }) {
   return (

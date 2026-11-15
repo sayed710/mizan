@@ -73,6 +73,32 @@ test('every pattern keeps exactly the values of its English message', () => {
   }
 });
 
+test('a message whose last value is empty is still translated', () => {
+  assert.equal(t('No value for {{1}}'), 'لا توجد قيمة للمتغير {{1}}');
+  assert.equal(t('No value for {{2}} (partner.name)'), 'لا توجد قيمة للمتغير {{2}} (partner.name)');
+});
+
+test('messages nested inside a value stop being translated after a few levels', () => {
+  const deep = `${'Journal '.repeat(5000)}X${' belongs to another company'.repeat(5000)}`;
+  const arabic = t(deep);
+  assert.ok(arabic.startsWith('دفتر اليومية دفتر اليومية دفتر اليومية Journal '));
+});
+
+test('browser dialogs show their message in Arabic and pass other arguments through', async () => {
+  const { translateDialogs } = await import('./i18n.js');
+  const shown = [];
+  const page = { alert: (m) => shown.push(m), confirm: (m) => shown.push(m) > 0, prompt: (m, initial) => { shown.push(m); return initial; } };
+  translateDialogs(page);
+  page.alert('Failed: 1/3 correct, try again');
+  assert.equal(page.confirm('Less than the bill of materials is consumed for Desk. Produce anyway?'), true);
+  assert.equal(page.prompt('Type your full name to sign (signer: Mona)', 'M'), 'M');
+  assert.deepEqual(shown, [
+    'لم تنجح: 1/3 إجابة صحيحة، حاول مرة أخرى',
+    'المستهلَك من Desk أقل من قائمة المواد. هل تريد الإنتاج على أي حال؟',
+    'اكتب اسمك الكامل للتوقيع (الموقّع: Mona)',
+  ]);
+});
+
 // Messages built purely from values and punctuation, with no words of their own to translate.
 const VALUE_ONLY = /^(?:\{\d+\}|[\s:.,()#"·→-])*$/;
 

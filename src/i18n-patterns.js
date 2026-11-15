@@ -191,6 +191,9 @@ const patterns = {
   'Tax return type for {1} must match the main return type category': 'نوع الإقرار الضريبي للشركة {1} يجب أن يطابق فئة نوع الإقرار الرئيسي',
   'Tax return type must belong to {1}': 'نوع الإقرار الضريبي يجب أن يتبع {1}',
   'Could not load the database (HTTP {1})': 'تعذّر تحميل قاعدة البيانات (HTTP {1})',
+  'Passed {1}/{2} — +{3} karma': 'نجحت {1}/{2} — +{3} نقطة',
+  'Failed: {1}/{2} correct, try again': 'لم تنجح: {1}/{2} إجابة صحيحة، حاول مرة أخرى',
+  ' (signer: {1})': ' (الموقّع: {1})',
   // Messages the server answers with.
   'The app for {1} is not installed': 'تطبيق {1} غير مثبَّت',
   'Only {1} of {2} in stock': 'المتوفر في المخزون {1} فقط من {2}',
@@ -238,10 +241,12 @@ function compile() {
   const literalLength = (key) => key.replace(/\{\d+\}/g, '').length;
   return PATTERN_KEYS
     .sort((a, b) => literalLength(b) - literalLength(a))
-    .map((key) => [new RegExp(`^${key.split(/\{\d+\}/).map(escapeRegex).join('([\\s\\S]+?)')}$`), patterns[key]]);
+    .map((key) => [new RegExp(`^${key.split(/\{\d+\}/).map(escapeRegex).join('([\\s\\S]*?)')}$`), patterns[key]]);
 }
 
 const MAX_REMEMBERED = 5000;
+// A value may hold a smaller message, and that one another; deeper than this a value is left as written.
+const MAX_NESTED = 2;
 const remembered = new Map();
 const word = (value) => (Object.hasOwn(words, value) ? words[value] : undefined);
 const capitalized = (value) => value.charAt(0).toUpperCase() + value.slice(1);
@@ -250,11 +255,15 @@ const capitalized = (value) => value.charAt(0).toUpperCase() + value.slice(1);
  * Arabic for a message that carries values, or null when no pattern fits.
  * `lookup` translates a captured value that is itself a known label (a field or model name).
  */
-export function translatePattern(message, lookup) {
-  if (remembered.has(message)) return remembered.get(message);
+export function translatePattern(message, lookup, nested = 0) {
+  if (!nested && remembered.has(message)) return remembered.get(message);
   compiled ??= compile();
   // A value may be a label, one of the words above, or a smaller message of its own.
-  const arabicValue = (value) => lookup(value) ?? word(value) ?? lookup(capitalized(value)) ?? translatePattern(value, lookup) ?? value;
+  const arabicValue = (value) => {
+    if (!value) return value;
+    const smaller = () => (nested < MAX_NESTED ? translatePattern(value, lookup, nested + 1) : null);
+    return lookup(value) ?? word(value) ?? lookup(capitalized(value)) ?? smaller() ?? value;
+  };
   let out = null;
   for (const [regex, arabic] of compiled) {
     const found = regex.exec(message);
@@ -262,6 +271,7 @@ export function translatePattern(message, lookup) {
     out = arabic.replace(/\{(\d+)\}/g, (_, n) => arabicValue(found[Number(n)]));
     break;
   }
+  if (nested) return out;
   if (remembered.size >= MAX_REMEMBERED) remembered.clear();
   remembered.set(message, out);
   return out;

@@ -74,6 +74,18 @@ export function setLang(next) {
   if (url.href === location.href) location.reload(); else location.replace(url.href);
 }
 
+/**
+ * Make the browser's own dialogs speak the interface language: models and screens call
+ * alert, confirm and prompt with English text or with an error's message.
+ */
+export function translateDialogs(page = globalThis) {
+  for (const name of ['alert', 'confirm', 'prompt']) {
+    const native = page[name];
+    if (typeof native !== 'function') continue;
+    page[name] = (message, ...rest) => native.call(page, t(message), ...rest);
+  }
+}
+
 const ar = {
   'Batch invoices must use the same currency; a mixed-currency total is unavailable': 'فواتير الدفعة يجب أن تكون بعملة واحدة؛ لا يمكن حساب إجمالي بعملات مختلفة',
   'Configure a company currency before adding invoices to the batch': 'حدّد عملة الشركة قبل إضافة فواتير إلى الدفعة',
