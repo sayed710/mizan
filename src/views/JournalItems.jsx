@@ -9,7 +9,7 @@ import { writeoffJournalItem } from '../models/pay.js';
 import { reconcileLedgerItems, unreconcileLedgerItems } from '../models/glReconcile.js';
 import { monthFilters, parseAmount, today } from '../models/common.js';
 import { money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
-import { t } from '../i18n.js';
+import { dateLocale, t } from '../i18n.js';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
 
 const OPTIONAL_STORAGE_KEY = 'mizan-report-cols:journalItems';
@@ -89,7 +89,7 @@ const defaultFiltersForMode = (mode) => (mode === 'draft' ? ['unposted'] : mode 
 
 function formatMonthLabel(monthKey) {
   if (!monthKey) return t('Undefined');
-  return new Date(`${monthKey}-01T00:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  return new Date(`${monthKey}-01T00:00`).toLocaleDateString(dateLocale, { month: 'long', year: 'numeric' });
 }
 
 function lineIds(line, key, altKey = null) {

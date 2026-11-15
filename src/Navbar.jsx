@@ -4,7 +4,7 @@ import { myEmployeeId } from './access.js';
 import { viewRecords as search } from './companyView.js';
 import { activityState } from './models/mail.js';
 import { t } from './i18n.js';
-import { Avatar, Icon, menuKeys, useDismiss } from './ui.jsx';
+import { Avatar, Icon, LanguageSwitch, menuKeys, useDismiss } from './ui.jsx';
 
 function MenuGroup({ app, menu, active }) {
   const [open, setOpen] = useState(false);
@@ -56,9 +56,10 @@ export function UserMenu() {
     <div className="nav-group user-menu" ref={ref}>
       <button type="button" aria-expanded={open} aria-label={`${t('User menu')}: ${name}`} onClick={() => setOpen(!open)}><Avatar name={name} /></button>
       {open && (
-        <div className="nav-dropdown" role="menu">
+        <div className="nav-dropdown" role="menu" onKeyDown={menuKeys}>
           <span className="muted user-menu-name">{name}{user?.login ? ` (${user.login})` : ''}</span>
           <a role="menuitem" href="#/settings/general" onClick={() => setOpen(false)}>{t('Settings')}</a>
+          <LanguageSwitch role="menuitem" />
           {isServer() && <button type="button" role="menuitem" onClick={logout}>{t('Log out')}</button>}
         </div>
       )}

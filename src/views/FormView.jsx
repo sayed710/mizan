@@ -6,7 +6,7 @@ import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { myEmployeeId } from '../access.js';
-import { t } from '../i18n.js';
+import { dateLocale, t } from '../i18n.js';
 import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
 import { companyCurrencyRecord } from '../money.js';
@@ -283,7 +283,7 @@ function Chatter({ db, model, id, name }) {
     setNote('');
   };
   return (
-    <aside className="chatter" aria-label="Chatter">
+    <aside className="chatter" aria-label={t('Chatter')}>
       <Activities db={db} model={model} id={id} name={name} />
       <div className="chatter-compose">
         <textarea value={note} placeholder={t('Log an internal note…')} onChange={(e) => setNote(e.target.value)}
@@ -312,7 +312,7 @@ function Chatter({ db, model, id, name }) {
           <li key={m.id} className={m.kind}>
             <Avatar name={m.author} size={30} />
             <div>
-              <div className="msg-meta"><b>{m.author}</b> <time dateTime={m.date}>{new Date(m.date).toLocaleString()}</time></div>
+              <div className="msg-meta"><b>{m.author}</b> <time dateTime={m.date}>{new Date(m.date).toLocaleString(dateLocale)}</time></div>
               <div className="msg-body">{m.body}</div>
             </div>
           </li>
@@ -524,7 +524,7 @@ export function FormView({ leaf, id, base, params }) {
       <div className="control-panel">
         <div className="cp-left">
           <button type="button" className="btn" onClick={() => leave(`${base}/new${query}`)}>{t('New')}</button>
-          <nav className="breadcrumb" aria-label="Breadcrumb">
+          <nav className="breadcrumb" aria-label={t('Breadcrumb')}>
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : current[def.form.title]}</span>
           </nav>

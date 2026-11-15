@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { login } from './store.js';
 import { t } from './i18n.js';
+import { LanguageSwitch } from './ui.jsx';
 
 export function Login() {
   const [name, setName] = useState('');
@@ -29,6 +30,7 @@ export function Login() {
         {error && <div className="alert" role="alert">{t(error)}</div>}
         <button type="submit" className="btn primary" disabled={busy}>{t('Log in')}</button>
         <a className="link" href="#/shop">{t('Visit our website')}</a>
+        <LanguageSwitch className="link lang-switch" />
       </form>
     </main>
   );

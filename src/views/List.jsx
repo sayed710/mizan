@@ -211,7 +211,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         <thead>
           <tr>
             <th className="check">
-              <input type="checkbox" aria-label="Select all" checked={allOn}
+              <input type="checkbox" aria-label={t('Select all')} checked={allOn}
                 onChange={() => {
                   const next = new Set(selected);
                   for (const r of visible) if (allOn) next.delete(r.id); else next.add(r.id);

@@ -3,7 +3,7 @@ import { Component, useEffect, useRef, useState } from 'react';
 import { models, targetOf } from './models/index.js';
 import { isMultiCompany, read } from './orm.js';
 import { relationCandidates } from './companyView.js';
-import { lang, t } from './i18n.js';
+import { LANGUAGES, dateLocale, lang, setLang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency, roundCurrency } from './money.js';
 import { parseAmount, today } from './models/common.js';
@@ -14,7 +14,6 @@ import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
 export { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
-const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
 let moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 let activeCurrency = null;
@@ -652,6 +651,11 @@ ICONS.recycle = <path d="M24 6l8 12h-5v6h-6v-6h-5zM10 30l6-10 4 6-3 5h12v6H10zm2
 export const Icon = ({ name, size = 18 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS[ALIAS[name]] ?? ICONS.grid}</svg>
 );
+
+/** One button per other interface language, each labelled in its own language. */
+export const LanguageSwitch = ({ className, role }) => LANGUAGES.filter(([code]) => code !== lang).map(([code, label]) => (
+  <button key={code} type="button" role={role} className={className} lang={code} onClick={() => setLang(code)}>{label}</button>
+));
 
 /** Keeps one broken screen from blanking the whole app; resets when the route (key) changes. React needs a class for this. */
 /** Placeholder while the data or a screen's code is loading. */

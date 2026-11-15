@@ -46,8 +46,8 @@ export function CalendarView({ model, records, open, newHref, db }) {
   return (
     <div className="calendar-view">
       <div className="view-toolbar">
-        <button type="button" className="btn sm" aria-label="Previous month" onClick={() => move(-1)}>‹</button>
-        <button type="button" className="btn sm" aria-label="Next month" onClick={() => move(1)}>›</button>
+        <button type="button" className="btn sm" aria-label={t('Previous month')} onClick={() => move(-1)}>‹</button>
+        <button type="button" className="btn sm" aria-label={t('Next month')} onClick={() => move(1)}>›</button>
         <button type="button" className="btn sm" onClick={() => setCursor({ y: new Date().getFullYear(), m: new Date().getMonth() })}>{t('Today')}</button>
         <h2 className="cal-title">{formatDate(iso(new Date(cursor.y, cursor.m, 1)), { month: 'long', year: 'numeric' })}</h2>
       </div>

@@ -218,7 +218,7 @@
 @media (max-width: 860px) { .pos { grid-template-columns: 1fr; height: auto; } }
 
 /* Search panel, navbar dropdowns, graph/pivot/calendar views, dashboard, RTL. */
-html[dir='rtl'] body { font-family: 'Segoe UI', Tahoma, 'Noto Sans Arabic', system-ui, sans-serif; }
+html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic', Tahoma, system-ui, sans-serif; line-height: 1.6; }
 
 .nav-group { position: relative; }
 .nav-group > button { background: none; border: 0; padding: 6px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
@@ -425,6 +425,7 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .login-card label { font-weight: 600; }
 .login-card input { padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; }
 .login-card .btn { justify-content: center; margin-top: 8px; padding: 9px; }
+.login-card .lang-switch { align-self: center; color: var(--muted); font-family: inherit; }
 .user-form { margin-top: 10px; }
 .user-form input { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
 

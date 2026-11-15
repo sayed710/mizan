@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 // Arabic must be active before i18n.js reads the language at import time.
 globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem() {} };
 const { t } = await import('./i18n.js');
-const { models, apps } = await import('./models/index.js');
+const { models, apps, APP_INFO } = await import('./models/index.js');
 
 // Product and platform names stay in their original spelling.
 const BRANDS = new Set(['Amazon', 'Noon', 'Shopee', 'Lazada', 'TikTok Shop', 'Jumia', 'Facebook', 'Instagram', 'X', 'YouTube']);
@@ -24,6 +24,7 @@ function uiStrings() {
     if (m.label) keys.add(m.label);
     for (const c of m.children ?? []) addMenu(c);
   };
+  for (const [category, summary] of Object.values(APP_INFO)) keys.add(category).add(summary);
   for (const app of apps ?? []) {
     if (app.name) keys.add(app.name);
     for (const m of app.menus ?? []) addMenu(m);
@@ -46,8 +47,34 @@ function uiStrings() {
   return [...keys].filter((k) => /[A-Za-z]/.test(k));
 }
 
+// The server starts, backs up and holds the database lease from a terminal: an operator reads these, not a screen.
+const OPERATOR_FILES = ['storage.js', 'backup.js'];
+const OPERATOR_MESSAGES = new Set(['Run "npm run build" first']);
+
+/** Messages a screen can show after a failed action: literal errors, browser dialogs and server answers outside tests. */
+function messageStrings() {
+  const walk = (d) => readdirSync(d).flatMap((n) => {
+    const p = join(d, n);
+    if (statSync(p).isDirectory()) return n === 'test-support' ? [] : walk(p);
+    return /\.jsx?$/.test(n) && !n.includes('.test.') && !['seed.js', 'migrations.js', 'i18n.js', ...OPERATOR_FILES].includes(n) ? [p] : [];
+  });
+  const keys = new Set();
+  for (const folder of ['.', '../server']) {
+    for (const file of walk(fileURLToPath(new URL(folder, import.meta.url)))) {
+      for (const m of readFileSync(file, 'utf8').matchAll(/(?:\b(?:new Error|alert|confirm|prompt)\(|\berror:)\s*(['"])((?:\\.|(?!\1)[^\\\n])*)\1/g)) keys.add(m[2].replace(/\\(['"])/g, '$1'));
+    }
+  }
+  // Spreadsheet error codes such as #VALUE! and bare identifiers such as a badge colour are not prose.
+  return [...keys].filter((k) => /[A-Za-z]{3}/.test(k) && !k.startsWith('#') && !/^[a-z_]+$/.test(k) && !OPERATOR_MESSAGES.has(k));
+}
+
 test('every UI string, field label and selection option has an Arabic translation', () => {
   const missing = uiStrings().filter((k) => !BRANDS.has(k) && t(k) === k);
+  assert.deepEqual(missing, []);
+});
+
+test('every literal error and dialog message has an Arabic translation', () => {
+  const missing = messageStrings().filter((k) => t(k) === k);
   assert.deepEqual(missing, []);
 });
 
