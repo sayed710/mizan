@@ -17,10 +17,11 @@ import {
 } from '../models/bank.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
-import { money } from '../ui.jsx';
+import { display, money } from '../ui.jsx';
 
 /** Format `amount` using `currency` (falling back to the active company currency when null). */
 const formatInCurrency = (amount, currency) => money(amount, currency?.name ?? null, currency ?? null);
+const fmtDate = (value) => display(null, { type: 'date' }, value);
 
 const TABS = [
   { id: 'candidates', label: 'Counterpart Candidates' },
@@ -220,7 +221,7 @@ export function BankReconcile() {
                       <span>{formatInCurrency(openBalance(line), findCompanyCurrencyRecord(db, line.company_id ?? null))}</span>
                     </div>
                     <div className="bank-reconcile-line-meta muted">
-                      <span>{line.date}</span>
+                      <span>{fmtDate(line.date)}</span>
                       <span>{journalName(line.journal_id)}</span>
                       {line.partner_id && <span>{partnerName(line.partner_id)}</span>}
                     </div>
@@ -240,7 +241,7 @@ export function BankReconcile() {
                 <div>
                   <h2>{selectedLine.payment_ref || t('Statement Line')}</h2>
                   <p className="muted">
-                    {selectedLine.date} · {journalName(selectedLine.journal_id)}
+                    {fmtDate(selectedLine.date)} · {journalName(selectedLine.journal_id)}
                     {selectedLine.partner_id ? ` · ${partnerName(selectedLine.partner_id)}` : ''}
                   </p>
                 </div>
@@ -289,7 +290,7 @@ export function BankReconcile() {
                                 <span>{formatInCurrency(move.amount_residual, documentCurrency(db, move))}</span>
                               </div>
                               <div className="bank-reconcile-line-meta muted">
-                                <span>{move.invoice_date}</span>
+                                <span>{fmtDate(move.invoice_date)}</span>
                                 <span>{partnerName(move.partner_id)}</span>
                                 {err && <span className="danger">{t(err)}</span>}
                               </div>
@@ -336,7 +337,7 @@ export function BankReconcile() {
                                 <span>{formatInCurrency(payment.amount, documentCurrency(db, payment))}</span>
                               </div>
                               <div className="bank-reconcile-line-meta muted">
-                                <span>{payment.date}</span>
+                                <span>{fmtDate(payment.date)}</span>
                                 <span>{partnerName(payment.partner_id)}</span>
                               </div>
                             </button>

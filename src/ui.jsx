@@ -271,22 +271,39 @@ export function useOptionalColumns(storageKey) {
 }
 
 export function OptionalColsMenu({ items, optionalState, onToggle }) {
-  const [colsOpen, setColsOpen] = useState(false);
+  const [colsOpen, setColsOpen] = useState(null);
   const menuRef = useRef(null);
-  useDismiss(colsOpen, () => setColsOpen(false), menuRef);
+  useDismiss(Boolean(colsOpen), () => setColsOpen(null), menuRef);
+  // The menu is fixed-positioned so a scrolling table wrapper cannot clip it; close it when anything scrolls.
+  useEffect(() => {
+    if (!colsOpen) return undefined;
+    const close = () => setColsOpen(null);
+    document.addEventListener('scroll', close, true);
+    return () => document.removeEventListener('scroll', close, true);
+  }, [colsOpen]);
+  const toggleRef = useRef(null);
+  const toggleMenu = () => {
+    if (colsOpen) { setColsOpen(null); return; }
+    const button = toggleRef.current;
+    const rect = button?.getBoundingClientRect?.();
+    if (!rect) { setColsOpen({}); return; }
+    const rtl = getComputedStyle(button).direction === 'rtl';
+    setColsOpen(rtl ? { top: rect.bottom, left: rect.left } : { top: rect.bottom, right: globalThis.innerWidth - rect.right });
+  };
   if (!items.length) return null;
   return (
     <div className="o2m-cols-menu" ref={menuRef}>
       <button
         type="button"
+        ref={toggleRef}
         className="o2m-cols-toggle"
         aria-label={t('Optional columns')}
-        aria-expanded={colsOpen}
+        aria-expanded={Boolean(colsOpen)}
         aria-haspopup="menu"
-        onClick={() => setColsOpen((o) => !o)}
+        onClick={toggleMenu}
       >⋯</button>
       {colsOpen && (
-        <div className="o2m-cols-dropdown" role="menu" onKeyDown={menuKeys}>
+        <div className="o2m-cols-dropdown" role="menu" style={colsOpen} onKeyDown={menuKeys}>
           {items.map(({ key, label, defaultVisible = false }) => {
             const checked = optionalState[key] ?? defaultVisible;
             return (
