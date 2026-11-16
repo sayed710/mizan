@@ -5,6 +5,7 @@ import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { eligiblePayments, matchPayment } from './models/bank.js';
 import { translatePattern } from './i18n-patterns.js';
+import { postMove, payMove } from './models/accounting.js';
 
 const runBtn = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -308,4 +309,85 @@ test('6b. change the payment journal\'s default account after posting -> stateme
   assert.equal(reconciled.state, 'reconciled');
   assert.equal(reconciled.open_amount, 0);
   assert.deepEqual(reconciled.payment_ids, [posted.id]);
+});
+
+test('7. direct foreign-currency payment with same-direction exchange-loss line is offered on its own bank and reconciles, rejected on other bank', () => {
+  const { db: initDb, bnk1, bnk2 } = setup();
+  const eur = search(initDb, 'res.currency').find((c) => c.name === 'EUR');
+  const partner = search(initDb, 'res.partner')[0];
+  const incomeAccount = search(initDb, 'account.account').find(
+    (a) => a.account_type === 'income' && (a.company_id ?? 1) === 1,
+  );
+
+  // Set exchange rates: invoice date 2026-05-01 rate 1.0 (100 EUR = 100 USD);
+  // payment date 2026-05-10 rate 1.25 (100 EUR = 80 USD -> 20 USD exchange loss).
+  let db = write(initDb, 'res.currency', eur.id, {
+    rate_ids: [
+      ...(eur.rate_ids ?? []),
+      { date: '2026-05-01', rate: 1.0 },
+      { date: '2026-05-10', rate: 1.25 },
+    ],
+  });
+
+  // Post EUR customer invoice for 100 EUR on 2026-05-01
+  const invRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    currency_id: eur.id,
+    invoice_date: '2026-05-01',
+    date: '2026-05-01',
+    invoice_line_ids: [
+      { name: 'FX Service', account_id: incomeAccount.id, qty: 1, price_unit: 100, tax: 0 },
+    ],
+  });
+  db = postMove(invRes.db, invRes.id);
+
+  // Pay invoice via payMove on 2026-05-10 directly on BNK2
+  // Through normal posting flow, this creates an exchange loss line (debit) alongside the liquidity line (debit).
+  db = payMove(db, invRes.id, 100, '2026-05-10', { journalId: bnk2.id, directBank: true });
+
+  const allPayments = search(db, 'account.payment');
+  const payment = allPayments[allPayments.length - 1];
+  assert.equal(payment.state, 'posted');
+  assert.equal(payment.outstanding_account_id, null);
+
+  // Verify the posted payment move has two debit lines: liquidity debit (80) and exchange loss debit (20)
+  const payMoveRecord = read(db, 'account.move', payment.move_id);
+  const debitLines = (payMoveRecord.line_ids ?? []).filter((l) => Number(l.debit) > 0 && !Number(l.credit));
+  assert.equal(debitLines.length, 2, 'payment entry has both liquidity debit and exchange-loss debit');
+
+  // 1. Offered on its own bank's statement line (BNK2) and matches/reconciles
+  const bnk2LineRes = create(db, 'account.bank.statement.line', {
+    journal_id: bnk2.id,
+    date: '2026-05-10',
+    payment_ref: 'BNK2 EUR deposit',
+    amount: 80,
+  });
+  const bnk2Line = read(bnk2LineRes.db, 'account.bank.statement.line', bnk2LineRes.id);
+
+  const candidatesOwn = eligiblePayments(bnk2LineRes.db, bnk2Line);
+  assert.ok(candidatesOwn.some((p) => p.id === payment.id), 'direct FX payment is eligible on its own bank journal');
+
+  const withPayment = write(bnk2LineRes.db, 'account.bank.statement.line', bnk2Line.id, { payment_ids: [payment.id] });
+  const lineToMatch = read(withPayment, 'account.bank.statement.line', bnk2Line.id);
+  const matched = runBtn(withPayment, 'account.bank.statement.line', lineToMatch.id, 'Match Payment');
+  const reconciled = read(matched, 'account.bank.statement.line', bnk2Line.id);
+  assert.equal(reconciled.state, 'reconciled');
+  assert.equal(reconciled.open_amount, 0);
+  assert.deepEqual(reconciled.payment_ids, [payment.id]);
+
+  // 2. Rejected on another bank's statement line (BNK1)
+  const bnk1LineRes = create(db, 'account.bank.statement.line', {
+    journal_id: bnk1.id,
+    date: '2026-05-10',
+    payment_ref: 'BNK1 deposit attempt',
+    amount: 80,
+  });
+  const bnk1Line = read(bnk1LineRes.db, 'account.bank.statement.line', bnk1LineRes.id);
+  const candidatesOther = eligiblePayments(bnk1LineRes.db, bnk1Line);
+  assert.equal(candidatesOther.some((p) => p.id === payment.id), false, 'not eligible on other bank');
+  assert.throws(
+    () => write(bnk1LineRes.db, 'account.bank.statement.line', bnk1Line.id, { payment_ids: [payment.id] }),
+    /This payment was booked directly on journal Bank 2; match it from that journal's statement/,
+  );
 });
