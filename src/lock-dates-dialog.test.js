@@ -172,7 +172,7 @@ test('the menu resolves to the Lock Dates dialog (not general settings)', async 
     assert.equal(find(container, (n) => n.tagName === 'LABEL' && n.textContent === 'Theme'), null);
 
     // Verify lock fields are present
-    const labels = findAll(dialog, (n) => n.tagName === 'LABEL').map((l) => l.textContent.replace('*', ''));
+    const labels = findAll(dialog, (n) => n.tagName === 'LABEL').map((l) => l.textContent.replaceAll('*', ''));
     assert.ok(labels.includes('Sales Lock Date'), 'Has Sales Lock Date');
     assert.ok(labels.includes('Purchase Lock Date'), 'Has Purchase Lock Date');
     assert.ok(labels.includes('Lock Date'), 'Has Lock Date');
