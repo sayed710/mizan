@@ -142,6 +142,24 @@ export function paymentOutstandingAccountId(db, payment) {
   return outstandingAccount(db, journal, payment.company_id ?? 1, payment.payment_type === 'inbound');
 }
 
+/**
+ * Pick the signed liquidity or outstanding move line from a posted payment entry.
+ * @param {object} entry - The posted account.move of the payment.
+ * @param {boolean} incoming - True for inbound (debit), false for outbound (credit).
+ * @param {number|null} [targetAccountId] - Optional account ID filter.
+ * @returns {object|null}
+ */
+export function paymentLiquidityLine(entry, incoming, targetAccountId = null) {
+  const lines = (entry?.line_ids ?? []).filter((l) => {
+    const signed = incoming
+      ? Number(l.debit) > 0 && !Number(l.credit)
+      : Number(l.credit) > 0 && !Number(l.debit);
+    if (!signed) return false;
+    return targetAccountId == null || l.account_id === targetAccountId;
+  });
+  return lines.length === 1 ? lines[0] : null;
+}
+
 /** Why this payment cannot be matched to the statement line (or null when eligible). */
 export function paymentMatchError(db, line, payment, { journal = null, companyCurrency = null, allowMatched = false } = {}) {
   const company = line?.company_id ?? 1;
@@ -160,13 +178,19 @@ export function paymentMatchError(db, line, payment, { journal = null, companyCu
   }
   const outstandingAccount = paymentOutstandingAccountId(db, payment);
   const statementJournalId = statementJournal?.id ?? line?.journal_id;
-  const paymentJournalId = payment.journal_id ?? (payment.move_id ? read(db, 'account.move', payment.move_id)?.journal_id : null);
-  if (!outstandingAccount && statementJournalId && paymentJournalId) {
+  if (!outstandingAccount && statementJournalId) {
+    const entry = read(db, 'account.move', payment.move_id);
+    if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) {
+      return 'Payment entry must be posted in the same company';
+    }
+    const liquidityLine = paymentLiquidityLine(entry, incoming);
+    if (!liquidityLine) return 'Cannot identify the payment outstanding item';
     const statementAccountId = paymentJournal(db, statementJournalId, company).accountId;
-    const paymentAccountId = paymentJournal(db, paymentJournalId, payment.company_id ?? company).accountId;
+    const paymentAccountId = liquidityLine.account_id;
     if (statementAccountId !== paymentAccountId) {
-      const payJournal = read(db, 'account.journal', paymentJournalId);
-      const journalName = payJournal?.name || payJournal?.code || paymentJournalId;
+      const paymentJournalId = payment.journal_id ?? entry.journal_id;
+      const payJournal = paymentJournalId ? read(db, 'account.journal', paymentJournalId) : null;
+      const journalName = payJournal?.name || payJournal?.code || paymentJournalId || 'Bank';
       return `This payment was booked directly on journal ${journalName}; match it from that journal's statement`;
     }
   }
@@ -178,7 +202,7 @@ export function eligiblePayments(db, line) {
   if (!line || !(Number(line.amount) > 0 || Number(line.amount) < 0)) return [];
   const company = line.company_id ?? 1;
   const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
-  if (journal && !isLiquidityJournal(journal)) return [];
+  if (journal && (journal.active === false || !isLiquidityJournal(journal))) return [];
   if (journal?.company_id && journal.company_id !== company) return [];
   const companyCurrency = read(db, 'res.company', company)?.currency_id;
   return search(db, 'account.payment')
@@ -232,11 +256,21 @@ function paymentOutstandingItem(db, payment, line, via) {
     throw new Error('Payment entry must be posted in the same company');
   }
   const outstanding = paymentOutstandingAccountId(db, payment);
-  const targetAccount = outstanding ?? via.accountId;
-  const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === targetAccount && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
-  if (liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
+  const liquidityLine = paymentLiquidityLine(entry, incoming, outstanding);
+  if (!liquidityLine) throw new Error('Cannot identify the payment outstanding item');
+  const targetAccount = outstanding ?? liquidityLine.account_id;
+  if (!outstanding && targetAccount !== via.accountId) {
+    throw new Error('Cannot identify the payment outstanding item');
+  }
   if (outstanding && outstanding === via.accountId) throw new Error('Outstanding and bank accounts must differ');
-  return { account: targetAccount, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref, isDirect: !outstanding, currency_id: liquidity[0].currency_id ?? null };
+  return {
+    account: targetAccount,
+    amount: round(incoming ? liquidityLine.debit : liquidityLine.credit),
+    partner_id: payment.partner_id,
+    name: payment.name || line.payment_ref,
+    isDirect: !outstanding,
+    currency_id: liquidityLine.currency_id ?? null,
+  };
 }
 
 export function matchPayment(db, line) {

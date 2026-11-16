@@ -200,3 +200,112 @@ test('5. two journals sharing one liquidity account, direct payment on one, matc
   assert.equal(reconciled.open_amount, 0);
   assert.deepEqual(reconciled.payment_ids, [posted.id]);
 });
+
+test('6a. archive the payment\'s journal after posting -> eligiblePayments on another bank\'s line does not throw and excludes it', () => {
+  const { db: initDb, bnk1, bnk2 } = setup();
+  const payment = create(initDb, 'account.payment', {
+    partner_id: 3,
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    amount: 100,
+    journal_id: bnk2.id,
+    date: '2026-01-02',
+  });
+  const postedDb = runBtn(payment.db, 'account.payment', payment.id, 'Confirm');
+  const posted = read(postedDb, 'account.payment', payment.id);
+  assert.equal(posted.state, 'posted');
+
+  // Archive BNK2 after posting
+  const archivedDb = write(postedDb, 'account.journal', bnk2.id, { active: false });
+
+  // Statement line on BNK1
+  const bnk1LineRes = create(archivedDb, 'account.bank.statement.line', {
+    journal_id: bnk1.id,
+    date: '2026-01-03',
+    payment_ref: 'BNK1 deposit after BNK2 archived',
+    amount: 100,
+  });
+  const bnk1Line = read(bnk1LineRes.db, 'account.bank.statement.line', bnk1LineRes.id);
+
+  // eligiblePayments on another bank's line does not throw and excludes it
+  let candidates;
+  assert.doesNotThrow(() => {
+    candidates = eligiblePayments(bnk1LineRes.db, bnk1Line);
+  });
+  assert.equal(candidates.some((p) => p.id === posted.id), false);
+});
+
+test('6b. change the payment journal\'s default account after posting -> statement on original account matches, statement on new account cannot', () => {
+  const { db: initDb, bnk2 } = setup();
+  const origAccountId = bnk2.default_account_id;
+
+  const payment = create(initDb, 'account.payment', {
+    partner_id: 3,
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    amount: 100,
+    journal_id: bnk2.id,
+    date: '2026-01-02',
+  });
+  const postedDb = runBtn(payment.db, 'account.payment', payment.id, 'Confirm');
+  const posted = read(postedDb, 'account.payment', payment.id);
+  assert.equal(posted.state, 'posted');
+
+  // Create a new liquidity account and change BNK2's default account
+  const newAccount = create(postedDb, 'account.account', {
+    code: '101406',
+    name: 'Bank 2 New Liquidity',
+    account_type: 'asset_cash',
+    company_id: 1,
+  });
+  const modifiedDb = write(newAccount.db, 'account.journal', bnk2.id, { default_account_id: newAccount.id });
+
+  // 1. Statement line on BNK2 (now using the new account) cannot match it
+  const bnk2LineRes = create(modifiedDb, 'account.bank.statement.line', {
+    journal_id: bnk2.id,
+    date: '2026-01-03',
+    payment_ref: 'BNK2 deposit on new account',
+    amount: 100,
+  });
+  const bnk2Line = read(bnk2LineRes.db, 'account.bank.statement.line', bnk2LineRes.id);
+  const candidatesNew = eligiblePayments(bnk2LineRes.db, bnk2Line);
+  assert.equal(candidatesNew.some((p) => p.id === posted.id), false);
+  assert.throws(
+    () => write(bnk2LineRes.db, 'account.bank.statement.line', bnk2Line.id, { payment_ids: [posted.id] }),
+    /This payment was booked directly on journal Bank 2; match it from that journal's statement/,
+  );
+
+  // 2. Statement line on a journal that uses the ORIGINAL account can match it
+  const suspenseAcc = search(modifiedDb, 'account.account').find((a) => a.code === '101404').id;
+  const origJournalRes = create(modifiedDb, 'account.journal', {
+    code: 'BNKO',
+    name: 'Bank Original Account',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: origAccountId,
+    suspense_account_id: suspenseAcc,
+    outstanding_receipts_account_id: null,
+    outstanding_payments_account_id: null,
+  });
+  const origJournal = read(origJournalRes.db, 'account.journal', origJournalRes.id);
+
+  const origLineRes = create(origJournalRes.db, 'account.bank.statement.line', {
+    journal_id: origJournal.id,
+    date: '2026-01-03',
+    payment_ref: 'Original account deposit',
+    amount: 100,
+  });
+  const origLine = read(origLineRes.db, 'account.bank.statement.line', origLineRes.id);
+
+  const candidatesOrig = eligiblePayments(origLineRes.db, origLine);
+  assert.ok(candidatesOrig.some((p) => p.id === posted.id), 'payment is eligible on statement using original account');
+
+  const withPayment = write(origLineRes.db, 'account.bank.statement.line', origLine.id, { payment_ids: [posted.id] });
+  const lineToMatch = read(withPayment, 'account.bank.statement.line', origLine.id);
+
+  const matched = runBtn(withPayment, 'account.bank.statement.line', lineToMatch.id, 'Match Payment');
+  const reconciled = read(matched, 'account.bank.statement.line', origLine.id);
+  assert.equal(reconciled.state, 'reconciled');
+  assert.equal(reconciled.open_amount, 0);
+  assert.deepEqual(reconciled.payment_ids, [posted.id]);
+});
