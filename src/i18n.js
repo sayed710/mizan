@@ -3131,6 +3131,17 @@ const ar = {
   Superseded: 'مُستبدلة',
   'Selected payment provider does not have a valid payment journal configured': 'مزوّد الدفع المحدد لا يملك دفتر دفع صالحاً مُعدّاً',
   'Missing payment status in webhook': 'حالة الدفع مفقودة في إشعار الدفع',
+  'Deferral of {document} ({period})': 'تأجيل {document} ({period})',
+  'A posting hook is required to post due deferral entries': 'تعذّر ترحيل قيود التأجيل المستحقة: دالة الترحيل غير مسجلة',
+  'Entry state must be posted or draft': 'يجب أن تكون حالة القيد مرحلاً أو مسودة',
+  'A cancelled schedule cannot have draft recognition entries': 'لا يمكن لجدول تأجيل ملغى أن يحتوي على قيود اعتراف مسودة',
+  'Linked recognition entry does not exist': 'قيد الاعتراف المرتبط غير موجود',
+  'Linked recognition entry belongs to another company': 'قيد الاعتراف المرتبط يتبع شركة أخرى',
+  'Cancelled recognition line must link to a cancelled entry': 'بند الاعتراف الملغى يجب أن يرتبط بقيد ملغى',
+  'Recognition entry amount does not match board line amount': 'مبلغ قيد الاعتراف لا يطابق مبلغ بند جدول الاعتراف',
+  'Posted recognition lines cannot be modified or removed': 'لا يمكن تعديل بنود الاعتراف المرحلة أو حذفها',
+  'Recognition lines cannot be removed from an active schedule': 'لا يمكن حذف بنود الاعتراف من جدول تأجيل نشط',
+  'Reverse the recognition entries before cancelling this deferral': 'اعكس قيود الاعتراف المرحّلة قبل إلغاء هذا التأجيل',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -65,6 +65,7 @@ const patterns = {
   'Configure the {1}': 'حدّد {1*}',
   'Invalid deferred service period on {1}': 'فترة الخدمة المؤجلة غير صالحة في {1}',
   'Cannot reverse deferred recognition: the period up to {1} is locked': 'تعذّر عكس الاعتراف المؤجل: الفترة حتى {1} مقفلة',
+  'Deferral of {1} ({2})': 'تأجيل {1} ({2})',
   'Credit notes exceed the amount on source invoice line {1}': 'الإشعارات الدائنة تتجاوز مبلغ بند الفاتورة المصدر {1}',
   'Workflow action does not apply to {1}': 'إجراء سير العمل لا ينطبق على {1}',
   'Configure a current-year earnings equity account for company {1}': 'حدّد حساب أرباح السنة الحالية ضمن حقوق الملكية للشركة {1}',

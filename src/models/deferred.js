@@ -5,6 +5,51 @@ import { invoiceLineAccount, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { closedYearLock, lockDateFor } from './finance.js';
 import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
+import { t } from '../i18n.js';
+
+// Decoupled from accounting.js to avoid a circular module import between accounting and deferred.
+let deferredPostMoveHook = null;
+export function registerDeferredPostMoveHook(fn) {
+  deferredPostMoveHook = fn;
+}
+
+export function deferralEntryRef(db, schedule, date) {
+  const sourceMove = schedule.source_move_id ? read(db, 'account.move', schedule.source_move_id) : null;
+  const docName = sourceMove?.name || schedule.name || '';
+  const [y, m] = date.split('-');
+  const period = `${m}/${y}`;
+  return t('Deferral of {document} ({period})', { document: docName, period });
+}
+
+export function deferralEntryLines(db, schedule, lineOrAmount, ref = '') {
+  const amount = typeof lineOrAmount === 'object' && lineOrAmount !== null ? lineOrAmount.amount : lineOrAmount;
+  const { deferred, recognition } = scheduleAccounts(db, schedule);
+  const debit = schedule.kind === 'expense' ? recognition : deferred;
+  const credit = schedule.kind === 'expense' ? deferred : recognition;
+  const currency = companyCurrencyRecord(db, schedule.company_id);
+  const absAmount = roundCurrency(Math.abs(Number(amount) || 0), currency);
+  const positive = Number(amount) >= 0;
+  const lineDebit = positive ? debit : credit;
+  const lineCredit = positive ? credit : debit;
+  return [
+    {
+      account_id: lineDebit,
+      debit: absAmount,
+      credit: 0,
+      partner_id: schedule.partner_id ?? null,
+      name: ref,
+      ...(lineDebit === recognition && schedule.analytic_distribution ? { analytic_distribution: schedule.analytic_distribution } : {}),
+    },
+    {
+      account_id: lineCredit,
+      debit: 0,
+      credit: absAmount,
+      partner_id: schedule.partner_id ?? null,
+      name: ref,
+      ...(lineCredit === recognition && schedule.analytic_distribution ? { analytic_distribution: schedule.analytic_distribution } : {}),
+    },
+  ];
+}
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const DAY = 86400000;
@@ -221,7 +266,9 @@ export function createInvoiceDeferrals(db, move) {
     const kind = move.move_type.startsWith('out') ? 'revenue' : 'expense';
     const settings = deferredSettings(next, move.company_id, kind);
     const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date, settings.computationMethod, companyCurrencyRecord(db, move.company_id), settings.periodicity);
-    const created = create(next, 'account.deferral', { name: `${move.name} ${line.line_id}`, kind, amount: refund ? -source.amount : source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board: refund ? board.map((r) => ({ ...r, amount: -r.amount })) : board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line_id: line.line_id, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
+    const lineDesc = line.name && line.name !== move.name ? ` - ${line.name}` : '';
+    const deferralName = `${move.name}${lineDesc}`;
+    const created = create(next, 'account.deferral', { name: deferralName, kind, amount: refund ? -source.amount : source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board: refund ? board.map((r) => ({ ...r, amount: -r.amount })) : board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line_id: line.line_id, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
     next = created.db;
     if (settings.isOnValidation) next = postDueEntries(next, read(next, 'account.deferral', created.id), '9999-12-31');
   }
@@ -354,6 +401,68 @@ function cancelScheduledReversals(db, sourceMove) {
     next = write(next, 'account.move', move.id, { state: 'cancel', auto_post: 'no' });
   }
   return { db: next, scheduled_reversals_before: scheduledReversalsBefore };
+}
+
+function cancelDraftDeferralMove(db, lineOrMoveId) {
+  const moveId = typeof lineOrMoveId === 'object' && lineOrMoveId !== null ? lineOrMoveId.move_id : lineOrMoveId;
+  if (!moveId) return db;
+  const move = read(db, 'account.move', moveId);
+  if (move && move.state === 'draft') {
+    return write(db, 'account.move', move.id, { state: 'cancel', auto_post: 'no' });
+  }
+  return db;
+}
+
+function restoreScheduledDrafts(db, scheduledDraftsBefore, autoPostMoveFn) {
+  let next = db;
+  const currentDate = today();
+  for (const prior of scheduledDraftsBefore ?? []) {
+    const move = read(next, 'account.move', prior.move_id);
+    if (!move) continue;
+    next = write(next, 'account.move', move.id, {
+      state: prior.state,
+      auto_post: prior.auto_post,
+      line_ids: prior.line_ids,
+    });
+    const date = move.date ?? move.invoice_date;
+    if (prior.state === 'draft' && prior.auto_post === 'at_date' && date <= currentDate && typeof autoPostMoveFn === 'function') {
+      next = autoPostMoveFn(next, move.id);
+    }
+  }
+  return next;
+}
+
+/** Sync deferral board lines and state when a linked move transitions between draft and posted. */
+export function syncDeferralOnMoveStateChange(db, move, _beforeState) {
+  if (!move || move.move_type !== 'entry') return db;
+  const schedules = (db.records['account.deferral'] ?? []).filter((s) =>
+    s.state !== 'cancel' && (s.board ?? []).some((l) => l.move_id === move.id)
+  );
+  if (!schedules.length) return db;
+  let next = db;
+  for (const schedule of schedules) {
+    let boardChanged = false;
+    const isPosted = move.state === 'posted';
+    const updatedBoard = (schedule.board ?? []).map((line) => {
+      if (line.move_id === move.id && line.posted !== isPosted) {
+        boardChanged = true;
+        return { ...line, posted: isPosted };
+      }
+      return line;
+    });
+    if (boardChanged) {
+      const isDone = updatedBoard.every((line) => {
+        if (line.cancelled) return true;
+        if (!line.amount) return Boolean(line.posted);
+        if (line.move_id === move.id) return isPosted;
+        if (line.move_id) return read(next, 'account.move', line.move_id)?.state === 'posted';
+        return line.posted;
+      });
+      const nextState = isDone ? 'done' : schedule.state === 'done' ? 'running' : schedule.state;
+      next = write(next, 'account.deferral', schedule.id, { board: updatedBoard, state: nextState });
+    }
+  }
+  return next;
 }
 
 function restoreScheduledReversals(db, scheduledReversalsBefore, autoPostMoveFn) {
@@ -514,6 +623,21 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
     }
 
     const activeUnposted = board.filter((line) => !line.posted && !line.cancelled);
+    const scheduledDraftsBefore = [];
+    for (const line of activeUnposted) {
+      if (line.move_id) {
+        const m = read(next, 'account.move', line.move_id);
+        if (m && m.state === 'draft') {
+          scheduledDraftsBefore.push({
+            move_id: line.move_id,
+            state: m.state,
+            auto_post: m.auto_post,
+            line_ids: structuredClone(m.line_ids),
+          });
+        }
+      }
+    }
+
     const updatedBoard = board.map((line) => {
       let updatedLine = reversalByDate.has(line.date)
         ? { ...line, reversal_move_id: reversalByDate.get(line.date), credit_adjusted_amount: roundCurrency(Math.abs(Number(line.amount) || 0), currency) }
@@ -526,7 +650,10 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
         if (revMove) updatedLine = { ...updatedLine, reversal_move_id: revMove.id };
       }
       if (updatedLine.posted || updatedLine.cancelled) return updatedLine;
-      if (item.full) return { ...updatedLine, amount: 0, cancelled: true };
+      if (item.full) {
+        if (line.move_id) next = cancelDraftDeferralMove(next, line.move_id);
+        return { ...updatedLine, amount: 0, cancelled: true };
+      }
       return updatedLine;
     });
 
@@ -544,7 +671,21 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
         if (line.posted || line.cancelled) continue;
         const amount = byDate.get(line.date);
         if (amount == null) throw new Error('The deferred recognition board has duplicate or missing period dates');
-        updatedBoard[index] = amount ? { ...line, amount } : { ...line, amount: 0, cancelled: true };
+        if (!amount) {
+          updatedBoard[index] = { ...line, amount: 0, cancelled: true };
+          if (line.move_id) next = cancelDraftDeferralMove(next, line.move_id);
+        } else {
+          updatedBoard[index] = { ...line, amount };
+          if (line.move_id) {
+            const m = read(next, 'account.move', line.move_id);
+            if (m && m.state === 'draft') {
+              const updatedLine = { ...line, amount };
+              const ref = m.ref || deferralEntryRef(next, schedule, line.date);
+              const lines = deferralEntryLines(next, schedule, updatedLine, ref);
+              next = write(next, 'account.move', line.move_id, { line_ids: lines });
+            }
+          }
+        }
       }
     }
 
@@ -579,6 +720,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
         state_before,
         move_ids: adjustmentMoveIds,
         scheduled_reversals_before: scheduledReversalsBefore,
+        scheduled_drafts_before: scheduledDraftsBefore,
         grouped_contributions_before: groupedContributionsBefore,
       },
     ];
@@ -629,6 +771,7 @@ export function revertInvoiceDeferralCreditAdjustment(db, note, reverseEntryFn, 
       }
     }
     next = restoreScheduledReversals(next, adjustment.scheduled_reversals_before, autoPostMoveFn);
+    next = restoreScheduledDrafts(next, adjustment.scheduled_drafts_before, autoPostMoveFn);
     const remainingAdjustments = (schedule.credit_adjustments ?? []).filter((adj) => adj.note_id !== note.id);
     next = write(next, 'account.deferral', schedule.id, {
       board: adjustment.board_before,
@@ -684,6 +827,12 @@ export function reverseInvoiceDeferrals(db, source) {
     for (const line of schedule.board ?? []) {
       if (!line.move_id || line.reversal_move_id) { board.push(line); continue; }
       const original = read(next, 'account.move', line.move_id);
+      if (!original) { board.push(line); continue; }
+      if (original.state === 'draft' || original.state === 'cancel') {
+        next = cancelDraftDeferralMove(next, original.id);
+        board.push({ ...line, cancelled: true });
+        continue;
+      }
       const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, deferred_entry_type: original.deferred_entry_type ?? deferredEntryTypeForKind(schedule.kind), archivedOriginIds: [original.id], lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
       next = postAnalytic(write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id }), reversal.id);
       board.push({ ...line, reversal_move_id: reversal.id });
@@ -717,35 +866,64 @@ export function computeBoard(db, d) {
 }
 
 /** Post every unposted board line dated on or before `upTo`; the schedule is done once all are posted. */
-export function postDueEntries(db, d, upTo = today()) {
+export function postDueEntries(db, d, upTo = today(), postMoveFn = deferredPostMoveHook) {
   d = read(db, 'account.deferral', d.id) ?? d;
   if (deferredSettings(db, d.company_id, d.kind).isGrouped) {
     throw new Error('Individual posting is unavailable for grouped deferrals');
   }
   if (d.state === 'cancel') return db;
-  const { deferred, recognition } = scheduleAccounts(db, d);
+  const currentDate = today();
   const journalSpec = deferredJournalSpec(db, d.company_id, d.kind);
   const entryType = deferredEntryTypeForKind(d.kind);
-  const debit = d.kind === 'expense' ? recognition : deferred;
-  const credit = d.kind === 'expense' ? deferred : recognition;
+  const postFn = postMoveFn !== undefined ? postMoveFn : deferredPostMoveHook;
+
   const { db: next, board } = (d.board ?? []).reduce((acc, l) => {
-    if (l.posted || l.cancelled || l.date > upTo) return { ...acc, board: [...acc.board, l] };
+    if (l.cancelled) return { ...acc, board: [...acc.board, l] };
     if (!l.amount) return { ...acc, board: [...acc.board, { ...l, posted: true, move_id: null }] };
-    const absAmount = Math.abs(l.amount);
-    const positive = l.amount >= 0;
-    const lineDebit = positive ? debit : credit;
-    const lineCredit = positive ? credit : debit;
-    const { db: booked, id } = postEntry(acc.db, {
-      ...journalSpec, company: d.company_id, date: l.date, ref: `${d.name} ${l.date.slice(0, 7)}`,
+
+    if (l.move_id) {
+      const existing = read(acc.db, 'account.move', l.move_id);
+      if (existing?.state === 'posted') {
+        return { ...acc, board: [...acc.board, { ...l, posted: true }] };
+      }
+      if (existing?.state === 'draft') {
+        if (l.date <= upTo && l.date <= currentDate) {
+          if (!postFn) throw new Error('A posting hook is required to post due deferral entries');
+          const postedDb = postFn(acc.db, existing.id);
+          return { db: postedDb, board: [...acc.board, { ...l, posted: true }] };
+        }
+        return { ...acc, board: [...acc.board, { ...l, posted: false }] };
+      }
+      if (existing?.state === 'cancel') {
+        return { ...acc, board: [...acc.board, { ...l, posted: false, cancelled: true }] };
+      }
+    }
+
+    if (l.date > upTo) {
+      return { ...acc, board: [...acc.board, { ...l, posted: false, move_id: null }] };
+    }
+
+    const ref = deferralEntryRef(acc.db, d, l.date);
+    const isDue = l.date <= currentDate;
+    const entryRes = postEntry(acc.db, {
+      ...journalSpec,
+      company: d.company_id,
+      date: l.date,
+      ref,
+      state: isDue ? 'posted' : 'draft',
+      ...(isDue ? {} : { auto_post: 'at_date' }),
       deferred_entry_type: entryType,
-      lines: [
-        { account: lineDebit, debit: absAmount, partner_id: d.partner_id ?? undefined, ...(lineDebit === recognition ? { analytic_distribution: d.analytic_distribution } : {}) },
-        { account: lineCredit, credit: absAmount, partner_id: d.partner_id ?? undefined, ...(lineCredit === recognition ? { analytic_distribution: d.analytic_distribution } : {}) },
-      ],
+      lines: deferralEntryLines(acc.db, d, l, ref),
     });
-    return { db: postAnalytic(booked, id), board: [...acc.board, { ...l, posted: true, move_id: id }] };
+    return {
+      db: entryRes.db,
+      board: [...acc.board, { ...l, posted: isDue, move_id: entryRes.id }],
+    };
   }, { db, board: [] });
-  return write(next, 'account.deferral', d.id, { board, state: board.every((l) => l.posted || l.cancelled) ? 'done' : 'running' });
+
+  const isDone = board.every((l) => l.cancelled || Boolean(l.posted));
+  const nextState = isDone ? 'done' : d.state === 'done' ? 'running' : d.state === 'draft' ? 'running' : d.state;
+  return write(next, 'account.deferral', d.id, { board, state: nextState });
 }
 
 /**
@@ -973,6 +1151,8 @@ function cancelDeferralError(db, schedule, { grouped = false } = {}) {
   const currency = companyCurrencyRecord(db, schedule.company_id);
   const unreversedBoard = (schedule.board ?? []).some((line) => {
     if (!line.move_id) return false;
+    const move = read(db, 'account.move', line.move_id);
+    if (!move || move.state !== 'posted') return false;
     const isReversed = reversed.has(line.move_id) || (line.reversal_move_id && !reversed.has(line.reversal_move_id));
     if (isReversed) return false;
     return adjustedRecognitionOutstanding(line, currency) > 0;
@@ -980,11 +1160,75 @@ function cancelDeferralError(db, schedule, { grouped = false } = {}) {
   return openGrouped || unreversedBoard ? 'Reverse the recognition entries before cancelling this deferral' : null;
 }
 
+const notDraft = (r) => Boolean(r?.state && r.state !== 'draft');
+
+export function deferralGuard(db, before, after) {
+  if (after.state === 'cancel') {
+    for (const line of after.board ?? []) {
+      if (line.move_id) {
+        const move = read(db, 'account.move', line.move_id);
+        if (move?.state === 'draft') {
+          return 'A cancelled schedule cannot have draft recognition entries';
+        }
+      }
+    }
+    if (before?.state !== 'cancel') {
+      const cancelErr = cancelDeferralError(db, after);
+      if (cancelErr) return cancelErr;
+    }
+  }
+
+  const schedCompany = after.company_id ?? 1;
+  const currency = companyCurrencyRecord(db, schedCompany);
+
+  for (const line of after.board ?? []) {
+    if (line.move_id) {
+      const move = read(db, 'account.move', line.move_id);
+      if (!move) return 'Linked recognition entry does not exist';
+      if (move.company_id && move.company_id !== schedCompany) {
+        return 'Linked recognition entry belongs to another company';
+      }
+      if (line.cancelled) {
+        if (move.state !== 'cancel') {
+          return 'Cancelled recognition line must link to a cancelled entry';
+        }
+      } else if (line.amount != null || after.state !== 'draft') {
+        const totalDebit = (move.line_ids ?? []).reduce((sum, l) => sum + (Number(l.debit) || 0), 0);
+        const expected = roundCurrency(Math.abs(Number(line.amount) || 0), currency);
+        if (roundCurrency(totalDebit, currency) !== expected) {
+          return 'Recognition entry amount does not match board line amount';
+        }
+      }
+    }
+  }
+
+  if (before && before.state !== 'draft') {
+    if ((after.board ?? []).length < (before.board ?? []).length) {
+      return 'Recognition lines cannot be removed from an active schedule';
+    }
+    const reversed = effectivelyReversedEntryIds(db.records['account.move'] ?? []);
+    const afterByMoveId = new Map((after.board ?? []).filter((l) => l.move_id).map((l) => [l.move_id, l]));
+    for (const bl of before.board ?? []) {
+      if (bl.move_id && !afterByMoveId.has(bl.move_id) && !reversed.has(bl.move_id)) {
+        return 'Recognition lines cannot be removed from an active schedule';
+      }
+      if (bl.posted && !reversed.has(bl.move_id)) {
+        const al = afterByMoveId.get(bl.move_id);
+        if (!al || al.date !== bl.date || al.amount !== bl.amount || al.posted !== true) {
+          return 'Posted recognition lines cannot be modified or removed';
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 export const deferredModels = {
   'account.deferral': {
     label: 'Deferrals',
     // Enforced on every write path, not only the Cancel button (Qodo 12).
-    guard: (db, before, after) => (after.state === 'cancel' && before?.state !== 'cancel' ? cancelDeferralError(db, after) : null),
+    guard: deferralGuard,
     actions: {
       postDueEntries,
       postCompanyDeferrals,
@@ -1001,17 +1245,17 @@ export const deferredModels = {
     ],
     fields: {
       name: { type: 'char', label: 'Name', required: true },
-      kind: { type: 'selection', label: 'Type', options: [['revenue', 'Deferred Revenue'], ['expense', 'Deferred Expense']] },
-      amount: { type: 'monetary', label: 'Amount' },
-      start_date: { type: 'date', label: 'Start Date' },
-      end_date: { type: 'date', label: 'End Date' },
-      months: { type: 'integer', label: 'Months' },
+      kind: { type: 'selection', label: 'Type', options: [['revenue', 'Deferred Revenue'], ['expense', 'Deferred Expense']], readonly: notDraft },
+      amount: { type: 'monetary', label: 'Amount', readonly: notDraft },
+      start_date: { type: 'date', label: 'Start Date', readonly: notDraft },
+      end_date: { type: 'date', label: 'End Date', readonly: notDraft },
+      months: { type: 'integer', label: 'Months', readonly: notDraft },
       source_move_id: { type: 'many2one', relation: 'account.move', label: 'Source Document' },
       source_line: { type: 'integer', label: 'Source Line' },
       source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true },
-      deferred_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Account' },
-      recognition_account_id: { type: 'many2one', relation: 'account.account', label: 'Recognition Account' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      deferred_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Account', readonly: notDraft },
+      recognition_account_id: { type: 'many2one', relation: 'account.account', label: 'Recognition Account', readonly: notDraft },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: notDraft },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['running', 'Running'], ['done', 'Done'], ['cancel', 'Cancelled']] },
@@ -1019,9 +1263,10 @@ export const deferredModels = {
       board: {
         type: 'one2many',
         label: 'Recognition Board',
+        readonly: notDraft,
         fields: {
-          date: { type: 'date', label: 'Date' },
-          amount: { type: 'monetary', label: 'Amount' },
+          date: { type: 'date', label: 'Date', readonly: notDraft },
+          amount: { type: 'monetary', label: 'Amount', readonly: notDraft },
           posted: { type: 'boolean', label: 'Posted' },
           cancelled: { type: 'boolean', label: 'Cancelled' },
           move_id: { type: 'many2one', relation: 'account.move', label: 'Entry' },
@@ -1043,9 +1288,18 @@ export const deferredModels = {
         { label: 'Compute', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: computeBoard(db, r) }) },
         { label: 'Post Due Entries', primary: true, when: (r) => ['running', 'done'].includes(r.state), run: (db, r) => ({ db: postDueEntries(db, read(db, 'account.deferral', r.id)) }) },
         { label: 'Cancel', when: (r) => ['draft', 'running'].includes(r.state), run: (db, r) => {
-          const error = cancelDeferralError(db, read(db, 'account.deferral', r.id), { grouped: true });
+          const current = read(db, 'account.deferral', r.id);
+          const error = cancelDeferralError(db, current, { grouped: true });
           if (error) throw new Error(error);
-          return { db: write(db, 'account.deferral', r.id, { state: 'cancel' }) };
+          let next = db;
+          const updatedBoard = (current.board ?? []).map((line) => {
+            if (line.move_id && !line.posted) {
+              next = cancelDraftDeferralMove(next, line.move_id);
+              return { ...line, cancelled: true };
+            }
+            return line;
+          });
+          return { db: write(next, 'account.deferral', r.id, { board: updatedBoard, state: 'cancel' }) };
         } },
       ],
       title: 'name',
