@@ -1,13 +1,13 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, validateTaxCompany } from './taxes.js';
+import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -530,7 +530,7 @@ export function intercompanyBill(db, move) {
   if (originalBill && (originalBill.move_type !== 'in_invoice' || originalBill.company_id !== buyer.id || originalBill.intercompany_move_id !== original.id)) {
     throw new Error('The original inter-company bill link is invalid');
   }
-  return { company_id: buyer.id, move_type: move.move_type === 'out_invoice' ? 'in_invoice' : 'in_refund', partner_id: seller.partner_id, journal_id: journal.id, invoice_date: move.invoice_date, currency_id: move.currency_id, invoice_line_ids, intercompany_move_id: move.id, ...(originalBill ? { reversed_entry_id: originalBill.id } : {}) };
+  return { company_id: buyer.id, move_type: move.move_type === 'out_invoice' ? 'in_invoice' : 'in_refund', partner_id: seller.partner_id, journal_id: journal.id, invoice_date: move.invoice_date, invoice_date_due: move.invoice_date_due ?? move.invoice_date, currency_id: move.currency_id, invoice_line_ids, intercompany_move_id: move.id, ...(originalBill ? { reversed_entry_id: originalBill.id } : {}) };
 }
 
 const newInvoiceLineId = () => {
@@ -686,8 +686,7 @@ export function postMove(db, id) {
   }
   for (const line of r.invoice_line_ids ?? []) {
     if (isSectionOrNote(line)) continue;
-    validateTaxCompany(db, [line.tax_source_id], r.company_id ?? 1);
-    validateTaxCompany(db, [line.tax_id, ...(line.tax_ids ?? []), ...(line.tax_breakdown ?? []).map((tax) => tax.tax_id)], r.company_id ?? 1);
+    validateTaxCompany(db, [line.tax_source_id, ...lineTaxIds(line)], r.company_id ?? 1);
   }
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
@@ -696,9 +695,13 @@ export function postMove(db, id) {
   const name = enteredName ?? sequence.name;
   if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
-  const counterpart = intercompanyBill(db, r);
-  const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal }, name);
-  const dueUpdate = r.invoice_payment_term_id ? termDue(db, { ...r, invoice_date: r.invoice_date ?? today() }) : {};
+  const term = r.invoice_payment_term_id ? read(db, 'account.payment.term', r.invoice_payment_term_id) : null;
+  const dueDateValue = term
+    ? termDue(db, { ...r, invoice_date: r.invoice_date ?? today() }).invoice_date_due
+    : (r.invoice_date_due || (r.invoice_date ?? today()));
+  const dueUpdate = { invoice_date_due: dueDateValue };
+  const counterpart = intercompanyBill(db, { ...r, invoice_date: r.invoice_date ?? today(), ...dueUpdate });
+  const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal, ...dueUpdate }, name);
   const originIds = [r.reversed_entry_id, r.debit_origin_id, r.correction_of_id].filter(Boolean);
   const paymentReferenceUpdate = !r.payment_reference?.trim() && r.move_type === 'out_invoice' && journalRecord.type === 'sale'
     ? (() => {
@@ -879,7 +882,7 @@ export function liquidityForeignFields(db, { currencyId, companyAmount, docAmoun
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber, memo } = {}) {
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
@@ -944,7 +947,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       ? [{ account: liquidity, debit: bank + extra, partner_id: r.partner_id, ...liquidityForeignAmount(value + excess) }, { account: counterpartCode, credit: open, partner_id: r.partner_id, ...foreignAmount(-value) }, ...credit, ...fx]
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id, ...foreignAmount(value) }, ...credit, { account: liquidity, credit: bank + extra, partner_id: r.partner_id, ...liquidityForeignAmount(-value - excess) }, ...fx],
   });
-  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
+  const paymentMemo = memo !== undefined ? memo : (r.name || '');
+  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: paymentMemo, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const moveName = read(withEntry, 'account.move', paymentMove).name;
   const name = draftName && draftName !== '/' ? draftName : paymentName(withEntry, journal, date, moveName);
@@ -1397,7 +1401,11 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   const company = read(db, 'res.company', r.company_id ?? 1);
   const discountAccount = sale ? company?.expense_early_payment_discount_account_id : company?.income_early_payment_discount_account_id;
   if (gap > 0 && discount >= gap && !discountAccount) throw new Error(`Configure the early payment discount ${sale ? 'expense' : 'income'} account on company ${company?.name ?? r.company_id ?? 1}`);
-  const paid = payMove(db, id, amount, date, { journalId: journalIdVal, ...(opts.checkNumber != null ? { checkNumber: opts.checkNumber } : {}) });
+  const paid = payMove(db, id, amount, date, {
+    journalId: journalIdVal,
+    ...(opts.checkNumber != null ? { checkNumber: opts.checkNumber } : {}),
+    ...(opts.memo !== undefined ? { memo: opts.memo } : {}),
+  });
   if (!(gap > 0) || discount < gap) return paid;
   const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
   const counterpart = invoiceCounterpartAccount(db, r);
@@ -1435,6 +1443,8 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   }).db;
 }
 
+const invoicePaymentMemo = (r) => r?.payment_reference?.trim() || r?.name || '';
+
 function registerPayment(db, r, values = {}) {
   if (shouldBePaid(db, r) === 'exception') throw new Error('Resolve or approve the three-way matching exception before registering payment');
   const amount = promptedAmount(values.amount);
@@ -1444,7 +1454,8 @@ function registerPayment(db, r, values = {}) {
   if (!validDate(date)) throw new Error('Enter a valid payment date');
   if (!journalIdVal) throw new Error('Select a payment journal');
   const payment = paymentJournal(db, journalIdVal, r.company_id ?? 1);
-  return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id }) };
+  const memo = values.memo !== undefined ? values.memo : invoicePaymentMemo(r);
+  return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id, memo }) };
 }
 
 export { registerPayment };
@@ -1502,9 +1513,12 @@ function outstandingCredits(db, r) {
   ];
 }
 
-const termDue = (db, r, { clear = false } = {}) => {
+const termDue = (db, r, { clear = false, defaultToDate = false } = {}) => {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
-  return term && r.invoice_date ? { invoice_date_due: dueDate(term, r.invoice_date) } : clear ? { invoice_date_due: null } : {};
+  if (term && r.invoice_date) return { invoice_date_due: dueDate(term, r.invoice_date) };
+  if (clear) return { invoice_date_due: null };
+  if (!term && r.invoice_date && defaultToDate) return { invoice_date_due: r.invoice_date };
+  return {};
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
@@ -1528,6 +1542,12 @@ const invoiceLineField = {
     const base = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
     const isDoc = db && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(moveWithJournal?.move_type);
     let updated = base;
+    if (isDoc && key === 'product_id' && base.product_id) {
+      const product = read(db, 'product', base.product_id);
+      if (product && !line.name?.trim()) {
+        updated = { ...updated, name: product.name || '' };
+      }
+    }
     if (isDoc && key === 'account_id' && !base.product_id && !isSectionOrNote(base)) {
       const account = base.account_id ? read(db, 'account.account', base.account_id) : null;
       const side = isPurchase(moveWithJournal) ? 'purchase' : 'sale';
@@ -1553,7 +1573,17 @@ const invoiceLineField = {
     price_unit: invoiceLinePrice,
     discount: { ...invoiceLineDiscount, optional: 'hide' },
     // A numeric rate without a tax record (e.g. a digitized bill) still taxes the line: show it rather than an empty selector.
-    tax_id: { ...invoiceLineTaxId, rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null) },
+    tax_id: {
+      ...invoiceLineTaxId,
+      domain: (tax, line, db) => {
+        if (tax.active === false) return false;
+        const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
+        if (tax.company_id && tax.company_id !== docCompany) return false;
+        const expectedUse = isPurchase(line) ? 'purchase' : 'sale';
+        return tax.type_tax_use === expectedUse;
+      },
+      rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null),
+    },
     tax: { ...invoiceLineTaxPct, hidden: true },
     ...invoiceLineExtraBase,
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
@@ -2146,6 +2176,42 @@ export const accountingModels = {
         const term = read(db, 'account.payment.term', after.invoice_payment_term_id);
         if (term?.company_id && term.company_id !== (after.company_id ?? 1)) return 'Payment terms belong to another company';
       }
+      if (['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(after.move_type)) {
+        const expectedUse = isPurchase(after) ? 'purchase' : 'sale';
+        const beforeLines = before?.invoice_line_ids ?? [];
+        const beforeMap = new Map();
+        beforeLines.forEach((l, idx) => {
+          const key = l.line_id ?? l.id;
+          if (key != null) beforeMap.set(String(key), l);
+          beforeMap.set(`idx:${idx}`, l);
+        });
+
+        const linesToCheck = [];
+        if (!before) {
+          linesToCheck.push(...(after.invoice_line_ids ?? []));
+        } else {
+          for (let i = 0; i < (after.invoice_line_ids ?? []).length; i++) {
+            const line = after.invoice_line_ids[i];
+            const key = line.line_id ?? line.id;
+            const beforeLine = key != null ? beforeMap.get(String(key)) : beforeMap.get(`idx:${i}`);
+            if (!beforeLine || !sameTaxIds(line, beforeLine)) {
+              linesToCheck.push(line);
+            }
+          }
+        }
+
+        for (const line of linesToCheck) {
+          if (isSectionOrNote(line)) continue;
+          for (const taxId of lineTaxIds(line)) {
+            const tax = read(db, 'account.tax', taxId);
+            if (tax && tax.type_tax_use && tax.type_tax_use !== expectedUse) {
+              return expectedUse === 'sale'
+                ? 'Customer invoices and credit notes only accept sale taxes'
+                : 'Vendor bills and refunds only accept purchase taxes';
+            }
+          }
+        }
+      }
       const counterpart = before?.intercompany_move_id ? read(db, 'account.move', before.intercompany_move_id) : null;
       const counterpartBlocked = counterpart && (counterpart.state === 'posted' || Number(counterpart.amount_paid) > 0 || paymentState(counterpart, db) === 'paid');
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
@@ -2171,7 +2237,7 @@ export const accountingModels = {
       return syncInvoicedQty(syncInvoicedQty(db, before), after);
     },
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
-    onchange: (r, key, db) => {
+    onchange: (r, key, db, context = {}) => {
       if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
         const partnerChange = key === 'partner_id';
         const partner = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
@@ -2203,7 +2269,15 @@ export const accountingModels = {
         };
       }
       if (r.move_type === 'entry' && key === 'date') return { invoice_date: r.date };
-      return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
+      if (key === 'invoice_date') {
+        if (r.invoice_payment_term_id) return termDue(db, r);
+        const prev = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null);
+        const prevDate = prev?.invoice_date;
+        const shouldFollow = !r.invoice_date_due || Boolean(prevDate && r.invoice_date_due === prevDate);
+        return shouldFollow && r.invoice_date ? { invoice_date_due: r.invoice_date } : {};
+      }
+      if (key === 'invoice_payment_term_id') return termDue(db, r);
+      return {};
     },
     fields: {
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
@@ -2225,7 +2299,7 @@ export const accountingModels = {
       invoice_date_due: { type: 'date', label: 'Due Date', tracking: true },
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
       payment_reference: { type: 'char', label: 'Payment Reference', tracking: true },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', tracking: true },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', tracking: true, emptyAsCompanyCurrency: true },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       invoice_cash_rounding_id: {
         type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding',
@@ -2358,12 +2432,19 @@ export const accountingModels = {
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
-      if ((vals.move_type ?? 'out_invoice') !== 'entry') {
+      const moveType = vals.move_type ?? 'out_invoice';
+      const companyId = vals.company_id ?? currentCompany(db);
+      if (moveType !== 'entry') {
         const salesperson = vals.invoice_user_id == null ? currentUserId(db) : null;
-        return salesperson ? { invoice_user_id: salesperson } : {};
+        const defaultJournal = vals.journal_id == null && !vals.invoice_line_ids?.length && !vals.line_ids?.length
+          ? resolveDocumentJournal(db, { move_type: moveType, company_id: companyId })?.id ?? null
+          : null;
+        return {
+          ...(salesperson ? { invoice_user_id: salesperson } : {}),
+          ...(defaultJournal ? { journal_id: defaultJournal } : {}),
+        };
       }
       const date = vals.date ?? vals.invoice_date ?? today();
-      const companyId = vals.company_id ?? db?.settings?.current_company_id ?? 1;
       const defaultJournal = vals.journal_id == null ? resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId })?.id ?? null : null;
       return {
         ...(vals.date == null ? { date } : {}),
@@ -2523,7 +2604,8 @@ export const accountingModels = {
             fields: [
               { name: 'amount', type: 'monetary', label: 'Payment Amount', required: true, default: String(roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r))) },
               { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
-              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Payment Journal', required: true, default: null, domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && isLiquidityJournal(j) },
+              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Payment Journal', required: true, default: defaultPaymentJournalId(db, r.company_id ?? 1), domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && isLiquidityJournal(j) },
+              { name: 'memo', type: 'char', label: 'Memo', default: invoicePaymentMemo(r) },
             ],
           }),
           run: registerPayment,

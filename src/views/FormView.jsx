@@ -95,17 +95,24 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
   if (item && Array.isArray(item.fields)) {
     const visibleFields = item.fields.filter((f) => (!def.fields[f]?.multiCompanyOnly || multiCompany) && !def.fields[f]?.hideWhen?.(current, db));
     if (!visibleFields.length) return null;
-    const first = def.fields[visibleFields[0]];
-    const firstReadonly = lockFor(def, readonly, visibleFields[0], current, db) || fieldReadonly(first, current, db);
+    const isRowReadonly = visibleFields.every((f) => lockFor(def, readonly, f, current, db) || fieldReadonly(def.fields[f], current, db));
+    const isOrJoin = item.join === 'or';
+    let fieldsToRender = visibleFields;
+    if (isRowReadonly && isOrJoin) {
+      const populated = visibleFields.filter((f) => current[f] != null && current[f] !== '');
+      fieldsToRender = populated.length ? populated : [visibleFields[0]];
+    }
+    const first = def.fields[fieldsToRender[0]];
+    const firstReadonly = lockFor(def, readonly, fieldsToRender[0], current, db) || fieldReadonly(first, current, db);
     const labelText = t(item.label ?? first.label);
     return (
       <div key={item.key ?? visibleFields[0]} className="field">
-        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${visibleFields[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
+        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${fieldsToRender[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
         <div className={`field-value field-pair${item.inline ? ' field-inline' : ''}`}>
-          {visibleFields.map((f, idx) => {
+          {fieldsToRender.map((f, idx) => {
             const fd = def.fields[f];
             const isRo = lockFor(def, readonly, f, current, db) || fieldReadonly(fd, current, db);
-            const sep = idx > 0 ? (item.joins ? item.joins[idx - 1] : item.join) : null;
+            const sep = (isRowReadonly && isOrJoin) ? null : (idx > 0 ? (item.joins ? item.joins[idx - 1] : item.join) : null);
             return (
               <Fragment key={f}>
                 {sep && <span className="field-join">{t(sep)}</span>}

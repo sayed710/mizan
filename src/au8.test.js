@@ -334,6 +334,7 @@ test('Regression: Cash rounding on invoices, bills, credit notes and refunds (ad
   for (const compMethod of companyMethods) {
     db = write(db, 'res.company', 1, { tax_calculation_rounding_method: compMethod });
     for (const moveType of moveTypes) {
+      const taxId = ['in_invoice', 'in_refund'].includes(moveType) ? 2 : 1;
       for (const rCfg of roundings) {
         const move = create(db, 'account.move', {
           move_type: moveType,
@@ -341,8 +342,8 @@ test('Regression: Cash rounding on invoices, bills, credit notes and refunds (ad
           invoice_date: '2026-03-01',
           invoice_cash_rounding_id: rCfg.roundingId,
           invoice_line_ids: [
-            { name: 'Item 1', qty: 1, price_unit: rCfg.price, tax_ids: [1] },
-            { name: 'Item 2', qty: 2, price_unit: 10.01, tax_ids: [1] },
+            { name: 'Item 1', qty: 1, price_unit: rCfg.price, tax_ids: [taxId] },
+            { name: 'Item 2', qty: 2, price_unit: 10.01, tax_ids: [taxId] },
           ],
         });
         const posted = postMove(move.db, move.id);
@@ -380,12 +381,13 @@ test('Regression: Cash rounding biggest_tax strategy per document type', () => {
 
   const moveTypes = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'];
   for (const moveType of moveTypes) {
+    const taxId = ['in_invoice', 'in_refund'].includes(moveType) ? 2 : 1;
     const move = create(db, 'account.move', {
       move_type: moveType,
       partner_id: 1,
       invoice_date: '2026-03-01',
       invoice_cash_rounding_id: roundBiggestTax.id,
-      invoice_line_ids: [{ name: 'Item 1', qty: 1, price_unit: 100.03, tax_ids: [1] }],
+      invoice_line_ids: [{ name: 'Item 1', qty: 1, price_unit: 100.03, tax_ids: [taxId] }],
     });
     const posted = postMove(move.db, move.id);
     const postedMove = read(posted, 'account.move', move.id);
@@ -422,6 +424,7 @@ test('Regression: Foreign currency cash rounding per document type', () => {
   const testPrices = [100.03, 100.02, 100.04, 100.01];
 
   for (const moveType of moveTypes) {
+    const taxId = ['in_invoice', 'in_refund'].includes(moveType) ? 2 : 1;
     for (const price of testPrices) {
       const move = create(db, 'account.move', {
         move_type: moveType,
@@ -429,7 +432,7 @@ test('Regression: Foreign currency cash rounding per document type', () => {
         currency_id: currency.id,
         invoice_date: '2026-01-01',
         invoice_cash_rounding_id: roundHalfUp.id,
-        invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: price, tax_ids: [1] }],
+        invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: price, tax_ids: [taxId] }],
       });
       const posted = postMove(move.db, move.id);
       const postedMove = read(posted, 'account.move', move.id);

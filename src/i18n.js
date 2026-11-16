@@ -3131,6 +3131,10 @@ const ar = {
   Superseded: 'مُستبدلة',
   'Selected payment provider does not have a valid payment journal configured': 'مزوّد الدفع المحدد لا يملك دفتر دفع صالحاً مُعدّاً',
   'Missing payment status in webhook': 'حالة الدفع مفقودة في إشعار الدفع',
+  'No checks yet.': 'لا توجد شيكات بعد.',
+  'Payment Amount': 'مبلغ الدفعة',
+  'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
+  'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

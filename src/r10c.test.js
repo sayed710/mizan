@@ -52,7 +52,8 @@ test('Register Payment confirms the date and journal for payment and discount en
   const fields = Object.fromEntries(wizard.fields.map((field) => [field.name, field]));
   assert.equal(fields.date.required, true);
   assert.equal(fields.journal_id.required, true);
-  assert.equal(fields.journal_id.default, null);
+  const defaultBank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  assert.equal(fields.journal_id.default, defaultBank.id);
   assert.equal(fields.journal_id.domain(bankB.journal), true);
   assert.throws(() => action.run(db, record, { amount: 98, date: '2026-01-02' }), /Select a payment journal/);
 
