@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { monthFilters, shiftMonth, today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isLiquidityJournal, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
+import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -131,8 +131,40 @@ const batchPaymentCompany = (db, batch) => {
 
 export { bookedStatementAmount, isPaymentMatched, statementCompanyAmount } from './ledger.js';
 
+/**
+ * Resolve the outstanding receipts or payments account ID of a payment, or null when booked directly to liquidity.
+ */
+export function paymentOutstandingAccountId(db, payment) {
+  if (!payment) return null;
+  if (payment.outstanding_account_id !== undefined) return payment.outstanding_account_id;
+  const journalId = payment.journal_id ?? (payment.move_id ? read(db, 'account.move', payment.move_id)?.journal_id : null);
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  return outstandingAccount(db, journal, payment.company_id ?? 1, payment.payment_type === 'inbound');
+}
+
+/**
+ * Pick the signed liquidity or outstanding move line from a posted payment entry.
+ * @param {object} db - Immutable database.
+ * @param {object} entry - The posted account.move of the payment.
+ * @param {boolean} incoming - True for inbound (debit), false for outbound (credit).
+ * @param {number|null} [targetAccountId] - Optional account ID filter.
+ * @returns {object|null}
+ */
+export function paymentLiquidityLine(db, entry, incoming, targetAccountId = null) {
+  const lines = (entry?.line_ids ?? []).filter((l) => {
+    const signed = incoming
+      ? Number(l.debit) > 0 && !Number(l.credit)
+      : Number(l.credit) > 0 && !Number(l.debit);
+    if (!signed) return false;
+    if (targetAccountId != null) return l.account_id === targetAccountId;
+    const account = read(db, 'account.account', l.account_id);
+    return isLiquidityAccount(account);
+  });
+  return lines.length === 1 ? lines[0] : null;
+}
+
 /** Why this payment cannot be matched to the statement line (or null when eligible). */
-function paymentMatchError(db, line, payment, { journal = null, companyCurrency = null } = {}) {
+export function paymentMatchError(db, line, payment, { journal = null, companyCurrency = null, allowMatched = false } = {}) {
   const company = line?.company_id ?? 1;
   const amount = Number(line?.amount);
   const incoming = amount > 0;
@@ -141,9 +173,29 @@ function paymentMatchError(db, line, payment, { journal = null, companyCurrency 
   }
   if (payment.state !== 'posted' || !payment.move_id) return 'Select a posted payment';
   if ((payment.company_id ?? 1) !== company) return 'The payment belongs to another company';
-  if (isPaymentMatched(db, payment, line.id)) return 'Payment is already matched';
-  if (journal?.currency_id && (payment.currency_id ?? companyCurrency) !== journal.currency_id) {
+  if (!allowMatched && isPaymentMatched(db, payment, line?.id)) return 'Payment is already matched';
+  const statementJournal = journal ?? (line?.journal_id ? read(db, 'account.journal', line.journal_id) : null);
+  const compCurrency = companyCurrency ?? read(db, 'res.company', company)?.currency_id;
+  if (statementJournal?.currency_id && (payment.currency_id ?? compCurrency) !== statementJournal.currency_id) {
     return 'Payment currency must match the bank journal currency';
+  }
+  const outstandingAccount = paymentOutstandingAccountId(db, payment);
+  const statementJournalId = statementJournal?.id ?? line?.journal_id;
+  if (!outstandingAccount && statementJournalId) {
+    const entry = read(db, 'account.move', payment.move_id);
+    if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) {
+      return 'Payment entry must be posted in the same company';
+    }
+    const liquidityLine = paymentLiquidityLine(db, entry, incoming);
+    if (!liquidityLine) return 'Cannot identify the payment outstanding item';
+    const statementAccountId = paymentJournal(db, statementJournalId, company).accountId;
+    const paymentAccountId = liquidityLine.account_id;
+    if (statementAccountId !== paymentAccountId) {
+      const paymentJournalId = payment.journal_id ?? entry.journal_id;
+      const payJournal = paymentJournalId ? read(db, 'account.journal', paymentJournalId) : null;
+      const journalName = payJournal?.name || payJournal?.code || paymentJournalId || 'Bank';
+      return `This payment was booked directly on journal ${journalName}; match it from that journal's statement`;
+    }
   }
   return null;
 }
@@ -153,7 +205,7 @@ export function eligiblePayments(db, line) {
   if (!line || !(Number(line.amount) > 0 || Number(line.amount) < 0)) return [];
   const company = line.company_id ?? 1;
   const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
-  if (journal && !isLiquidityJournal(journal)) return [];
+  if (journal && (journal.active === false || !isLiquidityJournal(journal))) return [];
   if (journal?.company_id && journal.company_id !== company) return [];
   const companyCurrency = read(db, 'res.company', company)?.currency_id;
   return search(db, 'account.payment')
@@ -183,10 +235,6 @@ function resolveAndValidatePayments(db, line) {
     throw new Error('Statement amount and direction must match the payment');
   }
   if (new Set(payments.map((payment) => payment.id)).size !== payments.length) throw new Error('A payment can only be selected once');
-  for (const payment of payments) {
-    const err = paymentMatchError(db, line, payment);
-    if (err) throw new Error(err);
-  }
   if (new Set(payments.map((payment) => payment.move_id)).size !== payments.length) throw new Error('A payment can only be selected once');
 
   const via = paymentJournal(db, line.journal_id ?? payments[0].journal_id, company);
@@ -195,11 +243,9 @@ function resolveAndValidatePayments(db, line) {
   if (journal?.company_id && journal.company_id !== company) throw new Error('The bank journal belongs to another company or does not exist');
   // Amounts are compared in company currency; only a foreign-currency bank journal fixes the payment currency.
   const companyCurrency = read(db, 'res.company', company)?.currency_id;
-  if (journal?.currency_id) {
-    for (const payment of payments) {
-      const err = paymentMatchError(db, line, payment, { journal, companyCurrency });
-      if (err) throw new Error(err);
-    }
+  for (const payment of payments) {
+    const err = paymentMatchError(db, line, payment, { journal, companyCurrency });
+    if (err) throw new Error(err);
   }
   return { payments, via, journal };
 }
@@ -212,12 +258,22 @@ function paymentOutstandingItem(db, payment, line, via) {
   if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) {
     throw new Error('Payment entry must be posted in the same company');
   }
-  const outstanding = payment.outstanding_account_id;
-  const targetAccount = outstanding ?? via.accountId;
-  const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === targetAccount && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
-  if (liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
+  const outstanding = paymentOutstandingAccountId(db, payment);
+  const liquidityLine = paymentLiquidityLine(db, entry, incoming, outstanding);
+  if (!liquidityLine) throw new Error('Cannot identify the payment outstanding item');
+  const targetAccount = outstanding ?? liquidityLine.account_id;
+  if (!outstanding && targetAccount !== via.accountId) {
+    throw new Error('Cannot identify the payment outstanding item');
+  }
   if (outstanding && outstanding === via.accountId) throw new Error('Outstanding and bank accounts must differ');
-  return { account: targetAccount, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref, isDirect: !outstanding, currency_id: liquidity[0].currency_id ?? null };
+  return {
+    account: targetAccount,
+    amount: round(incoming ? liquidityLine.debit : liquidityLine.credit),
+    partner_id: payment.partner_id,
+    name: payment.name || line.payment_ref,
+    isDirect: !outstanding,
+    currency_id: liquidityLine.currency_id ?? null,
+  };
 }
 
 export function matchPayment(db, line) {
@@ -426,7 +482,7 @@ function unreconcileError(db, before, after) {
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);
   if (!bankId) return 'Cannot unreconcile a transaction without its bank entry link';
   const allocations = before.allocations ?? [];
-  const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !p.outstanding_account_id);
+  const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !paymentOutstandingAccountId(db, p));
   const sources = new Set([bankId, ...allocations.flatMap((a) => [a.payment_move_id, a.writeoff_move_id]).filter(Boolean)].filter((id) => !isDirectPayment(id)));
   for (const id of sources) {
     const source = read(db, 'account.move', id);
@@ -464,7 +520,7 @@ export function unreconcile(db, line, reversalDate = null) {
   const date = reversalDate ?? [today(), target.date ?? '', read(db, 'account.move', bankId)?.invoice_date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
 
   let current = db;
-  const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !p.outstanding_account_id);
+  const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !paymentOutstandingAccountId(db, p));
   for (const allocation of allocations) {
     if (allocation.invoice_id) {
       const payment = (current.records['account.payment'] ?? []).find((p) => p.move_id === allocation.payment_move_id);
@@ -502,7 +558,7 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
   const signedNet = (lines) => round(sign * lines.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
 
   const linkedPayments = statementPaymentIds(db, after).map((id) => read(db, 'account.payment', id));
-  const directPayments = linkedPayments.filter((p) => p && !p.outstanding_account_id);
+  const directPayments = linkedPayments.filter((p) => p && !paymentOutstandingAccountId(db, p));
   const directMoveIds = new Set(directPayments.map((p) => p.move_id).filter(Boolean));
   const isDirectMatch = directPayments.length > 0
     && after.state === 'reconciled'
@@ -608,17 +664,28 @@ function lineGuard(db, before, after) {
   if (after.payment_id) {
     const payment = read(db, 'account.payment', after.payment_id);
     if (!payment || (payment.company_id ?? 1) !== company) return 'The linked payment belongs to another company or does not exist';
+    const err = paymentMatchError(db, after, payment, { journal, allowMatched: after.state !== 'reconciled' });
+    if (err) return err;
   }
   if (after.payment_ids?.length) {
     for (const pid of after.payment_ids) {
       const payment = read(db, 'account.payment', pid);
       if (!payment || (payment.company_id ?? 1) !== company) return 'The linked payment belongs to another company or does not exist';
+      const err = paymentMatchError(db, after, payment, { journal, allowMatched: after.state !== 'reconciled' });
+      if (err) return err;
     }
   }
   if (after.batch_payment_id) {
     const batch = read(db, 'account.batch.payment', after.batch_payment_id);
     const batchCompany = batchPaymentCompany(db, batch);
     if (!batch || batchCompany !== company) return 'The linked payment belongs to another company or does not exist';
+    for (const l of (batch.lines ?? []).filter((line) => !line.cancelled && line.payment_id)) {
+      const payment = read(db, 'account.payment', l.payment_id);
+      if (payment) {
+        const err = paymentMatchError(db, after, payment, { journal, allowMatched: after.state !== 'reconciled' });
+        if (err) return err;
+      }
+    }
   }
   const referenceAmount = bookedStatementAmount(db, after);
   if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > referenceAmount)) return 'Invalid open bank transaction amount';

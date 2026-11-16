@@ -63,8 +63,11 @@ export const JOURNALS = [
 
 export const LIQUIDITY_JOURNAL_TYPES = ['bank', 'cash', 'credit'];
 export const STATEMENT_JOURNAL_TYPES = ['bank', 'credit'];
+export const LIQUIDITY_ACCOUNT_TYPES = ['asset_cash', 'liability_credit_card'];
 /** True when a journal (or journal type) acts as a liquidity journal (bank, cash, or credit card). */
 export const isLiquidityJournal = (journalOrType) => LIQUIDITY_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
+/** True when an account (or account type) is a liquidity account (bank, cash, or credit card). */
+export const isLiquidityAccount = (accountOrType) => LIQUIDITY_ACCOUNT_TYPES.includes(typeof accountOrType === 'string' ? accountOrType : accountOrType?.account_type);
 /** True when a journal (or journal type) supports bank/card statement reconciliation and outstanding payment accounts. */
 export const isStatementJournal = (journalOrType) => STATEMENT_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
 /** Owning company ID of a journal; journals without `company_id` belong to company 1. */
