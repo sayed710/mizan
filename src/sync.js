@@ -54,7 +54,7 @@ function generatedAssetMove(seen, original, move, changed) {
   const before = (original.records['account.asset'] ?? []).find((record) => record.id === asset.id);
   if (!before || before.state !== 'open') return false;
 
-  const unchangedFields = new Set(['id', 'state', 'depreciation_ids']);
+  const unchangedFields = new Set(['id', 'state', 'depreciation_ids', 'cancelled_depreciation_ids', 'disposal_date', 'sale_value', 'sale_invoice_id', 'sale_invoice_line', 'disposal_move_id']);
   const fields = new Set([...Object.keys(before), ...Object.keys(asset)]);
   if ([...fields].some((field) => !unchangedFields.has(field) && same(before[field]) !== same(asset[field]))) return false;
   const beforeLines = linesByDate(before.depreciation_ids ?? []);

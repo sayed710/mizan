@@ -6,7 +6,7 @@ import { seed } from './seed.js';
 import { models } from './registry.js';
 import { accountId } from './models/ledger.js';
 import { confirmAsset, disposeAsset, hasDueDepreciation, modifyAsset, pauseAsset, postDepreciation, resumeAsset } from './models/assets.js';
-import { postMove } from './models/accounting.js';
+import { postMove, reverseDepreciation } from './models/accounting.js';
 import { newDefaults } from './views/formDefaults.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -77,7 +77,7 @@ test('1. Core depreciation-defining fields are readonly on open assets and serve
   // Server rejects write to core fields on open asset
   assert.throws(
     () => write(db, 'account.asset', open.id, { original_value: 5000 }),
-    /inconsistent with asset values/i,
+    /inconsistent with asset values|recorded value adjustments/i,
   );
   assert.throws(
     () => write(db, 'account.asset', open.id, { method_number: 10 }),
@@ -506,11 +506,11 @@ test('11. Structural invariants G1-G5 enforced identically by ORM write and serv
   // 4. Raw write of original_value rejected by write and by applyDiff (G3)
   assert.throws(
     () => write(db, 'account.asset', asset.id, { original_value: 5000 }),
-    /inconsistent with asset values/i,
+    /inconsistent with asset values|recorded value adjustments/i,
   );
   assert.throws(
     () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, original_value: 5000 }] } }, { author: 'test', isAdmin: false }),
-    /inconsistent with asset values/i,
+    /inconsistent with asset values|recorded value adjustments/i,
   );
 
   // 5. Re-drafting an open asset (state: 'draft') rejected by write and by applyDiff (G1)
@@ -586,4 +586,554 @@ test('11. Structural invariants G1-G5 enforced identically by ORM write and serv
   bankAsset = read(runningWithBank, 'account.asset', asset.id);
   assert.equal(bankAsset.state, 'close');
   assert.equal(bankAsset.disposal_date, '2027-02-01');
+});
+
+test('12. Q1: Posted depreciation lines immutable on write and applyDiff; reverseDepreciation works via write and applyDiff', () => {
+  let db = seed();
+  const open = createOpenAsset(db, {
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  db = open.db;
+  let asset = read(db, 'account.asset', open.id);
+
+  // Post 1 depreciation line legitimately
+  db = postDepreciation(db, asset, '2026-12-31');
+  asset = read(db, 'account.asset', open.id);
+  const postedLine = asset.depreciation_ids.find((l) => l.posted);
+  assert.ok(postedLine);
+  assert.ok(postedLine.move_id);
+
+  // Forged 1: Modify amount of posted line
+  const forgedAmountLines = asset.depreciation_ids.map((l) => (l.date === postedLine.date ? { ...l, amount: 2000 } : l));
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { depreciation_ids: forgedAmountLines }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedAmountLines }] } }, { author: 'test', isAdmin: false }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+
+  // Forged 2: Modify move_id of posted line
+  const forgedMoveLines = asset.depreciation_ids.map((l) => (l.date === postedLine.date ? { ...l, move_id: 99999 } : l));
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { depreciation_ids: forgedMoveLines }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedMoveLines }] } }, { author: 'test', isAdmin: false }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+
+  // Forged 3: Remove posted line
+  const forgedRemovedLines = asset.depreciation_ids.filter((l) => l.date !== postedLine.date);
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { depreciation_ids: forgedRemovedLines }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedRemovedLines }] } }, { author: 'test', isAdmin: false }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+
+  // Forged 4: Unpost line without reversal move
+  const forgedUnpostLines = asset.depreciation_ids.map((l) => (l.date === postedLine.date ? { ...l, posted: false, move_id: null } : l));
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { depreciation_ids: forgedUnpostLines }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedUnpostLines }] } }, { author: 'test', isAdmin: false }),
+    /Posted depreciation lines cannot be modified/i,
+  );
+
+  // Legitimate: reverseDepreciation works through write AND applyDiff
+  const depMove = read(db, 'account.move', postedLine.move_id);
+  assert.ok(depMove);
+  const revDb = reverseDepreciation(db, depMove, { date: '2026-12-31' });
+  const revAsset = read(revDb, 'account.asset', asset.id);
+  const revLine = revAsset.depreciation_ids.find((l) => l.date === postedLine.date);
+  assert.equal(revLine.posted, false);
+  assert.equal(revLine.move_id, null);
+
+  const syncedRevDb = applyDiff(db, diffDb(db, revDb), { author: 'test', isAdmin: false });
+  const syncedRevAsset = read(syncedRevDb, 'account.asset', asset.id);
+  const syncedRevLine = syncedRevAsset.depreciation_ids.find((l) => l.date === postedLine.date);
+  assert.equal(syncedRevLine.posted, false);
+  assert.equal(syncedRevLine.move_id, null);
+});
+
+test('13. Q2: Line posted:true requires valid posted move in asset company debiting exp and crediting dep, no sharing; workflows pass applyDiff', () => {
+  let db = seed();
+  const open = createOpenAsset(db, {
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  db = open.db;
+  const asset = read(db, 'account.asset', open.id);
+
+  // Legitimate 1: postDepreciation passes applyDiff
+  const postedDb = postDepreciation(db, asset, '2026-12-31');
+  const syncedPostedDb = applyDiff(db, diffDb(db, postedDb), { author: 'test', isAdmin: false });
+  const syncedAsset = read(syncedPostedDb, 'account.asset', asset.id);
+  const postedLine = syncedAsset.depreciation_ids.find((l) => l.posted);
+  assert.ok(postedLine);
+  assert.ok(postedLine.move_id);
+
+  // Legitimate 2: runScheduledJobs passes applyDiff
+  const schedDb = runScheduledJobs(syncedPostedDb, '2027-12-31');
+  const syncedSchedDb = applyDiff(syncedPostedDb, diffDb(syncedPostedDb, schedDb), { author: 'test', isAdmin: false });
+  const schedAsset = read(syncedSchedDb, 'account.asset', asset.id);
+  assert.ok(schedAsset.depreciation_ids.filter((l) => l.posted).length >= 2);
+
+  // Forged 1: Line posted:true with no move (move_id: null)
+  const line1 = asset.depreciation_ids[0];
+  const forgedNoMove = asset.depreciation_ids.map((l, idx) => (idx === 0 ? { ...l, posted: true, move_id: null } : l));
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { depreciation_ids: forgedNoMove }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedNoMove }] } }, { author: 'test', isAdmin: false }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+
+  // Forged 2: Line posted:true with draft move
+  const draftMove = create(db, 'account.move', {
+    move_type: 'entry',
+    journal_id: asset.journal_id,
+    company_id: asset.company_id,
+    date: line1.date,
+    line_ids: [
+      { account_id: asset.account_depreciation_expense_id, debit: line1.amount, credit: 0 },
+      { account_id: asset.account_depreciation_id, debit: 0, credit: line1.amount },
+    ],
+  });
+  const forgedDraftMoveLines = asset.depreciation_ids.map((l, idx) => (idx === 0 ? { ...l, posted: true, move_id: draftMove.id } : l));
+  assert.throws(
+    () => write(draftMove.db, 'account.asset', asset.id, { depreciation_ids: forgedDraftMoveLines }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+  assert.throws(
+    () => applyDiff(draftMove.db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedDraftMoveLines }] } }, { author: 'test', isAdmin: false }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+
+  // Forged 3: Line posted:true with move belonging to different company
+  const comp2 = create(db, 'res.company', { name: 'Comp 2', currency_id: 1 });
+  const moveComp2 = create(comp2.db, 'account.move', {
+    name: 'MISC/2026/0001',
+    move_type: 'entry',
+    journal_id: asset.journal_id,
+    company_id: comp2.id,
+    date: line1.date,
+    state: 'posted',
+    line_ids: [
+      { account_id: asset.account_depreciation_expense_id, debit: line1.amount, credit: 0 },
+      { account_id: asset.account_depreciation_id, debit: 0, credit: line1.amount },
+    ],
+  });
+  const forgedComp2Lines = asset.depreciation_ids.map((l, idx) => (idx === 0 ? { ...l, posted: true, move_id: moveComp2.id } : l));
+  assert.throws(
+    () => write(moveComp2.db, 'account.asset', asset.id, { depreciation_ids: forgedComp2Lines }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+  assert.throws(
+    () => applyDiff(moveComp2.db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedComp2Lines }] } }, { author: 'test', isAdmin: false }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+
+  // Forged 4: Line posted:true with move of wrong amount or wrong accounts
+  const badAmountMove = create(db, 'account.move', {
+    name: 'MISC/2026/0002',
+    move_type: 'entry',
+    journal_id: asset.journal_id,
+    company_id: asset.company_id,
+    date: line1.date,
+    state: 'posted',
+    line_ids: [
+      { account_id: asset.account_depreciation_expense_id, debit: 999, credit: 0 },
+      { account_id: asset.account_depreciation_id, debit: 0, credit: 999 },
+    ],
+  });
+  const forgedBadAmountLines = asset.depreciation_ids.map((l, idx) => (idx === 0 ? { ...l, posted: true, move_id: badAmountMove.id } : l));
+  assert.throws(
+    () => write(badAmountMove.db, 'account.asset', asset.id, { depreciation_ids: forgedBadAmountLines }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+  assert.throws(
+    () => applyDiff(badAmountMove.db, { upserts: { 'account.asset': [{ ...asset, depreciation_ids: forgedBadAmountLines }] } }, { author: 'test', isAdmin: false }),
+    /Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account/i,
+  );
+
+  // Forged 5: Two board lines on same asset sharing same move_id
+  const sharedOnSame = syncedAsset.depreciation_ids.map((l, idx) => (idx === 1 ? { ...l, posted: true, move_id: postedLine.move_id } : l));
+  assert.throws(
+    () => write(syncedPostedDb, 'account.asset', asset.id, { depreciation_ids: sharedOnSame }),
+    /Depreciation move cannot be shared between board lines/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedPostedDb, { upserts: { 'account.asset': [{ ...syncedAsset, depreciation_ids: sharedOnSame }] } }, { author: 'test', isAdmin: false }),
+    /Depreciation move cannot be shared between board lines/i,
+  );
+
+  // Forged 6: Another asset sharing the same move_id
+  const open2 = createOpenAsset(syncedPostedDb, {
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  const asset2 = read(open2.db, 'account.asset', open2.id);
+  const sharedOnOther = asset2.depreciation_ids.map((l, idx) => (idx === 0 ? { ...l, posted: true, move_id: postedLine.move_id } : l));
+  assert.throws(
+    () => write(open2.db, 'account.asset', open2.id, { depreciation_ids: sharedOnOther }),
+    /Depreciation move cannot be shared between board lines/i,
+  );
+  assert.throws(
+    () => applyDiff(open2.db, { upserts: { 'account.asset': [{ ...asset2, depreciation_ids: sharedOnOther }] } }, { author: 'test', isAdmin: false }),
+    /Depreciation move cannot be shared between board lines/i,
+  );
+});
+
+test('14. Q3: revaluation_ids prefix immutable, appended entries reference posted move on asset account, delta = sum', () => {
+  let db = seed();
+  const open = createOpenAsset(db, {
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  db = open.db;
+  const asset = read(db, 'account.asset', open.id);
+  const revalAccId = accountId(db, '450300');
+
+  // Legitimate 1: modifyAsset value increase (+2400) passes applyDiff
+  const modifiedInc = modifyAsset(db, asset, { date: '2026-06-15', value_change: 2400, accountId: revalAccId });
+  const syncedInc = applyDiff(db, diffDb(db, modifiedInc), { author: 'test', isAdmin: false });
+  const assetInc = read(syncedInc, 'account.asset', asset.id);
+  assert.equal(assetInc.original_value, 14400);
+  assert.equal(assetInc.revaluation_ids.length, 1);
+  const rev1 = assetInc.revaluation_ids[0];
+  assert.equal(rev1.amount, 2400);
+  assert.ok(rev1.move_id);
+
+  // Legitimate 2: modifyAsset impairment (-1200) passes applyDiff
+  const modifiedDec = modifyAsset(syncedInc, assetInc, { date: '2026-07-01', value_change: -1200 });
+  const syncedDec = applyDiff(syncedInc, diffDb(syncedInc, modifiedDec), { author: 'test', isAdmin: false });
+  const assetDec = read(syncedDec, 'account.asset', asset.id);
+  assert.equal(assetDec.original_value, 13200);
+  assert.equal(assetDec.revaluation_ids.length, 2);
+
+  // Legitimate 3: modifyAsset methodNumber change (no value change) passes applyDiff
+  const modifiedDur = modifyAsset(syncedDec, assetDec, { date: '2026-07-15', methodNumber: 6 });
+  const syncedDur = applyDiff(syncedDec, diffDb(syncedDec, modifiedDur), { author: 'test', isAdmin: false });
+  const assetDur = read(syncedDur, 'account.asset', asset.id);
+  assert.equal(assetDur.method_number, 6);
+
+  // Forged 1: Modify existing revaluation entry in prefix
+  const forgedModifyPrefix = assetInc.revaluation_ids.map((r, idx) => (idx === 0 ? { ...r, amount: 3000 } : r));
+  assert.throws(
+    () => write(syncedInc, 'account.asset', asset.id, { revaluation_ids: forgedModifyPrefix }),
+    /Existing value adjustments cannot be modified/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedInc, { upserts: { 'account.asset': [{ ...assetInc, revaluation_ids: forgedModifyPrefix }] } }, { author: 'test', isAdmin: false }),
+    /Existing value adjustments cannot be modified/i,
+  );
+
+  // Forged 2: Remove existing revaluation entry from prefix
+  assert.throws(
+    () => write(syncedInc, 'account.asset', asset.id, { revaluation_ids: [] }),
+    /Existing value adjustments cannot be removed/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedInc, { upserts: { 'account.asset': [{ ...assetInc, revaluation_ids: [] }] } }, { author: 'test', isAdmin: false }),
+    /Existing value adjustments cannot be removed/i,
+  );
+
+  // Forged 3: Append revaluation without valid move (e.g. null move_id)
+  const forgedAppendNoMove = [...assetInc.revaluation_ids, { date: '2026-08-01', amount: 1000, move_id: null }];
+  assert.throws(
+    () => write(syncedInc, 'account.asset', asset.id, { revaluation_ids: forgedAppendNoMove, original_value: 15400 }),
+    /Value adjustment must reference a posted move in the asset company/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedInc, { upserts: { 'account.asset': [{ ...assetInc, revaluation_ids: forgedAppendNoMove, original_value: 15400 }] } }, { author: 'test', isAdmin: false }),
+    /Value adjustment must reference a posted move in the asset company/i,
+  );
+
+  // Forged 4: Append revaluation with move that does not book on account_asset_id
+  const wrongMove = create(syncedInc, 'account.move', {
+    name: 'MISC/2026/0003',
+    move_type: 'entry',
+    journal_id: assetInc.journal_id,
+    company_id: assetInc.company_id,
+    date: '2026-08-01',
+    state: 'posted',
+    line_ids: [
+      { account_id: revalAccId, debit: 1000, credit: 0 },
+      { account_id: assetInc.account_depreciation_expense_id, debit: 0, credit: 1000 },
+    ],
+  });
+  const forgedAppendWrongMove = [...assetInc.revaluation_ids, { date: '2026-08-01', amount: 1000, move_id: wrongMove.id }];
+  assert.throws(
+    () => write(wrongMove.db, 'account.asset', asset.id, { revaluation_ids: forgedAppendWrongMove, original_value: 15400 }),
+    /Value adjustment move must book the adjustment amount on the fixed asset account/i,
+  );
+  assert.throws(
+    () => applyDiff(wrongMove.db, { upserts: { 'account.asset': [{ ...assetInc, revaluation_ids: forgedAppendWrongMove, original_value: 15400 }] } }, { author: 'test', isAdmin: false }),
+    /Value adjustment move must book the adjustment amount on the fixed asset account/i,
+  );
+
+  // Forged 5: Original value delta does not match sum of appended revaluations
+  assert.throws(
+    () => write(syncedInc, 'account.asset', asset.id, { original_value: 15000 }),
+    /inconsistent with asset values|recorded value adjustments/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedInc, { upserts: { 'account.asset': [{ ...assetInc, original_value: 15000 }] } }, { author: 'test', isAdmin: false }),
+    /inconsistent with asset values|recorded value adjustments/i,
+  );
+});
+
+test('15. Q4: Disposal field rules, disposal_move_id verification, sale invoice verification, legacy assets', () => {
+  let db = seed();
+  const open = createOpenAsset(db, {
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  db = open.db;
+  const asset = read(db, 'account.asset', open.id);
+
+  // Legitimate 1: disposeAsset without sale invoice passes applyDiff
+  const disposedNoInv = disposeAsset(db, asset, { date: '2026-06-01' });
+  const syncedDisposedNoInv = applyDiff(db, diffDb(db, disposedNoInv), { author: 'test', isAdmin: false });
+  const assetNoInv = read(syncedDisposedNoInv, 'account.asset', asset.id);
+  assert.equal(assetNoInv.state, 'close');
+  assert.equal(assetNoInv.disposal_date, '2026-06-01');
+  assert.ok(assetNoInv.disposal_move_id);
+
+  // Legitimate 2: disposeAsset with sale invoice passes applyDiff
+  const open2 = createOpenAsset(db, {
+    name: 'Asset With Sale Invoice',
+    acquisition_date: '2026-06-01',
+    original_value: 10000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  let db2 = open2.db;
+  const invoice = create(db2, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-06-15',
+    invoice_line_ids: [{ qty: 1, price_unit: 7000, tax: 0, account_id: accountId(db2, '101401') }],
+  });
+  db2 = postMove(invoice.db, invoice.id);
+  const disposedWithInv = disposeAsset(db2, read(db2, 'account.asset', open2.id), {
+    date: '2026-06-15',
+    saleValue: 7000,
+    invoiceId: invoice.id,
+  });
+  const syncedDisposedWithInv = applyDiff(db2, diffDb(db2, disposedWithInv), { author: 'test', isAdmin: false });
+  const assetWithInv = read(syncedDisposedWithInv, 'account.asset', open2.id);
+  assert.equal(assetWithInv.state, 'close');
+  assert.equal(assetWithInv.sale_value, 7000);
+  assert.equal(assetWithInv.sale_invoice_id, invoice.id);
+  assert.ok(assetWithInv.disposal_move_id);
+
+  // Legitimate 3: disposeAsset of asset where last line is posted during disposal passes applyDiff
+  const open3 = createOpenAsset(db, {
+    name: 'Asset Final Line Disposal',
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 1,
+    method_period: '12',
+  });
+  let db3 = open3.db;
+  const disposedFinal = disposeAsset(db3, read(db3, 'account.asset', open3.id), { date: '2026-12-31' });
+  const syncedDisposedFinal = applyDiff(db3, diffDb(db3, disposedFinal), { author: 'test', isAdmin: false });
+  const assetFinal = read(syncedDisposedFinal, 'account.asset', open3.id);
+  assert.equal(assetFinal.state, 'close');
+  assert.equal(assetFinal.depreciation_ids.filter((l) => l.posted).length, 1);
+  assert.ok(assetFinal.disposal_move_id);
+
+  // Legitimate 4: disposeAsset of asset already closed by depreciation passes applyDiff
+  const open4 = createOpenAsset(db, {
+    name: 'Asset Already Closed By Dep',
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 1,
+    method_period: '12',
+  });
+  let db4 = postDepreciation(open4.db, read(open4.db, 'account.asset', open4.id), '2026-12-31');
+  const fullyDeprecAsset = read(db4, 'account.asset', open4.id);
+  assert.equal(fullyDeprecAsset.state, 'close');
+  assert.equal(fullyDeprecAsset.disposal_date, undefined);
+  const disposedClosed = disposeAsset(db4, fullyDeprecAsset, { date: '2027-01-15' });
+  const syncedDisposedClosed = applyDiff(db4, diffDb(db4, disposedClosed), { author: 'test', isAdmin: false });
+  const assetClosedAndDisposed = read(syncedDisposedClosed, 'account.asset', open4.id);
+  assert.equal(assetClosedAndDisposed.state, 'close');
+  assert.equal(assetClosedAndDisposed.disposal_date, '2027-01-15');
+  assert.ok(assetClosedAndDisposed.disposal_move_id);
+
+  // Legitimate 5: Legacy closed asset with disposal_date but no disposal_move_id stays writable for unrelated fields
+  const legacyClosed = {
+    ...asset,
+    id: 88888,
+    name: 'Legacy Closed Machine',
+    state: 'close',
+    disposal_date: '2025-01-01',
+    sale_value: 0,
+    disposal_move_id: null,
+  };
+  let legacyDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.asset': [...(db.records['account.asset'] ?? []), legacyClosed],
+    },
+  };
+  const renamedLegacy = write(legacyDb, 'account.asset', legacyClosed.id, { name: 'Renamed Legacy Machine' });
+  assert.equal(read(renamedLegacy, 'account.asset', legacyClosed.id).name, 'Renamed Legacy Machine');
+  const syncedLegacy = applyDiff(legacyDb, { upserts: { 'account.asset': [{ ...legacyClosed, name: 'Renamed Legacy Machine' }] } }, { author: 'admin', isAdmin: true });
+  assert.equal(read(syncedLegacy, 'account.asset', legacyClosed.id).name, 'Renamed Legacy Machine');
+
+  // But legacy closed asset cannot alter disposal fields once set
+  assert.throws(
+    () => write(legacyDb, 'account.asset', legacyClosed.id, { disposal_date: '2025-02-01' }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => applyDiff(legacyDb, { upserts: { 'account.asset': [{ ...legacyClosed, disposal_date: '2025-02-01' }] } }, { author: 'admin', isAdmin: true }),
+    /Disposal fields cannot be modified once set/i,
+  );
+
+  // Forged 1: Setting disposal fields without disposal_move_id
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { state: 'close', disposal_date: '2026-06-01', sale_value: 0 }),
+    /Disposal move is required when disposing of an asset/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, state: 'close', disposal_date: '2026-06-01', sale_value: 0 }] } }, { author: 'test', isAdmin: false }),
+    /Disposal move is required when disposing of an asset/i,
+  );
+
+  // Forged 2: disposal_move_id referencing draft move or move of another company
+  const comp2 = create(db, 'res.company', { name: 'Comp 2', currency_id: 1 });
+  const draftDispMove = create(comp2.db, 'account.move', {
+    move_type: 'entry',
+    journal_id: asset.journal_id,
+    company_id: asset.company_id,
+    date: '2026-06-01',
+    line_ids: [{ account_id: asset.account_asset_id, debit: 0, credit: asset.original_value }],
+  });
+  assert.throws(
+    () => write(draftDispMove.db, 'account.asset', asset.id, { state: 'close', disposal_date: '2026-06-01', sale_value: 0, disposal_move_id: draftDispMove.id }),
+    /Disposal move must be a posted entry in the asset company/i,
+  );
+  assert.throws(
+    () => applyDiff(draftDispMove.db, { upserts: { 'account.asset': [{ ...asset, state: 'close', disposal_date: '2026-06-01', sale_value: 0, disposal_move_id: draftDispMove.id }] } }, { author: 'test', isAdmin: false }),
+    /Disposal move must be a posted entry in the asset company/i,
+  );
+
+  // Forged 3: disposal_move_id does not credit account_asset_id by original_value
+  const wrongDispMove = create(db, 'account.move', {
+    name: 'MISC/2026/0005',
+    move_type: 'entry',
+    journal_id: asset.journal_id,
+    company_id: asset.company_id,
+    date: '2026-06-01',
+    state: 'posted',
+    line_ids: [
+      { account_id: asset.account_asset_id, debit: 0, credit: 5000 },
+      { account_id: asset.account_depreciation_expense_id, debit: 5000, credit: 0 },
+    ],
+  });
+  assert.throws(
+    () => write(wrongDispMove.db, 'account.asset', asset.id, { state: 'close', disposal_date: '2026-06-01', sale_value: 0, disposal_move_id: wrongDispMove.id }),
+    /Disposal move must credit the fixed asset account by the asset original value/i,
+  );
+  assert.throws(
+    () => applyDiff(wrongDispMove.db, { upserts: { 'account.asset': [{ ...asset, state: 'close', disposal_date: '2026-06-01', sale_value: 0, disposal_move_id: wrongDispMove.id }] } }, { author: 'test', isAdmin: false }),
+    /Disposal move must credit the fixed asset account by the asset original value/i,
+  );
+
+  // Forged 4: sale_invoice_id referencing an unposted move or non-out_invoice
+  const postedDispMove = create(db, 'account.move', {
+    name: 'MISC/2026/0006',
+    move_type: 'entry',
+    journal_id: asset.journal_id,
+    company_id: asset.company_id,
+    date: '2026-06-01',
+    state: 'posted',
+    line_ids: [
+      { account_id: asset.account_asset_id, debit: 0, credit: asset.original_value },
+      { account_id: asset.account_depreciation_expense_id, debit: asset.original_value, credit: 0 },
+    ],
+  });
+  const draftInvoice = create(postedDispMove.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [{ qty: 1, price_unit: 5000, tax: 0, account_id: accountId(postedDispMove.db, '101401') }],
+  });
+  assert.throws(
+    () => write(draftInvoice.db, 'account.asset', asset.id, {
+      state: 'close',
+      disposal_date: '2026-06-01',
+      sale_value: 5000,
+      disposal_move_id: postedDispMove.id,
+      sale_invoice_id: draftInvoice.id,
+    }),
+    /Sale invoice must be a posted customer invoice in the asset company/i,
+  );
+  assert.throws(
+    () => applyDiff(draftInvoice.db, {
+      upserts: {
+        'account.asset': [{
+          ...asset,
+          state: 'close',
+          disposal_date: '2026-06-01',
+          sale_value: 5000,
+          disposal_move_id: postedDispMove.id,
+          sale_invoice_id: draftInvoice.id,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Sale invoice must be a posted customer invoice in the asset company/i,
+  );
+
+  // Forged 5: Modifying disposal fields once set
+  assert.throws(
+    () => write(syncedDisposedNoInv, 'account.asset', assetNoInv.id, { disposal_date: '2026-07-01' }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedDisposedNoInv, { upserts: { 'account.asset': [{ ...assetNoInv, disposal_date: '2026-07-01' }] } }, { author: 'test', isAdmin: false }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => write(syncedDisposedNoInv, 'account.asset', assetNoInv.id, { sale_value: 1000 }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedDisposedNoInv, { upserts: { 'account.asset': [{ ...assetNoInv, sale_value: 1000 }] } }, { author: 'test', isAdmin: false }),
+    /Disposal fields cannot be modified once set/i,
+  );
 });

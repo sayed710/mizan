@@ -50,35 +50,63 @@ export function assetAccountGuard(db, _before, asset) {
   return null;
 }
 
-export function assetGuard(db, before, asset, _ctx, vals) {
-  const accErr = assetAccountGuard(db, before, asset);
-  if (accErr) return accErr;
+export function validateAssetIntegrity(db, before, asset, vals) {
+  const company = asset.company_id ?? 1;
 
-  // G4: disposal_date and sale_value empty on draft/open/paused; set only when closing (Sell/Dispose); immutable once set
+  // Q4: Disposal field rules and move verification
   const hasDisposal = asset.disposal_date != null && asset.disposal_date !== '';
   const hasSale = asset.sale_value != null && asset.sale_value !== '';
-  if (asset.state !== 'close') {
-    if (hasDisposal || hasSale) {
-      return 'Disposal fields can only be set through Sell or Dispose';
-    }
-  } else if (before == null || before.state === 'draft') {
-    if (hasDisposal || hasSale) {
-      return 'Disposal fields can only be set through Sell or Dispose';
-    }
-  } else if (before.disposal_date != null && before.disposal_date !== '') {
-    if (asset.disposal_date !== before.disposal_date || cents(asset.sale_value) !== cents(before.sale_value)) {
+  const hasDisposalMove = asset.disposal_move_id != null;
+  const hasSaleInvoice = asset.sale_invoice_id != null;
+  const hasAnyDisposal = hasDisposal || hasSale || hasDisposalMove || hasSaleInvoice;
+
+  if (before?.disposal_date != null && before.disposal_date !== '') {
+    // Legacy closed assets or already-disposed assets: disposal fields are immutable once set
+    if (
+      asset.disposal_date !== before.disposal_date
+      || cents(asset.sale_value) !== cents(before.sale_value)
+      || (asset.disposal_move_id ?? null) !== (before.disposal_move_id ?? null)
+      || (asset.sale_invoice_id ?? null) !== (before.sale_invoice_id ?? null)
+    ) {
       return 'Disposal fields cannot be modified once set';
     }
+  } else if (hasAnyDisposal) {
+    // Disposal fields are being first set
+    if (asset.state !== 'close' || !before?.state || before.state === 'draft') {
+      return 'Disposal fields can only be set through Sell or Dispose';
+    }
+    if (!asset.disposal_move_id) {
+      return 'Disposal move is required when disposing of an asset';
+    }
+    const dispMove = read(db, 'account.move', asset.disposal_move_id);
+    if (!dispMove || dispMove.state !== 'posted' || (dispMove.company_id ?? 1) !== company) {
+      return 'Disposal move must be a posted entry in the asset company';
+    }
+    const origCents = cents(asset.original_value);
+    const fixedCredit = (dispMove.line_ids ?? []).find(
+      (l) => l.account_id === asset.account_asset_id && cents(l.credit) === origCents && (cents(l.debit) || 0) === 0,
+    );
+    if (!fixedCredit) {
+      return 'Disposal move must credit the fixed asset account by the asset original value';
+    }
+    if (asset.sale_invoice_id != null) {
+      const saleInv = read(db, 'account.move', asset.sale_invoice_id);
+      if (!saleInv || saleInv.state !== 'posted' || saleInv.move_type !== 'out_invoice' || (saleInv.company_id ?? 1) !== company) {
+        return 'Sale invoice must be a posted customer invoice in the asset company';
+      }
+    }
+  } else if (asset.state !== 'close' && (hasDisposal || hasSale)) {
+    return 'Disposal fields can only be set through Sell or Dispose';
   }
 
-  // Non-draft asset checks (G1, G2, G3)
+  // Non-draft asset checks
   if (before?.state && before.state !== 'draft') {
-    // G1: A non-draft asset can never go back to state 'draft'
+    // G1: Cannot reset confirmed asset to draft
     if (asset.state === 'draft') {
       return 'Cannot reset a confirmed asset to draft';
     }
 
-    // G2: Immutable fields after confirmation
+    // G2: Immutable core fields
     for (const field of IMMUTABLE_ASSET_FIELDS) {
       if (field === 'already_depreciated') {
         if (cents(asset.already_depreciated) !== cents(before.already_depreciated)) {
@@ -97,44 +125,90 @@ export function assetGuard(db, before, asset, _ctx, vals) {
       }
     }
 
-    // G3: original_value, salvage_value, method_number may change only together with a consistent board
-    const origChanged = cents(asset.original_value) !== cents(before.original_value);
+    // Q1: Posted depreciation lines immutability on EVERY write
+    const beforePosted = (before.depreciation_ids ?? []).filter((l) => l.posted);
+    const afterLines = asset.depreciation_ids ?? [];
+    for (const bp of beforePosted) {
+      const ap = afterLines.find((l) => l.date === bp.date);
+      if (!ap) {
+        return 'Posted depreciation lines cannot be modified';
+      }
+      if (cents(ap.amount) !== cents(bp.amount)) {
+        return 'Posted depreciation lines cannot be modified';
+      }
+      if (ap.posted && ap.move_id === bp.move_id) {
+        continue;
+      }
+      // Exception: reverseDepreciation moves line from posted -> unposted when move is reversed by a posted reversal
+      if (!ap.posted && ap.move_id === null) {
+        const hasReversal = (db.records['account.move'] ?? []).some(
+          (m) => m.state === 'posted' && m.reversed_entry_id === bp.move_id,
+        );
+        if (hasReversal) {
+          continue;
+        }
+      }
+      return 'Posted depreciation lines cannot be modified';
+    }
+
+    // Q3: revaluation_ids prefix immutability and move verification
+    const beforeRevals = before.revaluation_ids ?? [];
+    const afterRevals = asset.revaluation_ids ?? [];
+    if (afterRevals.length < beforeRevals.length) {
+      return 'Existing value adjustments cannot be removed';
+    }
+    for (let i = 0; i < beforeRevals.length; i++) {
+      const br = beforeRevals[i];
+      const ar = afterRevals[i];
+      if (!ar || ar.date !== br.date || cents(ar.amount) !== cents(br.amount) || ar.move_id !== br.move_id) {
+        return 'Existing value adjustments cannot be modified';
+      }
+    }
+    const newRevals = afterRevals.slice(beforeRevals.length);
+    for (const r of newRevals) {
+      const amtCents = cents(r.amount);
+      if (amtCents !== 0) {
+        if (!r.move_id) {
+          return 'Value adjustment must reference a posted move in the asset company';
+        }
+        const move = read(db, 'account.move', r.move_id);
+        if (!move || move.state !== 'posted' || (move.company_id ?? 1) !== company) {
+          return 'Value adjustment must reference a posted move in the asset company';
+        }
+        const fixedAcc = asset.account_asset_id;
+        if (amtCents > 0) {
+          const hasDebit = (move.line_ids ?? []).some(
+            (ml) => ml.account_id === fixedAcc && cents(ml.debit) === amtCents && (cents(ml.credit) || 0) === 0,
+          );
+          if (!hasDebit) {
+            return 'Value adjustment move must book the adjustment amount on the fixed asset account';
+          }
+        } else {
+          const hasCredit = (move.line_ids ?? []).some(
+            (ml) => ml.account_id === fixedAcc && cents(ml.credit) === -amtCents && (cents(ml.debit) || 0) === 0,
+          );
+          if (!hasCredit) {
+            return 'Value adjustment move must book the adjustment amount on the fixed asset account';
+          }
+        }
+      }
+    }
+    const addedRevalCents = newRevals.reduce((s, r) => s + cents(r.amount), 0);
+    const origDeltaCents = cents(asset.original_value) - cents(before.original_value);
+    if (origDeltaCents !== addedRevalCents) {
+      return 'Original value change must match recorded value adjustments';
+    }
+
+    // G3: Board totals consistency when original_value, salvage_value or method_number changed
+    const origChanged = origDeltaCents !== 0;
     const salvageChanged = cents(asset.salvage_value) !== cents(before.salvage_value);
     const methodNumChanged = asset.method_number !== before.method_number;
     if (origChanged || salvageChanged || methodNumChanged) {
-      const beforePosted = (before.depreciation_ids ?? []).filter((l) => l.posted);
-      const afterLines = asset.depreciation_ids ?? [];
-      const afterPosted = afterLines.filter((l) => l.posted);
-      // (a) already-posted board lines are unchanged
-      if (beforePosted.length > afterPosted.length) {
-        return 'Posted depreciation lines cannot be modified';
-      }
-      for (let i = 0; i < beforePosted.length; i++) {
-        const bp = beforePosted[i];
-        const ap = afterLines[i];
-        if (!ap || ap.date !== bp.date || cents(ap.amount) !== cents(bp.amount) || ap.move_id !== bp.move_id || !ap.posted) {
-          return 'Posted depreciation lines cannot be modified';
-        }
-      }
-
-      // (b) sum in cents of non-cancelled board amounts equals original_value - salvage_value - already_depreciated
       const boardCents = afterLines.filter((l) => !l.cancelled).reduce((s, l) => s + cents(l.amount), 0);
       const expectedCents = cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
       if (boardCents !== expectedCents) {
         return 'Depreciation board is inconsistent with asset values';
       }
-
-      // (c) change of original_value equals sum of revaluation_ids added in same write
-      const beforeRevals = before.revaluation_ids ?? [];
-      const afterRevals = asset.revaluation_ids ?? [];
-      const newRevals = afterRevals.slice(beforeRevals.length);
-      const addedRevalCents = newRevals.reduce((s, r) => s + cents(r.amount), 0);
-      const origDeltaCents = cents(asset.original_value) - cents(before.original_value);
-      if (origDeltaCents !== addedRevalCents) {
-        return 'Original value change must match recorded value adjustments';
-      }
-
-      // Duration check if method_number changed
       if (methodNumChanged) {
         const nonCancelledCount = afterLines.filter((l) => !l.cancelled).length;
         if (nonCancelledCount !== Number(asset.method_number) && nonCancelledCount !== Number(asset.method_number) + 1) {
@@ -144,10 +218,51 @@ export function assetGuard(db, before, asset, _ctx, vals) {
     }
   }
 
-  // G5: bill_id and journal_id validated only when that field changes
+  // Q2: A line may become posted:true (newly, or appear already posted) only if its move_id references a posted move
+  const afterLines = asset.depreciation_ids ?? [];
+  const beforePostedSet = new Set(
+    (before?.depreciation_ids ?? [])
+      .filter((l) => l.posted)
+      .map((l) => `${l.date}:${cents(l.amount)}:${l.move_id}`),
+  );
+  const afterPosted = afterLines.filter((l) => l.posted);
+  for (const ap of afterPosted) {
+    const key = `${ap.date}:${cents(ap.amount)}:${ap.move_id}`;
+    if (beforePostedSet.has(key)) {
+      continue;
+    }
+    if (!ap.move_id) {
+      return 'Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account';
+    }
+    const move = read(db, 'account.move', ap.move_id);
+    if (!move || move.state !== 'posted' || (move.company_id ?? 1) !== company) {
+      return 'Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account';
+    }
+    const lineCents = cents(ap.amount);
+    const expLine = (move.line_ids ?? []).find(
+      (ml) => ml.account_id === asset.account_depreciation_expense_id && cents(ml.debit) === lineCents && (cents(ml.credit) || 0) === 0,
+    );
+    const depLine = (move.line_ids ?? []).find(
+      (ml) => ml.account_id === asset.account_depreciation_id && cents(ml.credit) === lineCents && (cents(ml.debit) || 0) === 0,
+    );
+    if (!expLine || !depLine) {
+      return 'Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account';
+    }
+    if (afterLines.filter((l) => l.move_id === ap.move_id).length !== 1) {
+      return 'Depreciation move cannot be shared between board lines';
+    }
+    const otherAssetShares = (db.records['account.asset'] ?? []).some(
+      (a) => a.id !== asset.id && (a.depreciation_ids ?? []).some((l) => l.move_id === ap.move_id),
+    );
+    if (otherAssetShares) {
+      return 'Depreciation move cannot be shared between board lines';
+    }
+  }
+
+  // G5: bill_id and journal_id validation
   if (vals && 'bill_id' in vals && vals.bill_id !== (before?.bill_id ?? null) && vals.bill_id != null) {
     const bill = read(db, 'account.move', vals.bill_id);
-    if (!bill || bill.state !== 'posted' || bill.move_type !== 'in_invoice' || (bill.company_id ?? 1) !== (asset.company_id ?? 1)) {
+    if (!bill || bill.state !== 'posted' || bill.move_type !== 'in_invoice' || (bill.company_id ?? 1) !== company) {
       return 'Select a posted vendor bill in the asset company';
     }
     if (asset.partner_id && bill.partner_id && bill.partner_id !== asset.partner_id) {
@@ -162,6 +277,12 @@ export function assetGuard(db, before, asset, _ctx, vals) {
   }
 
   return null;
+}
+
+export function assetGuard(db, before, asset, _ctx, vals) {
+  const accErr = assetAccountGuard(db, before, asset);
+  if (accErr) return accErr;
+  return validateAssetIntegrity(db, before, asset, vals);
 }
 
 /** End date of period `i` counted from the acquisition period. */
@@ -381,7 +502,16 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
     loss < 0 && { account: disposalAccount, credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
   const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
-  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100, sale_invoice_id: invoice?.id ?? null, sale_invoice_line: invoice ? Number(invoiceLine) : null });
+  return write(postAnalytic(booked, id), 'account.asset', asset.id, {
+    depreciation_ids: kept,
+    cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })),
+    state: 'close',
+    disposal_date: date,
+    sale_value: sale / 100,
+    sale_invoice_id: invoice?.id ?? null,
+    sale_invoice_line: invoice ? Number(invoiceLine) : null,
+    disposal_move_id: id,
+  });
 }
 
 /** Modify a running or paused asset: apply value increase or decrease (impairment/revaluation), post adjusting entry, and recompute remaining board. */
@@ -473,6 +603,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
 export const assetModels = {
   'account.asset': {
     label: 'Assets',
+    guardLast: true,
     actions: { dispose: disposeAsset, modify: modifyAsset },
     fields: {
       name: { type: 'char', label: 'Asset Name', required: true },
@@ -534,6 +665,7 @@ export const assetModels = {
       sale_value: { type: 'monetary', label: 'Sale Price', readonly: true, hideWhen: (r) => r?.sale_value == null || r?.sale_value === '' },
       sale_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Sale Invoice', readonly: true },
       sale_invoice_line: { type: 'integer', label: 'Sale Invoice Line', readonly: true },
+      disposal_move_id: { type: 'many2one', relation: 'account.move', label: 'Disposal Entry', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: readonlyWhenNotDraft },
       account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account (Override)', readonly: readonlyWhenNotDraft },
     },
