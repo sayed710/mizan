@@ -254,7 +254,7 @@ const allApps = [
                 { label: 'Closing', children: [
           { key: 'reconcile', label: 'Reconcile', type: 'bankReconcile' },
           { key: 'tax-returns', label: 'Tax Returns', model: 'account.return', domain: (r, db) => !isAuditReturn(r, db) },
-          { key: 'lock-dates', label: 'Lock Dates…', type: 'settings' },
+          { key: 'lock-dates', label: 'Lock Dates…', type: 'lockDates' },
           { key: 'secure-entries', label: 'Secure Entries', model: 'account.secure.entries.wizard' },
         ] },
       ] },

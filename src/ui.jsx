@@ -484,7 +484,7 @@ function DistributionInput({ value, onChange, ...props }) {
   }} />;
 }
 
-export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, placeholder, record, label, isNew = false }) {
+export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, disabled = false, placeholder, record, label, isNew = false }) {
   const isReadonly = readonly || fieldReadonly(field, record, db);
   const isRequired = fieldRequired(field, record, db, isNew);
   if (field.type === 'one2many') return <Lines db={db} model={model} fieldName={fieldName} id={id} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
@@ -524,7 +524,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
     return <span className="readonly">{display(db, field, value, record)}</span>;
   }
   // aria-required rather than required: saving is validated by the app, not by native form validation.
-  const a11y = { id, 'aria-label': label, 'aria-required': isRequired || undefined };
+  const a11y = { id, 'aria-label': label, 'aria-required': isRequired || undefined, ...(disabled ? { disabled: true } : {}) };
   const text = (type = 'text', extra = {}) => (
     <input {...a11y} type={type} placeholder={placeholder} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );

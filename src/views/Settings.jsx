@@ -203,7 +203,7 @@ function SettingRow({ id, label, description, children }) {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Validate company accounting setting values before passing them to ORM write. */
-function validateCompanySettingWrite(db, company, vals) {
+export function validateCompanySettingWrite(db, company, vals) {
   for (const [field, use, label] of [['account_sale_tax_id', 'sale', 'Default Sales Tax'], ['account_purchase_tax_id', 'purchase', 'Default Purchase Tax']]) {
     if (vals[field] === undefined || vals[field] === null) continue;
     const tax = (db.records['account.tax'] ?? []).find((x) => x.id === vals[field]);
