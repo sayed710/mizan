@@ -533,8 +533,8 @@ export function FormView({ leaf, id, base, params }) {
   const banner = def.form.banner?.(current, db) ?? null;
   const footer = [].concat(resolve(def.form.footer) ?? []);
   const locked = !isNew && !!def.form.lockedWhen?.(current, db);
-  // An unposted sequence placeholder reads as Draft in the breadcrumb and the heading alike.
-  const displayTitle = current[def.form.title] === '/' ? t('Draft') : current[def.form.title];
+  // A readonly sequence title still holding the '/' placeholder reads as Draft in the breadcrumb and the heading alike.
+  const displayTitle = (titleField?.readonly || titleField?.compute) && current[def.form.title] === '/' ? t('Draft') : current[def.form.title];
 
   return (
     <main className="form-page">

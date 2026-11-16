@@ -326,3 +326,18 @@ test('invoice with section and note added via lines widget saves, syncs, posts, 
     await ctx.done();
   }
 });
+
+test('an editable title holding "/" keeps "/" in the breadcrumb, matching its input', async () => {
+  const leaf = leafFor('Customers', 'customers');
+  const ctx = await mountMoveForm({ leaf, id: 'new' });
+  try {
+    const res = create(ctx.getDb(), 'res.partner', { name: '/' });
+    await ctx.commit(res.db);
+    await ctx.render(String(res.id));
+    const crumb = find(ctx.host, (n) => n.tagName === 'NAV' && hasClass(n, 'breadcrumb'));
+    assert.equal(allFind(crumb, (n) => n.tagName === 'SPAN').at(-1).textContent.trim(), '/');
+    assert.equal(props(find(ctx.host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-name'))?.value, '/');
+  } finally {
+    await ctx.done();
+  }
+});
