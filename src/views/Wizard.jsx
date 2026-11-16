@@ -47,7 +47,7 @@ function WizardField({ db, field, value, values, onChange, id }) {
       </select>
     );
   }
-  return <FieldInput db={db} field={field} value={value} onChange={onChange} id={id} />;
+  return <FieldInput db={db} field={field} value={value} onChange={onChange} id={id} label={t(field.label)} />;
 }
 
 export function Wizard({ db, spec, onConfirm, onCancel, error }) {
@@ -86,6 +86,8 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
                 const next = { ...s, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) };
                 return { ...next, ...spec.onchange?.(next, f.name, db) };
               })} />
+              {f.warning && <p className="muted setting-desc">{t(f.warning)}</p>}
+              {f.help && <div className="field-help">{t(f.help)}</div>}
             </div>
           </div>
         ))}
@@ -93,7 +95,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
           <div className="alert" role="alert">{missing.length ? `${t('Fill in')}: ${missing.join(', ')}` : error}</div>
         )}
         <div className="row">
-          <button type="submit" className="btn primary">{t('Confirm')}</button>
+          <button type="submit" className="btn primary">{t(spec.confirmLabel ?? 'Confirm')}</button>
           <button type="button" className="btn" onClick={onCancel}>{t('Cancel')}</button>
         </div>
       </form>
