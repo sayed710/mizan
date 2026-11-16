@@ -270,23 +270,62 @@ export function useOptionalColumns(storageKey) {
   return [optionalState, isVisible, toggleCol];
 }
 
+const MENU_GAP = 4;
+const MENU_MIN_HEIGHT = 160;
+
+/**
+ * Fixed-position style for a dropdown anchored to `rect` (the toggle's client rect) inside a
+ * `viewport` of {width, height}. It aligns to the toggle's end edge, stays inside the viewport
+ * horizontally, opens upward when there is more room above, and caps its height to the room it has.
+ */
+export function anchoredMenuStyle(rect, { width, height }, { rtl = false, menuWidth = 190 } = {}) {
+  const maxLeft = Math.max(MENU_GAP, width - menuWidth - MENU_GAP);
+  const preferredLeft = rtl ? rect.left : rect.right - menuWidth;
+  const left = Math.min(Math.max(preferredLeft, MENU_GAP), maxLeft);
+  const below = height - rect.bottom - MENU_GAP;
+  const above = rect.top - MENU_GAP;
+  const openUp = below < MENU_MIN_HEIGHT && above > below;
+  return openUp
+    ? { left, bottom: height - rect.top, maxHeight: above }
+    : { left, top: rect.bottom, maxHeight: below };
+}
+
 export function OptionalColsMenu({ items, optionalState, onToggle }) {
-  const [colsOpen, setColsOpen] = useState(false);
+  const [colsOpen, setColsOpen] = useState(null);
   const menuRef = useRef(null);
-  useDismiss(colsOpen, () => setColsOpen(false), menuRef);
+  const dropdownRef = useRef(null);
+  useDismiss(Boolean(colsOpen), () => setColsOpen(null), menuRef);
+  // The menu is fixed-positioned so a scrolling table wrapper cannot clip it; close it when the page
+  // or a table scrolls, but not when the menu itself scrolls.
+  useEffect(() => {
+    if (!colsOpen) return undefined;
+    const close = (event) => { if (!dropdownRef.current?.contains(event.target)) setColsOpen(null); };
+    document.addEventListener('scroll', close, true);
+    return () => document.removeEventListener('scroll', close, true);
+  }, [colsOpen]);
+  const toggleRef = useRef(null);
+  const toggleMenu = () => {
+    if (colsOpen) { setColsOpen(null); return; }
+    const button = toggleRef.current;
+    const rect = button?.getBoundingClientRect?.();
+    if (!rect) { setColsOpen({}); return; }
+    const rtl = getComputedStyle(button).direction === 'rtl';
+    setColsOpen(anchoredMenuStyle(rect, { width: globalThis.innerWidth, height: globalThis.innerHeight }, { rtl }));
+  };
   if (!items.length) return null;
   return (
     <div className="o2m-cols-menu" ref={menuRef}>
       <button
         type="button"
+        ref={toggleRef}
         className="o2m-cols-toggle"
         aria-label={t('Optional columns')}
-        aria-expanded={colsOpen}
+        aria-expanded={Boolean(colsOpen)}
         aria-haspopup="menu"
-        onClick={() => setColsOpen((o) => !o)}
+        onClick={toggleMenu}
       >⋯</button>
       {colsOpen && (
-        <div className="o2m-cols-dropdown" role="menu" onKeyDown={menuKeys}>
+        <div className="o2m-cols-dropdown" role="menu" ref={dropdownRef} style={colsOpen} onKeyDown={menuKeys}>
           {items.map(({ key, label, defaultVisible = false }) => {
             const checked = optionalState[key] ?? defaultVisible;
             return (

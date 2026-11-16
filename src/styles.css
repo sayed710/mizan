@@ -430,6 +430,8 @@ html[dir='rtl'] .toggle-switch:checked::before { transform: translateX(-14px); }
 .kanban .load-more { width: 100%; margin-top: 4px; }
 
 /* Two-pane bank reconciliation widget */
+.panel.bank-reconcile-left, .panel.bank-reconcile-right { padding-inline: 16px; }
+.panel.bank-reconcile-left h2, .panel.bank-reconcile-right h2 { margin: 0 0 10px; }
 .bank-reconcile-layout { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(360px, 1.4fr); gap: 16px; align-items: start; margin-top: 12px; }
 .bank-reconcile-lines { display: flex; flex-direction: column; gap: 8px; }
 .bank-reconcile-line-item { text-align: start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
