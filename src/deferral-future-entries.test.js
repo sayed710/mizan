@@ -488,7 +488,7 @@ test('editing a future line amount on a running schedule rejected through ORM wr
   // ORM write rejected:
   assert.throws(
     () => write(db, 'account.deferral', sched.id, { board: tamperedBoard }),
-    /Recognition entry amount does not match board line amount/,
+    /Recognition line amounts cannot be changed on an active schedule/,
   );
 
   // applyDiff rejected:
@@ -501,7 +501,7 @@ test('editing a future line amount on a running schedule rejected through ORM wr
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
-    /Recognition entry amount does not match board line amount/,
+    /Recognition line amounts cannot be changed on an active schedule/,
   );
 });
 
@@ -517,13 +517,13 @@ test('editing a posted line rejected through ORM write and applyDiff', (t) => {
   const tamperedPostedDate = sched.board.map((l, i) => (i === 0 ? { ...l, date: '2026-10-15' } : l));
   assert.throws(
     () => write(db, 'account.deferral', sched.id, { board: tamperedPostedDate }),
-    /Posted recognition lines cannot be modified or removed/,
+    /Recognition line dates cannot be changed on an active schedule/,
   );
 
   const tamperedPostedAmount = sched.board.map((l, i) => (i === 0 ? { ...l, amount: 50 } : l));
   assert.throws(
     () => write(db, 'account.deferral', sched.id, { board: tamperedPostedAmount }),
-    /Recognition entry amount does not match board line amount|Posted recognition lines cannot be modified or removed/,
+    /Posted recognition lines cannot be modified or removed/,
   );
 
   // applyDiff rejected:
@@ -536,7 +536,7 @@ test('editing a posted line rejected through ORM write and applyDiff', (t) => {
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
-    /Posted recognition lines cannot be modified or removed/,
+    /Recognition line dates cannot be changed on an active schedule/,
   );
 });
 
@@ -552,7 +552,7 @@ test('deleting a line on an active schedule rejected through ORM write and apply
   // ORM write rejected:
   assert.throws(
     () => write(db, 'account.deferral', sched.id, { board: deletedBoard }),
-    /Recognition lines cannot be removed from an active schedule/,
+    /Recognition lines cannot be added or removed from an active schedule/,
   );
 
   // applyDiff rejected:
@@ -565,7 +565,7 @@ test('deleting a line on an active schedule rejected through ORM write and apply
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, deletedDb), { author: 'Admin', isAdmin: true }),
-    /Recognition lines cannot be removed from an active schedule/,
+    /Recognition lines cannot be added or removed from an active schedule/,
   );
 });
 
@@ -608,5 +608,533 @@ test('postEntry rejects unknown state value', () => {
   assert.throws(
     () => postEntry(db, { journal: 'MISC', state: 'unknown', lines: [] }),
     /Entry state must be posted or draft/,
+  );
+});
+
+test('appending a due line on an active schedule rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const billDraft = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(billDraft.db, billDraft.id);
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
+
+  const appendedBoard = [...sched.board, { date: '2027-12-31', amount: 100, posted: false, move_id: null }];
+
+  assert.throws(
+    () => write(db, 'account.deferral', sched.id, { board: appendedBoard }),
+    /Recognition lines cannot be added or removed from an active schedule/,
+  );
+
+  const appendedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) => (d.id === sched.id ? { ...d, board: appendedBoard } : d)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, appendedDb), { author: 'Admin', isAdmin: true }),
+    /Recognition lines cannot be added or removed from an active schedule/,
+  );
+});
+
+test('changing an unposted line date on an active schedule rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const billDraft = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(billDraft.db, billDraft.id);
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
+
+  const tamperedDateBoard = sched.board.map((l, i) => (i === 5 ? { ...l, date: '2027-05-15' } : l));
+
+  assert.throws(
+    () => write(db, 'account.deferral', sched.id, { board: tamperedDateBoard }),
+    /Recognition line dates cannot be changed on an active schedule/,
+  );
+
+  const tamperedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) => (d.id === sched.id ? { ...d, board: tamperedDateBoard } : d)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+    /Recognition line dates cannot be changed on an active schedule/,
+  );
+});
+
+test('relinking a line on an active schedule rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const billDraft = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(billDraft.db, billDraft.id);
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
+
+  const relinkedBoard = sched.board.map((l, i) => (i === 5 ? { ...l, move_id: sched.board[0].move_id } : l));
+
+  assert.throws(
+    () => write(db, 'account.deferral', sched.id, { board: relinkedBoard }),
+    /Recognition lines cannot be relinked to another entry/,
+  );
+
+  const relinkedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) => (d.id === sched.id ? { ...d, board: relinkedBoard } : d)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, relinkedDb), { author: 'Admin', isAdmin: true }),
+    /Recognition lines cannot be relinked to another entry/,
+  );
+});
+
+test('reverting credit note after rescaled draft auto-posts reverses interim move and restores recognition without rewriting posted move', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const billDraft = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(billDraft.db, billDraft.id);
+
+  const p = create(db, 'account.payment', {
+    partner_id: 2,
+    partner_type: 'supplier',
+    payment_type: 'outbound',
+    amount: 1200,
+    date: '2026-11-16',
+  });
+  db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = write(db, 'account.move', billDraft.id, { amount_paid: 1200 });
+
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
+  assert.equal(sched.board.length, 12);
+  assert.equal(sched.board[0].amount, 100);
+
+  const cn = creditNote(db, read(db, 'account.move', billDraft.id), { date: '2026-11-20' });
+  const cnId = cn.credit_note_id ?? cn.id;
+  const cnDraft = read(cn.db, 'account.move', cnId);
+  const cnWithPartial = write(cn.db, 'account.move', cnId, {
+    invoice_line_ids: [{ ...cnDraft.invoice_line_ids[0], price_unit: 300 }],
+  });
+  db = postMove(cnWithPartial, cnId);
+
+  let updatedSched = read(db, 'account.deferral', sched.id);
+  assert.equal(updatedSched.board[0].amount, 75);
+  const rescaledMoveId = updatedSched.board[0].move_id;
+  assert.equal(read(db, 'account.move', rescaledMoveId).state, 'draft');
+
+  t.mock.timers.setTime(new Date('2026-12-31T12:00:00Z').getTime());
+  db = postAutoPostMoves(db, '2026-12-31');
+
+  const moveM1 = read(db, 'account.move', rescaledMoveId);
+  assert.equal(moveM1.state, 'posted');
+  const moveM1Lines = JSON.stringify(moveM1.line_ids);
+
+  const prevDb = db;
+  db = write(db, 'account.move', cnId, { state: 'draft' });
+
+  const serverDb = applyDiff(prevDb, diffDb(prevDb, db), { author: 'Admin', isAdmin: true });
+  assert.ok(serverDb);
+
+  const moveM1After = read(db, 'account.move', rescaledMoveId);
+  assert.equal(moveM1After.state, 'posted', 'posted move is not rewritten to draft');
+  assert.equal(JSON.stringify(moveM1After.line_ids), moveM1Lines, 'posted move lines are untouched');
+
+  const moves = search(db, 'account.move');
+  const reversalMove = moves.find((m) => m.reversed_entry_id === moveM1.id);
+  assert.ok(reversalMove, 'reversal move exists');
+  assert.equal(reversalMove.state, 'posted');
+
+  const finalSched = read(db, 'account.deferral', sched.id);
+  assert.equal(finalSched.board[0].amount, 100);
+  assert.equal(finalSched.board[0].posted, true);
+  assert.notEqual(finalSched.board[0].move_id, rescaledMoveId, 'board points to fresh move');
+
+  const freshMove = read(db, 'account.move', finalSched.board[0].move_id);
+  assert.equal(freshMove.state, 'posted');
+  const freshMoveDebit = (freshMove.line_ids ?? []).reduce((sum, l) => sum + (Number(l.debit) || 0), 0);
+  assert.equal(freshMoveDebit, 100);
+
+  const expAccount = accountId(db, '600000');
+  const month1Entries = [moveM1After, reversalMove, freshMove];
+  const netMonth1 = month1Entries.reduce((net, m) => {
+    const line = m.line_ids.find((l) => l.account_id === expAccount);
+    return net + ((Number(line?.debit) || 0) - (Number(line?.credit) || 0));
+  }, 0);
+  assert.equal(netMonth1, 100, 'net recognition for Month 1 is exactly 100');
+
+  const allDeferralMoves = moves.filter((m) => m.ref?.startsWith('Deferral of') || m.ref?.startsWith('Reset of') || m.reversed_entry_id === moveM1.id);
+  const totalNet = allDeferralMoves.reduce((net, m) => {
+    const line = m.line_ids.find((l) => l.account_id === expAccount);
+    return net + ((Number(line?.debit) || 0) - (Number(line?.credit) || 0));
+  }, 0);
+  assert.equal(totalNet, 1200, 'total net recognition across all entries is 1200');
+
+  assert.equal(finalSched.state, 'running');
+});
+
+test('credit note reset after a restored draft entry became due posts it and keeps schedule state consistent', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const billDraft = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(billDraft.db, billDraft.id);
+
+  const p = create(db, 'account.payment', {
+    partner_id: 2,
+    partner_type: 'supplier',
+    payment_type: 'outbound',
+    amount: 1200,
+    date: '2026-11-16',
+  });
+  db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = write(db, 'account.move', billDraft.id, { amount_paid: 1200 });
+
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
+
+  const cn = creditNote(db, read(db, 'account.move', billDraft.id), { date: '2026-11-20' });
+  const cnId = cn.credit_note_id ?? cn.id;
+  const cnDraft = read(cn.db, 'account.move', cnId);
+  const cnWithPartial = write(cn.db, 'account.move', cnId, {
+    invoice_line_ids: [{ ...cnDraft.invoice_line_ids[0], price_unit: 300 }],
+  });
+  db = postMove(cnWithPartial, cnId);
+
+  // Advance time to 2026-12-31 WITHOUT running the auto-post runner
+  t.mock.timers.setTime(new Date('2026-12-31T12:00:00Z').getTime());
+
+  const schedBeforeReset = read(db, 'account.deferral', sched.id);
+  const m1Before = read(db, 'account.move', schedBeforeReset.board[0].move_id);
+  assert.equal(m1Before.state, 'draft');
+
+  const prevDb = db;
+  db = write(db, 'account.move', cnId, { state: 'draft' });
+
+  const serverDb = applyDiff(prevDb, diffDb(prevDb, db), { author: 'Admin', isAdmin: true });
+  assert.ok(serverDb);
+
+  const finalSched = read(db, 'account.deferral', sched.id);
+  assert.equal(finalSched.board[0].amount, 100);
+  assert.equal(finalSched.board[0].posted, true, 'due restored entry is posted on reset');
+
+  const m1After = read(db, 'account.move', finalSched.board[0].move_id);
+  assert.equal(m1After.state, 'posted', 'linked entry is posted');
+  const m1Debit = (m1After.line_ids ?? []).reduce((sum, l) => sum + (Number(l.debit) || 0), 0);
+  assert.equal(m1Debit, 100);
+
+  for (let i = 1; i < 12; i++) {
+    assert.equal(finalSched.board[i].posted, false);
+    const m = read(db, 'account.move', finalSched.board[i].move_id);
+    assert.equal(m.state, 'draft');
+    assert.equal(m.auto_post, 'at_date');
+  }
+
+  assert.equal(finalSched.state, 'running');
+});
+
+test('appending a fake adjustment with unposted credit note rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const bill = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(bill.db, bill.id);
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
+
+  // Draft credit note (not posted)
+  const cn = creditNote(db, read(db, 'account.move', bill.id), { date: '2026-11-20' });
+  const cnId = cn.credit_note_id ?? cn.id;
+  db = cn.db;
+
+  const fakeAdj = {
+    note_id: cnId,
+    board_before: sched.board,
+    state_before: sched.state,
+    move_ids: [],
+  };
+  const rescaledBoard = sched.board.map((l) => ({ ...l, amount: 75 }));
+
+  assert.throws(
+    () => write(db, 'account.deferral', sched.id, {
+      board: rescaledBoard,
+      credit_adjustments: [...(sched.credit_adjustments ?? []), fakeAdj],
+    }),
+    /Referenced credit note must exist and be posted/,
+  );
+
+  const tamperedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) =>
+        d.id === sched.id ? { ...d, board: rescaledBoard, credit_adjustments: [...(sched.credit_adjustments ?? []), fakeAdj] } : d
+      ),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+    /Referenced credit note must exist and be posted/,
+  );
+});
+
+test('appending a fake adjustment with wrong source credit note rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const bill1 = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(bill1.db, bill1.id);
+  const sched1 = search(db, 'account.deferral').find((d) => d.source_move_id === bill1.id);
+
+  // Bill 2 and its credit note
+  const bill2 = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200, lineName: 'Other Service' });
+  db = postMove(bill2.db, bill2.id);
+  const cn2 = creditNote(db, read(db, 'account.move', bill2.id), { date: '2026-11-20' });
+  const cn2Id = cn2.credit_note_id ?? cn2.id;
+  db = postMove(cn2.db, cn2Id);
+
+  const fakeAdj = {
+    note_id: cn2Id,
+    board_before: sched1.board,
+    state_before: sched1.state,
+    move_ids: [],
+  };
+  const rescaledBoard = sched1.board.map((l) => ({ ...l, amount: 75 }));
+
+  assert.throws(
+    () => write(db, 'account.deferral', sched1.id, {
+      board: rescaledBoard,
+      credit_adjustments: [...(sched1.credit_adjustments ?? []), fakeAdj],
+    }),
+    /Referenced credit note must reverse the source document of this schedule/,
+  );
+
+  const tamperedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) =>
+        d.id === sched1.id ? { ...d, board: rescaledBoard, credit_adjustments: [...(sched1.credit_adjustments ?? []), fakeAdj] } : d
+      ),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+    /Referenced credit note must reverse the source document of this schedule/,
+  );
+});
+
+test('appending a duplicate credit adjustment rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const bill = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(bill.db, bill.id);
+
+  // Pay bill
+  const p = create(db, 'account.payment', {
+    partner_id: 2,
+    partner_type: 'supplier',
+    payment_type: 'outbound',
+    amount: 1200,
+    date: '2026-11-16',
+  });
+  db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
+
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
+
+  // Post real credit note
+  const cn = creditNote(db, read(db, 'account.move', bill.id), { date: '2026-11-20' });
+  const cnId = cn.credit_note_id ?? cn.id;
+  const cnDraft = read(cn.db, 'account.move', cnId);
+  const cnWithPartial = write(cn.db, 'account.move', cnId, {
+    invoice_line_ids: [{ ...cnDraft.invoice_line_ids[0], price_unit: 300 }],
+  });
+  db = postMove(cnWithPartial, cnId);
+
+  const updatedSched = read(db, 'account.deferral', sched.id);
+  assert.equal((updatedSched.credit_adjustments ?? []).length, 1);
+
+  // Duplicate adjustment with same note_id
+  const duplicateAdj = {
+    note_id: cnId,
+    board_before: updatedSched.board,
+    state_before: updatedSched.state,
+    move_ids: [],
+  };
+  const furtherRescaled = updatedSched.board.map((l) => ({ ...l, amount: 50 }));
+
+  assert.throws(
+    () => write(db, 'account.deferral', sched.id, {
+      board: furtherRescaled,
+      credit_adjustments: [...updatedSched.credit_adjustments, duplicateAdj],
+    }),
+    /Credit note is already referenced by an adjustment on this schedule/,
+  );
+
+  const tamperedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) =>
+        d.id === sched.id ? { ...d, board: furtherRescaled, credit_adjustments: [...updatedSched.credit_adjustments, duplicateAdj] } : d
+      ),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+    /Credit note is already referenced by an adjustment on this schedule/,
+  );
+});
+
+test('linking an unlinked line to another schedules entry rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const bill1 = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(bill1.db, bill1.id);
+  const sched1 = search(db, 'account.deferral').find((d) => d.source_move_id === bill1.id);
+  const move1 = sched1.board[0].move_id;
+
+  // Create manual schedule with unlinked line
+  const manCreated = create(db, 'account.deferral', {
+    name: 'Manual Sched',
+    kind: 'expense',
+    amount: 100,
+    start_date: '2026-12-01',
+    end_date: '2026-12-31',
+    months: 1,
+    company_id: 1,
+    deferred_account_id: accountId(db, '132000'),
+    recognition_account_id: accountId(db, '600000'),
+    board: [{ date: '2026-12-31', amount: 100, posted: false, move_id: null }],
+    state: 'running',
+  });
+  db = manCreated.db;
+  const manId = manCreated.id;
+
+  // Attempt to link manSched line to bill1's move
+  const linkedBoard = [{ date: '2026-12-31', amount: 100, posted: false, move_id: move1 }];
+
+  assert.throws(
+    () => write(db, 'account.deferral', manId, { board: linkedBoard }),
+    /Recognition entry is already referenced by another recognition line/,
+  );
+
+  const tamperedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) =>
+        d.id === manId ? { ...d, board: linkedBoard } : d
+      ),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+    /Recognition entry is already referenced by another recognition line/,
+  );
+});
+
+test('linking an unlinked line to an unrelated entry with same total rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  // Unrelated entry with total 100
+  const unrelated = postEntry(db, {
+    journal: 'MISC',
+    date: '2026-12-31',
+    lines: [
+      { account_id: accountId(db, '620000'), debit: 100 },
+      { account_id: accountId(db, '230000'), credit: 100 },
+    ],
+  });
+  db = unrelated.db;
+  const unrelatedId = unrelated.id;
+
+  const manCreated = create(db, 'account.deferral', {
+    name: 'Manual Sched',
+    kind: 'expense',
+    amount: 100,
+    start_date: '2026-12-01',
+    end_date: '2026-12-31',
+    months: 1,
+    company_id: 1,
+    deferred_account_id: accountId(db, '132000'),
+    recognition_account_id: accountId(db, '600000'),
+    board: [{ date: '2026-12-31', amount: 100, posted: false, move_id: null }],
+    state: 'running',
+  });
+  db = manCreated.db;
+  const manId = manCreated.id;
+
+  const linkedBoard = [{ date: '2026-12-31', amount: 100, posted: false, move_id: unrelatedId }];
+
+  assert.throws(
+    () => write(db, 'account.deferral', manId, { board: linkedBoard }),
+    /Linked recognition entry type does not match schedule/,
+  );
+
+  const tamperedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) =>
+        d.id === manId ? { ...d, board: linkedBoard } : d
+      ),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+    /Linked recognition entry type does not match schedule/,
+  );
+});
+
+test('linking an unlinked line to an entry with wrong accounts rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  // Entry with deferred_entry_type: 'expense' but wrong accounts (e.g. 610000 instead of 600000)
+  const wrongAccEntry = postEntry(db, {
+    journal: 'MISC',
+    date: '2026-12-31',
+    deferred_entry_type: 'expense',
+    lines: [
+      { account_id: accountId(db, '610000'), debit: 100 },
+      { account_id: accountId(db, '132000'), credit: 100 },
+    ],
+  });
+  db = wrongAccEntry.db;
+  const wrongAccId = wrongAccEntry.id;
+
+  const manCreated = create(db, 'account.deferral', {
+    name: 'Manual Sched',
+    kind: 'expense',
+    amount: 100,
+    start_date: '2026-12-01',
+    end_date: '2026-12-31',
+    months: 1,
+    company_id: 1,
+    deferred_account_id: accountId(db, '132000'),
+    recognition_account_id: accountId(db, '600000'),
+    board: [{ date: '2026-12-31', amount: 100, posted: false, move_id: null }],
+    state: 'running',
+  });
+  db = manCreated.db;
+  const manId = manCreated.id;
+
+  const linkedBoard = [{ date: '2026-12-31', amount: 100, posted: false, move_id: wrongAccId }];
+
+  assert.throws(
+    () => write(db, 'account.deferral', manId, { board: linkedBoard }),
+    /Linked recognition entry lines do not match expected recognition accounts or amounts/,
+  );
+
+  const tamperedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.deferral': db.records['account.deferral'].map((d) =>
+        d.id === manId ? { ...d, board: linkedBoard } : d
+      ),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+    /Linked recognition entry lines do not match expected recognition accounts or amounts/,
   );
 });
