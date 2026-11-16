@@ -17,7 +17,7 @@ import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLed
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
-import { taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
+import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowColumns, periodsFor } from './reportCompare.js';
@@ -119,6 +119,22 @@ function Ledger({ db, period, analyticAccountIds }) {
 
 const partnerName = (db, id) => read(db, 'res.partner', id)?.name ?? '—';
 
+export function resolveTaxReportTemplate(db, companyId, companies = null) {
+  if (companyId && companyId !== 'all') {
+    const template = resolveTaxReturnTemplate(db, { company_id: Number(companyId) });
+    return TAX_RETURN_TEMPLATES[template]?.mode === 'boxes' ? template : null;
+  }
+  const scopeCompanies = companies ?? (db.settings?.allowed_company_ids
+    ? companiesOf(db).filter((c) => db.settings.allowed_company_ids.includes(c.id))
+    : companiesOf(db));
+  const templates = new Set(scopeCompanies.map((c) => resolveTaxReturnTemplate(db, { company_id: c.id })));
+  if (templates.size === 1) {
+    const single = [...templates][0];
+    return TAX_RETURN_TEMPLATES[single]?.mode === 'boxes' ? single : null;
+  }
+  return null;
+}
+
 export function TaxReportTable({ db, period, returnRecord = null }) {
   const safeBase = String(returnRecord?.name || 'tax-return').replace(/[^a-zA-Z0-9_-]+/g, '-');
   return (
@@ -137,16 +153,39 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
             <th className="num">{t('Tax')}</th>
           </tr>
         </thead>
-        <Tax db={db} period={period} />
+        <Tax db={db} period={period} variant="generic" />
       </table>
     </div>
   );
 }
 
-function Tax({ db, period }) {
-  const r = taxReport(db, period);
-  const byTax = taxesByTax(db, period);
-  const grids = taxesByGrid(db, period);
+export function Tax({ db, period, companyId = 'all', variant = null }) {
+  const effectiveCompanyId = companyId && companyId !== 'all' ? Number(companyId) : (period?.company_id ?? null);
+  const effectivePeriod = effectiveCompanyId ? { ...period, company_id: effectiveCompanyId } : period;
+  const countryTemplateKey = resolveTaxReportTemplate(db, companyId);
+  const activeVariant = variant ?? (countryTemplateKey ?? 'generic');
+
+  if (activeVariant !== 'generic') {
+    const { boxes } = taxReturnBoxes(db, { ...effectivePeriod, tax_return_template: activeVariant });
+    const templateSpec = TAX_RETURN_TEMPLATES[activeVariant];
+    const payableCode = templateSpec?.boxes?.find((b) => b.kind === 'net_payable')?.code;
+    return (
+      <tbody>
+        {boxes.map((b) => (
+          <tr key={b.code} className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}>
+            <td>{b.code}</td>
+            <td>{t(b.label)}</td>
+            <td className="num">{money(b.base)}</td>
+            <td className="num">{money(b.tax)}</td>
+          </tr>
+        ))}
+      </tbody>
+    );
+  }
+
+  const r = taxReport(db, effectivePeriod);
+  const byTax = taxesByTax(db, effectivePeriod);
+  const grids = taxesByGrid(db, effectivePeriod);
   const side = (key, title) => (
     <>
       <tr className="rep-section"><td>{t(title)}</td><td /><td /></tr>
@@ -474,7 +513,7 @@ const REPORTS = {
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
   valuation: { title: 'Stock Valuation', Body: Valuation, cols: ['On Hand', 'Unit Cost', 'Total Value'] },
   audit: { title: 'Audit Trail', Body: AuditTrail, cols: ['Author', 'Date'] },
-  tax: { title: 'Tax Return', Body: Tax, cols: ['Base', 'Tax'] },
+  tax: { title: 'Tax Report', Body: Tax, cols: ['Base', 'Tax'] },
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
@@ -534,6 +573,20 @@ function ReportPage({ leaf }) {
     : companyDb;
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
+  const countryTemplateKey = leaf.report === 'tax' ? resolveTaxReportTemplate(companyDb, selectedCompany, companies) : null;
+  const countryTemplate = countryTemplateKey ? TAX_RETURN_TEMPLATES[countryTemplateKey] : null;
+  const [taxVariant, setTaxVariant] = useState(null);
+  const [taxVariantCompany, setTaxVariantCompany] = useState(selectedCompany);
+  if (taxVariantCompany !== selectedCompany) {
+    setTaxVariantCompany(selectedCompany);
+    setTaxVariant(null);
+  }
+  const activeTaxVariant = (taxVariant && (taxVariant === 'generic' || taxVariant === countryTemplateKey))
+    ? taxVariant
+    : (countryTemplateKey ?? 'generic');
+  const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
+  const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : cols;
+  const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
@@ -599,8 +652,17 @@ function ReportPage({ leaf }) {
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
-        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
           <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
+        )}
+        {leaf.report === 'tax' && countryTemplate && (
+          <label className="inline-select">
+            {t('Variant')}
+            <select aria-label={t('Variant')} value={activeTaxVariant} onChange={(e) => setTaxVariant(e.target.value)}>
+              <option value={countryTemplateKey}>{t(countryTemplate.label)}</option>
+              <option value="generic">{t('Generic')}</option>
+            </select>
+          </label>
         )}
         {showAnalyticFilter && analyticAccounts.length > 0 && (
           <label className="inline-select">
@@ -643,8 +705,8 @@ function ReportPage({ leaf }) {
       </div>
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
-          <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} />}
+          <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} />}
         </table>
       </div>
     </main>
