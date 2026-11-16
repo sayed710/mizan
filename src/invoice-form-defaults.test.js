@@ -7,9 +7,9 @@ import { renderToStaticMarkup } from 'react-dom/server';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 const { seed } = await import('./seed.js');
-const { create, read, write } = await import('./orm.js');
+const { create, read, search, write } = await import('./orm.js');
 const { models } = await import('./models/index.js');
-const { newDefaults } = await import('./views/formDefaults.js');
+const { changeFormValue, newDefaults } = await import('./views/formDefaults.js');
 const { postMove } = await import('./models/accounting.js');
 const { FieldInput, display } = await import('./ui.jsx');
 const { FormView } = await import('./views/FormView.jsx');
@@ -234,7 +234,12 @@ test('4b. Tax-use validation: legacy posted invoice with purchase tax can be pai
       ...db.records,
       'account.move': db.records['account.move'].map((m) => (m.id === inv.id ? {
         ...m,
-        invoice_line_ids: [{ ...m.invoice_line_ids[0], tax_id: purchTax.id }],
+        invoice_line_ids: [{
+          ...m.invoice_line_ids[0],
+          tax_id: purchTax.id,
+          tax_ids: [purchTax.id],
+          tax_breakdown: [{ tax_id: purchTax.id }],
+        }],
       } : m)),
     },
   };
@@ -249,12 +254,20 @@ test('4b. Tax-use validation: legacy posted invoice with purchase tax can be pai
   });
   assert.ok(payResult.db, 'Payment on legacy invoice with purchase tax succeeds');
 
+  // Verify legacy payment diff can be synced via diffDb + applyDiff
+  const payDiff = diffDb(db, payResult.db);
+  assert.doesNotThrow(() => applyDiff(db, payDiff, { author: 'test', isAdmin: true }), 'Syncing payment on legacy invoice with purchase tax succeeds');
+
   // 2. Reset to draft succeeds
   const resetBtn = models['account.move'].form.buttons.find((b) => b.label === 'Reset to Draft');
   const resetDb = resetBtn.run(db, legacyInv).db;
   assert.equal(read(resetDb, 'account.move', legacyInv.id).state, 'draft', 'Reset to draft on legacy invoice succeeds');
 
-  // 3. Adding a new line with wrong-use tax via ORM write is rejected
+  // Verify legacy reset diff can be synced via diffDb + applyDiff
+  const resetDiff = diffDb(db, resetDb);
+  assert.doesNotThrow(() => applyDiff(db, resetDiff, { author: 'test', isAdmin: true }), 'Syncing reset to draft on legacy invoice with purchase tax succeeds');
+
+  // 3. Adding a new line with wrong-use tax via ORM write is rejected (tax_id, tax_ids, and tax_breakdown)
   assert.throws(
     () => {
       write(resetDb, 'account.move', legacyInv.id, {
@@ -267,12 +280,38 @@ test('4b. Tax-use validation: legacy posted invoice with purchase tax can be pai
     /Customer invoices and credit notes only accept sale taxes/i,
   );
 
-  // 4. Changing an existing line's tax_id to a wrong-use tax via ORM write is rejected
+  assert.throws(
+    () => {
+      write(resetDb, 'account.move', legacyInv.id, {
+        invoice_line_ids: [
+          ...legacyInv.invoice_line_ids,
+          { line_id: 'new-line-multi', product_id: 1, qty: 1, price_unit: 50, tax_ids: [purchTax.id] },
+        ],
+      });
+    },
+    /Customer invoices and credit notes only accept sale taxes/i,
+  );
+
+  assert.throws(
+    () => {
+      write(resetDb, 'account.move', legacyInv.id, {
+        invoice_line_ids: [
+          ...legacyInv.invoice_line_ids,
+          { line_id: 'new-line-bd', product_id: 1, qty: 1, price_unit: 50, tax_breakdown: [{ tax_id: purchTax.id }] },
+        ],
+      });
+    },
+    /Customer invoices and credit notes only accept sale taxes/i,
+  );
+
+  // 4. Changing an existing line's tax to a wrong-use tax via ORM write is rejected
   const { db: dbValid, id: validId } = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: 1,
-    invoice_line_ids: [{ line_id: 'val-line-1', product_id: 1, qty: 1, price_unit: 100, tax_id: saleTax.id }],
+    invoice_line_ids: [{ line_id: 'val-line-1', product_id: 1, qty: 1, price_unit: 100, tax_id: saleTax.id, tax_ids: [saleTax.id] }],
   });
+
+  // via tax_id
   assert.throws(
     () => {
       write(dbValid, 'account.move', validId, {
@@ -282,26 +321,133 @@ test('4b. Tax-use validation: legacy posted invoice with purchase tax can be pai
     /Customer invoices and credit notes only accept sale taxes/i,
   );
 
-  // 5. diffDb + applyDiff rejects wrong-use tax
-  const mutatedDb = {
+  // via tax_ids
+  assert.throws(
+    () => {
+      write(dbValid, 'account.move', validId, {
+        invoice_line_ids: [{ line_id: 'val-line-1', product_id: 1, qty: 1, price_unit: 100, tax_ids: [saleTax.id, purchTax.id] }],
+      });
+    },
+    /Customer invoices and credit notes only accept sale taxes/i,
+  );
+
+  // via tax_breakdown
+  assert.throws(
+    () => {
+      write(dbValid, 'account.move', validId, {
+        invoice_line_ids: [{ line_id: 'val-line-1', product_id: 1, qty: 1, price_unit: 100, tax_breakdown: [{ tax_id: purchTax.id }] }],
+      });
+    },
+    /Customer invoices and credit notes only accept sale taxes/i,
+  );
+
+  // 5. diffDb + applyDiff rejects wrong-use tax (via tax_ids and tax_breakdown)
+  const mutatedDbTaxIds = {
     ...dbValid,
     records: {
       ...dbValid.records,
       'account.move': dbValid.records['account.move'].map((m) => (m.id === validId ? {
         ...m,
-        invoice_line_ids: [{ line_id: 'val-line-1', product_id: 1, qty: 1, price_unit: 100, tax_id: purchTax.id }],
+        invoice_line_ids: [{ line_id: 'val-line-1', product_id: 1, qty: 1, price_unit: 100, tax_ids: [purchTax.id] }],
       } : m)),
     },
   };
-  const diff = diffDb(dbValid, mutatedDb);
   assert.throws(
-    () => applyDiff(dbValid, diff, { author: 'test', isAdmin: true }),
+    () => applyDiff(dbValid, diffDb(dbValid, mutatedDbTaxIds), { author: 'test', isAdmin: true }),
     /Customer invoices and credit notes only accept sale taxes/i,
   );
+
+  const mutatedDbBreakdown = {
+    ...dbValid,
+    records: {
+      ...dbValid.records,
+      'account.move': dbValid.records['account.move'].map((m) => (m.id === validId ? {
+        ...m,
+        invoice_line_ids: [{ line_id: 'val-line-1', product_id: 1, qty: 1, price_unit: 100, tax_breakdown: [{ tax_id: purchTax.id }] }],
+      } : m)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(dbValid, diffDb(dbValid, mutatedDbBreakdown), { author: 'test', isAdmin: true }),
+    /Customer invoices and credit notes only accept sale taxes/i,
+  );
+
+  // 6. Vendor bill checks: rejects sale taxes via tax_ids and tax_breakdown; legacy bills stay payable and resettable
+  const { db: dbBill, id: billId } = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 1,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ line_id: 'bill-line-1', product_id: 1, qty: 1, price_unit: 100, tax_id: purchTax.id }],
+  });
+  // via tax_ids
+  assert.throws(
+    () => write(dbBill, 'account.move', billId, {
+      invoice_line_ids: [{ line_id: 'bill-line-1', product_id: 1, qty: 1, price_unit: 100, tax_ids: [saleTax.id] }],
+    }),
+    /Vendor bills and refunds only accept purchase taxes/i,
+  );
+  // via tax_breakdown
+  assert.throws(
+    () => write(dbBill, 'account.move', billId, {
+      invoice_line_ids: [{ line_id: 'bill-line-1', product_id: 1, qty: 1, price_unit: 100, tax_breakdown: [{ tax_id: saleTax.id }] }],
+    }),
+    /Vendor bills and refunds only accept purchase taxes/i,
+  );
+  // via diffDb + applyDiff
+  const mutatedBillDb = {
+    ...dbBill,
+    records: {
+      ...dbBill.records,
+      'account.move': dbBill.records['account.move'].map((m) => (m.id === billId ? {
+        ...m,
+        invoice_line_ids: [{ line_id: 'bill-line-1', product_id: 1, qty: 1, price_unit: 100, tax_ids: [saleTax.id] }],
+      } : m)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(dbBill, diffDb(dbBill, mutatedBillDb), { author: 'test', isAdmin: true }),
+    /Vendor bills and refunds only accept purchase taxes/i,
+  );
+
+  // Legacy vendor bill with sale taxes on tax_ids / tax_breakdown can still be paid and reset
+  const postedBillDb = postMove(dbBill, billId);
+  const legacyBillDb = {
+    ...postedBillDb,
+    records: {
+      ...postedBillDb.records,
+      'account.move': postedBillDb.records['account.move'].map((m) => (m.id === billId ? {
+        ...m,
+        invoice_line_ids: [{
+          ...m.invoice_line_ids[0],
+          tax_id: saleTax.id,
+          tax_ids: [saleTax.id],
+          tax_breakdown: [{ tax_id: saleTax.id }],
+        }],
+      } : m)),
+    },
+  };
+  const legacyBill = read(legacyBillDb, 'account.move', billId);
+  const billPayResult = regBtn.run(legacyBillDb, legacyBill, {
+    amount: '114',
+    date: '2026-01-05',
+    journal_id: 3,
+  });
+  assert.ok(billPayResult.db, 'Payment on legacy bill with sale tax succeeds');
+  assert.doesNotThrow(() => applyDiff(legacyBillDb, diffDb(legacyBillDb, billPayResult.db), { author: 'test', isAdmin: true }), 'Syncing payment on legacy bill succeeds');
+  const billResetDb = resetBtn.run(legacyBillDb, legacyBill).db;
+  assert.equal(read(billResetDb, 'account.move', legacyBill.id).state, 'draft', 'Reset to draft on legacy bill succeeds');
+  assert.doesNotThrow(() => applyDiff(legacyBillDb, diffDb(legacyBillDb, billResetDb), { author: 'test', isAdmin: true }), 'Syncing reset on legacy bill succeeds');
 });
 
-test('5. Readonly due date row: in readonly mode never shows "or" separator', async () => {
+test('5. Readonly due date row: in readonly mode renders both populated fields without "or"; edit mode unchanged', async () => {
   let db = seed();
+  const termRes = create(db, 'account.payment.term', {
+    name: '30 Days Net',
+    line_ids: [{ value: 'balance', value_amount: 0, days: 30, end_of_month: false }],
+  });
+  db = termRes.db;
+  const term = read(db, 'account.payment.term', termRes.id);
+
   // Create a posted invoice without due date or payment term
   const { db: dbWithInv, id: invNoDueId } = create(db, 'account.move', {
     name: 'INV/2026/00001',
@@ -313,8 +459,6 @@ test('5. Readonly due date row: in readonly mode never shows "or" separator', as
     company_id: 1,
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax_id: null, tax: 0 }],
   });
-  // Post the invoice with no payment term and no due date
-  // (In current unpatched code, this leaves invoice_date_due undefined)
   const postedDb = postMove(dbWithInv, invNoDueId);
   const dbWithoutDue = {
     ...postedDb,
@@ -333,27 +477,66 @@ test('5. Readonly due date row: in readonly mode never shows "or" separator', as
     }),
   );
 
-  // Must not contain stray "or" in due date field-pair
+  // 1. Posted invoice without due date or term: no stray "or"
   assert.doesNotMatch(html, /<span class="field-join"[^>]*>\s*or\s*<\/span>/, 'No "or" separator on posted invoice without due date');
 
-  // Posted invoice with due date shows due date and no "or"
-  const dbWithDue = {
+  // 2. Posted invoice with due date only: shows due date, does not show term, no "or"
+  const dbWithDueOnly = {
     ...postedDb,
     records: {
       ...postedDb.records,
       'account.move': postedDb.records['account.move'].map((m) => (m.id === invNoDueId ? { ...m, invoice_date_due: '2026-11-25', invoice_payment_term_id: null } : m)),
     },
   };
-  await commit(dbWithDue);
-  const htmlWithDue = renderToStaticMarkup(
+  await commit(dbWithDueOnly);
+  const htmlWithDueOnly = renderToStaticMarkup(
     React.createElement(FormView, {
       id: invNoDueId,
       leaf: { model: 'account.move', defaults: { move_type: 'out_invoice' }, label: 'Invoices' },
       params: new URLSearchParams(),
     }),
   );
-  assert.doesNotMatch(htmlWithDue, /<span class="field-join"[^>]*>\s*or\s*<\/span>/, 'No "or" separator when due date is present');
-  assert.match(htmlWithDue, /Nov 25, 2026|2026-11-25|11\/25\/2026/, 'Shows due date in readonly mode');
+  assert.doesNotMatch(htmlWithDueOnly, /<span class="field-join"[^>]*>\s*or\s*<\/span>/, 'No "or" separator when only due date is present');
+  assert.match(htmlWithDueOnly, /Nov 25, 2026|2026-11-25|11\/25\/2026/, 'Shows due date in readonly mode');
+  assert.doesNotMatch(htmlWithDueOnly, /30 Days Net/, 'Does not show empty payment term in readonly mode');
+
+  // 3. Posted invoice with BOTH due date and payment term: shows BOTH and no "or"
+  const dbWithBoth = {
+    ...postedDb,
+    records: {
+      ...postedDb.records,
+      'account.move': postedDb.records['account.move'].map((m) => (m.id === invNoDueId ? { ...m, invoice_date_due: '2026-11-25', invoice_payment_term_id: term.id } : m)),
+    },
+  };
+  await commit(dbWithBoth);
+  const htmlWithBoth = renderToStaticMarkup(
+    React.createElement(FormView, {
+      id: invNoDueId,
+      leaf: { model: 'account.move', defaults: { move_type: 'out_invoice' }, label: 'Invoices' },
+      params: new URLSearchParams(),
+    }),
+  );
+  assert.doesNotMatch(htmlWithBoth, /<span class="field-join"[^>]*>\s*or\s*<\/span>/, 'No "or" separator when both due date and term are present');
+  assert.match(htmlWithBoth, /Nov 25, 2026|2026-11-25|11\/25\/2026/, 'Shows due date when both are present');
+  assert.match(htmlWithBoth, /30 Days Net/, 'Shows payment term name when both are present');
+
+  // 4. Draft invoice in edit mode: renders BOTH fields AND the "or" separator
+  const { db: dbDraft, id: draftInvId } = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-11-01',
+    company_id: 1,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax_id: null, tax: 0 }],
+  });
+  await commit(dbDraft);
+  const htmlDraft = renderToStaticMarkup(
+    React.createElement(FormView, {
+      id: draftInvId,
+      leaf: { model: 'account.move', defaults: { move_type: 'out_invoice' }, label: 'Invoices' },
+      params: new URLSearchParams(),
+    }),
+  );
+  assert.match(htmlDraft, /<span class="field-join"[^>]*>\s*or\s*<\/span>/, 'Edit mode renders "or" separator between fields');
 });
 
 test('6. Register Payment dialog: default payment journal and memo stored on payment', () => {
@@ -466,4 +649,159 @@ test('7. Vendors > Checks report shows styled empty-state message when no checks
     if (prevStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = prevStorage;
   }
+});
+
+test('8. Changing invoice date onchange: empty follows, equal follows, typed kept, payment term wins', () => {
+  let db = seed();
+  const termRes = create(db, 'account.payment.term', {
+    name: 'Net 15',
+    line_ids: [{ value: 100, value_type: 'percent', nb_days: 15, delay_type: 'days_after' }],
+  });
+  db = termRes.db;
+  const term15 = read(db, 'account.payment.term', termRes.id);
+
+  // 1. Empty due date follows new invoice date
+  const resEmpty = models['account.move'].onchange(
+    { invoice_date: '2026-11-15', invoice_date_due: null, invoice_payment_term_id: null },
+    'invoice_date',
+    db,
+    { previous: { invoice_date: '2026-11-01', invoice_date_due: null } },
+  );
+  assert.equal(resEmpty.invoice_date_due, '2026-11-15', 'Empty due date follows new invoice date');
+
+  // 2. Due date equal to old invoice date follows new invoice date
+  const resEqual = models['account.move'].onchange(
+    { invoice_date: '2026-11-15', invoice_date_due: '2026-11-01', invoice_payment_term_id: null },
+    'invoice_date',
+    db,
+    { previous: { invoice_date: '2026-11-01', invoice_date_due: '2026-11-01' } },
+  );
+  assert.equal(resEqual.invoice_date_due, '2026-11-15', 'Due date equal to old invoice date follows new invoice date');
+
+  // Also verify through changeFormValue
+  const baseEqual = { invoice_date: '2026-11-01', invoice_date_due: '2026-11-01', invoice_payment_term_id: null };
+  const formEqual = changeFormValue('account.move', baseEqual, {}, 'invoice_date', '2026-11-15', db);
+  assert.equal(formEqual.invoice_date_due, '2026-11-15', 'changeFormValue follows when due date was equal to old invoice date');
+
+  // 3. Typed different due date is kept
+  const resTyped = models['account.move'].onchange(
+    { invoice_date: '2026-11-15', invoice_date_due: '2026-11-25', invoice_payment_term_id: null },
+    'invoice_date',
+    db,
+    { previous: { invoice_date: '2026-11-01', invoice_date_due: '2026-11-25' } },
+  );
+  assert.equal(resTyped.invoice_date_due, undefined, 'Typed different due date is not overwritten by onchange');
+
+  // Also verify through changeFormValue
+  const baseTyped = { invoice_date: '2026-11-01', invoice_date_due: '2026-11-25', invoice_payment_term_id: null };
+  const formTyped = changeFormValue('account.move', baseTyped, {}, 'invoice_date', '2026-11-15', db);
+  assert.equal(formTyped.invoice_date, '2026-11-15');
+  assert.equal(formTyped.invoice_date_due, undefined, 'changeFormValue preserves typed different due date');
+
+  // 4. With a payment term, the term still wins
+  const resTerm = models['account.move'].onchange(
+    { invoice_date: '2026-11-15', invoice_date_due: '2026-11-25', invoice_payment_term_id: term15.id },
+    'invoice_date',
+    db,
+    { previous: { invoice_date: '2026-11-01', invoice_date_due: '2026-11-25' } },
+  );
+  assert.equal(resTerm.invoice_date_due, '2026-11-30', 'Payment term wins over existing due date');
+});
+
+function addCompanyInvoiceJournals(db, companyId, codePrefix = `C${companyId}`) {
+  let next = db;
+  let income = search(next, 'account.account').find((a) => a.company_id === companyId && a.account_type === 'income');
+  if (!income) {
+    const res = create(next, 'account.account', { code: `40${companyId}000`, name: `Income ${companyId}`, account_type: 'income', company_id: companyId });
+    next = res.db;
+    income = read(next, 'account.account', res.id);
+  }
+  let expense = search(next, 'account.account').find((a) => a.company_id === companyId && a.account_type === 'expense');
+  if (!expense) {
+    const res = create(next, 'account.account', { code: `60${companyId}000`, name: `Expense ${companyId}`, account_type: 'expense', company_id: companyId });
+    next = res.db;
+    expense = read(next, 'account.account', res.id);
+  }
+  const saleRes = create(next, 'account.journal', { name: `Sales ${companyId}`, code: `${codePrefix}S`, invoice_sequence_prefix: `${codePrefix}S/`, invoice_sequence_next_number: 1, type: 'sale', company_id: companyId, default_account_id: income.id });
+  const purchRes = create(saleRes.db, 'account.journal', { name: `Purchase ${companyId}`, code: `${codePrefix}P`, invoice_sequence_prefix: `${codePrefix}P/`, invoice_sequence_next_number: 1, type: 'purchase', company_id: companyId, default_account_id: expense.id });
+  const genRes = create(purchRes.db, 'account.journal', { name: `Misc ${companyId}`, code: `${codePrefix}M`, invoice_sequence_prefix: `${codePrefix}M/`, invoice_sequence_next_number: 1, type: 'general', company_id: companyId });
+  return write(genRes.db, 'res.company', companyId, {
+    default_sale_journal_id: saleRes.id,
+    default_purchase_journal_id: purchRes.id,
+    default_general_journal_id: genRes.id,
+    intercompany_journal_id: purchRes.id,
+    account_sale_account_id: income.id,
+    account_expense_account_id: expense.id,
+  });
+}
+
+test('9. Inter-company bill due date: draft without onchange and stale due date both match posted invoice', () => {
+  let db = seed();
+  const co2Partner = create(db, 'res.partner', { name: 'IC Buyer Partner', customer: true, supplier: true, company_id: null });
+  db = co2Partner.db;
+  const co1Partner = create(db, 'res.partner', { name: 'Main Co Vendor Partner', supplier: true, company_id: null });
+  db = co1Partner.db;
+  db = write(db, 'res.company', 1, { partner_id: co1Partner.id });
+  const buyer = createCompany(db, { name: 'IC Buyer Co', partner_id: co2Partner.id, intercompany_rule: 'invoice_bill' });
+  db = addCompanyInvoiceJournals(buyer.db, buyer.id, 'ICB');
+  const buyerExpense = search(db, 'account.account').find((a) => a.company_id === buyer.id && a.account_type === 'expense');
+
+  const termRes = create(db, 'account.payment.term', {
+    name: 'Net 30',
+    line_ids: [{ value: 100, value_type: 'percent', nb_days: 30, delay_type: 'days_after' }],
+  });
+  db = termRes.db;
+  const term30 = read(db, 'account.payment.term', termRes.id);
+
+  const productRes = create(db, 'product', {
+    name: 'IC Item',
+    sale_price: 100,
+    cost: 60,
+    supplier_tax_id: null,
+    purchase_tax: null,
+    property_account_expense_id: buyerExpense.id,
+  });
+  db = productRes.db;
+  const product = read(db, 'product', productRes.id);
+
+  // Case 1: Invoice created without onchange (no invoice_date_due)
+  const { db: dbInv1, id: inv1Id } = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: co2Partner.id,
+    invoice_date: '2026-03-01',
+    invoice_payment_term_id: term30.id,
+    invoice_line_ids: [{ product_id: product.id, name: product.name, qty: 1, price_unit: 100, discount: 0, tax: 0, tax_ids: [] }],
+  });
+  db = postMove(dbInv1, inv1Id);
+  const postedInv1 = read(db, 'account.move', inv1Id);
+  assert.equal(postedInv1.invoice_date_due, '2026-03-31', 'Posted invoice computed due date from term');
+  const bill1 = read(db, 'account.move', postedInv1.intercompany_move_id);
+  assert.ok(bill1, 'Intercompany bill was created');
+  assert.equal(bill1.invoice_date_due, postedInv1.invoice_date_due, 'Intercompany bill has same due date as posted invoice');
+  db = postMove(db, bill1.id);
+  const postedBill1 = read(db, 'account.move', bill1.id);
+  const payable1 = postedBill1.line_ids.find((l) => read(db, 'account.account', l.account_id)?.account_type === 'liability_payable');
+  assert.equal(payable1.date_maturity, postedInv1.invoice_date_due, 'Intercompany bill payable line maturity equals posted invoice due date');
+
+  // Case 2: Invoice created with a stale due date
+  const { db: dbInv2, id: inv2Id } = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: co2Partner.id,
+    invoice_date: '2026-04-01',
+    invoice_payment_term_id: term30.id,
+    invoice_date_due: '2026-04-05', // stale due date (term should compute 2026-05-01)
+    invoice_line_ids: [{ product_id: product.id, name: product.name, qty: 1, price_unit: 100, discount: 0, tax: 0, tax_ids: [] }],
+  });
+  db = postMove(dbInv2, inv2Id);
+  const postedInv2 = read(db, 'account.move', inv2Id);
+  assert.equal(postedInv2.invoice_date_due, '2026-05-01', 'Posted invoice overwritten stale due date from term');
+  const bill2 = read(db, 'account.move', postedInv2.intercompany_move_id);
+  assert.ok(bill2, 'Intercompany bill was created');
+  assert.equal(bill2.invoice_date_due, postedInv2.invoice_date_due, 'Intercompany bill has same due date as posted invoice');
+  db = postMove(db, bill2.id);
+  const postedBill2 = read(db, 'account.move', bill2.id);
+  const payable2 = postedBill2.line_ids.find((l) => read(db, 'account.account', l.account_id)?.account_type === 'liability_payable');
+  assert.equal(payable2.date_maturity, postedInv2.invoice_date_due, 'Intercompany bill payable line maturity equals posted invoice due date');
 });

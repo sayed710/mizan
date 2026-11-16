@@ -105,6 +105,34 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
 export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
 
+/** All tax IDs carried by a line (scalar tax_id, multi tax_ids, and tax_breakdown). */
+export function lineTaxIds(line) {
+  if (!line) return [];
+  const ids = new Set();
+  if (line.tax_id != null && line.tax_id !== '') ids.add(Number(line.tax_id));
+  if (Array.isArray(line.tax_ids)) {
+    for (const id of line.tax_ids) {
+      if (id != null && id !== '') ids.add(Number(id));
+    }
+  }
+  if (Array.isArray(line.tax_breakdown)) {
+    for (const b of line.tax_breakdown) {
+      const id = b?.tax_id;
+      if (id != null && id !== '') ids.add(Number(id));
+    }
+  }
+  return [...ids].filter((id) => Number.isInteger(id) && id > 0);
+}
+
+/** Whether two lines carry the exact same set of tax IDs. */
+export function sameTaxIds(a, b) {
+  const idsA = lineTaxIds(a);
+  const idsB = lineTaxIds(b);
+  if (idsA.length !== idsB.length) return false;
+  const setA = new Set(idsA);
+  return idsB.every((id) => setA.has(id));
+}
+
 /** Whether a tax replacement rule on `tax` maps `taxId` under `fpId`. */
 function taxReplaces(tax, fpId, taxId) {
   const mappings = tax.fiscal_position_mapping_ids ?? [];

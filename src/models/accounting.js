@@ -7,7 +7,7 @@ import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, validateTaxCompany } from './taxes.js';
+import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -686,8 +686,7 @@ export function postMove(db, id) {
   }
   for (const line of r.invoice_line_ids ?? []) {
     if (isSectionOrNote(line)) continue;
-    validateTaxCompany(db, [line.tax_source_id], r.company_id ?? 1);
-    validateTaxCompany(db, [line.tax_id, ...(line.tax_ids ?? []), ...(line.tax_breakdown ?? []).map((tax) => tax.tax_id)], r.company_id ?? 1);
+    validateTaxCompany(db, [line.tax_source_id, ...lineTaxIds(line)], r.company_id ?? 1);
   }
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
@@ -696,12 +695,12 @@ export function postMove(db, id) {
   const name = enteredName ?? sequence.name;
   if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
-  const counterpart = intercompanyBill(db, r);
   const term = r.invoice_payment_term_id ? read(db, 'account.payment.term', r.invoice_payment_term_id) : null;
   const dueDateValue = term
     ? termDue(db, { ...r, invoice_date: r.invoice_date ?? today() }).invoice_date_due
     : (r.invoice_date_due || (r.invoice_date ?? today()));
   const dueUpdate = { invoice_date_due: dueDateValue };
+  const counterpart = intercompanyBill(db, { ...r, invoice_date: r.invoice_date ?? today(), ...dueUpdate });
   const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal, ...dueUpdate }, name);
   const originIds = [r.reversed_entry_id, r.debit_origin_id, r.correction_of_id].filter(Boolean);
   const paymentReferenceUpdate = !r.payment_reference?.trim() && r.move_type === 'out_invoice' && journalRecord.type === 'sale'
@@ -2195,7 +2194,7 @@ export const accountingModels = {
             const line = after.invoice_line_ids[i];
             const key = line.line_id ?? line.id;
             const beforeLine = key != null ? beforeMap.get(String(key)) : beforeMap.get(`idx:${i}`);
-            if (!beforeLine || (line.tax_id ?? null) !== (beforeLine.tax_id ?? null)) {
+            if (!beforeLine || !sameTaxIds(line, beforeLine)) {
               linesToCheck.push(line);
             }
           }
@@ -2203,8 +2202,8 @@ export const accountingModels = {
 
         for (const line of linesToCheck) {
           if (isSectionOrNote(line)) continue;
-          if (line.tax_id) {
-            const tax = read(db, 'account.tax', line.tax_id);
+          for (const taxId of lineTaxIds(line)) {
+            const tax = read(db, 'account.tax', taxId);
             if (tax && tax.type_tax_use && tax.type_tax_use !== expectedUse) {
               return expectedUse === 'sale'
                 ? 'Customer invoices and credit notes only accept sale taxes'
@@ -2238,7 +2237,7 @@ export const accountingModels = {
       return syncInvoicedQty(syncInvoicedQty(db, before), after);
     },
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
-    onchange: (r, key, db) => {
+    onchange: (r, key, db, context = {}) => {
       if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
         const partnerChange = key === 'partner_id';
         const partner = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
@@ -2270,7 +2269,13 @@ export const accountingModels = {
         };
       }
       if (r.move_type === 'entry' && key === 'date') return { invoice_date: r.date };
-      if (key === 'invoice_date') return termDue(db, r, { defaultToDate: true });
+      if (key === 'invoice_date') {
+        if (r.invoice_payment_term_id) return termDue(db, r);
+        const prev = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null);
+        const prevDate = prev?.invoice_date;
+        const shouldFollow = !r.invoice_date_due || Boolean(prevDate && r.invoice_date_due === prevDate);
+        return shouldFollow && r.invoice_date ? { invoice_date_due: r.invoice_date } : {};
+      }
       if (key === 'invoice_payment_term_id') return termDue(db, r);
       return {};
     },

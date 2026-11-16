@@ -100,7 +100,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
     let fieldsToRender = visibleFields;
     if (isRowReadonly && isOrJoin) {
       const populated = visibleFields.filter((f) => current[f] != null && current[f] !== '');
-      fieldsToRender = populated.length ? [populated[0]] : [visibleFields[0]];
+      fieldsToRender = populated.length ? populated : [visibleFields[0]];
     }
     const first = def.fields[fieldsToRender[0]];
     const firstReadonly = lockFor(def, readonly, fieldsToRender[0], current, db) || fieldReadonly(first, current, db);
