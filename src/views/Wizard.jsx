@@ -13,12 +13,12 @@ export const missingFields = (spec, values) => spec.fields
   .filter((f) => f.required && (values[f.name] == null || values[f.name] === '' || (Array.isArray(values[f.name]) && !values[f.name].length)))
   .map((f) => t(f.label));
 
-function WizardField({ db, field, value, values, onChange, id }) {
+function WizardField({ db, field, value, values, onChange, id, disabled = false }) {
   if (field.type === 'many2one' || field.type === 'many2many') {
     const candidates = viewRecords(db, field.relation).filter((r) => !field.domain || field.domain(r));
     if (field.type === 'many2one') {
       return (
-        <select id={id} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
+        <select id={id} value={value ?? ''} disabled={disabled} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="" />
           {candidates.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </select>
@@ -41,18 +41,20 @@ function WizardField({ db, field, value, values, onChange, id }) {
   if (field.type === 'selection') {
     const options = typeof field.options === 'function' ? field.options(db, values) : field.options;
     return (
-      <select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}>
+      <select id={id} value={value ?? ''} disabled={disabled} onChange={(e) => onChange(e.target.value || null)}>
         <option value="" />
         {options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
       </select>
     );
   }
-  return <FieldInput db={db} field={field} value={value} onChange={onChange} id={id} label={t(field.label)} />;
+  return <FieldInput db={db} field={field} value={value} onChange={onChange} id={id} label={t(field.label)} disabled={disabled} />;
 }
 
 export function Wizard({ db, spec, onConfirm, onCancel, error }) {
   const [values, setValues] = useState(() => wizardDefaults(spec));
   const [missing, setMissing] = useState([]);
+  // A read-only wizard shows values without offering a write.
+  const readOnly = !!spec.readOnly;
   const box = useRef(null);
   useEffect(() => {
     const previous = document.activeElement;
@@ -61,6 +63,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
   }, []);
   const submit = (e) => {
     e.preventDefault();
+    if (readOnly) return;
     const empty = missingFields(spec, values);
     setMissing(empty);
     if (!empty.length) onConfirm(values);
@@ -82,7 +85,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
           <div className="field" key={f.name}>
             <label htmlFor={`w-${f.name}`}>{t(f.label)}{f.required && <span className="req" aria-hidden="true">*</span>}</label>
             <div className="field-value">
-              <WizardField db={db} field={f} id={`w-${f.name}`} value={values[f.name]} values={values} onChange={(v) => setValues((s) => {
+              <WizardField db={db} field={f} id={`w-${f.name}`} disabled={readOnly || !!f.disabled} value={values[f.name]} values={values} onChange={(v) => setValues((s) => {
                 const next = { ...s, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) };
                 return { ...next, ...spec.onchange?.(next, f.name, db) };
               })} />
@@ -95,7 +98,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
           <div className="alert" role="alert">{missing.length ? `${t('Fill in')}: ${missing.join(', ')}` : error}</div>
         )}
         <div className="row">
-          <button type="submit" className="btn primary">{t(spec.confirmLabel ?? 'Confirm')}</button>
+          <button type="submit" className="btn primary" disabled={readOnly}>{t(spec.confirmLabel ?? 'Confirm')}</button>
           <button type="button" className="btn" onClick={onCancel}>{t('Cancel')}</button>
         </div>
       </form>
