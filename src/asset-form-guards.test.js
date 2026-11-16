@@ -9,6 +9,8 @@ import { confirmAsset, disposeAsset, hasDueDepreciation, modifyAsset, pauseAsset
 import { postMove } from './models/accounting.js';
 import { newDefaults } from './views/formDefaults.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
+import { applyDiff, diffDb } from './sync.js';
+import { runScheduledJobs } from './models/scheduler.js';
 
 const BASE_ASSET = {
   name: 'Machine Tool',
@@ -75,15 +77,15 @@ test('1. Core depreciation-defining fields are readonly on open assets and serve
   // Server rejects write to core fields on open asset
   assert.throws(
     () => write(db, 'account.asset', open.id, { original_value: 5000 }),
-    /core asset fields|depreciation-defining/i,
+    /inconsistent with asset values/i,
   );
   assert.throws(
     () => write(db, 'account.asset', open.id, { method_number: 10 }),
-    /core asset fields|depreciation-defining/i,
+    /inconsistent with asset duration|inconsistent with asset values/i,
   );
   assert.throws(
     () => write(db, 'account.asset', open.id, { account_asset_id: accountId(db, '151000') + 1 }),
-    /core asset fields|depreciation-defining/i,
+    /core asset fields/i,
   );
 
   // Non-core edits (e.g. name, partner_id) are not blocked by core field guard
@@ -290,10 +292,16 @@ test('8. Running asset with non-general journal can still Post Depreciation, Pau
   });
   db = open.db;
 
-  // Set up a non-general journal (e.g. Bank or Sale) using an internal write
+  // Set up a non-general journal (e.g. Bank or Sale) directly in db.records
   const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
   assert.ok(bankJournal, 'bank journal exists');
-  db = write(db, 'account.asset', open.id, { journal_id: bankJournal.id }, { internal: true });
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.asset': db.records['account.asset'].map((rec) => (rec.id === open.id ? { ...rec, journal_id: bankJournal.id } : rec)),
+    },
+  };
 
   let asset = read(db, 'account.asset', open.id);
   assert.equal(asset.journal_id, bankJournal.id);
@@ -331,4 +339,251 @@ test('8. Running asset with non-general journal can still Post Depreciation, Pau
   asset = read(db, 'account.asset', open.id);
   assert.equal(asset.state, 'close');
   assert.equal(asset.disposal_date, '2026-05-01');
+});
+
+test('9. When current company is not company 1, new asset defaults match current company and confirm succeeds', () => {
+  let db = seed();
+  const company2 = create(db, 'res.company', { name: 'Branch Co' });
+  db = company2.db;
+
+  const misc2 = create(db, 'account.journal', { name: 'Misc Co2', code: 'MISC', type: 'general', company_id: company2.id });
+  db = misc2.db;
+
+  const assetAcc = create(db, 'account.account', { code: '151002', name: 'Fixed Assets Co 2', account_type: 'asset_fixed', company_id: company2.id });
+  db = assetAcc.db;
+  const depAcc = create(db, 'account.account', { code: '152002', name: 'Depreciation Co 2', account_type: 'asset_fixed', company_id: company2.id });
+  db = depAcc.db;
+  const expAcc = create(db, 'account.account', { code: '680002', name: 'Dep Expense Co 2', account_type: 'expense', company_id: company2.id });
+  db = expAcc.db;
+
+  // Set current company to Company 2
+  db = { ...db, settings: { ...db.settings, current_company_id: company2.id } };
+
+  // Create an asset without company_id or journal_id
+  const created = create(db, 'account.asset', {
+    name: 'Co2 Machine',
+    acquisition_date: '2026-06-01',
+    original_value: 6000,
+    salvage_value: 0,
+    method_number: 3,
+    method_period: '12',
+    account_asset_id: assetAcc.id,
+    account_depreciation_id: depAcc.id,
+    account_depreciation_expense_id: expAcc.id,
+  });
+  db = created.db;
+  const asset = read(db, 'account.asset', created.id);
+  assert.equal(asset.company_id, company2.id, 'Asset company must default to currentCompany (Company 2)');
+  assert.equal(asset.journal_id, misc2.id, 'Asset journal must default to Company 2 MISC journal');
+
+  // confirmAsset succeeds without company/journal mismatch error
+  assert.doesNotThrow(() => {
+    db = confirmAsset(db, read(db, 'account.asset', created.id));
+  });
+  assert.equal(read(db, 'account.asset', created.id).state, 'open');
+});
+
+test('10. Post Depreciation transitions open asset with 0 unposted lines to close; button and scheduler behavior', () => {
+  let db = seed();
+  const open = createOpenAsset(db, {
+    acquisition_date: '2026-01-01',
+    original_value: 2000,
+    method_number: 2,
+    method_period: '1',
+  });
+  db = open.db;
+
+  // Post all lines
+  db = postDepreciation(db, read(db, 'account.asset', open.id), '2026-03-01');
+  let asset = read(db, 'account.asset', open.id);
+  assert.equal(asset.state, 'close');
+
+  // Test an open asset whose lines are already posted (e.g. state reset or historical fixture)
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.asset': db.records['account.asset'].map((rec) => (rec.id === open.id ? { ...rec, state: 'open' } : rec)),
+    },
+  };
+  asset = read(db, 'account.asset', open.id);
+  assert.equal(asset.state, 'open');
+  assert.equal(asset.depreciation_ids.filter((l) => !l.posted).length, 0);
+
+  // Form button click: does NOT return 'No depreciation is due yet.'; closes the asset
+  const btn = models['account.asset'].form.buttons.find((b) => b.label === 'Post Depreciation');
+  const initialMoveCount = (db.records['account.move'] ?? []).length;
+  const btnResult = btn.run(db, asset);
+  assert.equal(btnResult.message, undefined, 'Must not notify when 0 unposted lines');
+  const closedAsset = read(btnResult.db, 'account.asset', open.id);
+  assert.equal(closedAsset.state, 'close', 'Form button must close an asset when all lines are posted');
+  assert.equal((btnResult.db.records['account.move'] ?? []).length, initialMoveCount, 'No new moves created');
+
+  // Direct postDepreciation on an open asset with empty board also transitions to close
+  const emptyBoardAsset = create(db, 'account.asset', {
+    ...BASE_ASSET,
+    ...assetAccounts(db),
+    state: 'open',
+    depreciation_ids: [],
+  });
+  db = emptyBoardAsset.db;
+  const closedEmpty = postDepreciation(db, read(db, 'account.asset', emptyBoardAsset.id));
+  assert.equal(read(closedEmpty, 'account.asset', emptyBoardAsset.id).state, 'close');
+
+  // Scheduler closes an open asset whose lines are all posted
+  let schedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.asset': db.records['account.asset'].map((rec) => (rec.id === open.id ? { ...rec, state: 'open' } : rec)),
+    },
+  };
+  schedDb = runScheduledJobs(schedDb, '2026-04-01');
+  assert.equal(read(schedDb, 'account.asset', open.id).state, 'close', 'Scheduler must close asset with all lines posted');
+});
+
+test('11. Structural invariants G1-G5 enforced identically by ORM write and server applyDiff', () => {
+  let db = seed();
+  const open = createOpenAsset(db, {
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  db = open.db;
+  const asset = read(db, 'account.asset', open.id);
+  const revalAccId = accountId(db, '450300');
+
+  // 1. Sell or Dispose diff accepted by applyDiff
+  const disposedDb = disposeAsset(db, asset, { date: '2026-06-01' });
+  const syncedDisposed = applyDiff(db, diffDb(db, disposedDb), { author: 'test', isAdmin: false });
+  assert.equal(read(syncedDisposed, 'account.asset', asset.id).state, 'close');
+  assert.equal(read(syncedDisposed, 'account.asset', asset.id).disposal_date, '2026-06-01');
+
+  // 2. Modify Depreciation diffs accepted by applyDiff
+  // 2a. Value increase (+2400)
+  const modifiedIncrease = modifyAsset(db, asset, {
+    date: '2026-06-15',
+    value_change: 2400,
+    accountId: revalAccId,
+  });
+  const syncedIncrease = applyDiff(db, diffDb(db, modifiedIncrease), { author: 'test', isAdmin: false });
+  assert.equal(read(syncedIncrease, 'account.asset', asset.id).original_value, 14400);
+
+  // 2b. Impairment / value decrease (-1200)
+  const modifiedImpair = modifyAsset(db, asset, {
+    date: '2026-06-15',
+    value_change: -1200,
+  });
+  const syncedImpair = applyDiff(db, diffDb(db, modifiedImpair), { author: 'test', isAdmin: false });
+  assert.equal(read(syncedImpair, 'account.asset', asset.id).original_value, 10800);
+
+  // 2c. Method number change (remaining duration to 6)
+  const modifiedDuration = modifyAsset(db, asset, {
+    date: '2026-06-15',
+    methodNumber: 6,
+  });
+  const syncedDuration = applyDiff(db, diffDb(db, modifiedDuration), { author: 'test', isAdmin: false });
+  const afterDuration = read(syncedDuration, 'account.asset', asset.id);
+  assert.equal(afterDuration.method_number, 6);
+  assert.equal(afterDuration.depreciation_ids.filter((l) => !l.cancelled).length, 6);
+
+  // 3. Post Depreciation, Pause, and Resume diffs accepted by applyDiff
+  const postedDb = postDepreciation(db, asset, '2026-12-31');
+  const syncedPost = applyDiff(db, diffDb(db, postedDb), { author: 'test', isAdmin: false });
+  assert.ok(read(syncedPost, 'account.asset', asset.id).depreciation_ids.filter((l) => l.posted).length > 0);
+
+  const assetAfterPost = read(syncedPost, 'account.asset', asset.id);
+  const pausedDb = pauseAsset(syncedPost, assetAfterPost, '2027-01-01');
+  const syncedPause = applyDiff(syncedPost, diffDb(syncedPost, pausedDb), { author: 'test', isAdmin: false });
+  assert.equal(read(syncedPause, 'account.asset', asset.id).state, 'paused');
+
+  const resumedDb = resumeAsset(syncedPause, read(syncedPause, 'account.asset', asset.id), '2027-01-15');
+  const syncedResume = applyDiff(syncedPause, diffDb(syncedPause, resumedDb), { author: 'test', isAdmin: false });
+  assert.equal(read(syncedResume, 'account.asset', asset.id).state, 'open');
+
+  // 4. Raw write of original_value rejected by write and by applyDiff (G3)
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { original_value: 5000 }),
+    /inconsistent with asset values/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, original_value: 5000 }] } }, { author: 'test', isAdmin: false }),
+    /inconsistent with asset values/i,
+  );
+
+  // 5. Re-drafting an open asset (state: 'draft') rejected by write and by applyDiff (G1)
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { state: 'draft' }),
+    /Cannot reset a confirmed asset to draft/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, state: 'draft' }] } }, { author: 'test', isAdmin: false }),
+    /Cannot reset a confirmed asset to draft/i,
+  );
+
+  // 6. Setting disposal_date on a running asset without moving to 'close' rejected by write and by applyDiff (G4)
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { disposal_date: '2026-05-01' }),
+    /Disposal fields can only be set through Sell or Dispose/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, disposal_date: '2026-05-01' }] } }, { author: 'test', isAdmin: false }),
+    /Disposal fields can only be set through Sell or Dispose/i,
+  );
+
+  // 7. Changing journal_id on an open asset rejected by write and by applyDiff (G2)
+  const anotherJournal = create(db, 'account.journal', { name: 'Other General', code: 'GEN2', type: 'general' });
+  db = anotherJournal.db;
+  assert.throws(
+    () => write(db, 'account.asset', asset.id, { journal_id: anotherJournal.id }),
+    /Cannot modify core asset fields once confirmed/i,
+  );
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, journal_id: anotherJournal.id }] } }, { author: 'test', isAdmin: false }),
+    /Cannot modify core asset fields once confirmed/i,
+  );
+
+  // 8. Running asset carrying a non-general journal can still Post, Pause, Resume, Modify and Dispose via applyDiff
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  let runningWithBank = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.asset': db.records['account.asset'].map((rec) => (rec.id === asset.id ? { ...rec, journal_id: bankJournal.id } : rec)),
+    },
+  };
+  let bankAsset = read(runningWithBank, 'account.asset', asset.id);
+
+  // Post via applyDiff
+  const bPost = postDepreciation(runningWithBank, bankAsset, '2026-12-31');
+  runningWithBank = applyDiff(runningWithBank, diffDb(runningWithBank, bPost), { author: 'test', isAdmin: false });
+  bankAsset = read(runningWithBank, 'account.asset', asset.id);
+  assert.ok(bankAsset.depreciation_ids.filter((l) => l.posted).length > 0);
+
+  // Pause via applyDiff
+  const bPause = pauseAsset(runningWithBank, bankAsset, '2027-01-01');
+  runningWithBank = applyDiff(runningWithBank, diffDb(runningWithBank, bPause), { author: 'test', isAdmin: false });
+  bankAsset = read(runningWithBank, 'account.asset', asset.id);
+  assert.equal(bankAsset.state, 'paused');
+
+  // Resume via applyDiff
+  const bResume = resumeAsset(runningWithBank, bankAsset, '2027-01-10');
+  runningWithBank = applyDiff(runningWithBank, diffDb(runningWithBank, bResume), { author: 'test', isAdmin: false });
+  bankAsset = read(runningWithBank, 'account.asset', asset.id);
+  assert.equal(bankAsset.state, 'open');
+
+  // Modify via applyDiff
+  const bModify = modifyAsset(runningWithBank, bankAsset, { date: '2027-01-15', value_change: 1000, accountId: revalAccId });
+  runningWithBank = applyDiff(runningWithBank, diffDb(runningWithBank, bModify), { author: 'test', isAdmin: false });
+  bankAsset = read(runningWithBank, 'account.asset', asset.id);
+  assert.equal(bankAsset.original_value, 13000);
+
+  // Dispose via applyDiff
+  const bDispose = disposeAsset(runningWithBank, bankAsset, { date: '2027-02-01' });
+  runningWithBank = applyDiff(runningWithBank, diffDb(runningWithBank, bDispose), { author: 'test', isAdmin: false });
+  bankAsset = read(runningWithBank, 'account.asset', asset.id);
+  assert.equal(bankAsset.state, 'close');
+  assert.equal(bankAsset.disposal_date, '2027-02-01');
 });

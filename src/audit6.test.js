@@ -53,7 +53,7 @@ test('bill reset rejects active or depreciated assets through button and direct 
   const fixture = billWithAsset();
   const active = confirmAsset(fixture.db, fixture.asset);
   for (const state of ['open', 'paused', 'close', 'draft']) {
-    const db = state === 'draft' ? write(active, 'account.asset', fixture.asset.id, { state, depreciation_ids: [{ posted: true }] }) : write(active, 'account.asset', fixture.asset.id, { state });
+    const db = state === 'draft' ? write(fixture.db, 'account.asset', fixture.asset.id, { state, depreciation_ids: [{ posted: true }] }) : write(active, 'account.asset', fixture.asset.id, { state });
     assert.throws(() => reset(db, fixture.id), /assets/);
     assert.throws(() => write(db, 'account.move', fixture.id, { state: 'draft' }), /assets/);
     assert.equal(read(db, 'account.move', fixture.id).state, 'posted');
