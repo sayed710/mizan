@@ -142,9 +142,9 @@ test('asset modification guards: enforces valid states, dates, configured accoun
   assert.throws(() => modifyAsset(db, a, { date: '2028-01-01', value_change: -4000 }), /already depreciated/i);
 
   // Missing configured asset account or loss account throws a clear error
-  const unconfigured = write(db, 'account.asset', a.id, { account_asset_id: null, account_loss_id: null });
+  const unconfigured = write(db, 'account.asset', a.id, { account_asset_id: null, account_loss_id: null }, { internal: true });
   assert.throws(() => modifyAsset(unconfigured, read(unconfigured, 'account.asset', a.id), { date: '2028-01-01', value_change: -100 }), /fixed asset account/i);
-  const noLoss = write(db, 'account.asset', a.id, { account_loss_id: null, account_depreciation_expense_id: null });
+  const noLoss = write(db, 'account.asset', a.id, { account_loss_id: null, account_depreciation_expense_id: null }, { internal: true });
   assert.throws(() => modifyAsset(noLoss, read(noLoss, 'account.asset', a.id), { date: '2028-01-01', value_change: -100 }), /loss or expense account/i);
 
   // Dispose the asset

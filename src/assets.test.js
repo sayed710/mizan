@@ -137,7 +137,7 @@ test('scrapping an asset books the remaining book value as a loss', () => {
 test('asset expense account labels distinguish override and model fallback used for posting', () => {
   const fields = models['account.asset'].fields;
   const visible = models['account.asset'].form.groups.flat();
-  assert.ok(visible.includes('account_expense_id'));
+  assert.ok(!visible.includes('account_expense_id'));
   assert.ok(visible.includes('account_depreciation_expense_id'));
   assert.notEqual(fields.account_expense_id.label, fields.account_depreciation_expense_id.label);
   const base = seed();

@@ -5,9 +5,31 @@ import { journalId, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
 import { configuredAccount } from './configured-account.js';
+import { currentCompany } from './company.js';
+import { t } from '../i18n.js';
 
 /** Depreciation settings of an asset without a model. */
 export const ASSET_DEPRECIATION_DEFAULTS = { method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false };
+
+export const CORE_ASSET_FIELDS = [
+  'original_value',
+  'salvage_value',
+  'already_depreciated',
+  'acquisition_date',
+  'method',
+  'method_number',
+  'method_period',
+  'method_progress_factor',
+  'prorata',
+  'company_id',
+  'account_asset_id',
+  'account_depreciation_id',
+  'account_depreciation_expense_id',
+  'journal_id',
+  'model_id',
+];
+
+export const readonlyWhenNotDraft = (r) => Boolean(r?.state && r.state !== 'draft');
 
 const DAY = 86400000;
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -21,6 +43,44 @@ export function assetAccountGuard(db, _before, asset) {
     const account = read(db, 'account.account', asset[field]);
     if (!account || account.active === false || (account.company_id && account.company_id !== (asset.company_id ?? 1))) return 'Asset accounts must be active and belong to the asset company';
   }
+  return null;
+}
+
+export function assetGuard(db, before, asset, ctx, vals) {
+  const accErr = assetAccountGuard(db, before, asset);
+  if (accErr) return accErr;
+
+  if (before?.state && before.state !== 'draft' && !ctx?.internal) {
+    for (const field of CORE_ASSET_FIELDS) {
+      if (vals && field in vals && vals[field] !== before[field]) {
+        return 'Cannot modify core asset fields once confirmed';
+      }
+    }
+  }
+
+  if (!ctx?.internal && vals) {
+    if (('disposal_date' in vals && vals.disposal_date !== (before?.disposal_date ?? null))
+      || ('sale_value' in vals && vals.sale_value !== (before?.sale_value ?? null))) {
+      return 'Disposal fields can only be set through Sell or Dispose';
+    }
+  }
+
+  if (!ctx?.internal && vals && 'bill_id' in vals && vals.bill_id !== (before?.bill_id ?? null) && vals.bill_id != null) {
+    const bill = read(db, 'account.move', vals.bill_id);
+    if (!bill || bill.state !== 'posted' || bill.move_type !== 'in_invoice' || (bill.company_id ?? 1) !== (asset.company_id ?? 1)) {
+      return 'Select a posted vendor bill in the asset company';
+    }
+    if (asset.partner_id && bill.partner_id && bill.partner_id !== asset.partner_id) {
+      return 'Select a posted vendor bill for the asset vendor';
+    }
+  }
+
+  if (!ctx?.internal && vals && 'journal_id' in vals && vals.journal_id !== (before?.journal_id ?? null) && vals.journal_id != null) {
+    const j = read(db, 'account.journal', vals.journal_id);
+    if (!j) return 'Asset journal not found';
+    if (j.type !== 'general') return 'Asset journal must be a miscellaneous journal';
+  }
+
   return null;
 }
 
@@ -83,6 +143,20 @@ function validate(db, asset) {
   if (!j) throw new Error('Asset journal not found');
   if (j.company_id && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
 
+  if (asset.state === 'draft') {
+    if (j.type !== 'general') throw new Error('Asset journal must be a miscellaneous journal');
+
+    if (asset.bill_id) {
+      const bill = read(db, 'account.move', asset.bill_id);
+      if (!bill || bill.state !== 'posted' || bill.move_type !== 'in_invoice' || (bill.company_id ?? 1) !== company) {
+        throw new Error('Select a posted vendor bill in the asset company');
+      }
+      if (asset.partner_id && bill.partner_id && bill.partner_id !== asset.partner_id) {
+        throw new Error('Select a posted vendor bill for the asset vendor');
+      }
+    }
+  }
+
   for (const [field, label] of [
     ['account_asset_id', 'fixed asset'],
     ['account_depreciation_id', 'depreciation'],
@@ -99,7 +173,7 @@ function validate(db, asset) {
 function computeBoard(db, asset) {
   validate(db, asset);
   const depreciation_ids = depreciationBoard(asset).map((l) => ({ ...l, posted: false, move_id: null }));
-  return write(db, 'account.asset', asset.id, { depreciation_ids });
+  return write(db, 'account.asset', asset.id, { depreciation_ids }, { internal: true });
 }
 
 /** Report values as of a cutoff, excluding subsequent recorded adjustments. */
@@ -125,7 +199,12 @@ export function depreciationReport(db, period, companyId = 'all') {
 
 /** Validate the asset, build its board and start depreciating. */
 export function confirmAsset(db, asset) {
-  return write(computeBoard(db, asset), 'account.asset', asset.id, { state: 'open' });
+  return write(computeBoard(db, asset), 'account.asset', asset.id, { state: 'open' }, { internal: true });
+}
+
+/** Returns true if the asset has unposted depreciation lines dated on or before `upTo`. */
+export function hasDueDepreciation(asset, upTo = today()) {
+  return (asset?.depreciation_ids ?? []).some((l) => !l.posted && l.date <= upTo);
 }
 
 /** Post each unposted board line dated on or before `upTo`; the asset closes once all are posted. */
@@ -137,6 +216,7 @@ export function postDepreciation(db, asset, upTo = today()) {
   const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
   const expAcc = asset.account_depreciation_expense_id;
   const depAcc = asset.account_depreciation_id;
+  if (!hasDueDepreciation(asset, upTo)) return db;
   const { db: next, lines } = (asset.depreciation_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, lines: [...acc.lines, l] };
     const { db: booked, id } = postEntry(acc.db, {
@@ -147,7 +227,7 @@ export function postDepreciation(db, asset, upTo = today()) {
     });
     return { db: postAnalytic(booked, id), lines: [...acc.lines, { ...l, posted: true, move_id: id }] };
   }, { db, lines: [] });
-  return write(next, 'account.asset', asset.id, { depreciation_ids: lines, state: lines.every((l) => l.posted) ? 'close' : 'open' });
+  return write(next, 'account.asset', asset.id, { depreciation_ids: lines, state: lines.every((l) => l.posted) ? 'close' : 'open' }, { internal: true });
 }
 
 /** Pause only after all depreciation due before the pause has been posted. */
@@ -155,7 +235,7 @@ export function pauseAsset(db, asset, date = today()) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
   if (asset.state !== 'open') throw new Error('Only running assets can be paused');
   if ((asset.depreciation_ids ?? []).some((line) => !line.posted && line.date < date)) throw new Error('Post overdue depreciation before pausing the asset');
-  return write(db, 'account.asset', asset.id, { state: 'paused', pause_date: date });
+  return write(db, 'account.asset', asset.id, { state: 'paused', pause_date: date }, { internal: true });
 }
 
 /** Shift remaining periods by the paused days and recompute their residual amounts. */
@@ -163,7 +243,7 @@ export function resumeAsset(db, asset, date = today()) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
   if (asset.state !== 'paused') throw new Error('Only a paused asset can be resumed');
   // Paused before pause dates were recorded: no pause period is known, so the board resumes unshifted, as it then did.
-  if (!asset.pause_date) return write(db, 'account.asset', asset.id, { state: 'open' });
+  if (!asset.pause_date) return write(db, 'account.asset', asset.id, { state: 'open' }, { internal: true });
   if (date < asset.pause_date) throw new Error('Resume date cannot precede the pause date');
   const days = dayNumber(date) - dayNumber(asset.pause_date);
   const posted = (asset.depreciation_ids ?? []).filter((line) => line.posted);
@@ -171,7 +251,7 @@ export function resumeAsset(db, asset, date = today()) {
   const accumulated = cents(asset.already_depreciated) + postedCents(asset);
   const dates = pending.map((line) => addDays(line.date, days));
   const board = pending.length ? depreciationBoard(asset, { periods: pending.length, dates, remainingBase: cents(asset.original_value) - cents(asset.salvage_value) - accumulated, initialCumulated: accumulated }).map((line) => ({ ...line, posted: false, move_id: null })) : [];
-  return write(db, 'account.asset', asset.id, { state: 'open', pause_date: null, depreciation_ids: [...posted, ...board] });
+  return write(db, 'account.asset', asset.id, { state: 'open', pause_date: null, depreciation_ids: [...posted, ...board] }, { internal: true });
 }
 
 /** Post due depreciation, drop the rest of the board and book the sale or scrapping of the asset. */
@@ -217,7 +297,7 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
     loss < 0 && { account: disposalAccount, credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
   const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
-  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100, sale_invoice_id: invoice?.id ?? null, sale_invoice_line: invoice ? Number(invoiceLine) : null });
+  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100, sale_invoice_id: invoice?.id ?? null, sale_invoice_line: invoice ? Number(invoiceLine) : null }, { internal: true });
 }
 
 /** Modify a running or paused asset: apply value increase or decrease (impairment/revaluation), post adjusting entry, and recompute remaining board. */
@@ -302,7 +382,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
     salvage_value: currentSalvage / 100,
     depreciation_ids: updatedDepreciationIds,
     state: updatedDepreciationIds.length && updatedDepreciationIds.every((l) => l.posted) ? 'close' : asset.state,
-  });
+  }, { internal: true });
 }
 
 export const assetModels = {
@@ -311,23 +391,37 @@ export const assetModels = {
     actions: { dispose: disposeAsset, modify: modifyAsset },
     fields: {
       name: { type: 'char', label: 'Asset Name', required: true },
-      acquisition_date: { type: 'date', label: 'Acquisition Date' },
-      original_value: { type: 'monetary', label: 'Original Value' },
-      salvage_value: { type: 'monetary', label: 'Not Depreciable Value' },
-      already_depreciated: { type: 'monetary', label: 'Depreciated at Import' },
-      method: { type: 'selection', label: 'Method', options: [['linear', 'Straight Line'], ['degressive', 'Declining'], ['degressive_then_linear', 'Declining then Straight Line']] },
-      method_number: { type: 'integer', label: 'Duration' },
-      method_period: { type: 'selection', label: 'Period', options: [['1', 'Months'], ['12', 'Years']] },
-      method_progress_factor: { type: 'float', label: 'Declining Factor' },
-      prorata: { type: 'boolean', label: 'Prorata Temporis' },
+      acquisition_date: { type: 'date', label: 'Acquisition Date', readonly: readonlyWhenNotDraft },
+      original_value: { type: 'monetary', label: 'Original Value', readonly: readonlyWhenNotDraft },
+      salvage_value: { type: 'monetary', label: 'Not Depreciable Value', readonly: readonlyWhenNotDraft },
+      already_depreciated: { type: 'monetary', label: 'Depreciated at Import', readonly: readonlyWhenNotDraft },
+      method: { type: 'selection', label: 'Method', options: [['linear', 'Straight Line'], ['degressive', 'Declining'], ['degressive_then_linear', 'Declining then Straight Line']], readonly: readonlyWhenNotDraft },
+      method_number: { type: 'integer', label: 'Duration', readonly: readonlyWhenNotDraft },
+      method_period: { type: 'selection', label: 'Period', options: [['1', 'Months'], ['12', 'Years']], readonly: readonlyWhenNotDraft },
+      method_progress_factor: { type: 'float', label: 'Declining Factor', readonly: readonlyWhenNotDraft },
+      prorata: { type: 'boolean', label: 'Prorata Temporis', readonly: readonlyWhenNotDraft },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
-      model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
-      account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account' },
-      account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
+      model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model', readonly: readonlyWhenNotDraft },
+      account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account', readonly: readonlyWhenNotDraft },
+      account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account', readonly: readonlyWhenNotDraft },
       account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Legacy Expense Account', readonly: true, compute: (r) => r.account_depreciation_expense_id ?? null },
-      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      journal_id: {
+        type: 'many2one',
+        relation: 'account.journal',
+        label: 'Journal',
+        domain: (j, r) => j.type === 'general' && (!j.company_id || j.company_id === (r?.company_id ?? 1)),
+        readonly: readonlyWhenNotDraft,
+      },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
-      bill_id: { type: 'many2one', relation: 'account.move', label: 'Bill' },
+      bill_id: {
+        type: 'many2one',
+        relation: 'account.move',
+        label: 'Bill',
+        domain: (bill, r) => bill.state === 'posted'
+          && bill.move_type === 'in_invoice'
+          && (bill.company_id ?? 1) === (r?.company_id ?? 1)
+          && (!r?.partner_id || bill.partner_id === r.partner_id),
+      },
       bill_line: { type: 'integer', label: 'Bill Line', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['open', 'Running'], ['paused', 'Paused'], ['close', 'Closed'], ['cancel', 'Cancelled']] },
       book_value: { type: 'monetary', label: 'Book Value', readonly: true, compute: (r) => r.disposal_date ? 0 : (cents(r.original_value) - cents(r.already_depreciated) - postedCents(r)) / 100 },
@@ -351,24 +445,50 @@ export const assetModels = {
         date: { type: 'date', label: 'Date' }, amount: { type: 'monetary', label: 'Value Change' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Entry' },
       } },
       pause_date: { type: 'date', label: 'Pause Date', readonly: true },
-      disposal_date: { type: 'date', label: 'Disposal Date' },
-      sale_value: { type: 'monetary', label: 'Sale Price' },
+      disposal_date: { type: 'date', label: 'Disposal Date', readonly: true, hideWhen: (r) => !r?.disposal_date },
+      sale_value: { type: 'monetary', label: 'Sale Price', readonly: true, hideWhen: (r) => r?.sale_value == null || r?.sale_value === '' },
       sale_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Sale Invoice', readonly: true },
       sale_invoice_line: { type: 'integer', label: 'Sale Invoice Line', readonly: true },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
-      account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account (Override)' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: readonlyWhenNotDraft },
+      account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account (Override)', readonly: readonlyWhenNotDraft },
     },
-    defaults: () => ({ acquisition_date: today(), ...ASSET_DEPRECIATION_DEFAULTS, state: 'draft', depreciation_ids: [], company_id: 1 }),
-    guard: assetAccountGuard,
+    defaults: (id, db) => {
+      const company = db ? currentCompany(db) : 1;
+      const defaultJournal = db ? (journalId(db, 'MISC', company) ?? null) : null;
+      return {
+        acquisition_date: today(),
+        ...ASSET_DEPRECIATION_DEFAULTS,
+        state: 'draft',
+        depreciation_ids: [],
+        company_id: company,
+        ...(defaultJournal ? { journal_id: defaultJournal } : {}),
+      };
+    },
+    guard: assetGuard,
     createDefaults: (db, vals) => {
       const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
-      if (!model) return {};
-      return Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'journal_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]]));
+      const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
+      const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
+      if (modelJournal) modelDefaults.journal_id = modelJournal;
+      const company = vals?.company_id ?? (db ? currentCompany(db) : 1);
+      const defaultJournal = !vals?.journal_id && !modelDefaults.journal_id ? (journalId(db, 'MISC', company) ?? null) : null;
+      return {
+        ...(defaultJournal ? { journal_id: defaultJournal } : {}),
+        ...modelDefaults,
+      };
     },
     onchange: (r, key, db) => {
+      if (key === 'company_id') {
+        const company = r.company_id ?? 1;
+        const currentJournal = r.journal_id ? read(db, 'account.journal', r.journal_id) : null;
+        if (!currentJournal || (currentJournal.company_id && currentJournal.company_id !== company)) {
+          return { journal_id: journalId(db, 'MISC', company) ?? null };
+        }
+      }
       if (key === 'model_id' && r.model_id) {
         const model = read(db, 'account.asset.model', r.model_id);
         if (model) {
+          const modelJournal = model.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : undefined;
           return {
             method: model.method ?? r.method,
             method_number: model.method_number ?? r.method_number,
@@ -379,7 +499,7 @@ export const assetModels = {
             account_depreciation_id: model.account_depreciation_id ?? r.account_depreciation_id,
             account_depreciation_expense_id: model.account_depreciation_expense_id ?? r.account_depreciation_expense_id,
             account_expense_id: model.account_depreciation_expense_id ?? r.account_depreciation_expense_id,
-            journal_id: model.journal_id ?? r.journal_id,
+            ...(modelJournal !== undefined ? { journal_id: modelJournal } : {}),
             analytic_distribution: model.analytic_distribution ?? r.analytic_distribution,
           };
         }
@@ -396,7 +516,11 @@ export const assetModels = {
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmAsset(db, r) }) },
         { label: 'Compute Depreciation', when: (r) => r.state === 'draft', run: (db, r) => ({ db: computeBoard(db, r) }) },
-        { label: 'Post Depreciation', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: postDepreciation(db, read(db, 'account.asset', r.id)) }) },
+        { label: 'Post Depreciation', primary: true, when: (r) => r.state === 'open', run: (db, r) => {
+          const asset = read(db, 'account.asset', r.id) ?? r;
+          if (!hasDueDepreciation(asset, today())) return { db, message: t('No depreciation is due yet.') };
+          return { db: postDepreciation(db, asset) };
+        } },
         { label: 'Pause', when: (r) => r.state === 'open', run: (db, r) => ({ db: pauseAsset(db, r) }) },
         { label: 'Resume', primary: true, when: (r) => r.state === 'paused', run: (db, r) => ({ db: resumeAsset(db, r) }) },
         { label: 'Modify Depreciation', when: (r) => ['open', 'paused'].includes(r.state) && !r.disposal_date,
@@ -437,7 +561,7 @@ export const assetModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_expense_id', 'account_depreciation_expense_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution', 'disposal_date', 'sale_value']],
+      groups: [['model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution', 'disposal_date', 'sale_value']],
       tabs: [{ label: 'Depreciation Board', fields: ['depreciation_ids', 'cancelled_depreciation_ids'] }],
       chatter: true,
     },
