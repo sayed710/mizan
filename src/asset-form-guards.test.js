@@ -1350,4 +1350,191 @@ test('15. Q4: Disposal field rules, disposal_move_id verification, sale invoice 
     }, { author: 'admin', isAdmin: true }),
     /Disposal fields cannot be modified once set/i,
   );
+
+  // Forged 12: Closing with a posted disposal entry but no disposal_date (or empty disposal_date)
+  assert.throws(
+    () => write(postedDispMove.db, 'account.asset', asset.id, {
+      state: 'close',
+      sale_value: 0,
+      disposal_move_id: postedDispMove.id,
+    }),
+    /Disposal date is required when disposing of an asset/i,
+  );
+  assert.throws(
+    () => applyDiff(postedDispMove.db, {
+      upserts: {
+        'account.asset': [{
+          ...asset,
+          state: 'close',
+          sale_value: 0,
+          disposal_move_id: postedDispMove.id,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Disposal date is required when disposing of an asset/i,
+  );
+  assert.throws(
+    () => write(postedDispMove.db, 'account.asset', asset.id, {
+      state: 'close',
+      disposal_date: '',
+      sale_value: 0,
+      disposal_move_id: postedDispMove.id,
+    }),
+    /Disposal date is required when disposing of an asset/i,
+  );
+  assert.throws(
+    () => applyDiff(postedDispMove.db, {
+      upserts: {
+        'account.asset': [{
+          ...asset,
+          state: 'close',
+          disposal_date: '',
+          sale_value: 0,
+          disposal_move_id: postedDispMove.id,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Disposal date is required when disposing of an asset/i,
+  );
+
+  // Forged 13: Invoice disposal with empty sale_value (omitted or empty string)
+  assert.throws(
+    () => write(dbInvTest, 'account.asset', assetInvTest.id, {
+      state: 'close',
+      disposal_date: '2026-06-15',
+      disposal_move_id: validDispMove.id,
+      sale_invoice_id: invoice.id,
+      sale_invoice_line: 0,
+    }),
+    /Sale price must match the invoice line amount/i,
+  );
+  assert.throws(
+    () => applyDiff(dbInvTest, {
+      upserts: {
+        'account.asset': [{
+          ...assetInvTest,
+          state: 'close',
+          disposal_date: '2026-06-15',
+          disposal_move_id: validDispMove.id,
+          sale_invoice_id: invoice.id,
+          sale_invoice_line: 0,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Sale price must match the invoice line amount/i,
+  );
+  assert.throws(
+    () => write(dbInvTest, 'account.asset', assetInvTest.id, {
+      state: 'close',
+      disposal_date: '2026-06-15',
+      sale_value: '',
+      disposal_move_id: validDispMove.id,
+      sale_invoice_id: invoice.id,
+      sale_invoice_line: 0,
+    }),
+    /Sale price must match the invoice line amount/i,
+  );
+  assert.throws(
+    () => applyDiff(dbInvTest, {
+      upserts: {
+        'account.asset': [{
+          ...assetInvTest,
+          state: 'close',
+          disposal_date: '2026-06-15',
+          sale_value: '',
+          disposal_move_id: validDispMove.id,
+          sale_invoice_id: invoice.id,
+          sale_invoice_line: 0,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Sale price must match the invoice line amount/i,
+  );
+
+  // Legacy record with partial disposal fields set (e.g. sale_value only) cannot be completed later
+  const legacyPartial = {
+    ...asset,
+    id: 88889,
+    name: 'Legacy Partial Disposal',
+    state: 'close',
+    sale_value: 0,
+    disposal_date: null,
+    disposal_move_id: null,
+  };
+  const legacyPartialDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.asset': [...(db.records['account.asset'] ?? []), legacyPartial],
+    },
+  };
+  const renamedPartial = write(legacyPartialDb, 'account.asset', legacyPartial.id, { name: 'Renamed Partial Machine' });
+  assert.equal(read(renamedPartial, 'account.asset', legacyPartial.id).name, 'Renamed Partial Machine');
+  const syncedPartial = applyDiff(legacyPartialDb, { upserts: { 'account.asset': [{ ...legacyPartial, name: 'Renamed Partial Machine' }] } }, { author: 'admin', isAdmin: true });
+  assert.equal(read(syncedPartial, 'account.asset', legacyPartial.id).name, 'Renamed Partial Machine');
+  assert.throws(
+    () => write(legacyPartialDb, 'account.asset', legacyPartial.id, { disposal_date: '2026-06-01' }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => applyDiff(legacyPartialDb, { upserts: { 'account.asset': [{ ...legacyPartial, disposal_date: '2026-06-01' }] } }, { author: 'admin', isAdmin: true }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => write(legacyPartialDb, 'account.asset', legacyPartial.id, { disposal_move_id: postedDispMove.id }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => applyDiff(legacyPartialDb, { upserts: { 'account.asset': [{ ...legacyPartial, disposal_move_id: postedDispMove.id }] } }, { author: 'admin', isAdmin: true }),
+    /Disposal fields cannot be modified once set/i,
+  );
+
+  // Legitimate: Sell or Dispose with and without invoice still accepted
+  const sellBtn = models['account.asset'].form.buttons.find((b) => b.label === 'Sell or Dispose');
+  const openSellNoInv = createOpenAsset(db, {
+    name: 'Asset Sell No Inv',
+    acquisition_date: '2026-06-01',
+    original_value: 6000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  const resNoInv = sellBtn.run(openSellNoInv.db, read(openSellNoInv.db, 'account.asset', openSellNoInv.id), {
+    date: '2026-06-15',
+    sale_value: 0,
+  });
+  const assetNoInvClosed = read(resNoInv.db, 'account.asset', openSellNoInv.id);
+  assert.equal(assetNoInvClosed.state, 'close');
+  assert.equal(assetNoInvClosed.disposal_date, '2026-06-15');
+  assert.ok(assetNoInvClosed.disposal_move_id);
+
+  const openSellWithInv = createOpenAsset(db, {
+    name: 'Asset Sell With Inv',
+    acquisition_date: '2026-06-01',
+    original_value: 8000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  let dbSellInv = openSellWithInv.db;
+  const freshInv = create(dbSellInv, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-06-15',
+    invoice_line_ids: [{ qty: 1, price_unit: 4000, tax: 0, account_id: accountId(dbSellInv, '101401') }],
+  });
+  dbSellInv = postMove(freshInv.db, freshInv.id);
+  const resWithInv = sellBtn.run(dbSellInv, read(dbSellInv, 'account.asset', openSellWithInv.id), {
+    date: '2026-06-15',
+    invoice_id: freshInv.id,
+    invoice_line: '0',
+    sale_value: '',
+  });
+  const assetWithInvClosed = read(resWithInv.db, 'account.asset', openSellWithInv.id);
+  assert.equal(assetWithInvClosed.state, 'close');
+  assert.equal(assetWithInvClosed.disposal_date, '2026-06-15');
+  assert.equal(assetWithInvClosed.sale_value, 4000);
+  assert.equal(assetWithInvClosed.sale_invoice_id, freshInv.id);
+  assert.equal(assetWithInvClosed.sale_invoice_line, 0);
+  assert.ok(assetWithInvClosed.disposal_move_id);
 });

@@ -320,6 +320,7 @@ const ar = {
   'Depreciation board is inconsistent with asset duration': 'جدول الإهلاك غير متطابق مع مدة الأصل',
   'Original value change must match recorded value adjustments': 'يجب أن يتطابق تغيير القيمة الأصلية مع تسويات القيمة المسجلة',
   'Disposal fields cannot be modified once set': 'لا يمكن تعديل حقول الاستبعاد بعد تعيينها',
+  'Disposal date is required when disposing of an asset': 'تاريخ الاستبعاد مطلوب عند استبعاد الأصل',
   'Disposal move is required when disposing of an asset': 'قيد الاستبعاد مطلوب عند استبعاد الأصل',
   'Disposal move must be a posted entry in the asset company': 'يجب أن يكون قيد الاستبعاد قيداً مرحّلاً في شركة الأصل',
   'Disposal move must credit the fixed asset account by the asset original value': 'يجب أن يجعل قيد الاستبعاد حساب الأصول الثابتة دائناً بالقيمة الأصلية للأصل',

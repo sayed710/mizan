@@ -72,7 +72,7 @@ export function saleInvoiceError(db, asset, { invoice, invoiceLine, date, saleVa
   }
   const lineInfo = saleInvoiceLineInfo(invoice, invoiceLine);
   if (!lineInfo) return { error: 'Sale invoice line not found', lineInfo: null };
-  if (saleValue != null && saleValue !== '' && cents(saleValue) !== lineInfo.amount) {
+  if (saleValue == null || saleValue === '' || cents(saleValue) !== lineInfo.amount) {
     return { error: 'Sale price must match the invoice line amount', lineInfo };
   }
   const lineUsedElsewhere = (db.records['account.asset'] ?? []).some(
@@ -93,22 +93,30 @@ export function validateAssetIntegrity(db, before, asset, vals) {
   const hasSaleLine = asset.sale_invoice_line != null && asset.sale_invoice_line !== '';
   const hasAnyDisposal = hasDisposal || hasSale || hasDisposalMove || hasSaleInvoice || hasSaleLine;
 
-  if (before?.disposal_date != null && before.disposal_date !== '') {
+  const beforeHasDisposal = before?.disposal_date != null && before.disposal_date !== '';
+  const beforeHasSale = before?.sale_value != null && before.sale_value !== '';
+  const beforeHasDisposalMove = before?.disposal_move_id != null;
+  const beforeHasSaleInvoice = before?.sale_invoice_id != null;
+  const beforeHasSaleLine = before?.sale_invoice_line != null && before.sale_invoice_line !== '';
+  const beforeHadAnyDisposal = beforeHasDisposal || beforeHasSale || beforeHasDisposalMove || beforeHasSaleInvoice || beforeHasSaleLine;
+
+  if (beforeHadAnyDisposal) {
     // Legacy closed assets or already-disposed assets: disposal fields are immutable once set
-    const sameLine = (asset.sale_invoice_line == null ? null : Number(asset.sale_invoice_line)) === (before.sale_invoice_line == null ? null : Number(before.sale_invoice_line));
-    if (
-      asset.disposal_date !== before.disposal_date
-      || cents(asset.sale_value) !== cents(before.sale_value)
-      || (asset.disposal_move_id ?? null) !== (before.disposal_move_id ?? null)
-      || (asset.sale_invoice_id ?? null) !== (before.sale_invoice_id ?? null)
-      || !sameLine
-    ) {
+    const sameDate = (asset.disposal_date || null) === (before.disposal_date || null);
+    const sameSale = (asset.sale_value == null || asset.sale_value === '' ? null : cents(asset.sale_value)) === (before.sale_value == null || before.sale_value === '' ? null : cents(before.sale_value));
+    const sameMove = (asset.disposal_move_id ?? null) === (before.disposal_move_id ?? null);
+    const sameInvoice = (asset.sale_invoice_id ?? null) === (before.sale_invoice_id ?? null);
+    const sameLine = (asset.sale_invoice_line == null || asset.sale_invoice_line === '' ? null : Number(asset.sale_invoice_line)) === (before.sale_invoice_line == null || before.sale_invoice_line === '' ? null : Number(before.sale_invoice_line));
+    if (!sameDate || !sameSale || !sameMove || !sameInvoice || !sameLine) {
       return 'Disposal fields cannot be modified once set';
     }
   } else if (hasAnyDisposal) {
     // Disposal fields are being first set
     if (asset.state !== 'close' || !before?.state || before.state === 'draft') {
       return 'Disposal fields can only be set through Sell or Dispose';
+    }
+    if (!hasDisposal) {
+      return 'Disposal date is required when disposing of an asset';
     }
     if (!asset.disposal_move_id) {
       return 'Disposal move is required when disposing of an asset';
@@ -527,7 +535,9 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   if (asset.state !== 'open' && (asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
   validate(db, asset);
   const invoice = invoiceId && read(db, 'account.move', invoiceId);
-  const { error: saleError, lineInfo } = invoiceId ? saleInvoiceError(db, asset, { invoice, invoiceLine, date, saleValue }) : { error: null, lineInfo: null };
+  const lineInfo = invoice && saleInvoiceLineInfo(invoice, invoiceLine);
+  const effectiveSaleValue = saleValue == null || saleValue === '' ? (lineInfo ? lineInfo.amount / 100 : undefined) : saleValue;
+  const { error: saleError } = invoiceId ? saleInvoiceError(db, asset, { invoice, invoiceLine, date, saleValue: effectiveSaleValue }) : { error: null, lineInfo: null };
   if (saleError) throw new Error(saleError);
   const sale = invoice ? lineInfo.amount : cents(saleValue ?? 0);
   if (sale < 0) throw new Error('The sale price cannot be negative');
