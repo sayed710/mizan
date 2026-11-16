@@ -26,9 +26,11 @@ test('invoice and bill post signed tax repartition rows to their configured acco
   const invoiceRows = rows.map((row) => row.repartition_type === 'tax' && row.account_id === first ? { ...row, factor_percent: 100 } : row);
   const refundRows = invoiceRows.map((row) => ({ ...row, account_id: row.account_id === first ? refundFirst.id : row.account_id === secondRecord.id ? refundSecond.id : null }));
   const tax = create(db, 'account.tax', { name: 'Signed split', amount: 10, type_tax_use: 'sale', invoice_repartition_line_ids: invoiceRows, refund_repartition_line_ids: refundRows });
-  db = tax.db;
+  const purchaseTax = create(tax.db, 'account.tax', { name: 'Signed split', amount: 10, type_tax_use: 'purchase', invoice_repartition_line_ids: invoiceRows, refund_repartition_line_ids: refundRows });
+  db = purchaseTax.db;
   for (const moveType of ['out_invoice', 'in_invoice', 'out_refund', 'in_refund']) {
-    const move = create(db, 'account.move', { move_type: moveType, partner_id: 1, invoice_date: '2026-06-01', invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(db, 'account.tax', tax.id)) }] });
+    const activeTax = ['in_invoice', 'in_refund'].includes(moveType) ? purchaseTax : tax;
+    const move = create(db, 'account.move', { move_type: moveType, partner_id: 1, invoice_date: '2026-06-01', invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(db, 'account.tax', activeTax.id)) }] });
     db = postMove(move.db, move.id);
     const items = read(db, 'account.move', move.id).line_ids.filter((line) => line.tax_name === 'Signed split');
     assert.equal(items.length, 2);

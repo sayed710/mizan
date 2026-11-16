@@ -11,7 +11,9 @@ export function Checks() {
   return <main className="action report-page">
     <div className="control-panel"><h1 className="cp-title">{t('Checks')}</h1></div>
     <div className="list-wrap"><table className="list report"><thead><tr>{['Check Number', 'Date', 'Payment', 'Vendor', 'Amount', 'Status'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
-      <tbody>{rows.map((row) => {
+      <tbody>{!rows.length ? (
+        <tr><td colSpan={6} className="empty">{t('No checks yet.')}</td></tr>
+      ) : rows.map((row) => {
         const payment = read(db, 'account.payment', row.paymentId);
         const invoice = read(db, 'account.move', row.invoiceId);
         return <tr key={row.key}><td>{row.checkNumber}</td><td>{row.date}</td>
