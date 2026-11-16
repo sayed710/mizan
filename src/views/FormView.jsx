@@ -533,6 +533,8 @@ export function FormView({ leaf, id, base, params }) {
   const banner = def.form.banner?.(current, db) ?? null;
   const footer = [].concat(resolve(def.form.footer) ?? []);
   const locked = !isNew && !!def.form.lockedWhen?.(current, db);
+  // An unposted sequence placeholder reads as Draft in the breadcrumb and the heading alike.
+  const displayTitle = current[def.form.title] === '/' ? t('Draft') : current[def.form.title];
 
   return (
     <main className="form-page">
@@ -541,7 +543,7 @@ export function FormView({ leaf, id, base, params }) {
           <button type="button" className="btn" onClick={() => leave(`${base}/new${query}`)}>{t('New')}</button>
           <nav className="breadcrumb" aria-label={t('Breadcrumb')}>
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
-            <span>{isNew ? t('New') : current[def.form.title]}</span>
+            <span>{isNew ? t('New') : displayTitle}</span>
           </nav>
           {!isNew && <ActionsMenu model={model} rec={rec} backHash={backHash} base={base} query={query} />}
           {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && current.move_type === 'out_invoice')) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
@@ -623,7 +625,7 @@ export function FormView({ leaf, id, base, params }) {
                     return <FieldInput key={f} db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={locked || fieldReadonly(fd, current, db)} record={current} label={t(fd.label)} placeholder={t(fd.placeholder ?? fd.label)} />;
                   })}</div>
                 : titleField.readonly || titleField.compute
-                  ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
+                  ? <h2>{isNew ? t('Draft') : displayTitle}</h2>
                   : <input id={`f-${def.form.title}`} aria-label={t(titleField.label)} placeholder={t(titleField.placeholder ?? titleField.label)} readOnly={locked}
                       value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>}

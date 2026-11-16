@@ -2654,9 +2654,9 @@ export const accountingModels = {
       warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
       groups: (r) => (isInvoice(r)
         ? [
-          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }],
+          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? [{ field: 'ref', label: 'Bill Reference' }] : [])],
           [
-            { field: 'invoice_date', label: 'Invoice Date' },
+            { field: 'invoice_date', label: isPurchase(r) ? 'Bill Date' : 'Invoice Date' },
             { label: 'Due Date', fields: ['invoice_date_due', 'invoice_payment_term_id'], join: 'or' },
             'journal_id',
             'currency_id',
@@ -2677,7 +2677,7 @@ export const accountingModels = {
               {
                 title: 'Invoice',
                 fields: [
-                  { field: 'ref', label: isPurchase(r) ? 'Bill Reference' : 'Customer Reference' },
+                  ...(isPurchase(r) ? [] : [{ field: 'ref', label: 'Customer Reference' }]),
                   'partner_bank_id',
                   'payment_reference',
                 ],

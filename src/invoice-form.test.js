@@ -205,20 +205,34 @@ test('invoice lines show Odoo 20 default columns, persist optional toggles in lo
   }
 });
 
-test('vendor bill form shows Vendor and Bill Reference', async () => {
+test('vendor bill form shows Vendor and Bill Reference in the header and a Bill Date', async () => {
   const leaf = leafFor('Vendors', 'bills');
   const ctx = await mountMoveForm({ leaf, id: 'new' });
   try {
     const groups = allFind(ctx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
-    const leftFields = fieldLabelsOf(groups[0]);
-    assert.deepEqual(leftFields, ['Vendor']);
+    assert.deepEqual(fieldLabelsOf(groups[0]), ['Vendor', 'Bill Reference']);
+    assert.deepEqual(fieldLabelsOf(groups[1]), ['Bill Date', 'Due Date', 'Journal', 'Currency']);
 
     const otherInfoTab = find(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab' && n.textContent.trim() === 'Other Info');
     await ctx.React.act(async () => props(otherInfoTab).onClick());
     const otherPanel = find(ctx.host, (n) => props(n)?.role === 'tabpanel');
     const otherGroups = allFind(otherPanel, (n) => hasClass(n, 'group'));
-    const billGroupLabels = fieldLabelsOf(otherGroups[0]);
-    assert.equal(billGroupLabels[0], 'Bill Reference');
+    assert.deepEqual(fieldLabelsOf(otherGroups[0]), ['Recipient Bank Account', 'Payment Reference']);
+  } finally {
+    await ctx.done();
+  }
+});
+
+test('a saved draft bill reads Draft in the breadcrumb and the heading, not its "/" placeholder', async () => {
+  const leaf = leafFor('Vendors', 'bills');
+  const ctx = await mountMoveForm({ leaf, id: 'new' });
+  try {
+    const id = await ctx.createMove({ move_type: 'in_invoice', partner_id: 2, invoice_line_ids: [{ name: 'Paper', qty: 1, price_unit: 10 }] });
+    assert.equal(read(ctx.getDb(), 'account.move', id).name, '/');
+    await ctx.render(String(id));
+    const crumb = find(ctx.host, (n) => n.tagName === 'NAV' && hasClass(n, 'breadcrumb'));
+    assert.equal(allFind(crumb, (n) => n.tagName === 'SPAN').at(-1).textContent.trim(), 'Draft');
+    assert.equal(find(ctx.host, (n) => n.tagName === 'H2').textContent.trim(), 'Draft');
   } finally {
     await ctx.done();
   }
