@@ -50,6 +50,38 @@ export function assetAccountGuard(db, _before, asset) {
   return null;
 }
 
+export function saleInvoiceLineInfo(invoice, invoiceLine) {
+  if (!invoice || invoiceLine == null || invoiceLine === '') return null;
+  const idx = Number(invoiceLine);
+  if (!Number.isInteger(idx)) return null;
+  const line = (invoice.line_ids ?? []).find((l) => (l.invoice_sources ?? []).some((s) => s.index === idx));
+  if (!line) return null;
+  const source = (line.invoice_sources ?? []).find((s) => s.index === idx);
+  if (!source) return null;
+  return { line, source, amount: cents(source.amount), accountId: line.account_id };
+}
+
+/** Shared sale-invoice rules for Sell or Dispose and the asset guard: returns { error, lineInfo }. */
+export function saleInvoiceError(db, asset, { invoice, invoiceLine, date, saleValue }) {
+  const company = asset?.company_id ?? 1;
+  if (!invoice || invoice.state !== 'posted' || invoice.move_type !== 'out_invoice' || (invoice.company_id ?? 1) !== company) {
+    return { error: 'Sale invoice must be a posted customer invoice in the asset company', lineInfo: null };
+  }
+  if (date && [invoice.date, invoice.invoice_date].some((d) => d && d > date)) {
+    return { error: 'Disposal date cannot precede the sale invoice date', lineInfo: null };
+  }
+  const lineInfo = saleInvoiceLineInfo(invoice, invoiceLine);
+  if (!lineInfo) return { error: 'Sale invoice line not found', lineInfo: null };
+  if (saleValue != null && saleValue !== '' && cents(saleValue) !== lineInfo.amount) {
+    return { error: 'Sale price must match the invoice line amount', lineInfo };
+  }
+  const lineUsedElsewhere = (db.records['account.asset'] ?? []).some(
+    (other) => other.id !== asset?.id && other.disposal_date && other.sale_invoice_id === invoice.id && other.sale_invoice_line === Number(invoiceLine),
+  );
+  if (lineUsedElsewhere) return { error: 'Sale invoice line already used by another asset disposal', lineInfo };
+  return { error: null, lineInfo };
+}
+
 export function validateAssetIntegrity(db, before, asset, vals) {
   const company = asset.company_id ?? 1;
 
@@ -58,15 +90,18 @@ export function validateAssetIntegrity(db, before, asset, vals) {
   const hasSale = asset.sale_value != null && asset.sale_value !== '';
   const hasDisposalMove = asset.disposal_move_id != null;
   const hasSaleInvoice = asset.sale_invoice_id != null;
-  const hasAnyDisposal = hasDisposal || hasSale || hasDisposalMove || hasSaleInvoice;
+  const hasSaleLine = asset.sale_invoice_line != null && asset.sale_invoice_line !== '';
+  const hasAnyDisposal = hasDisposal || hasSale || hasDisposalMove || hasSaleInvoice || hasSaleLine;
 
   if (before?.disposal_date != null && before.disposal_date !== '') {
     // Legacy closed assets or already-disposed assets: disposal fields are immutable once set
+    const sameLine = (asset.sale_invoice_line == null ? null : Number(asset.sale_invoice_line)) === (before.sale_invoice_line == null ? null : Number(before.sale_invoice_line));
     if (
       asset.disposal_date !== before.disposal_date
       || cents(asset.sale_value) !== cents(before.sale_value)
       || (asset.disposal_move_id ?? null) !== (before.disposal_move_id ?? null)
       || (asset.sale_invoice_id ?? null) !== (before.sale_invoice_id ?? null)
+      || !sameLine
     ) {
       return 'Disposal fields cannot be modified once set';
     }
@@ -89,10 +124,32 @@ export function validateAssetIntegrity(db, before, asset, vals) {
     if (!fixedCredit) {
       return 'Disposal move must credit the fixed asset account by the asset original value';
     }
+    const moveUsedElsewhere = (db.records['account.asset'] ?? []).some(
+      (a) => (a.id !== asset.id && a.disposal_move_id === asset.disposal_move_id)
+        || (a.depreciation_ids ?? []).some((l) => l.move_id === asset.disposal_move_id)
+        || (a.revaluation_ids ?? []).some((r) => r.move_id === asset.disposal_move_id),
+    );
+    if (moveUsedElsewhere) {
+      return 'Disposal move cannot be shared with another asset';
+    }
     if (asset.sale_invoice_id != null) {
       const saleInv = read(db, 'account.move', asset.sale_invoice_id);
-      if (!saleInv || saleInv.state !== 'posted' || saleInv.move_type !== 'out_invoice' || (saleInv.company_id ?? 1) !== company) {
-        return 'Sale invoice must be a posted customer invoice in the asset company';
+      const { error, lineInfo } = saleInvoiceError(db, asset, { invoice: saleInv, invoiceLine: asset.sale_invoice_line, date: asset.disposal_date, saleValue: asset.sale_value });
+      if (error) return error;
+      if (lineInfo.amount > 0) {
+        const saleDebit = (dispMove.line_ids ?? []).find(
+          (l) => l.account_id === lineInfo.accountId && cents(l.debit) === lineInfo.amount && (cents(l.credit) || 0) === 0,
+        );
+        if (!saleDebit) {
+          return 'Disposal move must book the sale on the sale invoice line account';
+        }
+      }
+    } else {
+      if (asset.sale_invoice_line != null && asset.sale_invoice_line !== '') {
+        return 'Sale invoice line must be empty without a sale invoice';
+      }
+      if (cents(asset.sale_value) > 0) {
+        return 'Select the customer invoice for this sale';
       }
     }
   } else if (asset.state !== 'close' && (hasDisposal || hasSale)) {
@@ -470,15 +527,10 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   if (asset.state !== 'open' && (asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
   validate(db, asset);
   const invoice = invoiceId && read(db, 'account.move', invoiceId);
-  if (invoiceId && (invoice?.state !== 'posted' || invoice.move_type !== 'out_invoice' || (invoice.company_id ?? 1) !== (asset.company_id ?? 1))) throw new Error('Select a posted sale invoice in the asset company');
-  if (invoice && [invoice.date, invoice.invoice_date].some((invoiceDate) => invoiceDate && invoiceDate > date)) throw new Error('Disposal date cannot precede the sale invoice date');
-  const saleLine = invoice && (invoice.line_ids ?? []).find((line) => (line.invoice_sources ?? []).some((source) => source.index === Number(invoiceLine)));
-  if (invoice && !saleLine) throw new Error('Sale invoice line not found');
-  const source = saleLine?.invoice_sources.find((item) => item.index === Number(invoiceLine));
-  const sale = invoice ? cents(source.amount) : cents(saleValue ?? 0);
+  const { error: saleError, lineInfo } = invoiceId ? saleInvoiceError(db, asset, { invoice, invoiceLine, date, saleValue }) : { error: null, lineInfo: null };
+  if (saleError) throw new Error(saleError);
+  const sale = invoice ? lineInfo.amount : cents(saleValue ?? 0);
   if (sale < 0) throw new Error('The sale price cannot be negative');
-  if (invoice && saleValue != null && cents(saleValue) !== sale) throw new Error('Sale price must match the invoice line amount');
-  if (invoice && (db.records['account.asset'] ?? []).some((other) => other.id !== asset.id && other.disposal_date && other.sale_invoice_id === invoice.id && other.sale_invoice_line === Number(invoiceLine))) throw new Error('Sale invoice line already used by another asset disposal');
   const depreciated = postDepreciation(db, asset, date);
   const current = read(depreciated, 'account.asset', asset.id);
   const kept = (current.depreciation_ids ?? []).filter((l) => l.posted);
@@ -497,7 +549,7 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   const lines = [
     { account: assetAcc, credit: original / 100 },
     accumulated > 0 && { account: depAcc, debit: accumulated / 100 },
-    sale > 0 && { account: saleLine.account_id, debit: sale / 100 },
+    sale > 0 && lineInfo && { account: lineInfo.accountId, debit: sale / 100 },
     loss > 0 && { account: disposalAccount, debit: loss / 100, analytic_distribution: asset.analytic_distribution },
     loss < 0 && { account: disposalAccount, credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);

@@ -1136,4 +1136,218 @@ test('15. Q4: Disposal field rules, disposal_move_id verification, sale invoice 
     () => applyDiff(syncedDisposedNoInv, { upserts: { 'account.asset': [{ ...assetNoInv, sale_value: 1000 }] } }, { author: 'test', isAdmin: false }),
     /Disposal fields cannot be modified once set/i,
   );
+
+  // Forged 6: A second asset with same account and value closed with first asset's disposal_move_id
+  const openDup = createOpenAsset(syncedDisposedNoInv, {
+    name: 'Duplicate Disposed Asset',
+    acquisition_date: '2026-06-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  const assetDup = read(openDup.db, 'account.asset', openDup.id);
+  assert.throws(
+    () => write(openDup.db, 'account.asset', assetDup.id, {
+      state: 'close',
+      disposal_date: '2026-06-01',
+      sale_value: 0,
+      disposal_move_id: assetNoInv.disposal_move_id,
+    }),
+    /Disposal move cannot be shared with another asset/i,
+  );
+  assert.throws(
+    () => applyDiff(openDup.db, {
+      upserts: {
+        'account.asset': [{
+          ...assetDup,
+          state: 'close',
+          disposal_date: '2026-06-01',
+          sale_value: 0,
+          disposal_move_id: assetNoInv.disposal_move_id,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Disposal move cannot be shared with another asset/i,
+  );
+
+  // Forged 7-9: Sale invoice relationship checks on an open asset
+  const openInvTest = createOpenAsset(db2, {
+    name: 'Asset For Invoice Tests',
+    acquisition_date: '2026-06-01',
+    original_value: 10000,
+    salvage_value: 0,
+    method_number: 5,
+    method_period: '12',
+  });
+  let dbInvTest = openInvTest.db;
+  const assetInvTest = read(dbInvTest, 'account.asset', openInvTest.id);
+  const validDispMove = create(dbInvTest, 'account.move', {
+    name: 'MISC/2026/0010',
+    move_type: 'entry',
+    journal_id: assetInvTest.journal_id,
+    company_id: assetInvTest.company_id,
+    date: '2026-06-15',
+    state: 'posted',
+    line_ids: [
+      { account_id: assetInvTest.account_asset_id, debit: 0, credit: 10000 },
+      { account_id: accountId(dbInvTest, '101401'), debit: 7000, credit: 0 },
+      { account_id: accountId(dbInvTest, '450300'), debit: 3000, credit: 0 },
+    ],
+  });
+  dbInvTest = validDispMove.db;
+
+  // Forged 7: Sale invoice with wrong line index
+  assert.throws(
+    () => write(dbInvTest, 'account.asset', assetInvTest.id, {
+      state: 'close',
+      disposal_date: '2026-06-15',
+      sale_value: 7000,
+      disposal_move_id: validDispMove.id,
+      sale_invoice_id: invoice.id,
+      sale_invoice_line: 99,
+    }),
+    /Sale invoice line not found/i,
+  );
+  assert.throws(
+    () => applyDiff(dbInvTest, {
+      upserts: {
+        'account.asset': [{
+          ...assetInvTest,
+          state: 'close',
+          disposal_date: '2026-06-15',
+          sale_value: 7000,
+          disposal_move_id: validDispMove.id,
+          sale_invoice_id: invoice.id,
+          sale_invoice_line: 99,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Sale invoice line not found/i,
+  );
+
+  // Forged 8: Sale invoice with mismatched sale_value
+  assert.throws(
+    () => write(dbInvTest, 'account.asset', assetInvTest.id, {
+      state: 'close',
+      disposal_date: '2026-06-15',
+      sale_value: 5000,
+      disposal_move_id: validDispMove.id,
+      sale_invoice_id: invoice.id,
+      sale_invoice_line: 0,
+    }),
+    /Sale price must match the invoice line amount/i,
+  );
+  assert.throws(
+    () => applyDiff(dbInvTest, {
+      upserts: {
+        'account.asset': [{
+          ...assetInvTest,
+          state: 'close',
+          disposal_date: '2026-06-15',
+          sale_value: 5000,
+          disposal_move_id: validDispMove.id,
+          sale_invoice_id: invoice.id,
+          sale_invoice_line: 0,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Sale price must match the invoice line amount/i,
+  );
+
+  // Forged 9: Disposal move does not book sale on sale invoice line account (unrelated posted invoice)
+  const unrelatedMove = create(dbInvTest, 'account.move', {
+    name: 'MISC/2026/0007',
+    move_type: 'entry',
+    journal_id: assetInvTest.journal_id,
+    company_id: assetInvTest.company_id,
+    date: '2026-06-15',
+    state: 'posted',
+    line_ids: [
+      { account_id: assetInvTest.account_asset_id, debit: 0, credit: assetInvTest.original_value },
+      { account_id: assetInvTest.account_depreciation_expense_id, debit: assetInvTest.original_value, credit: 0 },
+    ],
+  });
+  assert.throws(
+    () => write(unrelatedMove.db, 'account.asset', assetInvTest.id, {
+      state: 'close',
+      disposal_date: '2026-06-15',
+      sale_value: 7000,
+      disposal_move_id: unrelatedMove.id,
+      sale_invoice_id: invoice.id,
+      sale_invoice_line: 0,
+    }),
+    /Disposal move must book the sale on the sale invoice line account/i,
+  );
+  assert.throws(
+    () => applyDiff(unrelatedMove.db, {
+      upserts: {
+        'account.asset': [{
+          ...assetInvTest,
+          state: 'close',
+          disposal_date: '2026-06-15',
+          sale_value: 7000,
+          disposal_move_id: unrelatedMove.id,
+          sale_invoice_id: invoice.id,
+          sale_invoice_line: 0,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Disposal move must book the sale on the sale invoice line account/i,
+  );
+
+  // Forged 10: sale_invoice_line provided without sale_invoice_id
+  assert.throws(
+    () => write(postedDispMove.db, 'account.asset', asset.id, {
+      state: 'close',
+      disposal_date: '2026-06-01',
+      sale_value: 0,
+      disposal_move_id: postedDispMove.id,
+      sale_invoice_line: 0,
+    }),
+    /Sale invoice line must be empty without a sale invoice/i,
+  );
+  assert.throws(
+    () => applyDiff(postedDispMove.db, {
+      upserts: {
+        'account.asset': [{
+          ...asset,
+          state: 'close',
+          disposal_date: '2026-06-01',
+          sale_value: 0,
+          disposal_move_id: postedDispMove.id,
+          sale_invoice_line: 0,
+        }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Sale invoice line must be empty without a sale invoice/i,
+  );
+
+  // Forged 11: Modifying sale_invoice_line after disposal is rejected
+  assert.throws(
+    () => write(syncedDisposedWithInv, 'account.asset', assetWithInv.id, { sale_invoice_line: 1 }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => applyDiff(syncedDisposedWithInv, {
+      upserts: {
+        'account.asset': [{ ...assetWithInv, sale_invoice_line: 1 }],
+      },
+    }, { author: 'test', isAdmin: false }),
+    /Disposal fields cannot be modified once set/i,
+  );
+
+  // Legacy closed asset cannot modify sale_invoice_line
+  assert.throws(
+    () => write(legacyDb, 'account.asset', legacyClosed.id, { sale_invoice_line: 0 }),
+    /Disposal fields cannot be modified once set/i,
+  );
+  assert.throws(
+    () => applyDiff(legacyDb, {
+      upserts: {
+        'account.asset': [{ ...legacyClosed, sale_invoice_line: 0 }],
+      },
+    }, { author: 'admin', isAdmin: true }),
+    /Disposal fields cannot be modified once set/i,
+  );
 });
