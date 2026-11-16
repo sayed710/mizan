@@ -15,8 +15,8 @@ import {
 } from './models/onlineSync.js';
 import {
   formatTaxReturnName,
+  generateReturns,
 } from './models/taxreturn.js';
-import { runScheduledJobs } from './models/scheduler.js';
 import { SCHEMA_VERSION, migrate } from './migrations.js';
 import { find, setupDom } from './test-support/dom.js';
 
@@ -276,6 +276,28 @@ test('2. Brand-new connection default state is not_synchronized, reflects provid
   assert.equal(read(db, 'account.online.link', newLinkRes.id).state, 'error');
   assert.equal(read(db, 'account.online.link', newLinkRes.id).error_message, 'Bank API timeout');
 
+  // Reconnect action: sets state 'connected' only when the link has last_refresh; never synchronized link goes to 'not_synchronized'
+  const reconnectBtn = linkModel.form.buttons.find((b) => b.label === 'Reconnect');
+  assert.ok(reconnectBtn, 'Reconnect button exists');
+
+  // Case 1: link never synchronized (last_refresh is null) disconnected -> reconnects to not_synchronized
+  const unsyncedLink = create(db, 'account.online.link', { name: 'Never Synced', state: 'disconnected', last_refresh: null, error_message: 'old error' });
+  db = unsyncedLink.db;
+  const unsyncedRec = read(db, 'account.online.link', unsyncedLink.id);
+  const reconnectedUnsynced = reconnectBtn.run(db, unsyncedRec);
+  db = reconnectedUnsynced.db;
+  assert.equal(read(db, 'account.online.link', unsyncedLink.id).state, 'not_synchronized');
+  assert.equal(read(db, 'account.online.link', unsyncedLink.id).error_message, '');
+
+  // Case 2: link previously synchronized (last_refresh is set) disconnected -> reconnects to connected
+  const syncedLink = create(db, 'account.online.link', { name: 'Previously Synced', state: 'disconnected', last_refresh: '2026-06-01T12:00:00Z', error_message: 'network error' });
+  db = syncedLink.db;
+  const syncedRec = read(db, 'account.online.link', syncedLink.id);
+  const reconnectedSynced = reconnectBtn.run(db, syncedRec);
+  db = reconnectedSynced.db;
+  assert.equal(read(db, 'account.online.link', syncedLink.id).state, 'connected');
+  assert.equal(read(db, 'account.online.link', syncedLink.id).error_message, '');
+
   // Migration 55: updates legacy connection with connected state but no last_refresh to not_synchronized
   const legacyDb = {
     schema_version: 54,
@@ -292,20 +314,9 @@ test('2. Brand-new connection default state is not_synchronized, reflects provid
   assert.equal(SCHEMA_VERSION, 55);
 });
 
-test('3. Tax returns: scheduled generation is idempotent, name defaults canonically, and empty dates tab is clean', async () => {
+test('3. Tax returns: name defaults canonically, write/onchange enforces name rules, duplicate preserves copy name, and empty dates tab is clean', async () => {
   let db = seed();
   const { FormView } = await import('./views/FormView.jsx');
-
-  // 3a. Scheduled generation generates missing periodic returns for all active types across companies
-  const initialReturns = search(db, 'account.return');
-  const run1Db = runScheduledJobs(db, '2026-06-30');
-  const afterRun1 = search(run1Db, 'account.return');
-  assert.ok(afterRun1.length > initialReturns.length, 'runScheduledJobs created periodic returns');
-
-  // Idempotence: running a second time creates nothing new
-  const run2Db = runScheduledJobs(run1Db, '2026-06-30');
-  const afterRun2 = search(run2Db, 'account.return');
-  assert.equal(afterRun2.length, afterRun1.length, 'runScheduledJobs must be idempotent (no duplicates)');
 
   // 3b. formatTaxReturnName helper extracted and canonical format
   assert.equal(formatTaxReturnName('VAT Return', '2026-01-01', '2026-01-31'), 'VAT Return (2026-01-01 - 2026-01-31)');
@@ -319,6 +330,11 @@ test('3. Tax returns: scheduled generation is idempotent, name defaults canonica
 
   const vatType = search(db, 'account.return.type').find((t) => (t.company_id ?? 1) === 1 && t.category !== 'audit');
   assert.ok(vatType, 'VAT Return type found');
+
+  // 3a. generateReturns sets name_auto true on generated returns
+  const { created: generatedList } = generateReturns(db, vatType.id);
+  assert.ok(generatedList.length > 0, 'generateReturns created returns');
+  assert.ok(generatedList.every((r) => r.name_auto === true), 'all generated returns are name_auto');
 
   // Name requirement: false for tax return with type & dates, true without dates, true for audit working file
   assert.equal(fieldRequired(returnModel.fields.name, { type_id: vatType.id, date_from: '2026-04-01', date_to: '2026-04-30' }, db, true), false);
@@ -376,13 +392,17 @@ test('3. Tax returns: scheduled generation is idempotent, name defaults canonica
   assert.equal(returnModel.fields.name_auto?.hidden, true, 'name_auto is hidden');
   assert.equal(createdRet.name_auto, true, 'defaulted return has name_auto === true');
   assert.equal(read(customRetRes.db, 'account.return', customRetRes.id).name_auto, false, 'explicitly named return has name_auto === false');
-  assert.ok(afterRun1.every((r) => r.name_auto === true), 'all generated returns are name_auto');
 
   // onchange behavior: typed name survives a date change; auto name follows a date change
   const onchange = returnModel.onchange;
-  // 1. User edits name: name_auto is set to false
+  // 1. User edits name: non-empty name sets name_auto to false
   const userEdited = onchange({ ...createdRet, name: 'VAT Return (2026-04-01 - 2026-04-30)' }, 'name', db);
   assert.equal(userEdited.name_auto, false, 'editing name sets name_auto to false');
+
+  // Clearing the name (onchange) means automatic again: regenerates formatTaxReturnName(type, dates) and sets name_auto true
+  const clearedOnchange = onchange({ ...createdRet, name: '' }, 'name', db);
+  assert.equal(clearedOnchange.name, 'VAT Return (2026-04-01 - 2026-04-30)', 'clearing name in onchange regenerates name');
+  assert.equal(clearedOnchange.name_auto, true, 'clearing name in onchange sets name_auto true');
 
   // 2. Typed name survives date change
   const typedRecord = { ...createdRet, name: 'Custom Name', name_auto: false };
@@ -400,7 +420,123 @@ test('3. Tax returns: scheduled generation is idempotent, name defaults canonica
   assert.equal(afterDateChangeAuto.name, 'VAT Return (2026-04-01 - 2026-05-31)', 'auto name updates on date change');
   assert.equal(afterDateChangeAuto.name_auto, true, 'name_auto remains true after auto update');
 
-  // 4. Migration 55 sets name_auto true only where name === formatTaxReturnName(type name, date_from, date_to)
+  // 4. Clear the suggested name on a new return then change dates and save -> generated name, name_auto true
+  const { changeFormValue } = await import('./views/formDefaults.js');
+  const newReturnInitial = {
+    type_id: vatType.id,
+    date_from: '2026-08-01',
+    date_to: '2026-08-31',
+    company_id: 1,
+    name: 'VAT Return (2026-08-01 - 2026-08-31)',
+    name_auto: true,
+  };
+  let formChanges = changeFormValue('account.return', newReturnInitial, {}, 'name', '', db);
+  formChanges = changeFormValue('account.return', newReturnInitial, formChanges, 'date_to', '2026-09-30', db);
+  const savedClearedForm = saveFormRecord(db, 'account.return', null, { ...newReturnInitial, ...formChanges });
+  db = savedClearedForm.db;
+  const savedClearedRec = read(db, 'account.return', savedClearedForm.id);
+  assert.equal(savedClearedRec.name, 'VAT Return (2026-08-01 - 2026-09-30)', 'new return with cleared name and changed dates gets generated name');
+  assert.equal(savedClearedRec.name_auto, true, 'new return with cleared name has name_auto true');
+
+  // 5. Clear the name of a saved return via write -> generated name, name_auto true
+  const customSavedRet = create(db, 'account.return', {
+    name: 'Manual Tax Return Name',
+    name_auto: false,
+    type_id: vatType.id,
+    date_from: '2026-10-01',
+    date_to: '2026-10-31',
+    company_id: 1,
+  });
+  db = customSavedRet.db;
+  const writtenClearedDb = write(db, 'account.return', customSavedRet.id, { name: '' });
+  db = writtenClearedDb;
+  const writtenClearedRec = read(db, 'account.return', customSavedRet.id);
+  assert.equal(writtenClearedRec.name, 'VAT Return (2026-10-01 - 2026-10-31)', 'clearing name via write regenerates name');
+  assert.equal(writtenClearedRec.name_auto, true, 'clearing name via write sets name_auto true');
+
+  // Round 6 tests:
+  // (a) write(db, 'account.return', id, { name: rec.name, name_auto: true }) keeps name_auto true
+  const retA = create(db, 'account.return', {
+    type_id: vatType.id,
+    date_from: '2026-11-01',
+    date_to: '2026-11-30',
+    company_id: 1,
+  });
+  db = retA.db;
+  const recA = read(db, 'account.return', retA.id);
+  assert.equal(recA.name_auto, true);
+  const writeExplicitAutoDb = write(db, 'account.return', recA.id, { name: recA.name, name_auto: true });
+  db = writeExplicitAutoDb;
+  assert.equal(read(db, 'account.return', recA.id).name_auto, true, 'writing { name: rec.name, name_auto: true } preserves name_auto true');
+
+  // (b) write with the full record (as saveFormRecord does) and a changed date_to regenerates the name when name_auto was true
+  const retB = create(db, 'account.return', {
+    type_id: vatType.id,
+    date_from: '2026-04-01',
+    date_to: '2026-04-30',
+    company_id: 1,
+  });
+  db = retB.db;
+  const recB = read(db, 'account.return', retB.id);
+  assert.equal(recB.name_auto, true);
+  const fullSaveDb = write(db, 'account.return', recB.id, { ...recB, date_to: '2026-06-30' });
+  db = fullSaveDb;
+  const fullSaveRec = read(db, 'account.return', recB.id);
+  assert.equal(fullSaveRec.name, 'VAT Return (2026-04-01 - 2026-06-30)', 'full record write with changed date_to regenerates automatic name');
+  assert.equal(fullSaveRec.name_auto, true, 'full record write with changed date_to retains name_auto true');
+
+  // (c) write { name: 'My name' } with no name_auto -> false
+  const retC = create(db, 'account.return', {
+    type_id: vatType.id,
+    date_from: '2026-05-01',
+    date_to: '2026-05-31',
+    company_id: 1,
+  });
+  db = retC.db;
+  const recC = read(db, 'account.return', retC.id);
+  assert.equal(recC.name_auto, true);
+  const writeCustomNameDb = write(db, 'account.return', recC.id, { name: 'My name' });
+  db = writeCustomNameDb;
+  const writeCustomNameRec = read(db, 'account.return', recC.id);
+  assert.equal(writeCustomNameRec.name, 'My name');
+  assert.equal(writeCustomNameRec.name_auto, false, 'write { name: "My name" } with no name_auto sets name_auto false');
+
+  // Saved return without type/dates or audit return cannot persist empty name
+  const auditRetRes = create(db, 'account.return', {
+    name: 'Audit 2026',
+    audit_status: 'ongoing',
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    company_id: 1,
+  });
+  db = auditRetRes.db;
+  assert.throws(
+    () => write(db, 'account.return', auditRetRes.id, { name: '' }),
+    /Return is required/,
+    'write setting empty name on audit return throws validation error',
+  );
+
+  // 6. Duplicate a return then change its dates -> copy name kept
+  const { duplicateValues } = await import('./duplicate.js');
+  const returnToDuplicate = read(db, 'account.return', createdRetRes.id);
+  assert.equal(returnToDuplicate.name_auto, true);
+  const dupVals = duplicateValues('account.return', returnToDuplicate);
+  assert.equal(dupVals.name, `${returnToDuplicate.name} (copy)`);
+  assert.equal(dupVals.name_auto, undefined, 'copy: false excludes name_auto from duplicateValues');
+  const dupCreateRes = create(db, 'account.return', dupVals);
+  db = dupCreateRes.db;
+  const dupCreatedRec = read(db, 'account.return', dupCreateRes.id);
+  assert.equal(dupCreatedRec.name, `${returnToDuplicate.name} (copy)`);
+  assert.equal(dupCreatedRec.name_auto, false, 'duplicate copy gets name_auto false so edits preserve copy name');
+
+  // Changing dates on duplicate copy preserves copy name (onchange and write)
+  const dupDateOnchange = onchange({ ...dupCreatedRec, date_to: '2026-05-31' }, 'date_to', db);
+  assert.equal(dupDateOnchange.name, undefined, 'onchange on duplicated copy does not overwrite name');
+  const dupWrittenDb = write(db, 'account.return', dupCreatedRec.id, { date_to: '2026-05-31' });
+  db = dupWrittenDb;
+  assert.equal(read(db, 'account.return', dupCreatedRec.id).name, `${returnToDuplicate.name} (copy)`, 'write on duplicated copy preserves copy name');
+
+  // 7. Migration 55 sets name_auto true only where name === formatTaxReturnName(type name, date_from, date_to)
   const legacyReturnDb = {
     schema_version: 54,
     records: {

@@ -19,7 +19,6 @@ import { autoCheckout } from './attendanceplus.js';
 import { syncFromApplicant } from './skillsplus.js';
 import { expireRequests } from './signplus.js';
 import { blanketExpiryCheck } from './purchaseplus.js';
-import { generateAllReturns } from './taxreturn.js';
 
 /** New helpdesk tickets of teams that assign automatically get an owner; stale solved/waiting tickets close. */
 const helpdeskJobs = (db, at) => autoCloseStale((db.records['helpdesk.ticket'] ?? []).filter((t) => !t.user_id && t.team_id && t.stage_id === 'new')
@@ -62,7 +61,6 @@ export function runScheduledJobs(db, at = today(), { onError = () => {}, deliver
       return sent && typeof sent.then === 'function' ? sent.then(save) : save(sent);
     }],
     ['accounting', (db) => autoReconcile(db)],
-    ['accounting', tolerant(function generateReturnsJob(d, at) { return generateAllReturns(d, at); })],
     ['automation', tolerant(processDue)],
     ['social', publishDue],
     ['crm', (db) => assignAllTeams(db)],

@@ -208,22 +208,24 @@ function writeValues(db, model, before, vals) {
 
 /** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
 function prepareWrite(db, model, before, vals, ctx = undefined) {
+  const prepared = models[model].prepareWrite?.(db, vals, before);
+  if (prepared) ({ db, vals } = prepared);
   const result = writeValues(db, model, before, vals);
   const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx, vals);
   if (err) throw new Error(err);
   checkDeclared(model, result.after);
-  return result;
+  return { ...result, db };
 }
 
 export function write(db, model, id, vals, ctx = undefined) {
   assertWritable(model);
   const before = (db.records[model] ?? []).find((r) => r.id === id);
   if (!before) throw new Error(`${model} #${id} not found`);
-  const { after, clean } = prepareWrite(db, model, before, vals, ctx);
+  const { after, clean, db: nextDb = db } = prepareWrite(db, model, before, vals, ctx);
   const next = {
-    ...db,
-    records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? after : r)) },
-    messages: [...db.messages, ...trackingMessages(db, model, before, after, clean)],
+    ...nextDb,
+    records: { ...nextDb.records, [model]: nextDb.records[model].map((r) => (r.id === id ? after : r)) },
+    messages: [...nextDb.messages, ...trackingMessages(nextDb, model, before, after, clean)],
   };
   return models[model].onWrite?.(next, after, before, clean) ?? next;
 }
@@ -238,7 +240,10 @@ export function writeManyAtomic(db, model, updates) {
   for (const [id, vals] of updates) {
     const before = byId.get(id);
     if (!before) throw new Error(`${model} #${id} not found`);
-    changes.set(id, { before, vals, ...writeValues(db, model, before, vals) });
+    let nextVals = vals;
+    const prepared = models[model].prepareWrite?.(db, vals, before);
+    if (prepared) ({ db, vals: nextVals } = prepared);
+    changes.set(id, { before, vals: nextVals, ...writeValues(db, model, before, nextVals) });
   }
   let next = { ...db, records: { ...db.records, [model]: list.map((record) => changes.get(record.id)?.after ?? record) } };
   for (const { before, after, vals } of changes.values()) {
@@ -268,7 +273,8 @@ export function writeMany(db, model, updates) {
   for (const [id, vals] of updates) {
     const before = byId.get(id);
     if (!before) throw new Error(`${model} #${id} not found`);
-    const { after, clean } = prepareWrite(db, model, before, vals);
+    const { after, clean, db: nextDb = db } = prepareWrite(db, model, before, vals);
+    db = nextDb;
     written.set(id, after);
     tracked.push(...trackingMessages(db, model, before, after, clean));
   }

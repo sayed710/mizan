@@ -393,6 +393,14 @@ export function syncOnlineJournal(db, journalId, opts = {}) {
   return syncOnlineAccount(db, account.id, opts);
 }
 
+/** Reconnect an online sync link: transitions to connected if previously synchronized, or not_synchronized if never refreshed. */
+export function reconnectOnlineConnection(db, linkId) {
+  const link = read(db, LINK_MODEL, linkId);
+  if (!link) throw new Error('Online synchronization connection not found');
+  const state = link.last_refresh ? 'connected' : 'not_synchronized';
+  return write(db, LINK_MODEL, linkId, { state, error_message: '' });
+}
+
 const computeLinkAccounts = (r, db) => (db?.records?.[ACCOUNT_MODEL] ?? [])
   .filter((a) => a.link_id === r?.id && a.active !== false)
   .map((a) => {
@@ -480,7 +488,7 @@ export const onlineSyncModels = {
       buttons: [
         { label: 'Fetch Transactions', primary: true, when: (r) => Boolean(r?.id) && r.state !== 'disconnected', run: (db, r) => ({ db: syncOnlineConnection(db, r.id).db }) },
         { label: 'Disconnect', when: (r) => Boolean(r?.id) && r.state !== 'disconnected', vals: { state: 'disconnected' } },
-        { label: 'Reconnect', when: (r) => Boolean(r?.id) && r.state === 'disconnected', vals: { state: 'connected', error_message: '' } },
+        { label: 'Reconnect', when: (r) => Boolean(r?.id) && r.state === 'disconnected', run: (db, r) => ({ db: reconnectOnlineConnection(db, r.id) }) },
       ],
       groups: [['name', 'provider'], ['last_refresh', 'error_message']],
       tabs: [{ label: 'Online Accounts', fields: ['account_ids'] }],

@@ -32,8 +32,14 @@ export function isAuditReturn(r, db) {
   return !!(r?.type_id && db && read(db, 'account.return.type', r.type_id)?.category === 'audit');
 }
 
-/** Resolve whether the tax return name is required (audit working files and returns without full type and dates). */
-const isReturnNameRequired = (r, db) => Boolean(isNewAudit(db, r) || !r?.type_id || !r?.date_from || !r?.date_to);
+/** Resolve whether the tax return name is required (audit working files, returns without full type and dates, or saved records). */
+const isReturnNameRequired = (r, db, ctx = {}) => Boolean(
+  (ctx && !ctx.isNew && (!r || r.id))
+  || isNewAudit(db, r)
+  || !r?.type_id
+  || !r?.date_from
+  || !r?.date_to
+);
 
 // A new working-file form has no persisted type until its first save.
 const auditForm = (r, db, context) => isAuditReturn(r, db)
@@ -229,25 +235,14 @@ export function formatTaxReturnName(typeName, dateFrom, dateTo) {
   return typeName || '';
 }
 
-/**
- * Run generateReturns for every active periodic return type of every company.
- * Idempotent; skips periods already covered.
- */
-export function generateAllReturns(db, at = today()) {
-  let next = ensureReturnTypes(db);
-  const types = (next.records?.['account.return.type'] ?? []).filter((t) => t.active !== false && t.auto_generate !== false);
-  for (const type of types) next = generateReturns(next, type.id, at).db;
-  return next;
-}
-
 /** Create missing returns for each period up to today for return type `typeId`. */
-export function generateReturns(db, typeId, at = today()) {
+export function generateReturns(db, typeId) {
   let nextDb = ensureReturnTypes(db);
   const type = read(nextDb, 'account.return.type', typeId);
   if (!type) throw new Error('Return type not found');
   const companyId = type.company_id ?? 1;
   const periodicity = type.deadline_periodicity || 'monthly';
-  const atDate = at || today();
+  const atDate = today();
   const start = type.deadline_start_date || historicalStart(nextDb, companyId, periodicity, atDate);
   const periods = periodsUpTo(periodicity, start, atDate);
 
@@ -587,21 +582,66 @@ export const taxReturnModels = {
     prepareCreate: (db, vals) => {
       const companyId = returnCompany(db, vals);
       if (isAuditReturn(vals, db)) vals = { ...vals, audit_status: vals?.audit_status || 'ongoing', company_id: companyId };
-      if (!isNewAudit(db, vals) && !vals?.name && vals?.type_id && vals?.date_from && vals?.date_to) {
-        const type = read(db, 'account.return.type', vals.type_id);
-        const autoName = formatTaxReturnName(type?.name, vals.date_from, vals.date_to);
-        if (autoName) vals = { ...vals, name: autoName, name_auto: true };
-      } else if (vals?.name && vals.name_auto == null) {
-        vals = { ...vals, name_auto: false };
+      const hasText = Boolean(vals?.name && String(vals.name).trim());
+      if (!isNewAudit(db, vals)) {
+        if (!hasText && vals?.type_id && vals?.date_from && vals?.date_to) {
+          const type = read(db, 'account.return.type', vals.type_id);
+          const autoName = formatTaxReturnName(type?.name, vals.date_from, vals.date_to);
+          if (autoName) vals = { ...vals, name: autoName, name_auto: true };
+        } else if (hasText && vals.name_auto == null) {
+          vals = { ...vals, name_auto: false };
+        }
       }
       if (!isNewAudit(db, vals)) return { db, vals };
       if (vals.type_id) return { db, vals: { ...vals, company_id: companyId } };
       const ensured = ensureAuditReturnType(db, companyId);
       return { db: ensured.db, vals: { ...vals, company_id: companyId, type_id: ensured.typeId } };
     },
+    prepareWrite: (db, vals, before) => {
+      const combined = { ...before, ...vals };
+      if (!isNewAudit(db, combined)) {
+        if (vals.name !== undefined) {
+          const hasText = Boolean(vals.name && String(vals.name).trim());
+          if (!hasText) {
+            if (combined.type_id && combined.date_from && combined.date_to) {
+              const type = read(db, 'account.return.type', combined.type_id);
+              const autoName = formatTaxReturnName(type?.name, combined.date_from, combined.date_to);
+              if (autoName) return { db, vals: { ...vals, name: autoName, name_auto: true } };
+            }
+            return { db, vals: { ...vals, name_auto: true } };
+          }
+          const isAuto = vals.name_auto !== undefined
+            ? Boolean(vals.name_auto)
+            : (vals.name === before?.name ? Boolean(before?.name_auto) : false);
+          if (isAuto) {
+            const datesOrTypeChanged = combined.type_id !== before?.type_id
+              || combined.date_from !== before?.date_from
+              || combined.date_to !== before?.date_to;
+            if (datesOrTypeChanged && combined.type_id && combined.date_from && combined.date_to) {
+              const type = read(db, 'account.return.type', combined.type_id);
+              const autoName = formatTaxReturnName(type?.name, combined.date_from, combined.date_to);
+              if (autoName) return { db, vals: { ...vals, name: autoName, name_auto: true } };
+            }
+            return { db, vals: { ...vals, name_auto: true } };
+          }
+          return { db, vals: { ...vals, name_auto: false } };
+        }
+        if (before?.name_auto) {
+          const datesOrTypeChanged = (vals.type_id !== undefined && vals.type_id !== before?.type_id)
+            || (vals.date_from !== undefined && vals.date_from !== before?.date_from)
+            || (vals.date_to !== undefined && vals.date_to !== before?.date_to);
+          if (datesOrTypeChanged && combined.type_id && combined.date_from && combined.date_to) {
+            const type = read(db, 'account.return.type', combined.type_id);
+            const autoName = formatTaxReturnName(type?.name, combined.date_from, combined.date_to);
+            if (autoName) return { db, vals: { ...vals, name: autoName, name_auto: true } };
+          }
+        }
+      }
+      return { db, vals };
+    },
     fields: {
       name: { type: 'char', label: 'Return', required: isReturnNameRequired },
-      name_auto: { type: 'boolean', label: 'Automatic Name', hidden: true },
+      name_auto: { type: 'boolean', label: 'Automatic Name', hidden: true, copy: false },
       // Working files (audit_status set) pick audit types, tax returns pick tax types, both in the record's company.
       type_id: { type: 'many2one', relation: 'account.return.type', label: 'Return Type', required: true, domain: (type, r) => (type.company_id ?? 1) === (r?.company_id ?? 1) && (type.category === 'audit') === Boolean(r?.audit_status) },
       date_from: { type: 'date', label: 'Start Date', required: true },
@@ -674,7 +714,19 @@ export const taxReturnModels = {
     // Audit checks follow the working file's period and company.
     onchange: (r, key, db) => {
       const next = {};
-      if (key === 'name') next.name_auto = false;
+      if (key === 'name') {
+        const hasText = Boolean(r.name && String(r.name).trim());
+        if (hasText) {
+          next.name_auto = false;
+        } else {
+          next.name_auto = true;
+          if (!isNewAudit(db, r) && r.type_id && r.date_from && r.date_to) {
+            const type = read(db, 'account.return.type', r.type_id);
+            const autoName = formatTaxReturnName(type?.name, r.date_from, r.date_to);
+            if (autoName) next.name = autoName;
+          }
+        }
+      }
       if (!isNewAudit(db, r) && ['type_id', 'date_from', 'date_to'].includes(key) && (!r.name || r.name_auto)) {
         const type = r.type_id ? read(db, 'account.return.type', r.type_id) : null;
         if (type && r.date_from && r.date_to) {
