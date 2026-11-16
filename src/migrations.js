@@ -20,6 +20,7 @@ import { defaultCashFlowActivity } from './models/reports.js';
 import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
+import { formatTaxReturnName } from './models/taxreturn.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1565,6 +1566,44 @@ MIGRATIONS.push({ version: 54, name: 'online-sync-previous-bank-source', up: (db
   return changed
     ? { ...db, records: { ...db.records, 'account.journal': nextJournals } }
     : db;
+} });
+
+// v55: migrate existing un-synced online links from legacy default 'connected' to 'not_synchronized'
+// and backfill name_auto on existing tax returns matching formatTaxReturnName(type.name, date_from, date_to).
+MIGRATIONS.push({ version: 55, name: 'online-link-unsynced-state', up: (db) => {
+  let nextDb = db;
+  const links = db?.records?.['account.online.link'];
+  if (Array.isArray(links)) {
+    let linkChanged = false;
+    const nextLinks = links.map((link) => {
+      if (!link) return link;
+      if (link.state === 'connected' && !link.last_refresh) {
+        linkChanged = true;
+        return { ...link, state: 'not_synchronized' };
+      }
+      return link;
+    });
+    if (linkChanged) nextDb = { ...nextDb, records: { ...nextDb.records, 'account.online.link': nextLinks } };
+  }
+
+  const returns = db?.records?.['account.return'];
+  if (Array.isArray(returns)) {
+    const types = new Map((db?.records?.['account.return.type'] ?? []).map((t) => [t.id, t]));
+    let returnChanged = false;
+    const nextReturns = returns.map((ret) => {
+      if (!ret) return ret;
+      const type = types.get(ret.type_id);
+      const isAuto = Boolean(type?.name && ret.date_from && ret.date_to && ret.name === formatTaxReturnName(type.name, ret.date_from, ret.date_to));
+      if (ret.name_auto !== isAuto) {
+        returnChanged = true;
+        return { ...ret, name_auto: isAuto };
+      }
+      return ret;
+    });
+    if (returnChanged) nextDb = { ...nextDb, records: { ...nextDb.records, 'account.return': nextReturns } };
+  }
+
+  return nextDb;
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

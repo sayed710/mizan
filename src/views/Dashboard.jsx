@@ -2,7 +2,7 @@ import { search } from '../orm.js';
 import { today } from '../models/index.js';
 import { useDb, commit, getDb } from '../store.js';
 import { t } from '../i18n.js';
-import { money } from '../ui.jsx';
+import { money, display } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
 import { isLiquidityJournal, isStatementJournal } from '../models/ledger.js';
@@ -60,7 +60,7 @@ function OnlineSyncControls({ sync, journalId, primary = false }) {
       {sync.state === 'error' ? (
         <p className="journal-error" role="alert">{t(sync.errorMessage || 'Synchronization error')}</p>
       ) : sync.lastRefresh ? (
-        <p className="muted journal-sync-status">{t('Last sync:')} {String(sync.lastRefresh).slice(0, 16).replace('T', ' ')}</p>
+        <p className="muted journal-sync-status">{t('Last sync:')} {display(null, { type: 'datetime' }, sync.lastRefresh)}</p>
       ) : sync.state === 'disconnected' ? (
         <p className="muted journal-sync-status">{t('Online synchronization disconnected')}</p>
       ) : (

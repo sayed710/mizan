@@ -363,8 +363,8 @@ test('migration 43 renames unit_name to currency_unit_label, preserves checkAmou
     },
   };
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 54);
-  assert.equal(SCHEMA_VERSION, 54);
+  assert.equal(migrated.schema_version, 55);
+  assert.equal(SCHEMA_VERSION, 55);
 
   const migratedEur = read(migrated, 'res.currency', eur.id);
   assert.equal(migratedEur.currency_unit_label, 'Dinars');

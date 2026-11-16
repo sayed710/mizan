@@ -47,7 +47,15 @@ function PortalLink({ model, id }) {
 
 function withComputed(model, vals, db) {
   const computed = Object.entries(models[model].fields).filter(([, f]) => f.compute);
-  return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
+  return {
+    ...vals,
+    ...Object.fromEntries(
+      computed.map(([k, f]) => [
+        k,
+        f.editable && vals[k] !== undefined ? vals[k] : f.compute(vals, db),
+      ]),
+    ),
+  };
 }
 
 function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record, isNew = false }) {
@@ -653,18 +661,22 @@ export function FormView({ leaf, id, base, params }) {
                     return (
                       <>
                         {model === 'account.return' && activeTab.label === 'Tax Report' ? (
-                          <TaxReportTable
-                            db={db}
-                            returnRecord={current}
-                            period={{
-                              from: current.date_from,
-                              to: current.date_to,
-                              company_id: current.company_id,
-                              tax_unit_id: current.tax_unit_id && (read(db, 'account.tax.unit', current.tax_unit_id)?.company_ids ?? []).includes(current.company_id ?? 1)
-                                ? current.tax_unit_id
-                                : null,
-                            }}
-                          />
+                          (!current.date_from || !current.date_to) ? (
+                            <p className="muted empty-state">{t('Set start and end dates to view the tax report.')}</p>
+                          ) : (
+                            <TaxReportTable
+                              db={db}
+                              returnRecord={current}
+                              period={{
+                                from: current.date_from,
+                                to: current.date_to,
+                                company_id: current.company_id,
+                                tax_unit_id: current.tax_unit_id && (read(db, 'account.tax.unit', current.tax_unit_id)?.company_ids ?? []).includes(current.company_id ?? 1)
+                                  ? current.tax_unit_id
+                                  : null,
+                              }}
+                            />
+                          )
                         ) : (
                           <>
                             {(activeTab.fields ?? []).map((f) => renderTabField(f))}

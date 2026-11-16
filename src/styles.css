@@ -439,6 +439,7 @@ html[dir='rtl'] .toggle-switch:checked::before { transform: translateX(-14px); }
 .bank-reconcile-summary { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .bank-reconcile-amounts { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
 .bank-reconcile-manual, .bank-reconcile-writeoff-fields { display: grid; gap: 10px; margin-top: 12px; }
+.bank-reconcile-writeoff-fields select { max-width: 320px; }
 @media (max-width: 820px) {
   .bank-reconcile-layout { grid-template-columns: 1fr; }
 }
