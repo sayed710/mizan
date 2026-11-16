@@ -832,6 +832,7 @@ function draftAssetsFromBill(db, bill) {
     const account = read(next, 'account.account', booked.account);
     const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
     if (!fixed.has(booked.account) && !model) return next;
+    const modelJournal = model?.journal_id && read(next, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
     const product = read(next, 'product', line.product_id);
     const values = {
       name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
@@ -846,7 +847,7 @@ function draftAssetsFromBill(db, bill) {
         prorata: Boolean(model.prorata),
         account_depreciation_id: model.account_depreciation_id ?? null,
         account_depreciation_expense_id: model.account_depreciation_expense_id ?? null,
-        journal_id: model.journal_id ?? null,
+        ...(modelJournal ? { journal_id: modelJournal } : {}),
         analytic_distribution: model.analytic_distribution ?? null,
       } : {
         model_id: null,
