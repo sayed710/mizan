@@ -1667,3 +1667,19 @@ test('a credit adjustment cannot revive a cancelled recognition line through ORM
     /Recognition lines can only be cancelled by cancelling their entry/,
   );
 });
+
+test('a board that duplicates one period to drop another is rejected through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const bill = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(bill.db, bill.id);
+  const first = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
+  db = write(db, 'account.move', first.board[0].move_id, { state: 'cancel' });
+  const sched = read(db, 'account.deferral', first.id);
+  assert.equal(sched.board[0].cancelled, true);
+  // Same length, but the cancelled first period appears twice and the second period is gone.
+  const board = sched.board.map((l, i) => (i === 1 ? { ...sched.board[0] } : l));
+  assert.throws(() => write(db, 'account.deferral', sched.id, { board }), /Recognition line dates cannot be changed on an active schedule/);
+  const tampered = { ...db, records: { ...db.records, 'account.deferral': db.records['account.deferral'].map((d) => (d.id === sched.id ? { ...d, board } : d)) } };
+  assert.throws(() => applyDiff(db, diffDb(db, tampered), { author: 'Admin', isAdmin: true }), /Recognition line dates cannot be changed on an active schedule/);
+});

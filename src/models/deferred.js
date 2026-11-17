@@ -1443,6 +1443,12 @@ export function deferralGuard(db, before, after) {
     if ((after.board ?? []).length !== (before.board ?? []).length) {
       return 'Recognition lines cannot be added or removed from an active schedule';
     }
+    // Each original period stays on the board exactly once: a duplicated date could otherwise stand in for a dropped (e.g. posted) line.
+    const afterDates = (after.board ?? []).map((l) => l.date);
+    const beforeDates = new Set((before.board ?? []).map((l) => l.date));
+    if (new Set(afterDates).size !== afterDates.length || afterDates.some((date) => !beforeDates.has(date))) {
+      return 'Recognition line dates cannot be changed on an active schedule';
+    }
 
     const afterAdjs = after.credit_adjustments ?? [];
     const beforeAdjs = before.credit_adjustments ?? [];
