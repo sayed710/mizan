@@ -16,7 +16,7 @@ import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, rou
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
 import { t } from '../i18n.js';
-import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, deferralLinksMove, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, validateInvoiceDeferralCredit } from './deferred.js';
+import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, deferralLinksMove, registerDeferredPostMoveHook, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, syncDeferralOnMoveStateChange, validateInvoiceDeferralCredit } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
@@ -724,6 +724,8 @@ export function postMove(db, id) {
   const withAssets = r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
   return spawnRecurringMove(withAssets, read(withAssets, 'account.move', id));
 }
+
+registerDeferredPostMoveHook(postMove);
 
 /** Reverse an asset depreciation entry and make its board line available again. */
 export function reverseDepreciation(db, move, options = {}) {
@@ -2233,6 +2235,9 @@ export const accountingModels = {
       if (before.state === 'posted' && after.state !== 'posted') {
         db = reverseInvoiceDeferrals(db, before);
         db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry, attemptAutoPostMove);
+      }
+      if (before?.state !== after.state) {
+        db = syncDeferralOnMoveStateChange(db, after, before?.state);
       }
       if (!['invoice_line_ids', 'state', 'sale_id', 'purchase_id'].some((key) => key in vals)) return db;
       return syncInvoicedQty(syncInvoicedQty(db, before), after);
