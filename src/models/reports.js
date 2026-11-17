@@ -120,7 +120,7 @@ export function partnerLedger(db, { from, to, company_id, analyticAccountIds, pa
     r.debit += debit;
     r.credit += credit;
     // Reuse the journal item's derived reconciliation fields; never infer a matching number from labels or amounts.
-    const dueDate = l.date_maturity ?? read(db, 'account.move', l.move_id)?.invoice_date_due ?? '';
+    const dueDate = l.date_maturity ?? read(db, 'account.move', l.move_id)?.invoice_date_due ?? l.date;
     r.lines.push({
       date: l.date, dueDate, move_id: l.move_id, move_name: l.move_name,
       ...(l.matching_number ? { matchingNumber: l.matching_number } : {}),

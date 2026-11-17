@@ -231,3 +231,17 @@ test('customer statement runs one partner receivable with the payment reference'
   assert.deepEqual(customerStatement(db, 3, recent), { opening: 1210, lines: [], closing: 1210 }); // balance carried, no movement
   assert.deepEqual(customerStatement(db, 1, whole), { opening: 0, lines: [], closing: 0 }); // partner without receivable
 });
+
+test('partner ledger: a manual receivable entry without a due date shows its entry date', () => {
+  const db = seed();
+  const receivable = db.records['account.account'].find((a) => a.account_type === 'asset_receivable');
+  const income = db.records['account.account'].find((a) => a.account_type === 'income');
+  const partner = db.records['res.partner'][0];
+  const fixture = { ...db, records: { ...db.records, 'account.move': [...db.records['account.move'], {
+    id: 9101, company_id: 1, state: 'posted', move_type: 'entry', date: '2026-01-15', partner_id: partner.id,
+    line_ids: [{ account_id: receivable.id, partner_id: partner.id, debit: 80, credit: 0 }, { account_id: income.id, debit: 0, credit: 80 }],
+  }] } };
+  const line = partnerLedger(fixture, { from: '2026-01-01', to: '2026-01-31', company_id: 1 })
+    .find((r) => r.partner_id === partner.id).lines.find((l) => l.move_id === 9101);
+  assert.equal(line.dueDate, '2026-01-15');
+});

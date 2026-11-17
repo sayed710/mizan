@@ -596,7 +596,7 @@ function ReportPage({ leaf }) {
   const horizontalGroups = [];
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
-  const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner').sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
+  const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner', { includeArchived: true }).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const data = periods && leaf.report === 'cashflow'
     ? cashflowColumns(db, periods, {
       analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
