@@ -484,14 +484,17 @@ function restoreScheduledDrafts(db, scheduledDraftsBefore) {
     if (prior.state_after != null && move.state !== prior.state_after) {
       continue;
     }
+    // A draft edited after the credit note no longer matches what the adjustment wrote: restoring it would lose the edit, and keeping it would leave the board out of step.
     if (prior.line_ids_after != null && !deepEqual(move.line_ids, prior.line_ids_after)) {
-      continue;
+      throw new Error(`Recognition entry ${move.name && move.name !== '/' ? move.name : move.id} was changed after the credit note; undo the change or cancel the entry before resetting the credit note`);
     }
     // Only restore moves that are currently draft or cancel; never rewrite a posted move.
     if (move.state === 'draft' || move.state === 'cancel') {
+      // An automatic-posting choice made after the adjustment is the user's and stays.
+      const autoPostUntouched = prior.auto_post_after === undefined || move.auto_post === prior.auto_post_after;
       next = write(next, 'account.move', move.id, {
         state: prior.state,
-        auto_post: prior.auto_post,
+        auto_post: autoPostUntouched ? prior.auto_post : move.auto_post,
         line_ids: prior.line_ids,
       });
     }
@@ -772,7 +775,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
     // Record what the adjustment left on each snapshotted draft, so a revert restores only untouched moves.
     const scheduledDraftsAfterAdjustment = scheduledDraftsBefore.map((prior) => {
       const moveAfter = read(next, 'account.move', prior.move_id);
-      return moveAfter ? { ...prior, state_after: moveAfter.state, line_ids_after: structuredClone(moveAfter.line_ids) } : prior;
+      return moveAfter ? { ...prior, state_after: moveAfter.state, auto_post_after: moveAfter.auto_post, line_ids_after: structuredClone(moveAfter.line_ids) } : prior;
     });
 
     const state = item.full ? 'cancel' : updatedBoard.every((line) => line.posted || line.cancelled) ? 'done' : 'running';
@@ -1310,6 +1313,13 @@ function validateCreditAdjustmentTransition(db, before, after, currency) {
       const { expectedByDate } = rescale;
       const afterByDate = new Map((after.board ?? []).map((l) => [l.date, l]));
 
+      // A credit adjustment only rescales active lines; lines already cancelled stay cancelled.
+      for (const bl of (before.board ?? []).filter((l) => l.cancelled)) {
+        if (!afterByDate.get(bl.date)?.cancelled) {
+          return 'Recognition lines can only be cancelled by cancelling their entry';
+        }
+      }
+
       for (const bl of (before.board ?? []).filter((l) => !l.posted && !l.cancelled)) {
         const expected = expectedByDate.get(bl.date);
         const al = afterByDate.get(bl.date);
@@ -1367,6 +1377,9 @@ function validateCreditAdjustmentTransition(db, before, after, currency) {
         const snap = snapByDate.get(al.date);
         if (!snap) {
           return 'Restored recognition line date not found in adjustment snapshot';
+        }
+        if (snap.cancelled && !al.cancelled) {
+          return 'Recognition lines can only be cancelled by cancelling their entry';
         }
         if (bl && !bl.posted) {
           const expectedAmt = roundCurrency(Number(snap.amount) || 0, currency);
@@ -1493,6 +1506,8 @@ export function deferralGuard(db, before, after) {
         if (move.state !== 'cancel') {
           return 'Cancelled recognition line must link to a cancelled entry';
         }
+      } else if (move.state === 'cancel') {
+        return 'Active recognition line cannot link to a cancelled entry';
       } else if (after.state !== 'draft' || line.amount != null) {
         if (move.deferred_entry_type !== expectedEntryType) {
           return 'Linked recognition entry type does not match schedule';

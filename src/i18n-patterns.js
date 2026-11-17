@@ -60,6 +60,7 @@ const patterns = {
   'Map these accounts before closing: {1}': 'اربط هذه الحسابات قبل الإقفال: {1}',
   'The consolidated balances do not add up (difference {1}); check eliminations and mappings': 'الأرصدة المجمّعة غير متطابقة (الفرق {1})؛ راجع الاستبعادات والربط',
   'Configure an active deferred {1} journal on the company': 'حدّد دفتر يومية نشطاً للتأجيل ({1*}) على الشركة',
+  'Recognition entry {1} was changed after the credit note; undo the change or cancel the entry before resetting the credit note': 'تم تعديل قيد الاعتراف {1} بعد الإشعار الدائن؛ تراجع عن التعديل أو ألغِ القيد قبل إعادة الإشعار الدائن إلى مسودة',
   'Deferred {1} journal must belong to the company': 'يجب أن يتبع دفتر يومية التأجيل ({1*}) الشركة',
   'Deferred {1} journal must be a Miscellaneous journal': 'يجب أن يكون دفتر يومية التأجيل ({1*}) دفتر عمليات متنوعة',
   'Configure the {1}': 'حدّد {1*}',

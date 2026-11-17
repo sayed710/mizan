@@ -3171,6 +3171,7 @@ const ar = {
   'Recognition lines cannot be relinked to another entry': 'لا يمكن إعادة ربط بنود الاعتراف بقيد آخر',
   'Recognition lines cannot be unlinked from their entry': 'لا يمكن فك ربط بنود الاعتراف عن قيدها',
   'Recognition line amounts cannot be changed on an active schedule': 'لا يمكن تغيير مبالغ بنود الاعتراف في جدول تأجيل نشط',
+  'Active recognition line cannot link to a cancelled entry': 'لا يمكن أن يرتبط بند اعتراف نشط بقيد ملغى',
   'Recognition lines can only be cancelled by cancelling their entry': 'لا يُلغى بند الاعتراف إلا بإلغاء قيده',
   'Core deferral fields cannot be changed on an active schedule': 'لا يمكن تغيير حقول التأجيل الأساسية في جدول تأجيل نشط',
   'Reverse the recognition entries before cancelling this deferral': 'اعكس قيود الاعتراف المرحّلة قبل إلغاء هذا التأجيل',

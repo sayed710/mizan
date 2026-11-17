@@ -1591,3 +1591,79 @@ test('cancelling a recognition line whose entry is not cancelled rejected throug
     );
   }
 });
+
+function postedBillWithPartialCredit(t) {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const bill = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(bill.db, bill.id);
+  const payment = create(db, 'account.payment', { partner_id: 2, partner_type: 'supplier', payment_type: 'outbound', amount: 1200, date: '2026-11-16' });
+  db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
+  const cn = creditNote(db, read(db, 'account.move', bill.id), { date: '2026-11-20' });
+  const cnId = cn.credit_note_id ?? cn.id;
+  const cnDraft = read(cn.db, 'account.move', cnId);
+  db = postMove(write(cn.db, 'account.move', cnId, { invoice_line_ids: [{ ...cnDraft.invoice_line_ids[0], price_unit: 300 }] }), cnId);
+  return { db, schedId: sched.id, cnId };
+}
+
+test('resetting a credit note keeps automatic posting the user turned off on a rescaled draft', (t) => {
+  let { db, schedId, cnId } = postedBillWithPartialCredit(t);
+  const line = read(db, 'account.deferral', schedId).board[5];
+  assert.equal(read(db, 'account.move', line.move_id).auto_post, 'at_date');
+  db = write(db, 'account.move', line.move_id, { auto_post: 'no' });
+
+  db = write(db, 'account.move', cnId, { state: 'draft' });
+
+  const move = read(db, 'account.move', line.move_id);
+  assert.equal(move.state, 'draft');
+  assert.equal(move.auto_post, 'no', 'the user choice is kept');
+  assert.equal(read(db, 'account.deferral', schedId).board[5].amount, 100, 'the amount is restored');
+});
+
+test('resetting a credit note after a rescaled draft was edited is refused with a clear message', (t) => {
+  let { db, schedId, cnId } = postedBillWithPartialCredit(t);
+  const line = read(db, 'account.deferral', schedId).board[5];
+  const move = read(db, 'account.move', line.move_id);
+  db = write(db, 'account.move', move.id, { line_ids: move.line_ids.map((l) => ({ ...l, name: `${l.name ?? ''} (edited)` })) });
+
+  assert.throws(
+    () => write(db, 'account.move', cnId, { state: 'draft' }),
+    /Recognition entry \d+ was changed after the credit note; undo the change or cancel the entry before resetting the credit note/,
+  );
+});
+
+test('a credit adjustment cannot revive a cancelled recognition line through ORM write and applyDiff', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const bill = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(bill.db, bill.id);
+  const payment = create(db, 'account.payment', { partner_id: 2, partner_type: 'supplier', payment_type: 'outbound', amount: 1200, date: '2026-11-16' });
+  db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
+  const cancelledDate = sched.board[6].date;
+  db = write(db, 'account.move', sched.board[6].move_id, { state: 'cancel' });
+  assert.equal(read(db, 'account.deferral', sched.id).board[6].cancelled, true);
+
+  // A real partial credit note appends an adjustment; the forged copy also revives the cancelled line.
+  const cn = creditNote(db, read(db, 'account.move', bill.id), { date: '2026-11-20' });
+  const cnId = cn.credit_note_id ?? cn.id;
+  const cnDraft = read(cn.db, 'account.move', cnId);
+  const credited = postMove(write(cn.db, 'account.move', cnId, { invoice_line_ids: [{ ...cnDraft.invoice_line_ids[0], price_unit: 300 }] }), cnId);
+  const adjusted = read(credited, 'account.deferral', sched.id);
+  assert.equal(adjusted.credit_adjustments.length, 1);
+  assert.equal(adjusted.board[6].cancelled, true, 'the real adjustment keeps the cancelled line cancelled');
+
+  const revived = { ...adjusted, board: adjusted.board.map((l) => (l.date === cancelledDate ? { ...l, cancelled: false } : l)) };
+  const tampered = { ...credited, records: { ...credited.records, 'account.deferral': credited.records['account.deferral'].map((d) => (d.id === sched.id ? revived : d)) } };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tampered), { author: 'Admin', isAdmin: true }),
+    /Recognition lines can only be cancelled by cancelling their entry/,
+  );
+  assert.throws(
+    () => write(credited, 'account.deferral', sched.id, { board: revived.board }),
+    /Recognition lines can only be cancelled by cancelling their entry/,
+  );
+});
