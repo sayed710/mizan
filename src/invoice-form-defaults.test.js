@@ -825,4 +825,5 @@ test('readonly analytic distribution displays analytic account names and percent
   assert.equal(display(db, field, { [office.id]: 100 / 3 }, office), `${officeName} 33.33%`, 'rounded to two decimals');
   assert.equal(display(db, field, { [office.id]: 60, [cairo.id]: 40 }, office), `${officeName} 60%, ${cairoName} 40%`, 'entries in insertion order');
   assert.equal(display(db, field, { [unknown]: 100 }, office), `${unknown} 100%`, 'unknown id shown as the id');
+  assert.equal(display(db, field, { abc: '50' }, office), '{"abc":"50"}', 'a malformed stored value is shown as written instead of breaking the view');
 });
