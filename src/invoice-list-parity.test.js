@@ -112,7 +112,7 @@ test('sales and purchases menus configure exact Odoo 20 column order, optional s
 
   const salesSingle = visibleListColumns(models['account.move'], singleDb, {}, invoicesLeaf);
   assert.deepEqual(salesSingle.cols, [
-    'name', 'partner_id', 'invoice_date', 'invoice_date_due',
+    'display_name', 'partner_id', 'invoice_date', 'invoice_date_due',
     'amount_untaxed_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed', 'status_in_payment',
   ]);
   assert.ok(!salesSingle.optionalCols.some(([k]) => k === 'company_id'), 'single-company hides Company optional column');

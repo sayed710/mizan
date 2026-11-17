@@ -584,7 +584,8 @@ export function postedBillLine(move, index) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, state = 'posted', auto_post = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
+  if (!['posted', 'draft'].includes(state)) throw new Error('Entry state must be posted or draft');
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
   const jId = journal_id ?? (typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal)));
@@ -648,17 +649,21 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   } else if (search(db, 'account.analytic.plan').length) {
     throw new Error('Analytic posting support is not loaded');
   }
+  const isDraft = state === 'draft';
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;
+  const name = isDraft ? '/' : nextName(db, 'account.move', prefix);
   const made = create(db, 'account.move', {
-    move_type: 'entry', state: 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
-    name: nextName(db, 'account.move', prefix), line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
+    move_type: 'entry', state: isDraft ? 'draft' : 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
+    name, line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
+    ...(auto_post ? { auto_post } : {}),
     ...(is_tax_payment ? { is_tax_payment: true } : {}),
     ...(tax_return_id ? { tax_return_id } : {}),
     ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
     ...(deferred_entry_type ? { deferred_entry_type } : {}),
     ...(system_generated ? { system_generated: true } : {}),
   }, { archivedOriginIds, includeCashBasisTargets });
+  if (isDraft) return made;
   if (analyticPostingHooks?.postAnalytic) return { ...made, db: analyticPostingHooks.postAnalytic(made.db, made.id) };
   if (line_ids.some((line) => Object.keys(line.analytic_distribution ?? {}).length)) throw new Error('Analytic posting support is not loaded');
   return made;
@@ -1243,7 +1248,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
         ...l,
         line_identity: journalItemIdentity(l),
         move_id: m.id,
-        move_name: m.name,
+        move_name: m.display_name ?? m.name,
         date: m.date ?? m.invoice_date,
         invoice_date: m.invoice_date ?? null,
         ref: m.ref ?? '',
