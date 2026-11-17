@@ -358,6 +358,48 @@ export function validateInvoiceDeferralCredit(db, note, invoice = read(db, 'acco
   return plan;
 }
 
+/** Calculate expected unposted board amounts for a schedule adjusted by a credit note. */
+export function computeCreditRescaledUnpostedBoard(db, schedule, note) {
+  let plan;
+  try {
+    plan = validateInvoiceDeferralCredit(db, note);
+  } catch (e) {
+    return { error: e.message };
+  }
+  const item = (plan ?? []).find((p) => p.schedule.id === schedule.id);
+  if (!item) {
+    return { error: "Referenced credit note does not credit this schedule's source line" };
+  }
+
+  const currency = companyCurrencyRecord(db, schedule.company_id);
+  const activeUnposted = (schedule.board ?? []).filter((line) => !line.posted && !line.cancelled);
+  const expectedByDate = new Map();
+
+  if (item.full) {
+    for (const line of activeUnposted) {
+      expectedByDate.set(line.date, { amount: 0, cancelled: true });
+    }
+  } else if (activeUnposted.length) {
+    const currentTotal = roundCurrency(activeUnposted.reduce((sum, line) => sum + (Number(line.amount) || 0), 0), currency);
+    const previousRemainingShare = 1 - item.previousShare;
+    const nextRemainingShare = 1 - item.cumulativeShare;
+    const target = previousRemainingShare > 0
+      ? roundCurrency(currentTotal * nextRemainingShare / previousRemainingShare, currency)
+      : 0;
+    const amounts = allocateCents(target, activeUnposted.map((line) => Number(line.amount) || 0), currency);
+    activeUnposted.forEach((line, index) => {
+      const amt = amounts[index];
+      if (!amt) {
+        expectedByDate.set(line.date, { amount: 0, cancelled: true });
+      } else {
+        expectedByDate.set(line.date, { amount: amt, cancelled: false });
+      }
+    });
+  }
+
+  return { item, expectedByDate };
+}
+
 function recognitionCorrectionLines(schedule, amount, reverse = true) {
   const partnerId = schedule.partner_id ?? undefined;
   const analytic = schedule.analytic_distribution ? { analytic_distribution: schedule.analytic_distribution } : {};
@@ -413,11 +455,38 @@ function cancelDraftDeferralMove(db, lineOrMoveId) {
   return db;
 }
 
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
+
 function restoreScheduledDrafts(db, scheduledDraftsBefore) {
   let next = db;
   for (const prior of scheduledDraftsBefore ?? []) {
     const move = read(next, 'account.move', prior.move_id);
     if (!move) continue;
+    // Restore a move only when its current state is exactly what the adjustment left.
+    if (prior.state_after != null && move.state !== prior.state_after) {
+      continue;
+    }
+    if (prior.line_ids_after != null && !deepEqual(move.line_ids, prior.line_ids_after)) {
+      continue;
+    }
     // Only restore moves that are currently draft or cancel; never rewrite a posted move.
     if (move.state === 'draft' || move.state === 'cancel') {
       next = write(next, 'account.move', move.id, {
@@ -432,14 +501,23 @@ function restoreScheduledDrafts(db, scheduledDraftsBefore) {
 
 /** Align a schedule's board with its linked entries and derive running/done. `known` gives an entry state the db may not show yet. */
 function syncScheduleWithEntries(db, schedule, known = null) {
-  const entryPosted = (id) => (known && id === known.id ? known.state : read(db, 'account.move', id)?.state) === 'posted';
+  const getMoveState = (id) => (known && id === known.id ? known.state : read(db, 'account.move', id)?.state);
   let changed = false;
   const board = (schedule.board ?? []).map((line) => {
     if (!line.move_id) return line;
-    const posted = entryPosted(line.move_id);
-    if (posted === Boolean(line.posted)) return line;
-    changed = true;
-    return { ...line, posted };
+    const moveState = getMoveState(line.move_id);
+    const posted = moveState === 'posted';
+    if (posted !== Boolean(line.posted)) {
+      changed = true;
+      line = { ...line, posted };
+    }
+    if (!line.posted && moveState === 'cancel') {
+      if (!line.cancelled) {
+        changed = true;
+        line = { ...line, cancelled: true };
+      }
+    }
+    return line;
   });
   const isDone = board.length > 0 && board.every((line) => line.cancelled || Boolean(line.posted));
   const state = isDone ? 'done' : schedule.state === 'done' ? 'running' : schedule.state;
@@ -640,41 +718,30 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
         const revMove = (next.records['account.move'] ?? []).find((m) => m.state === 'posted' && m.reversed_entry_id === line.move_id && !reversed.has(m.id));
         if (revMove) updatedLine = { ...updatedLine, reversal_move_id: revMove.id };
       }
-      if (updatedLine.posted || updatedLine.cancelled) return updatedLine;
-      if (item.full) {
-        if (line.move_id) next = cancelDraftDeferralMove(next, line.move_id);
-        return { ...updatedLine, amount: 0, cancelled: true };
-      }
       return updatedLine;
     });
 
-    if (!item.full && activeUnposted.length) {
-      const currentTotal = roundCurrency(activeUnposted.reduce((sum, line) => sum + (Number(line.amount) || 0), 0), currency);
-      const previousRemainingShare = 1 - item.previousShare;
-      const nextRemainingShare = 1 - item.cumulativeShare;
-      const target = previousRemainingShare > 0
-        ? roundCurrency(currentTotal * nextRemainingShare / previousRemainingShare, currency)
-        : 0;
-      const amounts = allocateCents(target, activeUnposted.map((line) => Number(line.amount) || 0), currency);
-      const byDate = new Map(activeUnposted.map((line, index) => [line.date, amounts[index]]));
-      for (let index = 0; index < updatedBoard.length; index++) {
-        const line = updatedBoard[index];
-        if (line.posted || line.cancelled) continue;
-        const amount = byDate.get(line.date);
-        if (amount == null) throw new Error('The deferred recognition board has duplicate or missing period dates');
-        if (!amount) {
-          updatedBoard[index] = { ...line, amount: 0, cancelled: true };
-          if (line.move_id) next = cancelDraftDeferralMove(next, line.move_id);
-        } else {
-          updatedBoard[index] = { ...line, amount };
-          if (line.move_id) {
-            const m = read(next, 'account.move', line.move_id);
-            if (m && m.state === 'draft') {
-              const updatedLine = { ...line, amount };
-              const ref = m.ref || deferralEntryRef(next, schedule, line.date);
-              const lines = deferralEntryLines(next, schedule, updatedLine, ref);
-              next = write(next, 'account.move', line.move_id, { line_ids: lines });
-            }
+    const rescale = computeCreditRescaledUnpostedBoard(next, schedule, note);
+    if (rescale.error) throw new Error(rescale.error);
+    const { expectedByDate } = rescale;
+
+    for (let index = 0; index < updatedBoard.length; index++) {
+      const line = updatedBoard[index];
+      if (line.posted || line.cancelled) continue;
+      const expected = expectedByDate.get(line.date);
+      if (!expected) throw new Error('The deferred recognition board has duplicate or missing period dates');
+      if (expected.cancelled || !expected.amount) {
+        updatedBoard[index] = { ...line, amount: 0, cancelled: true };
+        if (line.move_id) next = cancelDraftDeferralMove(next, line.move_id);
+      } else {
+        updatedBoard[index] = { ...line, amount: expected.amount };
+        if (line.move_id) {
+          const m = read(next, 'account.move', line.move_id);
+          if (m && m.state === 'draft') {
+            const updatedLine = { ...line, amount: expected.amount };
+            const ref = m.ref || deferralEntryRef(next, schedule, line.date);
+            const lines = deferralEntryLines(next, schedule, updatedLine, ref);
+            next = write(next, 'account.move', line.move_id, { line_ids: lines });
           }
         }
       }
@@ -702,6 +769,12 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       }
     }
 
+    // Record what the adjustment left on each snapshotted draft, so a revert restores only untouched moves.
+    const scheduledDraftsAfterAdjustment = scheduledDraftsBefore.map((prior) => {
+      const moveAfter = read(next, 'account.move', prior.move_id);
+      return moveAfter ? { ...prior, state_after: moveAfter.state, line_ids_after: structuredClone(moveAfter.line_ids) } : prior;
+    });
+
     const state = item.full ? 'cancel' : updatedBoard.every((line) => line.posted || line.cancelled) ? 'done' : 'running';
     const credit_adjustments = [
       ...(schedule.credit_adjustments ?? []),
@@ -711,7 +784,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
         state_before,
         move_ids: adjustmentMoveIds,
         scheduled_reversals_before: scheduledReversalsBefore,
-        scheduled_drafts_before: scheduledDraftsBefore,
+        scheduled_drafts_before: scheduledDraftsAfterAdjustment,
         grouped_contributions_before: groupedContributionsBefore,
       },
     ];
@@ -770,9 +843,18 @@ export function revertInvoiceDeferralCreditAdjustment(db, note, reverseEntryFn, 
       if (move?.state === 'posted') postedSinceMoveIds.add(move.id);
     }
 
+    const cancelledSinceAdjustmentMoveIds = new Set();
+    for (const prior of adjustment.scheduled_drafts_before ?? []) {
+      const move = read(next, 'account.move', prior.move_id);
+      if (move?.state === 'cancel') cancelledSinceAdjustmentMoveIds.add(move.id);
+    }
+
     const restoredBoard = (adjustment.board_before ?? []).map((line) => {
       if (line.move_id && postedSinceMoveIds.has(line.move_id)) {
         return { ...line, move_id: null, posted: false };
+      }
+      if (line.move_id && cancelledSinceAdjustmentMoveIds.has(line.move_id)) {
+        return { ...line, cancelled: true };
       }
       return line;
     });
@@ -1181,7 +1263,7 @@ function validateCreditAdjustmentTransition(db, before, after, currency) {
 
   if (afterAdjs.length === beforeAdjs.length) {
     for (let i = 0; i < beforeAdjs.length; i++) {
-      if (beforeAdjs[i].note_id !== afterAdjs[i].note_id) {
+      if (!deepEqual(beforeAdjs[i], afterAdjs[i])) {
         return 'Existing credit adjustments cannot be modified';
       }
     }
@@ -1190,7 +1272,7 @@ function validateCreditAdjustmentTransition(db, before, after, currency) {
 
   if (afterAdjs.length > beforeAdjs.length) {
     for (let i = 0; i < beforeAdjs.length; i++) {
-      if (beforeAdjs[i].note_id !== afterAdjs[i].note_id) {
+      if (!deepEqual(beforeAdjs[i], afterAdjs[i])) {
         return 'Existing credit adjustments cannot be modified';
       }
     }
@@ -1219,6 +1301,28 @@ function validateCreditAdjustmentTransition(db, before, after, currency) {
       if (!after.source_move_id || note.reversed_entry_id !== after.source_move_id) {
         return 'Referenced credit note must reverse the source document of this schedule';
       }
+
+      const rescale = computeCreditRescaledUnpostedBoard(db, before, note);
+      if (rescale.error) {
+        return rescale.error;
+      }
+
+      const { expectedByDate } = rescale;
+      const afterByDate = new Map((after.board ?? []).map((l) => [l.date, l]));
+
+      for (const bl of (before.board ?? []).filter((l) => !l.posted && !l.cancelled)) {
+        const expected = expectedByDate.get(bl.date);
+        const al = afterByDate.get(bl.date);
+        if (!expected || !al) {
+          return 'Rescaled recognition line amount does not match credit adjustment';
+        }
+        if (roundCurrency(Number(al.amount) || 0, currency) !== roundCurrency(Number(expected.amount) || 0, currency)) {
+          return 'Rescaled recognition line amount does not match credit adjustment';
+        }
+        if (Boolean(al.cancelled) !== Boolean(expected.cancelled)) {
+          return 'Rescaled recognition line amount does not match credit adjustment';
+        }
+      }
     }
 
     const beforeUnpostedTotal = (before.board ?? [])
@@ -1237,6 +1341,13 @@ function validateCreditAdjustmentTransition(db, before, after, currency) {
   }
 
   if (afterAdjs.length < beforeAdjs.length) {
+    for (const adj of afterAdjs) {
+      const beforeAdj = beforeAdjs.find((b) => b.note_id === adj.note_id);
+      if (!beforeAdj || !deepEqual(beforeAdj, adj)) {
+        return 'Existing credit adjustments cannot be modified';
+      }
+    }
+
     const removedAdjs = beforeAdjs.filter((b) => !afterAdjs.some((a) => a.note_id === b.note_id));
     if (!removedAdjs.length) {
       return 'Existing credit adjustments cannot be modified';
@@ -1294,23 +1405,37 @@ export function deferralGuard(db, before, after) {
   const expectedEntryType = deferredEntryTypeForKind(after.kind);
 
   if (before && before.state !== 'draft') {
+    const protectedFields = [
+      'kind',
+      'amount',
+      'start_date',
+      'end_date',
+      'months',
+      'company_id',
+      'deferred_account_id',
+      'recognition_account_id',
+      'source_move_id',
+      'source_line_id',
+    ];
+    for (const field of protectedFields) {
+      if (field === 'amount') {
+        if (roundCurrency(Number(before.amount) || 0, currency) !== roundCurrency(Number(after.amount) || 0, currency)) {
+          return 'Core deferral fields cannot be changed on an active schedule';
+        }
+      } else if (before[field] !== after[field]) {
+        return 'Core deferral fields cannot be changed on an active schedule';
+      }
+    }
+
     if ((after.board ?? []).length !== (before.board ?? []).length) {
       return 'Recognition lines cannot be added or removed from an active schedule';
     }
 
-    const beforeAdjs = before.credit_adjustments ?? [];
     const afterAdjs = after.credit_adjustments ?? [];
+    const beforeAdjs = before.credit_adjustments ?? [];
     const creditAdjustmentsChanged = afterAdjs.length !== beforeAdjs.length;
-    if (creditAdjustmentsChanged) {
-      const adjErr = validateCreditAdjustmentTransition(db, before, after, currency);
-      if (adjErr) return adjErr;
-    } else {
-      for (let i = 0; i < beforeAdjs.length; i++) {
-        if (beforeAdjs[i].note_id !== afterAdjs[i].note_id) {
-          return 'Existing credit adjustments cannot be modified';
-        }
-      }
-    }
+    const adjErr = validateCreditAdjustmentTransition(db, before, after, currency);
+    if (adjErr) return adjErr;
 
     const beforeByDate = new Map((before.board ?? []).map((l) => [l.date, l]));
     const reversed = effectivelyReversedEntryIds(db.records['account.move'] ?? []);
@@ -1330,14 +1455,26 @@ export function deferralGuard(db, before, after) {
       }
 
       if (bl.posted && !reversed.has(bl.move_id)) {
-        if (al.date !== bl.date || al.amount !== bl.amount || al.move_id !== bl.move_id || al.posted !== true) {
+        if (al.date !== bl.date || al.amount !== bl.amount || al.move_id !== bl.move_id) {
           return 'Posted recognition lines cannot be modified or removed';
+        }
+        if (al.posted !== true) {
+          const move = read(db, 'account.move', al.move_id);
+          if (!move || move.state === 'posted') {
+            return 'Posted recognition lines cannot be modified or removed';
+          }
         }
       }
 
-      if (!bl.posted && al.amount !== bl.amount) {
-        if (!creditAdjustmentsChanged) {
-          return 'Recognition line amounts cannot be changed on an active schedule';
+      if (!bl.posted && al.amount !== bl.amount && !creditAdjustmentsChanged) {
+        return 'Recognition line amounts cannot be changed on an active schedule';
+      }
+
+      // Outside a credit adjustment, a line is cancelled only by cancelling its linked entry, and never revived.
+      if (!creditAdjustmentsChanged && Boolean(al.cancelled) !== Boolean(bl.cancelled)) {
+        const linked = al.move_id ? read(db, 'account.move', al.move_id) : null;
+        if (!al.cancelled || linked?.state !== 'cancel') {
+          return 'Recognition lines can only be cancelled by cancelling their entry';
         }
       }
     }
