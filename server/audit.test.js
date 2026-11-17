@@ -208,7 +208,11 @@ test('an edit through /api/diff is logged with the login, server time and old an
     const { body: db } = await admin('GET', '/api/db');
     const partner = db.records['res.partner'][0];
     const next = { ...db, records: { ...db.records, 'res.partner': db.records['res.partner'].map((p) => (p.id === partner.id ? { ...p, phone: '+20 100 000 0000' } : p)) } };
-    const before = new Date().toISOString();
+    // The server and the test runner are separate processes, and their wall
+    // clocks can differ by a few milliseconds (noticeably on Windows). Take the
+    // lower bound from the server's own clock so the comparison stays in one
+    // clock domain; the edit must still be stamped no earlier than this.
+    const before = (await admin('GET', '/api/audit?limit=1')).body[0].at;
     assert.equal((await admin('POST', '/api/diff', diffDb(db, next))).status, 200);
 
     const { status, body: log } = await admin('GET', `/api/audit?model=res.partner&id=${partner.id}`);

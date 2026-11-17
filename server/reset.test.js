@@ -27,7 +27,10 @@ async function withServer(env, fn) {
     const res = await fetch(`${origin}/api/login`, { method: 'POST', headers, body: JSON.stringify({ login: 'admin', password: 'test-admin-password' }) });
     await fn(origin, { ...headers, Cookie: res.headers.get('set-cookie').split(';')[0] }, directory);
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+    // A child that exited on its own (a crash, or a signal) still has exitCode === null but its IPC channel is
+    // already closed; send() on it emits an unhandled 'error' after the test has ended. Only signal a live child,
+    // and wait for 'close' (exit plus stdio teardown) so no pipe handle outlives the test before the dir is removed.
+    if (child.connected) { const exited = once(child, 'close'); child.send('shutdown'); await exited; }
     await rm(directory, { recursive: true, force: true });
   }
 }
