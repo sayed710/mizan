@@ -9,7 +9,7 @@ import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, for
 import { currentCompany } from './models/company.js';
 import { parseAmount, today } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
-import { parseDistributionInput } from './analytic_distribution.js';
+import { analyticAccountKey, normalizeDistribution, parseDistributionInput } from './analytic_distribution.js';
 import { fieldReadonly, fieldRequired } from './field-metadata.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
@@ -113,7 +113,12 @@ export function display(db, field, value, rec = null) {
     case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
-    case 'distribution': return JSON.stringify(value);
+    case 'distribution': return Object.entries(normalizeDistribution(value)).map(([id, percent]) => {
+      const accountId = analyticAccountKey(id);
+      const account = read(db, 'account.analytic.account', accountId);
+      const name = account?.display_name ?? account?.name ?? accountId;
+      return `${name} ${Number(percent.toFixed(2))}%`;
+    }).join(', ');
     case 'binary': return value?.name ?? '';
     case 'html': return String(value ?? '');
     case 'date': return field.widget === 'remaining_days' ? formatRelativeDate(value) : formatDate(value);
