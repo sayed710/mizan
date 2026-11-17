@@ -38,11 +38,24 @@ export { normalizeDistribution } from '../analytic_distribution.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
-/** Resolve a fresh default using the same account that will be posted, without throwing on incomplete lines. */
+const canonicalDistribution = (distribution) => Object.entries(distribution ?? {})
+  .filter(([, percent]) => Number(percent) > 0)
+  .map(([id, percent]) => [String(id), Number(percent)])
+  .sort(([a], [b]) => a.localeCompare(b));
+
+/** Whether two analytic distributions allocate exactly the same plans and shares. */
+export function sameDistribution(a, b) {
+  return JSON.stringify(canonicalDistribution(a)) === JSON.stringify(canonicalDistribution(b));
+}
+
+/**
+ * Resolve a fresh default using the same account that will be posted, without throwing on incomplete lines.
+ * When the posting account cannot be resolved yet, only the partner, product and company rules apply.
+ */
 export function defaultDistributionForLine(db, line, move, fallback = {}) {
   const accountId = move?.move_type === 'entry'
     ? (line.account_id ?? line.account)
-    : (invoiceLineAccountResult(db, move, line).account ?? line?.account_id ?? null);
+    : (invoiceLineAccountResult(db, move, line).account ?? null);
   return findAnalyticDistribution(db, {
     partner_id: line?.partner_id ?? move?.partner_id,
     product_id: line.product_id,

@@ -941,3 +941,185 @@ test('9. Inter-company bill due date: draft without onchange and stale due date 
   const payable2 = postedBill2.line_ids.find((l) => read(db, 'account.account', l.account_id)?.account_type === 'liability_payable');
   assert.equal(payable2.date_maturity, postedInv2.invoice_date_due, 'Intercompany bill payable line maturity equals posted invoice due date');
 });
+
+test('10. A fiscal position maps a product line account once, and posting uses exactly the account the line shows', () => {
+  let db = seed();
+  const source = create(db, 'account.account', { code: '499201', name: 'Chain Source Income', account_type: 'income' });
+  db = source.db;
+  const middle = create(db, 'account.account', { code: '499202', name: 'Chain Middle Income', account_type: 'income' });
+  db = middle.db;
+  const destination = create(db, 'account.account', { code: '499203', name: 'Chain Destination Income', account_type: 'income' });
+  db = destination.db;
+  const position = create(db, 'account.fiscal.position', {
+    name: 'Chained mapping',
+    account_ids: [
+      { account_src_id: source.id, account_dest_id: middle.id },
+      { account_src_id: middle.id, account_dest_id: destination.id },
+    ],
+  });
+  db = position.db;
+  const product = create(db, 'product', {
+    name: 'Chained Service',
+    type: 'service',
+    list_price: 100,
+    property_account_income_id: source.id,
+  });
+  db = product.db;
+
+  const lineField = models['account.move'].fields.invoice_line_ids;
+  const line = lineField.onchange(
+    { product_id: product.id, qty: 1, price_unit: 100, discount: 0, tax_id: null, tax: 0 },
+    'product_id',
+    db,
+    { move_type: 'out_invoice', company_id: 1, fiscal_position_id: position.id },
+  );
+  assert.equal(line.account_id, middle.id, 'The product account is mapped only once (A to B) when the line is filled');
+  assert.notEqual(line.account_id, destination.id, 'The filled account is not mapped a second time (B to C)');
+
+  const invoice = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-04-03',
+    fiscal_position_id: position.id,
+    invoice_line_ids: [line],
+  });
+  const posted = read(postMove(invoice.db, invoice.id), 'account.move', invoice.id);
+  const postedLine = posted.line_ids.find((l) => (l.invoice_sources ?? []).some((source) => source.index === 0));
+  assert.equal(postedLine?.account_id, line.account_id, 'The posted journal item uses the account the line shows');
+  assert.equal(postedLine?.account_id, middle.id, 'Posting does not map the line account a second time');
+});
+
+test('11. Changing the fiscal position on a draft recomputes auto-filled line accounts and keeps a manual one', () => {
+  let db = seed();
+  const source = create(db, 'account.account', { code: '499211', name: 'Draft Source Income', account_type: 'income' });
+  db = source.db;
+  const mapped = create(db, 'account.account', { code: '499212', name: 'Draft Mapped Income', account_type: 'income' });
+  db = mapped.db;
+  const manual = create(db, 'account.account', { code: '499213', name: 'Draft Manual Income', account_type: 'income' });
+  db = manual.db;
+  const position = create(db, 'account.fiscal.position', {
+    name: 'Draft mapping',
+    account_ids: [{ account_src_id: source.id, account_dest_id: mapped.id }],
+  });
+  db = position.db;
+  const product = create(db, 'product', {
+    name: 'Draft Service',
+    type: 'service',
+    list_price: 100,
+    property_account_income_id: source.id,
+  });
+  db = product.db;
+
+  const lineField = models['account.move'].fields.invoice_line_ids;
+  const auto = lineField.onchange(
+    { product_id: product.id, qty: 1, price_unit: 100, discount: 0, tax_id: null, tax: 0 },
+    'product_id',
+    db,
+    { move_type: 'out_invoice', company_id: 1 },
+  );
+  assert.equal(auto.account_id, source.id, 'Without a fiscal position the product line shows its own account');
+  const chosen = { ...auto, account_id: manual.id, name: 'Manual account' };
+
+  const created = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-04-04',
+    invoice_line_ids: [auto, chosen],
+  });
+  db = created.db;
+  const draft = read(db, 'account.move', created.id);
+
+  const changed = changeFormValue('account.move', draft, {}, 'fiscal_position_id', position.id, db);
+  assert.equal(changed.invoice_line_ids[0].account_id, mapped.id, 'The auto-filled account follows the new fiscal position');
+  assert.equal(changed.invoice_line_ids[1].account_id, manual.id, 'The user-chosen account is preserved');
+
+  db = write(db, 'account.move', created.id, changed);
+  const posted = read(postMove(db, created.id), 'account.move', created.id);
+  const postedAccounts = posted.line_ids.filter((l) => l.invoice_sources?.length).map((l) => l.account_id);
+  assert.ok(postedAccounts.includes(mapped.id), 'Posting uses the recomputed auto-filled account');
+  assert.ok(postedAccounts.includes(manual.id), 'Posting uses the preserved manual account');
+});
+
+function deferredAnalyticFixtures() {
+  let db = seed();
+  const deferredExpense = create(db, 'account.account', { code: '132900', name: 'Test Deferred Expense', account_type: 'asset_current', company_id: 1 });
+  db = write(deferredExpense.db, 'res.company', 1, { deferred_expense_account_id: deferredExpense.id });
+
+  const deferredAccountExpense = create(db, 'account.account', {
+    code: '699911', name: 'Deferred Expense Product Account', account_type: 'expense', company_id: 1, is_deferred: true,
+  });
+  db = deferredAccountExpense.db;
+  const product = create(db, 'product', {
+    name: 'Deferred Analytic Service', type: 'service', list_price: 100, cost: 100,
+    property_account_expense_id: deferredAccountExpense.id,
+  });
+  db = product.db;
+
+  const plan = create(db, 'account.analytic.plan', { name: 'Deferred Cost Center' });
+  db = plan.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Deferred Allocation', code: 'DEF-CC', plan_id: plan.id });
+  db = analytic.db;
+  const otherAnalytic = create(db, 'account.analytic.account', { name: 'Other Allocation', code: 'OTHER-CC', plan_id: plan.id });
+  db = otherAnalytic.db;
+  // A rule on the unresolved product account proves the default no longer guesses from the raw line account.
+  const wrongModel = create(db, 'account.analytic.distribution.model', {
+    account_prefix: '6999',
+    analytic_distribution: { [otherAnalytic.id]: 100 },
+  });
+  db = wrongModel.db;
+  const deferredModel = create(db, 'account.analytic.distribution.model', {
+    account_prefix: '1329',
+    analytic_distribution: { [analytic.id]: 100 },
+  });
+  db = deferredModel.db;
+  return {
+    db,
+    product,
+    deferredExpense,
+    deferredAccountExpense,
+    analytic,
+    otherAnalytic,
+    move: { move_type: 'in_invoice', company_id: 1 },
+    baseLine: { product_id: product.id, qty: 1, price_unit: 100, discount: 0, tax_id: null, tax: 0 },
+  };
+}
+
+test('12. The deferred posting account drives the analytic default only once the line dates resolve it', () => {
+  const fixture = deferredAnalyticFixtures();
+  let db = fixture.db;
+  const lineField = models['account.move'].fields.invoice_line_ids;
+
+  const productLine = lineField.onchange(fixture.baseLine, 'product_id', db, fixture.move);
+  assert.equal(productLine.account_id, fixture.deferredAccountExpense.id, 'The product line shows its own deferred account');
+  assert.deepEqual(productLine.analytic_distribution, {}, 'No analytic default is taken from the unresolved account');
+
+  const started = lineField.onchange({ ...productLine, deferred_start_date: '2026-01-01' }, 'deferred_start_date', db, fixture.move);
+  assert.deepEqual(started.analytic_distribution, {}, 'A single deferred date still leaves the posting account unresolved');
+
+  const ended = lineField.onchange({ ...started, deferred_end_date: '2026-12-31' }, 'deferred_end_date', db, fixture.move);
+  assert.deepEqual(ended.analytic_distribution, { [fixture.analytic.id]: 100 }, 'The resolved deferred account applies its prefix rule');
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 1,
+    invoice_date: '2026-05-03',
+    invoice_line_ids: [ended],
+  });
+  const posted = read(postMove(bill.db, bill.id), 'account.move', bill.id);
+  const postedLine = posted.line_ids.find((l) => (l.invoice_sources ?? []).some((source) => source.index === 0));
+  assert.equal(postedLine?.account_id, fixture.deferredExpense.id, 'Posting uses the deferred account the analytic default was based on');
+});
+
+test('13. A user-chosen analytic distribution survives entering the deferred dates', () => {
+  const fixture = deferredAnalyticFixtures();
+  const db = fixture.db;
+  const lineField = models['account.move'].fields.invoice_line_ids;
+
+  const productLine = lineField.onchange(fixture.baseLine, 'product_id', db, fixture.move);
+  const chosen = { ...productLine, analytic_distribution: { [fixture.otherAnalytic.id]: 100 } };
+  const started = lineField.onchange({ ...chosen, deferred_start_date: '2026-01-01' }, 'deferred_start_date', db, fixture.move);
+  assert.deepEqual(started.analytic_distribution, { [fixture.otherAnalytic.id]: 100 }, 'Entering the start date keeps the chosen distribution');
+
+  const ended = lineField.onchange({ ...started, deferred_end_date: '2026-12-31' }, 'deferred_end_date', db, fixture.move);
+  assert.deepEqual(ended.analytic_distribution, { [fixture.otherAnalytic.id]: 100 }, 'Entering the end date keeps the chosen distribution');
+});

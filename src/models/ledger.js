@@ -225,6 +225,14 @@ export function resolveDocumentJournal(db, move, { required = false } = {}) {
 }
 
 /**
+ * Map an explicitly configured line account through the document's fiscal position exactly once.
+ * Filled line accounts are stored already mapped, so posting never maps them a second time.
+ */
+export function mapLineAccount(db, move, accountId) {
+  return accountId ? mapAccount(db, move?.fiscal_position_id, accountId) : null;
+}
+
+/**
  * Resolve the account a line posts to before any deferred-account substitution.
  * This is exactly the resolution `invoiceBaseGroups` uses; it returns the error message instead of throwing,
  * so forms can show the account without failing while the document is still incomplete.
@@ -250,7 +258,8 @@ export function invoiceLineOriginalAccount(db, move, line, journal) {
   const source = getSourceAccount(line);
   if (source.error) return { account: null, error: source.error };
   if (!source.accountId) return { account: null, error: `No ${source.type} account found` };
-  const mapped = source.recorded ? source.accountId : mapAccount(db, move.fiscal_position_id, source.accountId);
+  // A line's own account was already mapped when it was filled or created, so it posts exactly as stored.
+  const mapped = source.type === 'line' ? source.accountId : mapLineAccount(db, move, source.accountId);
   const mappedAccount = read(db, 'account.account', mapped);
   const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
   const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { postMove } from './models/accounting.js';
-import { accountId, isBalanced } from './models/ledger.js';
+import { accountId, isBalanced, mapLineAccount } from './models/ledger.js';
 import { confirmAsset, depreciationBoard, disposeAsset, postDepreciation } from './models/assets.js';
 import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { seed } from './seed.js';
@@ -258,9 +258,10 @@ test('fiscal position mapped asset account is used for bill posting and disposal
     name: 'Asset mapping', account_ids: [{ account_src_id: source, account_dest_id: mapped.id }],
   });
   db = position.db;
+  // The line account is stored already mapped by the fiscal position, so posting keeps it as stored.
   const bill = create(db, 'account.move', {
     move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', fiscal_position_id: position.id,
-    invoice_line_ids: [{ name: 'Mapped machine', product_id: 1, qty: 1, price_unit: 100, tax: 0, account_id: source }],
+    invoice_line_ids: [{ name: 'Mapped machine', product_id: 1, qty: 1, price_unit: 100, tax: 0, account_id: mapLineAccount(db, { fiscal_position_id: position.id }, source) }],
   });
   db = postMove(bill.db, bill.id);
   const posted = read(db, 'account.move', bill.id);

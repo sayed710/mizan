@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
@@ -10,7 +10,7 @@ import { cashRoundingApplies, cashRoundingError, configuredAccount } from './con
 import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
-import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
+import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, sameDistribution } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
@@ -509,7 +509,7 @@ export function intercompanyBill(db, move) {
     const source = ownAccount?.company_id && ownAccount.company_id !== buyer.id ? { ...product, property_account_expense_id: null } : product;
     const rawAccount = read(db, 'account.account', productProperty(db, source, 'property_account_expense_id', buyer.id));
     if (!rawAccount || (rawAccount.company_id && rawAccount.company_id !== buyer.id)) throw new Error(`Configure an expense account for ${product.name}`);
-    const mappedAccountId = mapAccount(db, fpId, rawAccount.id);
+    const mappedAccountId = mapLineAccount(db, { fiscal_position_id: fpId }, rawAccount.id);
     const account = read(db, 'account.account', mappedAccountId);
     if (!account || (account.company_id && account.company_id !== buyer.id)) {
       throw new Error(`Configure an expense account for ${product.name}`);
@@ -1564,9 +1564,19 @@ const invoiceLineField = {
       const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
       if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
     }
-    return isDoc && ['product_id', 'account_id'].includes(key)
-      ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
-      : updated;
+    if (isDoc && ['product_id', 'account_id'].includes(key)) {
+      return { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) };
+    }
+    if (isDoc && ['deferred_start_date', 'deferred_end_date'].includes(key)) {
+      // The deferral dates decide which account the line posts to, so an auto-filled distribution follows them.
+      // Replace it only while it still equals the default this line had before the dates applied to it.
+      const before = defaultDistributionForLine(db, { ...line, deferred_start_date: null, deferred_end_date: null }, moveWithJournal);
+      const current = line.analytic_distribution ?? (line.analytic_account_id ? { [line.analytic_account_id]: 100 } : {});
+      return sameDistribution(current, before)
+        ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
+        : updated;
+    }
+    return updated;
   },
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
@@ -2257,14 +2267,34 @@ export const accountingModels = {
           && selectedBank.active !== false && (!selectedBank.company_id || selectedBank.company_id === (r.company_id ?? 1))
           ? selectedBank.id : null;
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
-        const context = { ...r, ...fiscal, journal_id: journal };
+        const nextContext = { ...r, ...fiscal, journal_id: journal };
+        // The state before this change: the form's previous values, else the stored record.
+        const previous = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null) ?? {};
+        // Accounts filled by a product are already mapped for the fiscal position the document had before this change.
+        const previousContext = {
+          ...r,
+          company_id: previous.company_id ?? r.company_id,
+          journal_id: previous.journal_id ?? r.journal_id,
+          fiscal_position_id: key === 'fiscal_position_id' ? (previous.fiscal_position_id ?? null) : (r.fiscal_position_id ?? null),
+        };
+        const previousJournal = resolveDocumentJournal(db, previousContext);
         const linesUpdate = Array.isArray(r.invoice_line_ids)
           ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
             const remapKey = (key === 'fiscal_position_id' || partnerChange || key === 'company_id') && !['line_section', 'line_note'].includes(line.display_type)
               ? (line.product_id ? 'product_id' : (line.account_id && (read(db, 'account.account', line.account_id)?.tax_ids ?? []).length ? 'account_id' : null))
               : null;
-            const updated = remapKey ? invoiceLineField.onchange(line, remapKey, db, context) : line;
-            return { ...updated, ...(remapKey ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, updated, context, line.analytic_distribution ?? {}) };
+            // A line account still equal to the one this document auto-computed before the change follows the new
+            // fiscal position. Any other account was chosen by the user and is preserved.
+            const autoBefore = line.product_id
+              ? invoiceLineOriginalAccount(db, previousContext, { ...line, account_id: null, income_account_id: null }, previousJournal)
+              : null;
+            const autoFilled = Boolean(autoBefore?.account) && line.account_id === autoBefore.account;
+            const autoAfter = autoFilled
+              ? invoiceLineOriginalAccount(db, nextContext, { ...line, account_id: null, income_account_id: null }, resolveDocumentJournal(db, nextContext))
+              : null;
+            const accountId = autoFilled ? (autoAfter.error ? null : autoAfter.account) : (line.account_id ?? null);
+            const updated = remapKey ? invoiceLineField.onchange(line, remapKey, db, nextContext) : line;
+            return { ...updated, account_id: accountId, ...(remapKey ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, { ...updated, account_id: accountId }, nextContext, line.analytic_distribution ?? {}) };
           }) }
           : {};
         return {
