@@ -1208,7 +1208,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
         ...l,
         line_identity: journalItemIdentity(l),
         move_id: m.id,
-        move_name: m.name,
+        move_name: m.display_name ?? m.name,
         date: m.date ?? m.invoice_date,
         invoice_date: m.invoice_date ?? null,
         ref: m.ref ?? '',
