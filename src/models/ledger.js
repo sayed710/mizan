@@ -236,10 +236,10 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
     const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
-    if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) {
+    if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation', move.company_id ?? 1))) {
       return { accountId: stockAccount(db, p, 'input', move.company_id ?? 1), configured: true, type: 'valuation' };
     }
-    const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
+    const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id', move.company_id ?? 1);
     if (configured) return { accountId: configured, configured: true, type: 'product' };
     if (!base) throw new Error(`Journal "${journal.name || journal.code}" has no default account configured for this company`);
     return { accountId: base, configured: true, type: 'journal default' };
