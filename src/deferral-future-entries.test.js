@@ -7,6 +7,7 @@ import { creditNote, postAutoPostMoves, postMove } from './models/accounting.js'
 import { postPayment } from './models/pay.js';
 import { deferralEntryRef, deferredModels, postDueEntries, registerDeferredPostMoveHook } from './models/deferred.js';
 import { fieldReadonly } from './field-metadata.js';
+import { models } from './registry.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -600,6 +601,25 @@ test('fieldReadonly locks deferral fields once not draft', () => {
     assert.equal(fieldReadonly(fields[f], { state: 'running' }, {}), true, `${f} readonly in running`);
     assert.equal(fieldReadonly(fields[f], { state: 'done' }, {}), true, `${f} readonly in done`);
     assert.equal(fieldReadonly(fields[f], { state: 'cancel' }, {}), true, `${f} readonly in cancel`);
+  }
+});
+
+test('deferral source fields and system-maintained board subfields have correct readonly', () => {
+  const fields = models['account.deferral'].fields;
+  const draft = { state: 'draft', start_date: '2026-12-01', end_date: '2027-11-30' };
+  const running = { state: 'running', start_date: '2026-12-01', end_date: '2027-11-30' };
+  const readonly = (field, record) => fieldReadonly(field, record, {});
+
+  // Guard-protected on an active schedule: editable while draft, readonly once running.
+  for (const name of ['source_move_id', 'source_line']) {
+    assert.equal(readonly(fields[name], draft), false, `${name} editable in draft`);
+    assert.equal(readonly(fields[name], running), true, `${name} readonly in running`);
+  }
+
+  // These board subfields are written only by system actions, never by the user (not even in draft).
+  for (const name of ['posted', 'cancelled', 'move_id', 'reversal_move_id']) {
+    assert.equal(readonly(fields.board.fields[name], draft), true, `board.${name} readonly in draft`);
+    assert.equal(readonly(fields.board.fields[name], running), true, `board.${name} readonly in running`);
   }
 });
 
