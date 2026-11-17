@@ -1738,10 +1738,10 @@ const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.jour
 
 export const journalEntriesView = {
   defaults: { move_type: 'entry' },
-  list: ['accounting_date', 'name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
+  list: ['accounting_date', 'display_name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
   optionalList: ['invoice_date', 'activities'],
-  listLabels: { accounting_date: 'Date', invoice_date: 'Invoice Date', amount_total_signed: 'Total', state: 'Status' },
-  searchFields: ['name', 'ref', 'partner_id', 'journal_id'],
+  listLabels: { display_name: 'Number', accounting_date: 'Date', invoice_date: 'Invoice Date', amount_total_signed: 'Total', state: 'Status' },
+  searchFields: ['name', 'display_name', 'ref', 'partner_id', 'journal_id'],
   filters: [
     [{ id: 'unposted', label: 'Unposted', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
     [
@@ -1763,7 +1763,7 @@ export const journalEntriesView = {
 };
 
 const INVOICE_LIST_FIELDS = {
-  name: { bold: true },
+  display_name: { bold: true },
   journal_id: { optional: 'hide' },
   invoice_date: { optional: 'show' },
   date: { optional: 'hide' },
@@ -1808,17 +1808,17 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
 
 const INVOICE_GROUP_BYS = ['invoice_user_id', 'partner_id', 'status_in_payment', 'journal_id', 'company_id', 'invoice_date', 'invoice_date_due', 'date'];
 const INVOICE_GROUP_BY_LABELS = { partner_id: 'Partner', invoice_date: 'Invoice Date', date: 'Accounting Date', status_in_payment: 'Status' };
-const INVOICE_SEARCH_FIELDS = ['name', 'invoice_origin', 'ref', 'payment_reference', 'partner_id', 'journal_id', 'invoice_user_id'];
+const INVOICE_SEARCH_FIELDS = ['name', 'display_name', 'invoice_origin', 'ref', 'payment_reference', 'partner_id', 'journal_id', 'invoice_user_id'];
 
 export const salesInvoiceView = {
   list: [
-    'name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
+    'display_name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
     'ref', 'invoice_user_id', 'activities', 'company_id',
     'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
     'currency_id', 'status_in_payment',
   ],
   listFields: INVOICE_LIST_FIELDS,
-  listLabels: { partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
+  listLabels: { display_name: 'Number', partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
   searchFields: INVOICE_SEARCH_FIELDS,
@@ -1828,13 +1828,13 @@ export const salesInvoiceView = {
 
 export const purchaseInvoiceView = {
   list: [
-    'name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
+    'display_name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
     'payment_reference', 'ref', 'activities', 'company_id',
     'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
     'currency_id', 'status_in_payment',
   ],
   listFields: INVOICE_LIST_FIELDS,
-  listLabels: { partner_id: 'Vendor', invoice_date: 'Bill Date', currency_id: 'Bill Currency' },
+  listLabels: { display_name: 'Number', partner_id: 'Vendor', invoice_date: 'Bill Date', currency_id: 'Bill Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
   searchFields: INVOICE_SEARCH_FIELDS,
@@ -2287,6 +2287,7 @@ export const accountingModels = {
     },
     fields: {
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
+      display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.name && r.name !== '/' ? r.name : t('Draft (* {id})', { id: r.id })) },
       move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
       journal_id: {
         type: 'many2one',
@@ -2463,8 +2464,9 @@ export const accountingModels = {
     groupBys: INVOICE_GROUP_BYS,
     groupByLabels: INVOICE_GROUP_BY_LABELS,
     views: ['list', 'kanban', 'graph', 'pivot', 'calendar'],
-    kanban: { title: 'name', lines: ['partner_id', 'amount_total', 'invoice_date_due'], badge: 'payment_state' },
-    list: ['name', 'partner_id', 'invoice_date', 'invoice_date_due', 'amount_untaxed', 'amount_total', 'amount_residual', 'status_in_payment'],
+    kanban: { title: 'display_name', lines: ['partner_id', 'amount_total', 'invoice_date_due'], badge: 'payment_state' },
+    list: ['display_name', 'partner_id', 'invoice_date', 'invoice_date_due', 'amount_untaxed', 'amount_total', 'amount_residual', 'status_in_payment'],
+    listLabels: { display_name: 'Number' },
     listDecoration: invoiceListDecoration,
     graph: { groupBy: 'invoice_date', measure: 'amount_total' },
     pivot: { row: 'partner_id', col: 'payment_state', measure: 'amount_total' },

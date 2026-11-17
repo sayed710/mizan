@@ -1541,7 +1541,7 @@ const ar = {
   Paid: 'مدفوعة', Partial: 'مدفوعة جزئياً', Cancelled: 'ملغاة', Received: 'تم الاستلام',
   // stages / options
   Qualified: 'مؤهلة', Proposition: 'عرض', Quotation: 'عرض سعر', 'Quotation Sent': 'تم إرسال العرض', 'Sales Order': 'أمر بيع',
-  RFQ: 'طلب عرض', 'RFQ Sent': 'تم إرسال الطلب', 'Purchase Order': 'أمر شراء', Draft: 'مسودة', Posted: 'مُرحّلة',
+  RFQ: 'طلب عرض', 'RFQ Sent': 'تم إرسال الطلب', 'Purchase Order': 'أمر شراء', Draft: 'مسودة', 'Draft (* {id})': 'مسودة (* {id})', Posted: 'مُرحّلة',
   'Not Paid': 'غير مدفوعة', 'Partially Paid': 'مدفوعة جزئياً', 'Customer Invoice': 'فاتورة عميل', 'Vendor Bill': 'فاتورة مورد',
   Goods: 'سلع', Service: 'خدمة', Office: 'المكتب', Home: 'المنزل', Other: 'أخرى', 'To Do': 'للتنفيذ', 'In Progress': 'قيد التنفيذ',
   Review: 'مراجعة', Done: 'منجزة', 'On Hold': 'معلّقة', Solved: 'تم الحل', Question: 'استفسار', Issue: 'مشكلة', Request: 'طلب',

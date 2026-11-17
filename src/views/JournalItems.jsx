@@ -139,7 +139,7 @@ function resolveLineTaxInfo(db, line, move) {
   };
 }
 
-function matchesItemSearch(line, rawQuery) {
+export function matchesItemSearch(line, rawQuery) {
   const trimmed = rawQuery.trim();
   if (!trimmed) return true;
   const q = trimmed.toLowerCase();

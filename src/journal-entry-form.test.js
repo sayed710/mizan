@@ -5,7 +5,8 @@ import { setupDom, find } from './test-support/dom.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
-import { postAutoPostMoves, postMove } from './models/accounting.js';
+import { journalEntriesView, postAutoPostMoves, postMove, purchaseInvoiceView, salesInvoiceView } from './models/accounting.js';
+import { journalItems } from './models/ledger.js';
 import { applyPaymentCredit, postPayment, reverseEntry } from './models/pay.js';
 import { bookBankMovement } from './models/bank.js';
 
@@ -726,4 +727,97 @@ test('posting refuses a number that sorts inside the journal secured chain', asy
   db = secureEntries(db, { throughMoveId: custom.id });
   const later = draft({});
   assert.throws(() => postMove(later.db, later.id), /numbered before the secured entries/);
+});
+
+test('a draft account.move shows a draft display_name in many2one references until posted', async () => {
+  const { display } = await import('./ui.jsx');
+  let db = seed();
+  const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
+  const acc1 = accounts.find((a) => a.account_type === 'expense');
+  const acc2 = accounts.find((a) => a.account_type === 'asset_current');
+  const created = create(db, 'account.move', {
+    move_type: 'entry', journal_id: misc.id, date: '2026-05-01',
+    line_ids: [{ account_id: acc1.id, debit: 10, credit: 0 }, { account_id: acc2.id, debit: 0, credit: 10 }],
+  });
+  db = created.db;
+
+  const draft = read(db, 'account.move', created.id);
+  assert.equal(draft.name, '/');
+  assert.equal(draft.display_name, `Draft (* ${created.id})`);
+
+  const many2one = { type: 'many2one', relation: 'account.move' };
+  assert.equal(display(db, many2one, created.id), `Draft (* ${created.id})`);
+
+  db = postMove(db, created.id);
+  const posted = read(db, 'account.move', created.id);
+  assert.notEqual(posted.name, '/');
+  assert.equal(posted.display_name, posted.name);
+  assert.equal(display(db, many2one, created.id), posted.name);
+});
+
+test('account.move lists and kanban select display_name and keep the Number heading', async () => {
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { colLabel, List } = await import('./views/List.jsx');
+  const def = models['account.move'];
+
+  for (const list of [journalEntriesView.list, salesInvoiceView.list, purchaseInvoiceView.list, def.list]) {
+    assert.ok(list.includes('display_name'), 'list selects display_name');
+    assert.ok(!list.includes('name'), 'list no longer selects the raw name');
+  }
+  assert.equal(def.kanban.title, 'display_name');
+  for (const labels of [journalEntriesView.listLabels, salesInvoiceView.listLabels, purchaseInvoiceView.listLabels, def.listLabels]) {
+    assert.equal(colLabel(def.fields, 'display_name', labels), 'Number');
+  }
+
+  let db = seed();
+  const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
+  const acc1 = accounts.find((a) => a.account_type === 'expense');
+  const acc2 = accounts.find((a) => a.account_type === 'asset_current');
+  const created = create(db, 'account.move', {
+    move_type: 'entry', journal_id: misc.id, date: '2026-06-01',
+    line_ids: [{ account_id: acc1.id, debit: 10, credit: 0 }, { account_id: acc2.id, debit: 0, credit: 10 }],
+  });
+  db = created.db;
+  const label = `Draft (* ${created.id})`;
+
+  const renderList = (record) => renderToStaticMarkup(React.createElement(List, {
+    db, model: 'account.move', records: [record], open: () => {}, selected: new Set(),
+    setSelected: () => {}, groupBy: [], list: ['display_name'], listLabels: { display_name: 'Number' },
+  }));
+  assert.match(renderList(read(db, 'account.move', created.id)), new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  db = postMove(db, created.id);
+  const posted = read(db, 'account.move', created.id);
+  assert.match(renderList(posted), new RegExp(posted.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('journalItems move_name shows the draft label for drafts and the number once posted, and search finds drafts', async () => {
+  const { matchesItemSearch } = await import('./views/JournalItems.jsx');
+  let db = seed();
+  const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
+  const acc1 = accounts.find((a) => a.account_type === 'expense');
+  const acc2 = accounts.find((a) => a.account_type === 'asset_current');
+  const created = create(db, 'account.move', {
+    move_type: 'entry', journal_id: misc.id, date: '2026-07-01',
+    line_ids: [{ account_id: acc1.id, debit: 10, credit: 0 }, { account_id: acc2.id, debit: 0, credit: 10 }],
+  });
+  db = created.db;
+  const label = `Draft (* ${created.id})`;
+
+  const draftRows = journalItems(db, { reviewMode: 'draft' }).filter((l) => l.move_id === created.id);
+  assert.ok(draftRows.length > 0, 'draft journal item rows exist');
+  assert.ok(draftRows.every((l) => l.move_name === label), 'draft rows carry the draft label in move_name');
+  assert.ok(draftRows.some((l) => matchesItemSearch(l, label)), 'searching by the draft label finds draft items');
+  assert.ok(draftRows.some((l) => matchesItemSearch(l, 'draft')), 'searching by "draft" finds draft items');
+
+  db = postMove(db, created.id);
+  const posted = read(db, 'account.move', created.id);
+  const postedRows = journalItems(db, { reviewMode: 'posted' }).filter((l) => l.move_id === created.id);
+  assert.ok(postedRows.length > 0, 'posted journal item rows exist');
+  assert.ok(postedRows.every((l) => l.move_name === posted.name), 'posted rows carry the stored number');
+  assert.ok(postedRows.some((l) => matchesItemSearch(l, posted.name)), 'searching by the number finds posted items');
 });
