@@ -634,19 +634,39 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   return made;
 }
 
+/**
+ * Return the id of the company's unique active default_for_payments liquidity journal or null (no throw),
+ * or throw when `throwErrors` is set.
+ */
+export function defaultPaymentJournalId(db, companyId = 1, { throwErrors = false } = {}) {
+  const company = companyId ?? 1;
+  const companies = db.records['res.company'] ?? [];
+  const singleCompany = companies.length <= 1 && (!companies.length || companies[0].id === company);
+  const defaults = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true
+    && (candidate.company_id === company || (singleCompany && candidate.company_id == null)));
+  if (!defaults.length) {
+    if (throwErrors) throw new Error('Select a payment journal or configure one default bank or cash journal');
+    return null;
+  }
+  if (defaults.length !== 1) {
+    if (throwErrors) throw new Error('Configure exactly one default payment journal for this company');
+    return null;
+  }
+  const [journal] = defaults;
+  if (journal.active === false || !isLiquidityJournal(journal)) {
+    if (!throwErrors) return null;
+  }
+  return journal.id;
+}
+
 /** Resolve the unique payment default or an explicitly selected liquidity journal. */
 export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
   const company = companyId ?? 1;
   let journal = selectedJournalId ? read(db, 'account.journal', selectedJournalId) : null;
   if (selectedJournalId && !journal) throw new Error('Selected payment journal does not exist');
   if (!selectedJournalId) {
-    const companies = db.records['res.company'] ?? [];
-    const singleCompany = companies.length <= 1 && (!companies.length || companies[0].id === company);
-    const defaults = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true
-      && (candidate.company_id === company || (singleCompany && candidate.company_id == null)));
-    if (!defaults.length) throw new Error('Select a payment journal or configure one default bank or cash journal');
-    if (defaults.length !== 1) throw new Error('Configure exactly one default payment journal for this company');
-    [journal] = defaults;
+    const journalId = defaultPaymentJournalId(db, company, { throwErrors: true });
+    journal = read(db, 'account.journal', journalId);
   }
   if (journal.active === false) throw new Error('The selected payment journal is archived');
   if (!isLiquidityJournal(journal)) throw new Error('Payment journal must be a bank or cash journal');

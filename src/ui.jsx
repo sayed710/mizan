@@ -5,7 +5,8 @@ import { isMultiCompany, read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { LANGUAGES, dateLocale, lang, setLang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
-import { companyCurrencyRecord, documentCurrency, formatCurrency, roundCurrency } from './money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, roundCurrency } from './money.js';
+import { currentCompany } from './models/company.js';
 import { parseAmount, today } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
 import { parseDistributionInput } from './analytic_distribution.js';
@@ -81,7 +82,14 @@ export function formatRelativeDate(iso, refDate = today()) {
 /** Display text of a field value; `rec` (or its parent document) gives monetary amounts their own currency. */
 export function display(db, field, value, rec = null) {
   if (rec && field.hideWhen?.(rec, db)) return '';
-  if (value == null || value === '') return '';
+  if (value == null || value === '') {
+    if (field?.type === 'many2one' && field?.emptyAsCompanyCurrency && rec) {
+      const compId = rec?.company_id ?? currentCompany(db);
+      const compCurr = findCompanyCurrencyRecord(db, compId);
+      return compCurr?.display_name ?? compCurr?.name ?? '';
+    }
+    return '';
+  }
   switch (field.type) {
     case 'monetary': {
       const context = { ...rec, company_id: rec?.company_id ?? db?.settings?.current_company_id ?? 1 };
@@ -415,7 +423,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
                 </tr>
               );
             }
-            const cellRec = { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id };
+            const cellRec = { ...l, move_type: l.move_type ?? record?.move_type, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id };
             return (
               <tr key={i}>
                 {cols.map(([k, f]) => {
@@ -605,13 +613,25 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
           {field.options.filter(([k]) => !field.legacyOptions?.includes(k) || k === value).map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
-    case 'many2one':
+    case 'many2one': {
+      const optCompanyCurrency = !!field?.emptyAsCompanyCurrency;
+      const compCurr = optCompanyCurrency ? findCompanyCurrencyRecord(db, record?.company_id ?? currentCompany(db)) : null;
+      const selectValue = optCompanyCurrency && (value == null || value === '') ? (compCurr?.id ?? '') : (value ?? '');
       return (
-        <select {...a11y} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
-          <option value="">{placeholder ?? ''}</option>
+        <select
+          {...a11y}
+          value={selectValue}
+          onChange={(e) => {
+            const raw = Number(e.target.value) || null;
+            const next = optCompanyCurrency && compCurr && raw === compCurr.id ? null : raw;
+            onChange(next);
+          }}
+        >
+          {!optCompanyCurrency && <option value="">{placeholder ?? ''}</option>}
           {relationCandidates(db, field.relation, value).filter((r) => !field.domain || r.id === Number(value) || field.domain(r, record, db)).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
         </select>
       );
+    }
     case 'priority': return <Stars value={value} onChange={onChange} />;
     case 'binary': return <FileInput id={id} value={value} onChange={onChange} />;
     case 'tags': return <TagsInput id={id} value={value} onChange={onChange} />;
