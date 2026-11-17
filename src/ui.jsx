@@ -113,8 +113,8 @@ export function display(db, field, value, rec = null) {
     case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
-    // A stored value outside the save-time contract still shows as written rather than breaking the view.
-    case 'distribution': return distributionError({ analytic_distribution: field }, { analytic_distribution: value }) ? JSON.stringify(value) : Object.entries(normalizeDistribution(value)).map(([id, percent]) => {
+    // Validated exactly as on save (per-plan totals need the db); a value outside that contract still shows as written rather than breaking the view.
+    case 'distribution': return distributionError({ analytic_distribution: field }, { analytic_distribution: value }, db) ? JSON.stringify(value) : Object.entries(normalizeDistribution(value, db)).map(([id, percent]) => {
       const accountId = analyticAccountKey(id);
       const account = read(db, 'account.analytic.account', accountId);
       const name = account?.display_name ?? account?.name ?? accountId;
