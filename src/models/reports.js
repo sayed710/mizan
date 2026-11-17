@@ -96,25 +96,37 @@ export function cashflowAnalysis(db, { from, to, company_id }) {
 }
 
 /** Receivable or payable ledger per partner: opening balance, the period's lines with a running balance, sorted by partner name. */
-export function partnerLedger(db, { from, to, company_id, analyticAccountIds } = {}, kind = 'receivable') {
+export function partnerLedger(db, { from, to, company_id, analyticAccountIds, partnerIds, unreconciledOnly = false } = {}, kind = 'receivable') {
   const accounts = accountIds(db, kind === 'payable' ? 'liability_payable' : 'asset_receivable');
+  const partners = partnerIds?.length ? new Set(partnerIds.map(Number)) : null;
+  // Odoo's "unreconciled entries only" keeps items with an open residual, in the period and in the opening alike.
+  const keep = (l) => accounts.has(l.account_id) && (!partners || partners.has(l.partner_id)) && (!unreconciledOnly || Math.abs(l.amount_residual ?? 0) > 1e-9);
   const rows = new Map();
   const row = (id) => {
     if (!rows.has(id)) rows.set(id, { partner_id: id, initial: 0, debit: 0, credit: 0, lines: [] });
     return rows.get(id);
   };
-  for (const l of itemsBefore(db, from, company_id, analyticAccountIds).filter((x) => accounts.has(x.account_id))) {
+  for (const l of itemsBefore(db, from, company_id, analyticAccountIds).filter(keep)) {
     const r = row(l.partner_id);
     r.initial += reportingBookedAmount(db, l, netOf(l));
   }
-  const items = filterByAnalytic(journalItems(db, { from, to, company_id }), analyticAccountIds).filter((x) => accounts.has(x.account_id)).sort((a, b) => a.date.localeCompare(b.date));
+  const items = filterByAnalytic(journalItems(db, { from, to, company_id }), analyticAccountIds)
+    .filter(keep)
+    .sort((a, b) => a.date.localeCompare(b.date));
   for (const l of items) {
     const r = row(l.partner_id);
     const debit = reportingBookedAmount(db, l, l.debit);
     const credit = reportingBookedAmount(db, l, l.credit);
     r.debit += debit;
     r.credit += credit;
-    r.lines.push({ date: l.date, move_id: l.move_id, move_name: l.move_name, debit, credit, currency_id: l.currency_id ?? null, amount_currency: l.amount_currency ?? null });
+    // Reuse the journal item's derived reconciliation fields; never infer a matching number from labels or amounts.
+    const dueDate = l.date_maturity ?? read(db, 'account.move', l.move_id)?.invoice_date_due ?? '';
+    r.lines.push({
+      date: l.date, dueDate, move_id: l.move_id, move_name: l.move_name,
+      ...(l.matching_number ? { matchingNumber: l.matching_number } : {}),
+      label: l.name ?? '', ...(l.ref ? { ref: l.ref } : {}),
+      debit, credit, currency_id: l.currency_id ?? null, amount_currency: l.amount_currency ?? null,
+    });
   }
   const name = (id) => read(db, 'res.partner', id)?.name ?? '';
   return [...rows.values()]

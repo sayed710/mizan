@@ -505,9 +505,9 @@ function InalterabilityCheck({ db, companyId }) {
 const REPORTS = {
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   fiscal: { title: 'Fiscal Report', Body: FiscalReport, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
   executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
@@ -551,6 +551,8 @@ function ReportPage({ leaf }) {
   const [journalId, setJournalId] = useState('');
   const [horizontalGroupId, setHorizontalGroupId] = useState('');
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
+  const [partnerFilterIds, setPartnerFilterIds] = useState([]);
+  const [unreconciledOnly, setUnreconciledOnly] = useState(false);
   const ledgerReports = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit'];
   const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
   const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
@@ -590,9 +592,11 @@ function ReportPage({ leaf }) {
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
+  const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const horizontalGroups = [];
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
+  const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner').sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const data = periods && leaf.report === 'cashflow'
     ? cashflowColumns(db, periods, {
       analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
@@ -675,6 +679,17 @@ function ReportPage({ leaf }) {
             </select>
           </label>
         )}
+        {isPartnerLedger && <>
+          <label className="inline-select">
+            <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
+          </label>
+          <label className="inline-select">
+            {t('Partners')}
+            <select aria-label={t('Partners')} multiple value={partnerFilterIds} onChange={(e) => setPartnerFilterIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}>
+              {partnerChoices.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
+        </>}
         {comparable && <label className="inline-select">
           {t('Comparison')}
           <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setHorizontalGroupId(''); }}>
@@ -706,7 +721,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} />}
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} />}
         </table>
       </div>
     </main>

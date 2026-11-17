@@ -5,7 +5,8 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
-import { accountId, postEntry } from './models/ledger.js';
+import { accountId, journalItems, postEntry } from './models/ledger.js';
+import { applyDiff, diffDb } from './sync.js';
 import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { cashFlow, customerStatement, executiveSummary, partnerLedger, trialBalance } from './models/reports.js';
 
@@ -83,6 +84,87 @@ test('partner ledger: payable side and opening balances carried across the perio
   const gulf = rows.find((r) => r.partner_id === 4);
   assert.deepEqual(pick(gulf), { initial: 7866, debit: 0, credit: 7866, end: 0 });
   assert.deepEqual(gulf.lines.map((l) => [l.debit, l.credit, l.balance]), [[0, 7866, 0]]);
+});
+
+test('partner ledger lines show due date, label and the reconciliation matching number', async () => {
+  const { reconcileLedgerItems } = await import('./models/glReconcile.js');
+  let db = seed();
+  const partner = create(db, 'res.partner', { name: 'Ledger Detail Partner' }); db = partner.db;
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: partner.id, invoice_date: '2026-03-01', invoice_date_due: '2026-04-01',
+    invoice_line_ids: [{ qty: 1, price_unit: 500, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+  const receivable = read(db, 'res.company', 1).account_default_receivable_id ?? accountId(db, '121000', 1);
+  const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const settlement = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-03-02', ref: 'Settlement',
+    lines: [{ account_id: receivable, partner_id: partner.id, credit: 500, name: 'Manual receipt' }, { account_id: accountId(db, '400000', 1), debit: 500 }],
+  });
+  db = settlement.db;
+  const selection = (moveId) => {
+    const items = journalItems(db).filter((l) => l.move_id === moveId && l.account_id === receivable);
+    assert.equal(items.length, 1);
+    return { move_id: moveId, line_identity: items[0].line_identity };
+  };
+  const next = reconcileLedgerItems(db, [selection(inv.id), selection(settlement.id)], { date: '2026-03-02' });
+  db = applyDiff(db, diffDb(db, next), { isAdmin: true });
+  const row = partnerLedger(db, { from: '2026-03-01', to: '2026-03-31' }).find((r) => r.partner_id === partner.id);
+  const invoiceLine = row.lines.find((l) => l.move_id === inv.id);
+  const receiptLine = row.lines.find((l) => l.move_id === settlement.id);
+  assert.equal(invoiceLine.dueDate, '2026-04-01'); // journal item date_maturity
+  assert.equal(invoiceLine.label, read(db, 'account.move', inv.id).name);
+  assert.ok(invoiceLine.matchingNumber, 'reconciled lines carry the GL matching number');
+  assert.equal(receiptLine.matchingNumber, invoiceLine.matchingNumber);
+  assert.equal(receiptLine.ref, 'Settlement');
+});
+
+test('partner ledger unreconciled-only keeps open lines in the period and the opening, dropping reconciled ones', () => {
+  const { db } = books();
+  const idOf = (name) => search(db, 'res.partner').find((p) => p.name === name).id;
+  const gulf = idOf('Gulf Interiors');
+  const omar = idOf('Omar Khaled');
+  const sara = idOf('Sara Hassan');
+  const filtered = partnerLedger(db, { ...whole, unreconciledOnly: true });
+  assert.deepEqual(filtered.map((r) => r.partner_id), [omar, sara]);
+  assert.deepEqual(filtered.find((r) => r.partner_id === omar).lines.map((l) => [l.debit, l.credit]), [[1140, 0]]);
+  assert.deepEqual(filtered.find((r) => r.partner_id === sara).lines.map((l) => [l.debit, l.credit]), [[1710, 0]]);
+  const opening = partnerLedger(db, { ...recent, unreconciledOnly: true });
+  assert.equal(opening.find((r) => r.partner_id === sara).initial, 1710); // open item, not the net 1210
+  assert.equal(opening.find((r) => r.partner_id === gulf), undefined); // fully reconciled before the period
+});
+
+test('partner ledger filters by one or more partners', () => {
+  const { db } = books();
+  const all = partnerLedger(db, whole).map((r) => r.partner_id);
+  const [first, second] = all;
+  assert.deepEqual(partnerLedger(db, { ...whole, partnerIds: [first] }).map((r) => r.partner_id), [first]);
+  assert.deepEqual(partnerLedger(db, { ...whole, partnerIds: [String(first)] }).map((r) => r.partner_id), [first]);
+  assert.deepEqual(partnerLedger(db, { ...whole, partnerIds: [first, second] }).map((r) => r.partner_id), [first, second]);
+  assert.deepEqual(partnerLedger(db, { ...whole, partnerIds: [] }).map((r) => r.partner_id), all);
+});
+
+test('partner ledger uses only the requested company journal items', () => {
+  const db = seed();
+  const receivable = db.records['account.account'].find((a) => a.account_type === 'asset_receivable');
+  const partner = db.records['res.partner'][0];
+  const move = (id, company_id, amount) => ({
+    id, company_id, state: 'posted', move_type: 'out_invoice', date: '2026-01-10', invoice_date: '2026-01-10',
+    invoice_date_due: '2026-02-10', partner_id: partner.id, line_ids: [{ account_id: receivable.id, partner_id: partner.id, debit: amount, credit: 0 }],
+  });
+  const fixture = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': [...db.records['res.company'], { id: 9999, name: 'Second', currency_id: db.records['res.company'][0].currency_id }],
+      'account.move': [...db.records['account.move'], move(9001, 1, 100), move(9002, 9999, 250)],
+    },
+  };
+  const period = { from: '2026-01-01', to: '2026-01-31' };
+  const moveIdsFor = (company_id) => partnerLedger(fixture, { ...period, company_id })
+    .find((r) => r.partner_id === partner.id).lines.map((l) => l.move_id).filter((id) => [9001, 9002].includes(id));
+  assert.deepEqual(moveIdsFor(1), [9001]);
+  assert.deepEqual(moveIdsFor(9999), [9002]);
 });
 
 test('cash flow splits every cash movement into operating, investing and financing', () => {
