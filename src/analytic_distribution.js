@@ -29,6 +29,12 @@ export function parseDistributionInput(text) {
   } catch { return NaN; }
 }
 
+/** A line's stored allocation: its distribution, else its legacy single analytic account at 100%. */
+export function storedLineDistribution(line) {
+  if (line?.analytic_distribution != null) return line.analytic_distribution;
+  return line?.analytic_account_id ? { [line.analytic_account_id]: 100 } : null;
+}
+
 /** One plan key per analytic account: its plan record, else its legacy plan selection. */
 export function analyticPlanKey(account) {
   return account.plan_id ? `plan:${account.plan_id}` : `legacy:${account.plan || 'project'}`;
@@ -103,6 +109,12 @@ export function planTotals(rows, db) {
     totals.set(key, current);
   }
   return [...totals.values()];
+}
+
+/** What is left of `account`'s plan after the other rows: the default for a row that just picked it. */
+export function remainingInPlan(otherRows, account, db) {
+  const used = planTotals(otherRows, db).find((g) => g.key === analyticPlanKey(account))?.total ?? 0;
+  return Math.max(0, Number((100 - used).toFixed(2)));
 }
 
 /** Check every declared distribution, including invoice and journal item subfields. */

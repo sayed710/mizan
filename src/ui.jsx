@@ -15,8 +15,11 @@ import {
   distributionRowsError,
   distributionToRows,
   normalizeDistribution,
+  parseDistributionInput,
   planTotals,
+  remainingInPlan,
   rowsToDistribution,
+  storedLineDistribution,
 } from './analytic_distribution.js';
 import { fieldReadonly, fieldRequired } from './field-metadata.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
@@ -93,11 +96,15 @@ export function formatDistribution(db, value, field = { type: 'distribution', la
   if (distributionError({ analytic_distribution: field }, { analytic_distribution: value }, db)) {
     return typeof value === 'string' ? value : JSON.stringify(value);
   }
-  return Object.entries(normalizeDistribution(value, db)).map(([id, percent]) => {
-    const accountId = analyticAccountKey(id);
+  return formatDistributionEntries(db, Object.entries(normalizeDistribution(value, db)).map(([id, percent]) => [analyticAccountKey(id), percent]));
+}
+
+/** "Account 60%, Account 40%" for [accountId, percent] pairs; a non-numeric percent is shown as typed. */
+function formatDistributionEntries(db, entries) {
+  return entries.map(([accountId, percent]) => {
     const account = read(db, 'account.analytic.account', accountId);
     const name = account?.display_name ?? account?.name ?? accountId;
-    return `${name} ${Number(percent.toFixed(2))}%`;
+    return `${name} ${typeof percent === 'number' && Number.isFinite(percent) ? Number(percent.toFixed(2)) : percent}%`;
   }).join(', ');
 }
 
@@ -105,6 +112,8 @@ export function formatDistribution(db, value, field = { type: 'distribution', la
 export function display(db, field, value, rec = null) {
   if (rec && field.hideWhen?.(rec, db)) return '';
   if (value == null || value === '') {
+    // A line with only a legacy analytic account shows it as the 100% allocation the ledger books.
+    if (field?.type === 'distribution' && rec) return formatDistribution(db, storedLineDistribution(rec), field);
     if (field?.type === 'many2one' && field?.emptyAsCompanyCurrency && rec) {
       const compId = rec?.company_id ?? currentCompany(db);
       const compCurr = findCompanyCurrencyRecord(db, compId);
@@ -551,7 +560,9 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
   const triggerRef = useRef(null);
   const nextIdRef = useRef(1);
 
-  const initRows = (val) => {
+  const initRows = (stored) => {
+    // Imported text that holds a valid distribution opens as rows; other text stays visible on the trigger until replaced.
+    const val = typeof stored === 'string' ? parseDistributionInput(stored) : stored;
     if (val && typeof val === 'object' && !Array.isArray(val) && !Number.isNaN(val)) {
       return distributionToRows(val).map((r) => ({
         _id: nextIdRef.current++,
@@ -636,12 +647,16 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
     const nextRows = rows.map((r) => {
       if (r._id !== idToUpdate) return r;
       if (key === 'accountId') {
-        return { ...r, accountId: val ? Number(val) : '' };
+        const accountId = val ? Number(val) : '';
+        const account = accountId && read(db, 'account.analytic.account', accountId);
+        if (!r.autoPercent || !account) return { ...r, accountId };
+        const percent = remainingInPlan(rows.filter((o) => o._id !== r._id), account, db);
+        return { ...r, accountId, percent, percentDraft: String(percent) };
       }
       if (key === 'percentDraft') {
         const parsed = parseAmount(val);
         const numVal = val.trim() === '' ? NaN : (Number.isFinite(parsed) && parsed >= 0 ? parsed : NaN);
-        return { ...r, percentDraft: val, percent: numVal };
+        return { ...r, percentDraft: val, percent: numVal, autoPercent: false };
       }
       return r;
     });
@@ -656,14 +671,8 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
   };
 
   const handleAddLine = () => {
-    const allocated = rows.reduce((sum, r) => sum + (Number.isFinite(r.percent) ? r.percent : 0), 0);
-    const defaultPercent = Math.max(0, Number((100 - allocated).toFixed(2)));
-    const newRow = {
-      _id: nextIdRef.current++,
-      accountId: '',
-      percent: defaultPercent,
-      percentDraft: String(defaultPercent),
-    };
+    // The plan is known only once an account is picked; selecting one sets what is left of that plan.
+    const newRow = { _id: nextIdRef.current++, accountId: '', percent: 100, percentDraft: '100', autoPercent: true };
     const nextRows = [...rows, newRow];
     setRows(nextRows);
     propagateChange(nextRows);
@@ -678,7 +687,10 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
     : display(db, models['account.analytic.account'].fields.plan, account.plan || 'project');
 
 
-  const displayText = formatDistribution(db, value, field ?? { type: 'distribution', label: 'Analytic Distribution' });
+  const invalid = Number.isNaN(value);
+  const displayText = invalid
+    ? formatDistributionEntries(db, rows.filter((r) => r.accountId).map((r) => [Number(r.accountId), r.percentDraft]))
+    : formatDistribution(db, value, field ?? { type: 'distribution', label: 'Analytic Distribution' });
   const placeholderText = placeholder ?? t(field?.label ?? 'Analytic Distribution');
 
   const renderRowItem = (row) => {
@@ -732,13 +744,17 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
         type="button"
         id={id}
         ref={triggerRef}
-        className="distribution-trigger"
+        className={`distribution-trigger${invalid ? ' invalid' : ''}`}
         aria-haspopup="dialog"
         aria-expanded={Boolean(popoverStyle)}
         disabled={disabled}
         onClick={togglePopover}
         onKeyDown={handleTriggerKeyDown}
         {...props}
+        // The accessible name carries the current tags, not only the field label.
+        aria-label={[props['aria-label'], displayText || placeholderText].filter(Boolean).join(': ')}
+        aria-invalid={invalid || undefined}
+        title={invalid && inlineError ? t(inlineError) : undefined}
       >
         <span className="distribution-trigger-text">
           {displayText || <span className="muted">{placeholderText}</span>}
@@ -838,7 +854,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
     <input {...a11y} type={type} placeholder={placeholder} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
-    case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} db={db} record={record} field={field} placeholder={placeholder} />;
+    case 'distribution': return <DistributionInput {...a11y} value={value ?? storedLineDistribution(record)} onChange={onChange} db={db} record={record} field={field} placeholder={placeholder} />;
     case 'html': {
       const htmlLabel = label ?? (field ? (field.custom ? field.label : t(field.label)) : '');
       if (sanitizeHtml('') === null) {

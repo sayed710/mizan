@@ -363,6 +363,7 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .distribution-widget { position: relative; width: 100%; min-width: 0; }
 .distribution-trigger { display: block; width: 100%; min-width: 0; text-align: start; background: none; border: 1px solid transparent; padding: 2px 4px; font: inherit; cursor: pointer; border-radius: var(--radius, 4px); color: inherit; }
 .distribution-trigger:hover { background: rgba(0, 0, 0, .04); border-color: var(--border, #d1d5db); }
+.distribution-trigger.invalid { border-color: var(--danger, #dc2626); }
 .distribution-trigger:focus-visible { outline: 2px solid var(--brand, #017e84); outline-offset: 1px; }
 .distribution-trigger-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

@@ -230,16 +230,29 @@ test('FieldInput renders DistributionInput for distribution field type', () => {
   assert.ok(html.includes(`${office.name} 100%`), 'shows account percentage');
 });
 
-test('legacy invoice-line analytic account migrates to the equivalent 100% distribution', async () => {
-  const { migrate } = await import('./migrations.js');
+
+test('a new row defaults to what is left of its own plan, not of every plan', async () => {
+  const { remainingInPlan } = await import('./analytic_distribution.js');
   const db = seed();
-  const move = db.records['account.move'].find((m) => m.invoice_line_ids?.length);
-  const [first, ...rest] = move.invoice_line_ids;
-  const legacy = { ...first, analytic_account_id: 1 };
-  delete legacy.analytic_distribution;
-  const old = { ...db, schema_version: 55, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => (m.id === move.id ? { ...m, invoice_line_ids: [legacy, ...rest] } : m)) } };
-  const migrated = migrate(old);
-  const line = migrated.records['account.move'].find((m) => m.id === move.id).invoice_line_ids[0];
-  assert.deepEqual(line.analytic_distribution, { 1: 100 });
-  assert.equal(migrated.records['account.move'].find((m) => m.id === move.id).invoice_line_ids.length, move.invoice_line_ids.length);
+  const accounts = search(db, 'account.analytic.account');
+  const office = accounts.find((a) => a.name === 'Office Projects');
+  const cairo = accounts.find((a) => a.name === 'Cairo Branch');
+  assert.notEqual(office.plan, cairo.plan, 'fixture accounts sit in different plans');
+  const full = [{ accountId: office.id, percent: 100 }];
+  assert.equal(remainingInPlan(full, cairo, db), 100, 'another plan is still empty');
+  assert.equal(remainingInPlan([{ accountId: office.id, percent: 70 }], office, db), 30);
+  assert.equal(remainingInPlan([{ accountId: office.id, percent: 120 }], office, db), 0);
+});
+
+test('a line with only a legacy analytic account shows and edits it as its 100% distribution', () => {
+  const db = seed();
+  const office = search(db, 'account.analytic.account').find((a) => a.name === 'Office Projects');
+  const field = { type: 'distribution', label: 'Analytic' };
+  const line = { analytic_account_id: office.id };
+  assert.equal(display(db, field, undefined, line), `${office.name} 100%`);
+  const html = renderToStaticMarkup(React.createElement(FieldInput, { db, field, value: undefined, record: line, onChange: () => {}, label: 'Analytic 1' }));
+  assert.ok(html.includes(`${office.name} 100%`), 'the widget shows the legacy account');
+  assert.ok(html.includes(`aria-label="Analytic 1: ${office.name} 100%"`), 'the accessible name carries the tags');
+  const distributed = { analytic_account_id: office.id, analytic_distribution: {} };
+  assert.equal(display(db, field, distributed.analytic_distribution, distributed), '', 'an explicit distribution wins over the legacy account');
 });
