@@ -1606,6 +1606,21 @@ MIGRATIONS.push({ version: 55, name: 'online-link-unsynced-state', up: (db) => {
   return nextDb;
 } });
 
+// Invoice lines now edit analytics only through the distribution widget; a line's single analytic account
+// becomes the same 100% distribution the ledger already derived from it, so it stays visible and editable.
+MIGRATIONS.push({ version: 56, name: 'invoice-line-analytic-account-to-distribution', up: (db) => {
+  const moves = db?.records?.['account.move'];
+  if (!Array.isArray(moves)) return db;
+  let changed = false;
+  const next = moves.map((move) => {
+    if (!move?.invoice_line_ids?.some((line) => line?.analytic_account_id && line.analytic_distribution == null)) return move;
+    changed = true;
+    return { ...move, invoice_line_ids: move.invoice_line_ids.map((line) => (line?.analytic_account_id && line.analytic_distribution == null
+      ? { ...line, analytic_distribution: { [line.analytic_account_id]: 100 } } : line)) };
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.move': next } } : db;
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

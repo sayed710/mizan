@@ -9,7 +9,15 @@ import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, for
 import { currentCompany } from './models/company.js';
 import { parseAmount, today } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
-import { analyticAccountKey, distributionError, normalizeDistribution, parseDistributionInput } from './analytic_distribution.js';
+import {
+  analyticAccountKey,
+  distributionError,
+  distributionRowsError,
+  distributionToRows,
+  normalizeDistribution,
+  planTotals,
+  rowsToDistribution,
+} from './analytic_distribution.js';
 import { fieldReadonly, fieldRequired } from './field-metadata.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
@@ -79,6 +87,20 @@ export function formatRelativeDate(iso, refDate = today()) {
   return t('{n} days ago', { n: -diff });
 }
 
+/** Canonical formatter for analytic distribution tags ("Account 60%, Account 40%"). */
+export function formatDistribution(db, value, field = { type: 'distribution', label: 'Analytic Distribution' }) {
+  if (value == null || Number.isNaN(value)) return '';
+  if (distributionError({ analytic_distribution: field }, { analytic_distribution: value }, db)) {
+    return typeof value === 'string' ? value : JSON.stringify(value);
+  }
+  return Object.entries(normalizeDistribution(value, db)).map(([id, percent]) => {
+    const accountId = analyticAccountKey(id);
+    const account = read(db, 'account.analytic.account', accountId);
+    const name = account?.display_name ?? account?.name ?? accountId;
+    return `${name} ${Number(percent.toFixed(2))}%`;
+  }).join(', ');
+}
+
 /** Display text of a field value; `rec` (or its parent document) gives monetary amounts their own currency. */
 export function display(db, field, value, rec = null) {
   if (rec && field.hideWhen?.(rec, db)) return '';
@@ -114,12 +136,7 @@ export function display(db, field, value, rec = null) {
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
     // Validated exactly as on save (per-plan totals need the db); a value outside that contract still shows as written rather than breaking the view.
-    case 'distribution': return distributionError({ analytic_distribution: field }, { analytic_distribution: value }, db) ? JSON.stringify(value) : Object.entries(normalizeDistribution(value, db)).map(([id, percent]) => {
-      const accountId = analyticAccountKey(id);
-      const account = read(db, 'account.analytic.account', accountId);
-      const name = account?.display_name ?? account?.name ?? accountId;
-      return `${name} ${Number(percent.toFixed(2))}%`;
-    }).join(', ');
+    case 'distribution': return formatDistribution(db, value, field);
     case 'binary': return value?.name ?? '';
     case 'html': return String(value ?? '');
     case 'date': return field.widget === 'remaining_days' ? formatRelativeDate(value) : formatDate(value);
@@ -527,14 +544,253 @@ export const isLabelable = (field, readonly, record, db) => {
   return !(isReadonly || (field?.compute && !field?.editable)) && !['one2many', 'priority'].includes(field?.type) && field?.widget !== 'radio';
 };
 
-function DistributionInput({ value, onChange, ...props }) {
-  const [draft, setDraft] = useState(() => typeof value === 'string' ? value : JSON.stringify(value ?? {}));
-  useEffect(() => { if (!Number.isNaN(value)) setDraft(typeof value === 'string' ? value : JSON.stringify(value ?? {})); }, [value]);
-  return <textarea {...props} value={draft} onChange={(e) => {
-    const next = e.target.value;
-    setDraft(next);
-    onChange(parseDistributionInput(next));
-  }} />;
+export function DistributionInput({ value, onChange, db = null, record = null, field = null, placeholder = null, id = null, disabled = false, ...props }) {
+  const [popoverStyle, setPopoverStyle] = useState(null);
+  const containerRef = useRef(null);
+  const dropdownRef = useRef(null);
+  const triggerRef = useRef(null);
+  const nextIdRef = useRef(1);
+
+  const initRows = (val) => {
+    if (val && typeof val === 'object' && !Array.isArray(val) && !Number.isNaN(val)) {
+      return distributionToRows(val).map((r) => ({
+        _id: nextIdRef.current++,
+        accountId: r.accountId,
+        percent: r.percent,
+        percentDraft: String(r.percent),
+      }));
+    }
+    return [];
+  };
+
+  const [rows, setRows] = useState(() => initRows(value));
+  const [lastPropValue, setLastPropValue] = useState(value);
+  const [emitted, setEmitted] = useState(value);
+
+  // A value this widget emitted keeps the rows (and the focused input); an outside change reloads them.
+  if (!Object.is(value, lastPropValue)) {
+    setLastPropValue(value);
+    if (!Object.is(value, emitted)) setRows(initRows(value));
+  }
+
+  useDismiss(Boolean(popoverStyle), () => {
+    setPopoverStyle(null);
+    triggerRef.current?.focus();
+  }, containerRef);
+
+  useEffect(() => {
+    if (!popoverStyle) return undefined;
+    const close = (event) => {
+      if (!dropdownRef.current?.contains(event.target)) {
+        setPopoverStyle(null);
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('scroll', close, true);
+    return () => document.removeEventListener('scroll', close, true);
+  }, [popoverStyle]);
+
+  const togglePopover = () => {
+    if (disabled) return;
+    if (popoverStyle) {
+      setPopoverStyle(null);
+      return;
+    }
+    const button = triggerRef.current;
+    const rect = button?.getBoundingClientRect?.();
+    if (!rect) {
+      setPopoverStyle({});
+      return;
+    }
+    const rtl = document.documentElement.dir === 'rtl' || (button && getComputedStyle(button).direction === 'rtl');
+    setPopoverStyle(anchoredMenuStyle(rect, { width: globalThis.innerWidth, height: globalThis.innerHeight }, { rtl, menuWidth: 340 }));
+  };
+
+  const handleTriggerKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      togglePopover();
+    }
+  };
+
+  const handlePopoverKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setPopoverStyle(null);
+      triggerRef.current?.focus();
+    }
+  };
+
+  const candidates = relationCandidates(db, 'account.analytic.account', null).filter((r) => !field?.domain || field.domain(r, record, db));
+
+  const inlineError = distributionRowsError(rows, db);
+
+  const propagateChange = (nextRows) => {
+    const next = rowsToDistribution(nextRows, db);
+    setEmitted(next);
+    onChange(next);
+  };
+
+  const handleUpdateRow = (idToUpdate, key, val) => {
+    const nextRows = rows.map((r) => {
+      if (r._id !== idToUpdate) return r;
+      if (key === 'accountId') {
+        return { ...r, accountId: val ? Number(val) : '' };
+      }
+      if (key === 'percentDraft') {
+        const parsed = parseAmount(val);
+        const numVal = val.trim() === '' ? NaN : (Number.isFinite(parsed) && parsed >= 0 ? parsed : NaN);
+        return { ...r, percentDraft: val, percent: numVal };
+      }
+      return r;
+    });
+    setRows(nextRows);
+    propagateChange(nextRows);
+  };
+
+  const handleRemoveRow = (idToRemove) => {
+    const nextRows = rows.filter((r) => r._id !== idToRemove);
+    setRows(nextRows);
+    propagateChange(nextRows);
+  };
+
+  const handleAddLine = () => {
+    const allocated = rows.reduce((sum, r) => sum + (Number.isFinite(r.percent) ? r.percent : 0), 0);
+    const defaultPercent = Math.max(0, Number((100 - allocated).toFixed(2)));
+    const newRow = {
+      _id: nextIdRef.current++,
+      accountId: '',
+      percent: defaultPercent,
+      percentDraft: String(defaultPercent),
+    };
+    const nextRows = [...rows, newRow];
+    setRows(nextRows);
+    propagateChange(nextRows);
+  };
+
+  const usedAccountIds = new Set(rows.map((r) => Number(r.accountId)).filter((id) => Number.isSafeInteger(id) && id > 0));
+
+  const planGroups = planTotals(rows, db);
+  const unassignedRows = rows.filter((r) => !planGroups.some((g) => g.rows.includes(r)));
+  const planName = (account) => account.plan_id
+    ? display(db, models['account.analytic.account'].fields.plan_id, account.plan_id)
+    : display(db, models['account.analytic.account'].fields.plan, account.plan || 'project');
+
+
+  const displayText = formatDistribution(db, value, field ?? { type: 'distribution', label: 'Analytic Distribution' });
+  const placeholderText = placeholder ?? t(field?.label ?? 'Analytic Distribution');
+
+  const renderRowItem = (row) => {
+    const choices = candidates.filter((c) => !usedAccountIds.has(c.id) || c.id === Number(row.accountId));
+    if (row.accountId && !choices.some((c) => c.id === Number(row.accountId))) {
+      const current = read(db, 'account.analytic.account', Number(row.accountId));
+      if (current) choices.unshift(current);
+    }
+    return (
+      <div key={row._id} className="distribution-row">
+        <select
+          className="distribution-account-select"
+          value={row.accountId ?? ''}
+          aria-label={t('Analytic Account')}
+          onChange={(e) => handleUpdateRow(row._id, 'accountId', e.target.value)}
+        >
+          <option value="">{t('Select an analytic account…')}</option>
+          {choices.map((acc) => (
+            <option key={acc.id} value={acc.id}>
+              {acc.display_name ?? acc.name ?? acc.id}
+            </option>
+          ))}
+        </select>
+        <div className="distribution-percent-cell">
+          <input
+            type="text"
+            inputMode="decimal"
+            dir="ltr"
+            className="distribution-percent-input"
+            value={row.percentDraft ?? (row.percent ?? '')}
+            aria-label={t('Percentage')}
+            onChange={(e) => handleUpdateRow(row._id, 'percentDraft', e.target.value)}
+          />
+          <span className="distribution-percent-unit">%</span>
+        </div>
+        <button
+          type="button"
+          className="distribution-remove-btn link danger"
+          aria-label={t('Remove')}
+          onClick={() => handleRemoveRow(row._id)}
+        >
+          ×
+        </button>
+      </div>
+    );
+  };
+
+  return (
+    <div className="distribution-widget" ref={containerRef}>
+      <button
+        type="button"
+        id={id}
+        ref={triggerRef}
+        className="distribution-trigger"
+        aria-haspopup="dialog"
+        aria-expanded={Boolean(popoverStyle)}
+        disabled={disabled}
+        onClick={togglePopover}
+        onKeyDown={handleTriggerKeyDown}
+        {...props}
+      >
+        <span className="distribution-trigger-text">
+          {displayText || <span className="muted">{placeholderText}</span>}
+        </span>
+      </button>
+
+      {popoverStyle && (
+        <div
+          className="distribution-popover"
+          ref={dropdownRef}
+          style={popoverStyle}
+          role="dialog"
+          aria-label={t(field?.label ?? 'Analytic Distribution')}
+          onKeyDown={handlePopoverKeyDown}
+        >
+          {planGroups.map((group) => (
+            <div key={group.key} className="distribution-plan-group">
+              <div className="distribution-plan-header">
+                <span className="distribution-plan-name">{planName(group.account)}</span>
+                <span className={`distribution-plan-total ${group.over ? 'danger bold' : 'muted'}`}>
+                  {Number(group.total.toFixed(2))}%
+                </span>
+              </div>
+              <div className="distribution-plan-rows">
+                {group.rows.map(renderRowItem)}
+              </div>
+            </div>
+          ))}
+
+          {unassignedRows.length > 0 && (
+            <div className="distribution-plan-group distribution-unassigned-group">
+              <div className="distribution-plan-rows">
+                {unassignedRows.map(renderRowItem)}
+              </div>
+            </div>
+          )}
+
+          <div className="distribution-actions">
+            <button type="button" className="link distribution-add-line" onClick={handleAddLine}>
+              + {t('Add a line')}
+            </button>
+          </div>
+
+          {inlineError && (
+            <div className="distribution-error danger" role="alert">
+              {t(inlineError)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, disabled = false, placeholder, record, label, isNew = false }) {
@@ -582,7 +838,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
     <input {...a11y} type={type} placeholder={placeholder} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
-    case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} />;
+    case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} db={db} record={record} field={field} placeholder={placeholder} />;
     case 'html': {
       const htmlLabel = label ?? (field ? (field.custom ? field.label : t(field.label)) : '');
       if (sanitizeHtml('') === null) {
