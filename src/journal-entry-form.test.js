@@ -727,3 +727,30 @@ test('posting refuses a number that sorts inside the journal secured chain', asy
   const later = draft({});
   assert.throws(() => postMove(later.db, later.id), /numbered before the secured entries/);
 });
+
+test('a draft account.move shows a draft display_name in many2one references until posted', async () => {
+  const { display } = await import('./ui.jsx');
+  let db = seed();
+  const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
+  const acc1 = accounts.find((a) => a.account_type === 'expense');
+  const acc2 = accounts.find((a) => a.account_type === 'asset_current');
+  const created = create(db, 'account.move', {
+    move_type: 'entry', journal_id: misc.id, date: '2026-05-01',
+    line_ids: [{ account_id: acc1.id, debit: 10, credit: 0 }, { account_id: acc2.id, debit: 0, credit: 10 }],
+  });
+  db = created.db;
+
+  const draft = read(db, 'account.move', created.id);
+  assert.equal(draft.name, '/');
+  assert.equal(draft.display_name, `Draft (* ${created.id})`);
+
+  const many2one = { type: 'many2one', relation: 'account.move' };
+  assert.equal(display(db, many2one, created.id), `Draft (* ${created.id})`);
+
+  db = postMove(db, created.id);
+  const posted = read(db, 'account.move', created.id);
+  assert.notEqual(posted.name, '/');
+  assert.equal(posted.display_name, posted.name);
+  assert.equal(display(db, many2one, created.id), posted.name);
+});
