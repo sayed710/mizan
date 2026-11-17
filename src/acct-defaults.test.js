@@ -5,6 +5,7 @@ import { create, read, write } from './orm.js';
 import { models } from './models/index.js';
 import { invoiceLineAccount, resolveCompanyAccount, resolveDocumentJournal } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
+import { moveValued, stockAccount } from './models/valuation.js';
 
 const PARTNER_ACCOUNTING_FIELDS = [
   'property_account_position_id',
@@ -115,4 +116,18 @@ test('a category belonging to another company does not supply the line account',
   const move = { move_type: 'out_invoice', partner_id: 1, company_id: 1, invoice_line_ids: [line] };
   const journal = resolveDocumentJournal(product.db, move, { required: true });
   assert.equal(invoiceLineAccount(product.db, move, line), resolveCompanyAccount(product.db, journal.default_account_id, 1));
+});
+
+test('another company category valuation applies to neither the bill line nor the receipt of this company', () => {
+  const base = seed();
+  const category = create(base, 'product.category', { name: 'Company 2 periodic category', company_id: 2, property_valuation: 'periodic' });
+  const product = create(category.db, 'product', { name: 'Company 1 stocked good', type: 'goods', categ_id: category.id, cost: 40 });
+  const db = product.db;
+  const line = { product_id: product.id, qty: 2, price_unit: 40, tax_id: null, tax: 0 };
+  const bill = { move_type: 'in_invoice', partner_id: 1, company_id: 1, invoice_line_ids: [line] };
+  assert.equal(invoiceLineAccount(db, bill, line), stockAccount(db, read(db, 'product', product.id), 'input', 1));
+  const layersBefore = (db.records['stock.valuation.layer'] ?? []).length;
+  const received = moveValued(db, [{ product_id: product.id, qty: 2, unit_cost: 40 }], 1, { company_id: 1 });
+  const layers = (received.records['stock.valuation.layer'] ?? []).slice(layersBefore);
+  assert.deepEqual(layers.map((l) => [l.product_id, l.company_id, l.quantity]), [[product.id, 1, 2]]);
 });
