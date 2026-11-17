@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
@@ -1547,6 +1547,14 @@ const invoiceLineField = {
       const product = read(db, 'product', base.product_id);
       if (product && !line.name?.trim()) {
         updated = { ...updated, name: product.name || '' };
+      }
+      // Show the account the line will post to, before any deferred-account substitution.
+      // Ignore any account already on the line so the product's own resolution wins, and never fail here:
+      // an unresolved or incomplete setup belongs to posting.
+      const journal = resolveDocumentJournal(db, moveWithJournal);
+      if (journal) {
+        const resolved = invoiceLineOriginalAccount(db, moveWithJournal, { ...updated, account_id: null, income_account_id: null }, journal);
+        if (!resolved.error && resolved.account) updated = { ...updated, account_id: resolved.account };
       }
     }
     if (isDoc && key === 'account_id' && !base.product_id && !isSectionOrNote(base)) {

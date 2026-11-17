@@ -11,6 +11,7 @@ const { create, read, search, write } = await import('./orm.js');
 const { models } = await import('./models/index.js');
 const { changeFormValue, newDefaults } = await import('./views/formDefaults.js');
 const { postMove } = await import('./models/accounting.js');
+const { invoiceLineAccount } = await import('./models/ledger.js');
 const { FieldInput, display } = await import('./ui.jsx');
 const { FormView } = await import('./views/FormView.jsx');
 const { Checks } = await import('./views/Checks.jsx');
@@ -213,6 +214,141 @@ test('4. Product fills the label: fills name from product name when empty, witho
   // If user already typed a label, it is NOT overwritten
   const preservedLine = lineField.onchange({ product_id: prodId, name: 'Custom User Label' }, 'product_id', db, { move_type: 'out_invoice' });
   assert.equal(preservedLine.name, 'Custom User Label', 'Typed label is preserved');
+});
+
+test('4c. Product fills the line account from its configured income/expense account, and posting uses that same account', () => {
+  let db = seed();
+  const income = create(db, 'account.account', { code: '499901', name: 'Product Test Income', account_type: 'income' });
+  db = income.db;
+  const expense = create(db, 'account.account', { code: '699901', name: 'Product Test Expense', account_type: 'expense' });
+  db = expense.db;
+  const product = create(db, 'product', {
+    name: 'Accounted Service',
+    type: 'service',
+    list_price: 150,
+    cost: 90,
+    property_account_income_id: income.id,
+    property_account_expense_id: expense.id,
+  });
+  db = product.db;
+
+  const lineField = models['account.move'].fields.invoice_line_ids;
+  const baseLine = { product_id: product.id, qty: 1, price_unit: 100, discount: 0, tax_id: null, tax: 0 };
+
+  const billLine = lineField.onchange(baseLine, 'product_id', db, { move_type: 'in_invoice', company_id: 1 });
+  assert.equal(billLine.account_id, expense.id, 'Vendor bill line shows the product expense account');
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 1,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [billLine],
+  });
+  const postedBill = read(postMove(bill.db, bill.id), 'account.move', bill.id);
+  const postedBillLine = postedBill.line_ids.find((l) => (l.invoice_sources ?? []).some((source) => source.index === 0));
+  assert.equal(postedBillLine?.account_id, billLine.account_id, 'Posted bill uses the account shown on the line');
+
+  const invoiceLine = lineField.onchange(baseLine, 'product_id', db, { move_type: 'out_invoice', company_id: 1 });
+  assert.equal(invoiceLine.account_id, income.id, 'Customer invoice line shows the product income account');
+
+  const invoice = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-04-02',
+    invoice_line_ids: [invoiceLine],
+  });
+  const postedInvoice = read(postMove(invoice.db, invoice.id), 'account.move', invoice.id);
+  const postedInvoiceLine = postedInvoice.line_ids.find((l) => (l.invoice_sources ?? []).some((source) => source.index === 0));
+  assert.equal(postedInvoiceLine?.account_id, invoiceLine.account_id, 'Posted invoice uses the account shown on the line');
+
+  const cleared = lineField.onchange({ ...billLine, product_id: null, account_id: expense.id }, 'product_id', db, { move_type: 'in_invoice', company_id: 1 });
+  assert.equal(cleared.account_id, expense.id, 'Clearing the product keeps a manually chosen account');
+});
+
+test('4d. Product account preview shows the original account for deferred lines and never throws while the document is incomplete', () => {
+  let db = seed();
+  const deferredExpense = create(db, 'account.account', { code: '132900', name: 'Test Deferred Expense', account_type: 'asset_current', company_id: 1 });
+  db = write(deferredExpense.db, 'res.company', 1, { deferred_expense_account_id: deferredExpense.id });
+
+  // A product expense account that is itself marked deferred.
+  const deferredAccountExpense = create(db, 'account.account', {
+    code: '699911', name: 'Deferred Expense Product Account', account_type: 'expense', company_id: 1, is_deferred: true,
+  });
+  db = deferredAccountExpense.db;
+  const deferredProduct = create(db, 'product', {
+    name: 'Deferred Service', type: 'service', list_price: 100, cost: 100,
+    property_account_expense_id: deferredAccountExpense.id,
+  });
+  db = deferredProduct.db;
+
+  const lineField = models['account.move'].fields.invoice_line_ids;
+  const baseLine = (productId, extra = {}) => ({ product_id: productId, qty: 1, price_unit: 100, discount: 0, tax_id: null, tax: 0, ...extra });
+
+  // Picking the product shows the original expense account, not the company deferred account, and does not throw.
+  const productLine = lineField.onchange(baseLine(deferredProduct.id), 'product_id', db, { move_type: 'in_invoice', company_id: 1 });
+  assert.equal(productLine.account_id, deferredAccountExpense.id, 'Product preview keeps the original deferred expense account');
+  assert.notEqual(productLine.account_id, deferredExpense.id, 'Product preview does not show the company deferred account');
+
+  // Posting still enforces the deferred dates for that account.
+  const missingDates = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 1, invoice_date: '2026-05-01', invoice_line_ids: [productLine],
+  });
+  assert.throws(() => postMove(missingDates.db, missingDates.id), /Set valid deferred start and end dates/, 'Posting still reports missing deferred dates');
+
+  // Deferred dates on the line: the preview keeps the original account while posting substitutes the deferred one.
+  const datedExpense = create(db, 'account.account', { code: '699912', name: 'Dated Expense Account', account_type: 'expense', company_id: 1 });
+  db = datedExpense.db;
+  const datedProduct = create(db, 'product', {
+    name: 'Dated Service', type: 'service', list_price: 100, cost: 100,
+    property_account_expense_id: datedExpense.id,
+  });
+  db = datedProduct.db;
+
+  const datedLine = lineField.onchange(
+    baseLine(datedProduct.id, { deferred_start_date: '2026-01-01', deferred_end_date: '2026-12-31' }),
+    'product_id', db, { move_type: 'in_invoice', company_id: 1 },
+  );
+  assert.equal(datedLine.account_id, datedExpense.id, 'Deferred-dated line keeps the original expense account');
+  assert.equal(
+    invoiceLineAccount(db, { move_type: 'in_invoice', company_id: 1 }, datedLine),
+    deferredExpense.id,
+    'Posting still substitutes the company deferred expense account',
+  );
+
+  // Product without accounts on a journal without a default account: the preview leaves the line account untouched.
+  const emptyProduct = create(db, 'product', { name: 'Unconfigured Service', type: 'service', list_price: 10, cost: 10 });
+  db = emptyProduct.db;
+  // A journal can reach purchase type without a default account (e.g. changing the type of an existing journal).
+  const noDefaultJournal = create(db, 'account.journal', {
+    name: 'No Default Bills', code: 'NODEFBILL', type: 'general', company_id: 1,
+    invoice_sequence_prefix: 'NODEF/', invoice_sequence_next_number: 1,
+  });
+  db = write(noDefaultJournal.db, 'account.journal', noDefaultJournal.id, { type: 'purchase' });
+  const untouched = lineField.onchange(
+    { ...baseLine(emptyProduct.id), account_id: datedExpense.id },
+    'product_id', db, { move_type: 'in_invoice', company_id: 1, journal_id: noDefaultJournal.id },
+  );
+  assert.equal(untouched.account_id, datedExpense.id, 'Unresolved product leaves the manually chosen account untouched');
+
+  // Posting keeps the exact journal-default message.
+  const noDefaultMove = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 1, invoice_date: '2026-05-02', journal_id: noDefaultJournal.id,
+    invoice_line_ids: [{ product_id: emptyProduct.id, qty: 1, price_unit: 50, tax_id: null, tax: 0 }],
+  });
+  assert.throws(
+    () => postMove(noDefaultMove.db, noDefaultMove.id),
+    /Journal "No Default Bills" has no default account configured for this company/,
+    'Posting still reports the missing journal default',
+  );
+
+  // No journal resolves at all: the preview succeeds and leaves the line account untouched.
+  const branch = createCompany(db, { name: 'No Journal Co' });
+  db = branch.db;
+  const noJournal = lineField.onchange(
+    { ...baseLine(emptyProduct.id), account_id: datedExpense.id },
+    'product_id', db, { move_type: 'in_invoice', company_id: branch.id },
+  );
+  assert.equal(noJournal.account_id, datedExpense.id, 'Missing journal leaves the manually chosen account untouched');
 });
 
 test('4b. Tax-use validation: legacy posted invoice with purchase tax can be paid and reset to draft; adding/changing wrong-use tax is rejected', () => {

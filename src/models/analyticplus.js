@@ -5,7 +5,7 @@ import { conversionRate, toCompany } from './currency.js';
 import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
-import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems, registerAnalyticPostingHooks } from './ledger.js';
+import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, invoiceLineAccountResult, journalItems, registerAnalyticPostingHooks } from './ledger.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { hasMultiCurrency } from './money.js';
 import { currentCompany } from './company.js';
@@ -38,12 +38,15 @@ export { normalizeDistribution } from '../analytic_distribution.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
-/** Resolve a fresh default using the same account that will be posted. */
+/** Resolve a fresh default using the same account that will be posted, without throwing on incomplete lines. */
 export function defaultDistributionForLine(db, line, move, fallback = {}) {
+  const accountId = move?.move_type === 'entry'
+    ? (line.account_id ?? line.account)
+    : (invoiceLineAccountResult(db, move, line).account ?? line?.account_id ?? null);
   return findAnalyticDistribution(db, {
     partner_id: line?.partner_id ?? move?.partner_id,
     product_id: line.product_id,
-    account_id: move?.move_type === 'entry' ? (line.account_id ?? line.account) : invoiceLineAccount(db, move, line),
+    account_id: accountId,
     company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : (line?.company_id ?? 1),
   }, fallback);
 }
