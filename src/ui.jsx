@@ -617,13 +617,6 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
     setPopoverStyle(anchoredMenuStyle(rect, { width: globalThis.innerWidth, height: globalThis.innerHeight }, { rtl, menuWidth: 340 }));
   };
 
-  const handleTriggerKeyDown = (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      togglePopover();
-    }
-  };
-
   const handlePopoverKeyDown = (e) => {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -749,7 +742,6 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
         aria-expanded={Boolean(popoverStyle)}
         disabled={disabled}
         onClick={togglePopover}
-        onKeyDown={handleTriggerKeyDown}
         {...props}
         // The accessible name carries the current tags, not only the field label.
         aria-label={[props['aria-label'], displayText || placeholderText].filter(Boolean).join(': ')}
