@@ -2,12 +2,12 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write } from './orm.js';
+import { create, getActiveCompany, read, search, setActiveCompany, write } from './orm.js';
 import { seed } from './seed.js';
 import { payMove, postMove } from './models/accounting.js';
 import { reversePayment } from './models/pay.js';
 import { agedBalance } from './models/finance.js';
-import { revalueForeignBalances, unrealizedExchange } from './models/closing.js';
+import { foreignBankBalances, revalueForeignBalances, unrealizedExchange } from './models/closing.js';
 import { accountId, isBalanced, journalId, postEntry } from './models/ledger.js';
 
 function fixture(type = 'out_invoice') {
@@ -127,4 +127,198 @@ test('revaluation uses the actual company two receivable account even with a dif
   const done = revalueForeignBalances(db, '2026-02-28');
   const entry = search(done, 'account.move').find((m) => m.company_id === company.id && m.revaluation_date === '2026-02-28');
   assert.equal(entry.line_ids.find((l) => l.account_id === account.id)?.debit, 100);
+});
+
+test('foreign bank account balance revalued', () => {
+  const currency = create(seed(), 'res.currency', {
+    name: 'BNKFX2',
+    rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }],
+  });
+  const bank = accountId(currency.db, '101401');
+  let db = postEntry(currency.db, {
+    journal: 'MISC', date: '2026-01-10', company: 1,
+    lines: [
+      { account_id: bank, debit: 100, credit: 0, currency_id: currency.id, amount_currency: 200 },
+      { account_id: accountId(currency.db, '301000'), debit: 0, credit: 100 },
+    ],
+  }).db;
+  db = postEntry(db, {
+    journal: 'MISC', date: '2026-01-15', company: 1,
+    lines: [
+      { account_id: accountId(db, '600000'), debit: 25, credit: 0 },
+      { account_id: bank, debit: 0, credit: 25, currency_id: currency.id, amount_currency: -50 },
+    ],
+  }).db;
+  const done = revalueForeignBalances(db, '2026-02-28', { companyId: 1 });
+  const entry = search(done, 'account.move').find((m) => m.company_id === 1 && m.revaluation_date === '2026-02-28');
+  assert.ok(entry);
+  assert.equal(entry.line_ids.find((l) => l.account_id === bank)?.debit, 75);
+  assert.equal(entry.line_ids.find((l) => l.account_id === accountId(done, '450100'))?.credit, 75);
+  assert.ok(isBalanced(entry.line_ids));
+});
+
+test('customer refund revalued with the right sign', () => {
+  const currency = create(seed(), 'res.currency', {
+    name: 'REFFX',
+    rate_ids: [
+      { date: '2026-01-01', rate: 2 },
+      { date: '2026-02-01', rate: 1 },
+      { date: '2026-03-01', rate: 4 },
+    ],
+  });
+  const refund = create(currency.db, 'account.move', {
+    move_type: 'out_refund',
+    partner_id: 1,
+    currency_id: currency.id,
+    invoice_date: '2026-01-10',
+    invoice_line_ids: [{ name: 'Refund', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  const posted = postMove(refund.db, refund.id);
+  const receivable = accountId(posted, '121000');
+  const loss = accountId(posted, '690100');
+  const gain = accountId(posted, '450100');
+
+  const doneLoss = revalueForeignBalances(posted, '2026-02-28', { companyId: 1 });
+  const entryLoss = search(doneLoss, 'account.move').find((m) => m.company_id === 1 && m.revaluation_date === '2026-02-28');
+  assert.ok(entryLoss);
+  assert.equal(entryLoss.line_ids.find((l) => l.account_id === receivable)?.credit, 50);
+  assert.equal(entryLoss.line_ids.find((l) => l.account_id === loss)?.debit, 50);
+  assert.ok(isBalanced(entryLoss.line_ids));
+
+  const doneGain = revalueForeignBalances(posted, '2026-03-15', { companyId: 1 });
+  const entryGain = search(doneGain, 'account.move').find((m) => m.company_id === 1 && m.revaluation_date === '2026-03-15');
+  assert.ok(entryGain);
+  assert.equal(entryGain.line_ids.find((l) => l.account_id === receivable)?.debit, 25);
+  assert.equal(entryGain.line_ids.find((l) => l.account_id === gain)?.credit, 25);
+  assert.ok(isBalanced(entryGain.line_ids));
+});
+
+test('a payment dated after the revaluation date is ignored', () => {
+  const currency = create(seed(), 'res.currency', {
+    name: 'CUTOFF_PAY_FX',
+    rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }],
+  });
+  const invoice = create(currency.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    currency_id: currency.id,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  let db = postMove(invoice.db, invoice.id);
+  db = payMove(db, invoice.id, 100, '2026-03-10');
+  const paidInvoice = read(db, 'account.move', invoice.id);
+  assert.equal(paidInvoice.amount_residual, 0);
+
+  const done = revalueForeignBalances(db, '2026-02-28', { companyId: 1 });
+  const entry = search(done, 'account.move').find((m) => m.company_id === 1 && m.revaluation_date === '2026-02-28');
+  assert.ok(entry);
+  const receivable = accountId(done, '121000');
+  assert.equal(entry.line_ids.find((l) => l.account_id === receivable)?.debit, 50);
+  assert.equal(entry.line_ids.find((l) => l.account_id === accountId(done, '450100'))?.credit, 50);
+
+  const bank = accountId(done, '101401');
+  assert.equal(entry.line_ids.some((l) => l.account_id === bank), false);
+});
+
+test('the next-day reversal exists', () => {
+  const { db } = fixture();
+  const done = revalueForeignBalances(db, '2026-02-28', { companyId: 1 });
+  const entry = search(done, 'account.move').find((m) => m.company_id === 1 && m.revaluation_date === '2026-02-28');
+  assert.ok(entry);
+  assert.equal(entry.state, 'posted');
+  assert.equal(entry.date, '2026-02-28');
+
+  assert.ok(entry.reversal_move_id);
+  const reversal = read(done, 'account.move', entry.reversal_move_id);
+  assert.ok(reversal);
+  assert.equal(reversal.state, 'posted');
+  assert.equal(reversal.move_type, 'entry');
+  assert.equal(reversal.date, '2026-03-01');
+  assert.equal(reversal.invoice_date, '2026-03-01');
+  assert.equal(reversal.reversed_entry_id, entry.id);
+  assert.equal(reversal.company_id, 1);
+  assert.ok(isBalanced(entry.line_ids));
+  assert.ok(isBalanced(reversal.line_ids));
+  assert.deepEqual(
+    reversal.line_ids.map((l) => [l.account_id, l.debit, l.credit]),
+    entry.line_ids.map((l) => [l.account_id, l.credit, l.debit]),
+  );
+});
+
+test('company 2 items untouched when revaluing company 1', () => {
+  const first = fixture();
+  const secondCompany = createCompanyWithDefaultInvoiceJournals(first.db, {
+    name: 'Second company isolation',
+    currency_id: first.db.settings.base_currency_id,
+  });
+  let db = secondCompany.db;
+  const accounts = {};
+  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) {
+    const existing = search(db, 'account.account').find((account) => account.company_id === secondCompany.id && account.code === code);
+    const created = existing ? { db, id: existing.id } : create(db, 'account.account', { code, name: code, account_type: type, company_id: secondCompany.id });
+    db = created.db;
+    accounts[code] = created.id;
+  }
+  const journal = create(db, 'account.journal', { code: 'MISC', name: 'Second misc', type: 'general', company_id: secondCompany.id });
+  db = write(journal.db, 'res.company', secondCompany.id, {
+    account_default_receivable_id: accounts['121000'],
+    income_currency_exchange_account_id: accounts['450100'],
+    expense_currency_exchange_account_id: accounts['650100'],
+    default_general_journal_id: journal.id,
+  });
+
+  const invoice2 = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    company_id: secondCompany.id,
+    currency_id: read(db, 'account.move', first.id).currency_id,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ name: 'C2 service', qty: 1, price_unit: 300, tax: 0 }],
+  });
+  db = postMove(invoice2.db, invoice2.id);
+
+  const c2MovesBefore = search(db, 'account.move').filter((m) => m.company_id === secondCompany.id);
+
+  const done = revalueForeignBalances(db, '2026-02-28', { companyId: 1 });
+
+  const c1Reval = search(done, 'account.move').filter((m) => (m.company_id ?? 1) === 1 && m.revaluation_date === '2026-02-28');
+  assert.equal(c1Reval.length, 1);
+
+  const c2Reval = search(done, 'account.move').filter((m) => m.company_id === secondCompany.id && m.revaluation_date === '2026-02-28');
+  assert.equal(c2Reval.length, 0);
+
+  const c2MovesAfter = search(done, 'account.move').filter((m) => m.company_id === secondCompany.id);
+  assert.deepEqual(c2MovesAfter, c2MovesBefore);
+});
+
+test('a foreign line without a recorded foreign amount is not revalued', () => {
+  const currency = create(seed(), 'res.currency', { name: 'NOAMTFX', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }] });
+  const bank = accountId(currency.db, '101401');
+  // A stored item (e.g. imported) that names a currency but never recorded the foreign amount.
+  const move = { id: 9401, company_id: 1, state: 'posted', move_type: 'entry', date: '2026-01-10',
+    line_ids: [{ account_id: bank, debit: 100, credit: 0, currency_id: currency.id }, { account_id: accountId(currency.db, '301000'), debit: 0, credit: 100 }] };
+  const db = { ...currency.db, records: { ...currency.db.records, 'account.move': [...currency.db.records['account.move'], move] } };
+  assert.deepEqual(foreignBankBalances(db, '2026-02-28', { companyId: 1 }).filter((r) => r.currency_id === currency.id), []);
+});
+
+test('company-scoped foreign bank balances ignore which company is active', () => {
+  const currency = create(seed(), 'res.currency', { name: 'ACTFX', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }] });
+  const bank = accountId(currency.db, '101401');
+  let db = postEntry(currency.db, {
+    journal: 'MISC', date: '2026-01-10', company: 1,
+    lines: [
+      { account_id: bank, debit: 100, credit: 0, currency_id: currency.id, amount_currency: 200 },
+      { account_id: accountId(currency.db, '301000'), debit: 0, credit: 100 },
+    ],
+  }).db;
+  const second = createCompanyWithDefaultInvoiceJournals(db, { name: 'Active elsewhere', currency_id: db.settings.base_currency_id });
+  db = second.db;
+  const previous = getActiveCompany();
+  setActiveCompany(second.id);
+  try {
+    assert.equal(foreignBankBalances(db, '2026-02-28', { companyId: 1 }).filter((r) => r.currency_id === currency.id).length, 1);
+  } finally {
+    setActiveCompany(previous);
+  }
 });
