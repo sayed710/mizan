@@ -17,7 +17,7 @@ import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLed
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
-import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
+import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowColumns, periodsFor } from './reportCompare.js';
@@ -159,25 +159,92 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
   );
 }
 
+/** The posted journal items behind one tax return box, shown under its row. */
+function TaxBoxDetailRow({ db, returnOrPeriod, code, colSpan }) {
+  const { items, tax, base } = taxBoxItems(db, returnOrPeriod, code);
+  const accountDisplay = (accId) => {
+    const acc = read(db, 'account.account', accId);
+    return acc ? `${acc.code} ${acc.name}` : '—';
+  };
+  return (
+    <tr className="tax-drill">
+      <td colSpan={colSpan}>
+        <table className="list report">
+          <thead>
+            <tr>
+              <th>{t('Date')}</th>
+              <th>{t('Journal Entry')}</th>
+              <th>{t('Account')}</th>
+              <th>{t('Partner')}</th>
+              <th>{t('Label')}</th>
+              <th className="num">{t('Tax')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.length === 0
+              ? <tr><td colSpan={6}>{t('No records found.')}</td></tr>
+              : items.map((it, idx) => (
+                <tr key={`${it.move_id}-${it.account_id}-${idx}`}>
+                  <td>{it.date}</td>
+                  <td><a href={`#/open/account.move/${it.move_id}`}>{it.move_name}</a></td>
+                  <td>{accountDisplay(it.account_id)}</td>
+                  <td>{partnerName(db, it.partner_id)}</td>
+                  <td>{it.name || '—'}</td>
+                  <td className="num">{money(it.tax)}</td>
+                </tr>
+              ))}
+          </tbody>
+          <tfoot>
+            <tr className="rep-total"><td colSpan={5}>{t('Total')}</td><td className="num">{money(tax)}</td></tr>
+            <tr><td colSpan={5}>{t('Base')}</td><td className="num">{money(base)}</td></tr>
+          </tfoot>
+        </table>
+      </td>
+    </tr>
+  );
+}
+
+/** A box amount that toggles its drill-down row. */
+function TaxAmountToggle({ value, open, onToggle }) {
+  return <button type="button" className="tax-drill-toggle" aria-expanded={open} onClick={onToggle}>{money(value)}</button>;
+}
+
 export function Tax({ db, period, companyId = 'all', variant = null }) {
   const effectiveCompanyId = companyId && companyId !== 'all' ? Number(companyId) : (period?.company_id ?? null);
   const effectivePeriod = effectiveCompanyId ? { ...period, company_id: effectiveCompanyId } : period;
   const countryTemplateKey = resolveTaxReportTemplate(db, companyId);
   const activeVariant = variant ?? (countryTemplateKey ?? 'generic');
+  const [openBoxes, setOpenBoxes] = useState(() => new Set());
+  const toggleBox = (code) => setOpenBoxes((prev) => {
+    const next = new Set(prev);
+    if (next.has(code)) next.delete(code);
+    else next.add(code);
+    return next;
+  });
 
   if (activeVariant !== 'generic') {
-    const { boxes } = taxReturnBoxes(db, { ...effectivePeriod, tax_return_template: activeVariant });
+    const returnSpec = { ...effectivePeriod, tax_return_template: activeVariant };
+    const { boxes } = taxReturnBoxes(db, returnSpec);
     const templateSpec = TAX_RETURN_TEMPLATES[activeVariant];
     const payableCode = templateSpec?.boxes?.find((b) => b.kind === 'net_payable')?.code;
     return (
       <tbody>
         {boxes.map((b) => (
-          <tr key={b.code} className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}>
-            <td>{b.code}</td>
-            <td>{t(b.label)}</td>
-            <td className="num">{money(b.base)}</td>
-            <td className="num">{money(b.tax)}</td>
-          </tr>
+          <Fragment key={b.code}>
+            <tr className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}>
+              <td>{b.code}</td>
+              <td>{t(b.label)}</td>
+              <td className="num">
+                <TaxAmountToggle value={b.base} open={openBoxes.has(b.code)} onToggle={() => toggleBox(b.code)} />
+              </td>
+              <td className="num">
+                <TaxAmountToggle value={b.tax} open={openBoxes.has(b.code)} onToggle={() => toggleBox(b.code)} />
+              </td>
+            </tr>
+            {openBoxes.has(b.code) && (
+              <TaxBoxDetailRow db={db} returnOrPeriod={returnSpec} code={b.code} colSpan={4} />
+            )}
+          </Fragment>
         ))}
       </tbody>
     );
@@ -186,24 +253,56 @@ export function Tax({ db, period, companyId = 'all', variant = null }) {
   const r = taxReport(db, effectivePeriod);
   const byTax = taxesByTax(db, effectivePeriod);
   const grids = taxesByGrid(db, effectivePeriod);
-  const side = (key, title) => (
+  const genericReturnSpec = { ...effectivePeriod, tax_return_template: 'generic' };
+
+  const rows = genericTaxRows(byTax);
+
+  const renderSection = (title, rows) => (
     <>
       <tr className="rep-section"><td>{t(title)}</td><td /><td /></tr>
-      {byTax.filter((x) => x.side === key).map((x) => (
-        <tr key={x.name} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>
+      {rows.map((x) => (
+        <Fragment key={x.code}>
+          <tr className="rep-detail">
+            <td>{x.name}</td>
+            <td className="num">
+              <TaxAmountToggle value={x.base} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} />
+            </td>
+            <td className="num">
+              <TaxAmountToggle value={x.tax} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} />
+            </td>
+          </tr>
+          {openBoxes.has(x.code) && (
+            <TaxBoxDetailRow db={db} returnOrPeriod={genericReturnSpec} code={x.code} colSpan={3} />
+          )}
+        </Fragment>
       ))}
     </>
   );
-  const line = (label, value, strong) => <tr className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td><td /><td className="num">{money(value)}</td></tr>;
+
+  const renderTotalLine = (label, code, value, strong) => (
+    <Fragment key={code}>
+      <tr className={`rep-total ${strong ? 'strong' : ''}`}>
+        <td>{t(label)}</td>
+        <td />
+        <td className="num">
+          <TaxAmountToggle value={value} open={openBoxes.has(code)} onToggle={() => toggleBox(code)} />
+        </td>
+      </tr>
+      {openBoxes.has(code) && (
+        <TaxBoxDetailRow db={db} returnOrPeriod={genericReturnSpec} code={code} colSpan={3} />
+      )}
+    </Fragment>
+  );
+
   return (
     <tbody>
-      {side('sale', 'Sales')}
-      {side('purchase', 'Purchases')}
+      {renderSection('Sales', rows.filter((x) => x.side === 'sale'))}
+      {renderSection('Purchases', rows.filter((x) => x.side === 'purchase'))}
       {grids.length > 0 && <tr className="rep-section"><td>{t('Tax Grids')}</td><td /><td /></tr>}
       {grids.map((x) => <tr key={x.id} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>)}
-      {line('Output Tax', r.output)}
-      {line('Input Tax', r.input)}
-      {line('Tax Payable', r.payable, true)}
+      {renderTotalLine('Output Tax', 'TOTAL-OUT', r.output)}
+      {renderTotalLine('Input Tax', 'TOTAL-IN', r.input)}
+      {renderTotalLine('Tax Payable', 'PAYABLE', r.payable, true)}
     </tbody>
   );
 }

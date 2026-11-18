@@ -672,7 +672,7 @@ export function taxAccounts(db, companyId) {
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
-function taxItems(db, period) {
+export function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
   const companyId = period?.company_id ?? period?.company;
   const accounts = taxAccounts(db, companyId);
@@ -877,15 +877,25 @@ export function postTaxReturnClosing(db, returnId) {
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
 
+/** Per-tax report row a tax item belongs to: its side and tax, or its tax name when it has no tax. */
+export function taxItemKey(l) {
+  return JSON.stringify([l.side, l.tax_id ?? null, l.tax_id == null ? (l.tax_name || 'Untagged') : null]);
+}
+
 /**
  * Base and tax per tax from the same journal items as the totals, so the rows always add up to them:
  * invoices, POS, expenses and cash-basis releases alike, in company currency; refunds come out negative.
  */
 export function taxesByTax(db, period = {}) {
+  return taxRowsFromItems(taxItems(db, period));
+}
+
+/** Group tax items into per-tax rows (side, tax, base, tax amount), sorted by side then name. */
+export function taxRowsFromItems(items) {
   const rows = new Map();
-  for (const l of taxItems(db, period)) {
+  for (const l of items) {
     const name = l.tax_name || 'Untagged';
-    const key = JSON.stringify([l.side, l.tax_id ?? null, l.tax_id == null ? name : null]);
+    const key = taxItemKey(l);
     const row = rows.get(key) ?? { side: l.side, tax_id: l.tax_id ?? null, name, base: 0, tax: 0 };
     rows.set(key, { ...row, base: round(row.base + taxItemBase(l)), tax: round(row.tax + l.tax) });
   }
