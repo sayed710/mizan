@@ -1047,6 +1047,7 @@ const ar = {
   'Return type not found': 'نوع الإقرار غير موجود',
   'Tax return not found': 'الإقرار الضريبي غير موجود',
   'Paid returns cannot be reset to draft': 'لا يمكن إعادة الإقرارات المدفوعة إلى مسودة',
+  'Cannot reset tax return: the period is locked by a later closed return': 'لا يمكن إعادة تعيين الإقرار الضريبي: الفترة مقفلة بإقرار مقفل لاحق',
   'Enter a valid timer timestamp with a timezone': 'أدخل طابعاً زمنياً صالحاً للمؤقّت مع المنطقة الزمنية',
   'Select a timesheet entry': 'اختر سجل وقت',
   'This timer is not running': 'هذا المؤقّت لا يعمل',

@@ -669,7 +669,7 @@ export function taxAccounts(db, companyId) {
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
-function taxItems(db, period) {
+export function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
   const companyId = period?.company_id ?? period?.company;
   const accounts = taxAccounts(db, companyId);
