@@ -3,6 +3,7 @@ import { models } from './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, getActiveCompany, read, search, setActiveCompany, write } from './orm.js';
+import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 import { payMove, postMove } from './models/accounting.js';
 import { reversePayment } from './models/pay.js';
@@ -330,4 +331,23 @@ test('company-scoped foreign bank balances ignore which company is active', () =
   } finally {
     setActiveCompany(previous);
   }
+});
+
+test('an account kept in a foreign currency rejects items in another or no currency', () => {
+  let db = seed();
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const other = create(db, 'res.currency', { name: 'OTHFX', rate_ids: [{ date: '2026-01-01', rate: 3 }] });
+  db = other.db;
+  const own = create(db, 'account.account', { code: 'EURCASH', name: 'EUR cash', account_type: 'asset_current', currency_id: eur.id, company_id: 1 });
+  db = own.db;
+  const entry = (line) => ({ journal: 'MISC', date: '2026-01-10', company: 1, lines: [{ account_id: own.id, debit: 100, credit: 0, ...line }, { account_id: accountId(db, '301000'), debit: 0, credit: 100 }] });
+  assert.throws(() => postEntry(db, entry({})), /only accepts journal items in EUR/);
+  assert.throws(() => postEntry(db, entry({ currency_id: other.id, amount_currency: 300 })), /only accepts journal items in EUR/);
+  const ok = postEntry(db, entry({ currency_id: eur.id, amount_currency: 92 }));
+  assert.equal(read(ok.db, 'account.move', ok.id).state, 'posted');
+  // The same rule holds when a posted entry arrives through sync.
+  const raw = { id: 9501, company_id: 1, state: 'posted', move_type: 'entry', date: '2026-01-10',
+    line_ids: [{ account_id: own.id, debit: 100, credit: 0 }, { account_id: accountId(db, '301000'), debit: 0, credit: 100 }] };
+  const after = { ...db, records: { ...db.records, 'account.move': [...db.records['account.move'], raw] } };
+  assert.throws(() => applyDiff(db, diffDb(db, after), { isAdmin: true }), /only accepts journal items in EUR/);
 });
