@@ -1177,3 +1177,48 @@ test('Invoice + credit note and invoice + payment flows keep exactly the same co
   // Source is out_refund with invoice_date 2026-02-15 => appliedValue uses note's date (2026-02-15) => 200
   assert.equal(appliedValue(afterCn, inv2Settled, cnRow), 200);
 });
+
+test('an account forcing the foreign currency still reconciles with an exchange entry that keeps its foreign balance', () => {
+  const setup = setupCurrencies(seed());
+  let db = setup.db;
+  const eur = setup.eur;
+  const partner = create(db, 'res.partner', { name: 'Forced EUR Partner' });
+  db = partner.db;
+  const misc = miscJournal(db, 1);
+  const forced = create(db, 'account.account', { code: '121900', name: 'EUR Receivable', account_type: 'asset_receivable', reconcile: true, currency_id: eur.id, company_id: 1 });
+  db = forced.db;
+  const rev = revAccount(db, 1);
+  const debitEntry = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-01-15', ref: 'EUR debit',
+    lines: [
+      { account_id: forced.id, partner_id: partner.id, debit: 125, currency_id: eur.id, amount_currency: 100 },
+      { account_id: rev, credit: 125 },
+    ],
+  });
+  db = debitEntry.db;
+  const creditEntry = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-02-15', ref: 'EUR credit',
+    lines: [
+      { account_id: forced.id, partner_id: partner.id, credit: 200, currency_id: eur.id, amount_currency: -100 },
+      { account_id: rev, debit: 200 },
+    ],
+  });
+  db = creditEntry.db;
+
+  const settled = reconcileLedgerItems(db, [
+    itemSelection(db, debitEntry.id, forced.id),
+    itemSelection(db, creditEntry.id, forced.id),
+  ], { date: '2026-02-20' });
+
+  const fxId = settled.records['account.partial.reconcile'].find((p) => p.exchange_move_id).exchange_move_id;
+  const fxLine = read(settled, 'account.move', fxId).line_ids.find((l) => l.account_id === forced.id);
+  assert.equal(fxLine.currency_id, eur.id);
+  assert.equal(fxLine.amount_currency, 0);
+  const eurBalance = journalItems(settled).filter((l) => l.account_id === forced.id).reduce((s, l) => s + (Number(l.amount_currency) || 0), 0);
+  assert.equal(eurBalance, 0);
+  for (const id of [debitEntry.id, creditEntry.id]) {
+    const item = reconciledJournalItems(settled, read(settled, 'account.move', id)).find((l) => l.account_id === forced.id);
+    assert.equal(item.amount_residual, 0);
+    assert.equal(item.amount_residual_currency, 0);
+  }
+});

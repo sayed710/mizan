@@ -8,6 +8,7 @@ import {
   isReconcilableAccount,
   journalItemIdentity,
   postEntry,
+  valueOnlyCurrencyFields,
   reconciledJournalItems,
   statementPaymentIds,
 } from './ledger.js';
@@ -694,6 +695,7 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
           const isGain = difference > 0;
           const gainLossAccount = exchangeAccount(next, companyId, difference);
           const partnerId = isGain ? c.line.partner_id : d.line.partner_id;
+          const valueOnly = valueOnlyCurrencyFields(next, account.id, companyId ?? 1);
           const fx = postEntry(next, {
             journal: 'MISC',
             company: companyId ?? 1,
@@ -702,11 +704,11 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
             archivedOriginIds: [d.move.id, c.move.id],
             lines: isGain
               ? [
-                  { account: account.id, debit: gap, credit: 0, partner_id: partnerId },
+                  { account: account.id, debit: gap, credit: 0, partner_id: partnerId, ...valueOnly },
                   { account: gainLossAccount, debit: 0, credit: gap },
                 ]
               : [
-                  { account: account.id, debit: 0, credit: gap, partner_id: partnerId },
+                  { account: account.id, debit: 0, credit: gap, partner_id: partnerId, ...valueOnly },
                   { account: gainLossAccount, debit: gap, credit: 0 },
                 ],
           });
