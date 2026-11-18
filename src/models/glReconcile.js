@@ -1,5 +1,5 @@
 // General-ledger reconciliation: account.partial.reconcile model, FIFO matching, write-off, and non-reversing unreconcile.
-import { create, read, write } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { companyCurrencyRecord, documentCurrency, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { sameCommercialPartner, today, validDate } from './common.js';
 import {
@@ -15,10 +15,12 @@ import { recordLockDate } from './finance.js';
 import {
   paymentUnapplication,
   reconcileJournalItems,
+  reverseEntry,
   selectedItems,
   unapplyPaymentCredit,
   unreconcileJournalItems,
 } from './pay.js';
+import { exchangeAccount } from './exchange-account.js';
 
 const DOCUMENT_TYPES = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'];
 const RECEIVABLE_PAYABLE = ['asset_receivable', 'liability_payable'];
@@ -31,18 +33,23 @@ const IMMUTABLE_LINK_FIELDS = [
   'account_id',
   'company_id',
   'amount',
+  'amount_currency',
+  'currency_id',
+  'exchange_move_id',
   'date',
 ];
 
+/** Resolve the effective currency of a journal item, defaulting to company currency. */
+function resolveItemCurrency(db, it, ownCurrency) {
+  if (it.line?.currency_id) return it.line.currency_id;
+  if (DOCUMENT_TYPES.includes(it.move?.move_type) && it.move?.currency_id) return it.move.currency_id;
+  return ownCurrency?.id ?? null;
+}
+
 /** Return the error message when reconciled items violate currency or receivable/payable partner rules. */
 function reconcileItemsCompatibilityError(db, items, account, ownCurrency) {
-  const isForeignItem = (it) => Boolean(
-    ownCurrency && (
-      (it.line.currency_id && it.line.currency_id !== ownCurrency.id)
-      || (DOCUMENT_TYPES.includes(it.move.move_type) && it.move.currency_id && it.move.currency_id !== ownCurrency.id)
-    ),
-  );
-  if (items.some(isForeignItem)) {
+  const itemCurrencies = new Set(items.map((it) => resolveItemCurrency(db, it, ownCurrency)).filter(Boolean));
+  if (itemCurrencies.size > 1) {
     return 'General-ledger reconciliation requires items in the company currency; reconcile foreign-currency documents from their payment or credit-note workflow';
   }
   const isArAp = RECEIVABLE_PAYABLE.includes(account?.account_type);
@@ -92,6 +99,20 @@ function partialReconcileStructureError(db, rec) {
     return 'Partial reconciliation amount must be greater than zero';
   }
   if (!validDate(rec.date)) return 'Partial reconciliation requires a valid date';
+  if (rec.currency_id != null) {
+    const curr = read(db, 'res.currency', rec.currency_id);
+    if (!curr || curr.active === false) return 'Partial reconciliation requires an active currency';
+  }
+  if (rec.amount_currency != null) {
+    const amtCurr = Number(rec.amount_currency);
+    if (!Number.isFinite(amtCurr) || amtCurr < 0) return 'Partial reconciliation currency amount must be non-negative';
+  }
+  if (rec.exchange_move_id != null) {
+    const fxMove = read(db, 'account.move', rec.exchange_move_id);
+    if (!fxMove || fxMove.state !== 'posted' || fxMove.move_type !== 'entry' || (fxMove.company_id ?? 1) !== companyId) {
+      return 'Partial reconciliation exchange entry must be a posted general entry belonging to this company';
+    }
+  }
   return null;
 }
 
@@ -235,6 +256,9 @@ export const glReconcileModels = {
       credit_line_index: { type: 'integer', label: 'Credit Line Index', required: true },
       account_id: { type: 'many2one', relation: 'account.account', label: 'Account', required: true },
       amount: { type: 'monetary', label: 'Amount', currency: 'company', required: true },
+      amount_currency: { type: 'monetary', label: 'Amount in Currency' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      exchange_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' },
       date: { type: 'date', label: 'Date', required: true },
       active: { type: 'boolean', label: 'Active', default: true },
       reversed: { type: 'boolean', label: 'Unreconciled', default: false },
@@ -248,10 +272,11 @@ export const glReconcileModels = {
 
 /** Compare two resolved journal items oldest first for FIFO debit/credit matching. */
 function compareOldestFirst(a, b) {
-  return (a.moveDate || '').localeCompare(b.moveDate || '')
-    || (a.dueDate || '').localeCompare(b.dueDate || '')
-    || a.move.id - b.move.id
-    || a.lineIndex - b.lineIndex;
+  const dateA = a.line?.date || a.moveDate || '';
+  const dateB = b.line?.date || b.moveDate || '';
+  return dateA.localeCompare(dateB)
+    || ((a.move?.id ?? 0) - (b.move?.id ?? 0))
+    || ((a.lineIndex ?? 0) - (b.lineIndex ?? 0));
 }
 
 /** Check whether two partner references belong to the same commercial entity (or are both unset). */
@@ -310,14 +335,27 @@ function documentSettledByCounterSide(move, line) {
 }
 
 /** Partition open items into debit and credit lists with rounded positive remaining balances. */
-function splitDebitCreditItems(items, ownCurrency, roundOwn) {
+function splitDebitCreditItems(items, matchCurrency, ownCurrency, isForeignCurrency) {
+  const roundMatch = (v) => (matchCurrency ? roundCurrency(v, matchCurrency) : round(v));
+  const roundOwn = (v) => (ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   const debits = [];
   const credits = [];
   for (const it of items) {
-    const r = Number(it.reconciledLine.amount_residual) || 0;
-    if (isCurrencyZero(r, ownCurrency)) continue;
-    if (r > 0) debits.push({ ...it, remaining: roundOwn(r) });
-    else if (r < 0) credits.push({ ...it, remaining: roundOwn(-r) });
+    const compVal = Number(it.reconciledLine?.amount_residual) || 0;
+    const matchVal = isForeignCurrency ? (Number(it.reconciledLine?.amount_residual_currency) || 0) : compVal;
+    if (isCurrencyZero(matchVal, matchCurrency)) continue;
+    const matchRemaining = roundMatch(Math.abs(matchVal));
+    const compRemaining = roundOwn(Math.abs(compVal));
+    const entry = {
+      ...it,
+      remainingMatch: matchRemaining,
+      remainingCompany: compRemaining,
+      originalMatch: matchRemaining,
+      originalCompany: compRemaining,
+      remaining: matchRemaining,
+    };
+    if (matchVal > 0 || compVal > 0) debits.push(entry);
+    else if (matchVal < 0 || compVal < 0) credits.push(entry);
   }
   return { debits, credits };
 }
@@ -335,26 +373,36 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
   const account = items[0].account;
   if (!isReconcilableAccount(account)) throw new Error('Selected journal items must be on a reconcilable account');
 
-  if (items.some((it) => it.reconciledLine?.reconciled === true || isCurrencyZero(Number(it.reconciledLine?.amount_residual) || 0, ownCurrency))) {
-    throw new Error('Selected journal items must not already be fully reconciled');
-  }
-
   const compatError = reconcileItemsCompatibilityError(db, items, account, ownCurrency);
   if (compatError) throw new Error(compatError);
+
+  const sharedCurrencyId = resolveItemCurrency(db, items[0], ownCurrency);
+  const isForeignCurrency = Boolean(sharedCurrencyId && ownCurrency && sharedCurrencyId !== ownCurrency.id);
+  const matchCurrency = isForeignCurrency ? read(db, 'res.currency', sharedCurrencyId) : ownCurrency;
+  const roundMatch = (v) => (matchCurrency ? roundCurrency(v, matchCurrency) : round(v));
+
+  if (items.some((it) => it.reconciledLine?.reconciled === true
+    || (isForeignCurrency
+      ? isCurrencyZero(Number(it.reconciledLine?.amount_residual_currency) || 0, matchCurrency)
+      : isCurrencyZero(Number(it.reconciledLine?.amount_residual) || 0, ownCurrency)))) {
+    throw new Error('Selected journal items must not already be fully reconciled');
+  }
 
   for (const it of items) {
     const lock = recordLockDate(db, it.move);
     if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
   }
 
-  const net = roundOwn(items.reduce((s, it) => s + Number(it.reconciledLine.amount_residual), 0));
+  const net = isForeignCurrency
+    ? roundMatch(items.reduce((s, it) => s + (Number(it.reconciledLine?.amount_residual_currency) || 0), 0))
+    : roundOwn(items.reduce((s, it) => s + Number(it.reconciledLine?.amount_residual), 0));
   const distinctPartners = new Set(items.map((it) => it.line.partner_id ?? null));
   const isArAp = RECEIVABLE_PAYABLE.includes(account.account_type);
   const groupPartnerId = isArAp
     ? (items[0].line.partner_id ?? null)
     : (distinctPartners.size === 1 ? [...distinctPartners][0] : null);
 
-  const { debits, credits } = splitDebitCreditItems(items, ownCurrency, roundOwn);
+  const { debits, credits } = splitDebitCreditItems(items, matchCurrency, ownCurrency, isForeignCurrency);
 
   let validatedWriteoff = null;
   if (writeoff) {
@@ -365,7 +413,7 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
       companyId,
       accountId: account.id,
       net,
-      ownCurrency,
+      ownCurrency: matchCurrency,
       groupPartnerId,
       defaultDate: date,
     });
@@ -378,19 +426,31 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
   if (amount != null) {
     const num = Number(amount);
     if (!Number.isFinite(num) || !(num > 0)) throw new Error('The applied amount must be a positive number');
-    requestedAmount = roundOwn(num);
-    if (!(requestedAmount > 0) || isCurrencyZero(requestedAmount, ownCurrency)) throw new Error('The applied amount must be a positive number');
+    requestedAmount = roundMatch(num);
+    if (!(requestedAmount > 0) || isCurrencyZero(requestedAmount, matchCurrency)) throw new Error('The applied amount must be a positive number');
     if (debits.length !== 1 || credits.length !== 1) {
       throw new Error('An explicit reconciliation amount is only supported when reconciling one debit item with one credit item');
     }
-    const maxAbsorbable = roundOwn(Math.min(debits[0].remaining, credits[0].remaining));
-    const excess = roundOwn(requestedAmount - maxAbsorbable);
-    if (excess > 0 && !isCurrencyZero(excess, ownCurrency)) {
+    const maxAbsorbable = roundMatch(Math.min(debits[0].remainingMatch, credits[0].remainingMatch));
+    const excess = roundMatch(requestedAmount - maxAbsorbable);
+    if (excess > 0 && !isCurrencyZero(excess, matchCurrency)) {
       throw new Error(EXCEEDED_AMOUNT_ERROR);
     }
   }
 
-  return { companyId, ownCurrency, roundOwn, account, net, groupPartnerId, validatedWriteoff, requestedAmount };
+  return {
+    companyId,
+    ownCurrency,
+    roundOwn,
+    matchCurrency,
+    roundMatch,
+    isForeignCurrency,
+    account,
+    net,
+    groupPartnerId,
+    validatedWriteoff,
+    requestedAmount,
+  };
 }
 
 /** Post the balancing write-off journal entry and append its counterpart item to the working selection. */
@@ -439,7 +499,6 @@ function settleDocumentSide(db, docItem, otherItem, { matchAmt, pairDate, partia
     amount: docAmt,
     moveId: otherItem.move.id,
     date: pairDate,
-    companyAmount: docAmt,
     lineIndex: docItem.multiInstallment ? docItem.lineIndex : null,
     partialReconcileId,
     consumePayment: true,
@@ -447,8 +506,18 @@ function settleDocumentSide(db, docItem, otherItem, { matchAmt, pairDate, partia
 }
 
 /** Match debits against credits oldest first, creating `account.partial.reconcile` links and document settlements. */
-function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate, requestedAmount, ownCurrency, roundOwn }) {
-  const { debits, credits } = splitDebitCreditItems(workingItems, ownCurrency, roundOwn);
+function matchDebitCreditPairs(db, workingItems, {
+  account,
+  companyId,
+  matchDate,
+  requestedAmount,
+  ownCurrency,
+  roundOwn,
+  matchCurrency,
+  roundMatch,
+  isForeignCurrency,
+}) {
+  const { debits, credits } = splitDebitCreditItems(workingItems, matchCurrency, ownCurrency, isForeignCurrency);
   debits.sort(compareOldestFirst);
   credits.sort(compareOldestFirst);
 
@@ -461,34 +530,154 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
   let ci = 0;
   let budget = requestedAmount;
   while (di < debits.length && ci < credits.length) {
-    if (budget != null && (budget <= 0 || isCurrencyZero(budget, ownCurrency))) break;
+    if (budget != null && (budget <= 0 || isCurrencyZero(budget, matchCurrency))) break;
     const d = debits[di];
     const c = credits[ci];
-    const matchAmt = roundOwn(Math.min(d.remaining, c.remaining, ...(budget != null ? [budget] : [])));
-    if (matchAmt > 0 && !isCurrencyZero(matchAmt, ownCurrency)) {
+    const matchAmt = roundMatch(Math.min(d.remainingMatch, c.remainingMatch, ...(budget != null ? [budget] : [])));
+    if (matchAmt > 0 && !isCurrencyZero(matchAmt, matchCurrency)) {
       const pairDate = [matchDate, d.moveDate, c.moveDate].sort().at(-1);
-      const created = create(next, 'account.partial.reconcile', {
+
+      let dCompShare;
+      if (d.remainingMatch === matchAmt || isCurrencyZero(d.remainingMatch - matchAmt, matchCurrency)) {
+        dCompShare = d.remainingCompany;
+      } else {
+        dCompShare = Math.min(d.remainingCompany, roundOwn(d.originalCompany * (matchAmt / d.originalMatch)));
+      }
+
+      let cCompShare;
+      if (c.remainingMatch === matchAmt || isCurrencyZero(c.remainingMatch - matchAmt, matchCurrency)) {
+        cCompShare = c.remainingCompany;
+      } else {
+        cCompShare = Math.min(c.remainingCompany, roundOwn(c.originalCompany * (matchAmt / c.originalMatch)));
+      }
+
+      const fxDiff = isForeignCurrency ? roundOwn(dCompShare - cCompShare) : 0;
+      let fxMoveId = null;
+
+      if (fxDiff !== 0) {
+        const absDiff = roundOwn(Math.abs(fxDiff));
+        const counterpartPartnerId = d.line.partner_id ?? c.line.partner_id ?? null;
+        const fxAccount = exchangeAccount(next, companyId, -fxDiff);
+
+        const fxLines = fxDiff > 0
+          ? [
+              {
+                account_id: account.id,
+                credit: absDiff,
+                debit: 0,
+                partner_id: counterpartPartnerId,
+                currency_id: matchCurrency.id,
+                amount_currency: 0,
+                name: 'Exchange Difference',
+              },
+              {
+                account_id: fxAccount,
+                debit: absDiff,
+                credit: 0,
+                name: 'Exchange Difference',
+              },
+            ]
+          : [
+              {
+                account_id: account.id,
+                debit: absDiff,
+                credit: 0,
+                partner_id: counterpartPartnerId,
+                currency_id: matchCurrency.id,
+                amount_currency: 0,
+                name: 'Exchange Difference',
+              },
+              {
+                account_id: fxAccount,
+                credit: absDiff,
+                debit: 0,
+                name: 'Exchange Difference',
+              },
+            ];
+
+        const bookedFx = postEntry(next, {
+          // Same journal as the other exchange-difference entries (credit notes, payments).
+          journal: 'MISC',
+          company: companyId,
+          date: pairDate,
+          ref: 'Exchange Difference',
+          archivedOriginIds: [d.move.id, c.move.id],
+          lines: fxLines,
+        });
+        next = bookedFx.db;
+        fxMoveId = bookedFx.id;
+      }
+
+      const baseLinkAmt = roundOwn(Math.min(dCompShare, cCompShare));
+      const primaryCreated = create(next, 'account.partial.reconcile', {
         debit_move_id: d.move.id,
         debit_line_index: d.lineIndex,
         credit_move_id: c.move.id,
         credit_line_index: c.lineIndex,
         account_id: account.id,
         company_id: companyId,
-        amount: matchAmt,
+        amount: baseLinkAmt,
+        amount_currency: isForeignCurrency ? matchAmt : null,
+        currency_id: isForeignCurrency ? matchCurrency.id : null,
+        exchange_move_id: fxMoveId,
         date: pairDate,
         active: true,
         reversed: false,
       });
-      next = settleDocumentSide(created.db, d, c, { matchAmt, pairDate, partialReconcileId: created.id });
-      next = settleDocumentSide(next, c, d, { matchAmt, pairDate, partialReconcileId: created.id });
-      d.remaining = roundOwn(d.remaining - matchAmt);
-      c.remaining = roundOwn(c.remaining - matchAmt);
-      if (budget != null) budget = roundOwn(budget - matchAmt);
+      next = primaryCreated.db;
+
+      if (fxMoveId != null) {
+        const absDiff = roundOwn(Math.abs(fxDiff));
+        const secLinkVals = fxDiff > 0
+          ? {
+              debit_move_id: d.move.id,
+              debit_line_index: d.lineIndex,
+              credit_move_id: fxMoveId,
+              credit_line_index: 0,
+              account_id: account.id,
+              company_id: companyId,
+              amount: absDiff,
+              amount_currency: 0,
+              currency_id: matchCurrency.id,
+              exchange_move_id: fxMoveId,
+              date: pairDate,
+              active: true,
+              reversed: false,
+            }
+          : {
+              debit_move_id: fxMoveId,
+              debit_line_index: 0,
+              credit_move_id: c.move.id,
+              credit_line_index: c.lineIndex,
+              account_id: account.id,
+              company_id: companyId,
+              amount: absDiff,
+              amount_currency: 0,
+              currency_id: matchCurrency.id,
+              exchange_move_id: fxMoveId,
+              date: pairDate,
+              active: true,
+              reversed: false,
+            };
+        const secCreated = create(next, 'account.partial.reconcile', secLinkVals);
+        next = secCreated.db;
+      }
+
+      next = settleDocumentSide(next, d, c, { matchAmt, pairDate, partialReconcileId: primaryCreated.id });
+      next = settleDocumentSide(next, c, d, { matchAmt, pairDate, partialReconcileId: primaryCreated.id });
+
+      d.remainingMatch = roundMatch(d.remainingMatch - matchAmt);
+      c.remainingMatch = roundMatch(c.remainingMatch - matchAmt);
+      d.remainingCompany = roundOwn(Math.max(0, d.remainingCompany - dCompShare));
+      c.remainingCompany = roundOwn(Math.max(0, c.remainingCompany - cCompShare));
+      d.remaining = d.remainingMatch;
+      c.remaining = c.remainingMatch;
+      if (budget != null) budget = roundMatch(budget - matchAmt);
     }
-    if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency)) di += 1;
-    if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency)) ci += 1;
+    if (d.remainingMatch <= 0 || isCurrencyZero(d.remainingMatch, matchCurrency)) di += 1;
+    if (c.remainingMatch <= 0 || isCurrencyZero(c.remainingMatch, matchCurrency)) ci += 1;
   }
-  if (budget != null && budget > 0 && !isCurrencyZero(budget, ownCurrency)) {
+  if (budget != null && budget > 0 && !isCurrencyZero(budget, matchCurrency)) {
     throw new Error(EXCEEDED_AMOUNT_ERROR);
   }
   return next;
@@ -571,6 +760,20 @@ function collectAndValidateUnreconcile(db, items, date) {
     }
   }
 
+  const fxMoveIds = new Set();
+  for (const g of activePartials) {
+    if (partialIds.has(g.id) && g.exchange_move_id) {
+      fxMoveIds.add(g.exchange_move_id);
+    }
+  }
+  if (fxMoveIds.size) {
+    for (const g of activePartials) {
+      if (g.exchange_move_id && fxMoveIds.has(g.exchange_move_id)) {
+        partialIds.add(g.id);
+      }
+    }
+  }
+
   const touchedLinks = activePartials.filter((g) => partialIds.has(g.id));
   for (const g of touchedLinks) {
     if (g.date && date < g.date) throw new Error('Enter an unreconciliation date on or after the matching date');
@@ -578,6 +781,18 @@ function collectAndValidateUnreconcile(db, items, date) {
       const move = read(db, 'account.move', mId);
       const lock = move && recordLockDate(db, move);
       if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
+    }
+  }
+
+  for (const fxId of fxMoveIds) {
+    const fxMove = read(db, 'account.move', fxId);
+    if (fxMove) {
+      const lock = recordLockDate(db, fxMove);
+      if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
+      const sourceDate = fxMove.invoice_date ?? fxMove.date ?? '';
+      if (sourceDate && date < sourceDate) {
+        throw new Error('Enter an unreconciliation date on or after the matching date');
+      }
     }
   }
 
@@ -596,7 +811,7 @@ function collectAndValidateUnreconcile(db, items, date) {
     }
   }
 
-  return { touchedLinks, docRows, legacySelections };
+  return { touchedLinks, docRows, legacySelections, fxMoveIds };
 }
 
 /**
@@ -608,7 +823,7 @@ export function unreconcileLedgerItems(db, selections, { date = today() } = {}) 
   const items = selectedItems(db, selections, { allowMultipleEntryLines: true });
   if (!validDate(date)) throw new Error('Enter a valid reversal date');
 
-  const { touchedLinks, docRows, legacySelections } = collectAndValidateUnreconcile(db, items, date);
+  const { touchedLinks, docRows, legacySelections, fxMoveIds } = collectAndValidateUnreconcile(db, items, date);
 
   let next = db;
   for (const g of touchedLinks) {
@@ -623,6 +838,14 @@ export function unreconcileLedgerItems(db, selections, { date = today() } = {}) 
       lineIndex,
       partialReconcileId: row.partial_reconcile_id,
     });
+  }
+  for (const fxId of fxMoveIds) {
+    const fxMove = read(next, 'account.move', fxId);
+    const alreadyReversed = search(next, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === fxId);
+    if (fxMove && fxMove.state === 'posted' && !alreadyReversed) {
+      const reversed = reverseEntry(next, fxMove, date, { reconciliation_reversal: true });
+      next = reversed.db;
+    }
   }
   if (legacySelections.length) {
     next = unreconcileJournalItems(next, legacySelections, { date });
