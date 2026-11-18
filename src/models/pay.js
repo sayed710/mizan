@@ -556,7 +556,9 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   if (!source || source.state !== 'posted' || source.move_type !== 'entry' || !validDate(date) || date < sourceDate) {
     throw new Error('A posted entry and valid reversal date are required');
   }
-  if (source.fx_payment_move_id && source.fx_invoice_id && !opts.reconciliation_reversal) {
+  const isSettlementFx = (source.fx_payment_move_id && source.fx_invoice_id)
+    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && g.exchange_move_id === source.id);
+  if (isSettlementFx && !opts.reconciliation_reversal) {
     throw new Error('An exchange difference entry linked to a settlement cannot be reversed independently');
   }
   if (search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === source.id)) {

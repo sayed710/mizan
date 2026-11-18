@@ -2,6 +2,7 @@
 import { create, read, write } from '../orm.js';
 import { companyCurrencyRecord, documentCurrency, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { sameCommercialPartner, today, validDate } from './common.js';
+import { exchangeAccount } from './exchange-account.js';
 import {
   installmentSettlementState,
   isReconcilableAccount,
@@ -15,6 +16,7 @@ import { recordLockDate } from './finance.js';
 import {
   paymentUnapplication,
   reconcileJournalItems,
+  reverseEntry,
   selectedItems,
   unapplyPaymentCredit,
   unreconcileJournalItems,
@@ -32,23 +34,80 @@ const IMMUTABLE_LINK_FIELDS = [
   'company_id',
   'amount',
   'date',
+  'debit_amount_currency',
+  'credit_amount_currency',
+  'exchange_move_id',
 ];
+
+/** Check whether a move is a generated currency exchange entry (or a reversal of one). */
+export function isExchangeEntry(db, moveOrId) {
+  const move = typeof moveOrId === 'object' && moveOrId !== null ? moveOrId : read(db, 'account.move', moveOrId);
+  if (!move || move.move_type !== 'entry') return false;
+  if (move.fx_payment_move_id && move.fx_invoice_id) return true;
+  return (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.exchange_move_id === move.id)
+    || (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => p.payment_fx_move_id === move.id))
+    || (move.reversed_entry_id ? isExchangeEntry(db, move.reversed_entry_id) : false);
+}
+
+/** Resolve the effective currency id for a journal item or document line. */
+export function itemCurrencyId(db, it, ownCurrency) {
+  if (it.line?.currency_id) return it.line.currency_id;
+  if (DOCUMENT_TYPES.includes(it.move?.move_type) && it.move?.currency_id) return it.move.currency_id;
+  return ownCurrency?.id ?? null;
+}
 
 /** Return the error message when reconciled items violate currency or receivable/payable partner rules. */
 function reconcileItemsCompatibilityError(db, items, account, ownCurrency) {
-  const isForeignItem = (it) => Boolean(
-    ownCurrency && (
-      (it.line.currency_id && it.line.currency_id !== ownCurrency.id)
-      || (DOCUMENT_TYPES.includes(it.move.move_type) && it.move.currency_id && it.move.currency_id !== ownCurrency.id)
-    ),
-  );
-  if (items.some(isForeignItem)) {
+  const ownId = ownCurrency?.id ?? null;
+  const currencies = items.map((it) => itemCurrencyId(db, it, ownCurrency));
+  const hasCompany = currencies.some((c) => c === ownId);
+  const hasForeign = currencies.some((c) => c !== ownId);
+  if (hasCompany && hasForeign) {
     return 'General-ledger reconciliation requires items in the company currency; reconcile foreign-currency documents from their payment or credit-note workflow';
+  }
+  const foreignCurrencies = new Set(currencies.filter((c) => c !== ownId));
+  if (foreignCurrencies.size > 1) {
+    return 'Selected items must be in the same currency';
   }
   const isArAp = RECEIVABLE_PAYABLE.includes(account?.account_type);
   if (isArAp && items.some((it) => !partnersCompatible(db, items[0].line.partner_id, it.line.partner_id))) {
     return 'Selected receivable or payable items must have the same partner';
   }
+  return null;
+}
+
+/**
+ * Validate that an exchange difference move is posted, 2-line, balanced, with counterpart on the reconciled
+ * account and the offset on the company-configured gain/loss exchange account.
+ */
+function postedExchangeEntryError(db, fxMoveId, accountId, companyId, { expectedNet = null, expectedPartnerId = undefined } = {}) {
+  const fx = read(db, 'account.move', fxMoveId);
+  if (!fx || fx.state !== 'posted' || fx.move_type !== 'entry' || (fx.company_id ?? 1) !== (companyId ?? 1)) {
+    return 'A dedicated posted exchange entry must match the settlement';
+  }
+  const fxLines = fx.line_ids ?? [];
+  if (fxLines.length !== 2) return 'A dedicated posted exchange entry must match the settlement';
+  const counterpartLine = fxLines.find((l) => l.account_id === accountId);
+  if (!counterpartLine) return 'A dedicated posted exchange entry must match the settlement';
+  if (expectedPartnerId !== undefined && counterpartLine.partner_id !== (expectedPartnerId ?? null)) {
+    return 'Exchange entry lines do not match the reconciliation difference';
+  }
+  const ownCurrency = companyCurrencyRecord(db, companyId ?? 1);
+  const roundOwn = (v) => (ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
+  const fxDiff = roundOwn((Number(counterpartLine.debit) || 0) - (Number(counterpartLine.credit) || 0));
+  if (isCurrencyZero(fxDiff, ownCurrency)) return 'An exchange entry is not required for this settlement';
+  if (expectedNet != null && fxDiff !== expectedNet) {
+    return 'Exchange entry lines do not match the reconciliation difference';
+  }
+  const expectedOffset = exchangeAccount(db, companyId, fxDiff);
+  const exchangeLine = fxLines.find((l) => l !== counterpartLine && l.account_id === expectedOffset && !l.partner_id);
+  if (!exchangeLine) {
+    return expectedNet != null
+      ? 'Exchange entry account does not match the company exchange account'
+      : 'A dedicated posted exchange entry must match the settlement';
+  }
+  const exDiff = roundOwn((Number(exchangeLine.debit) || 0) - (Number(exchangeLine.credit) || 0));
+  if (roundOwn(fxDiff + exDiff) !== 0) return 'A dedicated posted exchange entry must match the settlement';
   return null;
 }
 
@@ -75,12 +134,18 @@ function partialReconcileStructureError(db, rec) {
   }
   const account = read(db, 'account.account', rec.account_id);
   if (!isReconcilableAccount(account)) return 'Partial reconciliation requires a reconcilable account';
+
+  const isGapPartial = rec.exchange_move_id != null
+    && (rec.debit_move_id === rec.exchange_move_id || rec.credit_move_id === rec.exchange_move_id);
+
   const ownCurrency = companyCurrencyRecord(db, companyId);
-  const compatError = reconcileItemsCompatibilityError(db, [
-    { move: debitMove, line: debitLine },
-    { move: creditMove, line: creditLine },
-  ], account, ownCurrency);
-  if (compatError) return compatError;
+  if (!isGapPartial) {
+    const compatError = reconcileItemsCompatibilityError(db, [
+      { move: debitMove, line: debitLine },
+      { move: creditMove, line: creditLine },
+    ], account, ownCurrency);
+    if (compatError) return compatError;
+  }
   const roundOwn = (v) => (ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   const debitBal = roundOwn((Number(debitLine.debit) || 0) - (Number(debitLine.credit) || 0));
   const creditBal = roundOwn((Number(creditLine.credit) || 0) - (Number(creditLine.debit) || 0));
@@ -92,6 +157,21 @@ function partialReconcileStructureError(db, rec) {
     return 'Partial reconciliation amount must be greater than zero';
   }
   if (!validDate(rec.date)) return 'Partial reconciliation requires a valid date';
+
+  if (rec.debit_amount_currency != null) {
+    const dAmt = Number(rec.debit_amount_currency);
+    if (!Number.isFinite(dAmt) || dAmt < 0) return 'Debit amount in currency must be a non-negative number';
+  }
+  if (rec.credit_amount_currency != null) {
+    const cAmt = Number(rec.credit_amount_currency);
+    if (!Number.isFinite(cAmt) || cAmt < 0) return 'Credit amount in currency must be a non-negative number';
+  }
+
+  if (rec.exchange_move_id != null) {
+    const fxErr = postedExchangeEntryError(db, rec.exchange_move_id, rec.account_id, companyId);
+    if (fxErr) return fxErr;
+  }
+
   return null;
 }
 
@@ -101,9 +181,11 @@ function partialReconcileGuard(db, before, after) {
   if (err) return err;
   const debitMove = read(db, 'account.move', after.debit_move_id);
   const creditMove = read(db, 'account.move', after.credit_move_id);
+  const fxMove = after.exchange_move_id ? read(db, 'account.move', after.exchange_move_id) : null;
   const lockOn = (date) => [
     recordLockDate(db, { ...debitMove, date, invoice_date: date }),
     recordLockDate(db, { ...creditMove, date, invoice_date: date }),
+    fxMove ? recordLockDate(db, { ...fxMove, date, invoice_date: date }) : null,
   ].filter(Boolean).sort().at(-1);
 
   if (!before) {
@@ -144,8 +226,9 @@ function dbWithoutActivePartialLinks(db) {
   const activePartials = (db.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
   if (!activePartials.length) return db;
   const activeIds = new Set(activePartials.map((g) => g.id));
+  const activeFxIds = new Set(activePartials.map((g) => g.exchange_move_id).filter(Boolean));
   const payRestored = new Map();
-  const nextMoves = (db.records['account.move'] ?? []).map((move) => {
+  const nextMoves = (db.records['account.move'] ?? []).filter((m) => !activeFxIds.has(m.id)).map((move) => {
     const rows = move.payments ?? [];
     const removed = rows.filter((p) => !p.reversed && p.partial_reconcile_id != null && activeIds.has(p.partial_reconcile_id));
     if (!removed.length) return move;
@@ -191,14 +274,30 @@ function partialReconcileInvariant(db, after) {
     const baseDb = dbWithoutActivePartialLinks(db);
     const debitMove = read(baseDb, 'account.move', after.debit_move_id);
     const creditMove = read(baseDb, 'account.move', after.credit_move_id);
+    const isGapPartial = after.exchange_move_id != null
+      && (after.debit_move_id === after.exchange_move_id || after.credit_move_id === after.exchange_move_id);
+
     const debitItem = debitMove && reconciledJournalItems(baseDb, debitMove)[after.debit_line_index];
     const creditItem = creditMove && reconciledJournalItems(baseDb, creditMove)[after.credit_line_index];
-    const debitCap = debitItem && !debitItem.reconciled && Number(debitItem.amount_residual) > 0
+
+    let debitCap = debitItem && !debitItem.reconciled && Number(debitItem.amount_residual) > 0
       ? roundOwn(Number(debitItem.amount_residual))
       : 0;
-    const creditCap = creditItem && !creditItem.reconciled && Number(creditItem.amount_residual) < 0
+    let creditCap = creditItem && !creditItem.reconciled && Number(creditItem.amount_residual) < 0
       ? roundOwn(-Number(creditItem.amount_residual))
       : 0;
+
+    if (isGapPartial) {
+      if (after.debit_move_id === after.exchange_move_id) {
+        const fxLine = read(db, 'account.move', after.exchange_move_id)?.line_ids?.[after.debit_line_index];
+        debitCap = fxLine ? roundOwn(Math.abs((Number(fxLine.debit) || 0) - (Number(fxLine.credit) || 0))) : 0;
+      }
+      if (after.credit_move_id === after.exchange_move_id) {
+        const fxLine = read(db, 'account.move', after.exchange_move_id)?.line_ids?.[after.credit_line_index];
+        creditCap = fxLine ? roundOwn(Math.abs((Number(fxLine.credit) || 0) - (Number(fxLine.debit) || 0))) : 0;
+      }
+    }
+
     const debitSum = roundOwn(partials
       .filter((g) => g.debit_move_id === after.debit_move_id && g.debit_line_index === after.debit_line_index)
       .reduce((s, g) => s + (Number(g.amount) || 0), 0));
@@ -208,7 +307,85 @@ function partialReconcileInvariant(db, after) {
     if (debitSum > debitCap + 1e-9 || creditSum > creditCap + 1e-9) {
       return 'Total partial reconciliations cannot exceed the open journal line balance';
     }
+
+    if (!isGapPartial && (after.debit_amount_currency != null || after.credit_amount_currency != null || after.exchange_move_id != null)) {
+      if (!debitMove || !creditMove) return 'Partial reconciliation entries must exist in base database';
+      const dLine = reconciledJournalItems(baseDb, debitMove)[after.debit_line_index];
+      const cLine = reconciledJournalItems(baseDb, creditMove)[after.credit_line_index];
+      if (!dLine || !cLine) return 'Partial reconciliation lines must exist in base database';
+      const currD = itemCurrencyId(baseDb, { move: debitMove, line: dLine }, ownCurrency);
+      const currC = itemCurrencyId(baseDb, { move: creditMove, line: cLine }, ownCurrency);
+      if (currD !== (ownCurrency?.id ?? null) || currC !== (ownCurrency?.id ?? null)) {
+        if (currD !== currC) return 'Selected items must be in the same currency';
+        if (after.debit_amount_currency == null || after.credit_amount_currency == null || after.debit_amount_currency !== after.credit_amount_currency || !(Number(after.debit_amount_currency) > 0)) {
+          return 'Currency amounts on foreign partial reconciliation must match and be positive';
+        }
+        const commonCurr = Number(after.debit_amount_currency);
+        const dCompRes = Math.abs(Number(dLine.amount_residual) || 0);
+        const dCurrRes = Math.abs(Number(dLine.amount_residual_currency) || 0);
+        const cCompRes = Math.abs(Number(cLine.amount_residual) || 0);
+        const cCurrRes = Math.abs(Number(cLine.amount_residual_currency) || 0);
+        if (commonCurr > dCurrRes + 1e-9 || commonCurr > cCurrRes + 1e-9) {
+          return 'The applied amount cannot exceed the open balance available to reconcile';
+        }
+        const companyValueD = roundOwn(dCompRes * commonCurr / dCurrRes);
+        const companyValueC = roundOwn(cCompRes * commonCurr / cCurrRes);
+        const expectedBase = Math.min(companyValueD, companyValueC);
+        if (roundOwn(after.amount) !== expectedBase) {
+          return 'Partial reconciliation amount does not match the re-derived base amount';
+        }
+        const difference = roundOwn(companyValueC - companyValueD);
+        const gap = Math.abs(difference);
+        if (gap === 0) {
+          if (after.exchange_move_id != null) return 'An exchange entry is not required for this settlement';
+        } else {
+          if (!after.exchange_move_id) return 'An exchange entry is required for foreign reconciliation at different rates';
+          const fxId = after.exchange_move_id;
+          const expectedNet = difference > 0 ? gap : -gap;
+          const overvaluedPartnerId = difference > 0 ? cLine.partner_id : dLine.partner_id;
+          const fxErr = postedExchangeEntryError(db, fxId, after.account_id, after.company_id, {
+            expectedNet,
+            expectedPartnerId: overvaluedPartnerId,
+          });
+          if (fxErr) return fxErr;
+
+          const movesUsingFx = (db.records['account.move'] ?? []).filter((m) => (m.payments ?? []).some((p) => !p.reversed && p.payment_fx_move_id === fxId));
+          if (movesUsingFx.length > 0) return 'Exchange entry is already used by another settlement';
+
+          const otherSettlementUses = partials.filter((g) => (g.exchange_move_id === fxId || g.debit_move_id === fxId || g.credit_move_id === fxId)
+            && g.id !== after.id
+            && g.debit_move_id !== after.debit_move_id
+            && g.credit_move_id !== after.credit_move_id);
+          if (otherSettlementUses.length > 0) {
+            return 'Exchange entry is already used by another settlement';
+          }
+
+          const gapPartial = partials.find((g) => g && g.active !== false && !g.reversed
+            && (g.exchange_move_id === fxId || g.debit_move_id === fxId || g.credit_move_id === fxId)
+            && g.id !== after.id);
+          if (!gapPartial || roundOwn(gapPartial.amount) !== gap || gapPartial.account_id !== after.account_id) {
+            return 'Exchange reconciliation requires a matching gap partial';
+          }
+          if (difference > 0 && (gapPartial.debit_move_id !== fxId || gapPartial.credit_move_id !== after.credit_move_id || gapPartial.credit_line_index !== after.credit_line_index)) {
+            return 'Exchange reconciliation requires a matching gap partial';
+          }
+          if (difference < 0 && (gapPartial.debit_move_id !== after.debit_move_id || gapPartial.debit_line_index !== after.debit_line_index || gapPartial.credit_move_id !== fxId)) {
+            return 'Exchange reconciliation requires a matching gap partial';
+          }
+
+          const usesOfFx = partials.filter((g) => g.exchange_move_id === fxId || g.debit_move_id === fxId || g.credit_move_id === fxId);
+          if (usesOfFx.length > 2 || usesOfFx.some((g) => g.id !== after.id && g.id !== gapPartial.id)) {
+            return 'Exchange entry is already used by another settlement';
+          }
+        }
+      }
+    }
   } else if (after.reversed) {
+    if (after.exchange_move_id) {
+      const fx = read(db, 'account.move', after.exchange_move_id);
+      const isReversed = fx && (fx.reversal_move_id != null || (db.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === fx.id));
+      if (!isReversed) return 'Reversing a partial reconciliation must also reverse its exchange entry';
+    }
     const hasActiveDocRow = (db.records['account.move'] ?? []).some((m) => (
       (m.payments ?? []).some((p) => !p.reversed && p.partial_reconcile_id === after.id)
     ));
@@ -235,6 +412,9 @@ export const glReconcileModels = {
       credit_line_index: { type: 'integer', label: 'Credit Line Index', required: true },
       account_id: { type: 'many2one', relation: 'account.account', label: 'Account', required: true },
       amount: { type: 'monetary', label: 'Amount', currency: 'company', required: true },
+      debit_amount_currency: { type: 'monetary', label: 'Debit Amount Currency' },
+      credit_amount_currency: { type: 'monetary', label: 'Credit Amount Currency' },
+      exchange_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Difference Entry' },
       date: { type: 'date', label: 'Date', required: true },
       active: { type: 'boolean', label: 'Active', default: true },
       reversed: { type: 'boolean', label: 'Unreconciled', default: false },
@@ -335,6 +515,10 @@ function validateReconcileSelection(db, items, { date, amount, writeoff }) {
   const account = items[0].account;
   if (!isReconcilableAccount(account)) throw new Error('Selected journal items must be on a reconcilable account');
 
+  if (items.some((it) => isExchangeEntry(db, it.move))) {
+    throw new Error('Exchange entries cannot be reconciled directly');
+  }
+
   if (items.some((it) => it.reconciledLine?.reconciled === true || isCurrencyZero(Number(it.reconciledLine?.amount_residual) || 0, ownCurrency))) {
     throw new Error('Selected journal items must not already be fully reconciled');
   }
@@ -425,11 +609,28 @@ function postReconcileWriteoff(db, items, { companyId, account, net, groupPartne
 }
 
 /** Settle a document (`account.move`) counterpart line when matched through a partial reconciliation link. */
-function settleDocumentSide(db, docItem, otherItem, { matchAmt, pairDate, partialReconcileId }) {
+function settleDocumentSide(db, docItem, otherItem, { matchAmt, currencyAmt = null, pairDate, partialReconcileId }) {
   if (!documentSettledByCounterSide(docItem.move, docItem.line)) return db;
   const doc = read(db, 'account.move', docItem.move.id);
   const docCurr = documentCurrency(db, doc);
   const roundDoc = (v) => roundCurrency(v, docCurr);
+  const ownCurr = companyCurrencyRecord(db, doc.company_id ?? 1);
+  const isForeign = Boolean(docCurr && ownCurr && docCurr.id !== ownCurr.id);
+
+  if (isForeign) {
+    const docAmt = currencyAmt != null ? roundDoc(currencyAmt) : roundDoc(matchAmt);
+    if (!(docAmt > 0)) return db;
+    return appendDocumentSettlement(db, doc.id, {
+      amount: docAmt,
+      moveId: otherItem.move.id,
+      date: pairDate,
+      companyAmount: matchAmt,
+      lineIndex: docItem.multiInstallment ? docItem.lineIndex : null,
+      partialReconcileId,
+      consumePayment: true,
+    }).db;
+  }
+
   const openDoc = docItem.multiInstallment
     ? roundDoc(installmentSettlementState(db, doc).remainingByIndex.get(docItem.lineIndex) ?? residual(doc, db))
     : roundDoc(residual(doc, db));
@@ -464,29 +665,149 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
     if (budget != null && (budget <= 0 || isCurrencyZero(budget, ownCurrency))) break;
     const d = debits[di];
     const c = credits[ci];
-    const matchAmt = roundOwn(Math.min(d.remaining, c.remaining, ...(budget != null ? [budget] : [])));
-    if (matchAmt > 0 && !isCurrencyZero(matchAmt, ownCurrency)) {
-      const pairDate = [matchDate, d.moveDate, c.moveDate].sort().at(-1);
-      const created = create(next, 'account.partial.reconcile', {
-        debit_move_id: d.move.id,
-        debit_line_index: d.lineIndex,
-        credit_move_id: c.move.id,
-        credit_line_index: c.lineIndex,
-        account_id: account.id,
-        company_id: companyId,
-        amount: matchAmt,
-        date: pairDate,
-        active: true,
-        reversed: false,
-      });
-      next = settleDocumentSide(created.db, d, c, { matchAmt, pairDate, partialReconcileId: created.id });
-      next = settleDocumentSide(next, c, d, { matchAmt, pairDate, partialReconcileId: created.id });
-      d.remaining = roundOwn(d.remaining - matchAmt);
-      c.remaining = roundOwn(c.remaining - matchAmt);
-      if (budget != null) budget = roundOwn(budget - matchAmt);
+
+    const currD = itemCurrencyId(next, d, ownCurrency);
+    const currC = itemCurrencyId(next, c, ownCurrency);
+    const isForeignPair = currD !== (ownCurrency?.id ?? null) && currD === currC;
+
+    if (isForeignPair) {
+      const foreignCurr = read(next, 'res.currency', currD);
+      const roundCurr = (v) => roundCurrency(v, foreignCurr);
+      const remCurrD = d.remainingCurrency != null
+        ? d.remainingCurrency
+        : Math.abs(Number(d.reconciledLine.amount_residual_currency) || 0);
+      const remCurrC = c.remainingCurrency != null
+        ? c.remainingCurrency
+        : Math.abs(Number(c.reconciledLine.amount_residual_currency) || 0);
+
+      const commonCurr = roundCurr(Math.min(remCurrD, remCurrC));
+      if (commonCurr > 0 && !isCurrencyZero(commonCurr, foreignCurr)) {
+        const companyValueD = roundOwn(d.remaining * commonCurr / remCurrD);
+        const companyValueC = roundOwn(c.remaining * commonCurr / remCurrC);
+        const baseAmount = Math.min(companyValueD, companyValueC);
+        const difference = roundOwn(companyValueC - companyValueD);
+        const gap = Math.abs(difference);
+        const pairDate = [matchDate, d.moveDate, c.moveDate].sort().at(-1);
+
+        let fxId = null;
+        if (gap > 0 && !isCurrencyZero(gap, ownCurrency)) {
+          const isGain = difference > 0;
+          const gainLossAccount = exchangeAccount(next, companyId, difference);
+          const partnerId = isGain ? c.line.partner_id : d.line.partner_id;
+          const fx = postEntry(next, {
+            journal: 'MISC',
+            company: companyId ?? 1,
+            date: pairDate,
+            ref: `Exchange difference ${d.move.name || ''} / ${c.move.name || ''}`.trim(),
+            archivedOriginIds: [d.move.id, c.move.id],
+            lines: isGain
+              ? [
+                  { account: account.id, debit: gap, credit: 0, partner_id: partnerId },
+                  { account: gainLossAccount, debit: 0, credit: gap },
+                ]
+              : [
+                  { account: account.id, debit: 0, credit: gap, partner_id: partnerId },
+                  { account: gainLossAccount, debit: gap, credit: 0 },
+                ],
+          });
+          next = fx.db;
+          fxId = fx.id;
+        }
+
+        const p1 = create(next, 'account.partial.reconcile', {
+          debit_move_id: d.move.id,
+          debit_line_index: d.lineIndex,
+          credit_move_id: c.move.id,
+          credit_line_index: c.lineIndex,
+          account_id: account.id,
+          company_id: companyId,
+          amount: baseAmount,
+          debit_amount_currency: commonCurr,
+          credit_amount_currency: commonCurr,
+          exchange_move_id: fxId,
+          date: pairDate,
+          active: true,
+          reversed: false,
+        });
+        next = p1.db;
+
+        if (fxId) {
+          if (difference > 0) {
+            const p2 = create(next, 'account.partial.reconcile', {
+              debit_move_id: fxId,
+              debit_line_index: 0,
+              credit_move_id: c.move.id,
+              credit_line_index: c.lineIndex,
+              account_id: account.id,
+              company_id: companyId,
+              amount: gap,
+              debit_amount_currency: null,
+              credit_amount_currency: 0,
+              exchange_move_id: fxId,
+              date: pairDate,
+              active: true,
+              reversed: false,
+            });
+            next = p2.db;
+          } else {
+            const p2 = create(next, 'account.partial.reconcile', {
+              debit_move_id: d.move.id,
+              debit_line_index: d.lineIndex,
+              credit_move_id: fxId,
+              credit_line_index: 0,
+              account_id: account.id,
+              company_id: companyId,
+              amount: gap,
+              debit_amount_currency: 0,
+              credit_amount_currency: null,
+              exchange_move_id: fxId,
+              date: pairDate,
+              active: true,
+              reversed: false,
+            });
+            next = p2.db;
+          }
+        }
+
+        next = settleDocumentSide(next, d, c, { matchAmt: companyValueD, currencyAmt: commonCurr, pairDate, partialReconcileId: p1.id });
+        next = settleDocumentSide(next, c, d, { matchAmt: companyValueC, currencyAmt: commonCurr, pairDate, partialReconcileId: p1.id });
+
+        d.remaining = roundOwn(d.remaining - companyValueD);
+        d.remainingCurrency = roundCurr(remCurrD - commonCurr);
+        c.remaining = roundOwn(c.remaining - companyValueC);
+        c.remainingCurrency = roundCurr(remCurrC - commonCurr);
+        if (budget != null) budget = roundOwn(budget - baseAmount);
+      }
+      if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency) || (d.remainingCurrency != null && isCurrencyZero(d.remainingCurrency, foreignCurr))) di += 1;
+      if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency) || (c.remainingCurrency != null && isCurrencyZero(c.remainingCurrency, foreignCurr))) ci += 1;
+    } else {
+      const matchAmt = roundOwn(Math.min(d.remaining, c.remaining, ...(budget != null ? [budget] : [])));
+      if (matchAmt > 0 && !isCurrencyZero(matchAmt, ownCurrency)) {
+        const pairDate = [matchDate, d.moveDate, c.moveDate].sort().at(-1);
+        const created = create(next, 'account.partial.reconcile', {
+          debit_move_id: d.move.id,
+          debit_line_index: d.lineIndex,
+          credit_move_id: c.move.id,
+          credit_line_index: c.lineIndex,
+          account_id: account.id,
+          company_id: companyId,
+          amount: matchAmt,
+          debit_amount_currency: null,
+          credit_amount_currency: null,
+          exchange_move_id: null,
+          date: pairDate,
+          active: true,
+          reversed: false,
+        });
+        next = settleDocumentSide(created.db, d, c, { matchAmt, pairDate, partialReconcileId: created.id });
+        next = settleDocumentSide(next, c, d, { matchAmt, pairDate, partialReconcileId: created.id });
+        d.remaining = roundOwn(d.remaining - matchAmt);
+        c.remaining = roundOwn(c.remaining - matchAmt);
+        if (budget != null) budget = roundOwn(budget - matchAmt);
+      }
+      if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency)) di += 1;
+      if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency)) ci += 1;
     }
-    if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency)) di += 1;
-    if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency)) ci += 1;
   }
   if (budget != null && budget > 0 && !isCurrencyZero(budget, ownCurrency)) {
     throw new Error(EXCEEDED_AMOUNT_ERROR);
@@ -571,6 +892,32 @@ function collectAndValidateUnreconcile(db, items, date) {
     }
   }
 
+  const fxMovesToReverse = [];
+  const visitedFx = new Set();
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const pid of Array.from(partialIds)) {
+      const g = activePartials.find((p) => p.id === pid);
+      if (g?.exchange_move_id && !visitedFx.has(g.exchange_move_id)) {
+        visitedFx.add(g.exchange_move_id);
+        const fxMove = read(db, 'account.move', g.exchange_move_id);
+        if (fxMove && fxMove.state === 'posted') {
+          fxMovesToReverse.push(fxMove);
+        }
+        for (const sibling of activePartials) {
+          if ((sibling.exchange_move_id === g.exchange_move_id
+            || sibling.debit_move_id === g.exchange_move_id
+            || sibling.credit_move_id === g.exchange_move_id)
+            && !partialIds.has(sibling.id)) {
+            partialIds.add(sibling.id);
+            expanded = true;
+          }
+        }
+      }
+    }
+  }
+
   const touchedLinks = activePartials.filter((g) => partialIds.has(g.id));
   for (const g of touchedLinks) {
     if (g.date && date < g.date) throw new Error('Enter an unreconciliation date on or after the matching date');
@@ -579,6 +926,13 @@ function collectAndValidateUnreconcile(db, items, date) {
       const lock = move && recordLockDate(db, move);
       if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
     }
+  }
+
+  for (const fxMove of fxMovesToReverse) {
+    const fxDate = fxMove.invoice_date ?? fxMove.date ?? '';
+    if (fxDate && date < fxDate) throw new Error('Enter an unreconciliation date on or after the matching date');
+    const lock = recordLockDate(db, fxMove);
+    if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
   }
 
   const docRows = [];
@@ -596,7 +950,7 @@ function collectAndValidateUnreconcile(db, items, date) {
     }
   }
 
-  return { touchedLinks, docRows, legacySelections };
+  return { touchedLinks, docRows, legacySelections, fxMovesToReverse };
 }
 
 /**
@@ -608,7 +962,7 @@ export function unreconcileLedgerItems(db, selections, { date = today() } = {}) 
   const items = selectedItems(db, selections, { allowMultipleEntryLines: true });
   if (!validDate(date)) throw new Error('Enter a valid reversal date');
 
-  const { touchedLinks, docRows, legacySelections } = collectAndValidateUnreconcile(db, items, date);
+  const { touchedLinks, docRows, legacySelections, fxMovesToReverse } = collectAndValidateUnreconcile(db, items, date);
 
   let next = db;
   for (const g of touchedLinks) {
@@ -623,6 +977,39 @@ export function unreconcileLedgerItems(db, selections, { date = today() } = {}) 
       lineIndex,
       partialReconcileId: row.partial_reconcile_id,
     });
+  }
+  for (const fxMove of fxMovesToReverse) {
+    const reversed = reverseEntry(next, fxMove, date, { reconciliation_reversal: true });
+    next = reversed.db;
+    const revMove = read(next, 'account.move', reversed.id);
+    // The exchange line sits on the account the settlement matched; pair it with the same line of the reversal.
+    const matchedAccountId = touchedLinks.find((g) => g.exchange_move_id === fxMove.id)?.account_id;
+    const fxAccountLineIdx = (fxMove.line_ids ?? []).findIndex((l) => l.account_id === matchedAccountId);
+    if (fxAccountLineIdx >= 0) {
+      const fxLine = fxMove.line_ids[fxAccountLineIdx];
+      const revLine = revMove.line_ids?.[fxAccountLineIdx];
+      if (revLine) {
+        const debitBal = (Number(fxLine.debit) || 0) - (Number(fxLine.credit) || 0);
+        const isFxDebit = debitBal > 0;
+        const amount = Math.abs(debitBal);
+        const pair = create(next, 'account.partial.reconcile', {
+          debit_move_id: isFxDebit ? fxMove.id : revMove.id,
+          debit_line_index: fxAccountLineIdx,
+          credit_move_id: isFxDebit ? revMove.id : fxMove.id,
+          credit_line_index: fxAccountLineIdx,
+          account_id: fxLine.account_id,
+          company_id: fxMove.company_id ?? 1,
+          amount,
+          debit_amount_currency: null,
+          credit_amount_currency: null,
+          exchange_move_id: null,
+          date,
+          active: true,
+          reversed: false,
+        });
+        next = pair.db;
+      }
+    }
   }
   if (legacySelections.length) {
     next = unreconcileJournalItems(next, legacySelections, { date });

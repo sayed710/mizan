@@ -1120,7 +1120,17 @@ function computeReconciledItems(db, move, index) {
         ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, share / Math.abs(amount_residual)));
       } else if (posted && !document && matchedInfo?.hasAnyLink && matchedInfo.absBal > 1e-9) {
         const remaining = Math.max(0, roundOwn(matchedInfo.absBal - matchedInfo.matchedTotal));
-        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, remaining / matchedInfo.absBal));
+        const sign = amount_residual >= 0 ? 1 : -1;
+        if (matchedInfo.hasCurrencyLinks && line.currency_id && ownCurrency && line.currency_id !== ownCurrency.id) {
+          const foreignCurr = read(db, 'res.currency', line.currency_id);
+          const origCurrAbs = Math.abs(Number(line.amount_currency) || 0);
+          const remainingCurr = Math.max(0, cleanSignedZero(foreignCurr ? roundCurrency(origCurrAbs - matchedInfo.glMatchedCurrency, foreignCurr) : roundOwn(origCurrAbs - matchedInfo.glMatchedCurrency)));
+          const currSign = (Number(line.amount_currency) || 0) >= 0 ? 1 : -1;
+          amount_residual = cleanSignedZero(roundOwn(sign * remaining));
+          amount_residual_currency = cleanSignedZero(currSign * remainingCurr);
+        } else {
+          ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, remaining / matchedInfo.absBal));
+        }
       }
     }
     return { ...line, reconciled, amount_residual, amount_residual_currency };

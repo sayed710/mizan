@@ -750,6 +750,13 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   }
   const settlementOrigins = new Map();
   for (const [model, record] of changed) {
+    if (model === 'account.partial.reconcile' && record.exchange_move_id && !oldMoves.has(record.exchange_move_id)) {
+      const ids = settlementOrigins.get(record.exchange_move_id) ?? [];
+      for (const mId of [record.debit_move_id, record.credit_move_id]) {
+        if (mId && !ids.includes(mId)) ids.push(mId);
+      }
+      settlementOrigins.set(record.exchange_move_id, ids);
+    }
     if (model !== 'account.move') continue;
     const oldRows = oldMoves.get(record.id)?.payments ?? [];
     for (const row of (record.payments ?? []).slice(oldRows.length)) {
