@@ -2923,6 +2923,10 @@ Object.assign(accountingModels, {
         && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.company_id && a.company_id !== after.company_id)) {
         return 'Asset model must belong to the account company';
       }
+      if ((!after.account_depreciation_id || !after.account_depreciation_expense_id)
+        && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.create_asset === 'validate')) {
+        return 'Validated asset creation needs a depreciation model with depreciation accounts';
+      }
       return assetAccountGuard(db, before, after, ctx);
     },
     fields: {

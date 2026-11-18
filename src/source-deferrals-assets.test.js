@@ -326,6 +326,14 @@ test('validated asset creation requires a model with depreciation accounts, also
   const fixed = bare.db.records['account.account'].find((a) => a.account_type === 'asset_fixed');
   const forged = { ...bare.db, records: { ...bare.db.records, 'account.account': bare.db.records['account.account'].map((a) => (a.id === fixed.id ? { ...a, create_asset: 'validate', asset_model_id: null } : a)) } };
   assert.throws(() => applyDiff(bare.db, diffDb(bare.db, forged), { isAdmin: true }), message);
+
+  // The linked model cannot later drop a depreciation account, also through sync.
+  const accounts = assetAccounts(bare.db);
+  const full = create(bare.db, 'account.asset.model', { name: 'Full', method: 'linear', method_number: 3, method_period: '12', ...accounts });
+  const linked = create(full.db, 'account.account', { name: 'Linked', code: '158883', account_type: 'asset_fixed', asset_model_id: full.id, create_asset: 'validate' });
+  assert.throws(() => write(linked.db, 'account.asset.model', full.id, { account_depreciation_id: null }), message);
+  const stripped = { ...linked.db, records: { ...linked.db.records, 'account.asset.model': linked.db.records['account.asset.model'].map((m) => (m.id === full.id ? { ...m, account_depreciation_expense_id: null } : m)) } };
+  assert.throws(() => applyDiff(linked.db, diffDb(linked.db, stripped), { isAdmin: true }), message);
 });
 
 test('posting a bill again keeps its single validated asset', () => {
