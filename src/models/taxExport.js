@@ -2,7 +2,7 @@
 import { read } from '../orm.js';
 import { toCsv } from '../csv.js';
 import { round } from '../money.js';
-import { taxBaseTotal, taxItems, taxReport, taxesByTax } from './finance.js';
+import { taxBaseTotal, taxReport, taxesByTax } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES } from './taxTemplates.js';
 
 export { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES };
@@ -66,36 +66,31 @@ function templateBoxSpec(db, templateSpec, taxItem) {
     ?? null;
 }
 
-function buildGenericBoxes(db, period, taxRows, totals, allTaxItems = []) {
+function buildGenericBoxes(db, period, taxRows, totals) {
   const boxes = [];
   let saleIdx = 0;
   let purchIdx = 0;
   for (const row of taxRows) {
-    const matchLine = (l) => l.side === row.side
-      && (l.tax_id != null ? l.tax_id === row.tax_id : (l.tax_name || 'Untagged') === row.name);
-    const items = allTaxItems.filter(matchLine);
     if (row.side === 'sale') {
       saleIdx += 1;
-      boxes.push({ code: `OUT-${saleIdx}`, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail', box_kind: 'detail', items });
+      boxes.push({ code: `OUT-${saleIdx}`, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail' });
     } else if (row.side === 'purchase') {
       purchIdx += 1;
-      boxes.push({ code: `IN-${purchIdx}`, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail', box_kind: 'detail', items });
+      boxes.push({ code: `IN-${purchIdx}`, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail' });
     }
   }
   const saleBase = taxBaseTotal(db, period, (item) => item.side === 'sale');
   const purchBase = taxBaseTotal(db, period, (item) => item.side === 'purchase');
-  const saleItems = allTaxItems.filter((l) => l.side === 'sale');
-  const purchItems = allTaxItems.filter((l) => l.side === 'purchase');
   boxes.push(
-    { code: 'TOTAL-OUT', label: 'Output Tax', base: saleBase, tax: totals.output, kind: 'total', box_kind: 'total_output', items: saleItems },
-    { code: 'TOTAL-IN', label: 'Input Tax', base: purchBase, tax: totals.input, kind: 'total', box_kind: 'total_input', items: purchItems },
-    { code: 'PAYABLE', label: 'Tax Payable', base: 0, tax: totals.payable, kind: 'total', box_kind: 'net_payable', items: allTaxItems },
+    { code: 'TOTAL-OUT', label: 'Output Tax', base: saleBase, tax: totals.output, kind: 'total' },
+    { code: 'TOTAL-IN', label: 'Input Tax', base: purchBase, tax: totals.input, kind: 'total' },
+    { code: 'PAYABLE', label: 'Tax Payable', base: 0, tax: totals.payable, kind: 'total' },
   );
   return boxes;
 }
 
-function buildTemplateBoxes(db, period, templateSpec, taxRows, totals, allTaxItems = []) {
-  const acc = new Map(templateSpec.boxes.map((b) => [b.code, { hasRows: false, tax: 0, items: [] }]));
+function buildTemplateBoxes(db, period, templateSpec, taxRows, totals) {
+  const acc = new Map(templateSpec.boxes.map((b) => [b.code, { hasRows: false, tax: 0 }]));
   for (const row of taxRows) {
     const matched = templateBoxSpec(db, templateSpec, row);
     if (matched) {
@@ -104,26 +99,17 @@ function buildTemplateBoxes(db, period, templateSpec, taxRows, totals, allTaxIte
       slot.tax = round(slot.tax + row.tax);
     }
   }
-  for (const item of allTaxItems) {
-    const matched = templateBoxSpec(db, templateSpec, item);
-    if (matched) {
-      const slot = acc.get(matched.code);
-      if (slot) slot.items.push(item);
-    }
-  }
   const saleBase = taxBaseTotal(db, period, (item) => item.side === 'sale');
   const purchBase = taxBaseTotal(db, period, (item) => item.side === 'purchase');
-  const saleItems = allTaxItems.filter((l) => l.side === 'sale');
-  const purchItems = allTaxItems.filter((l) => l.side === 'purchase');
   return templateSpec.boxes.map((spec) => {
-    if (spec.kind === 'total_output') return { code: spec.code, label: spec.label, base: saleBase, tax: totals.output, kind: 'total', box_kind: 'total_output', items: saleItems };
-    if (spec.kind === 'total_input') return { code: spec.code, label: spec.label, base: purchBase, tax: totals.input, kind: 'total', box_kind: 'total_input', items: purchItems };
-    if (spec.kind === 'net_payable') return { code: spec.code, label: spec.label, base: 0, tax: totals.payable, kind: 'total', box_kind: 'net_payable', items: allTaxItems };
+    if (spec.kind === 'total_output') return { code: spec.code, label: spec.label, base: saleBase, tax: totals.output, kind: 'total' };
+    if (spec.kind === 'total_input') return { code: spec.code, label: spec.label, base: purchBase, tax: totals.input, kind: 'total' };
+    if (spec.kind === 'net_payable') return { code: spec.code, label: spec.label, base: 0, tax: totals.payable, kind: 'total' };
     const slot = acc.get(spec.code);
     const base = slot.hasRows
       ? taxBaseTotal(db, period, (item) => templateBoxSpec(db, templateSpec, item)?.code === spec.code)
       : 0;
-    return { code: spec.code, label: spec.label, base, tax: slot.tax, kind: 'detail', box_kind: 'detail', items: slot.items };
+    return { code: spec.code, label: spec.label, base, tax: slot.tax, kind: 'detail' };
   });
 }
 
@@ -132,12 +118,11 @@ export function taxReturnBoxes(db, ret) {
   const period = taxReturnPeriod(db, ret);
   const totals = taxReport(db, period);
   const taxRows = taxesByTax(db, period);
-  const allTaxItems = taxItems(db, period);
   const template = resolveTaxReturnTemplate(db, ret);
   const spec = TAX_RETURN_TEMPLATES[template];
   const boxes = spec.mode === 'boxes'
-    ? buildTemplateBoxes(db, period, spec, taxRows, totals, allTaxItems)
-    : buildGenericBoxes(db, period, taxRows, totals, allTaxItems);
+    ? buildTemplateBoxes(db, period, spec, taxRows, totals)
+    : buildGenericBoxes(db, period, taxRows, totals);
   return {
     template,
     templateLabel: spec.label,

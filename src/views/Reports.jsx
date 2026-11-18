@@ -160,12 +160,6 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
 }
 
 export function Tax({ db, period, companyId = 'all', variant = null }) {
-  const [openBoxes, setOpenBoxes] = useState(() => new Set());
-  const toggleBox = (code) => setOpenBoxes((prev) => {
-    const next = new Set(prev);
-    if (next.has(code)) next.delete(code); else next.add(code);
-    return next;
-  });
   const effectiveCompanyId = companyId && companyId !== 'all' ? Number(companyId) : (period?.company_id ?? null);
   const effectivePeriod = effectiveCompanyId ? { ...period, company_id: effectiveCompanyId } : period;
   const countryTemplateKey = resolveTaxReportTemplate(db, companyId);
@@ -177,31 +171,14 @@ export function Tax({ db, period, companyId = 'all', variant = null }) {
     const payableCode = templateSpec?.boxes?.find((b) => b.kind === 'net_payable')?.code;
     return (
       <tbody>
-        {boxes.map((b) => {
-          const isOpen = openBoxes.has(b.code);
-          const hasItems = (b.items ?? []).length > 0;
-          return (
-            <Fragment key={b.code}>
-              <tr
-                className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}
-                onClick={hasItems ? () => toggleBox(b.code) : undefined}
-                aria-expanded={hasItems ? isOpen : undefined}
-              >
-                <td>{b.code}</td>
-                <td>{hasItems && <span className="caret">{isOpen ? '▾' : '▸'}</span>}{t(b.label)}</td>
-                <td className="num">{money(b.base)}</td>
-                <td className="num">{money(b.tax)}</td>
-              </tr>
-              {isOpen && b.items.map((item, idx) => (
-                <tr key={`${b.code}-item-${idx}`} className="rep-detail rep-drilldown">
-                  <td colSpan={2}><a href={`#/open/account.move/${item.move_id}`}>{item.date} · {item.move_name}</a> <span className="muted">{item.name}</span></td>
-                  <td className="num">{item.invoiceBase != null ? money(item.invoiceBase) : ''}</td>
-                  <td className="num">{money(item.tax)}</td>
-                </tr>
-              ))}
-            </Fragment>
-          );
-        })}
+        {boxes.map((b) => (
+          <tr key={b.code} className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}>
+            <td>{b.code}</td>
+            <td>{t(b.label)}</td>
+            <td className="num">{money(b.base)}</td>
+            <td className="num">{money(b.tax)}</td>
+          </tr>
+        ))}
       </tbody>
     );
   }

@@ -11,19 +11,7 @@ import { invoiceJournalDefaults } from './test-support/accounting-company.js';
 import { taxSnapshot } from './models/taxes.js';
 import { payReturn, resetReturnToDraft, submitReturn } from './models/taxreturn.js';
 import { journalItems } from './models/ledger.js';
-import { register } from 'node:module';
-import { setupDom } from './test-support/dom.js';
 import { taxReturnBoxes } from './models/taxExport.js';
-
-register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
-const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
-const textOf = (node) => (node.nodeType === 3 ? node.nodeValue : (node.childNodes ?? []).map(textOf).join(''));
-const findAll = (node, predicate, out = []) => {
-  if (!node) return out;
-  if (predicate(node)) out.push(node);
-  for (const child of node.childNodes ?? []) findAll(child, predicate, out);
-  return out;
-};
 
 function setupCompany2(db) {
   const c2 = createCompany(db, { name: 'Company 2', ...invoiceJournalDefaults(db) });
@@ -113,7 +101,13 @@ test('behavior 4: resetting a closed return to draft is allowed only while nothi
   // Company 1 lock date and returns are completely unchanged
   assert.equal(read(resetC2, 'res.company', 1).tax_lock_date, '2026-02-28');
 
-  // 6. Once Return 2 is reset, Return 1 can be reset to draft
+  // 6. A return that was only reviewed (never submitted) still goes back to draft while later returns are closed
+  const reviewedRes = create(db, 'account.return', {
+    name: 'VAT C1 Dec 2025', type_id: vatType1.id, date_from: '2025-12-01', date_to: '2025-12-31', company_id: 1, state: 'reviewed',
+  });
+  assert.equal(read(resetReturnToDraft(reviewedRes.db, reviewedRes.id), 'account.return', reviewedRes.id).state, 'new');
+
+  // 7. Once Return 2 is reset, Return 1 can be reset to draft
   const reset2Db = resetReturnToDraft(db, ret2Res.id);
   assert.equal(read(reset2Db, 'account.return', ret2Res.id).state, 'new');
   assert.equal(read(reset2Db, 'res.company', 1).tax_lock_date, '2026-01-31');
@@ -129,164 +123,6 @@ test('behavior 4: resetting a closed return to draft is allowed only while nothi
     const m = read(reset1Db, 'account.move', moveId);
     assert.ok(m, 'Closing move must remain in database (not deleted)');
     assert.equal(m.state, 'cancel');
-  }
-});
-
-test('behavior 5: return boxes reconcile to source items and drill down to constituent journal items', () => {
-  let db = seed();
-  const { db: withC2, companyId: c2Id } = setupCompany2(db);
-  db = withC2;
-
-  // Configure company 1 with eg_vat template
-  db = write(db, 'res.company', 1, { tax_return_template: 'eg_vat' });
-
-  const saleTaxConsu = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'sale');
-  const purchTaxConsu = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'purchase');
-
-  // Create posted moves in Company 1
-  const inv1 = create(db, 'account.move', {
-    move_type: 'out_invoice',
-    partner_id: 1,
-    invoice_date: '2026-03-10',
-    company_id: 1,
-    invoice_line_ids: [{ name: 'Goods sale', qty: 2, price_unit: 100, ...taxSnapshot(saleTaxConsu) }],
-  });
-  db = postMove(inv1.db, inv1.id);
-
-  const bill1 = create(db, 'account.move', {
-    move_type: 'in_invoice',
-    partner_id: 2,
-    invoice_date: '2026-03-15',
-    company_id: 1,
-    invoice_line_ids: [{ name: 'Goods purchase', qty: 1, price_unit: 50, ...taxSnapshot(purchTaxConsu) }],
-  });
-  db = postMove(bill1.db, bill1.id);
-
-  // Create posted move in Company 2 in same period (must be isolated)
-  const saleTaxC2 = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === c2Id && t.type_tax_use === 'sale');
-  const invC2 = create(db, 'account.move', {
-    move_type: 'out_invoice',
-    partner_id: 1,
-    invoice_date: '2026-03-12',
-    company_id: c2Id,
-    invoice_line_ids: [{ name: 'C2 Sale', qty: 5, price_unit: 200, ...taxSnapshot(saleTaxC2) }],
-  });
-  db = postMove(invC2.db, invC2.id);
-
-  const vatType1 = search(db, 'account.return.type').find((t) => (t.company_id ?? 1) === 1 && t.name === 'VAT Return');
-  const retRes = create(db, 'account.return', {
-    name: 'VAT C1 March 2026',
-    type_id: vatType1.id,
-    date_from: '2026-03-01',
-    date_to: '2026-03-31',
-    company_id: 1,
-    tax_return_template: 'eg_vat',
-    state: 'new',
-  });
-  db = retRes.db;
-
-  const result = taxReturnBoxes(db, retRes);
-  assert.ok(result.boxes.length > 0, 'Return must produce boxes');
-
-  // Verify company isolation: Company 2 items must not appear in Company 1 boxes
-  for (const b of result.boxes) {
-    for (const item of b.items ?? []) {
-      assert.equal(item.company_id ?? 1, 1, 'Box drilldown must only contain Company 1 items');
-    }
-  }
-
-  // Reconcile each box amount to the drilled down journal items
-  for (const b of result.boxes) {
-    assert.ok(Array.isArray(b.items), `Box ${b.code} must have items array`);
-    if (b.box_kind === 'total_output') {
-      const sumTax = round(b.items.reduce((s, l) => s + (l.tax ?? 0), 0));
-      assert.equal(sumTax, b.tax, `Total output box ${b.code} must reconcile to source items tax sum`);
-    } else if (b.box_kind === 'total_input') {
-      const sumTax = round(b.items.reduce((s, l) => s + (l.tax ?? 0), 0));
-      assert.equal(sumTax, b.tax, `Total input box ${b.code} must reconcile to source items tax sum`);
-    } else if (b.box_kind === 'net_payable') {
-      const netTax = round(b.items.reduce((s, l) => s + (l.side === 'sale' ? l.tax : -l.tax), 0));
-      assert.equal(netTax, b.tax, `Net payable box ${b.code} must reconcile to source items net tax`);
-    } else {
-      // Detail box
-      const sumTax = round(b.items.reduce((s, l) => s + (l.tax ?? 0), 0));
-      assert.equal(sumTax, b.tax, `Detail box ${b.code} must reconcile to source items tax sum`);
-    }
-  }
-
-  // Verify generic variant also reconciles and supports drilldown
-  const genericResult = taxReturnBoxes(db, { ...retRes, tax_return_template: 'generic' });
-  for (const b of genericResult.boxes) {
-    assert.ok(Array.isArray(b.items), `Generic box ${b.code} must have items array`);
-    if (b.code === 'TOTAL-OUT') {
-      assert.equal(round(b.items.reduce((s, l) => s + (l.tax ?? 0), 0)), b.tax);
-    } else if (b.code === 'TOTAL-IN') {
-      assert.equal(round(b.items.reduce((s, l) => s + (l.tax ?? 0), 0)), b.tax);
-    } else if (b.code === 'PAYABLE') {
-      assert.equal(round(b.items.reduce((s, l) => s + (l.side === 'sale' ? l.tax : -l.tax), 0)), b.tax);
-    } else {
-      assert.equal(round(b.items.reduce((s, l) => s + (l.tax ?? 0), 0)), b.tax);
-    }
-  }
-});
-
-test('behavior 5 UI: clicking a tax report box toggles drilldown journal items', async () => {
-  const { makeEl } = setupDom();
-  const React = await import('react');
-  const { createRoot } = await import('react-dom/client');
-  const { Tax } = await import('./views/Reports.jsx');
-
-  let db = seed();
-  db = write(db, 'res.company', 1, { tax_return_template: 'eg_vat' });
-  const saleTaxConsu = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'sale');
-  db = write(db, 'account.tax', saleTaxConsu.id, { tax_scope: 'consu' });
-  const inv = create(db, 'account.move', {
-    move_type: 'out_invoice',
-    partner_id: 1,
-    invoice_date: '2026-03-10',
-    company_id: 1,
-    invoice_line_ids: [{ name: 'Goods sale item', qty: 2, price_unit: 100, ...taxSnapshot(read(db, 'account.tax', saleTaxConsu.id)) }],
-  });
-  db = postMove(inv.db, inv.id);
-
-  const period = { from: '2026-03-01', to: '2026-03-31', company_id: 1 };
-  const host = makeEl('div');
-  host.ownerDocument = globalThis.document;
-  const root = createRoot(host);
-
-  try {
-    await React.act(async () => root.render(React.createElement('table', null, React.createElement(Tax, { db, period, variant: 'eg_vat' }))));
-
-    // Initially, no drilldown row is expanded
-    let drilldownRows = findAll(host, (node) => node.tagName === 'TR' && (props(node)?.className ?? '').includes('rep-drilldown'));
-    assert.equal(drilldownRows.length, 0);
-
-    // Find BOX-1 row (Standard Sales - Goods) which has items
-    const rows = findAll(host, (node) => node.tagName === 'TR');
-    const box1Row = rows.find((r) => {
-      const cells = (r.childNodes ?? []).filter((c) => c.tagName === 'TD');
-      return cells.length >= 4 && textOf(cells[0]) === 'BOX-1';
-    });
-    assert.ok(box1Row, 'BOX-1 row must exist');
-
-    // Click BOX-1 row to expand drilldown
-    await React.act(async () => {
-      props(box1Row).onClick?.({ preventDefault: () => {} });
-    });
-
-    // Now drilldown rows are rendered
-    drilldownRows = findAll(host, (node) => node.tagName === 'TR' && (props(node)?.className ?? '').includes('rep-drilldown'));
-    assert.ok(drilldownRows.length > 0, 'Drilldown rows must render when expanded');
-    assert.ok(drilldownRows.some((r) => textOf(r).includes('2026-03-10')));
-
-    // Click again to collapse
-    await React.act(async () => {
-      props(box1Row).onClick?.({ preventDefault: () => {} });
-    });
-    drilldownRows = findAll(host, (node) => node.tagName === 'TR' && (props(node)?.className ?? '').includes('rep-drilldown'));
-    assert.equal(drilldownRows.length, 0, 'Drilldown rows must be collapsed on second click');
-  } finally {
-    await React.act(async () => root.unmount());
   }
 });
 
@@ -346,7 +182,7 @@ test('behavior 1: closing a return posts one closing entry zeroing every tax acc
   // 2. Net payable equals report boxes payable
   const { boxes, totals } = taxReturnBoxes(db, submittedRet);
   assert.equal(submittedRet.total_amount_to_pay, totals.payable);
-  const payableBox = boxes.find((b) => b.box_kind === 'net_payable' || b.code === 'PAYABLE');
+  const payableBox = boxes.find((b) => b.kind === 'total' && b.tax === totals.payable);
   assert.equal(payableBox.tax, submittedRet.total_amount_to_pay);
 
   // 3. Every tax account balance for Company 1 in that period is zeroed

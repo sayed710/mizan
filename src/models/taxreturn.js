@@ -414,7 +414,7 @@ export function resetReturnToDraft(db, returnId) {
   if (ret.state === 'paid') {
     throw new Error('Paid returns cannot be reset to draft');
   }
-  if (hasLaterClosedReturn(db, ret)) {
+  if (ret.state === 'submitted' && hasLaterClosedReturn(db, ret)) {
     throw new Error('Cannot reset tax return: the period is locked by a later closed return');
   }
 
