@@ -56,10 +56,10 @@ function yearGuard(db, before, after) {
   if (entryOff(after.closing_move_id) || entryOff(after.opening_move_id)) return 'Closing entries are dated on the fiscal year end';
   // Only the real entries made by closing or reopening may be named: an ordinary entry would vanish from the P&L.
   if (closes && !isClosingEntry(db, after, read(db, 'account.move', after.closing_move_id))) return 'The closing entry must be the one made by closing this fiscal year';
-  if (closes && after.closing_earnings_account_id !== currentYearEarningsAccount(db, after.company_id).id) return 'The closing earnings account must be the configured earnings account';
+  if (closes && after.closing_earnings_account_id !== currentYearEarningsAccount(db, after.company_id ?? 1).id) return 'The closing earnings account must be the configured earnings account';
   if (after.opening_move_id && after.opening_move_id !== before?.opening_move_id && !isReopeningEntry(db, after, read(db, 'account.move', after.opening_move_id))) return 'The reopening entry must be the one made by reopening this fiscal year';
   if (search(db, 'account.fiscal.year').some((y) => y.id !== after.id && [after.closing_move_id, after.opening_move_id].filter(Boolean).some((m) => y.closing_move_id === m || y.opening_move_id === m))) return 'That entry already belongs to another fiscal year';
-  return search(db, 'account.fiscal.year').some((y) => y.id !== after.id && (y.company_id ?? 1) === after.company_id && y.date_from <= after.date_to && y.date_to >= after.date_from)
+  return search(db, 'account.fiscal.year').some((y) => y.id !== after.id && (y.company_id ?? 1) === (after.company_id ?? 1) && y.date_from <= after.date_to && y.date_to >= after.date_from)
     ? 'Fiscal years must not overlap' : null;
 }
 
