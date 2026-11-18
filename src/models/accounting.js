@@ -825,13 +825,16 @@ function offsetCreditNote(db, noteId) {
 
 /** Bill lines booked on an account configured to create assets generate draft or validated assets (once per bill line). */
 function draftAssetsFromBill(db, bill) {
-  const existing = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id && a.state === 'draft');
+  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
+  const existing = billAssets.filter((a) => a.state === 'draft');
+  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
+  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
   const retained = new Set();
   // Without a model journal, assets use the company's configured general journal.
   const defaultJournal = read(db, 'res.company', bill.company_id ?? 1)?.default_general_journal_id ?? null;
   const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
     const booked = postedBillLine(bill, index);
-    if (!booked || booked.amount === 0) return next;
+    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
     const account = read(next, 'account.account', booked.account);
     const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
     // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
@@ -1917,6 +1920,10 @@ export const accountingModels = {
         const model = read(db, 'account.asset.model', after.asset_model_id);
         if (!model) return 'Select an existing asset model';
         if (model.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
+      }
+      if (after.create_asset === 'validate') {
+        const model = after.asset_model_id ? read(db, 'account.asset.model', after.asset_model_id) : null;
+        if (!model?.account_depreciation_id || !model?.account_depreciation_expense_id) return 'Validated asset creation needs a depreciation model with depreciation accounts';
       }
       if (after.deferred_account_id) {
         const defAcc = read(db, 'account.account', after.deferred_account_id);

@@ -6,6 +6,7 @@ import { models } from './registry.js';
 import { accountId } from './models/ledger.js';
 import { seed } from './seed.js';
 import { migrate } from './migrations.js';
+import { applyDiff, diffDb } from './sync.js';
 import { postMove } from './models/accounting.js';
 import { confirmAsset } from './models/assets.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
@@ -314,6 +315,36 @@ test('asset auto-creation: the account setting decides and the linked model supp
   const off = create(db, 'account.account', { name: 'Model but no creation', code: '156666', account_type: 'asset_fixed', asset_model_id: model.id, create_asset: 'no' });
   db = off.db;
   assert.equal(post(off.id), undefined);
+});
+
+test('validated asset creation requires a model with depreciation accounts, also through sync', () => {
+  const db = seed();
+  const message = /Validated asset creation needs a depreciation model with depreciation accounts/;
+  assert.throws(() => create(db, 'account.account', { name: 'No model', code: '158881', account_type: 'asset_fixed', create_asset: 'validate' }), message);
+  const bare = create(db, 'account.asset.model', { name: 'No accounts', method: 'linear', method_number: 3, method_period: '12' });
+  assert.throws(() => create(bare.db, 'account.account', { name: 'Bare model', code: '158882', account_type: 'asset_fixed', asset_model_id: bare.id, create_asset: 'validate' }), message);
+  const fixed = bare.db.records['account.account'].find((a) => a.account_type === 'asset_fixed');
+  const forged = { ...bare.db, records: { ...bare.db.records, 'account.account': bare.db.records['account.account'].map((a) => (a.id === fixed.id ? { ...a, create_asset: 'validate', asset_model_id: null } : a)) } };
+  assert.throws(() => applyDiff(bare.db, diffDb(bare.db, forged), { isAdmin: true }), message);
+});
+
+test('posting a bill again keeps its single validated asset', () => {
+  let db = seed();
+  const accounts = assetAccounts(db);
+  const model = create(db, 'account.asset.model', {
+    name: 'Two-year model', method: 'linear', method_number: 2, method_period: '12',
+    account_depreciation_id: accounts.account_depreciation_id, account_depreciation_expense_id: accounts.account_depreciation_expense_id,
+  });
+  const account = create(model.db, 'account.account', { name: 'Auto validated', code: '157778', account_type: 'asset_fixed', asset_model_id: model.id, create_asset: 'validate' });
+  const bill = create(account.db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01',
+    invoice_line_ids: [{ name: 'Press', qty: 1, price_unit: 4000, tax: 0, account_id: account.id }],
+  });
+  db = postMove(bill.db, bill.id);
+  db = postMove(db, bill.id);
+  const assets = search(db, 'account.asset').filter((a) => a.bill_id === bill.id);
+  assert.equal(assets.length, 1);
+  assert.equal(assets[0].state, 'open');
 });
 
 test('migration 56 keeps draft asset creation on accounts that created assets before', () => {
