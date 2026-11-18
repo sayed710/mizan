@@ -98,7 +98,7 @@ test('Chart of Accounts list shows Odoo 20 columns in order, renders reconcile c
     const table = find(ctx.host, (n) => n.tagName === 'TABLE' && hasClass(n, 'list'));
     assert.ok(table, 'renders Chart of Accounts table');
     const headers = allFind(table, (n) => n.tagName === 'TH').map((th) => th.textContent.trim()).filter(Boolean);
-    assert.deepEqual(headers, ['Code', 'Account Name', 'Type', 'Allow Reconciliation']);
+    assert.deepEqual(headers, ['Code', 'Account Name', 'Type', 'Allow Reconciliation', 'Account Currency', '⋯']);
 
     const tbody = allFind(table, (n) => n.tagName === 'TBODY')[0];
     const firstRow = tbody.childNodes[0];
@@ -175,6 +175,7 @@ test('account.account form renders Balance header, code+name title, and Accounti
     const panel = find(ctx.host, (n) => hasClass(n, 'tab-panel'));
     assert.deepEqual(fieldLabelsOf(panel), [
       'Type',
+      'Account Currency',
       'Default Taxes',
       'Fiscal Category',
       'Tags',

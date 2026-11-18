@@ -1,7 +1,7 @@
 // Fiscal closing and reversing exchange adjustments (comparative reports live in views/reportCompare.js).
 import { read, search, write } from '../orm.js';
 import { addDays, shiftMonth, today, validDate } from './common.js';
-import { balances, balanceSheet, isLiquidityAccount, journalItems, postEntry, profitAndLoss } from './ledger.js';
+import { balances, balanceSheet, isLiquidityAccount, journalItems, postEntry, profitAndLoss, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrency, toCompany } from './currency.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -335,7 +335,7 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
     const delta = [...new Set([...wanted.keys(), ...booked.keys()])].map((key) => {
       const row = wanted.get(key) ?? booked.get(key);
       const amount = companyRound((wanted.get(key)?.amount ?? 0) - (booked.get(key)?.amount ?? 0));
-      return { account_id: row.account_id, partner_id: row.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
+      return { account_id: row.account_id, partner_id: row.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount), ...valueOnlyCurrencyFields(db, row.account_id, company) };
     }).filter((line) => line.debit || line.credit);
     if (delta.length) plans.push({ company, journalId: revaluationJournalId(db, company), expected: delta });
   }
@@ -344,9 +344,10 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
   for (const plan of plans) {
     const { company, journalId, expected } = plan;
     const entry = postEntry(next, { journal: journalId, journal_id: journalId, date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company, system_generated: true });
+    const posted = read(entry.db, 'account.move', entry.id);
     const reversal = postEntry(entry.db, {
-      journal: journalId, journal_id: journalId, date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,
-      lines: expected.map((l) => ({ ...l, debit: l.credit ?? 0, credit: l.debit ?? 0 })),
+      journal: journalId, journal_id: journalId, date: addDays(date, 1), ref: `Reversal of ${posted.name}`, company,
+      lines: posted.line_ids.map(reversalLine),
       system_generated: true,
       archivedOriginIds: [entry.id],
     });

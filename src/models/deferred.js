@@ -1,7 +1,7 @@
 // Deferred revenue/expense: an invoiced amount recognised month by month over a period.
 import { create, read, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, today } from './common.js';
-import { invoiceLineAccount, postEntry } from './ledger.js';
+import { invoiceLineAccount, postEntry, reversalLine } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { closedYearLock, lockDateFor } from './finance.js';
 import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
@@ -930,7 +930,7 @@ export function reverseInvoiceDeferrals(db, source) {
         board.push({ ...line, cancelled: true });
         continue;
       }
-      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, deferred_entry_type: original.deferred_entry_type ?? deferredEntryTypeForKind(schedule.kind), archivedOriginIds: [original.id], lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
+      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, deferred_entry_type: original.deferred_entry_type ?? deferredEntryTypeForKind(schedule.kind), archivedOriginIds: [original.id], lines: original.line_ids.map(reversalLine) });
       next = postAnalytic(write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id }), reversal.id);
       board.push({ ...line, reversal_move_id: reversal.id });
     }
