@@ -584,10 +584,13 @@ function lockRule(db, before, after) {
   if (!before && after.system_generated && after.state === 'draft') return 'Draft moves cannot be system generated';
   if (!before && after.system_generated && after.move_type !== 'entry') return 'Invoices cannot be system generated';
   // A year's own closing or reopening entry is booked into it once, as it is created.
-  const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, companyId);
-  const taxLock = !before && isReturnEntry(db, after) ? returnTaxLock(db, companyId, after.tax_return_id) : taxLockFor(db, after);
-  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before), yearLock].sort().at(-1) : '';
-  const afterLock = [companyLockDate(db, after), taxLock, yearLock].sort().at(-1);
+  const beforeCompanyId = before?.company_id ?? 1;
+  const afterCompanyId = after?.company_id ?? beforeCompanyId;
+  const beforeYearLock = before ? closedYearLock(db, beforeCompanyId) : '';
+  const afterYearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, afterCompanyId);
+  const afterTaxLock = !before && isReturnEntry(db, after) ? returnTaxLock(db, afterCompanyId, after.tax_return_id) : taxLockFor(db, after);
+  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before), beforeYearLock].sort().at(-1) : '';
+  const afterLock = [companyLockDate(db, after), afterTaxLock, afterYearLock].sort().at(-1);
   const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;
   const afterLocked = after.state === 'posted' && afterLock && moveDate(after) <= afterLock;
   if (!beforeLocked && !afterLocked) return null;
