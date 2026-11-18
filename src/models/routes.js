@@ -3,7 +3,7 @@ import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { invoiceCounterpartAccount, partnerAccount, postEntry, postedBillLine } from './ledger.js';
 import { costMethod, stockAccount } from './valuation.js';
-import { productProperty } from './productconfig-helpers.js';
+import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
 import { allocateCents, companyCurrencyRecord, round } from '../money.js';
 import { getForecast, orderOrderpoints } from './orderpoint.js';
 import { rateAt } from './currency.js';
@@ -175,7 +175,7 @@ export function applyLandedCost(db, lc) {
   const targets = [...groups.values()];
   if (!targets.length || !(lc.cost_lines ?? []).length) throw new Error('Nothing to allocate');
   for (const group of targets) {
-    const isPeriodic = ['manual_periodic', 'periodic'].includes(productProperty(db, group.product, 'property_valuation'));
+    const isPeriodic = isPeriodicValuation(db, group.product, group.picking.company_id ?? lc.company_id ?? 1);
     group.isPeriodic = isPeriodic;
     group.layers = isPeriodic ? [] : (db.records['stock.valuation.layer'] ?? []).filter((l) => l.picking_id === group.picking.id && l.product_id === group.product.id && l.kind === 'in' && l.quantity > 0);
     if (!isPeriodic && !group.layers.length) throw new Error('The selected receipt has no valuation history');

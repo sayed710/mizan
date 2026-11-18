@@ -403,7 +403,7 @@ function validateReturnValuation(db, { original, lines, session }) {
     const p = read(db, 'product', l.product_id);
     if (p?.type !== 'goods' || !l.qty) continue;
     const qty = lineToStockQty(db, l, p);
-    const periodic = isPeriodicValuation(db, p);
+    const periodic = isPeriodicValuation(db, p, session.company_id);
     if (qty < 0) {
       const retLayer = original.return_layers?.find((c) => c.index === index);
       if (!retLayer?.layer_id) {
@@ -587,7 +587,7 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
     const p = read(stocked, 'product', l.product_id);
     if (p?.type !== 'goods' || !l.qty) continue;
     const qty = lineToStockQty(stocked, l, p);
-    const periodic = isPeriodicValuation(stocked, p);
+    const periodic = isPeriodicValuation(stocked, p, session.company_id);
     if (original && qty < 0 && original.return_layers?.find((c) => c.index === index)?.layer_id) {
       stocked = reverseReceipt(stocked, original.return_layers.find((c) => c.index === index).layer_id, { reference: name, company_id: session.company_id });
     } else if (original && qty < 0 && !periodic) {

@@ -5,7 +5,7 @@ import { amounts, appliedCashRounding, companyRoundingMethod, nextName, shiftMon
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
-import { productProperty } from './productconfig-helpers.js';
+import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
 import { discountTaxComputation, earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
 import { configuredEarningsAccount } from './earnings.js';
@@ -236,10 +236,10 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
     const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
-    if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) {
+    if (!sale && !dropship && p?.type === 'goods' && !isPeriodicValuation(db, p, move.company_id ?? 1)) {
       return { accountId: stockAccount(db, p, 'input', move.company_id ?? 1), configured: true, type: 'valuation' };
     }
-    const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
+    const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id', move.company_id ?? 1);
     if (configured) return { accountId: configured, configured: true, type: 'product' };
     if (!base) throw new Error(`Journal "${journal.name || journal.code}" has no default account configured for this company`);
     return { accountId: base, configured: true, type: 'journal default' };
