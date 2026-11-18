@@ -1871,6 +1871,7 @@ export const accountingModels = {
         hideWhen: (r) => !isIncomeOrExpenseAccount(r),
       },
       asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Account Currency', help: 'Journal items on this account are kept in this currency and revalued at closing.', tracking: true },
       description: { type: 'text', label: 'Description' },
       current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
     },
@@ -1919,7 +1920,7 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
+            ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'currency_id', 'reconcile', 'active'],
             ['is_deferred', 'deferred_account_id', 'asset_model_id'],
             ['description'],
           ],

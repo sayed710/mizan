@@ -1,13 +1,13 @@
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
-import './models/index.js';
+import { models } from './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write } from './orm.js';
+import { create, getActiveCompany, read, search, setActiveCompany, write } from './orm.js';
 import { seed } from './seed.js';
 import { payMove, postMove } from './models/accounting.js';
 import { reversePayment } from './models/pay.js';
 import { agedBalance } from './models/finance.js';
-import { revalueForeignBalances, unrealizedExchange } from './models/closing.js';
+import { foreignBankBalances, revalueForeignBalances, unrealizedExchange } from './models/closing.js';
 import { accountId, isBalanced, journalId, postEntry } from './models/ledger.js';
 
 function fixture(type = 'out_invoice') {
@@ -290,4 +290,44 @@ test('company 2 items untouched when revaluing company 1', () => {
 
   const c2MovesAfter = search(done, 'account.move').filter((m) => m.company_id === secondCompany.id);
   assert.deepEqual(c2MovesAfter, c2MovesBefore);
+});
+
+test('a foreign line without a recorded foreign amount is not revalued', () => {
+  const currency = create(seed(), 'res.currency', { name: 'NOAMTFX', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }] });
+  const bank = accountId(currency.db, '101401');
+  // A stored item (e.g. imported) that names a currency but never recorded the foreign amount.
+  const move = { id: 9401, company_id: 1, state: 'posted', move_type: 'entry', date: '2026-01-10',
+    line_ids: [{ account_id: bank, debit: 100, credit: 0, currency_id: currency.id }, { account_id: accountId(currency.db, '301000'), debit: 0, credit: 100 }] };
+  const db = { ...currency.db, records: { ...currency.db.records, 'account.move': [...currency.db.records['account.move'], move] } };
+  assert.deepEqual(foreignBankBalances(db, '2026-02-28', { companyId: 1 }).filter((r) => r.currency_id === currency.id), []);
+});
+
+test('an account can be kept in its own currency from the account form', () => {
+  const field = models['account.account'].fields.currency_id;
+  assert.equal(field?.relation, 'res.currency');
+  assert.ok(models['account.account'].form.tabs.some((tab) => (tab.groups ?? []).flat().includes('currency_id')));
+  const db = seed();
+  const created = create(db, 'account.account', { code: 'OWNCUR', name: 'Own currency', account_type: 'asset_current', currency_id: db.records['res.currency'].find((c) => c.name === 'EUR').id });
+  assert.equal(read(created.db, 'account.account', created.id).currency_id, db.records['res.currency'].find((c) => c.name === 'EUR').id);
+});
+
+test('company-scoped foreign bank balances ignore which company is active', () => {
+  const currency = create(seed(), 'res.currency', { name: 'ACTFX', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }] });
+  const bank = accountId(currency.db, '101401');
+  let db = postEntry(currency.db, {
+    journal: 'MISC', date: '2026-01-10', company: 1,
+    lines: [
+      { account_id: bank, debit: 100, credit: 0, currency_id: currency.id, amount_currency: 200 },
+      { account_id: accountId(currency.db, '301000'), debit: 0, credit: 100 },
+    ],
+  }).db;
+  const second = createCompanyWithDefaultInvoiceJournals(db, { name: 'Active elsewhere', currency_id: db.settings.base_currency_id });
+  db = second.db;
+  const previous = getActiveCompany();
+  setActiveCompany(second.id);
+  try {
+    assert.equal(foreignBankBalances(db, '2026-02-28', { companyId: 1 }).filter((r) => r.currency_id === currency.id).length, 1);
+  } finally {
+    setActiveCompany(previous);
+  }
 });
