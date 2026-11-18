@@ -397,12 +397,18 @@ function unapplicationError(db, stored, after, before) {
 
 /** Check whether a move is a generated currency exchange entry (or a reversal of one). */
 export function isExchangeEntry(db, moveOrId) {
-  const move = typeof moveOrId === 'object' && moveOrId !== null ? moveOrId : read(db, 'account.move', moveOrId);
-  if (!move || move.move_type !== 'entry') return false;
-  if (move.fx_payment_move_id && move.fx_invoice_id) return true;
-  return (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.exchange_move_id === move.id)
-    || (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => p.payment_fx_move_id === move.id))
-    || (move.reversed_entry_id ? isExchangeEntry(db, move.reversed_entry_id) : false);
+  // Walk the reversal chain iteratively; a client-supplied cycle ends the walk instead of recursing forever.
+  const seen = new Set();
+  let move = typeof moveOrId === 'object' && moveOrId !== null ? moveOrId : read(db, 'account.move', moveOrId);
+  while (move && move.move_type === 'entry' && !seen.has(move.id)) {
+    seen.add(move.id);
+    const id = move.id;
+    if (move.fx_payment_move_id && move.fx_invoice_id) return true;
+    if ((db.records['account.partial.reconcile'] ?? []).some((g) => g && g.exchange_move_id === id)
+      || (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => p.payment_fx_move_id === id))) return true;
+    move = move.reversed_entry_id ? read(db, 'account.move', move.reversed_entry_id) : null;
+  }
+  return false;
 }
 
 export function moveInvariant(db, after, before, stored = null) {

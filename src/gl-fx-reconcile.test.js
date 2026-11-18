@@ -8,7 +8,7 @@ import { accountId, journalItems, postEntry, reconciledJournalItems, valueOnlyCu
 import { postPayment, reverseEntry, applyPaymentCredit } from './models/pay.js';
 import { appliedValue } from './models/finance.js';
 import { models } from './models/index.js';
-import { reconcileLedgerItems, unreconcileLedgerItems } from './models/glReconcile.js';
+import { isExchangeEntry, reconcileLedgerItems, unreconcileLedgerItems } from './models/glReconcile.js';
 
 async function arabicTranslator() {
   const prevDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
@@ -1807,4 +1807,22 @@ test('a second clearing link between an exchange entry and its reversal is rejec
   const { id: _id, ...fields } = clearing;
   const forged = create(after, 'account.partial.reconcile', fields);
   assert.throws(() => applyDiff(after, diffDb(after, forged.db), { isAdmin: false }), /cannot exceed the open journal line balance/);
+});
+
+test('a reversal chain that loops back on itself does not recurse forever', () => {
+  const db = seed();
+  const withMoves = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [
+        ...(db.records['account.move'] ?? []),
+        { id: 900001, move_type: 'entry', state: 'posted', reversed_entry_id: 900002, line_ids: [] },
+        { id: 900002, move_type: 'entry', state: 'posted', reversed_entry_id: 900001, line_ids: [] },
+        { id: 900003, move_type: 'entry', state: 'posted', reversed_entry_id: 900003, line_ids: [] },
+      ],
+    },
+  };
+  assert.equal(isExchangeEntry(withMoves, 900001), false);
+  assert.equal(isExchangeEntry(withMoves, 900003), false);
 });
