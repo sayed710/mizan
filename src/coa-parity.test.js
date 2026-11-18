@@ -182,6 +182,7 @@ test('account.account form renders Balance header, code+name title, and Accounti
       'Active',
       'Deferred',
       'Deferred Account',
+      'Create Asset',
       'Depreciation Model',
       'Description',
     ]);

@@ -1606,6 +1606,20 @@ MIGRATIONS.push({ version: 55, name: 'online-link-unsynced-state', up: (db) => {
   return nextDb;
 } });
 
+// v56: assets are now created only from an account's explicit "Create Asset" setting. Accounts that created draft
+// assets before (fixed-asset accounts and accounts linked to an asset model) keep doing so.
+MIGRATIONS.push({ version: 56, name: 'account-create-asset-setting', up: (db) => {
+  const accounts = db?.records?.['account.account'];
+  if (!Array.isArray(accounts)) return db;
+  let changed = false;
+  const next = accounts.map((account) => {
+    if (!account || account.create_asset != null) return account;
+    changed = true;
+    return { ...account, create_asset: account.account_type === 'asset_fixed' || account.asset_model_id ? 'draft' : 'no' };
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.account': next } } : db;
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
