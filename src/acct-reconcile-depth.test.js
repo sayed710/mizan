@@ -217,30 +217,26 @@ test('Case 2: Guards: cross-company, different accounts, non-reconcilable, draft
     },
   });
 
-  // 4a. Cross-company
-  assert.throws(
-    () => reconcileLedgerItems(db, [itemSelection(db, move1.id, ar), itemSelection(db, moveCo2.id, arCo2)], { date: '2026-04-01' }),
-    /same company/i,
-  );
+  // 4a. Cross-company (the direct-call guard is covered in glrec.test.js)
   assert.throws(
     () => applyDiff(db, diffDb(db, forged({ credit_move_id: moveCo2.id })), { isAdmin: true }),
-    /company/i,
+    /Partial reconciliation entries must belong to the same company/,
   );
 
   // 4b. Different accounts
   assert.throws(
     () => reconcileLedgerItems(db, [itemSelection(db, move1.id, ar), itemSelection(db, moveAp.id, ap)], { date: '2026-04-01' }),
-    /same account/i,
+    /Selected journal items must be on the same account/,
   );
   assert.throws(
     () => applyDiff(db, diffDb(db, forged({ credit_move_id: moveAp.id })), { isAdmin: true }),
-    /match the link account/i,
+    /Partial reconciliation lines must match the link account/,
   );
 
   // 4c. Non-reconcilable account
   assert.throws(
     () => reconcileLedgerItems(db, [itemSelection(db, moveNonRecDeb.id, nonRec), itemSelection(db, moveNonRecCred.id, nonRec)], { date: '2026-04-01' }),
-    /reconcilable account/i,
+    /Select items on a reconcilable account/,
   );
   assert.throws(
     () => applyDiff(db, diffDb(db, forged({
@@ -248,27 +244,27 @@ test('Case 2: Guards: cross-company, different accounts, non-reconcilable, draft
       credit_move_id: moveNonRecCred.id,
       account_id: nonRec,
     })), { isAdmin: true }),
-    /reconcilable account/i,
+    /Partial reconciliation requires a reconcilable account/,
   );
 
   // 4d. Draft or cancelled items
   assert.throws(
     () => reconcileLedgerItems(db, [{ move_id: draftMove.id, line_identity: journalItemIdentity(draftMove.line_ids[0]) }, itemSelection(db, move1.id, ar)], { date: '2026-04-01' }),
-    /posted/i,
+    /The selected journal item is missing, ambiguous or no longer posted/,
   );
   assert.throws(
     () => applyDiff(db, diffDb(db, forged({ credit_move_id: draftMove.id })), { isAdmin: true }),
-    /posted/i,
+    /Partial reconciliation requires posted debit and credit journal entries/,
   );
 
   // 4e. Mixed currency (USD vs EUR)
   assert.throws(
     () => reconcileLedgerItems(db, [itemSelection(db, move1.id, ar), itemSelection(db, eurMove.id, ar)], { date: '2026-04-01' }),
-    /company currency/i,
+    /General-ledger reconciliation requires items in the company currency/,
   );
   assert.throws(
     () => applyDiff(db, diffDb(db, forged({ credit_move_id: eurMove.id })), { isAdmin: true }),
-    /company currency/i,
+    /General-ledger reconciliation requires items in the company currency/,
   );
 });
 
@@ -301,34 +297,38 @@ test('Case 3: Journal Items reconcile action reconciles through the ledger model
   db = c.db;
 
   const root = createRoot(host);
-  const arName = read(db, 'account.account', ar).name;
-  const selectRow = async (moveId) => {
-    const row = find(host, (n) => n.tagName === 'TR' && find(n, (a) => a.tagName === 'A' && props(a)?.href === `#/accounting/entries/${moveId}`) && n.textContent.includes(arName));
-    assert.ok(row, `Row for move ${moveId} must exist`);
-    const cb = find(row, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox');
-    await React.act(async () => props(cb).onChange({ target: { checked: true } }));
-  };
+  try {
+    const arName = read(db, 'account.account', ar).name;
+    const selectRow = async (moveId) => {
+      const row = find(host, (n) => n.tagName === 'TR' && find(n, (a) => a.tagName === 'A' && props(a)?.href === `#/accounting/entries/${moveId}`) && n.textContent.includes(arName));
+      assert.ok(row, `Row for move ${moveId} must exist`);
+      const cb = find(row, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox');
+      await React.act(async () => props(cb).onChange({ target: { checked: true } }));
+    };
 
-  await React.act(async () => {
-    await commit(db);
-    root.render(React.createElement(JournalItems, { leaf: { reviewMode: 'unreconciled' } }));
-  });
+    await React.act(async () => {
+      await commit(db);
+      root.render(React.createElement(JournalItems, { leaf: { reviewMode: 'unreconciled' } }));
+    });
 
-  await selectRow(d.id);
-  await selectRow(c.id);
+    await selectRow(d.id);
+    await selectRow(c.id);
 
-  const reconcileBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Reconcile');
-  assert.ok(reconcileBtn, 'Reconcile button exists');
-  await React.act(async () => props(reconcileBtn).onClick());
+    const reconcileBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Reconcile');
+    assert.ok(reconcileBtn, 'Reconcile button exists');
+    await React.act(async () => props(reconcileBtn).onClick());
 
-  const dateInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date' && !props(n)?.['aria-label']);
-  await React.act(async () => props(dateInput).onChange({ target: { value: '2026-04-01' } }));
-  await React.act(async () => props(find(host, (n) => n.tagName === 'FORM')).onSubmit({ preventDefault() {} }));
+    const dateInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date' && !props(n)?.['aria-label']);
+    await React.act(async () => props(dateInput).onChange({ target: { value: '2026-04-01' } }));
+    await React.act(async () => props(find(host, (n) => n.tagName === 'FORM')).onSubmit({ preventDefault() {} }));
 
-  const reconciledDb = getDb();
-  const dLine = reconciledJournalItems(reconciledDb, read(reconciledDb, 'account.move', d.id)).find((l) => l.account_id === ar);
-  const cLine = reconciledJournalItems(reconciledDb, read(reconciledDb, 'account.move', c.id)).find((l) => l.account_id === ar);
-  assert.equal(dLine.reconciled, true);
-  assert.equal(cLine.reconciled, true);
-  assert.equal(dLine.matching_number, cLine.matching_number);
+    const reconciledDb = getDb();
+    const dLine = reconciledJournalItems(reconciledDb, read(reconciledDb, 'account.move', d.id)).find((l) => l.account_id === ar);
+    const cLine = reconciledJournalItems(reconciledDb, read(reconciledDb, 'account.move', c.id)).find((l) => l.account_id === ar);
+    assert.equal(dLine.reconciled, true);
+    assert.equal(cLine.reconciled, true);
+    assert.equal(dLine.matching_number, cLine.matching_number);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
 });
