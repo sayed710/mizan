@@ -147,8 +147,9 @@ test('opening plus net change equals closing cash and closing cash reconciles to
   });
   db = confirmLoan(loan.db, read(loan.db, 'account.loan', loan.id));
 
-  // 2. Loan repayment on 2040-02-28
-  db = postDueLines(db, read(db, 'account.loan', loan.id), '2040-02-28');
+  // 2. First instalment, due 2040-03-31
+  db = postDueLines(db, read(db, 'account.loan', loan.id), '2040-03-31');
+  assert.ok(read(db, 'account.loan', loan.id).line_ids.some((l) => l.posted), 'The first instalment is posted inside the period');
 
   // 3. Operating expense payment on 2040-02-15
   const exp = create(db, 'account.move', {
@@ -157,14 +158,14 @@ test('opening plus net change equals closing cash and closing cash reconciles to
   });
   db = postMove(exp.db, exp.id);
 
-  const period = { from: '2040-02-01', to: '2040-02-28', company_id: 1 };
+  const period = { from: '2040-02-01', to: '2040-03-31', company_id: 1 };
   const flow = cashFlow(db, period);
 
   // Invariant 1: opening + net equals closing
   assert.equal(flow.closing, flow.opening + flow.net, 'Opening + net change must equal closing cash');
 
   // Invariant 2: closing cash equals ledger cash/bank account balances at end date
-  const ledgerItemsAtTo = journalItems(db, { to: '2040-02-28', company_id: 1 });
+  const ledgerItemsAtTo = journalItems(db, { to: '2040-03-31', company_id: 1 });
   const ledgerCashBalancesAtTo = balances(db, ledgerItemsAtTo)
     .filter((b) => b.account.account_type === 'asset_cash')
     .reduce((s, b) => s + b.balance, 0);
