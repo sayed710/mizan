@@ -887,8 +887,13 @@ export function taxItemKey(l) {
  * invoices, POS, expenses and cash-basis releases alike, in company currency; refunds come out negative.
  */
 export function taxesByTax(db, period = {}) {
+  return taxRowsFromItems(taxItems(db, period));
+}
+
+/** Group tax items into per-tax rows (side, tax, base, tax amount), sorted by side then name. */
+export function taxRowsFromItems(items) {
   const rows = new Map();
-  for (const l of taxItems(db, period)) {
+  for (const l of items) {
     const name = l.tax_name || 'Untagged';
     const key = taxItemKey(l);
     const row = rows.get(key) ?? { side: l.side, tax_id: l.tax_id ?? null, name, base: 0, tax: 0 };

@@ -234,7 +234,9 @@ export function Tax({ db, period, companyId = 'all', variant = null }) {
             <tr className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}>
               <td>{b.code}</td>
               <td>{t(b.label)}</td>
-              <td className="num">{money(b.base)}</td>
+              <td className="num">
+                <TaxAmountToggle value={b.base} open={openBoxes.has(b.code)} onToggle={() => toggleBox(b.code)} />
+              </td>
               <td className="num">
                 <TaxAmountToggle value={b.tax} open={openBoxes.has(b.code)} onToggle={() => toggleBox(b.code)} />
               </td>
@@ -262,7 +264,9 @@ export function Tax({ db, period, companyId = 'all', variant = null }) {
         <Fragment key={x.code}>
           <tr className="rep-detail">
             <td>{x.name}</td>
-            <td className="num">{money(x.base)}</td>
+            <td className="num">
+              <TaxAmountToggle value={x.base} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} />
+            </td>
             <td className="num">
               <TaxAmountToggle value={x.tax} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} />
             </td>

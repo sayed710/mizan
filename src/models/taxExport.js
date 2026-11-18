@@ -2,7 +2,8 @@
 import { read } from '../orm.js';
 import { toCsv } from '../csv.js';
 import { round } from '../money.js';
-import { taxBaseTotal, taxItemKey, taxItems, taxReport, taxesByTax } from './finance.js';
+import { taxBaseTotal, taxItemKey, taxItems, taxReport, taxRowsFromItems, taxesByTax } from './finance.js';
+import { deduplicatedTaxBase } from './taxBase.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES } from './taxTemplates.js';
 
 export { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES };
@@ -163,7 +164,7 @@ export function taxBoxItems(db, ret, code) {
       isNetPayable = true;
       matcher = () => true;
     } else {
-      const targetRow = genericTaxRows(taxesByTax(db, period)).find((row) => row.code === code);
+      const targetRow = genericTaxRows(taxRowsFromItems(allItems)).find((row) => row.code === code);
       if (!targetRow) return { items: [], tax: 0, base: 0 };
       const targetKey = taxItemKey({ side: targetRow.side, tax_id: targetRow.tax_id, tax_name: targetRow.name });
       matcher = (item) => taxItemKey(item) === targetKey;
@@ -190,7 +191,7 @@ export function taxBoxItems(db, ret, code) {
   });
 
   const tax = round(items.reduce((s, it) => s + it.tax, 0));
-  const base = isNetPayable ? 0 : taxBaseTotal(db, period, matcher);
+  const base = isNetPayable ? 0 : deduplicatedTaxBase(db, allItems, matcher);
   return { items, tax, base };
 }
 
