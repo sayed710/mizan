@@ -94,9 +94,15 @@ export function entryMatchedAmounts(db, move, index) {
         if (isCurrencyZero(leftCap, ownCurrency)) break;
       }
     }
+    const origCurrAbs = foreign ? Math.abs(Number(line.amount_currency) || 0) : 0;
+    const legacyMatchedCurrency = (foreign && absBal > 1e-9 && legacyMatched > 0)
+      ? roundForeign(legacyMatched * origCurrAbs / absBal)
+      : 0;
     return {
       absBal,
       glMatched,
+      legacyMatched,
+      legacyMatchedCurrency,
       matchedTotal: roundOwn(glMatched + legacyMatched),
       hasAnyLink: glLinks.length > 0 || legacyMatched > 0,
       hasCurrencyLinks,

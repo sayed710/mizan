@@ -1173,7 +1173,8 @@ function computeReconciledItems(db, move, index) {
         if (matchedInfo.hasCurrencyLinks && line.currency_id && ownCurrency && line.currency_id !== ownCurrency.id) {
           const foreignCurr = read(db, 'res.currency', line.currency_id);
           const origCurrAbs = Math.abs(Number(line.amount_currency) || 0);
-          const remainingCurr = Math.max(0, cleanSignedZero(foreignCurr ? roundCurrency(origCurrAbs - matchedInfo.glMatchedCurrency, foreignCurr) : roundOwn(origCurrAbs - matchedInfo.glMatchedCurrency)));
+          const totalMatchedCurrency = (matchedInfo.glMatchedCurrency ?? 0) + (matchedInfo.legacyMatchedCurrency ?? 0);
+          const remainingCurr = Math.max(0, cleanSignedZero(foreignCurr ? roundCurrency(origCurrAbs - totalMatchedCurrency, foreignCurr) : roundOwn(origCurrAbs - totalMatchedCurrency)));
           const currSign = (Number(line.amount_currency) || 0) >= 0 ? 1 : -1;
           amount_residual = cleanSignedZero(roundOwn(sign * remaining));
           amount_residual_currency = cleanSignedZero(currSign * remainingCurr);

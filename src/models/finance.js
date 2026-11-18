@@ -395,19 +395,32 @@ function unapplicationError(db, stored, after, before) {
   return null;
 }
 
+/** Check whether a move is a generated currency exchange entry (or a reversal of one). */
+export function isExchangeEntry(db, moveOrId) {
+  const move = typeof moveOrId === 'object' && moveOrId !== null ? moveOrId : read(db, 'account.move', moveOrId);
+  if (!move || move.move_type !== 'entry') return false;
+  if (move.fx_payment_move_id && move.fx_invoice_id) return true;
+  return (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.exchange_move_id === move.id)
+    || (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => p.payment_fx_move_id === move.id))
+    || (move.reversed_entry_id ? isExchangeEntry(db, move.reversed_entry_id) : false);
+}
+
 export function moveInvariant(db, after, before, stored = null) {
   if (before?.state === 'posted' && after.state !== 'posted' && backsSettlement(db, after.id)) return 'This entry records a payment; reverse the payment instead';
   if (after.state === 'posted' && after.reversed_entry_id) {
     const target = read(db, 'account.move', after.reversed_entry_id);
-    if (target) {
-      const isSettlementFx = (
+    if (target && isExchangeEntry(db, target)) {
+      if (target.reversed_entry_id) {
+        return 'An exchange difference entry linked to a settlement cannot be reversed independently';
+      }
+      const hasActiveSettlement = (
         Boolean(target.fx_payment_move_id && target.fx_invoice_id)
         && (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => !p.reversed && !p.unapplied && p.payment_fx_move_id === target.id))
       ) || (db.records['account.partial.reconcile'] ?? []).some((g) => (
         g && g.active !== false && !g.reversed
         && g.exchange_move_id === target.id
       ));
-      if (isSettlementFx) {
+      if (hasActiveSettlement) {
         return 'An exchange difference entry linked to a settlement cannot be reversed independently';
       }
     }
