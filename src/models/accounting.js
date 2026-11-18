@@ -2,7 +2,7 @@ import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
-import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
+import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
@@ -13,6 +13,7 @@ import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } f
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
+import { hasMultiCurrency } from './money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
 import { t } from '../i18n.js';
@@ -1865,11 +1866,20 @@ export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
     auditDelete: true,
+    // Currency validation looks at the journal items of the whole change set, so it runs after move changes.
+    guardLast: true,
     fields: {
       code: { type: 'char', label: 'Code', required: true, tracking: true },
       name: { type: 'char', label: 'Account Name', required: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES, tracking: true },
+      currency_id: {
+        type: 'many2one',
+        relation: 'res.currency',
+        label: 'Account Currency',
+        tracking: true,
+        hideWhen: (_r, db) => !hasMultiCurrency(db),
+      },
       tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', tracking: true, domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
       fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category', tracking: true },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
@@ -1931,13 +1941,21 @@ export const accountingModels = {
         if (after.id && defAcc.id === after.id) return 'An account cannot defer to itself';
         if (after.company_id && defAcc.company_id && defAcc.company_id !== after.company_id) return 'Deferred account must belong to the account company';
       }
+      if (after.currency_id) {
+        const currency = read(db, 'res.currency', after.currency_id);
+        if (!currency) return 'Select an existing account currency';
+        if (currency.active === false) return 'Select an active account currency';
+      }
+      const currencyError = accountCurrencyChangeError(db, before, after);
+      if (currencyError) return currencyError;
       return null;
     },
     protectDelete: accountDeleteGuard,
     sort: (a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')),
     groupBys: ['account_type'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
-    list: ['code', 'name', 'account_type', 'reconcile'],
+    list: ['code', 'name', 'account_type', 'reconcile', 'currency_id'],
+    listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') } },
     editableList: ['reconcile'],
     views: ['list', 'kanban'],
     form: {
@@ -1948,7 +1966,7 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
+            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
             ['is_deferred', 'deferred_account_id', 'create_asset', 'asset_model_id'],
             ['description'],
           ],
