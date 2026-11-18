@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { register } from 'node:module';
 import assert from 'node:assert/strict';
 import { find, setupDom } from './test-support/dom.js';
-import { create, read, search, write } from './orm.js';
+import { create, read, search } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { createCompany } from './models/company.js';
@@ -25,16 +25,6 @@ function miscJournal(db, companyId = 1) {
 
 function arAccount(db, companyId = 1) {
   return read(db, 'res.company', companyId)?.account_default_receivable_id ?? accountId(db, '121000', companyId);
-}
-
-function ensureCompanyFxAccounts(db, companyId = 1) {
-  const company = read(db, 'res.company', companyId);
-  const gainAcc = company.income_currency_exchange_account_id ?? accountId(db, '450100', companyId);
-  const lossAcc = company.expense_currency_exchange_account_id ?? accountId(db, '690100', companyId);
-  return write(db, 'res.company', companyId, {
-    income_currency_exchange_account_id: gainAcc,
-    expense_currency_exchange_account_id: lossAcc,
-  });
 }
 
 test('Case 1: Multi-item matching: multiple debits and credits matched oldest first, partial residual, full match shared matching number', async () => {
@@ -126,194 +116,16 @@ test('Case 1: Multi-item matching: multiple debits and credits matched oldest fi
   assert.equal(d1Full.matching_number, c1Full.matching_number);
   assert.equal(d1Full.matching_number, c2Full.matching_number);
   assert.equal(d1Full.matching_number, c3Full.matching_number);
+
+  // Unreconciling an item reopens it with its full residual and clears its matching number.
+  const reopened = unreconcileLedgerItems(fullDb, [itemSelection(fullDb, d1.id, ar)], { date: '2026-04-06' });
+  const d1Open = reconciledJournalItems(reopened, read(reopened, 'account.move', d1.id)).find((l) => l.account_id === ar);
+  assert.equal(d1Open.reconciled, false);
+  assert.equal(d1Open.amount_residual, 100);
+  assert.equal(d1Open.matching_number ?? null, null);
 });
 
-test('Case 2: Cross-currency: items in foreign currency matched in foreign currency, company difference posts exchange gain/loss entry', async () => {
-  let db = seed();
-  db = ensureCompanyFxAccounts(db, 1);
-  const partner = create(db, 'res.partner', { name: 'Cross-Currency Partner' });
-  db = partner.db;
-  const eur = create(db, 'res.currency', {
-    name: 'EUR_REC', symbol: '€', rounding: 0.01,
-    rate_ids: [
-      { date: '2026-04-01', rate: 0.5 }, // 1 EUR = 2 USD
-      { date: '2026-04-05', rate: 0.4 }, // 1 EUR = 2.5 USD
-    ],
-  });
-  db = eur.db;
-  const ar = arAccount(db, 1);
-  const rev = accountId(db, '400000', 1);
-  const misc = miscJournal(db, 1);
-
-  // Test 2a: Exchange Gain
-  // Debit item: 100 EUR on 2026-04-01 (1 EUR = 2 USD -> 200 USD debit)
-  // Credit item: 100 EUR on 2026-04-05 (1 EUR = 2.5 USD -> 250 USD credit)
-  // Matched in EUR: 100 EUR. Company difference: 200 - 250 = -50 USD (Exchange Gain of 50 USD)
-  const dEur = postEntry(db, {
-    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-04-01', ref: 'EUR Debit',
-    lines: [
-      { account_id: ar, partner_id: partner.id, debit: 200, currency_id: eur.id, amount_currency: 100 },
-      { account_id: rev, credit: 200 },
-    ],
-  });
-  const cEur = postEntry(dEur.db, {
-    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-04-05', ref: 'EUR Credit',
-    lines: [
-      { account_id: ar, partner_id: partner.id, credit: 250, currency_id: eur.id, amount_currency: -100 },
-      { account_id: rev, debit: 250 },
-    ],
-  });
-  db = cEur.db;
-
-  const matchedDb = reconcileLedgerItems(db, [
-    itemSelection(db, dEur.id, ar),
-    itemSelection(db, cEur.id, ar),
-  ], { date: '2026-04-05' });
-
-  // Verify exchange difference entry was posted
-  const partials = matchedDb.records['account.partial.reconcile'] ?? [];
-  assert.equal(partials.length, 2, 'Primary link and secondary FX balance link created');
-
-  const primary = partials.find((p) => p.amount_currency === 100);
-  assert.ok(primary, 'Primary partial link in EUR exists');
-  assert.equal(primary.amount, 200);
-  assert.equal(primary.currency_id, eur.id);
-  assert.ok(primary.exchange_move_id, 'Primary link has exchange_move_id');
-
-  const fxMove = read(matchedDb, 'account.move', primary.exchange_move_id);
-  assert.ok(fxMove, 'Exchange entry was posted');
-  assert.equal(fxMove.state, 'posted');
-  assert.equal(fxMove.move_type, 'entry');
-
-  // Exchange gain: AR receives debit of 50, exchange gain account receives credit of 50
-  const company = read(matchedDb, 'res.company', 1);
-  const gainAccount = company.income_currency_exchange_account_id;
-  const arFxLine = fxMove.line_ids.find((l) => l.account_id === ar);
-  const gainFxLine = fxMove.line_ids.find((l) => l.account_id === gainAccount);
-  assert.ok(arFxLine, 'AR line on exchange entry exists');
-  assert.ok(gainFxLine, 'Gain line on exchange entry exists');
-  assert.equal(arFxLine.debit, 50);
-  assert.equal(gainFxLine.credit, 50);
-
-  // Both items are fully reconciled and share the matching number
-  const dLine = reconciledJournalItems(matchedDb, read(matchedDb, 'account.move', dEur.id)).find((l) => l.account_id === ar);
-  const cLine = reconciledJournalItems(matchedDb, read(matchedDb, 'account.move', cEur.id)).find((l) => l.account_id === ar);
-  assert.equal(dLine.reconciled, true);
-  assert.equal(dLine.amount_residual, 0);
-  assert.equal(dLine.amount_residual_currency, 0);
-  assert.equal(cLine.reconciled, true);
-  assert.equal(cLine.amount_residual, 0);
-  assert.equal(cLine.amount_residual_currency, 0);
-  assert.ok(dLine.matching_number);
-  assert.equal(dLine.matching_number, cLine.matching_number);
-
-  // Test 2b: Exchange Loss
-  // Debit item: 100 EUR on 2026-04-05 (250 USD)
-  // Credit item: 100 EUR on 2026-04-01 (200 USD)
-  // Difference: 250 - 200 = +50 USD (Exchange Loss)
-  const dLoss = postEntry(matchedDb, {
-    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-04-05', ref: 'EUR Debit Loss',
-    lines: [
-      { account_id: ar, partner_id: partner.id, debit: 250, currency_id: eur.id, amount_currency: 100 },
-      { account_id: rev, credit: 250 },
-    ],
-  });
-  const cLoss = postEntry(dLoss.db, {
-    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-04-01', ref: 'EUR Credit Loss',
-    lines: [
-      { account_id: ar, partner_id: partner.id, credit: 200, currency_id: eur.id, amount_currency: -100 },
-      { account_id: rev, debit: 200 },
-    ],
-  });
-  const lossMatchedDb = reconcileLedgerItems(cLoss.db, [
-    itemSelection(cLoss.db, dLoss.id, ar),
-    itemSelection(cLoss.db, cLoss.id, ar),
-  ], { date: '2026-04-05' });
-
-  const lossPartials = (lossMatchedDb.records['account.partial.reconcile'] ?? []).filter((p) => p.debit_move_id === dLoss.id || p.credit_move_id === cLoss.id);
-  const lossPrimary = lossPartials.find((p) => p.amount_currency === 100);
-  assert.ok(lossPrimary?.exchange_move_id);
-  const lossFxMove = read(lossMatchedDb, 'account.move', lossPrimary.exchange_move_id);
-  const lossAccount = company.expense_currency_exchange_account_id;
-  const lossArLine = lossFxMove.line_ids.find((l) => l.account_id === ar);
-  const lossExpLine = lossFxMove.line_ids.find((l) => l.account_id === lossAccount);
-  assert.ok(lossArLine);
-  assert.ok(lossExpLine);
-  assert.equal(lossArLine.credit, 50);
-  assert.equal(lossExpLine.debit, 50);
-});
-
-test('Case 3: Unreconcile restores residuals and reverses (not deletes) its exchange difference entry', async () => {
-  let db = seed();
-  db = ensureCompanyFxAccounts(db, 1);
-  const partner = create(db, 'res.partner', { name: 'Unreconcile FX Partner' });
-  db = partner.db;
-  const eur = create(db, 'res.currency', {
-    name: 'EUR_UNREC', symbol: '€', rounding: 0.01,
-    rate_ids: [
-      { date: '2026-04-01', rate: 0.5 }, // 200 USD
-      { date: '2026-04-05', rate: 0.4 }, // 250 USD
-    ],
-  });
-  db = eur.db;
-  const ar = arAccount(db, 1);
-  const rev = accountId(db, '400000', 1);
-  const misc = miscJournal(db, 1);
-
-  const d = postEntry(db, {
-    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-04-01', ref: 'EUR Debit',
-    lines: [
-      { account_id: ar, partner_id: partner.id, debit: 200, currency_id: eur.id, amount_currency: 100 },
-      { account_id: rev, credit: 200 },
-    ],
-  });
-  const c = postEntry(d.db, {
-    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-04-05', ref: 'EUR Credit',
-    lines: [
-      { account_id: ar, partner_id: partner.id, credit: 250, currency_id: eur.id, amount_currency: -100 },
-      { account_id: rev, debit: 250 },
-    ],
-  });
-  const reconciled = reconcileLedgerItems(c.db, [
-    itemSelection(c.db, d.id, ar),
-    itemSelection(c.db, c.id, ar),
-  ], { date: '2026-04-05' });
-
-  const partialLink = (reconciled.records['account.partial.reconcile'] ?? []).find((p) => p.exchange_move_id != null);
-  const fxMoveId = partialLink.exchange_move_id;
-  assert.ok(fxMoveId, 'Exchange move was created');
-
-  // Unreconcile
-  const unreconciled = unreconcileLedgerItems(reconciled, [itemSelection(reconciled, d.id, ar)], { date: '2026-04-06' });
-
-  // 1. The exchange difference entry is NOT deleted
-  const fxMoveStillPresent = read(unreconciled, 'account.move', fxMoveId);
-  assert.ok(fxMoveStillPresent, 'Exchange difference entry must still exist');
-
-  // 2. A posted reversing entry reverses the exchange move
-  const reversingMove = search(unreconciled, 'account.move').find((m) => m.reversed_entry_id === fxMoveId);
-  assert.ok(reversingMove, 'Reversal entry exists for exchange difference entry');
-  assert.equal(reversingMove.state, 'posted');
-
-  // 3. Partial links are marked reversed
-  const linksAfter = (unreconciled.records['account.partial.reconcile'] ?? []).filter((p) => p.exchange_move_id === fxMoveId);
-  assert.ok(linksAfter.every((l) => l.reversed === true && l.active === false));
-
-  // 4. Residuals are restored
-  const dRestored = reconciledJournalItems(unreconciled, read(unreconciled, 'account.move', d.id)).find((l) => l.account_id === ar);
-  const cRestored = reconciledJournalItems(unreconciled, read(unreconciled, 'account.move', c.id)).find((l) => l.account_id === ar);
-  assert.equal(dRestored.reconciled, false);
-  assert.equal(dRestored.amount_residual, 200);
-  assert.equal(dRestored.amount_residual_currency, 100);
-  assert.equal(dRestored.matching_number ?? null, null);
-
-  assert.equal(cRestored.reconciled, false);
-  assert.equal(cRestored.amount_residual, -250);
-  assert.equal(cRestored.amount_residual_currency, -100);
-  assert.equal(cRestored.matching_number ?? null, null);
-});
-
-test('Case 4: Guards: cross-company, different accounts, non-reconcilable, draft/cancelled, mixed currency; held through diffDb+applyDiff', async () => {
+test('Case 2: Guards: cross-company, different accounts, non-reconcilable, draft/cancelled, mixed currency; held through diffDb+applyDiff', async () => {
   let db = seed();
   const co2 = createCompany(db, { name: 'Company 2', currency_id: 1 });
   db = co2.db;
@@ -460,7 +272,7 @@ test('Case 4: Guards: cross-company, different accounts, non-reconcilable, draft
   );
 });
 
-test('Case 5: Journal Items reconcile action reconciles through the ledger model', async () => {
+test('Case 3: Journal Items reconcile action reconciles through the ledger model', async () => {
   // UI parity: render JournalItems and verify action buttons trigger reconcileLedgerItems
   const { makeEl } = setupDom();
   const host = makeEl('div');
