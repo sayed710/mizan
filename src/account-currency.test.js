@@ -350,3 +350,194 @@ test('a generated entry without an exchange rate fails clearly instead of droppi
   }), /exchange rate|rate on or before/i);
   assert.equal(companyCurrencyRecord(made.db, 1).name, 'USD');
 });
+
+test('depreciation entry on a USD-forced account at rate R1, reversal dated when the rate is R2: reversal amount_currency === -original amount_currency; the account\'s foreign balance is 0 after the reversal', async () => {
+  const { createCompanyWithDefaultInvoiceJournals } = await import('./test-support/accounting-company.js');
+  const { confirmAsset, postDepreciation } = await import('./models/assets.js');
+  const { reverseDepreciation } = await import('./models/accounting.js');
+  const { assetAccounts } = await import('./test-support/asset-accounts.js');
+  let db = seed();
+  const eur = euro(db);
+  const usd = companyCurrencyRecord(db, 1);
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'EUR Co', currency_id: eur.id });
+  db = co2.db;
+
+  // Rate R1 = 1.25 (eur baseRate 0.8) on 2026-01-01, Rate R2 = 2.0 (eur baseRate 0.5) on 2026-02-01
+  db = write(db, 'res.currency', eur.id, {
+    rate_ids: [
+      { date: '2026-01-01', rate: 0.8, company_id: null },
+      { date: '2026-02-01', rate: 0.5, company_id: null },
+    ],
+  });
+
+  const accounts = assetAccounts(db, co2.id);
+  db = write(db, 'account.account', accounts.account_depreciation_id, { currency_id: usd.id });
+
+  const assetCreated = create(db, 'account.asset', {
+    name: 'Depreciating Machine',
+    company_id: co2.id,
+    acquisition_date: '2026-01-01',
+    original_value: 1200,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 12,
+    method_period: '1',
+    prorata: false,
+    state: 'draft',
+    depreciation_ids: [],
+    ...accounts,
+  });
+  db = confirmAsset(assetCreated.db, read(assetCreated.db, 'account.asset', assetCreated.id));
+  db = postDepreciation(db, read(db, 'account.asset', assetCreated.id), '2026-01-31');
+
+  const asset = read(db, 'account.asset', assetCreated.id);
+  const postedDep = asset.depreciation_ids.find((l) => l.posted);
+  assert.ok(postedDep, 'depreciation line must be posted');
+  const origMove = read(db, 'account.move', postedDep.move_id);
+  const origLine = origMove.line_ids.find((l) => l.account_id === accounts.account_depreciation_id);
+  assert.equal(origLine.currency_id, usd.id);
+  assert.equal(origLine.amount_currency, -125);
+
+  db = reverseDepreciation(db, origMove, { date: '2026-02-01' });
+
+  const revMove = (db.records['account.move'] ?? []).find((m) => m.reversed_entry_id === origMove.id && m.state === 'posted');
+  assert.ok(revMove, 'reversal move must exist');
+  const revLine = revMove.line_ids.find((l) => l.account_id === accounts.account_depreciation_id);
+  assert.equal(revLine.currency_id, usd.id);
+  assert.equal(revLine.amount_currency, -origLine.amount_currency);
+
+  const foreignBalance = (db.records['account.move'] ?? [])
+    .filter((m) => m.state === 'posted')
+    .flatMap((m) => m.line_ids ?? [])
+    .filter((l) => l.account_id === accounts.account_depreciation_id)
+    .reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0);
+  assert.equal(foreignBalance, 0);
+});
+
+test('revaluation on a USD-forced account: adjustment line has currency_id USD and amount_currency 0; the next-day reversal also 0; the account\'s USD balance is unchanged by revaluation + reversal', async () => {
+  const { createCompanyWithDefaultInvoiceJournals } = await import('./test-support/accounting-company.js');
+  const { revalueForeignBalances } = await import('./models/closing.js');
+  let db = seed();
+  const eur = euro(db);
+  const usd = companyCurrencyRecord(db, 1);
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'EUR Co', currency_id: eur.id });
+  db = co2.db;
+
+  // Rate R1 = 1.25 (eur baseRate 0.8) on 2026-01-01, Rate R2 = 2.0 (eur baseRate 0.5) on 2026-01-31
+  db = write(db, 'res.currency', eur.id, {
+    rate_ids: [
+      { date: '2026-01-01', rate: 0.8, company_id: null },
+      { date: '2026-01-31', rate: 0.5, company_id: null },
+    ],
+  });
+
+  const bnkJournal = search(db, 'account.journal').find((j) => j.company_id === co2.id && j.type === 'bank');
+  const usdAccount = bnkJournal.default_account_id;
+  db = write(db, 'account.account', usdAccount, { currency_id: usd.id });
+
+  const initial = postEntry(db, {
+    journal: bnkJournal.code,
+    company: co2.id,
+    date: '2026-01-01',
+    ref: 'Initial USD deposit',
+    lines: [
+      { account: usdAccount, debit: 100, credit: 0 },
+      { account: accountId(db, '301000', co2.id) ?? accountId(db, '301000'), credit: 100, debit: 0 },
+    ],
+  });
+  db = initial.db;
+
+  const initLine = read(db, 'account.move', initial.id).line_ids.find((l) => l.account_id === usdAccount);
+  assert.equal(initLine.currency_id, usd.id);
+  assert.equal(initLine.amount_currency, 125);
+
+  const getUsdBalance = (d) => (d.records['account.move'] ?? [])
+    .filter((m) => m.state === 'posted')
+    .flatMap((m) => m.line_ids ?? [])
+    .filter((l) => l.account_id === usdAccount)
+    .reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0);
+
+  const balanceBefore = getUsdBalance(db);
+  assert.equal(balanceBefore, 125);
+
+  db = revalueForeignBalances(db, '2026-01-31', { companyId: co2.id });
+
+  const adjMove = (db.records['account.move'] ?? []).find((m) => m.company_id === co2.id && m.revaluation_date === '2026-01-31' && m.state === 'posted');
+  assert.ok(adjMove, 'revaluation adjustment move must exist');
+  const adjLine = adjMove.line_ids.find((l) => l.account_id === usdAccount);
+  assert.ok(adjLine, 'adjustment line on USD account must exist');
+  assert.equal(adjLine.currency_id, usd.id);
+  assert.equal(adjLine.amount_currency, 0);
+
+  const revMove = read(db, 'account.move', adjMove.reversal_move_id);
+  assert.ok(revMove, 'reversal move must exist');
+  const revLine = revMove.line_ids.find((l) => l.account_id === usdAccount);
+  assert.ok(revLine, 'reversal line on USD account must exist');
+  assert.equal(revLine.currency_id, usd.id);
+  assert.equal(revLine.amount_currency, 0);
+
+  const balanceAfter = getUsdBalance(db);
+  assert.equal(balanceAfter, balanceBefore);
+});
+
+test('an exchange difference entry touching a USD-forced account leaves that account\'s USD balance unchanged', async () => {
+  const { createCompanyWithDefaultInvoiceJournals, withDefaultBankJournal } = await import('./test-support/accounting-company.js');
+  let db = seed();
+  const eur = euro(db);
+  const usd = companyCurrencyRecord(db, 1);
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'EUR Co', currency_id: eur.id });
+  db = withDefaultBankJournal(co2.db, co2.id);
+
+  // Rate R1 = 1.25 (eur baseRate 0.8) on 2026-01-01, Rate R2 = 2.0 (eur baseRate 0.5) on 2026-01-15
+  db = write(db, 'res.currency', eur.id, {
+    rate_ids: [
+      { date: '2026-01-01', rate: 0.8, company_id: null },
+      { date: '2026-01-15', rate: 0.5, company_id: null },
+    ],
+  });
+
+  const partner = search(db, 'res.partner').find((p) => p.is_company);
+  const recAccountId = accountId(db, '121000', co2.id) ?? accountId(db, '121000');
+  db = write(db, 'account.account', recAccountId, { currency_id: usd.id });
+
+  const inv = create(db, 'account.move', {
+    company_id: co2.id,
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: '2026-01-01',
+    currency_id: usd.id,
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  const bankJournal = search(db, 'account.journal').find((j) => j.company_id === co2.id && j.type === 'bank');
+  const pay = create(db, 'account.payment', {
+    company_id: co2.id,
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: partner.id,
+    amount: 100,
+    currency_id: usd.id,
+    date: '2026-01-15',
+    journal_id: bankJournal.id,
+  });
+  db = postPayment(pay.db, read(pay.db, 'account.payment', pay.id));
+
+  const settled = read(db, 'account.move', inv.id);
+  const fxMoveId = settled.payments?.[0]?.payment_fx_move_id;
+  assert.ok(fxMoveId, 'exchange difference move must exist');
+
+  const fxMove = read(db, 'account.move', fxMoveId);
+  const recLine = fxMove.line_ids.find((l) => l.account_id === recAccountId);
+  assert.ok(recLine, 'exchange difference must touch the receivable account');
+  assert.equal(recLine.currency_id, usd.id);
+  assert.equal(recLine.amount_currency, 0);
+
+  const getUsdBalance = (d) => (d.records['account.move'] ?? [])
+    .filter((m) => m.state === 'posted')
+    .flatMap((m) => m.line_ids ?? [])
+    .filter((l) => l.account_id === recAccountId)
+    .reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0);
+
+  assert.equal(getUsdBalance(db), 0);
+});

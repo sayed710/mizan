@@ -565,6 +565,36 @@ export function accountCurrencyFields(db, account, line, net, companyId, date) {
 }
 
 /**
+ * Currency fields for a line that only adjusts the company value (exchange difference, revaluation): on an account
+ * forcing a foreign currency the line carries that currency with no foreign amount.
+ */
+export function valueOnlyCurrencyFields(db, account, companyId) {
+  const acc = read(db, 'account.account', typeof account === 'number' ? account : accountId(db, account, companyId));
+  return acc?.currency_id && acc.currency_id !== companyCurrencyRecord(db, companyId).id ? { currency_id: acc.currency_id, amount_currency: 0 } : {};
+}
+
+/**
+ * Turn a posted journal item into a postEntry line for a reversing entry:
+ * swaps debit and credit, preserves partner_id and analytic_distribution, and
+ * keeps the same currency_id with amount_currency negated when present.
+ */
+export function reversalLine(line) {
+  const accountId = line.account_id ?? line.account;
+  return {
+    account: accountId,
+    account_id: accountId,
+    debit: line.credit ?? 0,
+    credit: line.debit ?? 0,
+    partner_id: line.partner_id ?? null,
+    ...(line.analytic_distribution != null ? { analytic_distribution: line.analytic_distribution } : {}),
+    ...(line.currency_id ? {
+      currency_id: line.currency_id,
+      amount_currency: -(Number(line.amount_currency) || 0) || 0,
+    } : {}),
+  };
+}
+
+/**
  * Create and post a miscellaneous entry.
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
