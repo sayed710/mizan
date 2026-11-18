@@ -165,6 +165,38 @@ export function accountsError(db, before, after) {
   return bad < 0 ? null : `Journal item ${bad + 1} needs an existing account`;
 }
 
+/**
+ * Whether `line` is stated in a currency other than its account's currency. A line without an explicit currency is
+ * stated in the entry company's currency; an empty line without a currency has no amount to state.
+ */
+function lineCurrencyMismatch(db, line, account, companyId) {
+  if (!account?.currency_id) return false;
+  const amount = (Number(line.debit) || 0) + (Number(line.credit) || 0);
+  if (!amount && !line.currency_id) return false;
+  const currencyId = line.currency_id ?? companyCurrencyRecord(db, companyId).id;
+  return currencyId !== account.currency_id;
+}
+
+/** A posted entry keeps every journal item in its account's currency. */
+export function accountCurrencyError(db, before, after) {
+  if (after.state !== 'posted') return null;
+  if (before?.state === 'posted' && JSON.stringify(before.line_ids) === JSON.stringify(after.line_ids)) return null;
+  const companyId = after.company_id ?? 1;
+  const accounts = new Map((db.records?.['account.account'] ?? []).map((account) => [account.id, account]));
+  const bad = (after.line_ids ?? []).some((line) => lineCurrencyMismatch(db, line, accounts.get(line.account_id), companyId));
+  return bad ? 'The account forces journal items in its currency' : null;
+}
+
+/** An account cannot adopt a currency that its already posted journal items do not use. */
+export function accountCurrencyChangeError(db, before, after) {
+  if ((before?.currency_id ?? null) === (after?.currency_id ?? null) || !after.currency_id) return null;
+  const moves = db.records?.['account.move'] ?? [];
+  const bad = moves.some((move) => move.state === 'posted'
+    && (move.line_ids ?? []).some((line) => line.account_id === after.id
+      && lineCurrencyMismatch(db, line, after, move.company_id ?? after.company_id ?? 1)));
+  return bad ? 'The account has journal items in another currency' : null;
+}
+
 /** Accounts used by journal items cannot be deleted (archive them instead): their balances would vanish from reports. */
 export function accountDeleteGuard(db, account, pending = db) {
   // `pending` is the database as the diff leaves it, so moves created in the same diff count too.
@@ -590,7 +622,7 @@ function securedMoveRule(before, after) {
 }
 
 export function moveGuard(db, before, after, _ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
@@ -701,7 +733,7 @@ export function taxAccounts(db, companyId) {
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
-function taxItems(db, period) {
+export function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
   const companyId = period?.company_id ?? period?.company;
   const accounts = taxAccounts(db, companyId);
@@ -906,15 +938,25 @@ export function postTaxReturnClosing(db, returnId) {
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
 
+/** Per-tax report row a tax item belongs to: its side and tax, or its tax name when it has no tax. */
+export function taxItemKey(l) {
+  return JSON.stringify([l.side, l.tax_id ?? null, l.tax_id == null ? (l.tax_name || 'Untagged') : null]);
+}
+
 /**
  * Base and tax per tax from the same journal items as the totals, so the rows always add up to them:
  * invoices, POS, expenses and cash-basis releases alike, in company currency; refunds come out negative.
  */
 export function taxesByTax(db, period = {}) {
+  return taxRowsFromItems(taxItems(db, period));
+}
+
+/** Group tax items into per-tax rows (side, tax, base, tax amount), sorted by side then name. */
+export function taxRowsFromItems(items) {
   const rows = new Map();
-  for (const l of taxItems(db, period)) {
+  for (const l of items) {
     const name = l.tax_name || 'Untagged';
-    const key = JSON.stringify([l.side, l.tax_id ?? null, l.tax_id == null ? name : null]);
+    const key = taxItemKey(l);
     const row = rows.get(key) ?? { side: l.side, tax_id: l.tax_id ?? null, name, base: 0, tax: 0 };
     rows.set(key, { ...row, base: round(row.base + taxItemBase(l)), tax: round(row.tax + l.tax) });
   }

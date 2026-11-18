@@ -545,6 +545,56 @@ export function postedBillLine(move, index) {
 }
 
 /**
+ * Currency fields a journal item needs when it is stated in a foreign currency. An explicit line currency wins; an
+ * account currency is applied to generated lines that do not choose one. The amount in that currency comes from the
+ * company amount at the entry date, so every generator posts converted journal items through one helper.
+ */
+export function accountCurrencyFields(db, account, line, net, companyId, date) {
+  const companyCurrency = companyCurrencyRecord(db, companyId);
+  const explicit = line.currency_id ? read(db, 'res.currency', line.currency_id) : null;
+  if (line.currency_id && !explicit) throw new Error('Journal item currency does not exist');
+  const accountCurrency = account?.currency_id ? read(db, 'res.currency', account.currency_id) : null;
+  if (account?.currency_id && !accountCurrency) throw new Error('Select an existing account currency');
+  const applied = accountCurrency && accountCurrency.id !== companyCurrency.id ? accountCurrency : null;
+  const currency = explicit ?? applied;
+  if (!currency) return {};
+  const amount = line.amount_currency == null && currency.id === applied?.id
+    ? net * rateAt(db, currency.id, date, companyId)
+    : line.amount_currency;
+  return { currency_id: currency.id, amount_currency: roundCurrency(amount ?? 0, currency) };
+}
+
+/**
+ * Currency fields for a line that only adjusts the company value (exchange difference, revaluation): on an account
+ * forcing a foreign currency the line carries that currency with no foreign amount.
+ */
+export function valueOnlyCurrencyFields(db, account, companyId) {
+  const acc = read(db, 'account.account', typeof account === 'number' ? account : accountId(db, account, companyId));
+  return acc?.currency_id && acc.currency_id !== companyCurrencyRecord(db, companyId).id ? { currency_id: acc.currency_id, amount_currency: 0 } : {};
+}
+
+/**
+ * Turn a posted journal item into a postEntry line for a reversing entry:
+ * swaps debit and credit, preserves partner_id and analytic_distribution, and
+ * keeps the same currency_id with amount_currency negated when present.
+ */
+export function reversalLine(line) {
+  const accountId = line.account_id ?? line.account;
+  return {
+    account: accountId,
+    account_id: accountId,
+    debit: line.credit ?? 0,
+    credit: line.debit ?? 0,
+    partner_id: line.partner_id ?? null,
+    ...(line.analytic_distribution != null ? { analytic_distribution: line.analytic_distribution } : {}),
+    ...(line.currency_id ? {
+      currency_id: line.currency_id,
+      amount_currency: -(Number(line.amount_currency) || 0) || 0,
+    } : {}),
+  };
+}
+
+/**
  * Create and post a miscellaneous entry.
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
@@ -590,8 +640,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const ownCurrency = companyCurrencyRecord(db, company);
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
-    const foreignCurrency = l.currency_id ? read(db, 'res.currency', l.currency_id) : null;
-    if (l.currency_id && !foreignCurrency) throw new Error('Journal item currency does not exist');
+    const currencyFields = accountCurrencyFields(db, acc, l, net, company, date);
     // Callers pass an explicit allocation; business entries receive applicable defaults from distribution models.
     let distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
     if (distribution == null && !system_generated && analyticEligibleAccount(acc)) {
@@ -606,7 +655,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
       }
     }
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
-    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
+    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...currencyFields, ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
   if (analyticPostingHooks?.checkMandatoryPlans) {

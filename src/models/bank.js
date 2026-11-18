@@ -618,7 +618,13 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
     return null;
   }
 
-  if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(incoming ? bankLines[0].debit : bankLines[0].credit) !== referenceAmount || (bankLines[0].currency_id && roundCurrency(bankLines[0].amount_currency, read(db, 'res.currency', bankLines[0].currency_id)) !== roundCurrency(after.amount, read(db, 'res.currency', bankLines[0].currency_id)))) {
+  const bankLine = bankLines[0];
+  const bankCurrency = bankLine?.currency_id ? read(db, 'res.currency', bankLine.currency_id) : null;
+  // A journal-currency statement is booked in its own units; an account-currency line converts the company amount.
+  const currencyAmountMatches = !bankCurrency
+    || roundCurrency(bankLine.amount_currency, bankCurrency) === roundCurrency(after.amount, bankCurrency)
+    || toCompany(db, bankCurrency.id, bankLine.amount_currency, after.date ?? today(), company) === referenceAmount;
+  if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(incoming ? bankLine.debit : bankLine.credit) !== referenceAmount || !currencyAmountMatches) {
     return 'The bank entry must book the transaction amount once';
   }
   const suspense = allocations.some((a) => a.payment_move_id !== after.bank_move_id) ? ensureBankSuspense(db, company, via.id).id : null;
