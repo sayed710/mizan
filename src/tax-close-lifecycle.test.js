@@ -94,6 +94,10 @@ test('behavior 4: resetting a closed return to draft is allowed only while nothi
     'returnGuard in applyDiff must reject resetting return to draft when a later closed return exists'
   );
 
+  // A sync client cannot reclassify the type as audit to slip past the reset rule.
+  const auditType = { ...db, records: { ...db.records, 'account.return.type': db.records['account.return.type'].map((t) => (t.id === vatType1.id ? { ...t, category: 'audit' } : t)) } };
+  assert.throws(() => applyDiff(db, diffDb(db, auditType), { isAdmin: true }), /Cannot change the category of a return type that has returns/);
+
   // 5. Company 2 is untouched: Company 1 having later returns does not block Company 2 from resetting
   const resetC2 = resetReturnToDraft(db, retC2Res.id);
   assert.equal(read(resetC2, 'account.return', retC2Res.id).state, 'new');

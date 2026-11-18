@@ -536,6 +536,11 @@ function returnGuard(db, before, after) {
 export const taxReturnModels = {
   'account.return.type': {
     label: 'Return Types',
+    // The tax/audit category decides which workflow and guards a return follows, so it is fixed once returns use the type.
+    guard: (db, before, after) => (before && before.category !== after.category
+      && (db.records['account.return'] ?? []).some((r) => r.type_id === after.id)
+      ? 'Cannot change the category of a return type that has returns'
+      : null),
     fields: {
       name: { type: 'char', label: 'Return Type', required: true },
       category: {
