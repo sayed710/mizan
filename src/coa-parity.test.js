@@ -178,7 +178,6 @@ test('account.account form renders Balance header, code+name title, and Accounti
       'Default Taxes',
       'Fiscal Category',
       'Tags',
-      'Account Currency',
       'Allow Reconciliation',
       'Active',
       'Deferred',

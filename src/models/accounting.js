@@ -77,20 +77,6 @@ function archivedLineAccountGuard(db, before, after, ctx = {}) {
   return null;
 }
 
-/** An account kept in a foreign currency only takes posted journal items recorded in that currency. */
-function accountCurrencyLineGuard(db, before, after) {
-  if (after.state !== 'posted' || (before?.state === 'posted' && before.line_ids === after.line_ids)) return null;
-  const own = findCompanyCurrencyRecord(db, after.company_id ?? 1)?.id;
-  for (const line of after.line_ids ?? []) {
-    const account = read(db, 'account.account', line.account_id);
-    if (!account?.currency_id || account.currency_id === own) continue;
-    if (line.currency_id !== account.currency_id || line.amount_currency == null) {
-      return `Account ${account.code || account.name} only accepts journal items in ${read(db, 'res.currency', account.currency_id)?.name ?? account.currency_id}`;
-    }
-  }
-  return null;
-}
-
 /**
  * Odoo gives sale and purchase journals their own credit note sequence ("R" + the invoice prefix);
  * any journal given a distinct refund prefix uses it too.
@@ -1885,7 +1871,6 @@ export const accountingModels = {
         hideWhen: (r) => !isIncomeOrExpenseAccount(r),
       },
       asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Account Currency', help: 'Journal items on this account are kept in this currency and revalued at closing.', tracking: true },
       description: { type: 'text', label: 'Description' },
       current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
     },
@@ -1934,7 +1919,7 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'currency_id', 'reconcile', 'active'],
+            ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
             ['is_deferred', 'deferred_account_id', 'asset_model_id'],
             ['description'],
           ],
@@ -2235,7 +2220,7 @@ export const accountingModels = {
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
         return 'The inter-company bill is posted or paid; issue a credit note instead';
       }
-      return archivedLineAccountGuard(db, before, after, ctx) ?? accountCurrencyLineGuard(db, before, after) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
+      return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
     },
     invariant: (db, after, before, stored) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before, stored),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),

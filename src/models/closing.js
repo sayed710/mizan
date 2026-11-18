@@ -180,8 +180,6 @@ const isRevaluableAccount = (account) => Boolean(
   account && (
     revaluableTypes.has(account.account_type)
     || isLiquidityAccount(account)
-    // An account with its own currency is explicitly kept in that currency, so its balance is revalued too.
-    || account.currency_id
   ),
 );
 const journalLineKey = (moveId, index) => `${moveId}:${index}`;

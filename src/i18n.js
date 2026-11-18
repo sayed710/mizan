@@ -1283,8 +1283,6 @@ const ar = {
   'Hard Lock Date must be a valid date': 'يجب أن يكون تاريخ الإقفال النهائي تاريخاً صالحاً',
   'To Check': 'قيد المراجعة',
   'Unreconciled': 'غير مطابق',
-  'Account Currency': 'عملة الحساب',
-  'Journal items on this account are kept in this currency and revalued at closing.': 'تُسجَّل بنود اليومية على هذا الحساب بهذه العملة ويُعاد تقييمها عند الإقفال.',
   'Whole Unit Name for Amounts in Words': 'اسم الوحدة الكاملة للمبالغ المكتوبة بالحروف',
   'Currency Status': 'حالة العملة',
   'Company IBAN for Payment QR': 'رقم IBAN للشركة لرمز دفع QR',

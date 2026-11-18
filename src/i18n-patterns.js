@@ -32,7 +32,6 @@ const patterns = {
   'Please answer: {1}': 'يرجى الإجابة عن: {1}',
   '{1} record(s) match': 'عدد السجلات المطابقة: {1}',
   'Journal {1} belongs to another company': 'دفتر اليومية {1} يتبع شركة أخرى',
-  'Account {1} only accepts journal items in {2}': 'الحساب {1} لا يقبل بنود يومية إلا بعملة {2}',
   'Configure the {1} account on asset {2}': 'حدّد حساب {1*} على الأصل {2}',
   '{1} account {2} belongs to another company': 'حساب {1*} ({2}) يتبع شركة أخرى',
   'Configure the disposal {1} account on company {2}': 'حدّد حساب {1*} الاستبعاد على الشركة {2}',
