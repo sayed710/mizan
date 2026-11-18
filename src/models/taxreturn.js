@@ -392,12 +392,30 @@ export function payReturn(db, returnId) {
   }), ret);
 }
 
+/** Check whether a later submitted or paid return exists for any company covered by `ret`. */
+export function hasLaterClosedReturn(db, ret) {
+  if (!ret?.date_to) return false;
+  const companies = returnCompanies(db, ret);
+  const returns = db.records?.['account.return'] ?? [];
+  return returns.some((r) => {
+    if (r.id === ret.id) return false;
+    if (!['submitted', 'paid'].includes(r.state)) return false;
+    if (!r.date_to || r.date_to < ret.date_to) return false;
+    if (r.date_to === ret.date_to && (r.date_from ?? '') <= (ret.date_from ?? '')) return false;
+    const rCompanies = returnCompanies(db, r);
+    return rCompanies.some((c) => companies.includes(c));
+  });
+}
+
 /** Reset to draft: cancels closing move and unlocks period, forbidden after pay. */
 export function resetReturnToDraft(db, returnId) {
   const ret = read(db, 'account.return', returnId);
   if (!ret) throw new Error('Tax return not found');
   if (ret.state === 'paid') {
     throw new Error('Paid returns cannot be reset to draft');
+  }
+  if (ret.state === 'submitted' && hasLaterClosedReturn(db, ret)) {
+    throw new Error('Cannot reset tax return: the period is locked by a later closed return');
   }
 
   let nextDb = syncTaxLockDate(db, ret, ret.id);
@@ -500,6 +518,9 @@ function returnGuard(db, before, after) {
       return 'Submitted or paid tax return closing links cannot be modified';
     }
     if (before.state === 'submitted' && after.state === 'new') {
+      if (hasLaterClosedReturn(db, before)) {
+        return 'Cannot reset tax return: the period is locked by a later closed return';
+      }
       if ((before.closing_move_ids ?? []).some((id) => read(db, 'account.move', id)?.state !== 'cancel')) {
         return 'Tax return closing moves must be cancelled before reset';
       }
