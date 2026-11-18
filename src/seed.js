@@ -117,6 +117,7 @@ export function seed() {
   CHART.forEach(([code, name, account_type, key]) => {
     const id = add('account.account', {
       code, name, account_type,
+      ...(account_type === 'asset_fixed' ? { create_asset: 'draft' } : {}),
       reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
       tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
     });

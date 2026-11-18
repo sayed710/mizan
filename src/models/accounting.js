@@ -19,7 +19,7 @@ import { t } from '../i18n.js';
 import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, deferralLinksMove, registerDeferredPostMoveHook, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, syncDeferralOnMoveStateChange, validateInvoiceDeferralCredit } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
-import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
+import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard, confirmAsset } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
@@ -823,17 +823,20 @@ function offsetCreditNote(db, noteId) {
   return applyCreditNote(db, noteId, invoice.id, settlementDate, value);
 }
 
-/** Bill lines booked on a fixed-asset account become draft assets (once per bill line). */
+/** Bill lines booked on an account configured to create assets generate draft or validated assets (once per bill line). */
 function draftAssetsFromBill(db, bill) {
-  const fixed = new Set((db.records['account.account'] ?? []).filter((a) => a.account_type === 'asset_fixed').map((a) => a.id));
   const existing = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id && a.state === 'draft');
   const retained = new Set();
+  // Without a model journal, assets use the company's configured general journal.
+  const defaultJournal = read(db, 'res.company', bill.company_id ?? 1)?.default_general_journal_id ?? null;
   const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
     const booked = postedBillLine(bill, index);
     if (!booked || booked.amount === 0) return next;
     const account = read(next, 'account.account', booked.account);
     const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
-    if (!fixed.has(booked.account) && !model) return next;
+    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
+    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
+    if (mode === 'no') return next;
     const modelJournal = model?.journal_id && read(next, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
     const product = read(next, 'product', line.product_id);
     const values = {
@@ -849,23 +852,36 @@ function draftAssetsFromBill(db, bill) {
         prorata: Boolean(model.prorata),
         account_depreciation_id: model.account_depreciation_id ?? null,
         account_depreciation_expense_id: model.account_depreciation_expense_id ?? null,
-        ...(modelJournal ? { journal_id: modelJournal } : {}),
+        journal_id: modelJournal ?? defaultJournal,
         analytic_distribution: model.analytic_distribution ?? null,
       } : {
         model_id: null,
         ...ASSET_DEPRECIATION_DEFAULTS,
         account_depreciation_id: null,
         account_depreciation_expense_id: null,
-        journal_id: null,
+        journal_id: defaultJournal,
         analytic_distribution: null,
       }),
     };
     const asset = existing.find((a) => a.bill_line === index);
+    let assetId;
+    let nextDb;
     if (asset) {
       retained.add(asset.id);
-      return write(next, 'account.asset', asset.id, { ...values, depreciation_ids: [] });
+      assetId = asset.id;
+      nextDb = write(next, 'account.asset', asset.id, { ...values, depreciation_ids: [] });
+    } else {
+      const created = create(next, 'account.asset', values);
+      assetId = created.id;
+      nextDb = created.db;
     }
-    return create(next, 'account.asset', values).db;
+    if (mode === 'validate') {
+      const assetRec = read(nextDb, 'account.asset', assetId);
+      if (assetRec && assetRec.state === 'draft') {
+        nextDb = confirmAsset(nextDb, assetRec);
+      }
+    }
+    return nextDb;
   }, db);
   const obsolete = existing.filter((asset) => !retained.has(asset.id)).map((asset) => asset.id);
   return obsolete.length ? unlink(result, 'account.asset', obsolete) : result;
@@ -1871,6 +1887,12 @@ export const accountingModels = {
         hideWhen: (r) => !isIncomeOrExpenseAccount(r),
       },
       asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      create_asset: {
+        type: 'selection',
+        label: 'Create Asset',
+        options: [['no', 'No'], ['draft', 'Draft'], ['validate', 'Validated']],
+        help: 'Create an asset in draft or validated status upon bill validation.',
+      },
       description: { type: 'text', label: 'Description' },
       current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
     },
@@ -1920,7 +1942,7 @@ export const accountingModels = {
           label: 'Accounting',
           groups: [
             ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
-            ['is_deferred', 'deferred_account_id', 'asset_model_id'],
+            ['is_deferred', 'deferred_account_id', 'create_asset', 'asset_model_id'],
             ['description'],
           ],
         },
@@ -2235,6 +2257,12 @@ export const accountingModels = {
       if (before.state === 'posted' && after.state !== 'posted') {
         db = reverseInvoiceDeferrals(db, before);
         db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry, attemptAutoPostMove);
+      }
+      if (after.state === 'cancel' && before?.state !== 'cancel') {
+        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === (before?.id ?? after.id) && a.state === 'draft').map((a) => a.id);
+        if (draftAssets.length) {
+          db = unlink(db, 'account.asset', draftAssets);
+        }
       }
       if (before?.state !== after.state) {
         db = syncDeferralOnMoveStateChange(db, after, before?.state);
