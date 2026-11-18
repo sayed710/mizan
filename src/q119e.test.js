@@ -439,14 +439,16 @@ test('Requirement 2 invariant (a): when no line carries multiple matching taxes,
   const fb = makeTax(fa.db, { name: 'FB 5%', amount: 5, type_tax_use: 'sale', accountCode: '251000' });
   db = fb.db;
   // Fixed dates before the seed's relative data, with their own EUR rate, keep this test independent of the current date.
-  db = { ...db, records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === 2 ? { ...c, rate_ids: [{ date: '2023-01-01', rate: 0.92, company_id: null }, ...c.rate_ids] } : c)) } };
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  assert.ok(eur, 'seed must provide EUR');
+  db = { ...db, records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === eur.id ? { ...c, rate_ids: [{ date: '2023-01-01', rate: 0.92, company_id: null }, ...c.rate_ids] } : c)) } };
 
   for (let k = 0; k < 8; k += 1) {
     const inv = postedInvoice(db, {
       partnerId: 1,
       moveType: 'out_invoice',
       date: '2023-10-05',
-      currencyId: 2,
+      currencyId: eur.id,
       lines: [
         { product_id: 5, qty: 1, price_unit: 10.01 + k * 3.33, ...combineTaxSnapshots(db, [fa.id]) },
         { product_id: 5, qty: 1, price_unit: 7.77 + k * 1.11, ...combineTaxSnapshots(db, [fb.id]) },
