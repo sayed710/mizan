@@ -3222,6 +3222,9 @@ const ar = {
   'Unfold All': 'توسيع الكل',
   'Collapse All': 'طي الكل',
   'Open Account': 'فتح الحساب',
+  'Cannot turn off Secure Posted Entries with Hash on a journal with secured entries': 'لا يمكن إيقاف تأمين القيود المرحلة بالتجزئة في دفتر يحتوي على قيود مؤمَّنة',
+  'Cash Basis Journal': 'دفتر الأساس النقدي',
+  'General journal used for cash-basis tax release entries.': 'دفتر القيود العامة المستخدم لقيود تحرير ضريبة الأساس النقدي.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
