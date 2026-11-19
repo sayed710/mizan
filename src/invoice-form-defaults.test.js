@@ -1263,3 +1263,169 @@ test('15. Clearing or editing deferred dates replaces auto-filled analytic distr
   assert.equal(postedLine?.account_id, regularAccount.id, 'Bill line posts to the product expense account, not the deferred expense account');
   assert.ok(!postedLine?.analytic_distribution || Object.keys(postedLine.analytic_distribution).length === 0, 'Posted journal item does not inherit the deferred analytic distribution');
 });
+
+test('16. A bill line with a deferred account where the analytic plan is mandatory only for the deferred account cannot be posted without an allocation', () => {
+  let db = seed();
+  const rawExpense = create(db, 'account.account', { code: '611001', name: 'Raw Expense', account_type: 'expense', company_id: 1 });
+  db = rawExpense.db;
+  const deferredExpense = create(db, 'account.account', { code: '211001', name: 'Deferred Expense Account', account_type: 'asset_current', company_id: 1 });
+  db = deferredExpense.db;
+  db = write(db, 'res.company', 1, { deferred_expense_account_id: deferredExpense.id });
+  const product = create(db, 'product', {
+    name: 'Prepaid Cloud Hosting',
+    type: 'service',
+    cost: 500,
+    list_price: 500,
+    property_account_expense_id: rawExpense.id,
+  });
+  db = product.db;
+
+  const plan = create(db, 'account.analytic.plan', {
+    name: 'Prepaid Audit Plan',
+    default_applicability: 'optional',
+    applicability_ids: [
+      { account_prefix: '211', applicability: 'mandatory', business_domain: 'bill' },
+    ],
+  });
+  db = plan.db;
+  const analyticAcc = create(db, 'account.analytic.account', { name: 'Infrastructure', plan_id: plan.id });
+  db = analyticAcc.db;
+
+  const lineField = models['account.move'].fields.invoice_line_ids;
+  const billMove = { move_type: 'in_invoice', partner_id: 1, company_id: 1 };
+  const rawLine = lineField.onchange({ product_id: product.id, qty: 1, price_unit: 500 }, 'product_id', db, billMove);
+  assert.equal(rawLine.account_id, rawExpense.id);
+
+  // Add deferred dates without analytic distribution
+  const datedLine = {
+    ...rawLine,
+    deferred_start_date: '2026-06-01',
+    deferred_end_date: '2027-05-31',
+    analytic_distribution: {},
+  };
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 1,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [datedLine],
+  });
+  db = bill.db;
+
+  // Posting without allocation must fail because the plan is mandatory for the deferred account (211001)
+  assert.throws(
+    () => postMove(db, bill.id),
+    /Allocate product lines to the mandatory analytic plan: Prepaid Audit Plan/
+  );
+
+  // Providing the allocation allows posting
+  const allocatedBill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 1,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [{ ...datedLine, analytic_distribution: { [analyticAcc.id]: 100 } }],
+  });
+  db = allocatedBill.db;
+  const postedDb = postMove(db, allocatedBill.id);
+  const syncedDb = applyDiff(db, diffDb(db, postedDb), { isAdmin: true });
+  const posted = read(syncedDb, 'account.move', allocatedBill.id);
+  assert.equal(posted.state, 'posted');
+  const postedLine = posted.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(postedLine?.account_id, deferredExpense.id);
+});
+
+test('17. Chained fiscal position mapping (A->B and B->C): credit note, correction, debit note, and recurring copy post to B', () => {
+  let db = seed();
+  const accA = create(db, 'account.account', { code: '400011', name: 'Income A', account_type: 'income', company_id: 1 });
+  db = accA.db;
+  const accB = create(db, 'account.account', { code: '400012', name: 'Income B', account_type: 'income', company_id: 1 });
+  db = accB.db;
+  const accC = create(db, 'account.account', { code: '400013', name: 'Income C', account_type: 'income', company_id: 1 });
+  db = accC.db;
+
+  const fp = create(db, 'account.fiscal.position', {
+    name: 'Chained Mapping FP',
+    account_ids: [
+      { account_src_id: accA.id, account_dest_id: accB.id },
+      { account_src_id: accB.id, account_dest_id: accC.id },
+    ],
+  });
+  db = fp.db;
+
+  const product = create(db, 'product', {
+    name: 'Chained Product',
+    type: 'service',
+    list_price: 200,
+    property_account_income_id: accA.id,
+  });
+  db = product.db;
+
+  const invoiceRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-07-01',
+    auto_post: 'monthly',
+    auto_post_until: '2026-12-31',
+    fiscal_position_id: fp.id,
+    invoice_line_ids: [
+      { product_id: product.id, qty: 1, price_unit: 200, tax: 0 },
+    ],
+  });
+  db = invoiceRes.db;
+  const invoice = read(db, 'account.move', invoiceRes.id);
+  const lineField = models['account.move'].fields.invoice_line_ids;
+  const filledLine = lineField.onchange(invoice.invoice_line_ids[0], 'product_id', db, invoice);
+  assert.equal(filledLine.account_id, accB.id);
+  assert.equal(filledLine.account_fiscal_position_id, fp.id);
+  db = write(db, 'account.move', invoice.id, { invoice_line_ids: [filledLine] });
+
+  // Post original invoice
+  db = postMove(db, invoice.id);
+  const postedInv = read(db, 'account.move', invoice.id);
+  const invPostedLine = postedInv.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(invPostedLine?.account_id, accB.id, 'Invoice line posts to B');
+
+  // 1. Credit note: reversing the invoice must post to B (not B->C)
+  const refundRes = models['account.move'].form.buttons.find((b) => b.label === 'Credit Note').run(db, postedInv, { method: 'refund', reason: 'Return' });
+  db = refundRes.db;
+  const creditNoteId = Number(refundRes.go.split('/').pop());
+  const creditNote = read(db, 'account.move', creditNoteId);
+  assert.equal(creditNote.fiscal_position_id, fp.id);
+  db = postMove(db, creditNote.id);
+  const postedCreditNote = read(db, 'account.move', creditNote.id);
+  const cnPostedLine = postedCreditNote.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(cnPostedLine?.account_id, accB.id, 'Credit note line posts to B (does not chain B->C)');
+
+  // 2. Correction: correcting the credit note must post to B (not B->C)
+  const corrRes = models['account.move'].form.buttons.find((b) => b.label === 'Correct Credit Note').run(db, postedCreditNote);
+  db = corrRes.db;
+  const corrId = Number(corrRes.go.split('/').pop());
+  const corrInvoice = read(db, 'account.move', corrId);
+  assert.equal(corrInvoice.fiscal_position_id, fp.id);
+  db = postMove(db, corrInvoice.id);
+  const postedCorr = read(db, 'account.move', corrInvoice.id);
+  const corrPostedLine = postedCorr.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(corrPostedLine?.account_id, accB.id, 'Correction line posts to B (does not chain B->C)');
+
+  // 3. Debit note: debiting the posted invoice must post to B (not B->C)
+  const debitRes = models['account.move'].form.buttons.find((b) => b.label === 'Debit Note').run(db, postedInv, { copy_lines: true, reason: 'Extra charge' });
+  db = debitRes.db;
+  const debitId = Number(debitRes.go.split('/').pop());
+  const debitMove = read(db, 'account.move', debitId);
+  assert.equal(debitMove.fiscal_position_id, fp.id);
+  db = postMove(db, debitMove.id);
+  const postedDebit = read(db, 'account.move', debitMove.id);
+  const debitPostedLine = postedDebit.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(debitPostedLine?.account_id, accB.id, 'Debit note line posts to B (does not chain B->C)');
+
+  // 4. Recurring copy: recurring entry generated from invoice must post to B (not B->C)
+  const nextRecurMove = search(db, 'account.move').find((m) => m.auto_post_origin_id === invoice.id);
+  assert.ok(nextRecurMove, 'Recurring entry was created');
+  assert.equal(nextRecurMove.fiscal_position_id, fp.id);
+  const postedRecurDb = postMove(db, nextRecurMove.id);
+  const syncedRecurDb = applyDiff(db, diffDb(db, postedRecurDb), { isAdmin: true });
+  const postedRecur = read(syncedRecurDb, 'account.move', nextRecurMove.id);
+  assert.equal(postedRecur.state, 'posted');
+  const recurPostedLine = postedRecur.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(recurPostedLine?.account_id, accB.id, 'Recurring copy line posts to B (does not chain B->C)');
+});

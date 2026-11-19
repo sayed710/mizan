@@ -93,7 +93,7 @@ export function planApplicability(db, plan, line, move = null) {
     ? (['out_invoice', 'out_refund'].includes(move.move_type) ? 'invoice' : 'bill')
     : move?.move_type === 'entry' ? 'general' : null;
 
-  const accountId = line?.account_id || (isInvoiceDoc ? invoiceLineAccount(db, move, line) : null);
+  const accountId = isInvoiceDoc ? (invoiceLineAccount(db, move, line) ?? line?.account_id ?? null) : (line?.account_id ?? null);
   const code = accountId ? read(db, 'account.account', accountId)?.code || '' : '';
 
   const product = line?.product_id ? read(db, 'product', line.product_id) : null;

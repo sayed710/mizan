@@ -264,7 +264,18 @@ export function invoiceLineOriginalAccount(db, move, line, journal) {
     source.recorded ||
     (source.type === 'line' && move?.fiscal_position_id && line.account_fiscal_position_id === move.fiscal_position_id)
   );
-  const mapped = alreadyMapped ? source.accountId : mapLineAccount(db, move, source.accountId);
+  let rawAccountId = source.accountId;
+  if (!alreadyMapped && source.type === 'line' && line.account_fiscal_position_id && line.account_fiscal_position_id !== move?.fiscal_position_id) {
+    if (line.product_id) {
+      const prodSource = getSourceAccount({ ...line, account_id: null, income_account_id: null });
+      if (prodSource.accountId) rawAccountId = prodSource.accountId;
+    } else {
+      const srcFp = read(db, 'account.fiscal.position', line.account_fiscal_position_id);
+      const mapping = (srcFp?.account_ids ?? []).find((m) => m.account_dest_id === source.accountId);
+      if (mapping) rawAccountId = mapping.account_src_id;
+    }
+  }
+  const mapped = alreadyMapped ? source.accountId : mapLineAccount(db, move, rawAccountId);
   const mappedAccount = read(db, 'account.account', mapped);
   const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
   const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);
