@@ -3366,6 +3366,8 @@ const ar = {
   'Opening balances on accounts in another currency are not supported yet': 'الأرصدة الافتتاحية للحسابات بعملة أخرى غير مدعومة بعد',
   'An account referenced by an opening entry cannot be moved to another company': 'لا يمكن نقل حساب مشار إليه في قيد افتتاح إلى شركة أخرى',
   'Opening Balancing Line': 'بند موازنة الافتتاح',
+  'Key Performance Indicator': 'مؤشر الأداء الرئيسي',
+  Metric: 'المؤشر',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

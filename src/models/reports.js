@@ -1,6 +1,6 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
-import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, journalItems, profitAndLoss } from './ledger.js';
+import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { round } from '../money.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
@@ -176,20 +176,20 @@ export function accountCashFlowActivity(db, account) {
  * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
  * equity and loans financing, everything else operating.
  */
-export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
+export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, weight } = {}) {
   const targetCompany = company_id;
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   // Journal-filtered report databases keep the unfiltered records for the source documents.
   const documentsDb = db.unfilteredDb ?? db;
   const cash = accountIds(db, 'asset_cash');
   const sum = (items) => round(balances(db, items.filter((l) => cash.has(l.account_id))).reduce((s, b) => s + b.balance, 0));
-  const all = analyticMoveItems(journalItems(db, { company_id: targetCompany, reviewMode: mode }), analyticAccountIds);
+  const all = weighted(analyticMoveItems(journalItems(db, { company_id: targetCompany, reviewMode: mode }), analyticAccountIds), weight);
   const opening = sum(all.filter((l) => from && l.date < from));
   const closing = sum(all.filter((l) => !to || l.date <= to));
   const totals = { operating: 0, investing: 0, financing: 0, unclassified: 0 };
   const attributed = new Map();
   const byMove = new Map();
-  for (const l of analyticMoveItems(journalItems(db, { from, to, company_id: targetCompany, reviewMode: mode }), analyticAccountIds)) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
+  for (const l of weighted(analyticMoveItems(journalItems(db, { from, to, company_id: targetCompany, reviewMode: mode }), analyticAccountIds), weight)) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
   const documents = search(documentsDb, 'account.move').filter((m) => m.state === 'posted'
     && (!targetCompany || (m.company_id ?? 1) === targetCompany)
     && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type));
@@ -282,7 +282,16 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
     if (!counterpart || !denominator || !fullDenominator) continue;
     const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
     if (!share) continue;
-    const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment)) * share;
+    const counterpartItem = {
+      ...counterpart.line,
+      move_id: entry.id,
+      journal_id: entry.journal_id,
+      company_id: entry.company_id ?? 1,
+      date: entry.date ?? entry.invoice_date,
+    };
+    const entryWeight = weight ? weight(counterpartItem) : 1;
+    if (!entryWeight) continue;
+    const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment)) * share * entryWeight;
     const attribution = { company_id: entry.company_id, date: effDate };
     add(counterpart.account, -amount, attribution);
     for (const x of source) add(x.account, amount * netOf(x.line) / denominator, attribution);
