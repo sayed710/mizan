@@ -584,10 +584,6 @@ function copyInvoiceLines(lines, {
   preserveSourceLineId = false,
   months = null,
   stripOrderLinks = false,
-  sourceFiscalPositionId = undefined,
-  targetFiscalPositionId = undefined,
-  db = null,
-  move = null,
 } = {}) {
   return (lines ?? []).map((line) => {
     const sourceLineId = line.line_id;
@@ -608,34 +604,9 @@ function copyInvoiceLines(lines, {
       delete copy.purchase_line_id;
     }
 
-    let accountId = copy.account_id ?? null;
-    let accountFiscalPositionId = copy.account_fiscal_position_id ?? null;
-
-    if (targetFiscalPositionId !== undefined && targetFiscalPositionId !== (sourceFiscalPositionId ?? accountFiscalPositionId)) {
-      if (db && copy.product_id) {
-        const moveCtx = move ? { ...move, fiscal_position_id: targetFiscalPositionId } : { move_type: 'out_invoice', company_id: 1, fiscal_position_id: targetFiscalPositionId };
-        const journal = resolveDocumentJournal(db, moveCtx);
-        const resolved = invoiceLineOriginalAccount(db, moveCtx, { ...copy, account_id: null, income_account_id: null }, journal);
-        if (!resolved.error && resolved.account) {
-          accountId = resolved.account;
-          accountFiscalPositionId = targetFiscalPositionId ?? null;
-        }
-      } else if (db && accountFiscalPositionId && accountId) {
-        const srcFp = read(db, 'account.fiscal.position', accountFiscalPositionId);
-        const mapping = (srcFp?.account_ids ?? []).find((m) => m.account_dest_id === accountId);
-        const rawAccount = mapping ? mapping.account_src_id : accountId;
-        accountId = targetFiscalPositionId ? mapLineAccount(db, { fiscal_position_id: targetFiscalPositionId }, rawAccount) : rawAccount;
-        accountFiscalPositionId = targetFiscalPositionId ?? null;
-      } else {
-        accountFiscalPositionId = null;
-      }
-    }
-
     return {
       ...copy,
       line_id: newInvoiceLineId(),
-      account_id: accountId,
-      account_fiscal_position_id: accountFiscalPositionId,
       ...(sourceCredit ? { source_line_id: String(sourceLineId) } : {}),
       ...(!sourceCredit && preserveSourceLineId && line.source_line_id ? { source_line_id: line.source_line_id } : {}),
       ...(months != null && line.deferred_start_date ? { deferred_start_date: shiftMonth(line.deferred_start_date, months) } : {}),
@@ -1399,8 +1370,6 @@ export function correctCreditNote(db, note) {
     invoice_origin: note.name, ref: `Correction of ${note.name}`, invoice_date: today(), invoice_date_due: today(),
     invoice_line_ids: copyInvoiceLines(note.invoice_line_ids, {
       stripOrderLinks: true,
-      sourceFiscalPositionId: note.fiscal_position_id ?? null,
-      targetFiscalPositionId: note.fiscal_position_id ?? null,
     }),
   }, { archivedOriginIds: [note.id] });
   return { db: postNote(out.db, 'account.move', note.id, `Correction invoice drafted for ${note.name}`), go: `#/accounting/${purchase ? 'bills' : 'invoices'}/${out.id}` };
@@ -1448,8 +1417,6 @@ export function debitNote(db, r, options = {}) {
     invoice_line_ids: copyLines
       ? copyInvoiceLines(r.invoice_line_ids, {
           stripOrderLinks: true,
-          sourceFiscalPositionId: r.fiscal_position_id ?? null,
-          targetFiscalPositionId: r.fiscal_position_id ?? null,
         })
       : [],
     ref,

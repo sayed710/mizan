@@ -260,21 +260,16 @@ export function invoiceLineOriginalAccount(db, move, line, journal) {
   if (!source.accountId) return { account: null, error: `No ${source.type} account found` };
   // A line whose account was already mapped by the document's fiscal position posts as stored.
   // Every other stored account (from orders, manual selection, import/API, copies) is mapped through the fiscal position.
+  // A line mapped by another fiscal position (a copy whose position changed) restarts from its product's account;
+  // a line without a product keeps the account it was mapped to, since the unmapped original is not recorded.
+  const mappedByOtherPosition = source.type === 'line' && Boolean(line.account_fiscal_position_id) && line.account_fiscal_position_id !== move?.fiscal_position_id;
+  const productSource = mappedByOtherPosition && line.product_id ? getSourceAccount({ ...line, account_id: null, income_account_id: null }) : null;
   const alreadyMapped = Boolean(
     source.recorded ||
-    (source.type === 'line' && move?.fiscal_position_id && line.account_fiscal_position_id === move.fiscal_position_id)
+    (source.type === 'line' && move?.fiscal_position_id && line.account_fiscal_position_id === move.fiscal_position_id) ||
+    (mappedByOtherPosition && !productSource?.accountId)
   );
-  let rawAccountId = source.accountId;
-  if (!alreadyMapped && source.type === 'line' && line.account_fiscal_position_id && line.account_fiscal_position_id !== move?.fiscal_position_id) {
-    if (line.product_id) {
-      const prodSource = getSourceAccount({ ...line, account_id: null, income_account_id: null });
-      if (prodSource.accountId) rawAccountId = prodSource.accountId;
-    } else {
-      const srcFp = read(db, 'account.fiscal.position', line.account_fiscal_position_id);
-      const mapping = (srcFp?.account_ids ?? []).find((m) => m.account_dest_id === source.accountId);
-      if (mapping) rawAccountId = mapping.account_src_id;
-    }
-  }
+  const rawAccountId = productSource?.accountId ?? source.accountId;
   const mapped = alreadyMapped ? source.accountId : mapLineAccount(db, move, rawAccountId);
   const mappedAccount = read(db, 'account.account', mapped);
   const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
