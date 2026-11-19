@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { accountId, postEntry } from './models/ledger.js';
 import { creditNote, postAutoPostMoves, postMove } from './models/accounting.js';
-import { postPayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment } from './models/pay.js';
 import { deferralEntryRef, deferredModels, postDueEntries, registerDeferredPostMoveHook } from './models/deferred.js';
 import { fieldReadonly } from './field-metadata.js';
 import { models } from './registry.js';
@@ -264,6 +264,7 @@ test('credit notes against bill/invoice with draft deferrals cancel drafts and l
     date: '2026-11-16',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, invDraft.id, '2026-11-16');
   db = write(db, 'account.move', invDraft.id, { amount_paid: 1200 });
 
   const scheduleId = search(db, 'account.deferral').find((d) => d.source_move_id === invDraft.id).id;
@@ -409,6 +410,7 @@ test('server sync path (applyDiff) accepts all deferral workflows without reject
     date: '2026-11-16',
   });
   bill2Db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  bill2Db = applyPaymentCredit(bill2Db, p.id, bill2.id, '2026-11-16');
   bill2Db = write(bill2Db, 'account.move', bill2.id, { amount_paid: 1200 });
   serverDb = viaServer(bill2.db, bill2Db);
 
@@ -763,6 +765,7 @@ test('reverting credit note after rescaled draft auto-posts reverses interim mov
     date: '2026-11-16',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, billDraft.id, '2026-11-16');
   db = write(db, 'account.move', billDraft.id, { amount_paid: 1200 });
 
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
@@ -846,6 +849,7 @@ test('credit note reset after a restored draft entry became due posts it and kee
     date: '2026-11-16',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, billDraft.id, '2026-11-16');
   db = write(db, 'account.move', billDraft.id, { amount_paid: 1200 });
 
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
@@ -993,6 +997,7 @@ test('appending a duplicate credit adjustment rejected through ORM write and app
     date: '2026-11-16',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, bill.id, '2026-11-16');
   db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
 
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
@@ -1210,6 +1215,7 @@ test('rewriting an existing adjustments move_ids or snapshots rejected through O
     date: '2026-11-16',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, bill.id, '2026-11-16');
   db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
 
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
@@ -1382,6 +1388,7 @@ test('a correct adjustment with wrong rescaled amounts rejected through ORM writ
     date: '2026-11-16',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, bill.id, '2026-11-16');
   db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
 
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
@@ -1487,6 +1494,7 @@ test('a draft cancelled after a partial credit note stays cancelled after the no
     date: '2026-11-16',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, bill.id, '2026-11-16');
   db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
 
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
@@ -1656,6 +1664,7 @@ function postedBillWithPartialCredit(t) {
   db = postMove(bill.db, bill.id);
   const payment = create(db, 'account.payment', { partner_id: 2, partner_type: 'supplier', payment_type: 'outbound', amount: 1200, date: '2026-11-16' });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, bill.id, '2026-11-16');
   db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
   const cn = creditNote(db, read(db, 'account.move', bill.id), { date: '2026-11-20' });
@@ -1698,6 +1707,7 @@ test('a credit adjustment cannot revive a cancelled recognition line through ORM
   db = postMove(bill.db, bill.id);
   const payment = create(db, 'account.payment', { partner_id: 2, partner_type: 'supplier', payment_type: 'outbound', amount: 1200, date: '2026-11-16' });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, bill.id, '2026-11-16');
   db = write(db, 'account.move', bill.id, { amount_paid: 1200 });
   const sched = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
   const cancelledDate = sched.board[6].date;

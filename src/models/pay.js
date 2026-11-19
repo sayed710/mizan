@@ -464,14 +464,15 @@ export function postPayment(db, p) {
     tax_return_id: currentPayment.return_id ?? null,
   });
   const name = explicitName ?? paymentName(booked, journal, date, read(booked, 'account.move', moveId).name);
-  const settled = taxClosing ? write(booked, 'account.move', taxClosing.move.id, {
-    amount_paid: amount, payment_date: date,
-    payments: [...(taxClosing.move.payments ?? []), { date, amount, move_id: moveId, company_amount: amount, line_index: taxClosing.index }],
-  }) : booked;
-  return write(settled, 'account.payment', p.id, {
+  const registered = write(booked, 'account.payment', p.id, {
     name, state: 'posted', move_id: moveId, journal_id: via.id, outstanding_account_id: outstanding,
     unapplied: isTaxOrDirect ? 0 : amount,
   });
+  const settled = taxClosing ? write(registered, 'account.move', taxClosing.move.id, {
+    amount_paid: amount, payment_date: date,
+    payments: [...(taxClosing.move.payments ?? []), { date, amount, move_id: moveId, company_amount: amount, line_index: taxClosing.index }],
+  }) : registered;
+  return settled;
 }
 
 /**
@@ -1354,8 +1355,7 @@ export const payModels = {
       groups: (r) => [
         [
           'payment_type',
-          'is_internal_transfer',
-          ...(r?.is_internal_transfer ? [] : [{ field: 'partner_id', label: r?.partner_type === 'supplier' ? 'Vendor' : 'Customer' }]),
+          ...(r?.is_internal_transfer ? ['is_internal_transfer'] : [{ field: 'partner_id', label: r?.partner_type === 'supplier' ? 'Vendor' : 'Customer' }]),
           { label: 'Amount', fields: ['amount', 'currency_id'] },
           'date',
           'memo',

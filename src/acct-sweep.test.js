@@ -5,11 +5,11 @@ import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove, payMove } from './models/accounting.js';
-import { postPayment, reversePayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment, reversePayment } from './models/pay.js';
 import { agedBalance } from './models/finance.js';
 import { cashFlow } from './models/reports.js';
 const doc = (db, type, date, currency) => { const m = create(db, 'account.move', { move_type: type, partner_id: 1, invoice_date: date, invoice_date_due: date, currency_id: currency, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] }); return { db: postMove(m.db, m.id), id: m.id }; };
-const payment = (db, side, direction, amount, date) => { const p = create(db, 'account.payment', { partner_id: 1, partner_type: side, payment_type: direction, amount, date }); return { id: p.id, db: postPayment(p.db, read(p.db, 'account.payment', p.id)) }; };
+const payment = (db, side, direction, amount, date, invoiceId) => { const p = create(db, 'account.payment', { partner_id: 1, partner_type: side, payment_type: direction, amount, date }); const posted = postPayment(p.db, read(p.db, 'account.payment', p.id)); const applied = invoiceId ? applyPaymentCredit(posted, p.id, invoiceId, date) : posted; return { id: p.id, db: applied }; };
 test('public write rejects application before its source payment date', () => {
  let db = seed(); const inv = doc(db, 'out_invoice', '2026-01-01'); const p = payment(inv.db, 'customer', 'inbound', 10, '2026-01-10'); db = p.db;
  const second = doc(db, 'out_invoice', '2026-01-01'); db = second.db;
@@ -18,10 +18,10 @@ test('public write rejects application before its source payment date', () => {
 test('standalone partial and full foreign settlements use booked company currency', () => {
  let db = seed(); const fx = create(db, 'res.currency', { name: 'SWEEPFX', rate_ids: [{ date: '2026-01-01', rate: 2 }] }); db = fx.db;
  const inv = doc(db, 'out_invoice', '2026-01-01', fx.id); db = inv.db;
- let p = payment(db, 'customer', 'inbound', 25, '2026-01-02'); db = p.db;
+ let p = payment(db, 'customer', 'inbound', 25, '2026-01-02', inv.id); db = p.db;
  let m = read(db, 'account.move', inv.id); assert.equal(m.amount_residual, 50); assert.equal(m.payments[0].amount, 50); assert.equal(m.payments[0].company_amount, 25);
  assert.equal(agedBalance(db, 'receivable', '2026-01-02').rows.find((r) => r.partner_id === 1).total, 25);
- p = payment(db, 'customer', 'inbound', 25, '2026-01-03'); db = p.db; m = read(db, 'account.move', inv.id);
+ p = payment(db, 'customer', 'inbound', 25, '2026-01-03', inv.id); db = p.db; m = read(db, 'account.move', inv.id);
  assert.equal(m.amount_residual, 0); assert.equal(m.payments[1].company_amount, 25);
 });
 test('unapplied outgoing customer and incoming vendor refund payments age as positive balances', () => {
@@ -74,12 +74,12 @@ test('standalone payment rejects non-finite amounts before posting', () => {
 
 test('standalone foreign settlement books payment-date conversion and exchange difference', () => {
  let db = seed(); const fx = create(db, 'res.currency', { name: 'FXVAR', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-01-02', rate: 1 }] });
- const inv = doc(fx.db, 'out_invoice', '2026-01-01', fx.id); const paid = payment(inv.db, 'customer', 'inbound', 25, '2026-01-02'); db = paid.db;
+ const inv = doc(fx.db, 'out_invoice', '2026-01-01', fx.id); const paid = payment(inv.db, 'customer', 'inbound', 25, '2026-01-02', inv.id); db = paid.db;
  const m = read(db, 'account.move', inv.id); assert.equal(m.amount_residual, 75); assert.equal(m.payments[0].company_amount, 12.5);
  assert.equal(agedBalance(db, 'receivable', '2026-01-02').rows.find((r) => r.partner_id === 1).total, 37.5);
  const fxEntry = read(db, 'account.move', m.payments[0].payment_fx_move_id);
  assert.ok(fxEntry && fxEntry.line_ids.some((l) => l.credit === 12.5));
- const second = payment(db, 'customer', 'inbound', 75, '2026-01-03'); db = second.db;
+ const second = payment(db, 'customer', 'inbound', 75, '2026-01-03', inv.id); db = second.db;
  assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
  db = reversePayment(db, read(db, 'account.payment', second.id), '2026-01-04');
  assert.equal(read(db, 'account.move', inv.id).amount_residual, 75);
@@ -106,7 +106,7 @@ test('historical cash flow retains standalone foreign payment conversion after r
  let db = seed(); const fx = create(db, 'res.currency', { name: 'FXHIST', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-01-02', rate: 1 }] });
  const fixed = fx.db.records['account.account'].find((a) => a.code === '151000').id;
  const m = create(fx.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', currency_id: fx.id, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0, account_id: fixed }] });
- db = postMove(m.db, m.id); const p = payment(db, 'customer', 'inbound', 25, '2026-01-02'); db = reversePayment(p.db, read(p.db, 'account.payment', p.id), '2026-01-03');
+ db = postMove(m.db, m.id); const p = payment(db, 'customer', 'inbound', 25, '2026-01-02', m.id); db = reversePayment(p.db, read(p.db, 'account.payment', p.id), '2026-01-03');
  const report = cashFlow(db, { from: '2026-01-02', to: '2026-01-02' });
  assert.equal(report.investing, 25); assert.equal(report.operating, 0);
 });

@@ -3363,6 +3363,10 @@ const ar = {
   'Transfer account entries must be reconciled together': 'يجب تسوية قيود حساب التحويل معاً',
   'Key Performance Indicator': 'مؤشر الأداء الرئيسي',
   Metric: 'المؤشر',
+  'Select a source journal': 'اختر دفتر يومية المصدر',
+  'Select a destination journal': 'اختر دفتر يومية الوجهة',
+  'The destination journal must belong to the same company': 'يجب أن ينتمي دفتر يومية الوجهة إلى نفس الشركة',
+  'Internal transfer destination entry is missing': 'قيد وجهة التحويل الداخلي مفقود',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
