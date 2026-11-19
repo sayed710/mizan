@@ -256,7 +256,7 @@ test('header buttons per state, Lock hashing, Reset to Draft locks, Reverse Entr
       ['quarterly', 'Quarterly'],
       ['yearly', 'Yearly'],
     ]);
-    assert.deepEqual(fieldLabelsOf(otherPanel()), ['Auto-post', 'Reverse Automatically', 'Fiscal Position', 'Currency', 'Terms and Conditions']);
+    assert.deepEqual(fieldLabelsOf(otherPanel()), ['Auto-post', 'Reverse Automatically', 'Fiscal Position', 'Currency', 'To Check', 'Terms and Conditions']);
 
     // Switching Auto-post to monthly reveals Auto-post until, and hides it again for quarterly -> at_date -> monthly order.
     await ctx.React.act(async () => props(autoPostSel).onChange({ target: { value: 'monthly' } }));

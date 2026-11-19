@@ -3223,6 +3223,7 @@ const ar = {
   'Journal used to record realized foreign exchange gains and losses.': 'الدفتر المستخدم لتسجيل أرباح وخسائر فروق العملة المحققة.',
   'Default general journal': 'دفتر اليومية الافتراضي',
   'Exchange Difference Journal must be a general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق العملة دفتراً عاماً مشتركاً أو تابعاً لهذه الشركة',
+  Recurring: 'متكرر',
   'Unfold All': 'توسيع الكل',
   'Collapse All': 'طي الكل',
   'Open Account': 'فتح الحساب',

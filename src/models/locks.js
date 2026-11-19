@@ -47,7 +47,7 @@ const MAINTAINED = {
   'sign.request': ['field_values'], // populated by the signer workflow; request configuration stays locked
   'documents.document': ['locked_by'], // Lock / Unlock
   'mailing.mailing': ['ab_testing_winner_selection'], // the A/B winner is chosen after sending
-  'account.move': ['ref'], // the reference stays editable on posted entries
+  'account.move': ['ref', 'to_check'], // the reference and the review flag stay editable on posted entries
   'account.payment': ['memo'], // memo stays editable on posted payments
   'account.bank.statement.line': ['move_id', 'payment_id'], // validated unreconciliation clears the matched links
 };
