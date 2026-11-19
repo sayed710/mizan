@@ -897,7 +897,7 @@ export function taxClosingMatchesReturn(db, ret) {
         || move.date !== ret.date_to || move.invoice_date !== ret.date_to) return false;
       const spec = taxClosingSpec(staged, ret, companyId);
       const currency = findCompanyCurrencyRecord(staged, companyId);
-      payable += spec.payable;
+      payable = round(payable + spec.payable);
       const expected = spec.lines.map((line) => {
         const net = roundCurrency((line.debit ?? 0) - (line.credit ?? 0), currency);
         return [line.account_id, line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
@@ -905,8 +905,7 @@ export function taxClosingMatchesReturn(db, ret) {
       const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
       if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
     }
-    const mainCurrency = findCompanyCurrencyRecord(staged, ret.company_id ?? 1);
-    return roundCurrency(Number(ret.total_amount_to_pay) || 0, mainCurrency) === roundCurrency(payable, mainCurrency);
+    return round(Number(ret.total_amount_to_pay) || 0) === payable;
   } catch {
     return false;
   }
@@ -924,7 +923,7 @@ export function postTaxReturnClosing(db, returnId) {
     next = entry.db;
     ids.push(entry.id);
   }
-  return { db: next, ids, payable: roundCurrency(specs.reduce((s, spec) => s + spec.payable, 0), findCompanyCurrencyRecord(db, ret.company_id ?? 1)) };
+  return { db: next, ids, payable: round(specs.reduce((s, spec) => s + spec.payable, 0)) };
 }
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
