@@ -10,6 +10,7 @@ import { ensureQuants } from './models/quant.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
+import { normalizeHorizontalGroupVals } from './models/configurableReports.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today, validDate } from './models/common.js';
 import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
@@ -1656,6 +1657,21 @@ MIGRATIONS.push({ version: 58, name: 'invoice-line-analytic-account-to-distribut
     };
   });
   return changed ? { ...db, records: { ...db.records, 'account.move': next } } : db;
+} });
+
+// Horizontal group rules previously edited legacy comma-separated `ids`.
+// Migrate stored rules by moving non-empty parsed IDs into the respective relational field (unioning with existing values) and clearing `ids`.
+MIGRATIONS.push({ version: 59, name: 'horizontal-group-rules-to-relational-ids', up: (db) => {
+  const groups = db?.records?.['account.report.horizontal.group'];
+  if (!Array.isArray(groups)) return db;
+  let changed = false;
+  const next = groups.map((group) => {
+    const normalized = normalizeHorizontalGroupVals(group);
+    if (JSON.stringify(normalized) === JSON.stringify(group)) return group;
+    changed = true;
+    return normalized;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.report.horizontal.group': next } } : db;
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
