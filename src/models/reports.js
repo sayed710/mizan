@@ -176,10 +176,11 @@ export function accountCashFlowActivity(db, account) {
  * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
  * equity and loans financing, everything else operating.
  */
-export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, docDb, unfilteredDb } = {}) {
+export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
   const targetCompany = company_id;
   const mode = reportReviewMode({ reviewMode, includeUnposted });
-  const documentsDb = docDb ?? unfilteredDb ?? db?.unfilteredDb ?? db;
+  // Journal-filtered report databases keep the unfiltered records for the source documents.
+  const documentsDb = db.unfilteredDb ?? db;
   const cash = accountIds(db, 'asset_cash');
   const sum = (items) => round(balances(db, items.filter((l) => cash.has(l.account_id))).reduce((s, b) => s + b.balance, 0));
   const all = analyticMoveItems(journalItems(db, { company_id: targetCompany, reviewMode: mode }), analyticAccountIds);

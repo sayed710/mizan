@@ -10,6 +10,7 @@ import { ensureQuants } from './models/quant.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
+import { normalizeHorizontalGroupVals } from './models/configurableReports.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today, validDate } from './models/common.js';
 import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
@@ -1664,34 +1665,11 @@ MIGRATIONS.push({ version: 59, name: 'horizontal-group-rules-to-relational-ids',
   const groups = db?.records?.['account.report.horizontal.group'];
   if (!Array.isArray(groups)) return db;
   let changed = false;
-  const fieldKeyFor = {
-    partner: 'partner_ids',
-    analytic: 'analytic_ids',
-    journal: 'journal_ids',
-    company: 'company_ids',
-  };
   const next = groups.map((group) => {
-    if (!group || !Array.isArray(group.rule_ids)) return group;
-    let groupChanged = false;
-    const nextRules = group.rule_ids.map((rule) => {
-      if (!rule || typeof rule !== 'object') return rule;
-      const key = fieldKeyFor[rule.field];
-      if (!key) return rule;
-      const raw = typeof rule.ids === 'string' ? rule.ids.trim() : '';
-      if (!raw) return rule;
-      if (!/^\d+(?:\s*,\s*\d+)*$/.test(raw)) return rule;
-      const parsed = [...new Set(raw.split(',').map((id) => Number(id.trim())))].filter((id) => Number.isSafeInteger(id) && id > 0);
-      if (!parsed.length) return rule;
-      groupChanged = true;
-      const existing = Array.isArray(rule[key]) ? rule[key] : [];
-      const combined = [...new Set([...existing.map(Number), ...parsed])];
-      return { ...rule, [key]: combined, ids: '' };
-    });
-    if (groupChanged) {
-      changed = true;
-      return { ...group, rule_ids: nextRules };
-    }
-    return group;
+    const normalized = normalizeHorizontalGroupVals(group);
+    if (JSON.stringify(normalized) === JSON.stringify(group)) return group;
+    changed = true;
+    return normalized;
   });
   return changed ? { ...db, records: { ...db.records, 'account.report.horizontal.group': next } } : db;
 } });

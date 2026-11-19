@@ -142,8 +142,7 @@ function groupError(db, before, group) {
     const report = read(db, 'account.report', id);
     if (!report || (report.company_id ?? 1) !== (group.company_id ?? 1)) return 'Reports must belong to the horizontal group company';
   }
-  for (let i = 0; i < group.rule_ids.length; i++) {
-    const rule = group.rule_ids[i];
+  for (const rule of group.rule_ids) {
     const cfg = HORIZONTAL_GROUP_RULES[rule?.field];
     if (!cfg) return 'Select partner, analytic account, journal, or company';
     if (HORIZONTAL_RULE_KEYS.some((key) => key !== cfg.fieldKey && Array.isArray(rule[key]) && rule[key].length)) {
@@ -156,10 +155,8 @@ function groupError(db, before, group) {
     if (relIds != null && (!Array.isArray(relIds) || relIds.some((id) => !Number.isSafeInteger(id) || id < 1))) {
       return 'Rule IDs must identify records available to the group company';
     }
-    const beforeRule = (rule.id && before?.rule_ids?.find((r) => r.id === rule.id))
-      ?? (before?.rule_ids?.[i]?.field === rule.field ? before.rule_ids[i] : null)
-      ?? before?.rule_ids?.find((r) => r.field === rule.field);
-    const beforeIds = new Set(beforeRule ? idsFor(beforeRule) : []);
+    // Archived records may stay on a rule that already used them, but cannot be newly added.
+    const beforeIds = new Set((before?.rule_ids ?? []).filter((r) => r?.field === rule.field).flatMap(idsFor));
     if (idsFor(rule).some((id) => {
       const record = read(db, cfg.model, id);
       if (!id || !record || (record.company_id && record.company_id !== (group.company_id ?? 1))) return true;

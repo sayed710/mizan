@@ -558,14 +558,15 @@ test('Qodo 2: Cash flow with a bank journal filter resolves invoice income accou
       ...db.records,
       'account.move': (db.records['account.move'] ?? []).filter((m) => m.journal_id === bankJournal.id),
     },
+    unfilteredDb: db,
   };
 
-  // With docDb passed (or through cashflowColumns), invoice is resolved and classified under income account (400000)
-  const cf = cashFlow(bankFilteredDb, { ...period, docDb: db });
+  // With the unfiltered records attached (also through cashflowColumns), invoice is resolved and classified under income account (400000)
+  const cf = cashFlow(bankFilteredDb, period);
   assert.ok(cf.lines.some((l) => l.account.code === '400000'), 'movement is classified under invoice income account');
   assert.ok(!cf.lines.some((l) => l.account.account_type === 'asset_receivable'), 'receivable account is not used when invoice is resolved');
 
-  const cols = cashflowColumns(bankFilteredDb, [period], { docDb: db });
+  const cols = cashflowColumns(bankFilteredDb, [period]);
   const opSection = cols.sections.find((s) => s.title === 'Operating Activities');
   assert.ok(opSection.rows.some((row) => row.account.code === '400000'), 'comparison path resolves invoice income account');
 
