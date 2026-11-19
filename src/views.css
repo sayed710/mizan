@@ -365,6 +365,35 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .o2m-add-actions { display: flex; flex-wrap: wrap; gap: 16px; }
 .o2m-section input { font-weight: 700; }
 .o2m-note input { font-style: italic; }
+
+/* Analytic Distribution Widget & Popover */
+.distribution-widget { position: relative; width: 100%; min-width: 0; }
+.distribution-trigger { display: block; width: 100%; min-width: 0; text-align: start; background: none; border: 1px solid transparent; padding: 2px 4px; font: inherit; cursor: pointer; border-radius: var(--radius, 4px); color: inherit; }
+.distribution-trigger:hover { background: rgba(0, 0, 0, .04); border-color: var(--border, #d1d5db); }
+.distribution-trigger.invalid { border-color: var(--danger, #dc2626); }
+.distribution-trigger:focus-visible { outline: 2px solid var(--brand, #017e84); outline-offset: 1px; }
+.distribution-trigger-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.distribution-popover { position: fixed; z-index: 60; width: 340px; max-width: calc(100vw - 8px); overflow-y: auto; background: var(--surface, #fff); border: 1px solid var(--border, #d1d5db); border-radius: 6px; padding: 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, .15); display: flex; flex-direction: column; gap: 10px; text-align: start; }
+.distribution-plan-group { display: flex; flex-direction: column; gap: 6px; }
+.distribution-plan-header { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 600; padding-bottom: 4px; border-bottom: 1px solid var(--border, #e5e7eb); }
+.distribution-plan-name { color: var(--text, #111827); }
+.distribution-plan-total { font-variant-numeric: tabular-nums; }
+.distribution-plan-total.bold { font-weight: 700; }
+.distribution-plan-rows { display: flex; flex-direction: column; gap: 6px; }
+
+.distribution-row { display: flex; align-items: center; gap: 8px; }
+.distribution-account-select { flex: 1; min-width: 0; padding: 4px 6px; font-size: 13px; border: 1px solid var(--border, #d1d5db); border-radius: 4px; background: var(--surface, #fff); color: var(--text, #111827); }
+.distribution-percent-cell { display: flex; align-items: center; gap: 2px; width: 75px; flex-shrink: 0; }
+.distribution-percent-input { width: 55px; padding: 4px 6px; font-size: 13px; text-align: end; border: 1px solid var(--border, #d1d5db); border-radius: 4px; background: var(--surface, #fff); color: var(--text, #111827); }
+.distribution-percent-unit { font-size: 13px; color: var(--muted, #6b7280); }
+.distribution-remove-btn { border: 0; background: none; cursor: pointer; padding: 2px 6px; font-size: 16px; line-height: 1; border-radius: 4px; }
+.distribution-remove-btn:hover { background: rgba(0, 0, 0, .06); }
+
+.distribution-actions { padding-top: 4px; }
+.distribution-add-line { font-size: 13px; cursor: pointer; border: 0; background: none; padding: 0; color: var(--brand, #017e84); }
+.distribution-add-line:hover { text-decoration: underline; }
+.distribution-error { font-size: 12px; margin-top: 2px; }
 .card-counter { font-size: 13px; color: var(--muted); }
 .card-counter b { color: var(--brand); }
 .statusbar button:disabled { cursor: default; }
