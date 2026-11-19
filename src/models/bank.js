@@ -135,7 +135,8 @@ export function reconcileWith(db, line, moveId) {
   const used = sameCurrency && value === foreignOpen ? available : sameCurrency && line.bank_move_id ? round(total * value / Math.abs(line.amount)) : toCompany(db, move.currency_id, value, date, company);
   if (!(value > 0) || !(used > 0) || used > available) throw new Error('The open statement amount is too small to settle this invoice');
   const remaining = round(available - used);
-  const hasWriteoff = line.writeoff_account_id != null || line.writeoff_amount != null || Boolean(line.writeoff_label);
+  // The write-off fields describe the line's one write-off; once it is booked they are not a new request.
+  const hasWriteoff = !line.writeoff_move_id && (line.writeoff_account_id != null || line.writeoff_amount != null || Boolean(line.writeoff_label));
   let writeoffValue = 0;
   if (hasWriteoff) {
     const amount = Number(line.writeoff_amount);
@@ -168,7 +169,7 @@ export function reconcileWith(db, line, moveId) {
     state: remaining ? 'to_check' : 'reconciled',
     move_id: moveId,
     payment_move_id: paymentMove,
-    writeoff_move_id: writeoff?.id ?? null,
+    writeoff_move_id: writeoff?.id ?? line.writeoff_move_id ?? null,
     bank_move_id: bankMoveId ?? paymentMove,
     open_amount: remaining,
     allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }],
@@ -636,8 +637,8 @@ function unreconcileLockError(db, line) {
 function unreconcileError(db, before, after) {
   const lockError = unreconcileLockError(db, before);
   if (lockError) return lockError;
-  if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length || after.writeoff_analytic_distribution != null) return 'Unreconciliation requires reversing entries and clearing the bank links';
-  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'writeoff_analytic_distribution', 'name']);
+  if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length || WRITEOFF_FIELDS.some((k) => after[k] != null)) return 'Unreconciliation requires reversing entries and clearing the bank links';
+  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', ...WRITEOFF_FIELDS, 'name']);
   if ([...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !clearedFields.has(k)).some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) return 'A reconciled bank transaction cannot be changed';
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);
   if (!bankId) return 'Cannot unreconcile a transaction without its bank entry link';
@@ -702,7 +703,7 @@ export function unreconcile(db, line, reversalDate = null) {
     batch_payment_id: null,
     payment_move_id: null,
     writeoff_move_id: null,
-    writeoff_analytic_distribution: null,
+    ...writeoffFieldsOf(null),
     bank_move_id: null,
     open_amount: null,
     allocations: [],

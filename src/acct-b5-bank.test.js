@@ -893,3 +893,32 @@ test('Qodo Issue 6: reconcileWith throws when statement amount is exhausted befo
     /The statement amount is fully used before all selected invoices are matched/,
   );
 });
+
+test('a booked write-off is not replayed after unreconciliation', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partner = search(db, 'res.partner')[0];
+  const inv = makeInvoice(db, { partnerId: partner.id, price: 100, date: '2026-03-01' });
+  db = inv.db;
+  const lineRes = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id, company_id: 1, partner_id: partner.id, amount: 90, date: '2026-03-02', payment_ref: 'Replay check', state: 'to_check',
+  });
+  db = lineRes.db;
+  db = reconcileWith(db, {
+    ...read(db, 'account.bank.statement.line', lineRes.id),
+    writeoff_account_id: accountId(db, '600000', 1), writeoff_amount: 10, writeoff_label: 'Fee',
+  }, inv.id);
+  const reconciled = read(db, 'account.bank.statement.line', lineRes.id);
+  assert.ok(reconciled.writeoff_move_id);
+
+  db = unreconcile(db, reconciled).db;
+  const cleared = read(db, 'account.bank.statement.line', lineRes.id);
+  assert.equal(cleared.writeoff_account_id ?? null, null);
+  assert.equal(cleared.writeoff_amount ?? null, null);
+  assert.equal(cleared.writeoff_label ?? null, null);
+
+  // Matching again from the stored line books no write-off and leaves the invoice partly open.
+  db = reconcileWith(db, cleared, inv.id);
+  assert.equal(read(db, 'account.bank.statement.line', lineRes.id).writeoff_move_id ?? null, null);
+  assert.equal(read(db, 'account.move', inv.id).amount_residual, 10);
+});
