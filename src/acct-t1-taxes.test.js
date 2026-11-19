@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, read, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
@@ -427,4 +427,24 @@ test('7. website carts use the same fallback fiscal position as sales orders', (
   const cart = cartTotals(db, [{ product_id: 2, qty: 1 }], { partnerCountry: 'Nowhere' });
   assert.equal(cart.orderLines[0].tax_id, mapped.id);
   assert.equal(cart.tax, 0);
+});
+
+test('8. website cart and checkout apply a ZIP-restricted fiscal position from the buyer ZIP', async () => {
+  const { publicCart, publicOrder } = await import('../server/api.js');
+  let db = seed();
+  const saleTax = db.records['account.tax'].find((t) => t.type_tax_use === 'sale' && Number(t.amount) === 14 && !t.price_include);
+  const fp = create(db, 'account.fiscal.position', { name: 'Free Zone', auto_apply: true, sequence: 1, country: 'Egypt', zip_from: '43000', zip_to: '43999' });
+  const mapped = create(fp.db, 'account.tax', { name: 'Free Zone 0%', amount_type: 'percent', amount: 0, type_tax_use: 'sale', fiscal_position_ids: [fp.id], original_tax_ids: [saleTax.id] });
+  db = write(mapped.db, 'product', 1, { tax_id: saleTax.id });
+  const lines = [{ product_id: 1, qty: 1 }];
+  assert.equal(cartTotals(db, lines, { partnerCountry: 'Egypt', partnerZip: '43100' }).orderLines[0].tax_id, mapped.id);
+  assert.equal(cartTotals(db, lines, { partnerCountry: 'Egypt', partnerZip: '11511' }).orderLines[0].tax_id, saleTax.id);
+  const preview = publicCart(db, { lines, country: 'Egypt', zip: '43100' });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.tax, 0);
+  const visitor = { name: 'Free Zone Buyer', email: 'buyer@example.com', street: '1 Port St', city: 'Suez', zip: '43100', country: 'Egypt' };
+  const order = publicOrder(db, { ...visitor, lines, carrier_id: 1, provider_code: 'wire' });
+  assert.equal(order.status, 201, JSON.stringify(order.body));
+  const sale = search(order.db, 'sale.order').find((o) => o.name === order.body.order);
+  assert.equal(sale.order_line.find((l) => l.product_id === 1).tax_id, mapped.id);
 });

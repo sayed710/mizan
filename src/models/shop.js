@@ -94,11 +94,11 @@ export function deliveryLine(db, price, fiscalPositionId = null, companyId = db.
 export const websiteCarriers = (db) => search(db, 'delivery.carrier').filter((c) => c.is_published && c.delivery_type !== 'api');
 
 /**
- * Cart summary with server-side prices: pricelist, product taxes (after the country's fiscal position) and delivery.
+ * Cart summary with server-side prices: pricelist, product taxes (after the buyer address's fiscal position) and delivery.
  * @returns {{ lines: { product_id: number, qty: number, price_unit: number, subtotal: number, tax: number }[], untaxed: number, tax: number, delivery: number, total: number, orderLines: object[] }}
  */
-export function cartTotals(db, lines, { pricelistId = null, carrierId = null, partnerCountry = '', companyId = db.settings?.current_company_id ?? 1 } = {}) {
-  const fiscalPositionId = autoFiscalPosition(db, { country: String(partnerCountry ?? '') }, companyId);
+export function cartTotals(db, lines, { pricelistId = null, carrierId = null, partnerCountry = '', partnerZip = '', companyId = db.settings?.current_company_id ?? 1 } = {}) {
+  const fiscalPositionId = autoFiscalPosition(db, { country: String(partnerCountry ?? ''), zip: String(partnerZip ?? '') }, companyId);
   const productLines = (lines ?? []).map((l) => shopLine(db, l.product_id, l.qty, { pricelistId, fiscalPositionId, companyId }));
   const untaxed = amounts(productLines).untaxed;
   const carrier = carrierId ? read(db, 'delivery.carrier', carrierId) : null;
