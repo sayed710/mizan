@@ -3223,6 +3223,14 @@ const ar = {
   'Journal used to record realized foreign exchange gains and losses.': 'الدفتر المستخدم لتسجيل أرباح وخسائر فروق العملة المحققة.',
   'Default general journal': 'دفتر اليومية الافتراضي',
   'Exchange Difference Journal must be a general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق العملة دفتراً عاماً مشتركاً أو تابعاً لهذه الشركة',
+  'Exchange rate must be strictly positive': 'يجب أن يكون سعر الصرف أكبر من صفر',
+  'Duplicate exchange rate row for the same date and company': 'يوجد صف سعر صرف مكرر لنفس التاريخ والشركة',
+  'Exchange Rate': 'سعر الصرف',
+  'Quick Actions': 'إجراءات سريعة',
+  'Bank transaction does not exist': 'المعاملة البنكية غير موجودة',
+  'Partner belongs to another company': 'الشريك يتبع شركة أخرى',
+  'Partner does not exist': 'الشريك غير موجود',
+  'A reconciled bank transaction cannot be changed': 'لا يمكن تعديل معاملة بنكية تمت تسويتها',
   Recurring: 'متكرر',
   'Unfold All': 'توسيع الكل',
   'Collapse All': 'طي الكل',
@@ -3239,6 +3247,7 @@ const ar = {
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
   'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
+  'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
