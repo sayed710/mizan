@@ -4,7 +4,7 @@ import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { creditNote, postAutoPostMoves, postMove } from './models/accounting.js';
 import { postDueEntries } from './models/deferred.js';
-import { postPayment, reverseEntry } from './models/pay.js';
+import { applyPaymentCredit, postPayment, reverseEntry } from './models/pay.js';
 
 const only = (records, label) => {
   assert.equal(records.length, 1, `${label} must have exactly one match`);
@@ -53,6 +53,7 @@ function postFullCreditWithScheduledReversal(reversalDate) {
     date: '2026-01-05',
   });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, created.id, '2026-01-05');
   db = write(db, 'account.move', created.id, { amount_paid: 120 });
 
   const credit = creditNote(db, move(db, created.id), { date: '2026-02-15' });
