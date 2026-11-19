@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove, payMove } from './models/accounting.js';
-import { postPayment, reversePayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment, reversePayment } from './models/pay.js';
 import { applyDiff, diffDb } from './sync.js';
 import { agedBalance } from './models/finance.js';
 import { accountId, journalItems } from './models/ledger.js';
@@ -17,19 +17,21 @@ function setup() {
   return { db: postMove(invoice.db, invoice.id), id: invoice.id };
 }
 
-function standalone(db) {
+function standalone(db, invoiceId) {
   const payment = create(db, 'account.payment', { partner_id: 1, partner_type: 'customer', payment_type: 'inbound', amount: 0.01, date: '2026-01-02' });
-  return { db: postPayment(payment.db, read(payment.db, 'account.payment', payment.id)), id: payment.id };
+  const posted = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  const allocated = invoiceId ? applyPaymentCredit(posted, payment.id, invoiceId, '2026-01-02') : posted;
+  return { db: allocated, id: payment.id };
 }
 
 test('standalone partial payments settle rounded foreign balance after a reversal', () => {
   let { db, id } = setup();
-  let first = standalone(db); db = first.db;
-  let second = standalone(db); db = second.db;
+  let first = standalone(db, id); db = first.db;
+  let second = standalone(db, id); db = second.db;
   assert.deepEqual(read(db, 'account.move', id).payments.map((p) => p.company_amount), [0.01, 0]);
   db = reversePayment(db, read(db, 'account.payment', first.id), '2026-01-03');
-  first = standalone(db); db = first.db;
-  second = standalone(db); db = second.db;
+  first = standalone(db, id); db = first.db;
+  second = standalone(db, id); db = second.db;
   const invoice = read(db, 'account.move', id);
   assert.equal(invoice.amount_residual, 0);
   assert.deepEqual(invoice.payments.filter((p) => !p.reversed).map((p) => p.company_amount), [0, 0.01, 0.01]);

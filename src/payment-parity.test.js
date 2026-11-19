@@ -261,7 +261,7 @@ test('Payment form renders Odoo 20 groups, radio Payment Type, direction-aware b
     const draftGroups = allFind(host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
     // Draft payments also offer the invoice to settle (Qodo: new payments must be able to target one invoice).
     assert.equal(draftGroups.length, 3);
-    assert.deepEqual(fieldLabelsOf(draftGroups[0]), ['Payment Type', 'Customer', 'Amount', 'Date', 'Memo']);
+    assert.deepEqual(fieldLabelsOf(draftGroups[0]), ['Payment Type', 'Internal Transfer', 'Customer', 'Amount', 'Date', 'Memo']);
     assert.deepEqual(fieldLabelsOf(draftGroups[1]), ['Journal', 'Customer Bank Account']);
     assert.deepEqual(fieldLabelsOf(draftGroups[2]), ['Invoice']);
     const radioGroup = allFind(host, (n) => props(n)?.role === 'radiogroup')[0];

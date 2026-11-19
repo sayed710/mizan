@@ -23,6 +23,7 @@ test('Qodo 1: unapplied rows on posted invoices are accepted without reversing e
     date: today(),
   });
   db = postPayment(pay.db, read(pay.db, 'account.payment', pay.id));
+  db = applyPaymentCredit(db, pay.id, inv.id, today());
   const postedPay = read(db, 'account.payment', pay.id);
   const appliedInv = read(db, 'account.move', inv.id);
   assert.equal(appliedInv.amount_residual, 0);
@@ -210,6 +211,7 @@ test('Qodo 34: selecting payment outstanding-account item in unreconcileJournalI
     amount: 100, journal_id: bankJournal.id, date: '2026-09-01', company_id: 1,
   });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, postedInv.id, '2026-09-01');
   const postedPay = read(db, 'account.payment', payment.id);
 
   assert.equal(postedPay.outstanding_account_id, outstandingAcc.id);
