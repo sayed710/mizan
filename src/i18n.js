@@ -3219,6 +3219,9 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Unfold All': 'توسيع الكل',
+  'Collapse All': 'طي الكل',
+  'Open Account': 'فتح الحساب',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

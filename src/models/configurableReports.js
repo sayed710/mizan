@@ -198,35 +198,69 @@ function resolveReportItems(db, report, period, companies, { analyticAccountIds 
     : filterByAnalytic(scoped, analyticAccountIds);
 }
 
+/** Sign with which each profitAndLoss detail group adds to net profit. */
+const EARNINGS_DETAIL_SIGN = { revenue: 1, otherIncome: 1, cost: -1, expense: -1, otherExpense: -1 };
+
+/** Accumulate each contributing account's raw (debit minus credit) balance, the convention of `accountRows`. */
+function addEarningsAccounts(target, detail) {
+  for (const [group, sign] of Object.entries(EARNINGS_DETAIL_SIGN)) {
+    for (const row of detail[group]) {
+      const entry = target.get(row.account.id) ?? { account: row.account, balance: 0 };
+      target.set(row.account.id, { ...entry, balance: round(entry.balance - sign * row.balance) });
+    }
+  }
+}
+
 function computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds } = {}) {
   const effective = effectiveReportPeriod(report, period);
   const reportDate = effective.to || today();
   const includeClosing = !report.exclude_closing;
   let currentYear = 0;
   let priorYears = 0;
+  const currentAccounts = new Map();
+  const priorAccounts = new Map();
   for (const cId of companies) {
     const yearStart = fiscalYearStart(db, reportDate, cId);
     const currentFilter = { ...effective, company_id: cId, from: yearStart, to: reportDate };
     const priorFilter = { ...effective, company_id: cId, from: '', to: addDays(yearStart, -1) };
-    currentYear = round(currentYear + profitAndLoss(db, currentFilter, { includeClosing, weight, analyticAccountIds }).net);
-    priorYears = round(priorYears + profitAndLoss(db, priorFilter, { includeClosing, weight, analyticAccountIds }).net);
+    const current = profitAndLoss(db, currentFilter, { includeClosing, weight, analyticAccountIds });
+    const prior = profitAndLoss(db, priorFilter, { includeClosing, weight, analyticAccountIds });
+    currentYear = round(currentYear + current.net);
+    priorYears = round(priorYears + prior.net);
+    addEarningsAccounts(currentAccounts, current.detail);
+    addEarningsAccounts(priorAccounts, prior.detail);
   }
-  return { current_year: currentYear, prior_years: priorYears };
+  return {
+    current_year: currentYear,
+    prior_years: priorYears,
+    accounts: { current_year: [...currentAccounts.values()], prior_years: [...priorAccounts.values()] },
+  };
 }
 
 /** Collect signed balance and debit/credit factors for every account contributing to a report line. */
-function collectAccountContributions(db, definitions, lineCode, accountRows, factor = 1, dcFactor = 1) {
+function collectAccountContributions(db, definitions, lineCode, state, factor = 1, dcFactor = 1) {
   const def = definitions.get(lineCode);
   const lineFactor = factor * (Number(def.sign) || 1);
   const contributions = [];
   if (def.parsed.terms) {
     for (const term of def.parsed.terms) {
-      contributions.push(...collectAccountContributions(db, definitions, term.code, accountRows, lineFactor * term.sign, dcFactor * term.sign));
+      contributions.push(...collectAccountContributions(db, definitions, term.code, state, lineFactor * term.sign, dcFactor * term.sign));
+    }
+    return contributions;
+  }
+  if (def.parsed.earnings) {
+    for (const row of state.earnings.accounts[def.parsed.earnings]) {
+      contributions.push({
+        account: row.account,
+        amount: lineFactor * row.balance,
+        dcFactor,
+        dc: { debit: Math.max(0, row.balance), credit: Math.max(0, -row.balance) },
+      });
     }
     return contributions;
   }
   if (!def.parsed.selectors) return contributions;
-  for (const row of accountRows) {
+  for (const row of state.accountRows) {
     if (matches(db, row.account, def.parsed.selectors)) {
       contributions.push({ account: row.account, amount: lineFactor * row.balance, dcFactor });
     }
@@ -317,11 +351,11 @@ export function configurableReport(db, report, period, group = null, options = {
       const cIdx = columns.indexOf('credit');
       bucketState.forEach((state, stateIdx) => {
         const balIdx = stateIdx * columns.length;
-        for (const { account, amount, dcFactor } of collectAccountContributions(db, definitions, line.code, state.accountRows)) {
+        for (const { account, amount, dcFactor, dc: earningsDc } of collectAccountContributions(db, definitions, line.code, state)) {
           const entry = accountMap.get(account.id) ?? { account, values: new Array(totalCols).fill(0) };
           entry.values[balIdx] += amount;
           if (dIdx >= 0 || cIdx >= 0) {
-            const dc = state.debitCreditByAccount.get(account.id);
+            const dc = earningsDc ?? state.debitCreditByAccount.get(account.id);
             if (dc) {
               if (dIdx >= 0) entry.values[balIdx + dIdx] += dcFactor * dc.debit;
               if (cIdx >= 0) entry.values[balIdx + cIdx] += dcFactor * dc.credit;
@@ -377,6 +411,12 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
   });
   return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows };
 }
+
+/** Whether a computed report line can be unfolded into its contributing account rows. */
+export const isExpandableLine = (line) => Boolean(line.foldable && line.accountRows.length);
+
+/** Journal Items route scoped to one account: the only drill-down filter the Journal Items view reads from its URL. */
+export const accountJournalItemsHref = (accountId) => `#/accounting/journal-items?account=${accountId}`;
 
 const company = { type: 'many2one', relation: 'res.company', label: 'Company', required: true };
 export const configurableReportModels = {
