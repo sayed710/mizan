@@ -382,8 +382,9 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
 
   const set = (i, key, v) => {
     const isComputed = Boolean(field.fields[key]?.compute);
+    const prevLine = value[i];
     const next = value.map((l, j) => (j === i && !isComputed ? { ...l, [key]: v } : l));
-    onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(isComputed ? { ...l, [key]: v } : l, key, db, record) : l)));
+    onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(isComputed ? { ...l, [key]: v } : l, key, db, record, { previous: prevLine }) : l)));
   };
   const addSpecialLine = (displayType) => {
     const base = field.newLine?.(record, db) ?? {};

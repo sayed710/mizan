@@ -1146,3 +1146,120 @@ test('readonly analytic distribution displays analytic account names and percent
   assert.equal(display(db, field, { [office.id]: 60, [cairo.id]: 100 }, office), `${officeName} 60%, ${cairoName} 100%`, 'each plan is checked on its own, so 160% across two plans is valid');
   assert.equal(display(db, field, { abc: '50' }, office), '{"abc":"50"}', 'a malformed stored value is shown as written instead of breaking the view');
 });
+
+test('14. Sale-order invoices and manual invoice lines under a fiscal position post with mapped accounts', () => {
+  let db = seed();
+  const source = create(db, 'account.account', { code: '499221', name: 'Raw Source Income', account_type: 'income' });
+  db = source.db;
+  const mapped = create(db, 'account.account', { code: '499222', name: 'Raw Mapped Income', account_type: 'income' });
+  db = mapped.db;
+  const position = create(db, 'account.fiscal.position', {
+    name: 'Order and manual mapping',
+    account_ids: [{ account_src_id: source.id, account_dest_id: mapped.id }],
+  });
+  db = position.db;
+  const product = create(db, 'product', {
+    name: 'Order Product',
+    type: 'service',
+    list_price: 150,
+    property_account_income_id: source.id,
+  });
+  db = product.db;
+
+  // Case A: Manual invoice line with a raw account under a fiscal position
+  const manualInv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-04-10',
+    fiscal_position_id: position.id,
+    invoice_line_ids: [
+      { name: 'Manual line', qty: 1, price_unit: 100, account_id: source.id, tax: 0 },
+    ],
+  });
+  db = manualInv.db;
+  const postedDb = postMove(db, manualInv.id);
+  const syncedDb = applyDiff(db, diffDb(db, postedDb), { isAdmin: true });
+  const postedManual = read(syncedDb, 'account.move', manualInv.id);
+  const postedManualLine = postedManual.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(postedManualLine?.account_id, mapped.id, 'Manual line raw account is mapped by the fiscal position on posting and syncs through diffDb+applyDiff');
+
+  // Case B: Sale-order invoice under a fiscal position
+  const partner = read(db, 'res.partner', 1);
+  const orderRes = create(db, 'sale.order', {
+    partner_id: partner.id,
+    fiscal_position_id: position.id,
+    order_line: [
+      { product_id: product.id, qty: 2, price_unit: 150, account_id: source.id },
+    ],
+  });
+  db = orderRes.db;
+  const order = read(db, 'sale.order', orderRes.id);
+  const confirmed = models['sale.order'].form.buttons.find((b) => b.label === 'Confirm').run(db, order);
+  db = confirmed.db;
+  const confirmedOrder = read(db, 'sale.order', order.id);
+  const invoiced = models['sale.order'].form.buttons.find((b) => b.label === 'Create Invoice').run(db, confirmedOrder, { method: 'regular' });
+  db = invoiced.db;
+  const invoiceId = Number(invoiced.go.split('/').pop());
+  const soInvoice = read(db, 'account.move', invoiceId);
+  assert.equal(soInvoice.fiscal_position_id, position.id, 'Created invoice copies the sale order fiscal position');
+  const postedSoDb = postMove(db, soInvoice.id);
+  const syncedSoDb = applyDiff(db, diffDb(db, postedSoDb), { isAdmin: true });
+  const postedSoInv = read(syncedSoDb, 'account.move', soInvoice.id);
+  const postedSoLine = postedSoInv.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(postedSoLine?.account_id, mapped.id, 'Sale order invoice line posts with fiscal position mapped account and syncs through diffDb+applyDiff');
+});
+
+test('15. Clearing or editing deferred dates replaces auto-filled analytic distribution using previous state', () => {
+  const fixture = deferredAnalyticFixtures();
+  const db = fixture.db;
+  const lineField = models['account.move'].fields.invoice_line_ids;
+
+  // Set up a line with dates and an auto-filled distribution from the deferred account
+  const productLine = lineField.onchange(fixture.baseLine, 'product_id', db, fixture.move);
+  const started = lineField.onchange({ ...productLine, deferred_start_date: '2026-01-01' }, 'deferred_start_date', db, fixture.move, { previous: productLine });
+  const ended = lineField.onchange({ ...started, deferred_end_date: '2026-12-31' }, 'deferred_end_date', db, fixture.move, { previous: started });
+  assert.deepEqual(ended.analytic_distribution, { [fixture.analytic.id]: 100 }, 'The auto-filled deferred distribution was applied');
+
+  // Case 1: Clearing deferred_end_date should remove the auto-filled deferred distribution
+  const clearedEnd = lineField.onchange({ ...ended, deferred_end_date: null }, 'deferred_end_date', db, fixture.move, { previous: ended });
+  assert.deepEqual(clearedEnd.analytic_distribution, {}, 'Clearing end date removes auto-filled deferred distribution');
+
+  // Case 2: Clearing deferred_start_date should remove the auto-filled deferred distribution
+  const clearedStart = lineField.onchange({ ...ended, deferred_start_date: null }, 'deferred_start_date', db, fixture.move, { previous: ended });
+  assert.deepEqual(clearedStart.analytic_distribution, {}, 'Clearing start date removes auto-filled deferred distribution');
+
+  // Case 3: Inverting dates (start > end) leaves account unresolved and clears auto-filled distribution
+  const inverted = lineField.onchange({ ...ended, deferred_end_date: '2025-01-01' }, 'deferred_end_date', db, fixture.move, { previous: ended });
+  assert.deepEqual(inverted.analytic_distribution, {}, 'Invalid date range clears auto-filled deferred distribution');
+
+  // Case 4: A user-chosen custom distribution survives clearing the dates
+  const custom = { ...ended, analytic_distribution: { [fixture.otherAnalytic.id]: 100 } };
+  const customCleared = lineField.onchange({ ...custom, deferred_end_date: null }, 'deferred_end_date', db, fixture.move, { previous: custom });
+  assert.deepEqual(customCleared.analytic_distribution, { [fixture.otherAnalytic.id]: 100 }, 'User-chosen distribution is preserved when clearing dates');
+
+  // Verify that posting with cleared dates on a regular product posts to the product expense account without deferred distribution, and syncs through diffDb+applyDiff
+  let currentDb = db;
+  const regularAccount = create(currentDb, 'account.account', { code: '777701', name: 'Regular Expense Account', account_type: 'expense', company_id: 1 });
+  currentDb = regularAccount.db;
+  const regProduct = create(currentDb, 'product', { name: 'Reg Service', type: 'service', cost: 100, list_price: 100, property_account_expense_id: regularAccount.id });
+  currentDb = regProduct.db;
+  const regLine = lineField.onchange({ product_id: regProduct.id, qty: 1, price_unit: 100 }, 'product_id', currentDb, fixture.move);
+  const regDated = lineField.onchange({ ...regLine, deferred_start_date: '2026-01-01', deferred_end_date: '2026-12-31' }, 'deferred_end_date', currentDb, fixture.move, { previous: regLine });
+  assert.deepEqual(regDated.analytic_distribution, { [fixture.analytic.id]: 100 });
+  const regCleared1 = lineField.onchange({ ...regDated, deferred_end_date: null }, 'deferred_end_date', currentDb, fixture.move, { previous: regDated });
+  const regCleared = lineField.onchange({ ...regCleared1, deferred_start_date: null }, 'deferred_start_date', currentDb, fixture.move, { previous: regCleared1 });
+  assert.deepEqual(regCleared.analytic_distribution, {});
+
+  const bill = create(currentDb, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 1,
+    invoice_date: '2026-05-15',
+    invoice_line_ids: [regCleared],
+  });
+  const postedBillDb = postMove(bill.db, bill.id);
+  const syncedBillDb = applyDiff(bill.db, diffDb(bill.db, postedBillDb), { isAdmin: true });
+  const postedBill = read(syncedBillDb, 'account.move', bill.id);
+  const postedLine = postedBill.line_ids.find((l) => (l.invoice_sources ?? []).some((s) => s.index === 0));
+  assert.equal(postedLine?.account_id, regularAccount.id, 'Bill line posts to the product expense account, not the deferred expense account');
+  assert.ok(!postedLine?.analytic_distribution || Object.keys(postedLine.analytic_distribution).length === 0, 'Posted journal item does not inherit the deferred analytic distribution');
+});

@@ -10,7 +10,7 @@ import { cashRoundingApplies, cashRoundingError, configuredAccount } from './con
 import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
-import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, sameDistribution } from './analyticplus.js';
+import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
 import { hasMultiCurrency } from './money.js';
@@ -525,7 +525,16 @@ export function intercompanyBill(db, move) {
     } catch {
       throw new Error(`Configure purchase taxes for ${buyer.name} on ${product.name}`);
     }
-    return { name: line.name, product_id: line.product_id, qty: line.qty, price_unit: line.price_unit, discount: line.discount, account_id: account.id, ...(tax ?? { tax: 0 }) };
+    return {
+      name: line.name,
+      product_id: line.product_id,
+      qty: line.qty,
+      price_unit: line.price_unit,
+      discount: line.discount,
+      account_id: account.id,
+      account_fiscal_position_id: fpId ?? null,
+      ...(tax ?? { tax: 0 }),
+    };
   });
   const original = move.move_type === 'out_refund' && move.reversed_entry_id ? read(db, 'account.move', move.reversed_entry_id) : null;
   const originalBill = original?.intercompany_move_id && read(db, 'account.move', original.intercompany_move_id);
@@ -576,9 +585,10 @@ function copyInvoiceLines(lines, { sourceCredit = false, preserveSourceLineId = 
     if (sourceCredit && (sourceLineId == null || sourceLineId === '')) {
       throw new Error('The source invoice line is missing its stable ID; update the database before creating a credit note');
     }
-    const { line_id: ignoredLineId, source_line_id: ignoredSourceLineId, ...copy } = line;
+    const { line_id: ignoredLineId, source_line_id: ignoredSourceLineId, account_fiscal_position_id: ignoredFpId, ...copy } = line;
     void ignoredLineId;
     void ignoredSourceLineId;
+    void ignoredFpId;
     return {
       ...copy,
       line_id: newInvoiceLineId(),
@@ -1343,7 +1353,7 @@ export function correctCreditNote(db, note) {
     move_type: purchase ? 'in_invoice' : 'out_invoice', correction_of_id: note.id, company_id: note.company_id,
     partner_id: note.partner_id, currency_id: note.currency_id ?? null, fiscal_position_id: note.fiscal_position_id ?? null,
     invoice_origin: note.name, ref: `Correction of ${note.name}`, invoice_date: today(), invoice_date_due: today(),
-    invoice_line_ids: note.invoice_line_ids.map(({ purchase_line_id, sale_line_id, line_id, source_line_id, ...line }) => ({ ...line, line_id: newInvoiceLineId() })),
+    invoice_line_ids: note.invoice_line_ids.map(({ purchase_line_id, sale_line_id, line_id, source_line_id, account_fiscal_position_id, ...line }) => ({ ...line, line_id: newInvoiceLineId() })),
   }, { archivedOriginIds: [note.id] });
   return { db: postNote(out.db, 'account.move', note.id, `Correction invoice drafted for ${note.name}`), go: `#/accounting/${purchase ? 'bills' : 'invoices'}/${out.id}` };
 }
@@ -1388,7 +1398,7 @@ export function debitNote(db, r, options = {}) {
     ...(r.invoice_cash_rounding_id ? { invoice_cash_rounding_id: r.invoice_cash_rounding_id } : {}),
     // Order and rental links stay on the source: a debit note never counts as a billed rental charge (Qodo 62).
     invoice_line_ids: copyLines
-      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, rental_id, rental_charge, ...line }) => ({ ...line }))
+      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, rental_id, rental_charge, account_fiscal_position_id, ...line }) => ({ ...line }))
       : [],
     ref,
   }, { archivedOriginIds: copyLines ? [r.id] : [] });
@@ -1580,7 +1590,7 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 const invoiceLineField = {
   ...invoiceLineBase,
   newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
-  onchange: (line, key, db, move) => {
+  onchange: (line, key, db, move, context = {}) => {
     const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: resolveDocumentJournal(db, move)?.id } : move);
     const base = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
     const isDoc = db && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(moveWithJournal?.move_type);
@@ -1596,27 +1606,27 @@ const invoiceLineField = {
       const journal = resolveDocumentJournal(db, moveWithJournal);
       if (journal) {
         const resolved = invoiceLineOriginalAccount(db, moveWithJournal, { ...updated, account_id: null, income_account_id: null }, journal);
-        if (!resolved.error && resolved.account) updated = { ...updated, account_id: resolved.account };
+        if (!resolved.error && resolved.account) {
+          updated = { ...updated, account_id: resolved.account, account_fiscal_position_id: moveWithJournal?.fiscal_position_id ?? null };
+        }
       }
     }
-    if (isDoc && key === 'account_id' && !base.product_id && !isSectionOrNote(base)) {
-      const account = base.account_id ? read(db, 'account.account', base.account_id) : null;
-      const side = isPurchase(moveWithJournal) ? 'purchase' : 'sale';
-      // An account without a default tax for this side keeps the line's current tax.
-      const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
-      if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
+    if (isDoc && key === 'account_id') {
+      updated = { ...updated, account_fiscal_position_id: null };
+      if (!base.product_id && !isSectionOrNote(base)) {
+        const account = base.account_id ? read(db, 'account.account', base.account_id) : null;
+        const side = isPurchase(moveWithJournal) ? 'purchase' : 'sale';
+        // An account without a default tax for this side keeps the line's current tax.
+        const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
+        if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
+      }
     }
     if (isDoc && ['product_id', 'account_id'].includes(key)) {
       return withTaxIds({ ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) });
     }
     if (isDoc && ['deferred_start_date', 'deferred_end_date'].includes(key)) {
-      // The deferral dates decide which account the line posts to, so an auto-filled distribution follows them.
-      // Replace it only while it still equals the default this line had before the dates applied to it.
-      const before = defaultDistributionForLine(db, { ...line, deferred_start_date: null, deferred_end_date: null }, moveWithJournal);
-      const current = line.analytic_distribution ?? (line.analytic_account_id ? { [line.analytic_account_id]: 100 } : {});
-      return withTaxIds(sameDistribution(current, before)
-        ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
-        : updated);
+      const prevLine = context?.previous ?? (context && !Array.isArray(context.invoice_line_ids) && (context.product_id || context.account_id) ? context : null) ?? (move?.invoice_line_ids?.find((l) => (line.line_id && l.line_id === line.line_id) || (line.id && l.id === line.id))) ?? null;
+      return withTaxIds(syncDeferredAnalyticDistribution(db, updated, line, prevLine, moveWithJournal));
     }
     return withTaxIds(updated);
   },
@@ -1645,6 +1655,7 @@ const invoiceLineField = {
     down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true },
     rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true },
     rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true },
+    account_fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position', readonly: true, hidden: true },
   },
 };
 
@@ -2377,8 +2388,9 @@ export const accountingModels = {
               ? invoiceLineOriginalAccount(db, nextContext, { ...line, account_id: null, income_account_id: null }, resolveDocumentJournal(db, nextContext))
               : null;
             const accountId = autoFilled ? (autoAfter.error ? null : autoAfter.account) : (line.account_id ?? null);
+            const accountFiscalPositionId = autoFilled ? (nextContext.fiscal_position_id ?? null) : (line.account_fiscal_position_id ?? null);
             const updated = remapKey ? invoiceLineField.onchange(line, remapKey, db, nextContext) : line;
-            return { ...updated, account_id: accountId, ...(remapKey ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, { ...updated, account_id: accountId }, nextContext, line.analytic_distribution ?? {}) };
+            return { ...updated, account_id: accountId, account_fiscal_position_id: accountFiscalPositionId, ...(remapKey ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, { ...updated, account_id: accountId }, nextContext, line.analytic_distribution ?? {}) };
           }) }
           : {};
         return {

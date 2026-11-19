@@ -258,8 +258,13 @@ export function invoiceLineOriginalAccount(db, move, line, journal) {
   const source = getSourceAccount(line);
   if (source.error) return { account: null, error: source.error };
   if (!source.accountId) return { account: null, error: `No ${source.type} account found` };
-  // A line's own account was already mapped when it was filled or created, so it posts exactly as stored.
-  const mapped = source.type === 'line' ? source.accountId : mapLineAccount(db, move, source.accountId);
+  // A line whose account was already mapped by the document's fiscal position posts as stored.
+  // Every other stored account (from orders, manual selection, import/API, copies) is mapped through the fiscal position.
+  const alreadyMapped = Boolean(
+    source.recorded ||
+    (source.type === 'line' && move?.fiscal_position_id && line.account_fiscal_position_id === move.fiscal_position_id)
+  );
+  const mapped = alreadyMapped ? source.accountId : mapLineAccount(db, move, source.accountId);
   const mappedAccount = read(db, 'account.account', mapped);
   const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
   const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);

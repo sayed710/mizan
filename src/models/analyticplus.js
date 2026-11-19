@@ -64,6 +64,20 @@ export function defaultDistributionForLine(db, line, move, fallback = {}) {
   }, fallback);
 }
 
+/**
+ * Update a line's analytic distribution when deferral dates change:
+ * if the distribution before the edit was auto-filled from the line's previous state,
+ * update it to the new auto-filled default for the updated line.
+ */
+export function syncDeferredAnalyticDistribution(db, updated, line, previousLine, move) {
+  const current = line.analytic_distribution ?? (line.analytic_account_id ? { [line.analytic_account_id]: 100 } : {});
+  const autoBefore = previousLine
+    ? defaultDistributionForLine(db, previousLine, move)
+    : defaultDistributionForLine(db, { ...line, deferred_start_date: null, deferred_end_date: null }, move);
+  if (!sameDistribution(current, autoBefore)) return updated;
+  return { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, move) };
+}
+
 /** Read a distribution, preserving the legacy single-account allocation. */
 export function distributionOfLine(line, db, move) {
   if (line.analytic_distribution != null) {
