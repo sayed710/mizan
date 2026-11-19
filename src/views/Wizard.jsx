@@ -65,10 +65,15 @@ function WizardField({ db, field, value, values, onChange, id, disabled = false 
 }
 
 export function Wizard({ db, spec, onConfirm, onCancel, error }) {
-  const [values, setValues] = useState(() => {
+  const [state, setState] = useState(() => {
     const init = wizardDefaults(spec);
-    return { ...init, ...spec.onchange?.(init, null, db) };
+    try {
+      return { values: { ...init, ...spec.onchange?.(init, null, db) }, fieldError: null };
+    } catch (e) {
+      return { values: init, fieldError: t(e.message) };
+    }
   });
+  const { values, fieldError } = state;
   const [missing, setMissing] = useState([]);
   // A read-only wizard shows values without offering a write.
   const readOnly = !!spec.readOnly;
@@ -78,10 +83,34 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
     box.current?.querySelector('input, select, textarea, button')?.focus();
     return () => previous?.focus?.();
   }, []);
+
+  let renderError = null;
+  const visibleFields = [];
+  for (const f of spec.fields) {
+    try {
+      if (!isFieldVisible(f, values)) continue;
+      const req = isFieldRequired(f, values);
+      const disabled = isFieldDisabled(f, values, readOnly);
+      const val = f.compute ? f.compute(values, db) : values[f.name];
+      visibleFields.push({ f, req, disabled, val });
+    } catch (e) {
+      renderError ??= t(e.message);
+    }
+  }
+  const interactionError = fieldError || renderError;
+  const displayedError = interactionError || error;
+  const canSubmit = !readOnly && !interactionError;
+
   const submit = (e) => {
     e.preventDefault();
-    if (readOnly) return;
-    const empty = missingFields(spec, values);
+    if (!canSubmit) return;
+    let empty;
+    try {
+      empty = missingFields(spec, values);
+    } catch (err) {
+      setState((s) => ({ ...s, fieldError: t(err.message) }));
+      return;
+    }
     setMissing(empty);
     if (!empty.length) onConfirm(values);
   };
@@ -98,29 +127,31 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
     <div className="wizard-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <form ref={box} className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title" onSubmit={submit} onKeyDown={onKeyDown}>
         <h2 id="wizard-title">{t(spec.title)}</h2>
-        {spec.fields.filter((f) => isFieldVisible(f, values)).map((f) => {
-          const req = isFieldRequired(f, values);
-          const disabled = isFieldDisabled(f, values, readOnly);
-          const val = f.compute ? f.compute(values, db) : values[f.name];
-          return (
-            <div className="field" key={f.name}>
-              <label htmlFor={`w-${f.name}`}>{t(f.label)}{req && <span className="req" aria-hidden="true">*</span>}</label>
-              <div className="field-value">
-                <WizardField db={db} field={f} id={`w-${f.name}`} disabled={disabled} value={val} values={values} onChange={(v) => setValues((s) => {
-                  const next = { ...s, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) };
-                  return { ...next, ...spec.onchange?.(next, f.name, db) };
-                })} />
-                {f.warning && <p className="muted setting-desc">{t(f.warning)}</p>}
-                {f.help && <div className="field-help">{t(f.help)}</div>}
-              </div>
+        {visibleFields.map(({ f, req, disabled, val }) => (
+          <div className="field" key={f.name}>
+            <label htmlFor={`w-${f.name}`}>{t(f.label)}{req && <span className="req" aria-hidden="true">*</span>}</label>
+            <div className="field-value">
+              <WizardField db={db} field={f} id={`w-${f.name}`} disabled={disabled} value={val} values={values} onChange={(v) => {
+                setMissing([]);
+                setState((s) => {
+                  const next = { ...s.values, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) };
+                  try {
+                    return { values: { ...next, ...spec.onchange?.(next, f.name, db) }, fieldError: null };
+                  } catch (err) {
+                    return { values: next, fieldError: t(err.message) };
+                  }
+                });
+              }} />
+              {f.warning && <p className="muted setting-desc">{t(f.warning)}</p>}
+              {f.help && <div className="field-help">{t(f.help)}</div>}
             </div>
-          );
-        })}
-        {(missing.length > 0 || error) && (
-          <div className="alert" role="alert">{missing.length ? `${t('Fill in')}: ${missing.join(', ')}` : error}</div>
+          </div>
+        ))}
+        {(missing.length > 0 || displayedError) && (
+          <div className="alert" role="alert">{missing.length && !interactionError ? `${t('Fill in')}: ${missing.join(', ')}` : displayedError}</div>
         )}
         <div className="row">
-          <button type="submit" className="btn primary" disabled={readOnly}>{t(spec.confirmLabel ?? 'Confirm')}</button>
+          <button type="submit" className="btn primary" disabled={!canSubmit}>{t(spec.confirmLabel ?? 'Confirm')}</button>
           <button type="button" className="btn" onClick={onCancel}>{t('Cancel')}</button>
         </div>
       </form>
