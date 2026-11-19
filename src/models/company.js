@@ -1,5 +1,5 @@
 import { create, read, updateSettings, write } from '../orm.js';
-import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
+import { fiscalPositionFor, lineTaxOf, productTax, taxAmount, taxGroups, taxSnapshot } from './taxes.js';
 import { DEFERRED_COMPUTATION_OPTIONS, DEFERRED_EXPENSE_GENERATION_OPTIONS, DEFERRED_PERIODICITY_OPTIONS, DEFERRED_REVENUE_GENERATION_OPTIONS, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod, postCompanyDeferrals } from './deferred.js';
 import { companyRoundingMethod, today, validDate } from './common.js';
 import { companyCurrencyRecord, documentCurrency } from '../money.js';
@@ -549,12 +549,12 @@ function purchaseLine(db, line, fpId, companyId) {
   const included = line.tax_include && factor ? lineTaxOf(line) / factor : 0;
   const net = Math.round(((Number(line.price_unit) || 0) - included) * 1e6) / 1e6;
   const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId, companyId) ?? taxSnapshot(null);
-  // A price-included tax is part of the price: a percentage scales it, a fixed amount per unit is added back (it sits
+  // A price-included tax is part of the price: a percentage or division tax adds its amount on the net price, a fixed amount per unit is added back (it sits
   // inside the discounted price, so the discount is undone for it).
   const kept_share = 1 - (Number(line.discount) || 0) / 100;
   const price_unit = !tax.tax_include ? net
     : tax.tax_type === 'fixed' ? Math.round((net + (kept_share > 0 ? (Number(tax.tax) || 0) / kept_share : 0)) * 1e6) / 1e6
-      : Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6;
+      : Math.round((net + taxAmount(net, tax)) * 1e6) / 1e6;
   return { ...kept, price_unit, ...tax };
 }
 
