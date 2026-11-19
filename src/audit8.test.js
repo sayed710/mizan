@@ -183,7 +183,7 @@ test('Item 1c: A single selected payment belonging to a batch matches only that 
   const p1 = read(db, 'account.payment', postedBatch.lines[0].payment_id);
   const p2 = read(db, 'account.payment', postedBatch.lines[1].payment_id);
 
-  // When amounts differ (statement line 100, single payment 75): must be rejected with the total mismatch message
+  // When amounts differ and payment is less (statement line 100, single payment 75): partial match leaves rest open
   const diffStmt = create(db, 'account.bank.statement.line', {
     journal_id: journal.id,
     date: '2025-01-03',
@@ -191,10 +191,10 @@ test('Item 1c: A single selected payment belonging to a batch matches only that 
     payment_id: p1.id,
     payment_ref: 'Diff amount',
   });
-  assert.throws(
-    () => runBtn(diffStmt.db, 'account.bank.statement.line', diffStmt.id, 'Match Payment'),
-    /The selected payments must total the bank transaction amount/
-  );
+  const diffDb = runBtn(diffStmt.db, 'account.bank.statement.line', diffStmt.id, 'Match Payment');
+  const diffLine = read(diffDb, 'account.bank.statement.line', diffStmt.id);
+  assert.equal(diffLine.state, 'to_check');
+  assert.equal(diffLine.open_amount, 25);
 
   // When amounts match (statement line 75, single payment 75): matches ONLY that payment
   const stmt = create(db, 'account.bank.statement.line', {
