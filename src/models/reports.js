@@ -287,9 +287,9 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
 }
 
 /** Executive KPIs for a period: P&L figures and margins, liquidity at the period end, days sales outstanding. */
-export function executiveSummary(db, { from, to, analyticAccountIds } = {}) {
-  const pl = profitAndLoss(db, { from, to }, { analyticAccountIds });
-  const bs = balanceSheet(db, to, { analyticAccountIds });
+export function executiveSummary(db, { from, to, company_id, analyticAccountIds } = {}) {
+  const pl = profitAndLoss(db, { from, to, company_id }, { analyticAccountIds });
+  const bs = balanceSheet(db, { to, company_id }, { analyticAccountIds });
   const sum = (rows, types) => round(rows.filter((r) => types.includes(r.account.account_type)).reduce((s, r) => s + r.balance, 0));
   const cash = sum(bs.assets, ['asset_cash']);
   const receivables = sum(bs.assets, ['asset_receivable']);
