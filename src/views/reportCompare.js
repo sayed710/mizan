@@ -197,7 +197,11 @@ export function cashflowAnalyticColumns(db, group, period, { analyticAccountIds,
     ...companyFilter,
     ...modeFilterFor(reviewMode, includeUnposted),
   };
-  const buckets = groupBuckets(scopedDb, group, journalItems(scopedDb, filter), { analyticAccountIds });
+  const discoveryFilter = {
+    ...filter,
+    from: '',
+  };
+  const buckets = groupBuckets(scopedDb, group, journalItems(scopedDb, discoveryFilter), { analyticAccountIds });
   return columns(buckets, buckets.map((b) => cashFlow(scopedDb, {
     ...filter, weight: b.weight, analyticAccountIds, includeUnposted, reviewMode,
   })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS, { showVariance: false });

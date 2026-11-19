@@ -733,7 +733,7 @@ function ReportPage({ leaf }) {
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const primaryCompanyId = selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany);
   // Like the statement reports, the cash flow offers the groups not limited to specific reports.
-  const horizontalGroups = comparable && leaf.report === 'cashflow'
+  const horizontalGroups = leaf.report === 'cashflow'
     ? search(companyDb, 'account.report.horizontal.group').filter((g) => (g.company_id ?? 1) === primaryCompanyId && !(g.report_ids ?? []).length)
     : [];
   const canComputePeriods = periodKey !== 'custom' || (validDate(period.from) && validDate(period.to) && period.from <= period.to);
@@ -856,7 +856,7 @@ function ReportPage({ leaf }) {
             <option value="last3">{t('Last 3 Periods')}</option>
           </select>
         </label>}
-        {comparable && horizontalGroups.length > 0 && <label className="inline-select">
+        {horizontalGroups.length > 0 && <label className="inline-select">
           {t('Horizontal Group')}
           <select aria-label={t('Horizontal Group')} value={horizontalGroupId} onChange={(e) => { setHorizontalGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
             <option value="">{t('None')}</option>

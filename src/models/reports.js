@@ -282,7 +282,14 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
     if (!counterpart || !denominator || !fullDenominator) continue;
     const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
     if (!share) continue;
-    const entryWeight = weight ? weight(counterpart.line) : 1;
+    const counterpartItem = {
+      ...counterpart.line,
+      move_id: entry.id,
+      journal_id: entry.journal_id,
+      company_id: entry.company_id ?? 1,
+      date: entry.date ?? entry.invoice_date,
+    };
+    const entryWeight = weight ? weight(counterpartItem) : 1;
     if (!entryWeight) continue;
     const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment)) * share * entryWeight;
     const attribution = { company_id: entry.company_id, date: effDate };

@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postEntry } from './models/ledger.js';
+import { postMove } from './models/accounting.js';
+import { postPayment } from './models/pay.js';
 import { today } from './models/common.js';
 import {
   accountJournalItemsHref,
@@ -420,6 +422,200 @@ test('FIN-13: ConfigurableReportPage passes analyticAccountIds to compareConfigu
     // In comparison mode, the current period column must STILL be filtered to $600.00, NOT $1,000.00!
     assert.ok(host.textContent.includes('$600.00'), 'Comparison mode keeps analytic account filter at $600.00');
     assert.ok(!host.textContent.includes('$1,000.00'), 'Comparison mode must not revert to unfiltered $1,000.00');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Follow-up Qodo Regression Tests (Problems 1, 2, 3)
+// ---------------------------------------------------------------------------
+
+test('Qodo 1: Advance payment reclassification weights with move journal and company for journal/company groups', () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
+  const yr = Number(today().slice(0, 4));
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' || j.code === 'BNK1');
+  const p1 = create(db, 'res.partner', { name: 'Adv Customer' }); db = p1.db;
+  const assetAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_fixed');
+
+  // Advance payment paid in Jan (earlier period): $500
+  const adv = create(db, 'account.payment', {
+    partner_id: p1.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    date: `${yr}-01-10`,
+    amount: 500,
+    journal_id: bankJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(adv.db, read(adv.db, 'account.payment', adv.id));
+  const advPayment = read(db, 'account.payment', adv.id);
+
+  // Invoice in Feb (report period) settled with earlier advance
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: p1.id,
+    invoice_date: `${yr}-02-05`,
+    invoice_date_due: `${yr}-02-05`,
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 500, tax: 0, account_id: assetAcc.id }],
+  });
+  db = postMove(inv.db, inv.id);
+  db = write(db, 'account.move', inv.id, {
+    amount_paid: 500,
+    payment_date: `${yr}-02-15`,
+    payments: [{ date: `${yr}-02-15`, amount: 500, move_id: advPayment.move_id, company_amount: 500 }],
+  });
+
+  const period = { from: `${yr}-02-01`, to: `${yr}-02-28` };
+
+  // 1. Group by journal
+  const jGroup = create(db, 'account.report.horizontal.group', {
+    name: 'By Journal',
+    company_id: 1,
+    rule_ids: [{ field: 'journal', journal_ids: [bankJournal.id] }],
+  });
+  db = jGroup.db;
+
+  const jCols = cashflowAnalyticColumns(db, read(db, 'account.report.horizontal.group', jGroup.id), period);
+  const bankIdx = jCols.headers.indexOf(bankJournal.name);
+  const otherJIdx = jCols.headers.indexOf('Others');
+  assert.ok(bankIdx >= 0, 'Bank journal column header exists');
+  assert.ok(otherJIdx >= 0, 'Others column header exists');
+
+  const invSectionJ = jCols.sections.find((s) => s.title === 'Investing Activities');
+  const opSectionJ = jCols.sections.find((s) => s.title === 'Operating Activities');
+  assert.equal(invSectionJ.totals[bankIdx], 500, 'Bank journal bucket receives $500 reclassified investing cash');
+  assert.equal(opSectionJ.totals[bankIdx], -500, 'Bank journal bucket receives -$500 operating adjustment');
+  assert.equal(invSectionJ.totals[otherJIdx], 0, 'Others bucket does NOT receive reclassified advance');
+  assert.equal(opSectionJ.totals[otherJIdx], 0, 'Others bucket does NOT receive operating adjustment');
+
+  // 2. Group by company
+  const compGroup = create(db, 'account.report.horizontal.group', {
+    name: 'By Company',
+    company_id: 1,
+    rule_ids: [{ field: 'company', company_ids: [1] }],
+  });
+  db = compGroup.db;
+
+  const cCols = cashflowAnalyticColumns(db, read(db, 'account.report.horizontal.group', compGroup.id), period);
+  const c1Name = read(db, 'res.company', 1).name;
+  const c1Idx = cCols.headers.indexOf(c1Name);
+  const otherCIdx = cCols.headers.indexOf('Others');
+  assert.ok(c1Idx >= 0, 'Company 1 column header exists');
+  assert.ok(otherCIdx >= 0, 'Others column header exists');
+
+  const invSectionC = cCols.sections.find((s) => s.title === 'Investing Activities');
+  const opSectionC = cCols.sections.find((s) => s.title === 'Operating Activities');
+  assert.equal(invSectionC.totals[c1Idx], 500, 'Company 1 bucket receives $500 reclassified investing cash');
+  assert.equal(opSectionC.totals[c1Idx], -500, 'Company 1 bucket receives -$500 operating adjustment');
+  assert.equal(invSectionC.totals[otherCIdx], 0, 'Others bucket does NOT receive reclassified advance');
+});
+
+test('Qodo 2: Opening cash discovers implicit bucket members from items up to period end', () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
+  const yr = Number(today().slice(0, 4));
+  const p1 = create(db, 'res.partner', { name: 'Early Cash Partner' }); db = p1.db;
+  const cashAcc = search(db, 'account.account').find((a) => a.code === '101401');
+  const revAcc = search(db, 'account.account').find((a) => a.code === '400000');
+
+  // Only cash movement for P1 is BEFORE the period (in Jan)
+  db = postEntry(db, {
+    journal: 'MISC', company: 1, date: `${yr}-01-15`,
+    lines: [
+      { account_id: cashAcc.id, debit: 1200, partner_id: p1.id },
+      { account_id: revAcc.id, credit: 1200, partner_id: p1.id },
+    ],
+  }).db;
+
+  // Implicit partner group (no partner_ids specified)
+  const implicitGroup = create(db, 'account.report.horizontal.group', {
+    name: 'Implicit Partners Group',
+    company_id: 1,
+    rule_ids: [{ field: 'partner' }],
+  });
+  db = implicitGroup.db;
+
+  // Report period is Feb (P1 has no activity inside Feb)
+  const period = { from: `${yr}-02-01`, to: `${yr}-02-28` };
+  const cols = cashflowAnalyticColumns(db, read(db, 'account.report.horizontal.group', implicitGroup.id), period);
+
+  assert.ok(cols.headers.includes('Early Cash Partner'), 'Implicit group includes Early Cash Partner column from earlier items');
+  const pIdx = cols.headers.indexOf('Early Cash Partner');
+  const otherIdx = cols.headers.indexOf('Others');
+
+  const openingRow = cols.totals.find((t) => t.label === 'Cash at Beginning');
+  const closingRow = cols.totals.find((t) => t.label === 'Cash at End');
+  const netRow = cols.totals.find((t) => t.label === 'Net Change in Cash');
+
+  assert.equal(openingRow.values[pIdx], 1200, 'Early Cash Partner bucket has $1,200 opening cash');
+  assert.equal(closingRow.values[pIdx], 1200, 'Early Cash Partner bucket has $1,200 closing cash');
+  assert.equal(netRow.values[pIdx], 0, 'Early Cash Partner has $0 net change during Feb');
+  assert.equal(openingRow.values[otherIdx], 0, 'Others bucket does NOT take Early Cash Partner opening cash');
+});
+
+test('Qodo 3: All Dates cash flow offers horizontal group selector and renders bucket columns', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/reports/cash-flow' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
+  const yr = Number(today().slice(0, 4));
+  const p1 = create(db, 'res.partner', { name: 'Global All Dates Partner' }); db = p1.db;
+  const cashAcc = search(db, 'account.account').find((a) => a.code === '101401');
+  const revAcc = search(db, 'account.account').find((a) => a.code === '400000');
+
+  db = postEntry(db, {
+    journal: 'MISC', company: 1, date: `${yr}-07-10`,
+    lines: [
+      { account_id: cashAcc.id, debit: 770, partner_id: p1.id },
+      { account_id: revAcc.id, credit: 770, partner_id: p1.id },
+    ],
+  }).db;
+
+  const hGroup = create(db, 'account.report.horizontal.group', {
+    name: 'All Dates Cashflow Group',
+    company_id: 1,
+    rule_ids: [{ field: 'partner', partner_ids: [p1.id] }],
+  });
+  db = hGroup.db;
+
+  await React.act(async () => store.commit(db));
+
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'cashflow', title: 'Cash Flow Statement' } })));
+
+    // Find the Period select and choose 'all' (All Dates)
+    const periodSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value !== undefined && Array.from(n.childNodes ?? []).some((c) => props(c)?.value === 'all'));
+    assert.ok(periodSelect, 'Period select exists');
+
+    await React.act(async () => {
+      props(periodSelect).onChange({ target: { value: 'all' } });
+    });
+
+    // Horizontal Group selector MUST still be rendered when 'all' is selected!
+    const groupSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Horizontal Group');
+    assert.ok(groupSelect, 'Horizontal Group selector must be rendered when All Dates is chosen');
+
+    // Select the horizontal group
+    await React.act(async () => {
+      props(groupSelect).onChange({ target: { value: String(hGroup.id) } });
+    });
+
+    // Bucket columns must be rendered
+    assert.ok(host.textContent.includes('Global All Dates Partner'), 'Table contains bucket column header');
+    assert.ok(host.textContent.includes('Others'), 'Table contains Others column header');
+    assert.ok(host.textContent.includes('$770.00'), 'Table contains partitioned amount');
   } finally {
     await React.act(async () => root.unmount());
   }
