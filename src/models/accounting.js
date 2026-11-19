@@ -1,13 +1,13 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reconcileReversalLines, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, validateTaxCompany } from './taxes.js';
+import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
@@ -26,7 +26,7 @@ import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
 import { onlineAccountForJournal } from './onlineSync.js';
 
-export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
+export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines };
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -1690,6 +1690,166 @@ const invoiceLineField = {
   },
 };
 
+/** Determine base repartition tags for a manual entry line based on debit/credit side. */
+function updateBaseLineTags(line, move, db) {
+  const taxIds = (line?.tax_ids ?? []).filter(Boolean);
+  if (!taxIds.length || !db) return { ...line, tax_tag_ids: [] };
+  const debit = Number(line.debit) || 0;
+  const credit = Number(line.credit) || 0;
+  const baseSide = debit >= credit ? 'debit' : 'credit';
+  const allBaseTags = new Set();
+  for (const id of taxIds) {
+    const tax = read(db, 'account.tax', id);
+    if (!tax) continue;
+    const side = entryTaxRepartitionSide(tax, baseSide);
+    for (const tagId of taxBaseTags(tax, side)) allBaseTags.add(tagId);
+  }
+  return { ...line, tax_tag_ids: [...allBaseTags].sort((a, b) => a - b) };
+}
+
+/** Compute and sync tax lines on manual journal entry lines (move_type 'entry'). */
+function computeEntryTaxLines(lines = [], move = {}, db = null) {
+  if (!db || !Array.isArray(lines)) return lines;
+
+  const companyId = move.company_id ?? db?.settings?.current_company_id ?? 1;
+  const companyCurrencyRec = companyCurrencyRecord(db, companyId);
+  const roundingMethod = companyRoundingMethod(db, companyId);
+  const moveDate = move.date ?? move.invoice_date ?? today();
+
+  const baseLines = [];
+  const existingTaxLines = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.tax_repartition_line_id != null || l.tax_id != null) {
+      existingTaxLines.push(l);
+    } else {
+      let baseLine = { ...l };
+      if (baseLine.account_id && baseLine.tax_ids === undefined) {
+        baseLine.tax_ids = accountDefaultTaxIds(db, read(db, 'account.account', baseLine.account_id), companyId);
+      }
+      baseLines.push(baseLine);
+    }
+  }
+
+  const matchedTaxLineIndexes = new Set();
+  const resultLines = [];
+
+  for (let bIdx = 0; bIdx < baseLines.length; bIdx++) {
+    const baseLine = baseLines[bIdx];
+    const taxIds = (baseLine.tax_ids ?? []).filter(Boolean);
+    const debit = Number(baseLine.debit) || 0;
+    const credit = Number(baseLine.credit) || 0;
+    const baseSide = debit >= credit ? 'debit' : 'credit';
+    const baseAmount = Math.max(debit, credit);
+
+    const isForeign = Boolean(baseLine.currency_id && companyCurrencyRec && baseLine.currency_id !== companyCurrencyRec.id);
+    const docCurrency = (isForeign && baseLine.currency_id) ? read(db, 'res.currency', baseLine.currency_id) : companyCurrencyRec;
+    const foreignAmount = isForeign && baseLine.amount_currency != null ? Math.abs(Number(baseLine.amount_currency) || 0) : null;
+
+    if (!taxIds.length || (baseAmount === 0 && (foreignAmount === null || foreignAmount === 0))) {
+      const updatedBase = { ...baseLine, tax_tag_ids: taxIds.length ? (baseLine.tax_tag_ids ?? []) : [] };
+      resultLines.push(updatedBase);
+      continue;
+    }
+
+    const firstTax = read(db, 'account.tax', taxIds[0]);
+    const side = entryTaxRepartitionSide(firstTax, baseSide);
+
+    const expanded = expandTaxIds(db, taxIds, move.fiscal_position_id);
+    const lineObj = {
+      qty: 1,
+      price_unit: (isForeign && foreignAmount != null) ? foreignAmount : baseAmount,
+      discount: 0,
+      tax_ids: taxIds,
+      tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id)),
+    };
+
+    const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
+
+    const baseTags = [...new Set(computed.taxes.flatMap((t) => {
+      const taxRec = read(db, 'account.tax', t.tax_id);
+      const tSide = entryTaxRepartitionSide(taxRec, baseSide);
+      return taxBaseTags(t, tSide, lineObj);
+    }))].sort((a, b) => a - b);
+
+    const updatedBase = {
+      ...baseLine,
+      tax_tag_ids: baseTags,
+      tax_grid_base: baseTags.length > 0,
+      ...(firstTax?.type_tax_use ? { tax_side: firstTax.type_tax_use } : {}),
+    };
+    resultLines.push(updatedBase);
+
+    for (let tIdx = 0; tIdx < computed.taxes.length; tIdx++) {
+      const t = computed.taxes[tIdx];
+      const taxRec = read(db, 'account.tax', t.tax_id);
+      const tSide = entryTaxRepartitionSide(taxRec, baseSide);
+
+      const { splits } = taxRepartitionSplits(t, lineObj, tSide, docCurrency);
+
+      for (let sIdx = 0; sIdx < splits.length; sIdx++) {
+        const { row, amount: splitDocAmount, base: splitDocBase } = splits[sIdx];
+        const taxAmount = isForeign
+          ? toCompany(db, baseLine.currency_id, splitDocAmount, moveDate, companyId)
+          : splitDocAmount;
+        const taxBase = isForeign
+          ? toCompany(db, baseLine.currency_id, splitDocBase, moveDate, companyId)
+          : (splitDocBase || baseAmount);
+
+        let taxAccountId;
+        if (t.tax_cash_basis) {
+          taxAccountId = cashBasisTransitionAccount(db, t.tax_id, companyId);
+        } else if (row.account_id) {
+          const mapped = mapAccount(db, move.fiscal_position_id, row.account_id);
+          taxAccountId = resolveCompanyAccount(db, mapped, companyId) ?? mapped;
+        } else {
+          taxAccountId = baseLine.account_id;
+        }
+
+        const analytic = (taxRec?.analytic && baseLine.analytic_distribution)
+          ? baseLine.analytic_distribution
+          : null;
+        const taxTagIds = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
+
+        const existingIdx = existingTaxLines.findIndex((cand, idx) => {
+          if (matchedTaxLineIndexes.has(idx)) return false;
+          return cand.tax_id === t.tax_id && (cand.tax_repartition_line_id == null || row.id == null || cand.tax_repartition_line_id === row.id);
+        });
+
+        const existing = existingIdx >= 0 ? existingTaxLines[existingIdx] : null;
+        if (existingIdx >= 0) matchedTaxLineIndexes.add(existingIdx);
+
+        const taxLine = {
+          ...(existing ?? {}),
+          account_id: taxAccountId,
+          partner_id: baseLine.partner_id ?? move.partner_id ?? null,
+          name: t.name || t.tax_name || taxLabel(t),
+          debit: baseSide === 'debit' ? taxAmount : 0,
+          credit: baseSide === 'credit' ? taxAmount : 0,
+          tax_id: t.tax_id,
+          tax_name: t.name || t.tax_name || taxLabel(t),
+          tax_repartition_line_id: row.id ?? null,
+          tax_base: taxBase,
+          tax_tag_ids: taxTagIds,
+          ...(t.type_tax_use ? { tax_side: t.type_tax_use } : (firstTax?.type_tax_use ? { tax_side: firstTax.type_tax_use } : {})),
+          ...(analytic && Object.keys(analytic).length ? { analytic_distribution: analytic } : {}),
+          ...(isForeign ? {
+            currency_id: baseLine.currency_id,
+            amount_currency: baseSide === 'debit' ? splitDocAmount : -splitDocAmount,
+          } : {}),
+        };
+        if (!analytic || !Object.keys(analytic).length) {
+          delete taxLine.analytic_distribution;
+        }
+        resultLines.push(taxLine);
+      }
+    }
+  }
+
+  return resultLines;
+}
+
 const lineItem = {
   type: 'one2many',
   label: 'Journal Items',
@@ -1718,14 +1878,31 @@ const lineItem = {
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Tax', hidden: true },
-    tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', hidden: true },
+    tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', widget: 'many2many_tags', hidden: true },
     tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
     tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },
     tax_grid_release: { type: 'boolean', label: 'Tax Grid Release', hidden: true },
     tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', hidden: true },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
+    tax_repartition_line_id: { type: 'integer', label: 'Tax Repartition Line', hidden: true },
   },
-  columnsFor: (record) => (record?.move_type === 'entry'
+  onchange: (line, key, db, move, _context = {}) => {
+    let updated = { ...line };
+    if (key === 'account_id') {
+      const account = updated.account_id && db ? read(db, 'account.account', updated.account_id) : null;
+      const companyId = move?.company_id ?? db?.settings?.current_company_id ?? 1;
+      updated = { ...updated, tax_ids: accountDefaultTaxIds(db, account, companyId) };
+      if (db) {
+        updated = updateBaseLineTags(updated, move, db);
+      }
+    } else if (key === 'tax_ids' || key === 'debit' || key === 'credit') {
+      if (db) {
+        updated = updateBaseLineTags(updated, move, db);
+      }
+    }
+    return updated;
+  },
+  columnsFor: (record, db) => (record?.move_type === 'entry'
     ? [
       ['account_id', lineItem.fields.account_id],
       ['partner_id', lineItem.fields.partner_id],
@@ -1733,9 +1910,12 @@ const lineItem = {
       ['currency_id', { ...lineItem.fields.currency_id, optional: 'hide' }],
       ['amount_currency', { ...lineItem.fields.amount_currency, optional: 'hide' }],
       ['date_maturity', lineItem.fields.date_maturity],
-      ['tax_ids', { ...lineItem.fields.tax_ids, hidden: false }],
+      ['tax_ids', { ...lineItem.fields.tax_ids, widget: 'many2many_tags', hidden: false }],
       ['debit', lineItem.fields.debit],
       ['credit', lineItem.fields.credit],
+      ...(db && search(db, 'account.analytic.plan').length
+        ? [['analytic_distribution', { ...lineItem.fields.analytic_distribution, hidden: false }]]
+        : []),
       ['tax_tag_ids', { ...lineItem.fields.tax_tag_ids, label: 'Tax Grids', hidden: false, optional: 'hide' }],
       ['discount_date', { ...lineItem.fields.discount_date, hidden: false, optional: 'hide' }],
     ]
@@ -2435,6 +2615,7 @@ export const accountingModels = {
         };
       }
       if (r.move_type === 'entry' && key === 'date') return { invoice_date: r.date };
+      if (r.move_type === 'entry' && key === 'line_ids') return { line_ids: computeEntryTaxLines(r.line_ids, r, db) };
       if (key === 'invoice_date') {
         if (r.invoice_payment_term_id) return termDue(db, r);
         const prev = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null);

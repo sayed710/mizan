@@ -325,6 +325,34 @@ export function accountTax(db, account, side, fpId, companyId = null) {
   return mapTaxIds(db, own, fpId, companyId);
 }
 
+/** Default tax IDs configured on an account, filtered to active taxes belonging to the company (or company-less). */
+export function accountDefaultTaxIds(db, account, companyId = null) {
+  if (!db || !account?.tax_ids) return [];
+  const targetCompany = companyId ?? db.settings?.current_company_id ?? 1;
+  return (account.tax_ids ?? []).filter((id) => {
+    const tax = read(db, 'account.tax', id);
+    return tax && tax.active !== false && (!tax.company_id || !targetCompany || tax.company_id === targetCompany);
+  });
+}
+
+/**
+ * Determine repartition side ('invoice' or 'refund') for a tax on a manual entry base line.
+ * Rule:
+ * - Purchase tax: debit base = invoice side; credit base = refund side.
+ * - Sale tax: credit base = invoice side; debit base = refund side.
+ * - Neither (e.g. 'none'): debit base = invoice side (purchase-like); credit base = invoice side (sale-like).
+ */
+export function entryTaxRepartitionSide(tax, baseSide) {
+  const use = tax?.type_tax_use;
+  if (use === 'purchase') {
+    return baseSide === 'debit' ? 'invoice' : 'refund';
+  }
+  if (use === 'sale') {
+    return baseSide === 'credit' ? 'invoice' : 'refund';
+  }
+  return 'invoice';
+}
+
 /** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */
 export const taxLabel = (l) => l.tax_name || `${Number(l.tax) || 0}%`;
 
@@ -684,6 +712,7 @@ export const taxModels = {
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       invoice_repartition_line_ids: repartitionField('Distribution for Invoices'),
       refund_repartition_line_ids: repartitionField('Distribution for Refunds'),
+      analytic: { type: 'boolean', label: 'Include in Analytic Cost' },
       active: { type: 'boolean', label: 'Active', tracking: true },
     },
     defaults: () => ({
@@ -699,6 +728,7 @@ export const taxModels = {
       price_include: false,
       include_base_amount: false,
       is_base_affected: true,
+      analytic: false,
       active: true,
       ...defaultTaxRepartitionLines(null, []),
     }),

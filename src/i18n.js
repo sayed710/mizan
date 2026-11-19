@@ -3345,6 +3345,8 @@ const ar = {
   'Deposit slips can only be printed for posted batch payments.': 'يمكن طباعة إشعارات الإيداع لدفعات الدفع المجمعة المرحلة فقط',
   'Key Performance Indicator': 'مؤشر الأداء الرئيسي',
   Metric: 'المؤشر',
+  'Include in Analytic Cost': 'تضمين في التكلفة التحليلية',
+  'Tax Repartition Line': 'بند توزيع الضريبة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
