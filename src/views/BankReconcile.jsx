@@ -16,7 +16,7 @@ import {
   setStatementLinePartner,
   statementCompanyAmount,
 } from '../models/bank.js';
-import { applyRule, isAutoRule, isMatchingRule } from '../models/reconcile.js';
+import { applyRule, isWriteoffButtonModel, ruleMatches } from '../models/reconcile.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { display, money } from '../ui.jsx';
@@ -24,9 +24,6 @@ import { display, money } from '../ui.jsx';
 /** Format `amount` using `currency` (falling back to the active company currency when null). */
 const formatInCurrency = (amount, currency) => money(amount, currency?.name ?? null, currency ?? null);
 const fmtDate = (value) => display(null, { type: 'date' }, value);
-
-/** Whether a rule acts as a quick-action writeoff button for manual execution in the widget. */
-const isWriteoffButtonModel = (rule) => Boolean(rule && !isMatchingRule(rule) && !isAutoRule(rule));
 
 const TABS = [
   { id: 'candidates', label: 'Counterpart Candidates' },
@@ -111,21 +108,25 @@ export function BankReconcile() {
     return (db.records['account.account'] ?? []).filter((a) => eligibleCounterpart(a, company));
   }, [db, selectedLine]);
 
-  const partners = useMemo(
-    () => companyFilter(db, search(db, 'res.partner'), 'res.partner')
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')),
-    [db],
-  );
+  const partners = useMemo(() => {
+    const lineCompany = selectedLine?.company_id ?? 1;
+    const activePartners = (search(db, 'res.partner') ?? []).filter(
+      (p) => !p.company_id || p.company_id === lineCompany,
+    );
+    const currentPartnerId = selectedLine?.partner_id;
+    if (currentPartnerId && !activePartners.some((p) => p.id === currentPartnerId)) {
+      const currentPartner = read(db, 'res.partner', currentPartnerId);
+      if (currentPartner) {
+        return [...activePartners, currentPartner].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+      }
+    }
+    return activePartners.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  }, [db, selectedLine]);
 
   const quickActionModels = useMemo(() => {
     if (!selectedLine) return [];
-    const lineCompany = selectedLine.company_id ?? 1;
-    const allModels = companyFilter(db, search(db, 'account.reconcile.model'), 'account.reconcile.model');
-    return allModels
-      .filter((r) => r.active !== false
-        && (!r.company_id || r.company_id === lineCompany)
-        && (!Array.isArray(r.match_journal_ids) || r.match_journal_ids.length === 0 || r.match_journal_ids.includes(selectedLine.journal_id))
-        && isWriteoffButtonModel(r))
+    return (search(db, 'account.reconcile.model') ?? [])
+      .filter((r) => isWriteoffButtonModel(r) && ruleMatches(r, selectedLine))
       .sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.id ?? 0) - (b.id ?? 0));
   }, [db, selectedLine]);
 
@@ -162,7 +163,10 @@ export function BankReconcile() {
       const nextDb = applyRule(currentDb, model, freshLine);
       const res = await commit(nextDb);
       if (res.ok) {
-        setSelectedLineId(null);
+        const afterLine = read(nextDb, 'account.bank.statement.line', selectedLine.id);
+        if (!afterLine || afterLine.state === 'reconciled') {
+          setSelectedLineId(null);
+        }
       }
     } catch (e) {
       setError(e.message);
