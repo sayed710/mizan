@@ -1223,12 +1223,16 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     debit: 0,
     credit: 0,
   }));
+  const company = read(db, 'res.company', r.company_id ?? 1);
+  const companyId = company ? company.id : null;
+  const cashBasisJournalId = company?.tax_cash_basis_journal_id
+    || resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId ?? 1 }, { required: true }).id;
   const posted = postEntry(db, {
-    journal: 'MISC',
+    journal: cashBasisJournalId,
     date,
     ref: `Cash basis taxes ${r.name}`,
     lines: [...lines, ...baseLines],
-    company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
+    company: companyId,
     system_generated: true,
     archivedOriginIds: [r.id],
     includeCashBasisTargets: true,

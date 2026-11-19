@@ -3206,6 +3206,8 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Cash Basis Journal': 'دفتر الأساس النقدي',
+  'General journal used for cash-basis tax release entries.': 'دفتر القيود العامة المستخدم لقيود تحرير ضريبة الأساس النقدي.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
