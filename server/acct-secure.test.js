@@ -513,7 +513,7 @@ test('account.tax.unit model is registered with correct fields', () => {
 
 test('account.tax.unit: guard requires at least 2 companies', () => {
   let db = seed();
-  db = create(db, 'res.company', { name: 'Second company' }).db;
+  db = create(db, 'res.company', { name: 'Second company', currency_id: read(db, 'res.company', 1).currency_id }).db;
   const m = models['account.tax.unit'];
   const guard = m.guard;
   assert.ok(guard, 'guard exists');
@@ -533,7 +533,7 @@ test('account.tax.unit: guard requires at least 2 companies', () => {
 
 test('account.tax.unit can be created with valid data', () => {
   let db = seed();
-  db = create(db, 'res.company', { name: 'Second company' }).db;
+  db = create(db, 'res.company', { name: 'Second company', currency_id: read(db, 'res.company', 1).currency_id }).db;
   const { db: db1, id } = create(db, 'account.tax.unit', {
     name: 'EU VAT Group', country: 'EU', vat: 'EU123456', company_ids: [1, 2], main_company_id: 1,
   });

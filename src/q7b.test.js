@@ -6,7 +6,7 @@ import { setupDom, find } from './test-support/dom.js';
 import { create, read, search, write, updateSettings } from './orm.js';
 import './models/index.js';
 import { seed } from './seed.js';
-import { balanceSheet, postEntry } from './models/ledger.js';
+import { balanceSheet, journalItems, partnerAccount, postEntry } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { today } from './models/common.js';
@@ -157,25 +157,42 @@ test('tax-unit returns settle each member company obligation with its own paymen
   const paid = read(db, 'account.return', ret.id);
   assert.equal(paid.state, 'paid');
   assert.equal(paid.is_completed, true);
-  assert.equal(paid.payment_ids.length, 2);
+  assert.equal(paid.payment_ids.length, 1);
 
-  const payMain = paid.payment_ids.map((id) => read(db, 'account.payment', id)).find((p) => p.company_id === 1);
-  const paySub = paid.payment_ids.map((id) => read(db, 'account.payment', id)).find((p) => p.company_id === sub.id);
+  const payMain = read(db, 'account.payment', paid.payment_ids[0]);
+  assert.equal(payMain.company_id, 1);
+  assert.equal(payMain.partner_id, 1);
   assert.equal(payMain.payment_type, 'outbound');
-  assert.equal(payMain.amount, 28);
+  assert.equal(payMain.amount, 14);
   assert.equal(payMain.destination_account_id, mainPayable.id);
   assert.equal(payMain.state, 'posted');
+  assert.equal(payMain.is_tax_payment, true);
+  assert.equal(payMain.return_id, ret.id);
 
-  assert.equal(paySub.payment_type, 'inbound');
-  assert.equal(paySub.amount, 14);
-  assert.equal(paySub.destination_account_id, subReceivable.id);
-  assert.equal(paySub.state, 'posted');
+  const closingIds = new Set(paid.closing_move_ids);
+  const settlements = (db.records['account.move'] ?? []).filter(
+    (m) => m.state === 'posted' && m.move_type === 'entry' && m.is_tax_payment && m.tax_return_id === ret.id && !closingIds.has(m.id) && m.id !== payMain.move_id,
+  );
+  assert.equal(settlements.length, 2);
 
-  for (const moveId of paid.closing_move_ids) {
-    const move = read(db, 'account.move', moveId);
-    assert.equal(move.payments?.length, 1);
-    assert.equal(move.amount_paid, move.company_id === 1 ? 28 : 14);
-  }
+  const mainSettlement = settlements.find((m) => m.company_id === 1);
+  const subSettlement = settlements.find((m) => m.company_id === sub.id);
+  assert.ok(mainSettlement);
+  assert.ok(subSettlement);
+
+  const mainCo = read(db, 'res.company', 1);
+  const mainIcPayable = partnerAccount(db, subCompany.partner_id, 1, 'payable');
+  const subIcReceivable = partnerAccount(db, mainCo.partner_id, sub.id, 'receivable');
+  assert.ok(mainSettlement.line_ids.some((l) => l.account_id === mainPayable.id && l.partner_id === 1 && l.debit === 14));
+  assert.ok(mainSettlement.line_ids.some((l) => l.account_id === mainIcPayable && l.partner_id === subCompany.partner_id && l.credit === 14));
+  assert.ok(subSettlement.line_ids.some((l) => l.account_id === subIcReceivable && l.partner_id === mainCo.partner_id && l.debit === 14));
+  assert.ok(subSettlement.line_ids.some((l) => l.account_id === subReceivable.id && l.partner_id === subCompany.partner_id && l.credit === 14));
+
+  const balanceOf = (companyId, accountId) => journalItems(db, { company_id: companyId })
+    .filter((l) => l.account_id === accountId)
+    .reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  assert.equal(balanceOf(1, mainPayable.id), 0);
+  assert.equal(balanceOf(sub.id, subReceivable.id), 0);
 });
 
 test('tax-unit submission fails explicitly when a member company is missing its required tax account configuration', () => {

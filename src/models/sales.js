@@ -13,7 +13,7 @@ import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
 import { fiscalPositionFor, isSectionOrNote, productTax, replaceTaxSnapshot, taxSnapshot } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
-import { resolveDocumentJournal } from './ledger.js';
+import { mapLineAccount, resolveDocumentJournal } from './ledger.js';
 import { productProperty } from './productconfig-helpers.js';
 import { documentCurrency, roundCurrency } from '../money.js';
 
@@ -217,9 +217,10 @@ function downPaymentLines(db, order, method, input) {
   const configured = company?.down_payment_account_id;
   const accountRecord = configured ? read(db, 'account.account', configured) : null;
   if (!accountRecord || accountRecord.active === false || (accountRecord.company_id && accountRecord.company_id !== (order.company_id ?? 1))) throw new Error(`Configure the down payment account on company ${company?.name ?? order.company_id ?? 1}`);
-  const account = accountRecord.id;
+  // The invoice copies the order's fiscal position, so the configured account is mapped once here and posts as stored.
+  const account = mapLineAccount(db, order, accountRecord.id);
   const lines = order.order_line.filter((l) => Number(l.qty) > 0).map(({ qty_invoiced, qty_delivered, sale_line_key, purchase_method, product_id, uom_id, ...line }) => ({
-    ...line, name: 'Down Payment', account_id: account, qty: Number(line.qty) * ratio, down_payment_key: crypto.randomUUID(),
+    ...line, name: 'Down Payment', account_id: account, account_fiscal_position_id: order.fiscal_position_id ?? null, qty: Number(line.qty) * ratio, down_payment_key: crypto.randomUUID(),
   }));
   const moves = search(db, 'account.move')
     .filter((m) => m.sale_id === order.id && ['out_invoice', 'out_refund'].includes(m.move_type));

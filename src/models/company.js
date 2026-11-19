@@ -10,6 +10,7 @@ import { STOCK_CHART_ROLES } from './stock-accounts.js';
 import { returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
+import { taxUnitCompatibilityError } from './accounting.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -325,6 +326,22 @@ function companyGuard(db, before, r, ctx) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  const countryChanged = before && (r.country ?? '') !== (before.country ?? '');
+  const currencyChanged = before && (r.currency_id ?? null) !== (before.currency_id ?? null);
+  if (countryChanged || currencyChanged) {
+    const staged = {
+      ...db,
+      records: {
+        ...db.records,
+        'res.company': (db.records['res.company'] ?? []).map((c) => (c.id === r.id ? r : c)),
+      },
+    };
+    const units = (db.records['account.tax.unit'] ?? []).filter((u) => (u.company_ids ?? []).includes(r.id));
+    for (const unit of units) {
+      const err = taxUnitCompatibilityError(staged, unit);
+      if (err) return err;
+    }
+  }
   for (const [field, type, label] of [
     ['default_sale_journal_id', 'sale', 'Default Sales Journal'],
     ['default_purchase_journal_id', 'purchase', 'Default Purchase Journal'],
