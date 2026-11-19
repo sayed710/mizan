@@ -157,18 +157,123 @@ export function create(db, model, vals, ctx = undefined) {
     : res;
 }
 
+const LINE_DETAIL_FIELDS = ['account_id', 'account', 'name', 'label', 'debit', 'credit', 'amount', 'amount_currency', 'qty', 'quantity', 'price_unit', 'price', 'tax_id', 'tax_ids', 'tax_name', 'tax'];
+
+/**
+ * Per-line description of a one2many change. Lines are matched by their stable identity
+ * (line_id, id, line_identity, etc.), never by position; lines without one are matched
+ * by identical detail values, leftovers show as removed/added.
+ * Returns null when no described field changed.
+ */
+function lineChangeDetail(oldDb, newDb, field, oldLines, newLines) {
+  const keys = LINE_DETAIL_FIELDS.filter((k) => field.fields?.[k]);
+  if (!keys.length) return null;
+
+  const show = (k, v, sourceDb) => {
+    if (v === null || v === undefined || v === '') return '—';
+    const sub = field.fields?.[k];
+    if (!sub) return String(v);
+    if (sub.options) return String(sub.options.find((o) => o[0] === v)?.[1] ?? v);
+    if (sub.type === 'many2one' && sub.relation) {
+      const relRec = (sourceDb?.records?.[sub.relation] ?? []).find((r) => r.id === v || r.name?.toLowerCase() === String(v).toLowerCase());
+      return String(relRec?.name ?? v);
+    }
+    if ((sub.type === 'many2many' || Array.isArray(v)) && sub.relation) {
+      const arr = Array.isArray(v) ? v : [v];
+      return arr.map((x) => {
+        const relRec = (sourceDb?.records?.[sub.relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
+        return String(relRec?.name ?? x);
+      }).join(', ');
+    }
+    if (Array.isArray(v)) return v.join(', ');
+    return String(v);
+  };
+
+  const labelOf = (k) => field.fields?.[k]?.label ?? k;
+
+  const describe = (line, sourceDb) => keys
+    .filter((k) => line[k] !== null && line[k] !== undefined && line[k] !== '' && !(Array.isArray(line[k]) && !line[k].length))
+    .map((k) => `${labelOf(k)} ${show(k, line[k], sourceDb)}`)
+    .join(', ');
+
+  const sig = (line) => JSON.stringify(keys.map((k) => line[k] ?? null));
+  const idOf = (line) => {
+    const id = line?.line_id ?? line?.id ?? line?.line_identity ?? line?.sale_line_key ?? line?.purchase_line_key;
+    return id === null || id === undefined || id === '' ? null : String(id);
+  };
+
+  const newById = new Map(newLines.filter((l) => idOf(l) !== null).map((l) => [idOf(l), l]));
+  const oldById = new Map(oldLines.filter((l) => idOf(l) !== null).map((l) => [idOf(l), l]));
+
+  const removed = oldLines.filter((l) => idOf(l) === null || !newById.has(idOf(l)));
+  const added = newLines.filter((l) => idOf(l) === null || !oldById.has(idOf(l)));
+
+  // Anonymous lines that are identical on both sides are unchanged.
+  for (const l of [...removed]) {
+    if (idOf(l) !== null) continue;
+    const i = added.findIndex((a) => idOf(a) === null && sig(a) === sig(l));
+    if (i >= 0) {
+      added.splice(i, 1);
+      removed.splice(removed.indexOf(l), 1);
+    }
+  }
+
+  const changed = [...oldById]
+    .filter(([id]) => newById.has(id))
+    .map(([id, o]) => ({
+      id,
+      o,
+      n: newById.get(id),
+      ks: keys.filter((k) => JSON.stringify(o[k] ?? null) !== JSON.stringify(newById.get(id)[k] ?? null)),
+    }))
+    .filter((c) => c.ks.length > 0);
+
+  const sortedAdded = added.map((l) => describe(l, newDb)).filter(Boolean).sort();
+  const sortedRemoved = removed.map((l) => describe(l, oldDb)).filter(Boolean).sort();
+
+  if (!sortedRemoved.length && !sortedAdded.length && !changed.length) return null;
+
+  const out = { parts: [], old: [], new: [] };
+  for (const d of sortedAdded) {
+    out.parts.push(`added (${d})`);
+    out.new.push(`+ ${d}`);
+  }
+  for (const d of sortedRemoved) {
+    out.parts.push(`removed (${d})`);
+    out.old.push(`- ${d}`);
+  }
+  for (const c of changed.sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
+    const pair = (ks, line, sourceDb) => ks.map((k) => `${labelOf(k)} ${show(k, line[k], sourceDb)}`).join(', ');
+    const ref = `[${c.id}] `;
+    out.parts.push(`changed ${ref}${c.ks.map((k) => `${labelOf(k)} ${show(k, c.o[k], oldDb)} → ${show(k, c.n[k], newDb)}`).join(', ')}`);
+    out.old.push(`~ ${ref}${pair(c.ks, c.o, oldDb)}`);
+    out.new.push(`~ ${ref}${pair(c.ks, c.n, newDb)}`);
+  }
+
+  return out;
+}
+
 /** Format a tracked field transition using the same display rules as `write()` tracking messages. */
 export function formatTrackingChange(oldDb, model, fieldKey, oldVal, newVal, newDb = oldDb) {
   const field = models[model]?.fields?.[fieldKey];
   if (!field) return null;
-  if (typeof newVal === 'object' && newVal !== null) {
+  if ((typeof newVal === 'object' && newVal !== null) || (newVal === null && Array.isArray(oldVal))) {
+    const detail = field.type === 'one2many' && field.fields && (Array.isArray(newVal) || Array.isArray(oldVal))
+      ? lineChangeDetail(oldDb, newDb, field, oldVal ?? [], newVal ?? []) : null;
+    if (detail) {
+      return {
+        body: `${field.label}: ${detail.parts.join('; ')}`,
+        old_value: detail.old.join('; ') || '—',
+        new_value: detail.new.join('; ') || '—',
+      };
+    }
     return { body: `${field.label}: updated`, old_value: '', new_value: 'updated' };
   }
   const label = (x, sourceDb) => {
     if (x === null || x === undefined || x === '') return '—';
     if (field.options) return field.options.find((o) => o[0] === x)?.[1] ?? x;
     if (field.type === 'many2one' && field.relation) {
-      const relRec = (sourceDb.records?.[field.relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
+      const relRec = (sourceDb?.records?.[field.relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
       if (relRec?.name) return relRec.name;
     }
     return x;
