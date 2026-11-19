@@ -327,8 +327,13 @@ export function configurableReport(db, report, period, group = null, options = {
       if (parsed.terms) {
         raw = parsed.terms.reduce((sum, term) => sum + term.sign * evaluate(term.code, stateIdx, column), 0);
       } else if (parsed.earnings) {
-        const net = bucketState[stateIdx].earnings[parsed.earnings];
-        raw = column === 'debit' ? (net < 0 ? -net : 0) : column === 'credit' ? (net > 0 ? net : 0) : -net;
+        if (column === 'balance') {
+          const net = bucketState[stateIdx].earnings[parsed.earnings];
+          raw = -net;
+        } else {
+          const accounts = bucketState[stateIdx].earnings.accounts[parsed.earnings] ?? [];
+          raw = accounts.reduce((sum, row) => sum + (column === 'debit' ? Math.max(0, row.balance) : Math.max(0, -row.balance)), 0);
+        }
       } else {
         raw = bucketState[stateIdx].accountRows
           .filter((row) => matches(db, row.account, parsed.selectors))

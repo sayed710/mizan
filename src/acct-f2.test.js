@@ -7,6 +7,8 @@ import { seed } from './seed.js';
 import { postEntry } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 import { today } from './models/common.js';
+import { createCompany } from './models/company.js';
+import { tableToRows } from './csv.js';
 import {
   accountJournalItemsHref,
   configurableReport,
@@ -275,4 +277,165 @@ test('migration 57 makes earnings lines of already-seeded Balance Sheets foldabl
   assert.equal(foldable.CYE, true);
   assert.equal(foldable.PYE, true);
   assert.equal(foldable.RET, false);
+});
+
+test('CSV export skips open-account arrow and exports plain account label', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/reports/balance' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  const db = seed();
+  await React.act(async () => commit(db));
+
+  const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { statementKind: 'balance', title: 'Balance Sheet' })));
+
+    // Click Unfold All to reveal account detail rows
+    const unfoldBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Unfold All');
+    assert.ok(unfoldBtn, 'Unfold All button must be rendered');
+    await React.act(async () => props(unfoldBtn).onClick());
+
+    const table = find(host, (n) => n.tagName === 'TABLE');
+    assert.ok(table, 'Table rendered');
+    const extractedRows = tableToRows(table);
+
+    // Find account row, e.g. for bank account 101401
+    const bankRow = extractedRows.find((r) => r[0] && r[0].startsWith('101401'));
+    assert.ok(bankRow, 'Expected 101401 Bank account row in extracted CSV rows');
+    assert.ok(!bankRow[0].includes('↗'), `Extracted CSV account label must not include the arrow ↗, got: "${bankRow[0]}"`);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Earnings line debit, credit, and balance columns agree with unfolded account rows sum', () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
+  const yr = Number(today().slice(0, 4));
+  const cashAcc = search(db, 'account.account').find((a) => a.code === '101401');
+  const revAcc = search(db, 'account.account').find((a) => a.code === '400000');
+  const expAcc = search(db, 'account.account').find((a) => a.code === '600000');
+
+  // Revenue 1000, Expense 400 -> Net profit = 600
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: `${yr}-03-10`,
+    lines: [
+      { account_id: cashAcc.id, debit: 600 },
+      { account_id: expAcc.id, debit: 400 },
+      { account_id: revAcc.id, credit: 1000 },
+    ],
+  }).db;
+
+  const bsRep = findStatementReport(db, 'balance', 1);
+  const repWithDc = write(db, 'account.report', bsRep.id, { show_debit: true, show_credit: true });
+  const out = configurableReport(repWithDc, read(repWithDc, 'account.report', bsRep.id), { from: `${yr}-01-01`, to: `${yr}-12-31` });
+
+  assert.deepEqual(out.columns, ['balance', 'debit', 'credit']);
+  const cyeRow = out.rows.find((r) => r.code === 'CYE');
+  assert.ok(cyeRow, 'CYE row must exist');
+  assert.equal(cyeRow.values[0], 600, 'CYE balance must be 600');
+  assert.ok(cyeRow.accountRows.length > 0, 'CYE must unfold to account rows');
+
+  const sumBalance = cyeRow.accountRows.reduce((s, r) => s + r.values[0], 0);
+  const sumDebit = cyeRow.accountRows.reduce((s, r) => s + r.values[1], 0);
+  const sumCredit = cyeRow.accountRows.reduce((s, r) => s + r.values[2], 0);
+
+  assert.equal(sumBalance, cyeRow.values[0], 'Sum of account row balances must equal CYE line balance');
+  assert.equal(sumDebit, cyeRow.values[1], 'Sum of account row debits must equal CYE line debit');
+  assert.equal(sumCredit, cyeRow.values[2], 'Sum of account row credits must equal CYE line credit');
+});
+
+test('Switching company prunes analyticAccountIds that do not exist in the new company scope', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/reports/balance' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  let db = seed();
+  const co2 = createCompany(db, { name: 'Company Two' });
+  db = co2.db;
+  db = { ...db, settings: { ...db.settings, allowed_company_ids: [1, co2.id] } };
+
+  const a1 = create(db, 'account.analytic.account', { name: 'Analytic Co 1', company_id: 1 });
+  db = a1.db;
+  const a2 = create(db, 'account.analytic.account', { name: 'Analytic Co 2', company_id: co2.id });
+  db = a2.db;
+
+  const yr = Number(today().slice(0, 4));
+  const bank1 = search(db, 'account.account').find((a) => a.code === '101401' && (a.company_id ?? 1) === 1);
+  const cap1 = search(db, 'account.account').find((a) => a.code === '301000' && (a.company_id ?? 1) === 1);
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: `${yr}-02-01`,
+    lines: [
+      { account_id: bank1.id, debit: 500, analytic_distribution: { [a1.id]: 100 } },
+      { account_id: cap1.id, credit: 500 },
+    ],
+  }).db;
+
+  const bank2 = create(db, 'account.account', { code: '101402', name: 'Co2 Bank', account_type: 'asset_cash', company_id: co2.id });
+  db = bank2.db;
+  const cap2 = create(db, 'account.account', { code: '301002', name: 'Co2 Capital', account_type: 'equity', company_id: co2.id });
+  db = cap2.db;
+  const j2 = create(db, 'account.journal', { name: 'Co2 Misc', code: 'MISC2', type: 'general', company_id: co2.id });
+  db = j2.db;
+
+  db = postEntry(db, {
+    journal: j2.id,
+    company: co2.id,
+    date: `${yr}-02-01`,
+    lines: [
+      { account_id: bank2.id, debit: 800, analytic_distribution: { [a2.id]: 100 } },
+      { account_id: cap2.id, credit: 800 },
+    ],
+  }).db;
+
+  await React.act(async () => commit(db));
+
+  const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { statementKind: 'balance', title: 'Balance Sheet' })));
+
+    // Step 1: In All / Company 1 view, select Analytic Co 1 (a1.id)
+    const analyticSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Analytic Accounts');
+    assert.ok(analyticSelect, 'Analytic Accounts select must be present');
+    await React.act(async () => {
+      props(analyticSelect).onChange({ target: { selectedOptions: [{ value: String(a1.id) }] } });
+    });
+
+    // Step 2: Switch company to Company Two
+    const companySelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Company');
+    assert.ok(companySelect, 'CompanySelect must be present');
+    await React.act(async () => {
+      props(companySelect).onChange({ target: { value: String(co2.id) } });
+    });
+
+    // Step 3: Verify the analytic selector now only has options for Co 2, and its value has pruned a1.id
+    const updatedAnalyticSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Analytic Accounts');
+    assert.ok(updatedAnalyticSelect, 'Analytic select present after company switch');
+    const selectedValues = props(updatedAnalyticSelect).value;
+    assert.ok(!selectedValues.includes(a1.id), `a1.id (${a1.id}) must be pruned from selected analytic accounts when switching to Co 2, got: ${JSON.stringify(selectedValues)}`);
+
+    // Verify Company Two data ($800.00) is displayed and not zeroed out by stale Co 1 analytic filter
+    assert.ok(host.textContent.includes('$800.00'), `Company Two un-filtered by stale a1 must show $800.00, got: ${host.textContent}`);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
 });

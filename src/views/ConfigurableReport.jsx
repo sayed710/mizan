@@ -90,6 +90,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     if (!nextLedger && ledgerId) setLedgerId('');
     const nextJournal = scopedJournals(companyDb, nextIds, nextLedger).find((item) => item.id === Number(journalId)) ?? null;
     if (!nextJournal && journalId) setJournalId('');
+    const nextAnalytic = search(companyDb, 'account.analytic.account').filter((a) => !a.company_id || nextIds.includes(a.company_id));
+    const allowedAnalyticIds = new Set(nextAnalytic.map((a) => a.id));
+    setAnalyticAccountIds((prev) => prev.filter((id) => allowedAnalyticIds.has(id)));
   };
   const db = targetJournalIds
     ? {
@@ -285,7 +288,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                     <tr key={`${line.code}:${acc.account.id}`} className="rep-detail" onClick={() => { globalThis.location.hash = accountJournalItemsHref(acc.account.id); }}>
                       <td style={{ paddingInlineStart: `${(line.depth + 1) * 1.5 + 0.75}rem` }}>
                         <a href={accountJournalItemsHref(acc.account.id)}>{acc.account.code} {acc.account.name}</a>
-                        {' '}<a className="muted" href={`#/open/account.account/${acc.account.id}`} aria-label={t('Open Account')} title={t('Open Account')} onClick={(e) => e.stopPropagation()}>↗</a>
+                        {' '}<a className="muted no-export" href={`#/open/account.account/${acc.account.id}`} aria-label={t('Open Account')} title={t('Open Account')} onClick={(e) => e.stopPropagation()}>↗</a>
                       </td>
                       <RowCells values={acc.values} variance={acc.variance} showVariance={data.showVariance} />
                     </tr>
