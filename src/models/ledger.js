@@ -568,9 +568,18 @@ export function accountCurrencyFields(db, account, line, net, companyId, date) {
  * Currency fields for a line that only adjusts the company value (exchange difference, revaluation): on an account
  * forcing a foreign currency the line carries that currency with no foreign amount.
  */
-export function valueOnlyCurrencyFields(db, account, companyId) {
+export function valueOnlyCurrencyFields(db, account, companyId, currencyId = null) {
   const acc = read(db, 'account.account', typeof account === 'number' ? account : accountId(db, account, companyId));
-  return acc?.currency_id && acc.currency_id !== companyCurrencyRecord(db, companyId).id ? { currency_id: acc.currency_id, amount_currency: 0 } : {};
+  const companyCurrencyId = companyCurrencyRecord(db, companyId)?.id;
+  const foreignId = acc?.currency_id && acc.currency_id !== companyCurrencyId ? acc.currency_id : currencyId;
+  return foreignId && foreignId !== companyCurrencyId ? { currency_id: foreignId, amount_currency: 0 } : {};
+}
+
+/** Journal of realized exchange difference entries: the company's exchange journal, else its default general journal. */
+export function exchangeJournal(db, companyId) {
+  const company = companyId ?? 1;
+  const journalId = read(db, 'res.company', company)?.currency_exchange_journal_id ?? null;
+  return resolveDocumentJournal(db, { move_type: 'entry', company_id: company, journal_id: journalId }, { required: true });
 }
 
 /**

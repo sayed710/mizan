@@ -626,6 +626,23 @@ export function unreconcile(db, line, reversalDate = null) {
   return { db: current };
 }
 
+/** Assign or clear the partner of an unreconciled bank statement line. */
+export function setStatementLinePartner(db, line, partnerId) {
+  const lineId = typeof line === 'object' && line ? line.id : line;
+  const target = read(db, 'account.bank.statement.line', lineId);
+  if (!target) throw new Error('Bank transaction does not exist');
+  if (target.state === 'reconciled') throw new Error('A reconciled bank transaction cannot be changed');
+  const pid = partnerId ? Number(partnerId) : null;
+  if (pid) {
+    const partner = read(db, 'res.partner', pid);
+    if (!partner) throw new Error('Partner does not exist');
+    if (partner.company_id && target.company_id && partner.company_id !== target.company_id) {
+      throw new Error('Partner belongs to another company');
+    }
+  }
+  return write(db, 'account.bank.statement.line', lineId, { partner_id: pid });
+}
+
 /** Validate the booked bank entry and payment allocations against the statement line amount and journal. */
 function bankEntryGuardError(db, after, { company, round, referenceAmount, via, bankAccount, allocations }) {
   const bankEntry = read(db, 'account.move', after.bank_move_id);
