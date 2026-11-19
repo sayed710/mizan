@@ -298,7 +298,7 @@ export const settlingEntries = (db) => {
   const moves = db.records['account.move'] ?? [];
   const partials = db.records['account.partial.reconcile'] ?? [];
   const fromPayments = moves.flatMap((m) => (m.payments ?? []).flatMap((p) => [p.move_id, p.payment_fx_move_id]));
-  const fromGl = partials.filter((g) => g && g.active !== false && !g.reversed).flatMap((g) => [g.debit_move_id, g.credit_move_id]);
+  const fromGl = partials.filter((g) => g && g.active !== false && !g.reversed).flatMap((g) => [g.debit_move_id, g.credit_move_id, g.exchange_move_id]);
   const fromFx = moves.filter((m) => m.move_type === 'entry' && m.fx_payment_move_id && m.fx_invoice_id).map((m) => m.id);
   return new Set([...fromPayments, ...fromGl, ...fromFx].filter(Boolean));
 };
