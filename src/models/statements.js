@@ -1,6 +1,158 @@
-// Bank statement files (OFX/QFX, CAMT.053) parsed into statement lines; re-importing the same transactions is a no-op.
+// Bank statement files (OFX/QFX, CAMT.053, QIF) parsed into statement lines; re-importing the same transactions is a no-op.
 import { create, read, search } from '../orm.js';
 import { isLiquidityJournal, journalCompany } from './ledger.js';
+import { sanitizeAccountNumber } from './partnerbank.js';
+
+const isValidCalendarDate = (y, m, d) => {
+  if (!Number.isSafeInteger(y) || y < 1000 || y > 9999) return false;
+  if (!Number.isSafeInteger(m) || m < 1 || m > 12) return false;
+  if (!Number.isSafeInteger(d) || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && (dt.getUTCMonth() + 1) === m && dt.getUTCDate() === d;
+};
+
+const qifDate = (v, dayFirst = false) => {
+  if (!v) return null;
+  const s = String(v).trim();
+  let y, m, d;
+  const iso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (iso) {
+    y = Number(iso[1]);
+    m = Number(iso[2]);
+    d = Number(iso[3]);
+  } else {
+    const mdy = s.match(/^(\d{1,2})[-/.'](\d{1,2})[-/.'](\d{2,4})$/);
+    if (!mdy) throw new Error('Invalid calendar date in QIF file');
+    const yr = mdy[3].length === 2 ? (Number(mdy[3]) < 70 ? 2000 + Number(mdy[3]) : 1900 + Number(mdy[3])) : Number(mdy[3]);
+    y = yr;
+    if (dayFirst) {
+      d = Number(mdy[1]);
+      m = Number(mdy[2]);
+    } else {
+      m = Number(mdy[1]);
+      d = Number(mdy[2]);
+    }
+  }
+  if (!isValidCalendarDate(y, m, d)) {
+    throw new Error('Invalid calendar date in QIF file');
+  }
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+};
+
+export const qifAmount = (v) => {
+  if (v == null || v === '') throw new Error('Ambiguous or invalid QIF amount');
+  const s = String(v).trim().replace(/\s+/g, '');
+  if (!s) throw new Error('Ambiguous or invalid QIF amount');
+
+  const hasComma = s.includes(',');
+  const hasDot = s.includes('.');
+
+  let normalized;
+  if (hasComma && hasDot) {
+    const lastComma = s.lastIndexOf(',');
+    const lastDot = s.lastIndexOf('.');
+    if (lastDot > lastComma) {
+      // rightmost is dot (decimal mark)
+      const beforeDot = s.slice(0, lastDot);
+      const afterDot = s.slice(lastDot + 1);
+      if (beforeDot.includes('.') || afterDot.includes('.') || afterDot.includes(',')) {
+        throw new Error('Ambiguous or invalid QIF amount');
+      }
+      normalized = beforeDot.replace(/,/g, '') + '.' + afterDot;
+    } else {
+      // rightmost is comma (decimal mark)
+      const beforeComma = s.slice(0, lastComma);
+      const afterComma = s.slice(lastComma + 1);
+      if (beforeComma.includes(',') || afterComma.includes(',') || afterComma.includes('.')) {
+        throw new Error('Ambiguous or invalid QIF amount');
+      }
+      normalized = beforeComma.replace(/\./g, '') + '.' + afterComma;
+    }
+  } else if (hasComma) {
+    // Lone comma followed by exactly three digits in groups (1,234 or 1,234,567) is thousands, otherwise lone comma is decimal mark.
+    if (/^[+-]?\d{1,3}(,\d{3})+$/.test(s)) {
+      normalized = s.replace(/,/g, '');
+    } else {
+      const parts = s.split(',');
+      if (parts.length !== 2) throw new Error('Ambiguous or invalid QIF amount');
+      normalized = parts[0] + '.' + parts[1];
+    }
+  } else if (hasDot) {
+    const parts = s.split('.');
+    if (parts.length !== 2) throw new Error('Ambiguous or invalid QIF amount');
+    normalized = s;
+  } else {
+    normalized = s;
+  }
+
+  const num = Number(normalized);
+  if (!Number.isFinite(num)) {
+    throw new Error('Ambiguous or invalid QIF amount');
+  }
+  return num;
+};
+
+/** Transactions of a QIF (Quicken Interchange Format) file as { date, amount, payment_ref, unique_import_id }, or with details. */
+export function parseQif(text, { details = false } = {}) {
+  const lines = [];
+  const entries = String(text).split(/\r?\n\s*\^\s*(?:\r?\n|$)/);
+
+  let hasDayFirst = false;
+  let hasMonthFirst = false;
+  for (const entry of entries) {
+    for (const raw of entry.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (line.startsWith('D')) {
+        const s = line.slice(1).trim();
+        if (!/^\d{4}[-/]/.test(s)) {
+          const mdy = s.match(/^(\d{1,2})[-/.'](\d{1,2})[-/.']\d{2,4}$/);
+          if (mdy) {
+            const p1 = Number(mdy[1]);
+            const p2 = Number(mdy[2]);
+            if (p1 > 12) hasDayFirst = true;
+            if (p2 > 12) hasMonthFirst = true;
+          }
+        }
+      }
+    }
+  }
+  if (hasDayFirst && hasMonthFirst) {
+    throw new Error('Contradictory date formats in QIF file');
+  }
+  const dayFirst = hasDayFirst;
+
+  for (const entry of entries) {
+    const rawLines = entry.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    let date = null;
+    let amount = NaN;
+    let payee = '';
+    let memo = '';
+    let ref = '';
+    for (const line of rawLines) {
+      if (line.startsWith('!')) continue;
+      const code = line[0];
+      const val = line.slice(1).trim();
+      if (code === 'D') date = qifDate(val, dayFirst);
+      else if (code === 'T' || (code === 'U' && Number.isNaN(amount))) amount = qifAmount(val);
+      else if (code === 'P') payee = val;
+      else if (code === 'M') memo = val;
+      else if (code === 'N') ref = val;
+    }
+    if (date && Number.isFinite(amount)) {
+      lines.push({
+        date,
+        amount,
+        payment_ref: [payee, memo].filter(Boolean).join(' - '),
+        unique_import_id: null,
+        ...(details ? {
+          ...(memo ? { narration: memo } : {}),
+          ...(ref ? { ref } : {}),
+        } : {}),
+      });
+    }
+  }
+  return lines;
+}
 
 const ofxDate = (v) => (/^\d{8}/.test(v ?? '') ? `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}` : null);
 // OFX 1.x is SGML: tags may be left unclosed, so a value runs to the next "<".
@@ -8,24 +160,33 @@ const ofxTag = (block, tag) => block.match(new RegExp(`<${tag}>([^<\\r\\n]*)`, '
 
 /** Transactions of an OFX/QFX file as { date, amount, payment_ref, unique_import_id }, or with metadata details. */
 export function parseOfx(text, { details = false } = {}) {
-  return [...String(text).matchAll(/<STMTTRN>([\s\S]*?)(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>)/gi)].map(([, b]) => {
-    const memo = ofxTag(b, 'MEMO');
-    const account_number = ofxTag(b, 'ACCTID');
-    const ref = ofxTag(b, 'REFNUM') || ofxTag(b, 'CHECKNUM');
-    const transaction_type = ofxTag(b, 'TRNTYPE');
-    return {
-      date: ofxDate(ofxTag(b, 'DTPOSTED')),
-      amount: Number(ofxTag(b, 'TRNAMT').replace(',', '.')),
-      payment_ref: [ofxTag(b, 'NAME'), memo].filter(Boolean).join(' - '),
-      unique_import_id: ofxTag(b, 'FITID') || null,
-      ...(details ? {
-        ...(account_number ? { account_number } : {}),
-        ...(memo ? { narration: memo } : {}),
-        ...(ref ? { ref } : {}),
-        ...(transaction_type ? { transaction_type } : {}),
-      } : {}),
-    };
-  }).filter((l) => l.date && Number.isFinite(l.amount));
+  const fileCurrency = ofxTag(text, 'CURDEF') || null;
+  const str = String(text);
+  const responseBlocks = [...str.matchAll(/<(?:STMTRS|CCSTMTRS)\b([\s\S]*?)(?=<\/(?:STMTRS|CCSTMTRS)>|<(?:STMTRS|CCSTMTRS)\b|<\/(?:STMTTRNRS|CCSTMTTRNRS|BANKMSGSRSV1|CREDITCARDMSGSRSV1)>|$)/gi)].map((m) => m[1]);
+  const blocks = responseBlocks.length ? responseBlocks : [str];
+  return blocks.flatMap((block) => {
+    const blockCurrency = ofxTag(block, 'CURDEF') || fileCurrency;
+    return [...block.matchAll(/<STMTTRN>([\s\S]*?)(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>|<\/CCBANKTRANLIST>|$)/gi)].map(([, b]) => {
+      const memo = ofxTag(b, 'MEMO');
+      const account_number = ofxTag(b, 'ACCTID');
+      const ref = ofxTag(b, 'REFNUM') || ofxTag(b, 'CHECKNUM');
+      const transaction_type = ofxTag(b, 'TRNTYPE');
+      const currency = ofxTag(b, 'CURDEF') || blockCurrency || null;
+      return {
+        date: ofxDate(ofxTag(b, 'DTPOSTED')),
+        ...(currency ? { currency } : {}),
+        amount: Number(ofxTag(b, 'TRNAMT').replace(',', '.')),
+        payment_ref: [ofxTag(b, 'NAME'), memo].filter(Boolean).join(' - '),
+        unique_import_id: ofxTag(b, 'FITID') || null,
+        ...(details ? {
+          ...(account_number ? { account_number } : {}),
+          ...(memo ? { narration: memo } : {}),
+          ...(ref ? { ref } : {}),
+          ...(transaction_type ? { transaction_type } : {}),
+        } : {}),
+      };
+    }).filter((l) => l.date && Number.isFinite(l.amount));
+  });
 }
 
 const xmlTag = (block, path) => path.reduce((acc, tag) => acc?.match(new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)</(?:\\w+:)?${tag}>`))?.[1], block)?.trim() ?? '';
@@ -56,10 +217,13 @@ export function parseCamt(text, { details = false } = {}) {
     const amount = Number(xmlTag(b, ['Amt']));
     const amountTag = b.match(/<(?:\w+:)?Amt\b[^>]*>/)?.[0] ?? '';
     const ref = xmlTag(b, ['Ustrd']) || xmlTag(b, ['AddtlNtryInf']) || xmlTag(b, ['Nm']);
+    // CdtDbtInd is the direction actually booked. A reversal (RvslInd) keeps the parties of the original
+    // operation, which ran the other way, so the counterpart is taken from the opposite side.
     const isDebit = xmlTag(b, ['CdtDbtInd']) === 'DBIT';
+    const reversed = /^(true|1)$/i.test(xmlTag(b, ['RvslInd']));
     // A batch entry (several TxDtls) books one total: transaction-level details would describe only one of them.
     const single = (b.match(/<(?:\w+:)?TxDtls\b/g) ?? []).length <= 1;
-    const account_number = details && single ? camtAccount(b, isDebit) : '';
+    const account_number = details && single ? camtAccount(b, reversed ? !isDebit : isDebit) : '';
     const narration = details ? unescapeXml((single ? xmlTag(b, ['AddtlTxInf']) : '') || xmlTag(b, ['AddtlNtryInf'])) : '';
     const lineRef = details ? unescapeXml([
       xmlTag(b, ['NtryRef']),
@@ -131,25 +295,66 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false, e
   const company = journal?.company_id ?? defaults.company_id ?? 1;
   const currencyId = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id ?? null;
   const currency = read(db, 'res.currency', currencyId);
-  if (camt && lines.some((l) => !l.currency || l.currency !== currency?.name)) throw new Error(`Statement currency does not match journal currency ${currency?.name ?? ''}`);
+  if (lines.some((l) => (camt && !l.currency) || (l.currency && l.currency !== currency?.name))) throw new Error(`Statement currency does not match journal currency ${currency?.name ?? ''}`);
   const journalId = defaults.journal_id ?? null;
-  const known = new Set(search(db, 'account.bank.statement.line')
-    .filter((l) => (exactJournalOnly ? l.journal_id === journalId : (l.journal_id == null || l.journal_id === journalId)) && (l.company_id ?? 1) === company)
-    .map((l) => l.unique_import_id).filter(Boolean));
+  const existing = search(db, 'account.bank.statement.line')
+    .filter((l) => (exactJournalOnly ? l.journal_id === journalId : (l.journal_id == null || l.journal_id === journalId)) && (l.company_id ?? 1) === company);
+  const known = new Set(existing.map((l) => l.unique_import_id).filter(Boolean));
+  const existingCounts = new Map();
+  for (const l of existing) {
+    const fp = `${l.date}|${l.payment_ref || '/'}|${Number(l.amount)}`;
+    existingCounts.set(fp, (existingCounts.get(fp) || 0) + 1);
+  }
   const fresh = lines.filter((l) => {
-    if (!l.unique_import_id) return true;
-    if (known.has(l.unique_import_id)) return false;
-    known.add(l.unique_import_id);
+    if (l.unique_import_id) {
+      if (known.has(l.unique_import_id)) return false;
+      known.add(l.unique_import_id);
+      return true;
+    }
+    const fp = `${l.date}|${l.payment_ref || '/'}|${Number(l.amount)}`;
+    const count = existingCounts.get(fp) || 0;
+    if (count > 0) {
+      existingCounts.set(fp, count - 1);
+      return false;
+    }
     return true;
   });
-  const next = fresh.reduce((acc, { currency: _currency, ...l }) => create(acc, 'account.bank.statement.line', { ...defaults, ...l, currency_id: currencyId, ...(journal ? { company_id: journalCompany(journal) } : {}), payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
+  const bankAccounts = search(db, 'res.partner.bank')
+    .filter((b) => b.active !== false && (!b.company_id || b.company_id === company));
+  // An account number held by several partners identifies none of them.
+  const partnerByAccount = new Map();
+  for (const b of bankAccounts) {
+    const key = b.sanitized_account_number || sanitizeAccountNumber(b.account_number);
+    partnerByAccount.set(key, partnerByAccount.has(key) && partnerByAccount.get(key) !== b.partner_id ? null : b.partner_id);
+  }
+  // The journal's own account (online sync stamps it on every line) is not a counterparty.
+  const ownBank = journal?.bank_account_id ? read(db, 'res.partner.bank', journal.bank_account_id) : null;
+  const ownKey = ownBank ? ownBank.sanitized_account_number || sanitizeAccountNumber(ownBank.account_number) : null;
+  const next = fresh.reduce((acc, { currency: _currency, ...l }) => {
+    let partnerId = l.partner_id ?? defaults.partner_id ?? null;
+    if (!partnerId && l.account_number && sanitizeAccountNumber(l.account_number) !== ownKey) {
+      partnerId = partnerByAccount.get(sanitizeAccountNumber(l.account_number)) ?? null;
+    }
+    return create(acc, 'account.bank.statement.line', {
+      ...defaults,
+      ...l,
+      currency_id: currencyId,
+      ...(journal ? { company_id: journalCompany(journal) } : {}),
+      payment_ref: l.payment_ref || '/',
+      state: 'to_check',
+      ...(partnerId ? { partner_id: partnerId } : {}),
+    }).db;
+  }, db);
   return { db: next, count: fresh.length };
 }
 
 /** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
 export function importStatement(db, fileName, text, defaults = {}) {
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
-  const lines = camt ? parseCamt(text, { details: true }) : parseOfx(text, { details: true });
+  const qif = /\.qif$/i.test(fileName) || /^\s*!Type:(?:Bank|Cash|CCard|Invst|Oth A|Oth L)/im.test(text);
+  const lines = camt
+    ? parseCamt(text, { details: true })
+    : (qif ? parseQif(text, { details: true }) : parseOfx(text, { details: true }));
   if (!lines.length) throw new Error('No transactions found in this file');
   return importStatementLines(db, lines, defaults, { camt });
 }

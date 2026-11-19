@@ -237,7 +237,7 @@ export function validateTaxCompany(db, ids, companyId, fpId = null) {
   for (const id of ids) visit(id);
 }
 
-/** Fiscal position for a partner: its own one, else the first auto-applied position for its country and zip range. */
+/** Fiscal position for a partner: its own one, else the first auto-applied position for its country and zip range, falling back to one with no country. */
 export function fiscalPositionFor(db, partnerId, companyId = null) {
   const p = read(db, 'res.partner', partnerId);
   if (!p) return null;
@@ -245,6 +245,15 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
     const position = read(db, 'account.fiscal.position', p.property_account_position_id);
     if (!companyId || !position?.company_id || position.company_id === companyId) return p.property_account_position_id;
   }
+  return autoFiscalPosition(db, p, companyId);
+}
+
+/**
+ * The auto-applied fiscal position for an address ({ country, zip, vat }): a position for its country first, else a
+ * position without a country (zip-specific first). Also used for website visitors, who have no partner record yet.
+ */
+export function autoFiscalPosition(db, address, companyId = null) {
+  const p = address ?? {};
   const country = (p.country ?? '').trim().toLowerCase();
   const pZip = String(p.zip ?? '').trim();
   const isNumericZip = (s) => /^\d+$/.test(s);
@@ -260,9 +269,19 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
     }
     return (!from || pZip >= from) && (!to || pZip <= to);
   };
-  const matches = search(db, 'account.fiscal.position').filter((fp) => (!companyId || !fp.company_id || fp.company_id === companyId) && fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country && (!fp.vat_required || String(p.vat ?? '').trim()) && zipMatches(fp));
-  matches.sort((a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || a.id - b.id);
-  return matches[0]?.id ?? null;
+  const hasZip = (fp) => Boolean(String(fp.zip_from ?? '').trim() || String(fp.zip_to ?? '').trim());
+  const baseMatches = search(db, 'account.fiscal.position').filter(
+    (fp) => (!companyId || !fp.company_id || fp.company_id === companyId) && fp.auto_apply && (!fp.vat_required || String(p.vat ?? '').trim()) && zipMatches(fp),
+  );
+  const bySeq = (a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || a.id - b.id;
+  const countryMatches = country ? baseMatches.filter((fp) => (fp.country ?? '').trim().toLowerCase() === country) : [];
+  if (countryMatches.length) {
+    countryMatches.sort(bySeq);
+    return countryMatches[0].id;
+  }
+  const fallbackMatches = baseMatches.filter((fp) => !(fp.country ?? '').trim());
+  fallbackMatches.sort((a, b) => (Number(hasZip(b)) - Number(hasZip(a))) || bySeq(a, b));
+  return fallbackMatches[0]?.id ?? null;
 }
 
 /** Map and snapshot explicit tax IDs (sales or purchase side) through the fiscal position. */
@@ -317,6 +336,16 @@ export const isSectionOrNote = (line) => Boolean(line && ['line_section', 'line_
 
 const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 
+/** Tax on an untaxed base: a percentage of the base, or for a division tax the share that makes it `amount`% of the taxed price. */
+export const taxAmount = (base, t) => {
+  const amt = Number(t.tax) || 0;
+  if (t.tax_type === 'division') {
+    if (100 - amt === 0) throw new Error('Division tax rate cannot be 100%');
+    return (base * amt) / (100 - amt);
+  }
+  return (base * amt) / 100;
+};
+
 /**
  * Compute untaxed base and per-tax breakdown for a single line strictly from its snapshot (Odoo 20 tax engine:
  * price-included taxes, include_base_amount / is_base_affected, group taxes, fixed taxes,
@@ -342,8 +371,8 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null, si
     const baseA = t.tax_is_base_affected !== false ? 1 + extraA : 1;
     const baseC = t.tax_is_base_affected !== false ? extraC : 0;
     const amt = Number(t.tax) || 0;
-    const taxA = t.tax_type === 'fixed' ? 0 : baseA * (amt / 100);
-    const taxC = t.tax_type === 'fixed' ? qty * amt : baseC * (amt / 100);
+    const taxA = t.tax_type === 'fixed' ? 0 : taxAmount(baseA, t);
+    const taxC = t.tax_type === 'fixed' ? qty * amt : taxAmount(baseC, t);
     if (t.tax_include) {
       inclA += taxA * factor;
       inclC += taxC * factor;
@@ -361,7 +390,7 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null, si
   for (const t of specs) {
     const curBase = (t.tax_is_base_affected !== false ? base0 + extraBase : base0);
     const amt = Number(t.tax) || 0;
-    const rawTax = t.tax_type === 'fixed' ? qty * amt : (curBase * amt) / 100;
+    const rawTax = t.tax_type === 'fixed' ? qty * amt : taxAmount(curBase, t);
     const taxAmt = roundPerLine ? roundCurrency(rawTax, currency) : rawTax;
     const baseAmt = roundPerLine ? roundCurrency(curBase, currency) : curBase;
     taxes.push({ ...t, base: baseAmt, amount: taxAmt });
@@ -597,6 +626,7 @@ export const taxModels = {
         ...(after.refund_repartition_line_ids ?? []).flatMap((l) => l.tag_ids ?? []),
       ];
       if (allTags.some((id) => read(db, 'account.account.tag', id)?.applicability !== 'taxes')) return 'Select only tax tags';
+      if (after.amount_type === 'division' && !(Number(after.amount) < 100)) return 'A percentage of price tax included must be below 100%';
       if (after.amount_type === 'group') {
         const children = after.children_tax_ids ?? [];
         if (after.id && children.includes(after.id)) return 'A group tax cannot include itself';
@@ -612,7 +642,17 @@ export const taxModels = {
     fields: {
       name: { type: 'char', label: 'Tax Name', required: true, tracking: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
-      amount_type: { type: 'selection', label: 'Tax Computation', tracking: true, options: [['percent', 'Percentage'], ['fixed', 'Fixed'], ['group', 'Group of Taxes']] },
+      amount_type: {
+        type: 'selection',
+        label: 'Tax Computation',
+        tracking: true,
+        options: [
+          ['percent', 'Percentage'],
+          ['division', 'Percentage of Price Tax Included'],
+          ['fixed', 'Fixed'],
+          ['group', 'Group of Taxes'],
+        ],
+      },
       amount: { type: 'float', label: 'Amount', tracking: true },
       children_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Child Taxes' },
       description: { type: 'char', label: 'Description', optional: 'show' },
@@ -634,7 +674,12 @@ export const taxModels = {
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', tracking: true, options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
-      cash_basis_transition_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Basis Transition Account' },
+      cash_basis_transition_account_id: {
+        type: 'many2one',
+        relation: 'account.account',
+        label: 'Cash Basis Transition Account',
+        hideWhen: (r) => r?.amount_type !== 'group' && r?.tax_exigibility !== 'on_payment',
+      },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group', domain: (g, tax) => !g.company_id || g.company_id === (tax?.company_id ?? 1) },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       invoice_repartition_line_ids: repartitionField('Distribution for Invoices'),
@@ -711,6 +756,18 @@ export const taxModels = {
 
   'account.fiscal.position': {
     label: 'Fiscal Positions',
+    guard: (db, _before, after) => {
+      // A mapping's source may be any account a line was entered with; the posted destination must be usable by this company.
+      // A position without a company is shared, so its destinations are checked when it is applied to a company.
+      if (!after.company_id) return null;
+      const fpCompany = after.company_id;
+      for (const row of after.account_ids ?? []) {
+        if (!row.account_dest_id) continue;
+        const account = read(db, 'account.account', row.account_dest_id);
+        if (!account || (account.company_id && account.company_id !== fpCompany)) return 'Fiscal position destination account must belong to the fiscal position company';
+      }
+      return null;
+    },
     fields: {
       name: { type: 'char', label: 'Fiscal Position', required: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },

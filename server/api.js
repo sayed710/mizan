@@ -209,7 +209,7 @@ export function publicCart(db, body) {
   const { lines, error } = cartLines(db, b.lines);
   if (error) return { status: 400, body: { error } };
   const companyId = db.settings?.current_company_id ?? 1;
-  const options = { pricelistId: pricelistOf(db, b.pricelist), partnerCountry: clip(b.country, 80), companyId };
+  const options = { pricelistId: pricelistOf(db, b.pricelist), partnerCountry: clip(b.country, 80), partnerZip: clip(b.zip, 20), companyId };
   const carriers = websiteCarriers(db);
   try {
     const totals = cartTotals(db, lines, { ...options, carrierId: carriers.find((c) => c.id === b.carrier_id)?.id ?? null });
@@ -261,7 +261,7 @@ export function publicOrder(db, body) {
   const pricelistId = pricelistOf(db, b.pricelist);
   const companyId = db.settings?.current_company_id ?? 1;
   try {
-    const totals = cartTotals(db, lines, { pricelistId, carrierId: carrier?.id ?? null, partnerCountry: address.country, companyId });
+    const totals = cartTotals(db, lines, { pricelistId, carrierId: carrier?.id ?? null, partnerCountry: address.country, partnerZip: address.zip, companyId });
     const { db: withPartner, partnerId, shippingId } = checkoutPartners(db, v, address);
     const token = randomBytes(24).toString('base64url');
     const order = create(withPartner, 'sale.order', {
