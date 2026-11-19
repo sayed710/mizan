@@ -86,22 +86,30 @@ export const toCompany = (db, currencyId, amount, date, companyId = null) => rou
   companyCurrencyRecord(db, companyId),
 );
 
+/** Rate rows a write adds or changes must be strictly positive and unique per date and company; rows a write leaves untouched are not rechecked, so a currency with a legacy bad row stays editable. */
+function rateRowsError(beforeRows = [], afterRows = []) {
+  const unchanged = new Set((beforeRows ?? []).map((row) => JSON.stringify(row)));
+  const keyOf = (row) => `${row.date ?? ''}:${row.company_id == null || row.company_id === '' ? 'all' : String(Number(row.company_id))}`;
+  const changed = (afterRows ?? []).filter((row) => !unchanged.has(JSON.stringify(row)));
+  for (const row of changed) {
+    if (!row || typeof row !== 'object') return 'Exchange rate must be strictly positive';
+    const rate = typeof row.rate === 'boolean' || row.rate === null || row.rate === '' ? NaN : Number(row.rate);
+    if (!Number.isFinite(rate) || rate <= 0) return 'Exchange rate must be strictly positive';
+    if ((afterRows ?? []).filter((other) => other && typeof other === 'object' && keyOf(other) === keyOf(row)).length > 1) {
+      return 'Duplicate exchange rate row for the same date and company';
+    }
+  }
+  return null;
+}
+
 export const currencyModels = {
   'res.currency': {
     label: 'Currencies',
     guard: (db, before, after) => {
       const rounding = Number(after.rounding ?? 0.01);
       if (!Number.isFinite(rounding) || rounding <= 0) return 'Currency rounding must be positive';
-      const seen = new Set();
-      for (const row of after.rate_ids ?? []) {
-        if (!row || typeof row !== 'object') return 'Exchange rate must be strictly positive';
-        const rate = typeof row.rate === 'boolean' || row.rate === null || row.rate === '' ? NaN : Number(row.rate);
-        if (!Number.isFinite(rate) || rate <= 0) return 'Exchange rate must be strictly positive';
-        const companyKey = row.company_id == null || row.company_id === '' ? 'all' : String(Number(row.company_id));
-        const key = `${row.date ?? ''}:${companyKey}`;
-        if (seen.has(key)) return 'Duplicate exchange rate row for the same date and company';
-        seen.add(key);
-      }
+      const rateError = rateRowsError(before?.rate_ids, after.rate_ids);
+      if (rateError) return rateError;
       if (!before || Number(before.rounding ?? 0.01) === rounding) return null;
       const id = before.id;
       const used = (db.records['res.company'] ?? []).some((company) => company.currency_id === id)

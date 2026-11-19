@@ -286,3 +286,12 @@ test('Unrealized Currencies view formats foreign balance with line foreign curre
     globalThis.localStorage = prevStorage;
   }
 });
+
+test('rate row guard leaves untouched legacy rows alone so the currency stays editable', () => {
+  const base = seed();
+  const legacy = withCurrency(base, { id: 992, name: 'LEGACY', symbol: 'L', rounding: 0.01, rate_ids: [{ date: '2020-01-01', rate: 0, company_id: 1 }] });
+  const renamed = withCurrency(legacy, { id: 992, name: 'LEGACY', symbol: 'X', rounding: 0.01, rate_ids: [{ date: '2020-01-01', rate: 0, company_id: 1 }] });
+  assert.equal(read(applyDiff(legacy, diffDb(legacy, renamed), { isAdmin: true }), 'res.currency', 992).symbol, 'X');
+  const addedBad = withCurrency(legacy, { id: 992, name: 'LEGACY', symbol: 'L', rounding: 0.01, rate_ids: [{ date: '2020-01-01', rate: 0, company_id: 1 }, { date: '2021-01-01', rate: -1, company_id: 1 }] });
+  assert.throws(() => applyDiff(legacy, diffDb(legacy, addedBad), { isAdmin: true }), /positive/i);
+});
