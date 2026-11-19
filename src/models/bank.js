@@ -277,21 +277,31 @@ function paymentOutstandingItem(db, payment, line, via) {
 }
 
 export function matchPayment(db, line) {
-  if (line.state !== 'to_check' || line.bank_move_id || (line.allocations ?? []).length) throw new Error('Unreconcile the booked bank transaction before matching a payment');
+  if (line.state !== 'to_check') throw new Error('This bank transaction is already reconciled');
   const company = line.company_id ?? 1;
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
   const { payments, via, journal } = resolveAndValidatePayments(db, line);
   const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via));
-  const amount = statementCompanyAmount(db, line);
+  const amount = line.bank_move_id ? round(line.open_amount) : statementCompanyAmount(db, line);
   const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
   const incoming = line.amount > 0;
   const foreign = journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id;
-  const fxAmounts = foreign ? payments.map((p) => roundCurrency(p.amount, read(db, 'res.currency', journal.currency_id))) : [];
+  const journalCurr = foreign ? read(db, 'res.currency', journal.currency_id) : null;
+  const fxAmounts = foreign ? payments.map((p) => roundCurrency(p.amount, journalCurr)) : [];
+  const foreignAmount = foreign
+    ? (line.bank_move_id
+        ? roundCurrency(Math.abs(line.amount) * amount / bookedStatementAmount(db, line), journalCurr)
+        : Math.abs(line.amount))
+    : amount;
+  const foreignPaymentsTotal = foreign
+    ? roundCurrency(fxAmounts.reduce((a, b) => a + b, 0), journalCurr)
+    : paymentsTotal;
   const foreignDifference = foreign
-    ? roundCurrency(fxAmounts.reduce((a, b) => a + b, 0) - Math.abs(line.amount), read(db, 'res.currency', journal.currency_id))
+    ? roundCurrency(foreignPaymentsTotal - foreignAmount, journalCurr)
     : 0;
   const difference = round(paymentsTotal - amount);
-  const needsWriteoff = foreign ? foreignDifference !== 0 : difference !== 0;
+  const isPartial = !line.writeoff_account_id && (foreign ? foreignDifference < 0 : difference < 0);
+  const needsWriteoff = !isPartial && (foreign ? foreignDifference !== 0 : difference !== 0);
   let writeoffAccount = null;
   if (needsWriteoff) {
     if (!line.writeoff_account_id) throw new Error('The selected payments must total the bank transaction amount');
@@ -312,7 +322,7 @@ export function matchPayment(db, line) {
     if (forbidden.has(writeoffAccount.id)) throw new Error('Write-off account must differ from the bank, suspense and outstanding accounts');
   }
   const allDirect = outstandingItems.every((item) => item.isDirect);
-  if (allDirect && !needsWriteoff && !difference) {
+  if (allDirect && !needsWriteoff && !difference && !line.bank_move_id && !(line.allocations ?? []).length) {
     const primaryMoveId = payments[0].move_id;
     return {
       db: write(db, 'account.bank.statement.line', line.id, {
@@ -328,56 +338,92 @@ export function matchPayment(db, line) {
       }),
     };
   }
+  let currentDb = db;
+  let bankMoveId = line.bank_move_id;
+  if (isPartial && !bankMoveId) {
+    const bookedBank = bookBankMovement(db, line, company, { date: line.date, openAmount: amount });
+    currentDb = bookedBank.db;
+    bankMoveId = bookedBank.bankMoveId;
+  }
   const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
-  // Direct payments already posted their liquidity lines to the bank account; net them with the statement line so only one liquidity delta line is posted.
-  const statementSigned = incoming ? amount : -amount;
-  const directOffset = round(outstandingItems.reduce((sum, item) => sum + (item.isDirect ? (incoming ? -item.amount : item.amount) : 0), 0));
-  const netLiquidity = round(statementSigned + directOffset);
-  const journalCurr = foreign ? read(db, 'res.currency', journal.currency_id) : null;
-  const netFx = foreign
-    ? roundCurrency(
-        (incoming ? Math.abs(line.amount) : -Math.abs(line.amount))
-          + outstandingItems.reduce((sum, item, i) => sum + (item.isDirect ? (incoming ? -fxAmounts[i] : fxAmounts[i]) : 0), 0),
-        journalCurr,
-      )
-    : 0;
-  const includeBankFx = foreign && (
-    netFx !== 0
-    || !outstandingItems.some((item) => item.isDirect)
-    || outstandingItems.some((item) => item.isDirect && item.currency_id === journal.currency_id)
-  );
-  const bankFx = includeBankFx ? { currency_id: journal.currency_id, amount_currency: netFx } : {};
-  const bankLines = netLiquidity
-    ? [netLiquidity > 0
-        ? { account: via.accountId, debit: netLiquidity, ...bankFx }
-        : { account: via.accountId, credit: -netLiquidity, ...bankFx }]
-    : [];
-  const paymentLines = outstandingItems.flatMap((item, i) => (item.isDirect ? [] : [incoming
-    ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(-fxAmounts[i]) }
-    : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }]));
-
-  const lines = incoming ? [...bankLines, ...paymentLines] : [...paymentLines, ...bankLines];
+  let lines;
   const writeoff = needsWriteoff ? (foreign ? statementCompanyAmount(db, line, foreignDifference) : difference) : 0;
+  const writeoffLines = [];
   if (needsWriteoff) {
     const companyNet = incoming ? writeoff : -writeoff;
     const currencyNet = incoming ? foreignDifference : -foreignDifference;
-    lines.push({ account_id: writeoffAccount.id, partner_id: line.partner_id ?? null, name: line.writeoff_label, debit: Math.max(0, companyNet), credit: Math.max(0, -companyNet), ...fx(currencyNet) });
+    writeoffLines.push({ account_id: writeoffAccount.id, partner_id: line.partner_id ?? null, name: line.writeoff_label, debit: Math.max(0, companyNet), credit: Math.max(0, -companyNet), ...fx(currencyNet) });
   }
-  const exchangeDifference = round((incoming ? 1 : -1) * (writeoff - difference));
-  if (exchangeDifference) lines.push({ account: exchangeAccount(db, company, exchangeDifference), ...(exchangeDifference > 0 ? { credit: exchangeDifference } : { debit: -exchangeDifference }) });
-  const booked = postEntry(db, { journal: via.code, journal_id: journal?.id, company, date: line.date, ref: line.payment_ref, lines });
+  const exchangeDifference = !isPartial ? round((incoming ? 1 : -1) * (writeoff - difference)) : 0;
+  const exchangeLines = exchangeDifference
+    ? [{ account: exchangeAccount(db, company, exchangeDifference), ...(exchangeDifference > 0 ? { credit: exchangeDifference } : { debit: -exchangeDifference }) }]
+    : [];
+
+  const usedAmount = isPartial ? paymentsTotal : amount;
+  const usedForeign = isPartial ? foreignPaymentsTotal : foreignAmount;
+
+  if (bankMoveId) {
+    const suspense = ensureBankSuspense(currentDb, company, line.journal_id).id;
+    const suspenseLines = incoming
+      ? [{ account: suspense, debit: usedAmount, ...fx(usedForeign) }]
+      : [{ account: suspense, credit: usedAmount, ...fx(-usedForeign) }];
+    const paymentLines = outstandingItems.flatMap((item, i) => [incoming
+      ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(-fxAmounts[i]) }
+      : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }]);
+    lines = incoming
+      ? [...suspenseLines, ...paymentLines, ...writeoffLines, ...exchangeLines]
+      : [...paymentLines, ...writeoffLines, ...exchangeLines, ...suspenseLines];
+  } else {
+    // Direct payments already posted their liquidity lines to the bank account; net them with the statement line so only one liquidity delta line is posted.
+    const statementSigned = incoming ? amount : -amount;
+    const directOffset = round(outstandingItems.reduce((sum, item) => sum + (item.isDirect ? (incoming ? -item.amount : item.amount) : 0), 0));
+    const netLiquidity = round(statementSigned + directOffset);
+    const netFx = foreign
+      ? roundCurrency(
+          (incoming ? Math.abs(line.amount) : -Math.abs(line.amount))
+            + outstandingItems.reduce((sum, item, i) => sum + (item.isDirect ? (incoming ? -fxAmounts[i] : fxAmounts[i]) : 0), 0),
+          journalCurr,
+        )
+      : 0;
+    const includeBankFx = foreign && (
+      netFx !== 0
+      || !outstandingItems.some((item) => item.isDirect)
+      || outstandingItems.some((item) => item.isDirect && item.currency_id === journal.currency_id)
+    );
+    const bankFx = includeBankFx ? { currency_id: journal.currency_id, amount_currency: netFx } : {};
+    const bankLines = netLiquidity
+      ? [netLiquidity > 0
+          ? { account: via.accountId, debit: netLiquidity, ...bankFx }
+          : { account: via.accountId, credit: -netLiquidity, ...bankFx }]
+      : [];
+    const paymentLines = outstandingItems.flatMap((item, i) => (item.isDirect ? [] : [incoming
+      ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(-fxAmounts[i]) }
+      : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }]));
+
+    lines = incoming
+      ? [...bankLines, ...paymentLines, ...writeoffLines, ...exchangeLines]
+      : [...paymentLines, ...writeoffLines, ...exchangeLines, ...bankLines];
+  }
+
+  const booked = postEntry(currentDb, { journal: via.code, journal_id: journal?.id, company, date: line.date, ref: line.payment_ref, lines });
+  const finalBankMoveId = bankMoveId ?? booked.id;
+  const remaining = isPartial ? round(amount - usedAmount) : 0;
+  const state = remaining > 0 ? 'to_check' : 'reconciled';
+  const finalOpenAmount = remaining > 0 ? remaining : 0;
+  const isFinal = remaining === 0;
 
   return {
     db: write(booked.db, 'account.bank.statement.line', line.id, {
-      state: 'reconciled',
+      state,
       move_id: booked.id,
-      bank_move_id: booked.id,
-      open_amount: 0,
-      allocations: [{ payment_move_id: booked.id, amount }],
-      payment_move_id: payments.length === 1 ? payments[0].move_id : null,
-      payment_id: payments.length === 1 ? payments[0].id : null,
-      payment_ids: payments.map((p) => p.id),
-      batch_payment_id: line.batch_payment_id ?? null,
+      bank_move_id: finalBankMoveId,
+      open_amount: finalOpenAmount,
+      allocations: [...(line.allocations ?? []), { payment_move_id: booked.id, amount: usedAmount }],
+      payment_move_id: isFinal && payments.length === 1 ? payments[0].move_id : null,
+      payment_id: isFinal && payments.length === 1 ? payments[0].id : null,
+      payment_ids: isFinal ? payments.map((p) => p.id) : [],
+      batch_payment_id: isFinal ? (line.batch_payment_id ?? null) : null,
+      partner_id: line.partner_id ?? payments[0]?.partner_id ?? null,
     }),
   };
 }
