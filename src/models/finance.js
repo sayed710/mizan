@@ -587,8 +587,28 @@ export function paymentInvariant(db, after) {
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
   if (after.is_tax_payment || after.return_id) {
     const ret = (db.records['account.return'] ?? []).find((r) => r.id === after.return_id && r.state === 'paid');
-    const closings = (ret?.closing_move_ids ?? []).map((id) => (db.records['account.move'] ?? []).find((m) => m.id === id));
-    if (!ret || !closings.some((closing) => closing && settlementCapacity(db, entry, closing) >= round(Number(after.amount) || 0))) return 'The tax payment must settle its closing entry';
+    if (!ret) return 'The tax payment must settle its closing entry';
+    if (ret.tax_unit_id) {
+      const { mainCompanyId, mainSpec, destinationAccount, netPayable } = taxUnitSettlementSpec(db, ret);
+      if (!netPayable
+        || (after.company_id ?? 1) !== mainCompanyId
+        || (entry.company_id ?? 1) !== mainCompanyId
+        || after.partner_id !== mainSpec.partner
+        || round(Number(after.amount) || 0) !== Math.abs(netPayable)
+        || after.payment_type !== (netPayable < 0 ? 'inbound' : 'outbound')
+        || after.destination_account_id !== destinationAccount?.id) {
+        return 'The tax payment must settle its closing entry';
+      }
+      const paidToDest = (after.payment_type === 'inbound' ? 1 : -1) * (entry.line_ids ?? [])
+        .filter((l) => l.account_id === destinationAccount.id && l.partner_id === mainSpec.partner)
+        .reduce((s, l) => s + (Number(l.credit) || 0) - (Number(l.debit) || 0), 0);
+      if (round(paidToDest) !== Math.abs(netPayable)) return 'The tax payment must settle its closing entry';
+    } else {
+      const closings = (ret?.closing_move_ids ?? []).map((id) => (db.records['account.move'] ?? []).find((m) => m.id === id));
+      if (!closings.some((closing) => closing && settlementCapacity(db, entry, closing) >= round(Number(after.amount) || 0))) {
+        return 'The tax payment must settle its closing entry';
+      }
+    }
   } else {
   if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
@@ -928,6 +948,93 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
     lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
   }
   return { lines, payable: report.payable, payableAccount, receivableAccount, partner: partner.id };
+}
+
+/** Build the representative company payment summary and per-company inter-company settlement entries for a tax unit return. */
+export function taxUnitSettlementSpec(db, ret) {
+  const unit = read(db, 'account.tax.unit', ret.tax_unit_id);
+  if (!unit) throw new Error('Tax unit not found');
+  const companies = returnCompanies(db, ret);
+  const mainCompanyId = unit.main_company_id ?? ret.company_id ?? 1;
+  if (!companies.includes(mainCompanyId) || (ret.company_id ?? 1) !== mainCompanyId) {
+    throw new Error('Tax return company must match the tax unit main company');
+  }
+  const mainCompany = read(db, 'res.company', mainCompanyId);
+  if (!mainCompany?.partner_id || !read(db, 'res.partner', mainCompany.partner_id)) {
+    throw new Error('Configure a company contact for every company in the tax unit');
+  }
+
+  const specs = companies.map((companyId) => ({ companyId, spec: taxClosingSpec(db, ret, companyId) }));
+  const mainSpec = specs.find((s) => s.companyId === mainCompanyId)?.spec;
+  if (!mainSpec) throw new Error('Main company is missing from the tax unit');
+  const netPayable = round(specs.reduce((sum, s) => sum + s.spec.payable, 0));
+
+  const destinationAccount = (netPayable > 0 || (netPayable === 0 && mainSpec.payable >= 0))
+    ? mainSpec.payableAccount
+    : mainSpec.receivableAccount;
+
+  const mainLines = [];
+  const memberEntries = [];
+
+  // If the main company's own closing amount sits in the other tax account (payable vs receivable) than the destination,
+  // transfer it into the destination account in the same entry.
+  if (destinationAccount.id === mainSpec.payableAccount.id && mainSpec.payable < 0) {
+    const amount = Math.abs(mainSpec.payable);
+    mainLines.push(
+      { account_id: destinationAccount.id, debit: amount, partner_id: mainSpec.partner },
+      { account_id: mainSpec.receivableAccount.id, credit: amount, partner_id: mainSpec.partner },
+    );
+  } else if (destinationAccount.id === mainSpec.receivableAccount.id && mainSpec.payable > 0) {
+    const amount = mainSpec.payable;
+    mainLines.push(
+      { account_id: mainSpec.payableAccount.id, debit: amount, partner_id: mainSpec.partner },
+      { account_id: destinationAccount.id, credit: amount, partner_id: mainSpec.partner },
+    );
+  }
+
+  for (const { companyId: memberId, spec } of specs) {
+    if (memberId === mainCompanyId || !spec.payable) continue;
+    const memberCompany = read(db, 'res.company', memberId);
+    if (!memberCompany?.partner_id || !read(db, 'res.partner', memberCompany.partner_id)) {
+      throw new Error('Configure a company contact for every company in the tax unit');
+    }
+    const amount = Math.abs(spec.payable);
+    const positive = spec.payable > 0;
+    const mainIcAccount = partnerAccount(db, memberCompany.partner_id, mainCompanyId, positive ? 'receivable' : 'payable');
+    const memberIcAccount = partnerAccount(db, mainCompany.partner_id, memberId, positive ? 'payable' : 'receivable');
+
+    if (positive) {
+      mainLines.push(
+        { account_id: mainIcAccount, debit: amount, partner_id: memberCompany.partner_id },
+        { account_id: destinationAccount.id, credit: amount, partner_id: mainSpec.partner },
+      );
+      memberEntries.push({
+        companyId: memberId,
+        lines: [
+          { account_id: spec.payableAccount.id, debit: amount, partner_id: spec.partner },
+          { account_id: memberIcAccount, credit: amount, partner_id: mainCompany.partner_id },
+        ],
+      });
+    } else {
+      mainLines.push(
+        { account_id: destinationAccount.id, debit: amount, partner_id: mainSpec.partner },
+        { account_id: mainIcAccount, credit: amount, partner_id: memberCompany.partner_id },
+      );
+      memberEntries.push({
+        companyId: memberId,
+        lines: [
+          { account_id: memberIcAccount, debit: amount, partner_id: mainCompany.partner_id },
+          { account_id: spec.receivableAccount.id, credit: amount, partner_id: spec.partner },
+        ],
+      });
+    }
+  }
+
+  const entries = [
+    ...(mainLines.length ? [{ companyId: mainCompanyId, lines: mainLines }] : []),
+    ...memberEntries,
+  ];
+  return { mainCompanyId, mainCompany, mainSpec, destinationAccount, netPayable, entries };
 }
 
 /** Validate a submitted closing against its linked return and the posted ledger. */

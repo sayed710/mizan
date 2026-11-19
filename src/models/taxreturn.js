@@ -3,7 +3,8 @@ import { create, getActiveCompany, read, search, write } from '../orm.js';
 import { round } from '../money.js';
 import { addDays, today } from './common.js';
 import { postPayment } from './pay.js';
-import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, validateTaxReturnPeriod } from './finance.js';
+import { postEntry, resolveDocumentJournal } from './ledger.js';
+import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, taxUnitSettlementSpec, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 
@@ -339,6 +340,16 @@ export function submitReturn(db, returnId) {
   return syncTaxLockDate(nextDb, currentRet);
 }
 
+function moveLinesMatch(move, expectedLines) {
+  const norm = (line) => {
+    const net = round((Number(line.debit) || 0) - (Number(line.credit) || 0));
+    return `${line.account_id}:${line.partner_id ?? ''}:${Math.max(0, net)}:${Math.max(0, -net)}`;
+  };
+  const exp = expectedLines.map(norm).sort();
+  const act = (move.line_ids ?? []).map(norm).sort();
+  return JSON.stringify(act) === JSON.stringify(exp);
+}
+
 /** Pay a submitted tax return: registers outbound payment or inbound refund to payment_partner_id. */
 export function payReturn(db, returnId) {
   const ret = read(db, 'account.return', returnId);
@@ -359,35 +370,75 @@ export function payReturn(db, returnId) {
 
   let nextDb = db;
   const paymentIds = [];
-  const specs = returnCompanies(db, ret).map((companyId) => ({ companyId, spec: taxClosingSpec(db, ret, companyId) }));
 
-  for (const { companyId, spec } of specs) {
-    if (!spec.payable) continue;
-    const inbound = spec.payable < 0;
-    const targetAccount = inbound ? spec.receivableAccount : spec.payableAccount;
-    const created = create(nextDb, 'account.payment', {
-      partner_id: spec.partner,
-      partner_type: 'supplier',
-      payment_type: inbound ? 'inbound' : 'outbound',
-      amount: Math.abs(spec.payable),
-      date: today(),
-      memo: inbound ? `Tax Return Refund: ${ret.name}` : `Tax Return Payment: ${ret.name}`,
-      company_id: companyId,
-      state: 'draft',
-      destination_account_id: targetAccount.id,
-      destination_account_code: targetAccount.code,
-      is_tax_payment: true,
-      return_id: ret.id,
-    });
-    paymentIds.push(created.id);
-    nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
+  if (ret.tax_unit_id) {
+    const { mainCompanyId, mainSpec, destinationAccount, netPayable, entries } = taxUnitSettlementSpec(nextDb, ret);
+    const settlementDate = today();
+    if (netPayable !== 0) {
+      const inbound = netPayable < 0;
+      const created = create(nextDb, 'account.payment', {
+        partner_id: mainSpec.partner,
+        partner_type: 'supplier',
+        payment_type: inbound ? 'inbound' : 'outbound',
+        amount: Math.abs(netPayable),
+        date: today(),
+        memo: inbound ? `Tax Return Refund: ${ret.name}` : `Tax Return Payment: ${ret.name}`,
+        company_id: mainCompanyId,
+        state: 'draft',
+        destination_account_id: destinationAccount.id,
+        destination_account_code: destinationAccount.code,
+      });
+      nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
+      nextDb = write(nextDb, 'account.payment', created.id, {
+        is_tax_payment: true,
+        return_id: ret.id,
+      });
+      paymentIds.push(created.id);
+    }
+    for (const entry of entries) {
+      const journal = resolveDocumentJournal(nextDb, { move_type: 'entry', company_id: entry.companyId }, { required: true });
+      nextDb = postEntry(nextDb, {
+        journal: journal.code,
+        journal_id: journal.id,
+        date: settlementDate,
+        ref: `Tax Unit Settlement: ${ret.name}`,
+        lines: entry.lines,
+        company: entry.companyId,
+        is_tax_payment: true,
+        tax_return_id: ret.id,
+      }).db;
+    }
+  } else {
+    const specs = returnCompanies(db, ret).map((companyId) => ({ companyId, spec: taxClosingSpec(db, ret, companyId) }));
+
+    for (const { companyId, spec } of specs) {
+      if (!spec.payable) continue;
+      const inbound = spec.payable < 0;
+      const targetAccount = inbound ? spec.receivableAccount : spec.payableAccount;
+      const created = create(nextDb, 'account.payment', {
+        partner_id: spec.partner,
+        partner_type: 'supplier',
+        payment_type: inbound ? 'inbound' : 'outbound',
+        amount: Math.abs(spec.payable),
+        date: today(),
+        memo: inbound ? `Tax Return Refund: ${ret.name}` : `Tax Return Payment: ${ret.name}`,
+        company_id: companyId,
+        state: 'draft',
+        destination_account_id: targetAccount.id,
+        destination_account_code: targetAccount.code,
+        is_tax_payment: true,
+        return_id: ret.id,
+      });
+      paymentIds.push(created.id);
+      nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
+    }
   }
 
   const mainPaymentId = paymentIds.find((id) => (read(nextDb, 'account.payment', id)?.company_id ?? 1) === (ret.company_id ?? 1)) ?? paymentIds[0] ?? null;
   return syncTaxLockDate(write(nextDb, 'account.return', ret.id, {
     state: 'paid',
     is_completed: true,
-    ...(mainPaymentId ? { payment_id: mainPaymentId } : {}),
+    payment_id: mainPaymentId,
     payment_ids: paymentIds,
   }), ret);
 }
@@ -446,6 +497,32 @@ function taxPaymentsMatchReturn(db, after) {
   const staged = { ...db, records: { ...db.records, 'account.return': (db.records['account.return'] ?? []).map((r) => r.id === after.id ? after : r) } };
   const ids = after.payment_ids?.length ? after.payment_ids : (after.payment_id ? [after.payment_id] : []);
   if ((after.payment_id && !ids.includes(after.payment_id)) || new Set(ids).size !== ids.length) return false;
+  if (after.tax_unit_id) {
+    const { mainCompanyId, mainSpec, destinationAccount, netPayable, entries } = taxUnitSettlementSpec(staged, after);
+    if (netPayable === 0) {
+      if (ids.length !== 0) return false;
+    } else {
+      if (ids.length !== 1) return false;
+      const payment = read(db, 'account.payment', ids[0]);
+      const payMove = payment?.move_id ? read(db, 'account.move', payment.move_id) : null;
+      if (!payment || payment.state !== 'posted' || (payment.company_id ?? 1) !== mainCompanyId
+        || payment.partner_id !== mainSpec.partner
+        || !payment.is_tax_payment || payment.return_id !== after.id
+        || payment.destination_account_id !== destinationAccount.id
+        || payment.payment_type !== (netPayable < 0 ? 'inbound' : 'outbound')
+        || round(Number(payment.amount) || 0) !== Math.abs(netPayable)
+        || payMove?.state !== 'posted') {
+        return false;
+      }
+    }
+    const closingIds = new Set(after.closing_move_ids ?? []);
+    const paymentMoveIds = new Set(ids.map((id) => read(db, 'account.payment', id)?.move_id).filter(Boolean));
+    const settlementMoves = (db.records['account.move'] ?? []).filter((m) =>
+      m.state === 'posted' && m.move_type === 'entry' && m.is_tax_payment && m.tax_return_id === after.id && !closingIds.has(m.id) && !paymentMoveIds.has(m.id));
+    if (settlementMoves.length !== entries.length) return false;
+    return entries.every((entry) =>
+      settlementMoves.some((m) => (m.company_id ?? 1) === entry.companyId && moveLinesMatch(m, entry.lines)));
+  }
   const payments = ids.map((id) => read(db, 'account.payment', id));
   if (payments.some((p) => !p || p.state !== 'posted' || !p.is_tax_payment || p.return_id !== after.id)) return false;
   let required = 0;
@@ -469,13 +546,13 @@ function returnGuard(db, before, after) {
   if (before && isAuditReturn(before, db) !== isAudit) return 'Cannot change a return between tax and audit workflows';
   if (!isAudit && after.audit_status != null) return 'Audit status requires an audit return type';
   if (!isAudit && after.tax_unit_id) {
-    try {
-      returnCompanies(db, after);
-      const unit = read(db, 'account.tax.unit', after.tax_unit_id);
-      const mainType = read(db, 'account.return.type', after.type_id);
-      const { error } = taxUnitMemberTypeValidation(db, unit, mainType ? [mainType] : []);
-      if (error) return error;
-    } catch (error) { return error.message; }
+    const unit = read(db, 'account.tax.unit', after.tax_unit_id);
+    if (!unit) return 'Tax unit not found';
+    const companies = Array.isArray(unit.company_ids) ? unit.company_ids : [];
+    if (!companies.includes(after.company_id ?? 1)) return 'Tax unit must contain the return company';
+    const mainType = read(db, 'account.return.type', after.type_id);
+    const { error } = taxUnitMemberTypeValidation(db, unit, mainType ? [mainType] : []);
+    if (error) return error;
   }
   if (isAudit) {
     if (before?.audit_status === 'done') {

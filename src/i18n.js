@@ -3234,6 +3234,12 @@ const ar = {
   'Contradictory date formats in QIF file': 'صيغ تواريخ متضاربة في ملف QIF',
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
+  'All companies in a tax unit must have the same country': 'يجب أن تنتمي جميع الشركات في الوحدة الضريبية إلى نفس البلد',
+  'All companies in a tax unit must use the same currency': 'يجب أن تستخدم جميع الشركات في الوحدة الضريبية نفس العملة',
+  'Tax unit not found': 'الوحدة الضريبية غير موجودة',
+  'Tax return company must match the tax unit main company': 'يجب أن تطابق شركة الإقرار الضريبي الشركة الرئيسية للوحدة الضريبية',
+  'Configure a company contact for every company in the tax unit': 'حدّد جهة اتصال لكل شركة في الوحدة الضريبية',
+  'Main company is missing from the tax unit': 'الشركة الرئيسية مفقودة من الوحدة الضريبية',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
