@@ -2855,6 +2855,33 @@ export const INCOTERMS_2020 = [
   ['DDP', 'Delivered Duty Paid'],
 ];
 
+/** Check compatibility of companies within a tax unit (same country, each has currency, same currency). */
+export function taxUnitCompatibilityError(db, unit) {
+  const companies = Array.isArray(unit?.company_ids) ? unit.company_ids : [];
+  const companyRecords = companies.map((id) => read(db, 'res.company', id));
+  if (companyRecords.some((c) => !c)) return null;
+  const mainCompany = read(db, 'res.company', unit.main_company_id);
+  const normCountry = (v) => String(v ?? '').trim().toLowerCase();
+  const unitCountry = normCountry(unit.country) || normCountry(mainCompany?.country);
+  const hasAnyCompanyCountry = companyRecords.some((company) => normCountry(company?.country));
+  if (unitCountry && hasAnyCompanyCountry) {
+    if (companyRecords.some((company) => !normCountry(company?.country))) {
+      return 'Set a country on every company in the tax unit';
+    }
+    if (companyRecords.some((company) => normCountry(company.country) !== unitCountry)) {
+      return 'All companies in a tax unit must have the same country';
+    }
+  }
+  const currencyRecords = companies.map((id) => findCompanyCurrencyRecord(db, id));
+  if (currencyRecords.some((c) => !c?.id)) {
+    return 'Set a currency on every company in the tax unit';
+  }
+  if (new Set(currencyRecords.map((c) => c.id)).size > 1) {
+    return 'All companies in a tax unit must use the same currency';
+  }
+  return null;
+}
+
 Object.assign(accountingModels, {
   'account.incoterm': {
     label: 'Incoterms',
@@ -2911,26 +2938,8 @@ Object.assign(accountingModels, {
       if (new Set(companies).size < 2) return 'A tax unit must contain at least 2 companies';
       if (!after.main_company_id || !companies.includes(after.main_company_id)) return 'The main company must be one of the tax unit companies';
       if (companies.some((id) => !read(db, 'res.company', id))) return 'Select existing companies';
-      const companyRecords = companies.map((id) => read(db, 'res.company', id));
-      const mainCompany = read(db, 'res.company', after.main_company_id);
-      const normCountry = (v) => String(v ?? '').trim().toLowerCase();
-      const unitCountry = normCountry(after.country) || normCountry(mainCompany?.country);
-      const hasAnyCompanyCountry = companyRecords.some((company) => normCountry(company?.country));
-      if (unitCountry && hasAnyCompanyCountry) {
-        if (companyRecords.some((company) => !normCountry(company?.country))) {
-          return 'Set a country on every company in the tax unit';
-        }
-        if (companyRecords.some((company) => normCountry(company.country) !== unitCountry)) {
-          return 'All companies in a tax unit must have the same country';
-        }
-      }
-      const currencyRecords = companies.map((id) => findCompanyCurrencyRecord(db, id));
-      if (currencyRecords.some((c) => !c?.id)) {
-        return 'Set a currency on every company in the tax unit';
-      }
-      if (new Set(currencyRecords.map((c) => c.id)).size > 1) {
-        return 'All companies in a tax unit must use the same currency';
-      }
+      const compatErr = taxUnitCompatibilityError(db, after);
+      if (compatErr) return compatErr;
       const mainTypes = unitReturns.map((ret) => read(db, 'account.return.type', ret.type_id)).filter(Boolean);
       const { error } = taxUnitMemberTypeValidation(db, after, mainTypes);
       if (error) return error;

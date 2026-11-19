@@ -949,6 +949,37 @@ test('tax unit paid return replays through diffDb + applyDiff and rejects ordina
       /The journal entry must book this payment amount and direction|Tax return payment requires a posted payment/i,
     );
   }
+
+  // 5. A balanced entry that debits the tax account for the full amount, credits the outstanding account one step less and a third account the difference, is rejected
+  {
+    const origPay = read(paidDb, 'account.payment', replayedRet.payment_id);
+    const origMove = read(paidDb, 'account.move', origPay.move_id);
+    const outstandingLine = origMove.line_ids.find((l) => l.account_id !== mainType.tax_payable_account_id);
+    const shortEntry = postEntry(paidDb, {
+      journal: 'MISC',
+      date: today(),
+      ref: 'Short liquidity entry',
+      company: mainCompanyId,
+      lines: [
+        { account_id: mainType.tax_payable_account_id, partner_id: mainType.payment_partner_id, debit: 42 },
+        { account_id: outstandingLine.account_id, partner_id: mainType.payment_partner_id, credit: 41.99 },
+        { account_id: mainIcRec.id, credit: 0.01 },
+      ],
+    });
+    const shortEntryDb = {
+      ...shortEntry.db,
+      records: {
+        ...shortEntry.db.records,
+        'account.payment': shortEntry.db.records['account.payment'].map((p) => (
+          p.id === replayedRet.payment_id ? { ...p, move_id: shortEntry.id } : p
+        )),
+      },
+    };
+    assert.throws(
+      () => applyDiff(submittedDb, diffDb(submittedDb, shortEntryDb), { isAdmin: true }),
+      /The journal entry must book this payment amount and direction|Tax return payment requires a posted payment/i,
+    );
+  }
 });
 
 test('Finding 2: a member with no currency next to a base-currency company is rejected', () => {
@@ -1004,4 +1035,79 @@ test('Finding 3: an Egypt unit with a member without a country is rejected', () 
     () => applyDiff(db, diffDb(db, draft), { isAdmin: true }),
     /Set a country on every company in the tax unit/i,
   );
+});
+
+test('Company edits that break tax unit country or currency compatibility are rejected, including with submitted returns', () => {
+  const { db, memberId, mainType, memberType } = setupTaxUnitEnv({ mainCountry: 'Egypt', memberCountry: 'Egypt' });
+  const unit = create(db, 'account.tax.unit', {
+    name: 'Egypt Unit',
+    country: 'Egypt',
+    main_company_id: 1,
+    company_ids: [1, memberId],
+    member_return_type_ids: [{ company_id: memberId, type_id: memberType.id }],
+  });
+  let nextDb = unit.db;
+
+  // 1. Changing member country on a unit without submitted returns is rejected
+  {
+    const draft = {
+      ...nextDb,
+      records: {
+        ...nextDb.records,
+        'res.company': nextDb.records['res.company'].map((c) => (
+          c.id === memberId ? { ...c, country: 'UAE' } : c
+        )),
+      },
+    };
+    assert.throws(
+      () => applyDiff(nextDb, diffDb(nextDb, draft), { isAdmin: true }),
+      /All companies in a tax unit must have the same country|Set a country on every company in the tax unit/i,
+    );
+  }
+
+  // 2. Changing member currency on a unit without submitted returns is rejected
+  {
+    const sar = ensureCurrencyRecord(nextDb, 'SAR');
+    nextDb = sar.db;
+    const draft = {
+      ...nextDb,
+      records: {
+        ...nextDb.records,
+        'res.company': nextDb.records['res.company'].map((c) => (
+          c.id === memberId ? { ...c, currency_id: sar.id } : c
+        )),
+      },
+    };
+    assert.throws(
+      () => applyDiff(nextDb, diffDb(nextDb, draft), { isAdmin: true }),
+      /All companies in a tax unit must use the same currency|Set a currency on every company in the tax unit/i,
+    );
+  }
+
+  // 3. Changing member country on a unit with submitted returns is rejected
+  {
+    const ret = create(nextDb, 'account.return', {
+      name: 'Q1 Return',
+      type_id: mainType.id,
+      tax_unit_id: unit.id,
+      company_id: 1,
+      date_from: '2026-01-01',
+      date_to: '2026-03-31',
+    });
+    const reviewed = reviewReturn(ret.db, ret.id);
+    const submitted = submitReturn(reviewed, ret.id);
+    const draft = {
+      ...submitted,
+      records: {
+        ...submitted.records,
+        'res.company': submitted.records['res.company'].map((c) => (
+          c.id === memberId ? { ...c, country: 'Saudi Arabia' } : c
+        )),
+      },
+    };
+    assert.throws(
+      () => applyDiff(submitted, diffDb(submitted, draft), { isAdmin: true }),
+      /All companies in a tax unit must have the same country/i,
+    );
+  }
 });

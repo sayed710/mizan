@@ -1046,7 +1046,6 @@ export function taxUnitPaymentEntryError(db, payment, entry, spec = null) {
   const inbound = payment.payment_type === 'inbound';
   const companyCurrency = companyCurrencyRecord(db, mainCompanyId);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
-  const companyStep = Number(companyCurrency?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === mainSpec.partner).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
   const expected = companyRound(Math.abs(netPayable));
   let bank;
@@ -1056,8 +1055,9 @@ export function taxUnitPaymentEntryError(db, payment, entry, spec = null) {
     return error.message;
   }
   const counterpart = (inbound ? -1 : 1) * net(destinationAccount.id);
-  if (counterpart < 0 || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
-    || Math.abs(counterpart - expected) > companyStep + 1e-9) {
+  const liquidity = (inbound ? 1 : -1) * net(bank);
+  if (counterpart < 0 || Math.abs(liquidity - expected) > 1e-9
+    || Math.abs(counterpart - expected) > 1e-9) {
     return 'The journal entry must book this payment amount and direction';
   }
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== payment.id && p.state === 'posted' && p.move_id === entry.id)) {
