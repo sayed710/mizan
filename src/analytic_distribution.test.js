@@ -256,3 +256,111 @@ test('a line with only a legacy analytic account shows and edits it as its 100% 
   const distributed = { analytic_account_id: office.id, analytic_distribution: {} };
   assert.equal(display(db, field, distributed.analytic_distribution, distributed), '', 'an explicit distribution wins over the legacy account');
 });
+
+test('migration skips secured moves so version-2 hash chains stay valid while migrating unsecured invoices and displaying derived allocation', async () => {
+  const { read, write } = await import('./orm.js');
+  const { postMove } = await import('./models/accounting.js');
+  const { checkInalterability, secureEntries } = await import('./models/hash_chain.js');
+  const { migrate, SCHEMA_VERSION } = await import('./migrations.js');
+  const { applyDiff, diffDb } = await import('./sync.js');
+
+  let db = seed();
+  const office = search(db, 'account.analytic.account').find((a) => a.name === 'Office Projects');
+  const partner = search(db, 'res.partner')[0];
+  const product = search(db, 'product')[0];
+  const { accountId } = await import('./models/ledger.js');
+  const journalRes = create(db, 'account.journal', {
+    name: 'Secure Sales',
+    code: 'SECS',
+    type: 'sale',
+    company_id: 1,
+    default_account_id: accountId(db, '400000'),
+    invoice_sequence_prefix: 'SECS/',
+    invoice_sequence_next_number: 1,
+    restrict_mode_hash_table: true,
+  });
+  db = journalRes.db;
+  const journalId = journalRes.id;
+
+  // Create and post an invoice, then simulate a pre-distribution legacy line before version-2 securing.
+  const securedDraft = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    journal_id: journalId,
+    company_id: 1,
+    date: '2026-01-10',
+    invoice_date: '2026-01-10',
+    invoice_line_ids: [{ product_id: product.id, name: 'Legacy Line', qty: 1, price_unit: 200, tax: 0, analytic_account_id: office.id }],
+  });
+  db = postMove(securedDraft.db, securedDraft.id);
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => (m.id === securedDraft.id ? {
+        ...m,
+        invoice_line_ids: m.invoice_line_ids.map(({ analytic_distribution: _drop, ...line }) => ({ ...line, analytic_account_id: office.id })),
+      } : m)),
+    },
+  };
+  db = secureEntries(db, { companyId: 1, hashDate: '2026-01-31' });
+  const securedBefore = read(db, 'account.move', securedDraft.id);
+  assert.equal(securedBefore.inalterable_hash_version, 2);
+  assert.equal(Object.hasOwn(securedBefore.invoice_line_ids[0], 'analytic_distribution'), false);
+
+  // Also add an unsecured draft invoice with a legacy analytic account.
+  const draftRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    journal_id: journalId,
+    company_id: 1,
+    date: '2026-02-05',
+    invoice_date: '2026-02-05',
+    invoice_line_ids: [{ product_id: product.id, name: 'Draft Legacy', qty: 1, price_unit: 100, tax: 0, analytic_account_id: office.id }],
+  });
+  db = draftRes.db;
+  db = {
+    ...db,
+    schema_version: 57,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => (m.id === draftRes.id ? {
+        ...m,
+        invoice_line_ids: m.invoice_line_ids.map(({ analytic_distribution: _drop, ...line }) => ({ ...line, analytic_account_id: office.id })),
+      } : m)),
+    },
+  };
+
+  const migrated = migrate(db);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrate(migrated), migrated, 'migration is idempotent');
+
+  // Unsecured invoice is migrated to 100% distribution.
+  const migratedDraft = read(migrated, 'account.move', draftRes.id);
+  assert.deepEqual(migratedDraft.invoice_line_ids[0].analytic_distribution, { [office.id]: 100 });
+
+  // Secured invoice's hashed payload is untouched and its chain stays valid.
+  const migratedSecured = read(migrated, 'account.move', securedDraft.id);
+  assert.equal(Object.hasOwn(migratedSecured.invoice_line_ids[0], 'analytic_distribution'), false);
+  assert.equal(migratedSecured.invoice_line_ids[0].analytic_account_id, office.id);
+  const chainReport = checkInalterability(migrated, { journalId });
+  assert.equal(chainReport.length, 1);
+  assert.equal(chainReport[0].status, 'ok');
+  assert.equal(chainReport[0].corrupted_move, null);
+
+  // Extending the secured journal's chain after migration succeeds, including through diffDb + applyDiff.
+  const nextPosted = postMove(write(migrated, 'account.move', draftRes.id, { state: 'draft' }), draftRes.id);
+  const extended = secureEntries(nextPosted, { companyId: 1, hashDate: '2026-02-28' });
+  const synced = applyDiff(nextPosted, diffDb(nextPosted, extended), { isAdmin: true });
+  assert.equal(read(synced, 'account.move', draftRes.id).secure_sequence_number, 2);
+  assert.equal(checkInalterability(synced, { journalId })[0].status, 'ok');
+
+  // The skipped secured invoice line still shows its derived allocation in the editor.
+  const field = { type: 'distribution', label: 'Analytic' };
+  const securedLine = migratedSecured.invoice_line_ids[0];
+  assert.equal(display(migrated, field, securedLine.analytic_distribution, securedLine), `${office.name} 100%`);
+  const readonlyHtml = renderToStaticMarkup(React.createElement(FieldInput, {
+    db: migrated, field, value: securedLine.analytic_distribution, record: securedLine, readonly: true, onChange: () => {}, label: 'Analytic 1',
+  }));
+  assert.ok(readonlyHtml.includes(`${office.name} 100%`));
+});
