@@ -307,7 +307,7 @@ test('Journal Items list columns match Odoo 20 order, optional state, multi-comp
     await click(singleCtx.React, toggleBtn);
     const singleOpts = optionalMenuButtons(thead).map((b) => b.textContent.replace('✓', '').trim());
     assert.deepEqual(singleOpts, [
-      'Invoice Date', 'Journal', 'Partner', 'Reference', 'Product', 'Label',
+      'Invoice Date', 'Journal', 'Status', 'Partner', 'Reference', 'Product', 'Label',
       'Analytic Distribution', 'Taxes', 'In Currency', 'Currency', 'Tax Grids',
       'Discount Date', 'Discount Amount', 'Originator Tax', 'Due Date', 'Balance',
       'Matching', 'Residual', 'Residual in Currency',
@@ -345,7 +345,7 @@ test('Journal Items list columns match Odoo 20 order, optional state, multi-comp
     const menuBtns = optionalMenuButtons(thead);
     const menuLabels = menuBtns.map((b) => b.textContent.replace('✓', '').trim());
     assert.deepEqual(menuLabels, [
-      'Invoice Date', 'Company', 'Journal', 'Partner', 'Reference', 'Product', 'Label',
+      'Invoice Date', 'Company', 'Journal', 'Status', 'Partner', 'Reference', 'Product', 'Label',
       'Analytic Distribution', 'Taxes', 'In Currency', 'Currency', 'Tax Grids',
       'Discount Date', 'Discount Amount', 'Originator Tax', 'Due Date', 'Balance',
       'Matching', 'Residual', 'Residual in Currency',
@@ -358,7 +358,7 @@ test('Journal Items list columns match Odoo 20 order, optional state, multi-comp
       .map((n) => n.textContent.trim());
     assert.deepEqual(allHeaders, [
       'Select',
-      'Invoice Date', 'Date', 'Company', 'Journal', 'Journal Entry', 'Account',
+      'Invoice Date', 'Date', 'Company', 'Journal', 'Journal Entry', 'Status', 'Account',
       'Partner', 'Reference', 'Product', 'Label', 'Analytic Distribution', 'Taxes',
       'In Currency', 'Currency', 'Debit', 'Credit', 'Tax Grids',
       'Discount Date', 'Discount Amount', 'Originator Tax', 'Due Date', 'Balance',
@@ -461,7 +461,7 @@ test('Journal Items filters distinguish Unreconciled vs With residual, Not Secur
     const filterButtons = allFind(filterGroup, (n) => n.tagName === 'BUTTON');
     assert.deepEqual(
       filterButtons.map((b) => b.textContent.trim()),
-      ['Unposted', 'Posted', 'Not Secured', 'Unreconciled', 'With residual', 'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous', 'Payable', 'Receivable', 'P&L Accounts', 'Date: This Month', 'Date: This Year', 'Invoice Date: This Month', 'Invoice Date: This Year'],
+      ['Unposted', 'Posted', 'To Check', 'Not Secured', 'Unreconciled', 'With residual', 'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous', 'Payable', 'Receivable', 'P&L Accounts', 'Date: This Month', 'Date: This Year', 'Invoice Date: This Month', 'Invoice Date: This Year'],
     );
     const clickFilter = async (label) => click(ctx.React, filterButtons.find((b) => b.textContent.trim() === label));
     const itemRows = () => allFind(find(ctx.host, (n) => n.tagName === 'TBODY'), (n) => n.tagName === 'TR' && !hasClass(n, 'group-row'));
@@ -522,7 +522,7 @@ test('Journal Items filters distinguish Unreconciled vs With residual, Not Secur
     const groupSelect = find(ctx.host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === t('Group By'));
     assert.deepEqual(
       allFind(groupSelect, (n) => n.tagName === 'OPTION').map((o) => o.textContent.trim()),
-      ['None', 'Journal Entry', 'Account', 'Partner', 'Journal', 'Date', 'Invoice Date', 'Taxes', 'Tax Grid', 'Matching'],
+      ['None', 'Journal Entry', 'Account', 'Partner', 'Journal', 'Company', 'Status', 'Date', 'Invoice Date', 'Taxes', 'Tax Grid', 'Matching'],
     );
     for (const val of ['move', 'account', 'partner', 'journal', 'date', 'invoice_date', 'taxes', 'tax_grids', 'matching']) {
       await ctx.React.act(async () => {

@@ -262,6 +262,9 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
 .list tr.group-row { background: #f3f4f8; font-weight: 600; }
 .list tr.group-row:hover { background: #eceef5; }
 .caret { display: inline-block; width: 14px; color: var(--muted); }
+.fold-caret::before { content: '▸'; }
+.fold-caret.open::before { content: '▾'; }
+html[dir="rtl"] .fold-caret:not(.open)::before { content: '◂'; }
 .list tr.danger td { color: var(--danger); }
 .list tr.info td { color: #1d6fa5; }
 .list tr.muted td { color: var(--muted); }
@@ -636,3 +639,4 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .user-menu .nav-dropdown a:hover, .user-menu .nav-dropdown button:hover { background: var(--brand-soft); }
 .user-menu-name { padding: 6px 10px; font-size: 12px; }
 .empty-state { padding: 16px; margin: 0; }
+.bank-reconcile-quick-actions { display: flex; flex-flow: row wrap; gap: 8px; margin-block: 10px; }

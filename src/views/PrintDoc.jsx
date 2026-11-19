@@ -195,14 +195,15 @@ function DepositSlip({ db, batch }) {
 }
 
 function printCell(db, model, k, f, l, rec) {
-  if (model === 'account.move' && k === 'tax_id') {
+  if (model === 'account.move' && (k === 'tax_id' || k === 'tax_ids')) {
     if (Array.isArray(l.tax_ids) && l.tax_ids.length > 1 && Array.isArray(l.tax_breakdown) && l.tax_breakdown.length) {
       return l.tax_breakdown.map((t) => taxInvoiceLabel(t)).join(', ');
     }
     if (l.tax_invoice_label) return l.tax_invoice_label;
     if (l.tax_name) return l.tax_name;
   }
-  return display(db, f, l[k], { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id });
+  const value = f.valueFallback && !(l[k]?.length) ? f.valueFallback(l) : l[k];
+  return display(db, f, value, { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id });
 }
 
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */

@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { installmentSettlementState, invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
+import { exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -379,9 +379,10 @@ export function allocatePaymentToInvoice(db, payment, invoice, availableCredit, 
     const counterpart = payment.destination_account_code
       || (payment.destination_account_id ? read(db, 'account.account', payment.destination_account_id)?.code : null)
       || invoiceCounterpartAccount(db, invoice);
-    const counterpartForced = valueOnlyCurrencyFields(withFx, counterpart, invoice.company_id);
+    const counterpartForced = valueOnlyCurrencyFields(withFx, counterpart, invoice.company_id, invoice.currency_id);
+    const fxJournalId = exchangeJournal(withFx, invoice.company_id).id;
     const fx = postEntry(withFx, {
-      journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${payment.name}`,
+      journal_id: fxJournalId, journal: fxJournalId, company: invoice.company_id ?? 1, date, ref: `Exchange difference ${payment.name}`,
       archivedOriginIds: [invoice.id, ...(payment.move_id ? [payment.move_id] : [])],
       lines: diff > 0
         ? [{ account: counterpart, debit: diff, partner_id: payment.partner_id, ...counterpartForced }, { account: exchangeAccount(withFx, invoice.company_id, diff), credit: diff }]
@@ -638,7 +639,7 @@ function reverseCashBasis(db, allocation, invoice, date) {
     tax_base: (l.tax_base_signed || !(Number(l.debit) || Number(l.credit)) ? -1 : 1) * (Number(l.tax_base) || 0),
   }));
   const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;
-  const reversal = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company, archivedOriginIds: [original.id, invoice.id], includeCashBasisTargets: true });
+  const reversal = postEntry(db, { journal: original.journal_id ?? 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company, archivedOriginIds: [original.id, invoice.id], includeCashBasisTargets: true });
   return write(reversal.db, 'account.move', reversal.id, {
     reversed_entry_id: original.id,
     cash_basis_origin_move_id: invoice.id,

@@ -1,6 +1,6 @@
 import { Fragment, useRef, useState } from 'react';
 import { search } from '../orm.js';
-import { compareConfigurableReport, findStatementReport } from '../models/configurableReports.js';
+import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine } from '../models/configurableReports.js';
 import { currentCompany } from '../models/company.js';
 import { today } from '../models/common.js';
 import { useDb } from '../store.js';
@@ -90,6 +90,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     if (!nextLedger && ledgerId) setLedgerId('');
     const nextJournal = scopedJournals(companyDb, nextIds, nextLedger).find((item) => item.id === Number(journalId)) ?? null;
     if (!nextJournal && journalId) setJournalId('');
+    const nextAnalytic = search(companyDb, 'account.analytic.account').filter((a) => !a.company_id || nextIds.includes(a.company_id));
+    const allowedAnalyticIds = new Set(nextAnalytic.map((a) => a.id));
+    setAnalyticAccountIds((prev) => prev.filter((id) => allowedAnalyticIds.has(id)));
   };
   const db = targetJournalIds
     ? {
@@ -113,7 +116,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     ))
     : [];
   const group = groups.find((g) => g.id === Number(groupId)) ?? null;
-  const analyticAccounts = statementKind ? search(companyDb, 'account.analytic.account') : [];
+  const analyticAccounts = search(companyDb, 'account.analytic.account').filter(
+    (a) => !a.company_id || (statementKind ? companyIds.includes(a.company_id) : a.company_id === reportCompany),
+  );
   const periods = statementKind && comparable && comparison !== 'none'
     ? periodsFor(periodKey, comparison, today())
     : [{ ...period, label: '' }];
@@ -123,8 +128,12 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     periods,
     period,
     group,
-    { companyIds, analyticAccountIds: statementKind ? analyticAccountIds : [] },
+    { companyIds, analyticAccountIds },
   );
+
+  const expandableCodes = data.rows.filter(isExpandableLine).map((line) => line.code);
+  const allUnfolded = expandableCodes.length > 0 && expandableCodes.every((code) => openCodes.has(code));
+  const toggleAll = () => setOpenCodes(allUnfolded ? new Set() : new Set(expandableCodes));
 
   const toggle = (code) => setOpenCodes((prev) => {
     const next = new Set(prev);
@@ -223,9 +232,27 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                 {groups.map((g) => <option value={g.id} key={g.id}>{g.name}</option>)}
               </select>
             </label>
+            {analyticAccounts.length > 0 && (
+              <label className="inline-select">
+                {t('Analytic Accounts')}
+                <select
+                  aria-label={t('Analytic Accounts')}
+                  multiple
+                  value={analyticAccountIds}
+                  onChange={(e) => setAnalyticAccountIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}
+                >
+                  {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              </label>
+            )}
           </>
         )}
         <span className="spacer" />
+        {expandableCodes.length > 0 && (
+          <button type="button" className="btn sm" aria-pressed={allUnfolded} onClick={toggleAll}>
+            {t(allUnfolded ? 'Collapse All' : 'Unfold All')}
+          </button>
+        )}
         <button type="button" className="btn sm" onClick={() => window.print()}>{t('Print')}</button>
         <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       </div>
@@ -241,7 +268,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
           </thead>
           <tbody>
             {data.rows.map((line) => {
-              const canExpand = Boolean(line.foldable && line.accountRows.length);
+              const canExpand = isExpandableLine(line);
               const isOpen = canExpand && openCodes.has(line.code);
               const rowClass = [line.strong ? 'rep-total strong' : canExpand ? 'rep-section' : ''].filter(Boolean).join(' ');
               return (
@@ -252,15 +279,16 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                     aria-expanded={canExpand ? isOpen : undefined}
                   >
                     <td style={{ paddingInlineStart: `${line.depth * 1.5 + 0.75}rem` }}>
-                      {canExpand && <span className="caret">{isOpen ? '▾' : '▸'} </span>}
+                      {canExpand && <span className={isOpen ? 'caret fold-caret open' : 'caret fold-caret'} aria-hidden="true" />}
                       {t(line.name)}
                     </td>
                     <RowCells values={line.values} variance={line.variance} showVariance={data.showVariance} />
                   </tr>
                   {isOpen && line.accountRows.map((acc) => (
-                    <tr key={`${line.code}:${acc.account.id}`} className="rep-detail">
+                    <tr key={`${line.code}:${acc.account.id}`} className="rep-detail" onClick={() => { globalThis.location.hash = accountJournalItemsHref(acc.account.id); }}>
                       <td style={{ paddingInlineStart: `${(line.depth + 1) * 1.5 + 0.75}rem` }}>
-                        <a href={`#/open/account.account/${acc.account.id}`}>{acc.account.code} {acc.account.name}</a>
+                        <a href={accountJournalItemsHref(acc.account.id)}>{acc.account.code} {acc.account.name}</a>
+                        {' '}<a className="muted no-export" href={`#/open/account.account/${acc.account.id}`} aria-label={t('Open Account')} title={t('Open Account')} onClick={(e) => e.stopPropagation()}>↗</a>
                       </td>
                       <RowCells values={acc.values} variance={acc.variance} showVariance={data.showVariance} />
                     </tr>

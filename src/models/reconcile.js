@@ -17,10 +17,19 @@ const parseStrictNumber = (raw) => {
   return Number.isFinite(n) ? n : NaN;
 };
 
-/** Compile a regular expression case-insensitively, returning null if invalid or empty. */
+// A repeated group that contains a quantifier or alternation, such as (a+)+, (\w*x)* or (a|aa)+, can backtrack
+// exponentially on a near-matching label and block the auto-reconcile run. Bounded repeats of bounded groups, such as
+// (a{1,3}){1,2}, stay allowed.
+// ponytail: shape check, not a full regex analyser (does not parse character classes or lookarounds); isolate matching in a worker if patterns ever need nested repeats or alternations.
+const NESTED_REPEAT = [
+  /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/,
+  /\((?:[^()\x5c]|\x5c.)*(?:[+*?|]|\{\d+,?\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\})/,
+];
+
+/** Compile a regular expression case-insensitively, returning null if invalid, empty or prone to runaway backtracking. */
 function compileRegex(pattern) {
   const text = String(pattern ?? '');
-  if (!text) return null;
+  if (!text || NESTED_REPEAT.some((shape) => shape.test(text))) return null;
   try {
     return new RegExp(text, 'i');
   } catch {
@@ -33,6 +42,14 @@ export const isMatchingRule = (rule) => rule?.rule_type === 'matching_rule' || r
 
 /** Whether the rule runs automatically during batch auto-reconciliation. */
 export const isAutoRule = (rule) => (rule?.trigger != null ? rule.trigger === 'auto_reconcile' : Boolean(rule?.auto_reconcile));
+
+/** Whether a rule acts as a quick-action writeoff button for manual execution in the widget. */
+export const isWriteoffButtonModel = (rule) => Boolean(
+  rule
+  && !isMatchingRule(rule)
+  && !isAutoRule(rule)
+  && (rule.line_ids ?? []).some((l) => Boolean(l.account_id || l.account_code)),
+);
 
 /** Keep numeric float `amount` synchronized with `amount_string` for non-regex line types. */
 function syncLineAmount(line, index = 0) {
@@ -306,6 +323,7 @@ function writeOff(db, rule, line) {
         account: l.account_id,
         partner_id: partner,
         name: l.label || line.payment_ref,
+        ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}),
         ...(taxRecs.length ? {
           tax_side: (sameAsCounterpart ? incoming : !incoming) ? 'sale' : 'purchase',
           tax_grid_base: true,
@@ -376,6 +394,7 @@ export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) throw new Error('Reconciliation model belongs to another company');
+  if (!ruleMatches(rule, line)) throw new Error('Reconciliation model does not apply to this transaction');
   const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_id);
   if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
     if (new Set(mappings.map((l) => l.partner_id)).size !== 1 || !read(db, 'res.partner', mappings[0].partner_id)) throw new Error('Select one valid partner for the mapping');
@@ -421,6 +440,7 @@ export function applyRule(db, rule, line) {
               writeoff_account_id: wo.account_id,
               writeoff_label: wo.label || rule.name || 'Payment Tolerance',
               writeoff_amount: diff,
+              ...(wo.analytic_distribution ? { writeoff_analytic_distribution: wo.analytic_distribution } : {}),
             });
             return reconcileWith(withWo, read(withWo, 'account.bank.statement.line', line.id), match.id);
           }
@@ -448,7 +468,7 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
  * rules and manual matching remain available for the remainder.
  */
 export function autoReconcile(db) {
-  const rules = activeRules(db).filter((r) => isAutoRule(r) && r.match_label !== 'match_regex' && !(r.line_ids ?? []).some((l) => l.amount_type === 'regex'));
+  const rules = activeRules(db).filter((r) => isAutoRule(r) && !(r.line_ids ?? []).some((l) => l.amount_type === 'regex'));
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
     const line = read(acc, 'account.bank.statement.line', l.id);
     const rule = rules.find((r) => ruleMatches(r, line) && !(line.allocations ?? []).some((a) => a.reconcile_model_id === r.id));
@@ -490,6 +510,15 @@ function guardReconcileModel(db, _before, rule) {
       const account = read(db, 'account.account', line.account_id);
       if (!account || account.active === false || (account.company_id && account.company_id !== (rule.company_id ?? 1))) {
         return 'Reconciliation accounts must be active and belong to the model company';
+      }
+    }
+    if (line.analytic_distribution && typeof line.analytic_distribution === 'object') {
+      const modelCompany = rule.company_id ?? 1;
+      for (const id of Object.keys(line.analytic_distribution)) {
+        const analytic = read(db, 'account.analytic.account', Number(id));
+        if (analytic?.company_id && analytic.company_id !== modelCompany) {
+          return 'Analytic accounts in the distribution must belong to the model company';
+        }
       }
     }
     const isPartnerMappingOnly = !line.account_id && !line.account_code && Boolean(line.partner_id) && line.amount_string == null && line.amount == null;
@@ -591,6 +620,7 @@ export const reconcileModels = {
           amount_string: { type: 'char', label: 'Amount' },
           amount: { type: 'float', label: 'Numeric Amount', hidden: true },
           tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', optional: 'hide' },
+          analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', optional: 'hide' },
           label: { type: 'char', label: 'Label' },
         },
         newLine: () => ({ sequence: 10, partner_id: null, account_id: null, amount_type: 'percentage', amount_string: '100', amount: 100, tax_ids: [], label: '' }),

@@ -288,7 +288,8 @@ test('Journal Entries filters, group-bys and search fields cover all Odoo 20 opt
     const filterLabels = allFind(filterSection, (n) => n.tagName === 'BUTTON').map((b) => b.textContent.trim());
     assert.deepEqual(filterLabels, [
       'Unposted', 'Posted',
-      'Reversed', 'Manual',
+      'Reversed', 'Manual', 'Recurring',
+      'To Check',
       'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous',
       'Date: This Month', 'Date: This Year',
       'Invoice Date: This Month', 'Invoice Date: This Year',
@@ -491,7 +492,7 @@ test('Journal Items shows default/optional columns, all filters on seed data, gr
     const filterButtons = allFind(filterGroup, (n) => n.tagName === 'BUTTON');
     assert.deepEqual(
       filterButtons.map((b) => b.textContent.trim()),
-      ['Unposted', 'Posted', 'Not Secured', 'Unreconciled', 'With residual', 'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous', 'Payable', 'Receivable', 'P&L Accounts', 'Date: This Month', 'Date: This Year', 'Invoice Date: This Month', 'Invoice Date: This Year'],
+      ['Unposted', 'Posted', 'To Check', 'Not Secured', 'Unreconciled', 'With residual', 'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous', 'Payable', 'Receivable', 'P&L Accounts', 'Date: This Month', 'Date: This Year', 'Invoice Date: This Month', 'Invoice Date: This Year'],
     );
     const bodyItemRows = () => allFind(find(ctx.host, (n) => n.tagName === 'TBODY'), (n) => n.tagName === 'TR' && !hasClass(n, 'group-row'));
     const clickFilter = async (labelText) => {
@@ -517,7 +518,7 @@ test('Journal Items shows default/optional columns, all filters on seed data, gr
     // Group By: Journal Entry, Account, Partner, Journal, Date, Invoice Date, Taxes, Tax Grid, Matching.
     const groupSelect = find(ctx.host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === t('Group By'));
     const optTexts = allFind(groupSelect, (n) => n.tagName === 'OPTION').map((o) => o.textContent.trim());
-    assert.deepEqual(optTexts, ['None', 'Journal Entry', 'Account', 'Partner', 'Journal', 'Date', 'Invoice Date', 'Taxes', 'Tax Grid', 'Matching']);
+    assert.deepEqual(optTexts, ['None', 'Journal Entry', 'Account', 'Partner', 'Journal', 'Company', 'Status', 'Date', 'Invoice Date', 'Taxes', 'Tax Grid', 'Matching']);
     for (const val of ['move', 'account', 'partner', 'journal', 'date', 'invoice_date', 'taxes', 'tax_grids', 'matching']) {
       await ctx.React.act(async () => {
         props(groupSelect).onChange({ target: { value: val } });
