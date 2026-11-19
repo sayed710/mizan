@@ -291,3 +291,23 @@ test('entry with two identical receivable lines reversed: all four lines end rec
   assert.equal(revLines[1].reconciled, true);
 });
 
+
+test('a line closed inside a still-open partial group shows the group P number, and a closed group shows its full number', () => {
+  const s = setup();
+  // A (100) is closed by B (60) and part of C (70); C stays open, so there is no full reconcile yet (Odoo: no full_reconcile_id, P number).
+  const payB = s.post(null, () => [{ account_id: s.ar, partner_id: s.partner.id, credit: 60 }, { account_id: s.rev, debit: 60 }]);
+  const payC = s.post(null, () => [{ account_id: s.ar, partner_id: s.partner.id, credit: 70 }, { account_id: s.rev, debit: 70 }]);
+  const db1 = reconcileLedgerItems(s.db, [sel(s.db, s.src, s.ar), sel(s.db, payB, s.ar)], { date: '2026-04-02' });
+  const db2 = reconcileLedgerItems(db1, [sel(db1, s.src, s.ar), sel(db1, payC, s.ar)], { date: '2026-04-03' });
+  const a = arItem(db2, s.src, s.ar);
+  assert.equal(a.reconciled, true);
+  assert.match(a.matching_number, /^P\d+$/);
+  assert.equal(arItem(db2, payB, s.ar).matching_number, a.matching_number);
+  assert.equal(arItem(db2, payC, s.ar).matching_number, a.matching_number);
+  // Closing C with D (30) completes the group: every line now carries the full (non-P) number.
+  const payD = s.post(db2, () => [{ account_id: s.ar, partner_id: s.partner.id, debit: 30 }, { account_id: s.rev, credit: 30 }]);
+  const db3 = reconcileLedgerItems(s.db, [sel(s.db, payC, s.ar), sel(s.db, payD, s.ar)], { date: '2026-04-04' });
+  const full = arItem(db3, s.src, s.ar).matching_number;
+  assert.ok(full && !full.startsWith('P'), `expected a full number, got ${full}`);
+  for (const id of [payB, payC, payD]) assert.equal(arItem(db3, id, s.ar).matching_number, full);
+});
