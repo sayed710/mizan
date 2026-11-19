@@ -896,15 +896,16 @@ export function taxClosingMatchesReturn(db, ret) {
       if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
         || move.date !== ret.date_to || move.invoice_date !== ret.date_to) return false;
       const spec = taxClosingSpec(staged, ret, companyId);
-      payable = round(payable + spec.payable);
+      const currency = findCompanyCurrencyRecord(staged, companyId);
+      payable = roundCurrency(payable + spec.payable, currency);
       const expected = spec.lines.map((line) => {
-        const net = round((line.debit ?? 0) - (line.credit ?? 0));
+        const net = roundCurrency((line.debit ?? 0) - (line.credit ?? 0), currency);
         return [line.account_id, line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
       });
       const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
       if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
     }
-    return round(Number(ret.total_amount_to_pay) || 0) === payable;
+    return roundCurrency(Number(ret.total_amount_to_pay) || 0, findCompanyCurrencyRecord(staged, ret.company_id ?? 1)) === payable;
   } catch {
     return false;
   }

@@ -272,3 +272,31 @@ test('item 1: throws when difference exceeds tolerance or when needed rounding a
     /Unbalanced tax account: ledger balance does not match tax report/
   );
 });
+
+test('a three-decimal company currency submits a closing with a sub-cent rounding line', () => {
+  const env = setupTaxClosingEnv(seed());
+  const bhd = create(env.db, 'res.currency', { name: 'BHD', rounding: 0.001, rate_ids: [{ date: '2026-01-01', rate: 1 }] });
+  let db = write(bhd.db, 'res.company', 1, { currency_id: bhd.id });
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-04-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Sale', qty: 1, price_unit: 100, ...taxSnapshot(env.saleTax) }],
+  });
+  db = postMove(inv.db, inv.id);
+  db = postEntry(db, {
+    journal: 'MISC', date: '2026-04-15', company: 1,
+    lines: [
+      { account_id: env.vatOutAccId, credit: 0.005, tax_name: env.saleTax.name, tax_zero: true },
+      { account: '101401', debit: 0.005 },
+    ],
+  }).db;
+  const ret = create(db, 'account.return', {
+    name: 'BHD Apr 2026', type_id: env.vatType.id, date_from: '2026-04-01', date_to: '2026-04-30', company_id: 1,
+  });
+  const reviewed = reviewReturn(ret.db, ret.id);
+  const submitted = submitReturn(reviewed, ret.id);
+  const synced = applyDiff(reviewed, diffDb(reviewed, submitted), { isAdmin: true });
+  const subRet = read(synced, 'account.return', ret.id);
+  assert.equal(taxClosingMatchesReturn(synced, subRet), true);
+  const closing = read(synced, 'account.move', subRet.closing_move_ids[0]);
+  assert.equal(closing.line_ids.find((l) => l.account_id === env.profitAccId).credit, 0.005);
+});
