@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reconcileReversalLines, reverseEntry, SETTLES } from './pay.js';
@@ -413,6 +413,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
   'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
+  'to_check', // a review flag belongs to the reviewed entry only
 ]);
 function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
@@ -809,13 +810,14 @@ export function applyCreditNote(db, noteId, invoiceId, date = null, amount = nul
   const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
   if (gap) {
     const account = invoiceCounterpartAccount(db, invoice);
-    const forced = valueOnlyCurrencyFields(next, account, invoice.company_id);
+    const forced = valueOnlyCurrencyFields(next, account, invoice.company_id, invoice.currency_id);
     const fxAmount = Math.abs(gap);
     // The receivable/payable balance left by the two rates is cleared against the exchange gain or loss.
     const clearsDebit = sale ? gap < 0 : gap > 0;
     const open = clearsDebit ? { account, debit: fxAmount, partner_id: invoice.partner_id, ...forced } : { account, credit: fxAmount, partner_id: invoice.partner_id, ...forced };
     const fxLines = exchangeLines(db, invoice.company_id, clearsDebit ? fxAmount : -fxAmount);
-    const fx = postEntry(next, { journal: 'MISC', company: invoice.company_id ?? 1, date: appDate, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines], archivedOriginIds: [invoice.id, note.id] });
+    const fxJournalId = exchangeJournal(next, invoice.company_id).id;
+    const fx = postEntry(next, { journal_id: fxJournalId, journal: fxJournalId, company: invoice.company_id ?? 1, date: appDate, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines], archivedOriginIds: [invoice.id, note.id] });
     next = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: note.id, fx_invoice_id: invoice.id } : entry) } };
   }
   return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
@@ -1077,7 +1079,7 @@ export function appendDocumentSettlement(db, docId, {
 }
 
 /** Settle a document with an explicitly chosen company-currency write-off. */
-export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal, lineIndex = null } = {}) {
+export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal, lineIndex = null, analyticDistribution = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
   if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice) || !Number.isFinite(Number(amount)) || !(amount > 0) || amount > residual(invoice, db)) throw new Error('Write-off exceeds the remaining invoice');
   const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
@@ -1095,10 +1097,11 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   const fx = exchangeLines(db, invoice.company_id, diff);
   const partner_id = invoice.partner_id;
   const via = paymentJournal(db, journal, invoice.company_id ?? 1);
+  const analytic = analyticDistribution ? { analytic_distribution: analyticDistribution } : {};
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, company: invoice.company_id ?? 1, date, ref: label, archivedOriginIds: [invoice.id],
     lines: incoming
-      ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
-      : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });
+      ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label, ...analytic }, { account: counterpart, credit: open, partner_id }, ...fx]
+      : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label, ...analytic }, ...fx] });
   const settled = appendDocumentSettlement(booked.db, invoiceId, {
     amount,
     moveId: booked.id,
@@ -1786,7 +1789,9 @@ export const journalEntriesView = {
     [
       { id: 'reversed', label: 'Reversed', fn: (r, db) => Boolean(r.reversed_entry_id || r.reversal_move_id || (db?.records?.['account.move'] ?? []).some((m) => m.state !== 'cancel' && m.reversed_entry_id === r.id)) },
       { id: 'manual', label: 'Manual', fn: (r) => !((r.auto_post && r.auto_post !== 'no') || r.auto_post_origin_id) },
+      { id: 'recurring', label: 'Recurring', fn: (r) => Boolean(RECURRENCE_MONTHS[r.auto_post] || r.auto_post_origin_id) },
     ],
+    [{ id: 'to_check', label: 'To Check', fn: (r) => r.to_check === true }],
     [
       { id: 'sales', label: 'Sales', fn: (r, db) => moveJournalType(db, r) === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r, db) => moveJournalType(db, r) === 'purchase' },
@@ -2017,10 +2022,17 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after) => {
       const companyId = after.company_id ?? 1;
-      const cashBasisOwners = before?.id ? (db.records['res.company'] ?? []).filter((c) => c.tax_cash_basis_journal_id === before.id) : [];
-      const blockedOwner = cashBasisOwners.find((c) => after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id));
-      if (blockedOwner) {
-        return `Clear the Cash Basis Journal of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+      if (before?.id) {
+        const companies = db.records['res.company'] ?? [];
+        for (const [field, label] of [
+          ['tax_cash_basis_journal_id', 'Cash Basis Journal'],
+          ['currency_exchange_journal_id', 'Exchange Difference Journal'],
+        ]) {
+          const blockedOwner = companies.find((c) => c[field] === before.id && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id)));
+          if (blockedOwner) {
+            return `Clear the ${label} of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+          }
+        }
       }
       const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
       if (linkedOnlineAccount) {
@@ -2499,6 +2511,7 @@ export const accountingModels = {
       incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm', domain: (r) => r.active !== false },
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
+      to_check: { type: 'boolean', label: 'To Check', copy: false },
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
@@ -2553,6 +2566,7 @@ export const accountingModels = {
       statusbar: 'state',
       statusbarHide: ['cancel'],
       lockedWhen: (r) => r.state !== 'draft' || Boolean(r.inalterable_hash),
+      unlockedFields: ['to_check'],
       smart: [
         {
           label: 'Reversal Entries',
@@ -2819,6 +2833,7 @@ export const accountingModels = {
                 ...(r?.auto_reverse ? ['reverse_date', 'reverse_journal_id'] : []),
                 'fiscal_position_id',
                 'currency_id',
+                'to_check',
               ],
               ['narration'],
             ],

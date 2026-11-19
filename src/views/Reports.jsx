@@ -774,7 +774,7 @@ function ReportPage({ leaf }) {
             <option value="number">{t('Journal Entry Number')}</option>
           </select>
         </label>}
-        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+        {(['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
           <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
         )}
         {leaf.report === 'tax' && countryTemplate && (

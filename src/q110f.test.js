@@ -79,7 +79,10 @@ test('matching foreign invoice payments clears each booked company-currency outs
   }
   const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), company_id: 1, date: '2025-01-04', amount: 75, payment_ref: 'Foreign receipts', payment_ids: paymentIds });
   const wrong = create(statement.db, 'account.bank.statement.line', { journal_id: bankJournalId(statement.db), company_id: 1, date: '2025-01-04', amount: 200, payment_ref: 'Wrong value', payment_ids: paymentIds });
-  assert.throws(() => run(wrong.db, 'account.bank.statement.line', wrong.id, 'Match Payment'), /total the bank transaction amount/);
+  const wrongRes = run(wrong.db, 'account.bank.statement.line', wrong.id, 'Match Payment');
+  const wrongLine = read(wrongRes, 'account.bank.statement.line', wrong.id);
+  assert.equal(wrongLine.state, 'to_check');
+  assert.equal(wrongLine.open_amount, 125);
   db = run(statement.db, 'account.bank.statement.line', statement.id, 'Match Payment');
   const matched = read(db, 'account.bank.statement.line', statement.id);
   assert.equal(matched.state, 'reconciled');
@@ -128,9 +131,10 @@ test('unbooked payment matching validates against the full statement amount', ()
     paymentIds.push(search(db, 'account.payment').find((payment) => payment.move_id === moveId).id);
   }
   const partial = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), date: '2025-01-03', amount: 100, open_amount: 60, payment_ref: 'Partial payment', payment_id: paymentIds[0] });
-  const before = JSON.stringify(partial.db);
-  assert.throws(() => run(partial.db, 'account.bank.statement.line', partial.id, 'Match Payment'), /selected payments must total the bank transaction amount/);
-  assert.equal(JSON.stringify(partial.db), before);
+  const partialDb = run(partial.db, 'account.bank.statement.line', partial.id, 'Match Payment');
+  const partialLine = read(partialDb, 'account.bank.statement.line', partial.id);
+  assert.equal(partialLine.state, 'to_check');
+  assert.equal(partialLine.open_amount, 40);
   const full = create(partial.db, 'account.bank.statement.line', { journal_id: bankJournalId(partial.db), date: '2025-01-03', amount: 100, open_amount: 60, payment_ref: 'Full payment', payment_id: paymentIds[1] });
   db = run(full.db, 'account.bank.statement.line', full.id, 'Match Payment');
   const matched = read(db, 'account.bank.statement.line', full.id);

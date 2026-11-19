@@ -13,8 +13,10 @@ import {
   matchError,
   matchPayment,
   reconcileWith,
+  setStatementLinePartner,
   statementCompanyAmount,
 } from '../models/bank.js';
+import { applyRule, isWriteoffButtonModel, ruleMatches } from '../models/reconcile.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { display, money } from '../ui.jsx';
@@ -106,9 +108,71 @@ export function BankReconcile() {
     return (db.records['account.account'] ?? []).filter((a) => eligibleCounterpart(a, company));
   }, [db, selectedLine]);
 
+  const partners = useMemo(() => {
+    const lineCompany = selectedLine?.company_id ?? 1;
+    const activePartners = (search(db, 'res.partner') ?? []).filter(
+      (p) => !p.company_id || p.company_id === lineCompany,
+    );
+    const currentPartnerId = selectedLine?.partner_id;
+    if (currentPartnerId && !activePartners.some((p) => p.id === currentPartnerId)) {
+      const currentPartner = read(db, 'res.partner', currentPartnerId);
+      if (currentPartner) {
+        return [...activePartners, currentPartner].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+      }
+    }
+    return activePartners.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  }, [db, selectedLine]);
+
+  const quickActionModels = useMemo(() => {
+    if (!selectedLine) return [];
+    return (search(db, 'account.reconcile.model') ?? [])
+      .filter((r) => isWriteoffButtonModel(r) && ruleMatches(r, selectedLine))
+      .sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.id ?? 0) - (b.id ?? 0));
+  }, [db, selectedLine]);
+
   const selectLine = (line) => {
     setSelectedLineId(line.id);
     setError('');
+  };
+
+  const handlePartnerChange = async (partnerId) => {
+    if (!selectedLine) return;
+    setError('');
+    setBusy(true);
+    try {
+      const currentDb = getDb();
+      const nextDb = setStatementLinePartner(currentDb, selectedLine.id, partnerId ? Number(partnerId) : null);
+      await commit(nextDb);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleApplyModel = async (model) => {
+    if (!selectedLine) return;
+    setError('');
+    setBusy(true);
+    try {
+      const currentDb = getDb();
+      const freshLine = read(currentDb, 'account.bank.statement.line', selectedLine.id);
+      if (!freshLine || freshLine.state !== 'to_check') {
+        throw new Error('This bank transaction is already reconciled');
+      }
+      const nextDb = applyRule(currentDb, model, freshLine);
+      const res = await commit(nextDb);
+      if (res.ok) {
+        const afterLine = read(nextDb, 'account.bank.statement.line', selectedLine.id);
+        if (!afterLine || afterLine.state === 'reconciled') {
+          setSelectedLineId(null);
+        }
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const togglePaymentSelection = (paymentId) => {
@@ -122,6 +186,7 @@ export function BankReconcile() {
       writeoff_account_id: writeoffAccountId ? Number(writeoffAccountId) : null,
       writeoff_label: writeoffLabel,
       writeoff_amount: writeoffAmount !== '' ? Number(writeoffAmount) : null,
+      writeoff_analytic_distribution: null,
     };
   };
 
@@ -240,16 +305,47 @@ export function BankReconcile() {
               <header className="bank-reconcile-summary">
                 <div>
                   <h2>{selectedLine.payment_ref || t('Statement Line')}</h2>
-                  <p className="muted">
-                    {fmtDate(selectedLine.date)} · {journalName(selectedLine.journal_id)}
-                    {selectedLine.partner_id ? ` · ${partnerName(selectedLine.partner_id)}` : ''}
-                  </p>
+                  <div className="bank-reconcile-line-meta muted">
+                    <span>{fmtDate(selectedLine.date)} · {journalName(selectedLine.journal_id)}</span>
+                    <label className="inline-select">
+                      {t('Partner')}
+                      <select
+                        aria-label={t('Partner')}
+                        disabled={busy}
+                        value={selectedLine.partner_id ? String(selectedLine.partner_id) : ''}
+                        onChange={(e) => handlePartnerChange(e.target.value)}
+                      >
+                        <option value="">{t('No Partner')}</option>
+                        {partners.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
                 </div>
                 <div className="bank-reconcile-amounts">
                   <span>{t('Statement Amount')}: <strong>{formatInCurrency(selectedLine.amount, selectedLineCurrency)}</strong></span>
                   <span>{t('Open Balance')}: <strong>{formatInCurrency(openBalance(selectedLine), findCompanyCurrencyRecord(db, selectedLine.company_id ?? null))}</strong></span>
                 </div>
               </header>
+
+              {quickActionModels.length > 0 && (
+                <div className="bank-reconcile-quick-actions" role="toolbar" aria-label={t('Quick Actions')}>
+                  {quickActionModels.map((model) => (
+                    <button
+                      key={model.id}
+                      type="button"
+                      className="btn sm"
+                      disabled={busy}
+                      onClick={() => handleApplyModel(model)}
+                    >
+                      {model.name}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               <div className="tabs" role="tablist">
                 {TABS.map((tab) => (

@@ -1620,6 +1620,23 @@ MIGRATIONS.push({ version: 56, name: 'account-create-asset-setting', up: (db) =>
   return changed ? { ...db, records: { ...db.records, 'account.account': next } } : db;
 } });
 
+/** Earnings lines of existing Balance Sheets unfold into the P&L accounts behind them, as on newly seeded reports. */
+MIGRATIONS.push({ version: 57, name: 'balance-sheet-earnings-foldable', up: (db) => {
+  const reports = db?.records?.['account.report'];
+  if (!Array.isArray(reports)) return db;
+  let changed = false;
+  const next = reports.map((report) => {
+    if (report?.kind !== 'balance' || !Array.isArray(report.line_ids)) return report;
+    const lines = report.line_ids.map((line) => {
+      if (line.foldable !== false || !/^earnings:/i.test(String(line.formula ?? '').trim())) return line;
+      changed = true;
+      return { ...line, foldable: true };
+    });
+    return lines.some((line, i) => line !== report.line_ids[i]) ? { ...report, line_ids: lines } : report;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.report': next } } : db;
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
