@@ -3219,6 +3219,11 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Quick Actions': 'إجراءات سريعة',
+  'Bank transaction does not exist': 'المعاملة البنكية غير موجودة',
+  'Partner belongs to another company': 'الشريك يتبع شركة أخرى',
+  'Partner does not exist': 'الشريك غير موجود',
+  'A reconciled bank transaction cannot be changed': 'لا يمكن تعديل معاملة بنكية تمت تسويتها',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
