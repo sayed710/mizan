@@ -5,7 +5,7 @@ import { deliver, moveValued } from './valuation.js';
 import { explode } from './more.js';
 import { round as round2 } from '../money.js';
 import { applyLots } from './logistics.js';
-import { productProperty } from './productconfig-helpers.js';
+import { isPeriodicValuation } from './productconfig-helpers.js';
 import { defaultStockLocationId } from './stock-location.js';
 
 
@@ -34,7 +34,7 @@ export function validateScrap(db, scrap, date = today()) {
     const move = create(next, 'stock.picking', { picking_type: 'internal', state: 'done', date_done: date, origin: scrap.name,
       company_id: company, location_id: source, location_dest_id: destination.id, move_ids: [{ product_id: product.id, qty, lot_name: scrap.lot_name ?? '' }] });
     next = applyLots(move.db, read(move.db, 'stock.picking', move.id), -1);
-    const automated = product.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(next, product, 'property_valuation'));
+    const automated = product.type === 'goods' && !isPeriodicValuation(next, product, company);
     const stockLine = { location_id: source, company_id: company, lot_name: scrap.lot_name };
     const out = automated ? deliver(next, product.id, qty, { date, reference: `Scrap ${scrap.name}: ${product.name}`, counterpart_role: 'price_difference', pickingId: move.id, stockLine }) : null;
     const value = out?.value ?? round2(qty * (Number(product.cost) || 0));

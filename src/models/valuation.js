@@ -5,14 +5,14 @@ import { postEntry } from './ledger.js';
 import { configuredAccount } from './configured-account.js';
 import { moveStock, salesModels } from './sales.js';
 import { allocateCents, round } from '../money.js';
-import { productProperty } from './productconfig-helpers.js';
+import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
 import { rateAt } from './currency.js';
 import { convert, uomForLegacy } from './uom.js';
 import { stockAccount } from './stock-accounts.js';
 export { stockAccount } from './stock-accounts.js';
 
 const companyOf = (db) => getActiveCompany() ?? db.settings?.current_company_id ?? 1;
-export const isPeriodicValuation = (db, p) => ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'));
+export { isPeriodicValuation } from './productconfig-helpers.js';
 
 const layers = (db, id, company = companyOf(db)) => (db.records['stock.valuation.layer'] ?? []).filter((l) => l.product_id === id && (l.company_id ?? 1) === company);
 const quantity = (ls) => ls.reduce((s, l) => s + l.quantity, 0);
@@ -58,7 +58,7 @@ function openingStock(db, ids, date, company = companyOf(db)) {
     const p = product(db, id);
     const qty = stockQuantity(db, p, company);
     const value = round(qty * (Number(p.cost) || 0));
-    return { id, p, qty, value, accounts: !isPeriodicValuation(db, p) && value ? valuationAccounts(db, p, company) : null };
+    return { id, p, qty, value, accounts: !isPeriodicValuation(db, p, company) && value ? valuationAccounts(db, p, company) : null };
   });
   const equity = plans.some((plan) => plan.accounts) ? configuredAccount(db, read(db, 'res.company', company)?.opening_equity_account_id, company, 'opening balance equity', read(db, 'res.company', company)?.name ?? 'the company') : null;
   let next = db;
@@ -108,7 +108,7 @@ function valuationAccounts(db, p, company) {
 export function postValuation(db, layerId, counterpartRole) {
   const l = read(db, 'stock.valuation.layer', layerId);
   if (!l) throw new Error('Valuation layer not found');
-  if (l.move_id || l.opening || isPeriodicValuation(db, product(db, l.product_id))) return db;
+  if (l.move_id || l.opening || isPeriodicValuation(db, product(db, l.product_id), l.company_id ?? companyOf(db))) return db;
   const diff = Number(l.price_difference) || 0;
   if (!l.value && !diff) return db;
   const compId = l.company_id ?? getActiveCompany() ?? 1;
@@ -280,7 +280,7 @@ export function moveValued(db, lines, sign, options = {}) {
     const p = read(next, 'product', l.product_id);
     const qty = Number(l.qty) || 0;
     if (!p || p.type !== 'goods' || !qty || !sign) return next;
-    if (isPeriodicValuation(next, p)) {
+    if (isPeriodicValuation(next, p, compId)) {
       // Periodic products carry no cost layers, but on-hand quantities still cannot go negative.
       if (sign < 0 && qty * -sign > stockQuantity(next, p, compId) + 1e-8) throw new Error('Not enough stock to deliver');
       return moveStock(next, [{ ...l, ...options.stockLine, company_id: compId, picking_id: options.pickingId ?? options.stockLine?.picking_id ?? l.picking_id }], sign);

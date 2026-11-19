@@ -43,6 +43,9 @@ export function productProperty(db, product, key, companyId = null) {
   return categoryProperty(db, product?.categ_id, key, companyId);
 }
 
+/** Periodic valuation keeps stock quantity-only (no layers or entries); the category setting is read for the given company. */
+export const isPeriodicValuation = (db, product, companyId = null) => ['manual_periodic', 'periodic'].includes(productProperty(db, product, 'property_valuation', companyId));
+
 export function migrateProductCategories(db) {
   let next = db;
   for (const p of db.records.product ?? []) {

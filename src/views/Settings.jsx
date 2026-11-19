@@ -220,7 +220,7 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
   }
-  for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id']) {
+  for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id', 'tax_cash_basis_journal_id']) {
     if (vals[field] === undefined || vals[field] === null) continue;
     const journal = (db.records['account.journal'] ?? []).find((x) => x.id === vals[field]);
     if (!journal || journal.active === false || journal.type !== 'general' || (journal.company_id && journal.company_id !== company.id)) {
@@ -263,7 +263,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const hasField = (name) => Boolean(fields[name]);
   const taxesByUse = (use) => (db.records['account.tax'] ?? [])
     .filter((tax) => tax.active !== false && tax.type_tax_use === use && (!tax.company_id || !company || tax.company_id === company.id));
-  const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
+  const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
   const showCurrencies = hasField('currency_id') || !company;
   const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
   const showVendorBills = hasField('three_way_matching');
@@ -335,6 +335,15 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
               </select>
             </SettingRow>
           )}
+          {hasField('tax_cash_basis_journal_id') && (
+            <SettingRow id="tax_cash_basis_journal_id" label="Cash Basis Journal" description="General journal used for cash-basis tax release entries.">
+              <select id="tax_cash_basis_journal_id" disabled={readOnly || !company} value={company?.tax_cash_basis_journal_id ?? ''}
+                onChange={(e) => onWriteCompany({ tax_cash_basis_journal_id: e.target.value ? Number(e.target.value) : null })}>
+                <option value="">{t('None')}</option>
+                {generalJournals.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+              </select>
+            </SettingRow>
+          )}
           {hasField('tax_periodicity') && (
             <SettingRow id="tax_periodicity" label="Tax Periodicity" description="How often periodic tax returns are generated for the company.">
               <select id="tax_periodicity" disabled={readOnly || !company} value={company?.tax_periodicity ?? 'monthly'}
@@ -359,27 +368,40 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
       )}
 
       {showCurrencies && (
-        <div className="settings-block" data-block="currencies">
-          <h3>{t('Currencies')}</h3>
-          <SettingRow id="currency" label="Main Currency" description="The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.">
-            {company
-              ? <span id="currency" className="readonly">{currentCompany(db).currency}</span>
-              : (
-                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
-                  const currency = e.target.value;
-                  const curId = db.settings?.current_company_id ?? 1;
-                  const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
-                  commit(updateSettings(getDb(), { currency, ...(db.settings?.companies?.length ? { companies } : {}) }));
-                }}>
-                  {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+        <>
+          <div className="settings-block" data-block="currencies">
+            <h3>{t('Currencies')}</h3>
+            <SettingRow id="currency" label="Main Currency" description="The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.">
+              {company
+                ? <span id="currency" className="readonly">{currentCompany(db).currency}</span>
+                : (
+                  <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
+                    const currency = e.target.value;
+                    const curId = db.settings?.current_company_id ?? 1;
+                    const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
+                    commit(updateSettings(getDb(), { currency, ...(db.settings?.companies?.length ? { companies } : {}) }));
+                  }}>
+                    {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                )}
+              <p className="muted setting-links">
+                {appOpen(db, getUser(), 'accounting') ? <a href="#/accounting/currencies">{t('Currencies')}</a> : <span>{t('Currencies')}</span>}
+                {company && <> {' · '} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></>}
+              </p>
+            </SettingRow>
+          </div>
+          {hasField('currency_exchange_journal_id') && (
+            <div className="settings-block">
+              <SettingRow id="currency_exchange_journal_id" label="Exchange Difference Journal" description="Journal used to record realized foreign exchange gains and losses.">
+                <select id="currency_exchange_journal_id" disabled={readOnly || !company} value={company?.currency_exchange_journal_id ?? ''}
+                  onChange={(e) => onWriteCompany({ currency_exchange_journal_id: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">{t('Default general journal')}</option>
+                  {generalJournals.map((j) => <option key={j.id} value={j.id}>{j.name || j.code}</option>)}
                 </select>
-              )}
-            <p className="muted setting-links">
-              {appOpen(db, getUser(), 'accounting') ? <a href="#/accounting/currencies">{t('Currencies')}</a> : <span>{t('Currencies')}</span>}
-              {company && <> {' · '} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></>}
-            </p>
-          </SettingRow>
-        </div>
+              </SettingRow>
+            </div>
+          )}
+        </>
       )}
 
       {showCustomerPayments && (

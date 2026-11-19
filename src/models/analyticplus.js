@@ -251,7 +251,7 @@ export function analyticBalance(db, accountId, { from, to } = {}) {
   for (const line of linesByAccount(db).get(accountId) ?? []) {
     if (!inPeriod(line, from, to)) continue;
     const source = findCompanyCurrencyRecord(db, line.company_id ?? 1);
-    const rate = !target || !source || source.id === target.id ? 1 : conversionRate(db, source.id, target.id, line.date, line.company_id ?? null);
+    const rate = !target || !source || source.id === target.id ? 1 : conversionRate(db, source.id, target.id, line.date, line.company_id ?? 1);
     if (rate == null) return { debit: null, credit: null, balance: null };
     const amount = (Number(line.amount) || 0) * rate;
     if (amount < 0) debit -= amount; else credit += amount;

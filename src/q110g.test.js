@@ -97,6 +97,7 @@ test('reposted bills reset draft asset model-derived fields when switched to unm
     name: 'Generic Equipment',
     code: '151200',
     account_type: 'asset_fixed',
+    create_asset: 'draft',
   });
   db = unmodeledAcc.db;
 

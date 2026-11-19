@@ -252,7 +252,7 @@ test('one-cent grouped bill drafts only usable assets and disposes the booked va
 test('fiscal position mapped asset account is used for bill posting and disposal', () => {
   let db = seed();
   const source = accountId(db, '151000');
-  const mapped = create(db, 'account.account', { code: '151100', name: 'Mapped fixed assets', account_type: 'asset_fixed' });
+  const mapped = create(db, 'account.account', { code: '151100', name: 'Mapped fixed assets', account_type: 'asset_fixed', create_asset: 'draft' });
   db = mapped.db;
   const position = create(db, 'account.fiscal.position', {
     name: 'Asset mapping', account_ids: [{ account_src_id: source, account_dest_id: mapped.id }],
