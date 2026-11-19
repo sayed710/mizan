@@ -209,11 +209,17 @@ test('an edit through /api/diff is logged with the login, server time and old an
     const partner = db.records['res.partner'][0];
     const next = { ...db, records: { ...db.records, 'res.partner': db.records['res.partner'].map((p) => (p.id === partner.id ? { ...p, phone: '+20 100 000 0000' } : p)) } };
     // The server and the test runner are separate processes, and their wall
-    // clocks can differ by a few milliseconds (noticeably on Windows). Take the
-    // lower bound from the server's own clock so the comparison stays in one
-    // clock domain; the edit must still be stamped no earlier than this.
-    const before = (await admin('GET', '/api/audit?limit=1')).body[0].at;
+    // clocks can differ by a few milliseconds (noticeably on Windows). Bracket
+    // the edit with fresh audit rows stamped by the server's own clock
+    // immediately before and after POST /api/diff (not the startup seed row).
+    assert.equal((await admin('POST', '/api/keys', { name: 'audit-clock-before' })).status, 201);
+    const before = (await admin('GET', '/api/audit?limit=1')).body[0];
+    assert.equal(before.model, 'auth.api_key');
     assert.equal((await admin('POST', '/api/diff', diffDb(db, next))).status, 200);
+    const [{ created }] = (await admin('GET', '/api/keys')).body;
+    assert.equal((await admin('DELETE', `/api/keys?created=${created}`)).status, 200);
+    const after = (await admin('GET', '/api/audit?limit=1')).body[0];
+    assert.equal(after.model, 'auth.api_key');
 
     const { status, body: log } = await admin('GET', `/api/audit?model=res.partner&id=${partner.id}`);
     assert.equal(status, 200);
@@ -221,7 +227,9 @@ test('an edit through /api/diff is logged with the login, server time and old an
     assert.equal(log[0].actor, 'admin');
     assert.equal(log[0].action, 'write');
     assert.deepEqual(log[0].changes, { phone: [partner.phone ?? null, '+20 100 000 0000'] });
-    assert.ok(log[0].at >= before);
+    assert.ok(log[0].at >= before.at, `expected ${log[0].at} >= ${before.at}`);
+    assert.ok(log[0].at <= after.at, `expected ${log[0].at} <= ${after.at}`);
+    assert.ok(log[0].id > before.id && log[0].id < after.id);
     assert.equal((await admin('GET', '/api/audit')).body.at(-1).action, 'seed');
 
     assert.equal((await admin('POST', '/api/users', { login: 'clerk', name: 'Clerk', password: 'clerk-password' })).status, 201);
