@@ -1,10 +1,10 @@
 import { Fragment, useMemo, useState } from 'react';
 import { viewRecords } from '../companyView.js';
 import { read } from '../orm.js';
-import { useDb, commit } from '../store.js';
+import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
-import { checkRegisterRows, voidCheck } from '../models/payments.js';
+import { checkRegisterRows, CHECK_REGISTER_STATES } from '../models/payments.js';
 
 export function Checks() {
   const db = useDb();
@@ -14,17 +14,9 @@ export function Checks() {
 
   const rows = checkRegisterRows(db, viewRecords(db, 'account.batch.payment'), viewRecords(db, 'account.payment'));
 
-  const handleVoid = (row) => {
-    const nextDb = voidCheck(db, row.paymentId, row.checkNumber);
-    commit(nextDb);
-  };
-
   const filtered = useMemo(() => {
     return rows.filter((row) => {
-      if (status === 'printed' && !['Posted', 'Issued'].includes(row.state)) return false;
-      if (status === 'unprinted' && row.state !== 'Draft') return false;
-      if (status === 'voided' && row.state !== 'Voided') return false;
-      if (status === 'cancelled' && row.state !== 'Cancelled') return false;
+      if (status !== 'all' && row.state !== status) return false;
 
       if (search.trim()) {
         const q = search.trim().toLowerCase();
@@ -55,7 +47,7 @@ export function Checks() {
   const renderRow = (row) => {
     const payment = read(db, 'account.payment', row.paymentId);
     const invoice = read(db, 'account.move', row.invoiceId);
-    const isVoidedOrCancelled = row.state === 'Voided' || row.state === 'Cancelled';
+    const canPrint = ['Posted', 'Issued'].includes(row.state);
     const printUrl = row.batchId ? `#/print/account.batch.payment/${row.batchId}` : `#/print/account.payment/${row.paymentId}`;
     return (
       <tr key={row.key}>
@@ -72,11 +64,8 @@ export function Checks() {
         <td>{money(row.amount)}</td>
         <td>{t(row.state)}</td>
         <td>
-          {!isVoidedOrCancelled && (
-            <div className="btn-group">
-              <a href={printUrl} className="btn sm" title={t('Print Check')}>{t('Print')}</a>
-              <button type="button" className="btn sm danger" onClick={() => handleVoid(row)} title={t('Void Check')}>{t('Void')}</button>
-            </div>
+          {canPrint && (
+            <a href={printUrl} className="btn sm" title={t('Print Check')}>{t('Print')}</a>
           )}
         </td>
       </tr>
@@ -103,9 +92,9 @@ export function Checks() {
             aria-label={t('Status Filter')}
           >
             <option value="all">{t('All Statuses')}</option>
-            <option value="printed">{t('Printed / Issued')}</option>
-            <option value="voided">{t('Voided')}</option>
-            <option value="cancelled">{t('Cancelled')}</option>
+            {CHECK_REGISTER_STATES.map((s) => (
+              <option key={s} value={s}>{t(s)}</option>
+            ))}
           </select>
           <label className="checkbox-label">
             <input

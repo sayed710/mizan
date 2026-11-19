@@ -3246,6 +3246,7 @@ const ar = {
   'Void': 'إلغاء',
   'Voided': 'ملغى',
   'Select an existing batch payment': 'حدد دفعة دفع موجودة',
+  'Issued': 'صادر',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

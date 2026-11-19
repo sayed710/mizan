@@ -1,10 +1,11 @@
 import { useEffect } from 'react';
 import { models } from '../models/index.js';
-import { read, search } from '../orm.js';
+import { read } from '../orm.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { display, formatDate } from '../ui.jsx';
-import { checkAmountDisplay } from '../models/payments.js';
+import { batchCurrency, checkAmountDisplay } from '../models/payments.js';
+import { paymentSettledMoves } from '../models/pay.js';
 import { subtotal } from '../models/common.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
 import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
@@ -63,11 +64,7 @@ function Checks({ db, batch }) {
         } catch (e) {
           amounts = { numeric: t(e.message), words: t(e.message) };
         }
-        const settledMoves = payment?.move_id
-          ? search(db, 'account.move').filter((m) =>
-              (m.payments ?? []).some((p) => !p.unapplied && p.move_id === payment.move_id)
-            )
-          : (move ? [move] : []);
+        const settledMoves = payment ? paymentSettledMoves(db, payment) : [];
         const stubMoves = settledMoves.length ? settledMoves : (move ? [move] : []);
 
         return (
@@ -82,7 +79,7 @@ function Checks({ db, batch }) {
               <table className="paper-lines stub-table">
                 <thead>
                   <tr>
-                    <th>{t('Bill')}</th>
+                    <th>{t('Document')}</th>
                     <th>{t('Date')}</th>
                     <th className="num">{t('Original Amount')}</th>
                     <th className="num">{t('Net Payment')}</th>
@@ -90,13 +87,19 @@ function Checks({ db, batch }) {
                 </thead>
                 <tbody>
                   {stubMoves.length ? stubMoves.map((m) => {
-                    const linePaid = (m.payments ?? []).find((p) => !p.unapplied && p.move_id === payment?.move_id)?.amount ?? l.amount;
+                    const docCurrency = documentCurrency(db, m) ?? amounts.currency;
+                    const matchingRows = payment?.move_id
+                      ? (m.payments ?? []).filter((p) => !p.reversed && p.move_id === payment.move_id)
+                      : [];
+                    const linePaid = matchingRows.length
+                      ? matchingRows.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+                      : l.amount;
                     return (
                       <tr key={m.id}>
                         <td>{m.name || m.ref || '—'}</td>
                         <td>{formatDate(m.invoice_date || m.date)}</td>
-                        <td className="num">{formatCurrency(m.amount_total, amounts.currency)}</td>
-                        <td className="num">{formatCurrency(linePaid, amounts.currency)}</td>
+                        <td className="num">{docCurrency ? formatCurrency(m.amount_total, docCurrency) : m.amount_total}</td>
+                        <td className="num">{docCurrency ? formatCurrency(linePaid, docCurrency) : linePaid}</td>
                       </tr>
                     );
                   }) : (
@@ -122,9 +125,10 @@ function DepositSlip({ db, batch }) {
   const company = documentCompany(db, batch);
   if (!company) return <main className="print-page"><p role="alert">{t('Configure the batch company before printing.')}</p></main>;
   const journal = batch.journal_id ? read(db, 'account.journal', batch.journal_id) : null;
-  const currency = batch.currency_id ? read(db, 'res.currency', batch.currency_id) : (journal?.currency_id ? read(db, 'res.currency', journal.currency_id) : null);
+  const { currency, error: currencyError } = batchCurrency(db, batch);
   const lines = (batch.lines ?? []).filter((l) => !l.cancelled);
   const totalAmount = lines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
+  const formattedTotal = currencyError ? t(currencyError) : (currency ? formatCurrency(totalAmount, currency) : totalAmount);
 
   return (
     <main className="print-page">
@@ -147,7 +151,7 @@ function DepositSlip({ db, batch }) {
           <div><dt>{t('Date')}</dt><dd>{formatDate(batch.date)}</dd></div>
           <div><dt>{t('Bank Journal')}</dt><dd>{journal?.name ?? '—'}</dd></div>
           <div><dt>{t('Number of Items')}</dt><dd>{lines.length}</dd></div>
-          <div><dt>{t('Total Amount')}</dt><dd>{currency ? formatCurrency(totalAmount, currency) : totalAmount}</dd></div>
+          <div><dt>{t('Total Amount')}</dt><dd>{formattedTotal}</dd></div>
         </dl>
         <table className="paper-lines">
           <thead>
@@ -181,7 +185,7 @@ function DepositSlip({ db, batch }) {
           <tfoot>
             <tr>
               <td colSpan={3}><b>{t('Total')}</b></td>
-              <td className="num"><b>{currency ? formatCurrency(totalAmount, currency) : totalAmount}</b></td>
+              <td className="num"><b>{formattedTotal}</b></td>
             </tr>
           </tfoot>
         </table>
