@@ -3234,6 +3234,9 @@ const ar = {
   'Contradictory date formats in QIF file': 'صيغ تواريخ متضاربة في ملف QIF',
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
+  'Include Unposted Entries': 'تضمين القيود غير المرحّلة',
+  'Select partner, analytic account, journal, or company': 'اختر شريكاً أو حساباً تحليلياً أو يوميةً أو شركةً',
+  'Rule IDs must match the selected grouping field': 'يجب أن تطابق معرّفات القاعدة حقل التجميع المحدد',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

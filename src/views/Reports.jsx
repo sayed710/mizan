@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
-import { today } from '../models/common.js';
+import { today, validDate } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
 import { filterByAnalytic, journalItems } from '../models/ledger.js';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
@@ -20,7 +20,7 @@ import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
-import { cashflowColumns, periodsFor } from './reportCompare.js';
+import { cashflowColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage } from './reportNavigation.js';
 export { PERIODS };
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -74,7 +74,7 @@ function Comparison({ data }) {
 
 function Ledger({ db, period, analyticAccountIds }) {
   const items = filterByAnalytic(journalItems(db, period), analyticAccountIds);
-  const opening = period.from ? filterByAnalytic(journalItems(db, { to: period.from }), analyticAccountIds).filter((l) => l.date < period.from) : [];
+  const opening = period.from ? filterByAnalytic(journalItems(db, { to: period.from, ...(period.reviewMode ? { reviewMode: period.reviewMode } : {}) }), analyticAccountIds).filter((l) => l.date < period.from) : [];
   const accounts = [...new Set([...items, ...opening].map((l) => l.account_id))]
     .map((id) => read(db, 'account.account', id)).filter(Boolean).sort((a, b) => a.code.localeCompare(b.code));
   const [open, setOpen] = useState(() => new Set());
@@ -659,18 +659,23 @@ function ReportPage({ leaf }) {
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
-  const [journalId, setJournalId] = useState('');
+  const [journalIds, setJournalIds] = useState([]);
+  const [includeUnposted, setIncludeUnposted] = useState(false);
   const [horizontalGroupId, setHorizontalGroupId] = useState('');
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [partnerFilterIds, setPartnerFilterIds] = useState([]);
   const [unreconciledOnly, setUnreconciledOnly] = useState(false);
   const [auditSort, setAuditSort] = useState('date');
-  const ledgerReports = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit'];
+  const ledgerReports = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit', 'cashflow', 'executive'];
   const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
   const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
-  const availableJournals = ledger ? search(companyDb, 'account.journal').filter((j) => (ledger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal');
-  const targetJournalIds = journalId
-    ? [Number(journalId)]
+  const availableJournals = (ledger ? search(companyDb, 'account.journal').filter((j) => (ledger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal'))
+    .filter((j) => selectedCompany === 'all' || !j.company_id || j.company_id === Number(selectedCompany));
+  const selectedJournalIds = ledgerReports.includes(leaf.report)
+    ? journalIds.filter((jId) => availableJournals.some((j) => j.id === jId))
+    : [];
+  const targetJournalIds = selectedJournalIds.length
+    ? selectedJournalIds
     : ledger
       ? (ledger.journal_ids ?? [])
       : null;
@@ -702,16 +707,19 @@ function ReportPage({ leaf }) {
   const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : cols;
   const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
-  const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
+  const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && periodKey !== 'all';
+  const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
+  const effectivePeriod = showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period;
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const horizontalGroups = [];
-  const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
+  const canComputePeriods = periodKey !== 'custom' || (validDate(period.from) && validDate(period.to) && period.from <= period.to);
+  const periods = comparable && comparison !== 'none' && canComputePeriods ? periodsFor(periodKey, comparison, period) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
   const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner', { includeArchived: true }).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const data = periods && leaf.report === 'cashflow'
     ? cashflowColumns(db, periods, {
-      analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
+      analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
     })
     : null;
   const tableRef = useRef(null);
@@ -757,14 +765,13 @@ function ReportPage({ leaf }) {
         </label>}
         {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
         {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
-          <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalId(''); }}>
+          <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
             <option value="">{t('All Ledgers')}</option>
             {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </label>}
         {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Journals')}
-          <select aria-label={t('Journals')} value={journalId} onChange={(e) => setJournalId(e.target.value)}>
-            <option value="">{t('All Journals')}</option>
+          <select aria-label={t('Journals')} multiple value={selectedJournalIds.length ? selectedJournalIds : ''} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
@@ -824,6 +831,9 @@ function ReportPage({ leaf }) {
             {horizontalGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
         </label>}
+        {showUnpostedOption && <label className="inline-select">
+          <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
+        </label>}
         <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>
         <span className="spacer" />
         {isAudit && (
@@ -839,7 +849,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} />}
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} />}
         </table>
       </div>
     </main>
