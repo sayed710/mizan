@@ -5,13 +5,12 @@ import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
-import { applyRule, sameCommercialPartner, suggestRule } from './reconcile.js';
+import { applyRule, counterpartTaxLines, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { shouldBePaid } from './billcontrol.js';
-import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 
 /** The first active matching reconciliation model (by sequence), or null. */
 const modelFor = (db, line) => suggestRule(db, line);
@@ -540,107 +539,31 @@ export function bookToAccount(db, line, opts = {}) {
   const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * foreignValue } : {};
 
   const company = line.company_id ?? 1;
-  const companyCurrency = companyCurrencyRecord(current, company);
   const rawTaxIds = opts?.tax_ids ?? opts?.taxIds ?? line.tax_ids ?? [];
-  const taxIds = (Array.isArray(rawTaxIds) ? rawTaxIds : [rawTaxIds]).map(Number).filter(Boolean);
-  const taxRecs = taxIds.length > 0 ? expandTaxIds(current, taxIds) : [];
-  for (const tax of taxRecs) {
-    if (tax.company_id && tax.company_id !== company) throw new Error('Tax belongs to another company');
-    const repart = taxRepartitionLines(tax, 'invoice');
-    for (const row of repart.filter((r) => r.repartition_type === 'tax')) {
-      if (row.account_id) {
-        const acc = read(current, 'account.account', row.account_id);
-        if (!acc || acc.active === false) throw new Error('Tax account does not exist or is inactive');
-        if (acc.company_id && acc.company_id !== company) throw new Error('Tax account belongs to another company');
-      }
-    }
-  }
-
-  const incoming = line.amount > 0;
   const entryRef = String(opts?.label ?? line.payment_ref ?? '').trim() || line.payment_ref;
-  let lines;
-  if (taxRecs.length > 0) {
-    const taxSpecs = taxRecs.map((tax) => ({
-      tax_id: tax.id,
-      tax: Number(tax.amount) || 0,
-      tax_type: tax.amount_type || 'percent',
-      tax_include: true,
-      tax_cash_basis: tax.tax_exigibility === 'on_payment',
-      tax_name: tax.name,
-      tax_include_base_amount: !!tax.include_base_amount,
-      tax_is_base_affected: tax.is_base_affected !== false,
-      tax_sequence: Number(tax.sequence ?? 1),
-      invoice_repartition_line_ids: tax.invoice_repartition_line_ids ?? [],
-      refund_repartition_line_ids: tax.refund_repartition_line_ids ?? [],
-    }));
 
-    const computed = computeLineTaxes({
-      qty: 1,
-      price_unit: requested,
-      tax_breakdown: taxSpecs,
-    }, { currency: companyCurrency, roundingMethod: 'round_per_line' });
+  const counterparts = counterpartTaxLines(current, {
+    company,
+    tax_ids: rawTaxIds,
+    amount: foreign ? foreignValue : Math.abs(requested),
+    account_id: account.id,
+    incoming: line.amount > 0,
+    currency: read(current, 'res.currency', currency),
+    foreignCurrency: foreign ? currency : null,
+    companyValue: Math.abs(requested),
+    balance: foreign ? foreignValue : Math.abs(requested),
+    date: line.date,
+    partner_id: line.partner_id ?? null,
+    name: entryRef,
+  });
 
-    const net = computed.untaxed;
-    const allBaseTags = [...new Set(taxRecs.flatMap((t) => taxRepartitionLines(t, 'invoice').find((r) => r.repartition_type === 'base')?.tag_ids ?? []))];
+  const liquidityLine = line.amount > 0
+    ? { account: liquidity, debit: requested, ...fx(1) }
+    : { account: liquidity, credit: requested, ...fx(-1) };
 
-    const foreignCurr = foreign ? read(current, 'res.currency', currency) : null;
-    const foreignComputed = foreign ? computeLineTaxes({
-      qty: 1,
-      price_unit: foreignValue,
-      tax_breakdown: taxSpecs,
-    }, { currency: foreignCurr, roundingMethod: 'round_per_line' }) : null;
-    const foreignNet = foreignComputed ? foreignComputed.untaxed : 0;
-
-    const taxLines = [];
-    for (let ti = 0; ti < computed.taxes.length; ti++) {
-      const t = computed.taxes[ti];
-      const taxRec = taxRecs.find((rec) => rec.id === t.tax_id);
-      if (!taxRec) continue;
-      const splits = taxRepartitionSplits(t, {}, 'invoice', companyCurrency).splits;
-      const foreignSplits = foreign ? taxRepartitionSplits(foreignComputed.taxes[ti], {}, 'invoice', foreignCurr).splits : null;
-      for (let si = 0; si < splits.length; si++) {
-        const { row, amount: splitAmount, base: splitBase } = splits[si];
-        const taxAccId = row.account_id ?? account.id;
-        const taxSide = taxRec.type_tax_use || (incoming ? 'sale' : 'purchase');
-        const fxTaxAmt = foreignSplits ? foreignSplits[si]?.amount ?? 0 : 0;
-        taxLines.push({
-          account: taxAccId,
-          debit: incoming ? 0 : splitAmount,
-          credit: incoming ? splitAmount : 0,
-          name: taxRec.name,
-          tax_id: taxRec.id,
-          tax_name: taxRec.name,
-          tax_side: taxSide,
-          tax_base: splitBase,
-          ...(row.tag_ids?.length ? { tax_tag_ids: [...row.tag_ids] } : {}),
-          ...(foreign ? { currency_id: currency, amount_currency: (incoming ? -1 : 1) * fxTaxAmt } : {}),
-        });
-      }
-    }
-
-    const netLine = {
-      account: account.id,
-      debit: incoming ? 0 : net,
-      credit: incoming ? net : 0,
-      name: entryRef,
-      tax_side: taxRecs[0]?.type_tax_use || (incoming ? 'sale' : 'purchase'),
-      tax_grid_base: true,
-      ...(allBaseTags.length ? { tax_tag_ids: allBaseTags } : {}),
-      ...(foreign ? { currency_id: currency, amount_currency: (incoming ? -1 : 1) * foreignNet } : {}),
-    };
-
-    const liquidityLine = incoming
-      ? { account: liquidity, debit: requested, ...fx(1) }
-      : { account: liquidity, credit: requested, ...fx(-1) };
-
-    lines = incoming
-      ? [liquidityLine, netLine, ...taxLines]
-      : [netLine, ...taxLines, liquidityLine];
-  } else {
-    lines = line.amount > 0
-      ? [{ account: liquidity, debit: requested, ...fx(1) }, { account: account.id, credit: requested, ...fx(-1) }]
-      : [{ account: account.id, debit: requested, ...fx(1) }, { account: liquidity, credit: requested, ...fx(-1) }];
-  }
+  const lines = line.amount > 0
+    ? [liquidityLine, ...counterparts]
+    : [...counterparts, liquidityLine];
   const { db: booked, id } = postEntry(current, { journal: via.code, journal_id: via.id, date: line.date, ref: entryRef, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
   return {
     db: write(booked, 'account.bank.statement.line', line.id, {

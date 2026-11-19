@@ -6,8 +6,9 @@ register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 import { create, read, search } from './orm.js';
 import { seed } from './seed.js';
-import { STATEMENT_JOURNAL_TYPES, isStatementJournal, accountId } from './models/ledger.js';
+import { ONLINE_FEED_JOURNAL_TYPES, STATEMENT_JOURNAL_TYPES, isOnlineFeedJournal, isStatementJournal, accountId } from './models/ledger.js';
 import { bookToAccount, reconcileWith, unreconcile } from './models/bank.js';
+import { counterpartTaxLines } from './models/reconcile.js';
 import { journalCards, taxReport, taxesByGrid } from './models/finance.js';
 import { postMove } from './models/accounting.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -31,10 +32,21 @@ function makeInvoice(db, { partnerId = 1, price = 200, companyId = 1, date = '20
 // BANK-7: Cash journals in bank reconciliation
 // -------------------------------------------------------------------------
 
-test('BANK-7: STATEMENT_JOURNAL_TYPES includes cash and isStatementJournal recognises cash', () => {
+test('BANK-7: STATEMENT_JOURNAL_TYPES includes cash, isOnlineFeedJournal restricts feeds to bank/credit, and Arabic translations exist', async () => {
   assert.ok(STATEMENT_JOURNAL_TYPES.includes('cash'), 'STATEMENT_JOURNAL_TYPES must include cash');
   assert.equal(isStatementJournal('cash'), true, 'isStatementJournal must return true for cash type string');
   assert.equal(isStatementJournal({ type: 'cash' }), true, 'isStatementJournal must return true for cash journal object');
+
+  assert.deepEqual(ONLINE_FEED_JOURNAL_TYPES, ['bank', 'credit']);
+  assert.equal(isOnlineFeedJournal('bank'), true);
+  assert.equal(isOnlineFeedJournal('credit'), true);
+  assert.equal(isOnlineFeedJournal('cash'), false);
+
+  const fs = await import('node:fs');
+  const i18nContent = fs.readFileSync(new URL('./i18n.js', import.meta.url), 'utf8');
+  assert.ok(i18nContent.includes("Taxes: 'الضرائب'"));
+  assert.ok(i18nContent.includes("None: 'لا شيء'"));
+  assert.ok(i18nContent.includes("'Select an invoice or bill to match': 'اختر فاتورة أو فاتورة مورد للمطابقة'"));
 });
 
 test('BANK-7: a statement line on a cash journal can be created, matched to an invoice, unreconciled, and dashboard counts open lines', () => {
@@ -263,9 +275,10 @@ test('BANK-12: BankReconcile widget renders Taxes field in Manual Operation tab 
     assert.ok(manualTab, 'Manual Operation tab must exist');
     await React.act(async () => props(manualTab).onClick());
 
-    // Taxes field must exist
+    // Taxes field must exist and be multi-select
     const taxesSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Taxes');
     assert.ok(taxesSelect, 'Taxes select must exist in manual operation tab');
+    assert.equal(props(taxesSelect)?.multiple, true, 'Taxes select must be a multi-select');
 
     // Select counterpart account
     const accountSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Counterpart Account');
@@ -276,7 +289,7 @@ test('BANK-12: BankReconcile widget renders Taxes field in Manual Operation tab 
 
     // Select the tax
     await React.act(async () => {
-      props(taxesSelect).onChange({ target: { value: String(tax.id) } });
+      props(taxesSelect).onChange({ target: { selectedOptions: [{ value: String(tax.id) }] } });
     });
 
     // Click Validate
@@ -537,4 +550,39 @@ test('BANK-7, BANK-12, BANK-14: operations replay cleanly through diffDb + apply
   assert.equal(read(db, 'account.move', invA.id).amount_residual, 0);
   assert.equal(read(db, 'account.move', invB.id).amount_residual, 0);
   assert.equal(read(db, 'account.bank.statement.line', multiLine.id).state, 'reconciled');
+});
+
+test('BANK-12: counterpartTaxLines extracts canonical tax split logic for both directions', () => {
+  const db = seed();
+  const tax = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'sale');
+  const account = accountId(db, '400000', 1);
+
+  // Seeded 14% sale tax on 114 amount gives 100 net + 14 tax
+  // Incoming (receipt): net line credit, tax line credit, tax_side: sale
+  const inLines = counterpartTaxLines(db, {
+    company: 1,
+    tax_ids: [tax.id],
+    amount: 114,
+    account_id: account,
+    incoming: true,
+  });
+  assert.equal(inLines.length, 2);
+  assert.equal(inLines[0].credit, 100);
+  assert.equal(inLines[0].tax_side, 'sale');
+  assert.equal(inLines[1].credit, 14);
+  assert.equal(inLines[1].tax_side, 'sale');
+
+  // Outgoing (payment): net line debit, tax line debit, tax_side: purchase
+  const outLines = counterpartTaxLines(db, {
+    company: 1,
+    tax_ids: [tax.id],
+    amount: 114,
+    account_id: account,
+    incoming: false,
+  });
+  assert.equal(outLines.length, 2);
+  assert.equal(outLines[0].debit, 100);
+  assert.equal(outLines[0].tax_side, 'purchase');
+  assert.equal(outLines[1].debit, 14);
+  assert.equal(outLines[1].tax_side, 'purchase');
 });

@@ -4,7 +4,7 @@ import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } fro
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
-import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
 
 export { sameCommercialPartner } from './common.js';
 
@@ -227,6 +227,114 @@ function splitCounterparts(lines, balance, currency, paymentRef = '', incoming =
   return split;
 }
 
+/**
+ * Compute the net counterpart line and tax lines for a reconciliation model or manual statement booking.
+ * Returns [netLine, ...taxLines].
+ */
+export function counterpartTaxLines(db, {
+  company = 1,
+  tax_ids = [],
+  amount = 0,
+  account_id,
+  incoming = true,
+  currency = null,
+  foreignCurrency = null,
+  companyValue = null,
+  balance = null,
+  date = null,
+  partner_id = null,
+  name = '',
+  analytic_distribution = null,
+} = {}) {
+  const compId = typeof company === 'object' && company ? company.id : (company ?? 1);
+  const compCurrency = companyCurrencyRecord(db, compId);
+  const calcCurrency = typeof currency === 'object' && currency ? currency : (currency ? read(db, 'res.currency', currency) : compCurrency);
+  const absValue = Math.abs(Number(amount) || 0);
+
+  const rawTaxIds = tax_ids ?? [];
+  const taxIds = (Array.isArray(rawTaxIds) ? rawTaxIds : [rawTaxIds]).map(Number).filter(Boolean);
+  const taxRecs = taxIds.length > 0 ? expandTaxIds(db, taxIds) : [];
+  for (const tax of taxRecs) {
+    if (tax.company_id && tax.company_id !== compId) {
+      throw new Error('Tax belongs to another company');
+    }
+    const repart = taxRepartitionLines(tax, 'invoice');
+    for (const row of repart.filter((r) => r.repartition_type === 'tax')) {
+      if (row.account_id) {
+        const account = read(db, 'account.account', row.account_id);
+        if (!account || account.active === false) throw new Error('Tax account does not exist or is inactive');
+        if (account.company_id && account.company_id !== compId) throw new Error('Tax account belongs to another company');
+      }
+    }
+  }
+
+  const isCredit = Boolean(incoming);
+  const bal = balance != null && Number(balance) !== 0 ? Math.abs(Number(balance)) : absValue;
+  const compVal = companyValue != null ? Math.abs(Number(companyValue)) : absValue;
+
+  const side = (val, debit, extra = {}) => ({
+    ...extra,
+    [debit ? 'debit' : 'credit']: roundCurrency(compVal * val / bal, compCurrency),
+    ...(foreignCurrency ? { currency_id: foreignCurrency, amount_currency: (debit ? 1 : -1) * val } : {}),
+  });
+
+  if (!taxRecs.length) {
+    return [
+      side(absValue, !isCredit, {
+        account: account_id,
+        partner_id,
+        name: name || '',
+        ...(analytic_distribution != null ? { analytic_distribution } : {}),
+      }),
+    ];
+  }
+
+  const taxSpecs = taxRecs.map((tax) => ({
+    ...taxSnapshot(tax, db),
+    tax_include: true,
+  }));
+
+  const computed = computeLineTaxes({
+    qty: 1,
+    price_unit: absValue,
+    tax_breakdown: taxSpecs,
+  }, { currency: calcCurrency, roundingMethod: 'round_per_line' });
+
+  const allBaseTags = [...new Set(taxRecs.flatMap((t) => taxRepartitionLines(t, 'invoice').find((r) => r.repartition_type === 'base')?.tag_ids ?? []))];
+
+  const taxLines = [];
+  for (const t of computed.taxes) {
+    const taxRec = taxRecs.find((rec) => rec.id === t.tax_id);
+    if (!taxRec) continue;
+    for (const { row, amount: splitAmount, base } of taxRepartitionSplits(t, {}, 'invoice', calcCurrency).splits) {
+      const taxDebit = splitAmount < 0 ? isCredit : !isCredit;
+      taxLines.push(side(Math.abs(splitAmount), taxDebit, {
+        account: row.account_id ?? account_id,
+        partner_id,
+        name: taxRec.name,
+        tax_id: taxRec.id,
+        tax_name: taxRec.name,
+        tax_side: isCredit ? 'sale' : 'purchase',
+        tax_base: toCompany(db, foreignCurrency ?? calcCurrency.id, base, date, compId),
+        tax_tag_ids: row.tag_ids ?? [],
+      }));
+    }
+  }
+
+  const net = computed.untaxed;
+  const netLine = side(net, !isCredit, {
+    account: account_id,
+    partner_id,
+    name: name || '',
+    ...(analytic_distribution != null ? { analytic_distribution } : {}),
+    tax_side: isCredit ? 'sale' : 'purchase',
+    tax_grid_base: true,
+    tax_tag_ids: allBaseTags,
+  });
+
+  return [netLine, ...taxLines];
+}
+
 function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
   const company = line.company_id ?? 1;
@@ -262,76 +370,22 @@ function writeOff(db, rule, line) {
     ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}),
   });
   const items = counterparts.flatMap((l) => {
-    const absValue = Math.abs(l.value);
     const sameAsCounterpart = l.value > 0;
-    const taxRecs = expandTaxIds(db, l.tax_ids ?? []);
-    for (const tax of taxRecs) {
-      const repart = taxRepartitionLines(tax, 'invoice');
-      for (const row of repart.filter((r) => r.repartition_type === 'tax')) {
-        if (row.account_id) {
-          const account = read(db, 'account.account', row.account_id);
-          if (!account || account.active === false) throw new Error('Tax account does not exist or is inactive');
-          if (account.company_id && account.company_id !== company) throw new Error('Tax account belongs to another company');
-        }
-      }
-    }
-    const taxSpecs = taxRecs.map((tax) => ({
-      tax_id: tax.id,
-      tax: Number(tax.amount) || 0,
-      tax_type: tax.amount_type || 'percent',
-      tax_include: true,
-      tax_cash_basis: tax.tax_exigibility === 'on_payment',
-      tax_name: tax.name,
-      tax_include_base_amount: !!tax.include_base_amount,
-      tax_is_base_affected: tax.is_base_affected !== false,
-      tax_sequence: Number(tax.sequence ?? 1),
-      invoice_repartition_line_ids: tax.invoice_repartition_line_ids ?? [],
-      refund_repartition_line_ids: tax.refund_repartition_line_ids ?? [],
-    }));
-
-    const computed = computeLineTaxes({
-      qty: 1,
-      price_unit: absValue,
-      tax_breakdown: taxSpecs,
-    }, { currency, roundingMethod: 'round_per_line' });
-
-    const partner = l.partner_id ?? partner_id;
-    const allBaseTags = [...new Set(taxRecs.flatMap((t) => taxRepartitionLines(t, 'invoice').find((r) => r.repartition_type === 'base')?.tag_ids ?? []))];
-
-    const taxLines = [];
-    for (const t of computed.taxes) {
-      const taxRec = taxRecs.find((rec) => rec.id === t.tax_id);
-      if (!taxRec) continue;
-      for (const { row, amount, base } of taxRepartitionSplits(t, {}, 'invoice', currency).splits) {
-        const taxDebit = sameAsCounterpart ? (amount < 0 ? incoming : !incoming) : (amount < 0 ? !incoming : incoming);
-        taxLines.push(side(Math.abs(amount), taxDebit, {
-          account: row.account_id ?? l.account_id,
-          partner_id: partner,
-          name: taxRec.name,
-          tax_id: taxRec.id,
-          tax_name: taxRec.name,
-          tax_side: (sameAsCounterpart ? incoming : !incoming) ? 'sale' : 'purchase',
-          tax_base: toCompany(db, journalCurrency, base, line.date, company),
-          tax_tag_ids: row.tag_ids ?? [],
-        }));
-      }
-    }
-
-    const net = computed.untaxed;
-    return [
-      side(net, sameAsCounterpart ? !incoming : incoming, {
-        account: l.account_id,
-        partner_id: partner,
-        name: l.label || line.payment_ref,
-        ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}),
-        ...(taxRecs.length ? {
-          tax_side: (sameAsCounterpart ? incoming : !incoming) ? 'sale' : 'purchase',
-          tax_grid_base: true,
-          tax_tag_ids: allBaseTags,
-        } : {}),
-      }),
-      ...taxLines,
-    ];
+    return counterpartTaxLines(db, {
+      company,
+      tax_ids: l.tax_ids ?? [],
+      amount: Math.abs(l.value),
+      account_id: l.account_id,
+      incoming: sameAsCounterpart ? incoming : !incoming,
+      currency,
+      foreignCurrency: foreign ? journalCurrency : null,
+      companyValue,
+      balance,
+      date: line.date,
+      partner_id: l.partner_id ?? partner_id,
+      name: l.label || line.payment_ref,
+      analytic_distribution: l.analytic_distribution,
+    });
   });
   const counterpartSide = incoming ? 'credit' : 'debit';
   const opposingSide = incoming ? 'debit' : 'credit';

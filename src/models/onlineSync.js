@@ -2,7 +2,7 @@ import { create, read, unlink, write } from '../orm.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
 import { validDate } from './common.js';
 import { importStatementLines } from './statements.js';
-import { journalCompany } from './ledger.js';
+import { isOnlineFeedJournal, journalCompany } from './ledger.js';
 
 const LINK_MODEL = 'account.online.link';
 const ACCOUNT_MODEL = 'account.online.account';
@@ -94,7 +94,7 @@ export function journalStatementBalance(db, journalId) {
 /** Validate a statement journal linked to an online account or connection of `companyId`. */
 function linkedJournalError(journal, companyId) {
   if (!journal) return 'Select an existing journal';
-  if (!['bank', 'credit'].includes(journal.type)) return 'Only bank or credit card journals can be linked to an online account';
+  if (!isOnlineFeedJournal(journal)) return 'Only bank or credit card journals can be linked to an online account';
   if (journalCompany(journal) !== companyId) return 'The linked journal must belong to the same company as the connection';
   return null;
 }
@@ -102,7 +102,7 @@ function linkedJournalError(journal, companyId) {
 /** UI domain filter for linking a statement journal to an online connection or account. */
 function linkedJournalDomain(journal, record, db) {
   const companyId = record?.company_id ?? db?._company;
-  return ['bank', 'credit'].includes(journal.type) && (!companyId || journalCompany(journal) === companyId);
+  return isOnlineFeedJournal(journal) && (!companyId || journalCompany(journal) === companyId);
 }
 
 /** Validate an `account.online.account` record against its connection, company, journal type, and 1-to-1 uniqueness. */

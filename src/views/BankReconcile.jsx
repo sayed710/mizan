@@ -490,18 +490,16 @@ export function BankReconcile() {
                     <label>
                       {t('Taxes')}
                       <select
+                        multiple
                         aria-label={t('Taxes')}
-                        value={manualTaxIds[0] != null ? String(manualTaxIds[0]) : ''}
+                        value={manualTaxIds.length === 0 ? [''] : manualTaxIds.map(String)}
                         onChange={(e) => {
-                          let ids = [];
-                          if (e.target.selectedOptions) {
-                            ids = Array.from(e.target.selectedOptions).map((o) => Number(o.value)).filter(Boolean);
-                          } else if (Array.isArray(e.target.value)) {
-                            ids = e.target.value.map(Number).filter(Boolean);
-                          } else if (e.target.value) {
-                            ids = [Number(e.target.value)];
-                          }
-                          setManualTaxIds(ids);
+                          const options = e.target.selectedOptions
+                            ? Array.from(e.target.selectedOptions)
+                            : (Array.isArray(e.target.value) ? e.target.value.map((v) => ({ value: v })) : [{ value: e.target.value }]);
+                          const hasNone = options.some((o) => o.value === '' || o.value == null);
+                          const selected = options.map((o) => Number(o.value)).filter(Boolean);
+                          setManualTaxIds(hasNone ? [] : selected);
                         }}
                       >
                         <option value="">{t('None')}</option>
