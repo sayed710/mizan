@@ -153,12 +153,12 @@ test('Finding 2: ConfigurableReportPage limits ledgers and journals to selected 
     assert.ok(optionTexts(ledgerSel()).includes('Branch Ledger'), 'Branch Ledger should be listed for Branch Co');
     assert.ok(!optionValues(journalSel()).includes(String(j1.id)), 'Main Ops journal should not be listed for Branch Co');
     assert.ok(optionValues(journalSel()).includes(String(j2.id)), 'Branch Ops journal should be listed for Branch Co');
-    assert.equal(props(journalSel()).value, '', 'Unavailable journal selection must be cleared on company change');
+    assert.deepEqual(props(journalSel()).value, [], 'Unavailable journal selection must be cleared on company change');
     assert.ok(textOf(host).includes('222.00'), 'Branch Co figures must not be emptied by stale journal filter');
 
     // Switching back to Co1 must keep the cleared journal selection (not resurrect j1) and exclude Co2's ledger/journal
     await React.act(async () => props(selectByLabel('Company')).onChange({ target: { value: '1' } }));
-    assert.equal(props(journalSel()).value, '', 'Cleared journal selection must stay cleared');
+    assert.deepEqual(props(journalSel()).value, [], 'Cleared journal selection must stay cleared');
     assert.ok(!optionTexts(ledgerSel()).includes('Branch Ledger'));
     assert.ok(!optionValues(journalSel()).includes(String(j2.id)));
     assert.ok(textOf(host).includes('111.00'));

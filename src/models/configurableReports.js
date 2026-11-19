@@ -13,6 +13,8 @@ import {
 import { addDays, today } from './common.js';
 import { reportingBookedAmount } from './money.js';
 import { distributionOfLine, normalizeDistribution } from './analyticplus.js';
+import { companyFilter } from './company.js';
+import { reportReviewMode } from './reports.js';
 import {
   findStatementReport,
   STANDARD_BALANCE_LINES,
@@ -24,6 +26,7 @@ import { round } from '../money.js';
 
 export {
   findStatementReport,
+  reportReviewMode,
   STANDARD_BALANCE_LINES,
   STANDARD_PNL_LINES,
   STATEMENT_REPORT_SPECS,
@@ -92,8 +95,47 @@ function reportError(db, before, report) {
   } catch (error) { return error.message; }
 }
 
-const idsFor = (rule) => String(rule.ids ?? '').trim() ? [...new Set(String(rule.ids).split(',').map((id) => Number(id.trim())))] : [];
-function groupError(db, _before, group) {
+const HORIZONTAL_GROUP_RULES = {
+  partner: { label: 'Partner', model: 'res.partner', fieldKey: 'partner_ids', idsLabel: 'Partners' },
+  analytic: { label: 'Analytic Account', model: 'account.analytic.account', fieldKey: 'analytic_ids', idsLabel: 'Analytic Accounts' },
+  journal: { label: 'Journal', model: 'account.journal', fieldKey: 'journal_ids', idsLabel: 'Journals' },
+  company: { label: 'Company', model: 'res.company', fieldKey: 'company_ids', idsLabel: 'Companies' },
+};
+const HORIZONTAL_RULE_KEYS = Object.values(HORIZONTAL_GROUP_RULES).map((cfg) => cfg.fieldKey);
+const parseLegacyRuleIds = (raw) => {
+  const text = String(raw ?? '').trim();
+  if (!text) return [];
+  if (!/^\d+(?:\s*,\s*\d+)*$/.test(text)) return null;
+  const nums = [...new Set(text.split(',').map((id) => Number(id.trim())))];
+  return nums.every((id) => Number.isSafeInteger(id) && id > 0) ? nums : null;
+};
+const idsFor = (rule) => {
+  const cfg = HORIZONTAL_GROUP_RULES[rule?.field];
+  const rel = cfg ? rule?.[cfg.fieldKey] : null;
+  if (Array.isArray(rel) && rel.length) return [...new Set(rel.map(Number))];
+  return parseLegacyRuleIds(rule?.ids) ?? [];
+};
+const emptyRuleArrays = () => Object.fromEntries(HORIZONTAL_RULE_KEYS.map((key) => [key, []]));
+export function normalizeHorizontalGroupVals(vals) {
+  if (!vals || !Array.isArray(vals.rule_ids)) return vals;
+  return {
+    ...vals,
+    rule_ids: vals.rule_ids.map((rule) => {
+      if (!rule || typeof rule !== 'object') return rule;
+      const cfg = HORIZONTAL_GROUP_RULES[rule.field];
+      if (!cfg) return rule;
+      const raw = typeof rule.ids === 'string' ? rule.ids.trim() : '';
+      const parsed = parseLegacyRuleIds(raw);
+      if (parsed && parsed.length) {
+        const existing = Array.isArray(rule[cfg.fieldKey]) ? rule[cfg.fieldKey] : [];
+        const combined = [...new Set([...existing.map(Number), ...parsed])];
+        return { ...rule, [cfg.fieldKey]: combined, ids: '' };
+      }
+      return rule;
+    }),
+  };
+}
+function groupError(db, before, group) {
   if (!read(db, 'res.company', group.company_id)) return 'Select an existing group company';
   if (!Array.isArray(group.rule_ids) || !group.rule_ids.length) return 'Add at least one horizontal group rule';
   for (const id of group.report_ids ?? []) {
@@ -101,11 +143,37 @@ function groupError(db, _before, group) {
     if (!report || (report.company_id ?? 1) !== (group.company_id ?? 1)) return 'Reports must belong to the horizontal group company';
   }
   for (const rule of group.rule_ids) {
-    if (!['partner', 'analytic'].includes(rule.field)) return 'Select partner or analytic account';
+    const cfg = HORIZONTAL_GROUP_RULES[rule?.field];
+    if (!cfg) return 'Select partner, analytic account, journal, or company';
+    if (HORIZONTAL_RULE_KEYS.some((key) => key !== cfg.fieldKey && Array.isArray(rule[key]) && rule[key].length)) {
+      return 'Rule IDs must match the selected grouping field';
+    }
     const raw = String(rule.ids ?? '').trim();
-    if (raw && !/^\d+(?:\s*,\s*\d+)*$/.test(raw)) return 'Rule IDs must be a comma-separated list of IDs';
-    const model = rule.field === 'partner' ? 'res.partner' : 'account.analytic.account';
-    if (idsFor(rule).some((id) => { const record = read(db, model, id); return !id || !record || (record.company_id && record.company_id !== (group.company_id ?? 1)); })) return 'Rule IDs must identify records available to the group company';
+    const parsedRaw = raw ? parseLegacyRuleIds(raw) : [];
+    if (raw && !parsedRaw) return 'Rule IDs must be a comma-separated list of IDs';
+    const relIds = rule[cfg.fieldKey];
+    if (relIds != null && (!Array.isArray(relIds) || relIds.some((id) => !Number.isSafeInteger(id) || id < 1))) {
+      return 'Rule IDs must identify records available to the group company';
+    }
+    if (idsFor(rule).some((id) => {
+      const record = read(db, cfg.model, id);
+      return !id || !record || (record.company_id && record.company_id !== (group.company_id ?? 1));
+    })) return 'Rule IDs must identify records available to the group company';
+  }
+  // Archived records may keep the references they already had, but cannot gain new ones.
+  const references = (rules) => {
+    const counts = new Map();
+    for (const rule of rules ?? []) {
+      for (const id of idsFor(rule)) counts.set(`${rule.field}:${id}`, (counts.get(`${rule.field}:${id}`) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const beforeRefs = references(before?.rule_ids);
+  for (const [key, count] of references(group.rule_ids)) {
+    const [field, id] = key.split(':');
+    if (read(db, HORIZONTAL_GROUP_RULES[field].model, Number(id))?.active === false && count > (beforeRefs.get(key) ?? 0)) {
+      return 'Rule IDs must identify records available to the group company';
+    }
   }
   return null;
 }
@@ -157,21 +225,44 @@ function analyticWeights(db, item, analyticAccountIds) {
   return weights;
 }
 
-/** One column per matched partner or analytic account of each horizontal group rule, plus the unmatched share. */
+function allowedCompanyRecords(db) {
+  const activeCompanies = (db.records?.['res.company'] ?? [])
+    .filter((c) => c.active !== false)
+    .map((c) => ({ ...c, company_id: c.id }));
+  return companyFilter(db, activeCompanies);
+}
+
+/** One column per matched partner, analytic account, journal, or company of each horizontal group rule, plus the unmatched share. */
 export function groupBuckets(db, group, items, { analyticAccountIds } = {}) {
   const cache = new WeakMap();
   const analytic = (item) => cache.get(item) ?? cache.set(item, analyticWeights(db, item, analyticAccountIds)).get(item);
+  const allowedCompanyIds = new Set(allowedCompanyRecords(db).map((c) => c.id));
   return group.rule_ids.flatMap((rule, index) => {
-    const domain = idsFor(rule);
-    const model = rule.field === 'partner' ? 'res.partner' : 'account.analytic.account';
+    const cfg = HORIZONTAL_GROUP_RULES[rule.field];
+    if (!cfg) return [];
+    const rawDomain = idsFor(rule);
+    const domain = rule.field === 'company' ? rawDomain.filter((id) => allowedCompanyIds.has(id)) : rawDomain;
     const used = new Set();
     for (const item of items) {
       if (rule.field === 'partner' && item.partner_id) used.add(item.partner_id);
-      if (rule.field === 'analytic') for (const id of analytic(item).keys()) used.add(id);
+      else if (rule.field === 'analytic') for (const id of analytic(item).keys()) used.add(id);
+      else if (rule.field === 'journal' && item.journal_id) used.add(item.journal_id);
+      else if (rule.field === 'company') {
+        const cId = item.company_id ?? 1;
+        if (allowedCompanyIds.has(cId)) used.add(cId);
+      }
     }
-    const ids = (domain.length ? domain : [...used]).filter((id) => read(db, model, id)).sort((a, b) => String(read(db, model, a).name).localeCompare(String(read(db, model, b).name)) || a - b);
-    const fraction = (item, id) => rule.field === 'partner' ? Number(item.partner_id === id) : analytic(item).get(id) ?? 0;
-    return [...ids.map((id) => ({ key: `${index}:${id}`, label: read(db, model, id).name, weight: (item) => fraction(item, id) })),
+    const ids = (domain.length ? domain : [...used])
+      .filter((id) => read(db, cfg.model, id) && (rule.field !== 'company' || allowedCompanyIds.has(id)))
+      .sort((a, b) => String(read(db, cfg.model, a).name).localeCompare(String(read(db, cfg.model, b).name)) || a - b);
+    const fraction = (item, id) => {
+      if (rule.field === 'partner') return Number(item.partner_id === id);
+      if (rule.field === 'analytic') return analytic(item).get(id) ?? 0;
+      if (rule.field === 'journal') return Number(item.journal_id === id);
+      if (rule.field === 'company') return Number((item.company_id ?? 1) === id);
+      return 0;
+    };
+    return [...ids.map((id) => ({ key: `${index}:${id}`, label: read(db, cfg.model, id).name, weight: (item) => fraction(item, id) })),
       { key: `${index}:other`, label: 'Others', weight: (item) => Math.max(0, 1 - ids.reduce((sum, id) => sum + fraction(item, id), 0)) }];
   });
 }
@@ -181,16 +272,41 @@ function effectiveReportPeriod(report, period) {
   return { ...period, from: '', to: period?.to || today() };
 }
 
-function targetCompanyIds(db, report, group, options) {
-  if (group) return [report.company_id];
-  if (Array.isArray(options?.companyIds) && options.companyIds.length) return options.companyIds.map(Number);
-  if (options?.companyId != null) return [Number(options.companyId)];
+export function targetCompanyIds(db, report, group, options) {
+  const allowedCompanies = allowedCompanyRecords(db);
+  const allowedCompanyIds = new Set(allowedCompanies.map((c) => c.id));
+  if (group) {
+    const companyRules = (group.rule_ids ?? []).filter((r) => r.field === 'company');
+    if (companyRules.length) {
+      const explicit = companyRules.flatMap((r) => idsFor(r));
+      const baseCompanies = Array.isArray(options?.companyIds) && options.companyIds.length
+        ? options.companyIds.map(Number).filter((id) => allowedCompanyIds.has(id))
+        : options?.companyId != null && allowedCompanyIds.has(Number(options.companyId))
+          ? [Number(options.companyId)]
+          : allowedCompanies.map((c) => c.id);
+      // A rule naming companies stays restricted to them, even when none is allowed or selected any more.
+      if (explicit.length) {
+        const baseSet = new Set(baseCompanies);
+        return [...new Set(explicit.filter((id) => baseSet.has(id)))];
+      }
+      return baseCompanies;
+    }
+    return [report.company_id];
+  }
+  if (Array.isArray(options?.companyIds) && options.companyIds.length) {
+    return options.companyIds.map(Number).filter((id) => allowedCompanyIds.has(id));
+  }
+  if (options?.companyId != null) {
+    const cId = Number(options.companyId);
+    return allowedCompanyIds.has(cId) ? [cId] : [report.company_id];
+  }
   return [report.company_id];
 }
 
-function resolveReportItems(db, report, period, companies, { analyticAccountIds } = {}) {
+function resolveReportItems(db, report, period, companies, { analyticAccountIds, reviewMode } = {}) {
   const effective = effectiveReportPeriod(report, period);
-  const raw = companies.flatMap((companyId) => journalItems(db, { ...effective, company_id: companyId }));
+  const modeFilter = reviewMode ? { reviewMode } : {};
+  const raw = companies.flatMap((companyId) => journalItems(db, { ...effective, company_id: companyId, ...modeFilter }));
   const scoped = report.exclude_closing ? raw.filter((item) => !item.is_closing) : raw;
   if (!analyticAccountIds?.length) return scoped;
   return report.date_scope === 'cumulative'
@@ -211,18 +327,19 @@ function addEarningsAccounts(target, detail) {
   }
 }
 
-function computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds } = {}) {
+function computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds, reviewMode } = {}) {
   const effective = effectiveReportPeriod(report, period);
   const reportDate = effective.to || today();
   const includeClosing = !report.exclude_closing;
+  const modeFilter = reviewMode ? { reviewMode } : {};
   let currentYear = 0;
   let priorYears = 0;
   const currentAccounts = new Map();
   const priorAccounts = new Map();
   for (const cId of companies) {
     const yearStart = fiscalYearStart(db, reportDate, cId);
-    const currentFilter = { ...effective, company_id: cId, from: yearStart, to: reportDate };
-    const priorFilter = { ...effective, company_id: cId, from: '', to: addDays(yearStart, -1) };
+    const currentFilter = { ...effective, company_id: cId, from: yearStart, to: reportDate, ...modeFilter };
+    const priorFilter = { ...effective, company_id: cId, from: '', to: addDays(yearStart, -1), ...modeFilter };
     const current = profitAndLoss(db, currentFilter, { includeClosing, weight, analyticAccountIds });
     const prior = profitAndLoss(db, priorFilter, { includeClosing, weight, analyticAccountIds });
     currentYear = round(currentYear + current.net);
@@ -284,7 +401,8 @@ export function configurableReport(db, report, period, group = null, options = {
   }
   const companies = targetCompanyIds(db, report, group, options);
   const analyticIds = options?.analyticAccountIds;
-  const items = resolveReportItems(db, report, period, companies, { analyticAccountIds: analyticIds });
+  const reviewMode = reportReviewMode(period, options);
+  const items = resolveReportItems(db, report, period, companies, { analyticAccountIds: analyticIds, reviewMode });
   const columns = ['balance', ...(report.show_debit ? ['debit'] : []), ...(report.show_credit ? ['credit'] : [])];
   const buckets = group ? groupBuckets(db, group, items, { analyticAccountIds: analyticIds }) : [{ key: 'all', label: '', weight: () => 1 }];
   const needEarnings = report.line_ids.some((l) => /^earnings:/i.test(String(l.formula ?? '').trim()));
@@ -304,7 +422,7 @@ export function configurableReport(db, report, period, group = null, options = {
       bucket,
       accountRows: balances(db, weightedItems),
       debitCreditByAccount,
-      earnings: needEarnings ? computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds: analyticIds }) : null,
+      earnings: needEarnings ? computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds: analyticIds, reviewMode }) : null,
     };
   });
   const definitions = new Map(report.line_ids.map((line) => [line.code, { ...line, sign: Number(line.sign) || 1, parsed: parseFormula(line.formula) }]));
@@ -456,11 +574,27 @@ export const configurableReportModels = {
     label: 'Horizontal Groups', fields: {
       name: { type: 'char', label: 'Name', required: true }, company_id: company,
       report_ids: { type: 'many2many', relation: 'account.report', label: 'Accounting Reports' },
-      rule_ids: { type: 'one2many', label: 'Group Rules', fields: {
-        field: { type: 'selection', label: 'Field', options: [['partner', 'Partner'], ['analytic', 'Analytic Account']] },
-        ids: { type: 'char', label: 'IDs (comma-separated)' },
-      }, newLine: () => ({ field: 'partner', ids: '' }) },
-    }, defaults: () => ({ report_ids: [], rule_ids: [{ field: 'partner', ids: '' }] }), createDefaults: (db) => ({ company_id: currentCompanyId(db) }), guard: groupError,
-    list: ['name', 'company_id'], form: { title: 'name', groups: [['company_id', 'report_ids']], tabs: [{ label: 'Group Rules', fields: ['rule_ids'] }] },
+      rule_ids: {
+        type: 'one2many',
+        label: 'Group Rules',
+        fields: {
+          field: { type: 'selection', label: 'Field', options: Object.entries(HORIZONTAL_GROUP_RULES).map(([k, cfg]) => [k, cfg.label]) },
+          partner_ids: { type: 'many2many', relation: 'res.partner', label: 'Partners', hideWhen: (r) => r.field !== 'partner', domain: (rec, rule) => !rec.company_id || rec.company_id === (rule.company_id ?? 1) },
+          analytic_ids: { type: 'many2many', relation: 'account.analytic.account', label: 'Analytic Accounts', hideWhen: (r) => r.field !== 'analytic', domain: (rec, rule) => !rec.company_id || rec.company_id === (rule.company_id ?? 1) },
+          journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Journals', hideWhen: (r) => r.field !== 'journal', domain: (rec, rule) => !rec.company_id || rec.company_id === (rule.company_id ?? 1) },
+          company_ids: { type: 'many2many', relation: 'res.company', label: 'Companies', hideWhen: (r) => r.field !== 'company' },
+          ids: { type: 'char', label: 'IDs (comma-separated)', hidden: true },
+        },
+        onchange: (line, key) => (key === 'field' ? { ...line, ...emptyRuleArrays(), ids: '' } : line),
+        newLine: () => ({ field: 'partner', ...emptyRuleArrays() }),
+      },
+    },
+    defaults: () => ({ report_ids: [], rule_ids: [{ field: 'partner', ...emptyRuleArrays() }] }),
+    createDefaults: (db) => ({ company_id: currentCompanyId(db) }),
+    prepareCreate: (db, vals) => ({ db, vals: normalizeHorizontalGroupVals(vals) }),
+    prepareWrite: (db, vals) => ({ db, vals: normalizeHorizontalGroupVals(vals) }),
+    guard: groupError,
+    list: ['name', 'company_id'],
+    form: { title: 'name', groups: [['company_id', 'report_ids']], tabs: [{ label: 'Group Rules', fields: ['rule_ids'] }] },
   },
 };

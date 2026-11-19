@@ -80,7 +80,8 @@ test('Qodo 17: cash flow page has no horizontal balance sheet group path', async
   assert.equal(data.sections.some((section) => section.title === 'Assets'), false);
   const text = await renderReportText(db, 'cashflow');
   assert.match(text, /Cash Flow Statement/);
-  assert.doesNotMatch(text, /Horizontal Group|Total Assets|Total Liabilities/);
+  // FIN-9: the cash flow offers horizontal groups, but its own cash flow columns, never the balance sheet path.
+  assert.doesNotMatch(text, /Total Assets|Total Liabilities/);
 });
 
 test('Qodo 38: zero analytic actuals skip foreign currency conversion', () => {

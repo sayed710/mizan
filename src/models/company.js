@@ -280,6 +280,8 @@ export function withCompany(models) {
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
   'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
+  'fiscalyear_last_day', 'fiscalyear_last_month',
+  'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
   'currency_exchange_journal_id',
   'deferred_revenue_journal_id', 'deferred_expense_journal_id',
@@ -308,6 +310,29 @@ function companyGuard(db, before, r, ctx) {
   if (r.tax_periodicity != null && r.tax_periodicity !== '' && !['monthly', 'trimester', 'semester', 'year'].includes(r.tax_periodicity)) return 'Select a valid tax periodicity';
   if (r.tax_calculation_rounding_method != null && r.tax_calculation_rounding_method !== '' && !['round_per_line', 'round_globally'].includes(r.tax_calculation_rounding_method)) return 'Select a valid tax rounding method';
   if (r.invoice_qr != null && r.invoice_qr !== '' && !['zatca', 'epc'].includes(r.invoice_qr)) return 'Select a valid payment QR format';
+  const lastMonth = r.fiscalyear_last_month != null && r.fiscalyear_last_month !== '' ? Number(r.fiscalyear_last_month) : null;
+  const lastDay = r.fiscalyear_last_day != null && r.fiscalyear_last_day !== '' ? Number(r.fiscalyear_last_day) : null;
+  if (lastMonth != null) {
+    if (!Number.isInteger(lastMonth) || lastMonth < 1 || lastMonth > 12) {
+      return 'Fiscal year end month must be between 1 and 12';
+    }
+  }
+  if (lastDay != null) {
+    const month = lastMonth ?? 12;
+    const maxDays = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month] ?? 31;
+    if (!Number.isInteger(lastDay) || lastDay < 1 || lastDay > maxDays) {
+      return 'Fiscal year end day is invalid for the selected month';
+    }
+  }
+  if (r.currency_provider != null && r.currency_provider !== '' && !['none', 'ecb'].includes(r.currency_provider)) {
+    return 'Select a valid currency provider';
+  }
+  if (r.currency_interval_unit != null && r.currency_interval_unit !== '' && !['manually', 'daily', 'weekly', 'monthly'].includes(r.currency_interval_unit)) {
+    return 'Select a valid currency interval unit';
+  }
+  if (r.currency_next_execution_date != null && r.currency_next_execution_date !== '' && !validDate(r.currency_next_execution_date)) {
+    return 'Currency next execution date must be a valid date';
+  }
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => (
@@ -669,9 +694,27 @@ export const companyModels = {
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
+      fiscalyear_last_day: { type: 'integer', label: 'Fiscal Year End Day' },
+      fiscalyear_last_month: { type: 'integer', label: 'Fiscal Year End Month' },
+      currency_provider: {
+        type: 'selection',
+        label: 'Currency Provider',
+        options: [['none', 'None'], ['ecb', 'European Central Bank']],
+      },
+      currency_interval_unit: {
+        type: 'selection',
+        label: 'Currency Interval Unit',
+        options: [['manually', 'Manually'], ['daily', 'Daily'], ['weekly', 'Weekly'], ['monthly', 'Monthly']],
+      },
+      currency_next_execution_date: { type: 'date', label: 'Next Currency Rates Execution Date' },
     },
     defaults: () => ({
       active: true,
+      fiscalyear_last_day: 31,
+      fiscalyear_last_month: 12,
+      currency_provider: 'none',
+      currency_interval_unit: 'manually',
+      currency_next_execution_date: null,
       intercompany_rule: 'none',
       tax_periodicity: 'monthly',
       deferred_amount_computation_method: 'days',
