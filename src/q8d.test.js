@@ -69,6 +69,7 @@ test('Qodo 24: a scheduled reversal does not post once its source is cancelled',
   const reversal = search(db, 'account.move').find((m) => m.reversed_entry_id === entry.id);
   assert.equal(reversal.state, 'draft');
   db = button('account.move', 'Cancel', button('account.move', 'Reset to Draft', db, entry.id), entry.id);
+  // Reset to Draft cancels the scheduled reversal (r1), so auto-post leaves it cancelled.
   db = postAutoPostMoves(db, '2031-03-02');
-  assert.equal(read(db, 'account.move', reversal.id).state, 'draft');
+  assert.equal(read(db, 'account.move', reversal.id).state, 'cancel');
 });
