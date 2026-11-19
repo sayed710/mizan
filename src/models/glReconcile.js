@@ -9,6 +9,7 @@ import {
   journalItemIdentity,
   postEntry,
   valueOnlyCurrencyFields,
+  exchangeJournal,
   reconciledJournalItems,
   statementPaymentIds,
 } from './ledger.js';
@@ -902,9 +903,11 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
           const isGain = difference > 0;
           const gainLossAccount = exchangeAccount(next, companyId, difference);
           const partnerId = isGain ? c.line.partner_id : d.line.partner_id;
-          const valueOnly = valueOnlyCurrencyFields(next, account.id, companyId ?? 1);
+          const valueOnly = valueOnlyCurrencyFields(next, account.id, companyId ?? 1, foreignCurr?.id);
+          const fxJournalId = exchangeJournal(next, companyId).id;
           const fx = postEntry(next, {
-            journal: 'MISC',
+            journal_id: fxJournalId,
+            journal: fxJournalId,
             company: companyId ?? 1,
             date: pairDate,
             ref: `Exchange difference ${d.move.name || ''} / ${c.move.name || ''}`.trim(),
