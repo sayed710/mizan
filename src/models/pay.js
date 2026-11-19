@@ -28,21 +28,34 @@ export function selectedItems(db, selections, { allowMultipleEntryLines = false 
   if (!selections?.length) throw new Error('Select journal items first');
   const seen = new Set();
   const reconciledByMove = new Map();
-  return selections.map(({ move_id, line_identity }) => {
-    const key = JSON.stringify([move_id, line_identity]);
+  return selections.map(({ move_id, line_identity, line_index }) => {
+    const key = JSON.stringify([move_id, line_index ?? line_identity]);
     if (seen.has(key)) throw new Error('Select each journal item only once');
     seen.add(key);
     const move = read(db, 'account.move', move_id);
-    const matches = (move?.line_ids ?? []).filter((line) => journalItemIdentity(line) === line_identity);
-    if (move?.state !== 'posted' || matches.length !== 1) throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
-    const [line] = matches;
+    let line;
+    let lineIndex;
+    if (line_index != null && Number.isInteger(line_index)) {
+      if (move?.state !== 'posted' || line_index < 0 || line_index >= (move?.line_ids ?? []).length) {
+        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      }
+      line = move.line_ids[line_index];
+      if (line_identity && journalItemIdentity(line) !== line_identity) {
+        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      }
+      lineIndex = line_index;
+    } else {
+      const matches = (move?.line_ids ?? []).filter((l) => journalItemIdentity(l) === line_identity);
+      if (move?.state !== 'posted' || matches.length !== 1) throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      [line] = matches;
+      lineIndex = (move.line_ids ?? []).indexOf(line);
+    }
     const account = read(db, 'account.account', line.account_id);
     const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
     if (!account || !(account.reconcile === true || counterpart)) throw new Error('Select items on a reconcilable account');
     // Multi-installment invoices and bills legitimately split one receivable/payable total across dated counterpart lines.
     const sameCounterpart = (move.line_ids ?? []).filter((item) => item.account_id === line.account_id && item.partner_id === line.partner_id);
     if (!allowMultipleEntryLines && sameCounterpart.length !== 1 && !(isInvoice(move) && counterpart)) throw new Error('This entry has multiple counterpart items; settle it from its document workflow');
-    const lineIndex = (move.line_ids ?? []).indexOf(line);
     const multiInstallment = isInvoice(move) && counterpart && sameCounterpart.length > 1;
     let lineResidual = isInvoice(move) ? residual(move, db) : 0;
     if (multiInstallment) {
@@ -554,15 +567,14 @@ export function reconcileReversalLines(db, sourceId, reversalId, date) {
   const source = read(db, 'account.move', sourceId);
   const reversal = read(db, 'account.move', reversalId);
   const reconciled = reconciledJournalItems(db, source);
-  const unique = (move, line) => move.line_ids.filter((l) => journalItemIdentity(l) === journalItemIdentity(line)).length === 1;
   return source.line_ids.reduce((acc, line, i) => {
     const mirror = reversal.line_ids?.[i];
     if (!mirror || mirror.account_id !== line.account_id || (Number(mirror.debit) || 0) !== (Number(line.credit) || 0) || (Number(mirror.credit) || 0) !== (Number(line.debit) || 0)) return acc;
     if (!isReconcilableAccount(read(acc, 'account.account', line.account_id)) || reconciled[i]?.reconciled) return acc;
-    if (!(Number(line.debit) || Number(line.credit)) || !unique(source, line) || !unique(reversal, mirror)) return acc;
+    if (!(Number(line.debit) || Number(line.credit))) return acc;
     return reconcileLedgerItems(acc, [
-      { move_id: source.id, line_identity: journalItemIdentity(line) },
-      { move_id: reversal.id, line_identity: journalItemIdentity(mirror) },
+      { move_id: source.id, line_index: i, line_identity: journalItemIdentity(line) },
+      { move_id: reversal.id, line_index: i, line_identity: journalItemIdentity(mirror) },
     ], { date });
   }, db);
 }

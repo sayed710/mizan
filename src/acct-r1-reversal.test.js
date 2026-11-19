@@ -248,18 +248,46 @@ test('future scheduled at_date draft cannot be posted manually before its date, 
   assert.equal(arLine(posted, out.id, ar).reconciled, true);
 });
 
-test('reversing an entry with identical reconcilable lines does not crash; unique lines still reconcile', () => {
+test('transitive partial matching: line A partially matched to B (link 1) and to C (link 2) results in A, B and C all showing the same P number', () => {
+  const s = setup();
+  // Line A has debit 100 on AR
+  const payB = s.post(null, () => [{ account_id: s.ar, partner_id: s.partner.id, credit: 30 }, { account_id: s.rev, debit: 30 }]);
+  const payC = s.post(null, () => [{ account_id: s.ar, partner_id: s.partner.id, credit: 40 }, { account_id: s.rev, debit: 40 }]);
+
+  // Link 1: match A with B for 30
+  const db1 = reconcileLedgerItems(s.db, [sel(s.db, s.src, s.ar), sel(s.db, payB, s.ar)], { date: '2026-04-02' });
+  // Link 2: match A with C for 40
+  const db2 = reconcileLedgerItems(db1, [sel(db1, s.src, s.ar), sel(db1, payC, s.ar)], { date: '2026-04-03' });
+
+  const aItem = arItem(db2, s.src, s.ar);
+  const bItem = arItem(db2, payB, s.ar);
+  const cItem = arItem(db2, payC, s.ar);
+
+  assert.ok(aItem.matching_number?.startsWith('P'), `Expected A to have P matching number, got ${aItem.matching_number}`);
+  assert.equal(aItem.matching_number, bItem.matching_number);
+  assert.equal(aItem.matching_number, cItem.matching_number);
+
+  assert.equal(reconciledJournalItems(db2, read(db2, 'account.move', s.src), { partialMatching: true })[0].matching_number, aItem.matching_number);
+  assert.equal(reconciledJournalItems(db2, read(db2, 'account.move', payB), { partialMatching: true })[0].matching_number, bItem.matching_number);
+  assert.equal(reconciledJournalItems(db2, read(db2, 'account.move', payC), { partialMatching: true })[0].matching_number, cItem.matching_number);
+});
+
+test('entry with two identical receivable lines reversed: all four lines end reconciled', () => {
   const s = setup();
   const dup = s.post(null, () => [
-    { account_id: s.ar, partner_id: s.partner.id, name: 'Dup', debit: 50 },
-    { account_id: s.ar, partner_id: s.partner.id, name: 'Dup', debit: 50 },
-    { account_id: s.ar, partner_id: s.partner.id, name: 'Unique', debit: 25 },
-    { account_id: s.rev, credit: 125 },
+    { account_id: s.ar, partner_id: s.partner.id, debit: 50 },
+    { account_id: s.ar, partner_id: s.partner.id, debit: 50 },
+    { account_id: s.rev, credit: 100 },
   ]);
   const out = reverseEntry(s.db, read(s.db, 'account.move', dup), '2026-05-01');
   assert.equal(read(out.db, 'account.move', out.id).state, 'posted');
-  const lines = reconciledJournalItems(out.db, read(out.db, 'account.move', dup));
-  assert.equal(lines[0].reconciled, false);
-  assert.equal(lines[1].reconciled, false);
-  assert.equal(lines[2].reconciled, true);
+  const srcLines = reconciledJournalItems(out.db, read(out.db, 'account.move', dup)).filter((l) => l.account_id === s.ar);
+  const revLines = reconciledJournalItems(out.db, read(out.db, 'account.move', out.id)).filter((l) => l.account_id === s.ar);
+  assert.equal(srcLines.length, 2);
+  assert.equal(revLines.length, 2);
+  assert.equal(srcLines[0].reconciled, true);
+  assert.equal(srcLines[1].reconciled, true);
+  assert.equal(revLines[0].reconciled, true);
+  assert.equal(revLines[1].reconciled, true);
 });
+
