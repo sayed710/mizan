@@ -260,3 +260,19 @@ test('FIN-13: Custom account.report renders Analytic Accounts filter and filters
     await React.act(async () => root.unmount());
   }
 });
+
+test('migration 57 makes earnings lines of already-seeded Balance Sheets foldable and leaves other lines alone', async () => {
+  const { migrate } = await import('./migrations.js');
+  const db = seed();
+  const sheet = findStatementReport(db, 'balance', 1);
+  assert.ok(sheet, 'seed has a Balance Sheet');
+  // A Balance Sheet stored before this release: earnings lines were not foldable, and a user folded Retained Earnings shut.
+  const legacyLines = sheet.line_ids.map((l) => (/^earnings:/.test(l.formula) || l.code === 'RET' ? { ...l, foldable: false } : l));
+  const legacy = { ...db, schema_version: 56, records: { ...db.records,
+    'account.report': db.records['account.report'].map((r) => (r.id === sheet.id ? { ...r, line_ids: legacyLines } : r)) } };
+  const migrated = findStatementReport(migrate(legacy), 'balance', 1);
+  const foldable = Object.fromEntries(migrated.line_ids.map((l) => [l.code, l.foldable]));
+  assert.equal(foldable.CYE, true);
+  assert.equal(foldable.PYE, true);
+  assert.equal(foldable.RET, false);
+});
