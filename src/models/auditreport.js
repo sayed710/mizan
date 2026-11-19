@@ -3,6 +3,7 @@ import { read, write } from '../orm.js';
 import { today } from './common.js';
 import { configurableReport, findStatementReport } from './configurableReports.js';
 import { currentCompany } from './company.js';
+import { t } from '../i18n.js';
 
 function formatMoney(n) {
   return Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -22,17 +23,17 @@ function renderReportTable(title, reportData, tableClass, valueHeader) {
         `      <tr><td>${escapeHtml(acc.account?.code ?? '')} ${escapeHtml(acc.account?.name ?? '')}</td><td class="text-right">${formatMoney(acc.values?.[0] ?? 0)}</td></tr>`
       ).join('\n');
       const totClass = totalClass || 'total-row';
-      return `      <tr class="section-header"><td colspan="2"><strong>${escapeHtml(r.name ?? '')}</strong></td></tr>\n${accRows}\n      <tr class="${totClass}"><td>${escapeHtml(r.name ?? '')}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
+      return `      <tr class="section-header"><td colspan="2"><strong>${escapeHtml(t(r.name ?? ''))}</strong></td></tr>\n${accRows}\n      <tr class="${totClass}"><td>${escapeHtml(t(r.name ?? ''))}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
     }
-    return `      <tr${totalClass ? ` class="${totalClass}"` : ''}><td>${escapeHtml(r.name ?? '')}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
+    return `      <tr${totalClass ? ` class="${totalClass}"` : ''}><td>${escapeHtml(t(r.name ?? ''))}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
   }).join('\n');
 
-  return `  <h2>${escapeHtml(title)}</h2>
+  return `  <h2>${escapeHtml(t(title))}</h2>
   <table class="report-table ${tableClass}">
     <thead>
       <tr>
-        <th class="text-left">Account</th>
-        <th class="text-right">${valueHeader}</th>
+        <th class="text-left">${escapeHtml(t('Account'))}</th>
+        <th class="text-right">${escapeHtml(t(valueHeader))}</th>
       </tr>
     </thead>
     <tbody>
@@ -81,7 +82,7 @@ export const auditReportModels = {
       body: { type: 'html', label: 'Body' },
     },
     defaults: (id, db) => ({
-      title: `Annual Report ${today().slice(0, 4)}`,
+      title: `${t('Annual Report')} ${today().slice(0, 4)}`,
       start_date: `${today().slice(0, 4)}-01-01`,
       end_date: `${today().slice(0, 4)}-12-31`,
       status: 'draft',
