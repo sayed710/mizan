@@ -304,7 +304,7 @@ test('rendered dashboard shows empty states for journals with no posted entries 
 
   const bankCard = journalCardHtml(html, 'Empty Bank');
   assert.match(bankCard, /Import your bank statements to reconcile them\./);
-  assert.match(bankCard, /<label class="btn primary sm">Import Statement<input type="file" accept="\.csv,text\/csv,\.ofx,\.qfx,\.xml" hidden=""\/><\/label>/);
+  assert.match(bankCard, /<label class="btn primary sm">Import Statement<input type="file" accept="\.csv,text\/csv,\.ofx,\.qfx,\.xml,\.qif" hidden=""\/><\/label>/);
   assert.doesNotMatch(bankCard, /No transactions yet\./);
 
   const cashCard = journalCardHtml(html, 'Empty Cash');

@@ -3226,6 +3226,9 @@ const ar = {
   'Cannot turn off Secure Posted Entries with Hash on a journal with secured entries': 'لا يمكن إيقاف تأمين القيود المرحلة بالتجزئة في دفتر يحتوي على قيود مؤمَّنة',
   'Cash Basis Journal': 'دفتر الأساس النقدي',
   'General journal used for cash-basis tax release entries.': 'دفتر القيود العامة المستخدم لقيود تحرير ضريبة الأساس النقدي.',
+  'Ambiguous or invalid QIF amount': 'مبلغ QIF غامض أو غير صالح',
+  'Contradictory date formats in QIF file': 'صيغ تواريخ متضاربة في ملف QIF',
+  'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
 };
 
