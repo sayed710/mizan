@@ -1,5 +1,5 @@
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { cashFlow, reportReviewMode } from '../models/reports.js';
+import { cashFlow, executiveSummary, reportReviewMode } from '../models/reports.js';
 import { round } from '../money.js';
 import { groupBuckets, targetCompanyIds } from '../models/configurableReports.js';
 import { shiftMonth, validDate } from '../models/common.js';
@@ -88,11 +88,14 @@ function columns(periods, reports, sectionDefs, totalDefs, { showVariance = true
       })),
     };
   });
-  const totals = totalDefs.map(([label, value, strong = false]) => ({ label, values: reports.map(value), strong }));
+  const totals = totalDefs.map(([label, value, strong = false, format = null]) => ({
+    label, values: reports.map(value), strong, ...(format && { format }),
+  }));
   // Variances follow sections, then totals, in their respective array order.
   const variance = showVariance ? [...sections.map((s) => s.totals), ...totals.map((r) => r.values)].map((values) => {
     const previous = values.at(-2);
-    const amount = previous == null ? null : round(values.at(-1) - previous);
+    const current = values.at(-1);
+    const amount = previous == null || current == null ? null : round(current - previous);
     return { amount, pct: amount == null || !previous ? null : round(amount / Math.abs(previous) * 100) };
   }) : null;
   return { headers: periods.map((p) => p.label), sections, totals, variance };
@@ -180,4 +183,48 @@ export function cashflowColumns(db, periods, { analyticAccountIds, company_id, i
   return columns(periods, periods.map((p) => cashFlow(db, {
     ...p, company_id, analyticAccountIds, ...(includeUnposted != null && { includeUnposted }), ...(reviewMode && { reviewMode }),
   })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS);
+}
+
+/** Horizontal comparison columns partitioned by a horizontal group for the Cash Flow Statement. */
+export function cashflowAnalyticColumns(db, group, period, { analyticAccountIds, company_id, includeUnposted, reviewMode } = {}) {
+  const allowedCompanies = hasCompanyRule(group) ? new Set(targetCompanyIds(db, { company_id: group?.company_id ?? 1 }, group)) : null;
+  const scopedDb = allowedCompanies
+    ? { ...db, records: { ...db.records, 'account.move': (db.records?.['account.move'] ?? []).filter((m) => allowedCompanies.has(m.company_id ?? 1)) } }
+    : db;
+  const companyFilter = hasCompanyRule(group) ? {} : { company_id: group?.company_id ?? company_id ?? 1 };
+  const filter = {
+    ...period,
+    ...companyFilter,
+    ...modeFilterFor(reviewMode, includeUnposted),
+  };
+  const discoveryFilter = {
+    ...filter,
+    from: '',
+  };
+  const buckets = groupBuckets(scopedDb, group, journalItems(scopedDb, discoveryFilter), { analyticAccountIds });
+  return columns(buckets, buckets.map((b) => cashFlow(scopedDb, {
+    ...filter, weight: b.weight, analyticAccountIds, includeUnposted, reviewMode,
+  })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS, { showVariance: false });
+}
+
+const EXECUTIVE_SECTIONS = [];
+const EXECUTIVE_TOTALS = [
+  ['Revenue', (s) => s.revenue],
+  ['Gross Profit', (s) => s.grossProfit],
+  ['Net Profit', (s) => s.netProfit, true],
+  ['Cash', (s) => s.cash],
+  ['Receivables', (s) => s.receivables],
+  ['Payables', (s) => s.payables],
+  ['Current Ratio', (s) => s.currentRatio, false, 'ratio'],
+  ['Gross Margin', (s) => s.grossMargin, false, 'pct'],
+  ['Net Margin', (s) => s.netMargin, false, 'pct'],
+  ['Days Sales Outstanding', (s) => s.dso, false, 'int'],
+];
+
+/** Executive Summary per calendar period, KPI rows aligned. */
+export function executiveColumns(db, periods, { analyticAccountIds, company_id, includeUnposted, reviewMode } = {}) {
+  const modeFilter = modeFilterFor(reviewMode, includeUnposted);
+  return columns(periods, periods.map((p) => executiveSummary(db, {
+    ...p, company_id, analyticAccountIds, ...modeFilter,
+  })), EXECUTIVE_SECTIONS, EXECUTIVE_TOTALS);
 }
