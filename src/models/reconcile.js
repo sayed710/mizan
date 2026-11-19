@@ -17,10 +17,10 @@ const parseStrictNumber = (raw) => {
   return Number.isFinite(n) ? n : NaN;
 };
 
-// A repeated group that itself contains a repeat, such as (a+)+ or (\w*x)*, can backtrack for minutes on a
-// near-matching label and block the auto-reconcile run.
-// ponytail: shape check, not a full regex analyser; isolate matching in a worker if patterns ever need nested repeats.
-const NESTED_REPEAT = /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/;
+// A repeated group that contains a quantifier or alternation, such as (a+)+, (\w*x)* or (a|aa)+, can backtrack
+// exponentially on a near-matching label and block the auto-reconcile run.
+// ponytail: shape check, not a full regex analyser (does not parse character classes or lookarounds); isolate matching in a worker if patterns ever need nested repeats or alternations.
+const NESTED_REPEAT = /\((?:[^()\x5c]|\x5c.)*(?:[+*?|]|\{\d+,?\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/;
 
 /** Compile a regular expression case-insensitively, returning null if invalid, empty or prone to runaway backtracking. */
 function compileRegex(pattern) {
@@ -497,6 +497,15 @@ function guardReconcileModel(db, _before, rule) {
       const account = read(db, 'account.account', line.account_id);
       if (!account || account.active === false || (account.company_id && account.company_id !== (rule.company_id ?? 1))) {
         return 'Reconciliation accounts must be active and belong to the model company';
+      }
+    }
+    if (line.analytic_distribution && typeof line.analytic_distribution === 'object') {
+      const modelCompany = rule.company_id ?? 1;
+      for (const id of Object.keys(line.analytic_distribution)) {
+        const analytic = read(db, 'account.analytic.account', Number(id));
+        if (analytic?.company_id && analytic.company_id !== modelCompany) {
+          return 'Analytic accounts in the distribution must belong to the model company';
+        }
       }
     }
     const isPartnerMappingOnly = !line.account_id && !line.account_code && Boolean(line.partner_id) && line.amount_string == null && line.amount == null;
