@@ -1,5 +1,5 @@
 // Foreign currencies with dated rates; amounts convert to the company currency for the ledger.
-import { read } from '../orm.js';
+import { read, write } from '../orm.js';
 import { today } from './common.js';
 import { companyCurrencyRecord, currencyDecimalPlaces, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
 
@@ -85,6 +85,56 @@ export const toCompany = (db, currencyId, amount, date, companyId = null) => rou
   (Number(amount) || 0) / rateAt(db, currencyId, date, companyId),
   companyCurrencyRecord(db, companyId),
 );
+
+/**
+ * Upsert an exchange rate row on `currencyId` for (currency, date, company).
+ * Applies only for active currencies, never creating duplicates.
+ */
+export function upsertCurrencyRate(db, currencyId, { date = today(), rate, companyId = null } = {}) {
+  const numericRate = Number(rate);
+  if (!Number.isFinite(numericRate) || numericRate <= 0) return db;
+  const currency = read(db, 'res.currency', currencyId);
+  if (!currency || currency.active === false) return db;
+  const rows = currency.rate_ids ?? [];
+  const targetCompany = companyId == null || companyId === '' ? null : Number(companyId);
+  const matchIdx = rows.findIndex((r) => r.date === date && (r.company_id == null ? null : Number(r.company_id)) === targetCompany);
+  let nextRows;
+  if (matchIdx >= 0) {
+    nextRows = rows.map((r, i) => (i === matchIdx ? { ...r, rate: numericRate, date, company_id: targetCompany } : r));
+  } else {
+    nextRows = [...rows, { date, rate: numericRate, company_id: targetCompany }];
+  }
+  return write(db, 'res.currency', currency.id, { rate_ids: nextRows });
+}
+
+/**
+ * Upsert exchange rates for active currencies in `db` for a date and company.
+ */
+export function upsertCurrencyRates(db, rates, { date = today(), companyId = null } = {}) {
+  let nextDb = db;
+  if (Array.isArray(rates)) {
+    for (const item of rates) {
+      const cId = item.currency_id ?? item.currencyId ?? item.currency;
+      nextDb = upsertCurrencyRate(nextDb, cId, {
+        date: item.date ?? date,
+        rate: item.rate,
+        companyId: item.company_id ?? item.companyId ?? companyId,
+      });
+    }
+    return nextDb;
+  }
+  if (rates && typeof rates === 'object') {
+    const currencies = nextDb.records['res.currency'] ?? [];
+    for (const c of currencies) {
+      if (c.active === false) continue;
+      const rate = rates[c.name] ?? rates[c.id];
+      if (rate != null) {
+        nextDb = upsertCurrencyRate(nextDb, c.id, { date, rate, companyId });
+      }
+    }
+  }
+  return nextDb;
+}
 
 /** Rate rows a write adds or changes must be strictly positive and unique per date and company; rows a write leaves untouched are not rechecked, so a currency with a legacy bad row stays editable. */
 function rateRowsError(beforeRows = [], afterRows = []) {
