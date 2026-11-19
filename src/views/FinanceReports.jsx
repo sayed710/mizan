@@ -118,12 +118,13 @@ export function CashFlow({ db, period, companyId, analyticAccountIds }) {
   );
 }
 
-export function ExecutiveSummary({ db, period, analyticAccountIds }) {
-  const s = executiveSummary(db, { ...period, analyticAccountIds });
+export function ExecutiveSummary({ db, period, companyId, analyticAccountIds }) {
+  const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
+  const s = executiveSummary(db, { ...period, ...(currentCo ? { company_id: currentCo } : {}), analyticAccountIds });
   const rows = [
     ['Revenue', money(s.revenue)], ['Gross Profit', money(s.grossProfit)], ['Net Profit', money(s.netProfit)],
     ['Cash', money(s.cash)], ['Receivables', money(s.receivables)], ['Payables', money(s.payables)],
-    ['Current Ratio', s.currentRatio ?? '—'], ['Gross Margin', pct(s.grossMargin)], ['Net Margin', pct(s.netMargin)],
+    ['Current Ratio', s.currentRatio == null ? '—' : s.currentRatio.toFixed(2)], ['Gross Margin', pct(s.grossMargin)], ['Net Margin', pct(s.netMargin)],
     ['Days Sales Outstanding', s.dso ?? '—'],
   ];
   return <tbody>{rows.map(([label, value]) => <tr key={label} className="rep-detail"><td>{t(label)}</td><td className="num">{value}</td></tr>)}</tbody>;
