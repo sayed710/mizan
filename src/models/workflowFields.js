@@ -77,7 +77,6 @@ const FIELDS = {
 
 /** Subfields of one2many lines: model → field → subfields. */
 const LINE_FIELDS = {
-  'account.move': { invoice_line_ids: { analytic_distribution: hidden('json', 'Analytic Distribution', { readonly: false }) } },
   'hr.appraisal': {
     employee_feedback: { type: hidden('selection', 'Answer Type', { options: [['text', 'Text'], ['rating', 'Rating']] }) },
     manager_feedback: { type: hidden('selection', 'Answer Type', { options: [['text', 'Text'], ['rating', 'Rating']] }) },

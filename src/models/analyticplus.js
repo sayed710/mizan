@@ -35,7 +35,7 @@ const allocatedShares = (db, distribution, base) => {
   return entries.map(([id], index) => [id, amounts[index]]);
 };
 export { normalizeDistribution } from '../analytic_distribution.js';
-import { normalizeDistribution } from '../analytic_distribution.js';
+import { normalizeDistribution, storedLineDistribution } from '../analytic_distribution.js';
 export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
 const canonicalDistribution = (distribution) => Object.entries(distribution ?? {})
@@ -80,12 +80,8 @@ export function syncDeferredAnalyticDistribution(db, updated, line, previousLine
 
 /** Read a distribution, preserving the legacy single-account allocation. */
 export function distributionOfLine(line, db, move) {
-  if (line.analytic_distribution != null) {
-    return line.analytic_distribution;
-  }
-  if (line.analytic_account_id) {
-    return { [line.analytic_account_id]: 100 };
-  }
+  const stored = storedLineDistribution(line);
+  if (stored != null) return stored;
   return db ? defaultDistributionForLine(db, line, move) : {};
 }
 

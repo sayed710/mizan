@@ -1576,6 +1576,7 @@ const {
   tax_ids: invoiceLineTaxIds,
   tax: invoiceLineTaxPct,
   analytic_account_id: invoiceLineAnalytic,
+  analytic_distribution: invoiceLineAnalyticDist,
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
 
@@ -1636,7 +1637,8 @@ const invoiceLineField = {
     product_id: invoiceLineProduct,
     name: { type: 'char', label: 'Label' },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
-    analytic_account_id: { ...invoiceLineAnalytic, optional: 'hide' },
+    analytic_account_id: { ...invoiceLineAnalytic, hidden: true },
+    analytic_distribution: { ...invoiceLineAnalyticDist, label: 'Analytic', hidden: false, optional: 'hide' },
     deferred_start_date: { type: 'date', label: 'Deferred Start Date', optional: 'hide' },
     deferred_end_date: { type: 'date', label: 'Deferred End Date', optional: 'hide' },
     qty: invoiceLineQty,
