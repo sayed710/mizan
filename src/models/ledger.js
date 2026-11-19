@@ -761,18 +761,32 @@ export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.a
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
 
-/** IDs of active payments linked to a bank statement line (batch, multi-select, or single). */
+/** IDs of active payments linked to a bank statement line (allocations, batch, multi-select, or single). */
 export function statementPaymentIds(db, line) {
   if (!line) return [];
+  const allocated = (line.allocations ?? []).flatMap((a) => a.payment_ids ?? []);
+  let current = [];
   if (line.batch_payment_id) {
-    return [...new Set((read(db, 'account.batch.payment', line.batch_payment_id)?.lines ?? [])
+    current = (read(db, 'account.batch.payment', line.batch_payment_id)?.lines ?? [])
       .filter((l) => !l.cancelled && l.payment_id)
-      .map((l) => l.payment_id))];
+      .map((l) => l.payment_id);
+  } else if (Array.isArray(line.payment_ids) && line.payment_ids.length > 0) {
+    current = line.payment_ids.filter(Boolean);
+  } else if (line.payment_id) {
+    current = [line.payment_id];
   }
-  if (Array.isArray(line.payment_ids) && line.payment_ids.length > 0) {
-    return [...new Set(line.payment_ids.filter(Boolean))];
-  }
-  return line.payment_id ? [line.payment_id] : [];
+  return [...new Set([...allocated, ...current].filter(Boolean))];
+}
+
+/** Whether a statement line's bank_move_id was booked through its journal's suspense account (not a direct-payment bank entry). */
+export function isBookedToSuspense(db, line) {
+  if (!line?.bank_move_id) return false;
+  const company = line.company_id ?? 1;
+  const journalId = line.journal_id ?? paymentJournal(db, null, company).id;
+  const suspenseId = read(db, 'account.journal', journalId)?.suspense_account_id;
+  if (!suspenseId) return false;
+  const bankEntry = read(db, 'account.move', line.bank_move_id);
+  return (bankEntry?.line_ids ?? []).some((l) => l.account_id === suspenseId);
 }
 
 /** Company amount of a statement line: what its bank entry booked, or a fresh conversion before booking. */
@@ -781,7 +795,7 @@ export function bookedStatementAmount(db, line) {
   const company = line.company_id ?? 1;
   const account = paymentJournal(db, line.journal_id, company).accountId;
   const sign = line.amount > 0 ? 1 : -1;
-  const directMoves = line.state === 'reconciled' && (line.allocations ?? []).every((a) => !a.invoice_id && !a.reconcile_model_id)
+  const directMoves = !isBookedToSuspense(db, line) && line.state === 'reconciled' && (line.allocations ?? []).every((a) => !a.invoice_id && !a.reconcile_model_id)
     ? statementPaymentIds(db, line)
         .map((id) => read(db, 'account.payment', id))
         .filter((p) => p && !p.outstanding_account_id && p.move_id)
@@ -841,6 +855,7 @@ function reconcileIndex(db) {
   for (const statement of db.records['account.bank.statement.line'] ?? []) {
     for (const allocation of statement.allocations ?? []) {
       markPaymentMove(allocation.payment_move_id, statement.id);
+      for (const paymentId of allocation.payment_ids ?? []) markPaymentId(paymentId, statement.id);
     }
     if (statement.state === 'reconciled') {
       markPaymentMove(statement.payment_move_id, statement.id);
