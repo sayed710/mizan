@@ -298,7 +298,7 @@ export const settlingEntries = (db) => {
   const moves = db.records['account.move'] ?? [];
   const partials = db.records['account.partial.reconcile'] ?? [];
   const fromPayments = moves.flatMap((m) => (m.payments ?? []).flatMap((p) => [p.move_id, p.payment_fx_move_id]));
-  const fromGl = partials.filter((g) => g && g.active !== false && !g.reversed).flatMap((g) => [g.debit_move_id, g.credit_move_id]);
+  const fromGl = partials.filter((g) => g && g.active !== false && !g.reversed).flatMap((g) => [g.debit_move_id, g.credit_move_id, g.exchange_move_id]);
   const fromFx = moves.filter((m) => m.move_type === 'entry' && m.fx_payment_move_id && m.fx_invoice_id).map((m) => m.id);
   return new Set([...fromPayments, ...fromGl, ...fromFx].filter(Boolean));
 };
@@ -1223,12 +1223,18 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     debit: 0,
     credit: 0,
   }));
+  const company = read(db, 'res.company', r.company_id ?? 1);
+  const companyId = company ? company.id : null;
+  // Configured cash basis journal, then the company's default general journal; companies with neither keep the legacy MISC journal.
+  const cashBasisJournalId = company?.tax_cash_basis_journal_id
+    || resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId ?? 1 })?.id
+    || 'MISC';
   const posted = postEntry(db, {
-    journal: 'MISC',
+    journal: cashBasisJournalId,
     date,
     ref: `Cash basis taxes ${r.name}`,
     lines: [...lines, ...baseLines],
-    company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
+    company: companyId,
     system_generated: true,
     archivedOriginIds: [r.id],
     includeCashBasisTargets: true,
@@ -1999,6 +2005,11 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after) => {
       const companyId = after.company_id ?? 1;
+      const cashBasisOwners = before?.id ? (db.records['res.company'] ?? []).filter((c) => c.tax_cash_basis_journal_id === before.id) : [];
+      const blockedOwner = cashBasisOwners.find((c) => after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id));
+      if (blockedOwner) {
+        return `Clear the Cash Basis Journal of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+      }
       const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
       if (linkedOnlineAccount) {
         if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
