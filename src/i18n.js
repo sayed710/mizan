@@ -3206,6 +3206,7 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Cannot turn off Secure Posted Entries with Hash on a journal with secured entries': 'لا يمكن إيقاف تأمين القيود المرحلة بالتجزئة في دفتر يحتوي على قيود مؤمَّنة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
