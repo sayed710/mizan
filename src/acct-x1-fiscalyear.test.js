@@ -250,6 +250,27 @@ test('Settings renders Fiscal Year End under Fiscal Periods and writes to res.co
   }
 });
 
+test('Settings: switching from default (31 December) to February clamps day to 28 in one write', async () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { fiscalyear_last_day: 31, fiscalyear_last_month: 12 });
+  const ctx = await renderSettingsView(db);
+  try {
+    const monthControl = ctx.control('fiscalyear_last_month');
+    assert.ok(monthControl);
+
+    // Switch month to February ('2')
+    await ctx.React.act(async () => {
+      props(monthControl)?.onChange?.({ target: { value: '2' } });
+    });
+
+    const updatedComp = read(ctx.getDb(), 'res.company', 1);
+    assert.equal(updatedComp.fiscalyear_last_month, 2);
+    assert.equal(updatedComp.fiscalyear_last_day, 28);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 8. Arabic translations
 // ---------------------------------------------------------------------------

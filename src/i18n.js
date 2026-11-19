@@ -3303,6 +3303,7 @@ const ar = {
   'company_id is required': 'معرّف الشركة مطلوب',
   'log function is required': 'دالة السجل مطلوبة',
   'Invalid ECB XML feed: empty response': 'موجز XML للبنك المركزي الأوروبي غير صالح: استجابة فارغة',
+  'Invalid ECB XML feed: missing date or currency rates': 'موجز XML للبنك المركزي الأوروبي غير صالح: تاريخ أو أسعار العملات مفقودة',
   'Invalid ECB rates': 'أسعار البنك المركزي الأوروبي غير صالحة',
 };
 

@@ -1,13 +1,14 @@
 import { read, write } from '../src/orm.js';
 import { today } from '../src/models/common.js';
-import { companyCurrencyRecord } from '../src/money.js';
-import { advanceExecutionDate, convertRatesToCompanyCurrency, parseEcbXml, upsertCurrencyRates } from '../src/models/currency.js';
+import { advanceExecutionDate, baseCurrency, convertRatesToBaseCurrency, parseEcbXml, upsertCurrencyRates } from '../src/models/currency.js';
 
 export const ECB_URL = 'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml';
+const ECB_FETCH_TIMEOUT_MS = 30000;
 
 /** Fetch and parse ECB rates. */
 export async function fetchEcbRates(fetchFn = globalThis.fetch) {
-  const res = await fetchFn(ECB_URL);
+  const signal = AbortSignal.timeout(ECB_FETCH_TIMEOUT_MS);
+  const res = await fetchFn(ECB_URL, { signal });
   if (!res.ok) {
     const msg = `Failed to fetch ECB rates: ${res.status} ${res.statusText}`;
     throw new Error(msg);
@@ -17,7 +18,8 @@ export async function fetchEcbRates(fetchFn = globalThis.fetch) {
 }
 
 /**
- * Fetch ECB rates and upsert them for a specific company into res.currency.rate.
+ * Fetch ECB rates and upsert them for a specific company into res.currency.rate,
+ * expressed in terms of the database base currency.
  */
 export async function updateCompanyCurrencyRates(db, companyId, { fetchFn = globalThis.fetch, date = null } = {}) {
   const company = read(db, 'res.company', companyId);
@@ -25,18 +27,14 @@ export async function updateCompanyCurrencyRates(db, companyId, { fetchFn = glob
     const msg = `Company ${companyId} not found`;
     throw new Error(msg);
   }
-  const companyCurrency = companyCurrencyRecord(db, companyId);
-  if (!companyCurrency) {
-    const msg = `Company currency for company ${companyId} is not configured`;
-    throw new Error(msg);
-  }
+  const base = baseCurrency(db);
 
   const { date: feedDate, rates: ecbRates } = await fetchEcbRates(fetchFn);
-  const companyRates = convertRatesToCompanyCurrency(ecbRates, companyCurrency.name);
+  const baseRates = convertRatesToBaseCurrency(ecbRates, base.name);
   const rateDate = date ?? feedDate ?? today();
 
-  const nextDb = upsertCurrencyRates(db, companyRates, { date: rateDate, companyId });
-  return { db: nextDb, date: rateDate, rates: companyRates };
+  const nextDb = upsertCurrencyRates(db, baseRates, { date: rateDate, companyId });
+  return { db: nextDb, date: rateDate, rates: baseRates };
 }
 
 /**

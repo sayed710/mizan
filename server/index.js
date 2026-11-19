@@ -1195,12 +1195,17 @@ setInterval(runMailJobs, MAIL_JOB_INTERVAL_MS).unref();
 
 // Scheduled currency rate updates fetch daily rates for companies with automatic intervals.
 const CURRENCY_RATES_JOB_INTERVAL_MS = 60 * 60 * 1000;
+let currencyRatesJobRunning = false;
 const runCurrencyRatesJob = async () => {
+  if (currencyRatesJobRunning) return;
+  currencyRatesJobRunning = true;
   try {
     const { updateDueCurrencyRates } = await import('./currencyRates.js');
     await updateDueCurrencyRates(storeFor({ author: 'Scheduler', isAdmin: true }), { log });
   } catch (e) {
     log('error', 'scheduled currency rates update failed', { error: e });
+  } finally {
+    currencyRatesJobRunning = false;
   }
 };
 runCurrencyRatesJob();

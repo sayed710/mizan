@@ -524,7 +524,16 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
                   id="fiscalyear_last_month"
                   disabled={readOnly || !company}
                   value={String(company?.fiscalyear_last_month ?? 12)}
-                  onChange={(e) => onWriteCompany({ fiscalyear_last_month: Number(e.target.value) })}
+                  onChange={(e) => {
+                    const newMonth = Number(e.target.value);
+                    const maxDays = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][newMonth] ?? 31;
+                    const curDay = company?.fiscalyear_last_day ?? 31;
+                    const clampedDay = Math.min(Math.max(1, curDay), maxDays);
+                    onWriteCompany({
+                      fiscalyear_last_month: newMonth,
+                      fiscalyear_last_day: clampedDay,
+                    });
+                  }}
                 >
                   <option value="1">{t('January')}</option>
                   <option value="2">{t('February')}</option>

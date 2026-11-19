@@ -15,7 +15,7 @@ const { models } = await import('../src/models/index.js');
 const { createCompany } = await import('../src/models/company.js');
 const {
   advanceExecutionDate,
-  convertRatesToCompanyCurrency,
+  convertRatesToBaseCurrency,
   parseEcbXml,
   upsertCurrencyRate,
   upsertCurrencyRates,
@@ -173,28 +173,44 @@ test('parseEcbXml parses date and EUR-based rates, adding EUR: 1.0', () => {
   assert.equal(parsed.rates.CAD, 1.512);
 });
 
+test('parseEcbXml throws if feed is missing date or non-EUR currency rates', () => {
+  assert.throws(() => parseEcbXml('<html><body>502 Bad Gateway</body></html>'), /missing date or currency rates/);
+  assert.throws(() => parseEcbXml('<Cube><Cube time="2026-11-18"></Cube></Cube>'), /missing date or currency rates/);
+  assert.throws(() => parseEcbXml('<Cube><Cube currency="USD" rate="1.08"/></Cube>'), /missing date or currency rates/);
+});
+
 // ---------------------------------------------------------------------------
-// 3. Conversion from EUR rates to company currency (pure helper in src/models/currency.js)
+// 3. Conversion from EUR rates to database base currency (pure helper in src/models/currency.js)
 // ---------------------------------------------------------------------------
 
-test('convertRatesToCompanyCurrency converts EUR-based rates to company currency terms', () => {
+test('convertRatesToBaseCurrency converts EUR-based rates to database base currency terms and omits base', () => {
   const parsed = parseEcbXml(SAMPLE_ECB_XML);
 
-  // When company currency is USD (1.085 units per EUR):
+  // When base currency is USD (1.085 units per EUR):
   // 1 USD = (1 / 1.085) EUR ~ 0.921659 EUR
   // 1 USD = (0.8325 / 1.085) GBP ~ 0.767281 GBP
-  const usdCompanyRates = convertRatesToCompanyCurrency(parsed.rates, 'USD');
-  assert.equal(usdCompanyRates.USD, 1.0);
-  assert.ok(Math.abs(usdCompanyRates.EUR - 1.0 / 1.085) < 1e-6);
-  assert.ok(Math.abs(usdCompanyRates.GBP - 0.8325 / 1.085) < 1e-6);
+  const usdBaseRates = convertRatesToBaseCurrency(parsed.rates, 'USD');
+  assert.equal(usdBaseRates.USD, undefined, 'Base currency USD must be omitted');
+  assert.ok(Math.abs(usdBaseRates.EUR - 1.0 / 1.085) < 1e-6);
+  assert.ok(Math.abs(usdBaseRates.GBP - 0.8325 / 1.085) < 1e-6);
 
-  // When company currency is EUR (1.0 in feed):
-  const eurCompanyRates = convertRatesToCompanyCurrency(parsed.rates, 'EUR');
-  assert.equal(eurCompanyRates.EUR, 1.0);
-  assert.equal(eurCompanyRates.USD, 1.085);
+  // When base currency is EUR (1.0 in feed):
+  const eurBaseRates = convertRatesToBaseCurrency(parsed.rates, 'EUR');
+  assert.equal(eurBaseRates.EUR, undefined, 'Base currency EUR must be omitted');
+  assert.equal(eurBaseRates.USD, 1.085);
 
-  // When company currency is not in feed (e.g. SAR), fails with clear error:
-  assert.throws(() => convertRatesToCompanyCurrency(parsed.rates, 'SAR'), /not in the ECB feed/);
+  // When base currency is not in feed (e.g. SAR), fails with clear error:
+  assert.throws(() => convertRatesToBaseCurrency(parsed.rates, 'SAR'), /not in the ECB feed/);
+});
+
+test('fetchEcbRates enforces timeout with AbortSignal', async () => {
+  let signalReceived = null;
+  const timeoutFetch = async (url, opts) => {
+    signalReceived = opts?.signal;
+    throw new DOMException('The operation was aborted', 'TimeoutError');
+  };
+  await assert.rejects(() => fetchEcbRates(timeoutFetch), /aborted/);
+  assert.ok(signalReceived instanceof AbortSignal);
 });
 
 // ---------------------------------------------------------------------------
@@ -244,6 +260,34 @@ test('upsertCurrencyRate and upsertCurrencyRates write rates only for active cur
   assert.equal((read(db, 'res.currency', inactId).rate_ids ?? []).length, 0);
 });
 
+test('upsertCurrencyRate replaces all legacy duplicate rows for (currency, date, company) with one updated row', () => {
+  let db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(eur);
+
+  // Directly seed two duplicate rate rows in db (simulating legacy data)
+  const legacyRows = [
+    { date: '2026-11-19', rate: 0.90, company_id: 1 },
+    { date: '2026-11-19', rate: 0.91, company_id: 1 },
+    { date: '2026-11-15', rate: 0.88, company_id: 1 },
+  ];
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.currency': (db.records['res.currency'] ?? []).map((c) => (c.id === eur.id ? { ...c, rate_ids: legacyRows } : c)),
+    },
+  };
+
+  const updatedDb = upsertCurrencyRate(db, eur.id, { date: '2026-11-19', rate: 0.95, companyId: 1 });
+  const updatedEur = read(updatedDb, 'res.currency', eur.id);
+  const matching = (updatedEur.rate_ids ?? []).filter((r) => r.date === '2026-11-19' && r.company_id === 1);
+  assert.equal(matching.length, 1, 'Must collapse duplicates into exactly one row');
+  assert.equal(matching[0].rate, 0.95);
+  const unrelated = (updatedEur.rate_ids ?? []).filter((r) => r.date === '2026-11-15');
+  assert.equal(unrelated.length, 1, 'Must preserve unrelated rows');
+});
+
 // ---------------------------------------------------------------------------
 // 5. updateCompanyCurrencyRates and advanceExecutionDate
 // ---------------------------------------------------------------------------
@@ -267,6 +311,43 @@ test('updateCompanyCurrencyRates fetches rates and upserts for company', async (
   const row = eur.rate_ids.find((r) => r.date === '2026-11-19' && r.company_id === 1);
   assert.ok(row);
   assert.ok(row.rate > 0);
+});
+
+test('import rates when base is USD and company is EUR: conversionRate/rateAt give ECB cross rates', async () => {
+  let db = seed();
+  const { rateAt, conversionRate } = await import('../src/models/currency.js');
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(usd && eur);
+  const createdGbp = create(db, 'res.currency', { name: 'GBP', symbol: '£', active: true });
+  db = createdGbp.db;
+  const gbp = read(db, 'res.currency', createdGbp.id);
+  db = { ...db, settings: { ...db.settings, base_currency_id: usd.id } };
+
+  const comp = createCompany(db, { name: 'EUR Company', currency_id: eur.id });
+  db = comp.db;
+  const eurCompId = comp.id;
+
+  const res = await updateCompanyCurrencyRates(db, eurCompId, {
+    fetchFn: mockFetch(SAMPLE_ECB_XML),
+    date: '2026-11-18',
+  });
+  db = res.db;
+
+  const usdAfter = read(db, 'res.currency', usd.id);
+  const usdCompRow = (usdAfter.rate_ids ?? []).find((r) => r.company_id === eurCompId);
+  assert.equal(usdCompRow, undefined, 'Base currency USD must never have a rate row written');
+
+  assert.equal(rateAt(db, eur.id, '2026-11-18', eurCompId), 1);
+  const usdRateInEurComp = rateAt(db, usd.id, '2026-11-18', eurCompId);
+  assert.ok(Math.abs(usdRateInEurComp - 1.085) < 1e-6, `Expected ~1.085, got ${usdRateInEurComp}`);
+  const gbpRateInEurComp = rateAt(db, gbp.id, '2026-11-18', eurCompId);
+  assert.ok(Math.abs(gbpRateInEurComp - 0.8325) < 1e-6, `Expected ~0.8325, got ${gbpRateInEurComp}`);
+
+  // Test conversionRate gives ECB cross rates for USD and EUR documents
+  assert.equal(conversionRate(db, eur.id, eur.id, '2026-11-18', eurCompId), 1);
+  assert.ok(Math.abs(conversionRate(db, eur.id, usd.id, '2026-11-18', eurCompId) - 1.085) < 1e-6);
+  assert.ok(Math.abs(conversionRate(db, usd.id, eur.id, '2026-11-18', eurCompId) - 1 / 1.085) < 1e-6);
 });
 
 test('advanceExecutionDate advances date by interval unit', () => {
