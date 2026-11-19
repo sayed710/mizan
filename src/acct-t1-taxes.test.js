@@ -11,6 +11,7 @@ import { postMove } from './models/accounting.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { computeLineTaxes, defaultTaxRepartitionLines, fiscalPositionFor, lineTaxOf, lineUntaxed, taxSnapshot } from './models/taxes.js';
 import { createCompany, ensureMainCompany, interCompanyRules } from './models/company.js';
+import { cartTotals } from './models/shop.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -415,4 +416,15 @@ test('6. an inter-company purchase with a price-included division tax keeps the 
   assert.equal(line.price_unit, 125);
   assert.equal(Math.round(lineUntaxed(line) * 100) / 100, 100);
   assert.equal(Math.round(lineTaxOf(line) * 100) / 100, 25);
+});
+
+test('7. website carts use the same fallback fiscal position as sales orders', () => {
+  let db = seed();
+  const saleTax = db.records['account.tax'].find((t) => t.type_tax_use === 'sale' && Number(t.amount) === 14 && !t.price_include);
+  const fp = create(db, 'account.fiscal.position', { name: 'Any Country', auto_apply: true, sequence: -1 });
+  const mapped = create(fp.db, 'account.tax', { name: 'Mapped Zero', amount_type: 'percent', amount: 0, type_tax_use: 'sale', fiscal_position_ids: [fp.id], original_tax_ids: [saleTax.id] });
+  db = write(mapped.db, 'product', 2, { tax_id: saleTax.id });
+  const cart = cartTotals(db, [{ product_id: 2, qty: 1 }], { partnerCountry: 'Nowhere' });
+  assert.equal(cart.orderLines[0].tax_id, mapped.id);
+  assert.equal(cart.tax, 0);
 });

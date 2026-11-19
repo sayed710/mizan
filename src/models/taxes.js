@@ -245,6 +245,15 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
     const position = read(db, 'account.fiscal.position', p.property_account_position_id);
     if (!companyId || !position?.company_id || position.company_id === companyId) return p.property_account_position_id;
   }
+  return autoFiscalPosition(db, p, companyId);
+}
+
+/**
+ * The auto-applied fiscal position for an address ({ country, zip, vat }): a position for its country first, else a
+ * position without a country (zip-specific first). Also used for website visitors, who have no partner record yet.
+ */
+export function autoFiscalPosition(db, address, companyId = null) {
+  const p = address ?? {};
   const country = (p.country ?? '').trim().toLowerCase();
   const pZip = String(p.zip ?? '').trim();
   const isNumericZip = (s) => /^\d+$/.test(s);
