@@ -116,7 +116,7 @@ const idsFor = (rule) => {
   return parseLegacyRuleIds(rule?.ids) ?? [];
 };
 const emptyRuleArrays = () => Object.fromEntries(HORIZONTAL_RULE_KEYS.map((key) => [key, []]));
-function normalizeHorizontalGroupVals(vals) {
+export function normalizeHorizontalGroupVals(vals) {
   if (!vals || !Array.isArray(vals.rule_ids)) return vals;
   return {
     ...vals,
@@ -124,24 +124,26 @@ function normalizeHorizontalGroupVals(vals) {
       if (!rule || typeof rule !== 'object') return rule;
       const cfg = HORIZONTAL_GROUP_RULES[rule.field];
       if (!cfg) return rule;
-      const existing = rule[cfg.fieldKey];
       const raw = typeof rule.ids === 'string' ? rule.ids.trim() : '';
-      if ((!Array.isArray(existing) || !existing.length) && raw) {
-        const parsed = parseLegacyRuleIds(raw);
-        if (parsed) return { ...rule, [cfg.fieldKey]: parsed, ids: '' };
+      const parsed = parseLegacyRuleIds(raw);
+      if (parsed && parsed.length) {
+        const existing = Array.isArray(rule[cfg.fieldKey]) ? rule[cfg.fieldKey] : [];
+        const combined = [...new Set([...existing.map(Number), ...parsed])];
+        return { ...rule, [cfg.fieldKey]: combined, ids: '' };
       }
       return rule;
     }),
   };
 }
-function groupError(db, _before, group) {
+function groupError(db, before, group) {
   if (!read(db, 'res.company', group.company_id)) return 'Select an existing group company';
   if (!Array.isArray(group.rule_ids) || !group.rule_ids.length) return 'Add at least one horizontal group rule';
   for (const id of group.report_ids ?? []) {
     const report = read(db, 'account.report', id);
     if (!report || (report.company_id ?? 1) !== (group.company_id ?? 1)) return 'Reports must belong to the horizontal group company';
   }
-  for (const rule of group.rule_ids) {
+  for (let i = 0; i < group.rule_ids.length; i++) {
+    const rule = group.rule_ids[i];
     const cfg = HORIZONTAL_GROUP_RULES[rule?.field];
     if (!cfg) return 'Select partner, analytic account, journal, or company';
     if (HORIZONTAL_RULE_KEYS.some((key) => key !== cfg.fieldKey && Array.isArray(rule[key]) && rule[key].length)) {
@@ -154,14 +156,15 @@ function groupError(db, _before, group) {
     if (relIds != null && (!Array.isArray(relIds) || relIds.some((id) => !Number.isSafeInteger(id) || id < 1))) {
       return 'Rule IDs must identify records available to the group company';
     }
-    if (raw && Array.isArray(relIds) && relIds.length) {
-      const relSorted = [...new Set(relIds)].sort((a, b) => a - b);
-      const rawSorted = [...new Set(parsedRaw)].sort((a, b) => a - b);
-      if (JSON.stringify(relSorted) !== JSON.stringify(rawSorted)) return 'Rule IDs must match the selected grouping field';
-    }
+    const beforeRule = (rule.id && before?.rule_ids?.find((r) => r.id === rule.id))
+      ?? (before?.rule_ids?.[i]?.field === rule.field ? before.rule_ids[i] : null)
+      ?? before?.rule_ids?.find((r) => r.field === rule.field);
+    const beforeIds = new Set(beforeRule ? idsFor(beforeRule) : []);
     if (idsFor(rule).some((id) => {
       const record = read(db, cfg.model, id);
-      return !id || !record || record.active === false || (record.company_id && record.company_id !== (group.company_id ?? 1));
+      if (!id || !record || (record.company_id && record.company_id !== (group.company_id ?? 1))) return true;
+      if (record.active === false && !beforeIds.has(id)) return true;
+      return false;
     })) return 'Rule IDs must identify records available to the group company';
   }
   return null;
@@ -267,15 +270,17 @@ export function targetCompanyIds(db, report, group, options) {
   if (group) {
     const companyRules = (group.rule_ids ?? []).filter((r) => r.field === 'company');
     if (companyRules.length) {
-      if (Array.isArray(options?.companyIds) && options.companyIds.length) {
-        return options.companyIds.map(Number).filter((id) => allowedCompanyIds.has(id));
-      }
       const explicit = companyRules.flatMap((r) => idsFor(r)).filter((id) => allowedCompanyIds.has(id));
+      const baseCompanies = Array.isArray(options?.companyIds) && options.companyIds.length
+        ? options.companyIds.map(Number).filter((id) => allowedCompanyIds.has(id))
+        : options?.companyId != null && allowedCompanyIds.has(Number(options.companyId))
+          ? [Number(options.companyId)]
+          : allowedCompanies.map((c) => c.id);
       if (explicit.length) {
-        const withReport = allowedCompanyIds.has(report.company_id) ? [report.company_id, ...explicit] : explicit;
-        return [...new Set(withReport)];
+        const baseSet = new Set(baseCompanies);
+        return [...new Set(explicit.filter((id) => baseSet.has(id)))];
       }
-      return allowedCompanies.map((c) => c.id);
+      return baseCompanies;
     }
     return [report.company_id];
   }

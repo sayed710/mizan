@@ -181,7 +181,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             </label>
             <label className="inline-select">
               {t('Journals')}
-              <select aria-label={t('Journals')} multiple value={selectedJournalIds.length ? selectedJournalIds : ''} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
+              <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
                 {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
               </select>
             </label>

@@ -176,9 +176,10 @@ export function accountCashFlowActivity(db, account) {
  * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
  * equity and loans financing, everything else operating.
  */
-export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
+export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, docDb, unfilteredDb } = {}) {
   const targetCompany = company_id;
   const mode = reportReviewMode({ reviewMode, includeUnposted });
+  const documentsDb = docDb ?? unfilteredDb ?? db?.unfilteredDb ?? db;
   const cash = accountIds(db, 'asset_cash');
   const sum = (items) => round(balances(db, items.filter((l) => cash.has(l.account_id))).reduce((s, b) => s + b.balance, 0));
   const all = analyticMoveItems(journalItems(db, { company_id: targetCompany, reviewMode: mode }), analyticAccountIds);
@@ -188,15 +189,15 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
   const attributed = new Map();
   const byMove = new Map();
   for (const l of analyticMoveItems(journalItems(db, { from, to, company_id: targetCompany, reviewMode: mode }), analyticAccountIds)) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
-  const documents = search(db, 'account.move').filter((m) => m.state === 'posted'
+  const documents = search(documentsDb, 'account.move').filter((m) => m.state === 'posted'
     && (!targetCompany || (m.company_id ?? 1) === targetCompany)
     && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type));
   const documentSources = new Map(documents.map((document) => {
-    const allSources = cashFlowDocumentSources(db, document);
+    const allSources = cashFlowDocumentSources(documentsDb, document);
     const selectedLines = analyticAccountIds?.length
       ? analyticMoveItems(document.line_ids ?? [], analyticAccountIds)
       : (document.line_ids ?? []);
-    const selectedSources = selectedLines.map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
+    const selectedSources = selectedLines.map((line) => ({ line, account: read(documentsDb, 'account.account', line.account_id) }))
       .filter((source) => source.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(source.account.account_type));
     return [document.id, { all: allSources, selected: selectedSources }];
   }));
@@ -226,7 +227,7 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
           const denominator = cashFlowSourceTotal(source);
           if (!denominator) continue;
           for (const settlement of settlements) {
-            const available = Math.max(0, Math.abs(appliedValue(db, doc, settlement)) - (consumed.get(settlement) ?? 0));
+            const available = Math.max(0, Math.abs(appliedValue(documentsDb, doc, settlement)) - (consumed.get(settlement) ?? 0));
             const portion = Math.min(Math.abs(remaining), available) * Math.sign(amount);
             consumed.set(settlement, (consumed.get(settlement) ?? 0) + Math.abs(portion));
             for (const x of source) add(x.account, portion * netOf(x.line) / denominator, l);
@@ -240,10 +241,10 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
   // Reclassify realized exchange differences on invoice-linked payments with the cash settlement.
   for (const items of byMove.values()) {
     const moveId = items[0].move_id;
-    const original = read(db, 'account.move', moveId);
-    const payment = (db.records['account.payment'] ?? []).find((p) => p.move_id === moveId || (original?.reversed_entry_id && p.move_id === original.reversed_entry_id));
+    const original = read(documentsDb, 'account.move', moveId) ?? read(db, 'account.move', moveId);
+    const payment = (documentsDb.records['account.payment'] ?? db.records['account.payment'] ?? []).find((p) => p.move_id === moveId || (original?.reversed_entry_id && p.move_id === original.reversed_entry_id));
     if (!payment?.invoice_id) continue;
-    const doc = read(db, 'account.move', payment.invoice_id);
+    const doc = read(documentsDb, 'account.move', payment.invoice_id);
     const settlement = (doc?.payments ?? []).find((p) => p.move_id === payment.move_id);
     if (!settlement) continue;
     const source = cashFlowSelectedSources(documentSources.get(doc.id), analyticAccountIds);
@@ -252,10 +253,10 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
     const cashNet = items.filter((l) => cash.has(l.account_id)).reduce((sum, l) => sum + netOf(l), 0);
     if (!denominator || !fullDenominator || !cashNet) continue;
     const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
-    const delta = round((toCompany(db, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(db, doc, settlement)) * Math.sign(cashNet) * share);
+    const delta = round((toCompany(documentsDb, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(documentsDb, doc, settlement)) * Math.sign(cashNet) * share);
     if (!delta) continue;
-    const counterpartAccounts = new Set((doc.line_ids ?? []).filter((line) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', line.account_id)?.account_type)).map((line) => line.account_id));
-    const fxItems = items.filter((line) => !cash.has(line.account_id) && !counterpartAccounts.has(line.account_id)).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }));
+    const counterpartAccounts = new Set((doc.line_ids ?? []).filter((line) => ['asset_receivable', 'liability_payable'].includes(read(documentsDb, 'account.account', line.account_id)?.account_type)).map((line) => line.account_id));
+    const fxItems = items.filter((line) => !cash.has(line.account_id) && !counterpartAccounts.has(line.account_id)).map((line) => ({ line, account: read(documentsDb, 'account.account', line.account_id) }));
     // The exchange difference is the payment entry's single line that is neither cash nor the invoice counterpart; otherwise it stays unattributed.
     if (fxItems.length !== 1 || !fxItems[0].account) continue;
     const fxAmount = fxItems.reduce((sum, x) => sum - netOf(x.line), 0);

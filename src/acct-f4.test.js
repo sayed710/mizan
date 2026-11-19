@@ -7,12 +7,14 @@ import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { accountId, journalId, postEntry } from './models/ledger.js';
-import { today } from './models/common.js';
-import { configurableReport } from './models/configurableReports.js';
+import { addDays, today } from './models/common.js';
+import { payMove, postMove } from './models/accounting.js';
+import { configurableReport, normalizeHorizontalGroupVals } from './models/configurableReports.js';
 import { findStatementReport } from './models/statementReports.js';
 import { cashFlow, executiveSummary, reportReviewMode, trialBalance } from './models/reports.js';
 import { applyDiff, diffDb } from './sync.js';
-import { balanceAnalyticColumns, periodsFor, pnlAnalyticColumns } from './views/reportCompare.js';
+import { balanceAnalyticColumns, cashflowColumns, periodsFor, pnlAnalyticColumns } from './views/reportCompare.js';
+import { migrate } from './migrations.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
@@ -465,5 +467,289 @@ test('FIN-12: horizontal groups store real record ids validated against chosen m
     }
   } finally {
     globalThis.localStorage = prevStorage;
+  }
+});
+
+test('Qodo 1: targetCompanyIds with explicit company rule and Company=all only shows explicit company, no Others from 1 or 3', () => {
+  let db = seed();
+  const date = `${today().slice(0, 4)}-06-15`;
+  const period = { from: `${today().slice(0, 4)}-01-01`, to: `${today().slice(0, 4)}-12-31` };
+
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch Co2' });
+  db = co2.db;
+  const co3 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch Co3' });
+  db = co3.db;
+
+  const co2Journal = search(db, 'account.journal').find((j) => j.company_id === co2.id && j.type === 'general')
+    ?? search(db, 'account.journal').find((j) => j.company_id === co2.id);
+  const co3Journal = search(db, 'account.journal').find((j) => j.company_id === co3.id && j.type === 'general')
+    ?? search(db, 'account.journal').find((j) => j.company_id === co3.id);
+
+  const co2Cash = create(db, 'account.account', { code: '101402', name: 'Co2 Cash', account_type: 'asset_cash', company_id: co2.id });
+  db = co2Cash.db;
+  const co2Inc = create(db, 'account.account', { code: '400002', name: 'Co2 Income', account_type: 'income', company_id: co2.id });
+  db = co2Inc.db;
+
+  const co3Cash = create(db, 'account.account', { code: '101403', name: 'Co3 Cash', account_type: 'asset_cash', company_id: co3.id });
+  db = co3Cash.db;
+  const co3Inc = create(db, 'account.account', { code: '400003', name: 'Co3 Income', account_type: 'income', company_id: co3.id });
+  db = co3Inc.db;
+
+  // Post entry in Co1 (100)
+  db = postEntry(db, {
+    journal: 'MISC', company: 1, date,
+    lines: [{ account: '101401', debit: 100 }, { account: '400000', credit: 100 }],
+  }).db;
+  // Post entry in Co2 (200)
+  db = postEntry(db, {
+    journal: co2Journal.id, company: co2.id, date,
+    lines: [{ account_id: co2Cash.id, debit: 200 }, { account_id: co2Inc.id, credit: 200 }],
+  }).db;
+  // Post entry in Co3 (300)
+  db = postEntry(db, {
+    journal: co3Journal.id, company: co3.id, date,
+    lines: [{ account_id: co3Cash.id, debit: 300 }, { account_id: co3Inc.id, credit: 300 }],
+  }).db;
+
+  // 3 allowed companies
+  db = { ...db, settings: { ...db.settings, current_company_id: 1, allowed_company_ids: [1, co2.id, co3.id] } };
+
+  // Group lists ONLY company 2
+  const group = create(db, 'account.report.horizontal.group', {
+    name: 'Only Co2',
+    company_id: 1,
+    rule_ids: [{ field: 'company', company_ids: [co2.id] }],
+  });
+  db = group.db;
+  const groupRec = read(db, 'account.report.horizontal.group', group.id);
+  const pnlRep = findStatementReport(db, 'pnl', 1);
+
+  // Company=all passes companyIds = [1, co2.id, co3.id]
+  const res = configurableReport(db, pnlRep, period, groupRec, { companyIds: [1, co2.id, co3.id] });
+
+  // Only company 2's amounts appear, no Others amount from 1 or 3
+  assert.deepEqual(res.buckets.map((b) => b.label), ['Branch Co2', 'Others']);
+  assert.deepEqual(res.rows.find((r) => r.code === 'NET').values, [200, 0]);
+});
+
+test('Qodo 2: Cash flow with a bank journal filter resolves invoice income accounts from unfiltered company db', async () => {
+  let db = seed();
+  const date = addDays(today(), -2);
+  const period = { from: addDays(today(), -7), to: addDays(today(), 7) };
+
+  // Customer invoice in sales journal (INV)
+  const { db: withInv, id: invId } = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: 5, invoice_date: date, company_id: 1,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 500 }],
+  });
+  db = postMove(withInv, invId);
+  const invoice = read(db, 'account.move', invId);
+  assert.equal(invoice.state, 'posted');
+
+  // Bank payment in Bank journal (BNK)
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  assert.ok(bankJournal);
+  db = payMove(db, invId, 500, date);
+
+  // Bank-filtered db (as Reports.jsx builds when targetJournalIds = [bankJournal.id])
+  const bankFilteredDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': (db.records['account.move'] ?? []).filter((m) => m.journal_id === bankJournal.id),
+    },
+  };
+
+  // With docDb passed (or through cashflowColumns), invoice is resolved and classified under income account (400000)
+  const cf = cashFlow(bankFilteredDb, { ...period, docDb: db });
+  assert.ok(cf.lines.some((l) => l.account.code === '400000'), 'movement is classified under invoice income account');
+  assert.ok(!cf.lines.some((l) => l.account.account_type === 'asset_receivable'), 'receivable account is not used when invoice is resolved');
+
+  const cols = cashflowColumns(bankFilteredDb, [period], { docDb: db });
+  const opSection = cols.sections.find((s) => s.title === 'Operating Activities');
+  assert.ok(opSection.rows.some((row) => row.account.code === '400000'), 'comparison path resolves invoice income account');
+
+  // Also verify UI integration in Reports.jsx (ReportPage for cashflow)
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { commit, initStore } = await import('./store.js');
+  await initStore();
+  await React.act(async () => commit(db));
+
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'cashflow' } })));
+    const journalSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Journals');
+    assert.ok(journalSelect);
+
+    // Select only the bank journal
+    await React.act(async () => props(journalSelect).onChange({
+      target: {
+        selectedOptions: [{ value: String(bankJournal.id) }],
+      },
+    }));
+
+    // The rendered Cash Flow table must show the invoice income account (400000)
+    assert.ok(textOf(host).includes('400000'), 'Cash Flow with bank journal filter renders invoice income account 400000');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Qodo 3: Legacy horizontal-group rule migration and normalization moves ids into relational many2many', () => {
+  // 1) normalizeHorizontalGroupVals unions parsed ids into field many2many and clears ids
+  const normalized = normalizeHorizontalGroupVals({
+    rule_ids: [
+      { field: 'partner', partner_ids: [1], ids: '2, 3' },
+      { field: 'journal', ids: '10' },
+      { field: 'analytic', ids: '' },
+    ],
+  });
+  assert.deepEqual(normalized.rule_ids[0].partner_ids, [1, 2, 3]);
+  assert.equal(normalized.rule_ids[0].ids, '');
+  assert.deepEqual(normalized.rule_ids[1].journal_ids, [10]);
+  assert.equal(normalized.rule_ids[1].ids, '');
+
+  // 2) Migration 59 upgrades legacy stored horizontal groups
+  const legacyDb = {
+    ...seed(),
+    schema_version: 58,
+    records: {
+      ...seed().records,
+      'account.report.horizontal.group': [
+        {
+          id: 991,
+          name: 'Legacy Group',
+          company_id: 1,
+          rule_ids: [
+            { field: 'partner', ids: '1, 2' },
+            { field: 'journal', journal_ids: [1], ids: '2' },
+          ],
+        },
+      ],
+    },
+  };
+  const migrated = migrate(legacyDb);
+  assert.equal(migrated.schema_version, 59);
+  const upgradedGroup = migrated.records['account.report.horizontal.group'].find((g) => g.id === 991);
+  assert.deepEqual(upgradedGroup.rule_ids[0].partner_ids, [1, 2]);
+  assert.equal(upgradedGroup.rule_ids[0].ids, '');
+  assert.deepEqual(upgradedGroup.rule_ids[1].journal_ids, [1, 2]);
+  assert.equal(upgradedGroup.rule_ids[1].ids, '');
+});
+
+test('Qodo 4: groupError allows saving groups with existing archived records but blocks newly added archived records', () => {
+  let db = seed();
+  // Partner 5 is active initially
+  const p5 = read(db, 'res.partner', 5);
+  assert.ok(p5 && p5.active !== false);
+  const p6 = read(db, 'res.partner', 6);
+  assert.ok(p6 && p6.active !== false);
+
+  // Create a group with partner 5
+  const group = create(db, 'account.report.horizontal.group', {
+    name: 'Active Partners Group',
+    company_id: 1,
+    rule_ids: [{ field: 'partner', partner_ids: [5] }],
+  });
+  db = group.db;
+
+  // Archive partner 5
+  db = write(db, 'res.partner', 5, { active: false });
+  assert.equal(read(db, 'res.partner', 5).active, false);
+
+  // Updating the group (e.g. changing its name) must NOT fail even though partner 5 is archived
+  assert.doesNotThrow(() => {
+    db = write(db, 'account.report.horizontal.group', group.id, { name: 'Renamed Group' });
+  });
+
+  // Verify through diffDb + applyDiff (server-side diff guard verification)
+  const modifiedGroup = { ...read(db, 'account.report.horizontal.group', group.id), name: 'Diff Renamed' };
+  const targetDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.report.horizontal.group': db.records['account.report.horizontal.group'].map((g) => (g.id === group.id ? modifiedGroup : g)),
+    },
+  };
+  const diff = diffDb(db, targetDb);
+  assert.doesNotThrow(() => {
+    applyDiff(db, diff);
+  });
+
+  // Archive partner 6
+  db = write(db, 'res.partner', 6, { active: false });
+
+  // Adding archived partner 6 to the existing rule MUST be blocked
+  assert.throws(() => {
+    write(db, 'account.report.horizontal.group', group.id, {
+      rule_ids: [{ field: 'partner', partner_ids: [5, 6] }],
+    });
+  }, /Rule IDs must identify records available to the group company/);
+
+  // Creating a new group with archived partner 6 MUST be blocked
+  assert.throws(() => {
+    create(db, 'account.report.horizontal.group', {
+      name: 'New With Archived',
+      company_id: 1,
+      rule_ids: [{ field: 'partner', partner_ids: [6] }],
+    });
+  }, /Rule IDs must identify records available to the group company/);
+});
+
+test('Qodo 5: Multi-select Journals dropdowns pass value as string array without React warning', async () => {
+  const db = seed();
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { commit, initStore } = await import('./store.js');
+  await initStore();
+  await React.act(async () => commit(db));
+
+  const warnings = [];
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  console.error = (...args) => warnings.push(args.join(' '));
+
+  try {
+    // 1) ConfigurableReportPage
+    const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+    const host1 = makeEl('div');
+    host1.ownerDocument = globalThis.document;
+    const root1 = createRoot(host1);
+    try {
+      await React.act(async () => root1.render(React.createElement(ConfigurableReportPage, { statementKind: 'pnl', title: 'Profit and Loss' })));
+      const journalSel1 = find(host1, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Journals');
+      assert.ok(journalSel1);
+      assert.deepEqual(props(journalSel1).value, [], 'ConfigurableReport empty journals selection value is string array []');
+    } finally {
+      await React.act(async () => root1.unmount());
+    }
+
+    // 2) Reports.jsx (ReportPage)
+    const { Reports } = await import('./views/Reports.jsx');
+    const host2 = makeEl('div');
+    host2.ownerDocument = globalThis.document;
+    const root2 = createRoot(host2);
+    try {
+      await React.act(async () => root2.render(React.createElement(Reports, { leaf: { report: 'pnl' } })));
+      const journalSel2 = find(host2, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Journals');
+      assert.ok(journalSel2);
+      assert.deepEqual(props(journalSel2).value, [], 'Reports empty journals selection value is string array []');
+    } finally {
+      await React.act(async () => root2.unmount());
+    }
+
+    // Verify NO React warning about "The `value` prop supplied to <select> must be an array"
+    const selectWarnings = warnings.filter((w) => w.includes('The `value` prop supplied to <select> must be an array'));
+    assert.equal(selectWarnings.length, 0, 'No React warning for select multiple value');
+  } finally {
+    console.warn = origWarn;
+    console.error = origError;
   }
 });

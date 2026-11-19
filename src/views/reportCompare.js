@@ -176,6 +176,6 @@ const CASHFLOW_TOTALS = [
 ];
 
 /** Cash flow statement per calendar period, activity lines aligned by account. */
-export function cashflowColumns(db, periods, { analyticAccountIds, company_id, includeUnposted, reviewMode } = {}) {
-  return columns(periods, periods.map((p) => cashFlow(db, { ...p, company_id, analyticAccountIds, includeUnposted, reviewMode })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS);
+export function cashflowColumns(db, periods, { analyticAccountIds, company_id, includeUnposted, reviewMode, docDb, unfilteredDb } = {}) {
+  return columns(periods, periods.map((p) => cashFlow(db, { ...p, company_id, analyticAccountIds, includeUnposted, reviewMode, docDb, unfilteredDb })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS);
 }

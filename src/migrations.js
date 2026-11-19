@@ -1658,6 +1658,44 @@ MIGRATIONS.push({ version: 58, name: 'invoice-line-analytic-account-to-distribut
   return changed ? { ...db, records: { ...db.records, 'account.move': next } } : db;
 } });
 
+// Horizontal group rules previously edited legacy comma-separated `ids`.
+// Migrate stored rules by moving non-empty parsed IDs into the respective relational field (unioning with existing values) and clearing `ids`.
+MIGRATIONS.push({ version: 59, name: 'horizontal-group-rules-to-relational-ids', up: (db) => {
+  const groups = db?.records?.['account.report.horizontal.group'];
+  if (!Array.isArray(groups)) return db;
+  let changed = false;
+  const fieldKeyFor = {
+    partner: 'partner_ids',
+    analytic: 'analytic_ids',
+    journal: 'journal_ids',
+    company: 'company_ids',
+  };
+  const next = groups.map((group) => {
+    if (!group || !Array.isArray(group.rule_ids)) return group;
+    let groupChanged = false;
+    const nextRules = group.rule_ids.map((rule) => {
+      if (!rule || typeof rule !== 'object') return rule;
+      const key = fieldKeyFor[rule.field];
+      if (!key) return rule;
+      const raw = typeof rule.ids === 'string' ? rule.ids.trim() : '';
+      if (!raw) return rule;
+      if (!/^\d+(?:\s*,\s*\d+)*$/.test(raw)) return rule;
+      const parsed = [...new Set(raw.split(',').map((id) => Number(id.trim())))].filter((id) => Number.isSafeInteger(id) && id > 0);
+      if (!parsed.length) return rule;
+      groupChanged = true;
+      const existing = Array.isArray(rule[key]) ? rule[key] : [];
+      const combined = [...new Set([...existing.map(Number), ...parsed])];
+      return { ...rule, [key]: combined, ids: '' };
+    });
+    if (groupChanged) {
+      changed = true;
+      return { ...group, rule_ids: nextRules };
+    }
+    return group;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.report.horizontal.group': next } } : db;
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

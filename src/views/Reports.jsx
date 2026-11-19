@@ -682,6 +682,7 @@ function ReportPage({ leaf }) {
   const db = targetJournalIds
     ? {
         ...companyDb,
+        unfilteredDb: companyDb,
         records: {
           ...companyDb.records,
           'account.move': (companyDb.records['account.move'] ?? []).filter((move) =>
@@ -709,7 +710,12 @@ function ReportPage({ leaf }) {
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
-  const effectivePeriod = showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period;
+  const effectivePeriod = {
+    ...period,
+    ...(showUnpostedOption && includeUnposted ? { reviewMode: 'all' } : {}),
+    docDb: companyDb,
+    unfilteredDb: companyDb,
+  };
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const horizontalGroups = [];
@@ -719,7 +725,7 @@ function ReportPage({ leaf }) {
   const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner', { includeArchived: true }).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const data = periods && leaf.report === 'cashflow'
     ? cashflowColumns(db, periods, {
-      analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
+      analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted, docDb: companyDb, unfilteredDb: companyDb,
     })
     : null;
   const tableRef = useRef(null);
@@ -771,7 +777,7 @@ function ReportPage({ leaf }) {
           </select>
         </label>}
         {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Journals')}
-          <select aria-label={t('Journals')} multiple value={selectedJournalIds.length ? selectedJournalIds : ''} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
+          <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
