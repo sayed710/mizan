@@ -2,7 +2,7 @@ import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
-import { importStatement, importStatementLines, parseCamt, parseOfx, parseQif } from './models/statements.js';
+import { importStatement, importStatementLines, parseCamt, parseOfx, parseQif, qifAmount } from './models/statements.js';
 import { seed } from './seed.js';
 
 test('BANK-9: CAMT.053 reversal keeps the booked direction and takes the counterpart of the original operation', () => {
@@ -175,4 +175,93 @@ test('the journal own bank account on synced lines does not set the company as p
   const line = search(next, 'account.bank.statement.line').find((l) => l.unique_import_id === 'SYNC-1');
   assert.ok(line);
   assert.equal(line.partner_id ?? null, null);
+});
+
+test('QIF amounts read both separator orders and reject unreadable amounts', () => {
+  // Test required cases: 1,234.56 / 1.234,56 / 1234,5 / 1,234
+  assert.equal(qifAmount('1,234.56'), 1234.56);
+  assert.equal(qifAmount('1.234,56'), 1234.56);
+  assert.equal(qifAmount('1234,5'), 1234.5);
+  assert.equal(qifAmount('1,234'), 1234);
+  assert.equal(qifAmount('1,234,567'), 1234567);
+
+  // Ambiguous amounts must throw a clear error
+  assert.throws(() => qifAmount('1.2.3'), /ambiguous|invalid/i);
+  assert.throws(() => qifAmount('1,2,3'), /ambiguous|invalid/i);
+});
+
+test('each OFX statement response keeps its own currency, so a later response in another currency is rejected', () => {
+  const multiOfx = `OFXHEADER:100
+<OFX><BANKMSGSRSV1>
+<STMTTRNRS><STMTRS>
+<CURDEF>USD
+<BANKTRANLIST>
+<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260501<TRNAMT>100.00<FITID>TX-USD-1<NAME>USD Client</STMTTRN>
+</BANKTRANLIST></STMTRS></STMTTRNRS>
+<STMTTRNRS><STMTRS>
+<CURDEF>EUR
+<BANKTRANLIST>
+<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260502<TRNAMT>200.00<FITID>TX-EUR-1<NAME>EUR Client</STMTTRN>
+</BANKTRANLIST></STMTRS></STMTTRNRS>
+</BANKMSGSRSV1></OFX>`;
+
+  const parsed = parseOfx(multiOfx);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].currency, 'USD');
+  assert.equal(parsed[1].currency, 'EUR');
+
+  const initial = seed();
+  const bankJournal = search(initial, 'account.journal').find((j) => j.type === 'bank'); // USD journal
+  assert.throws(
+    () => importStatement(initial, 'multi.ofx', multiOfx, { journal_id: bankJournal.id }),
+    /Statement currency does not match journal currency USD/
+  );
+});
+
+test('QIF date order is decided once per file and invalid or contradictory dates are rejected', () => {
+  // Day-first file (31 > 12 on first part indicates day-first; 02/06 must be June 2)
+  const dayFirstQif = `!Type:Bank
+D31/05/2026
+T100
+PTest Day First 1
+^
+D02/06/2026
+T200
+PTest Day First 2
+^`;
+  const parsedDayFirst = parseQif(dayFirstQif);
+  assert.deepEqual(parsedDayFirst.map((l) => l.date), ['2026-05-31', '2026-06-02']);
+
+  // Month-first file (31 > 12 on second part indicates month-first; 06/02 must be June 2)
+  const monthFirstQif = `!Type:Bank
+D05/31/2026
+T100
+PTest Month First 1
+^
+D06/02/2026
+T200
+PTest Month First 2
+^`;
+  const parsedMonthFirst = parseQif(monthFirstQif);
+  assert.deepEqual(parsedMonthFirst.map((l) => l.date), ['2026-05-31', '2026-06-02']);
+
+  // Contradictory file (first part > 12 on one date, second part > 12 on another)
+  const contradictoryQif = `!Type:Bank
+D31/05/2026
+T100
+PTest 1
+^
+D05/31/2026
+T200
+PTest 2
+^`;
+  assert.throws(() => parseQif(contradictoryQif), /contradictory|ambiguous/i);
+
+  // Invalid calendar date (April only has 30 days)
+  const invalidDateQif = `!Type:Bank
+D31/04/2026
+T100
+PTest Invalid Date
+^`;
+  assert.throws(() => parseQif(invalidDateQif), /invalid.*date/i);
 });

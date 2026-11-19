@@ -3,34 +3,124 @@ import { create, read, search } from '../orm.js';
 import { isLiquidityJournal, journalCompany } from './ledger.js';
 import { sanitizeAccountNumber } from './partnerbank.js';
 
-const qifDate = (v) => {
-  if (!v) return null;
-  const s = String(v).trim();
-  const iso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`;
-  const mdy = s.match(/^(\d{1,2})[-/.'](\d{1,2})[-/.'](\d{2,4})$/);
-  if (mdy) {
-    let year = mdy[3];
-    if (year.length === 2) {
-      year = Number(year) < 70 ? `20${year}` : `19${year}`;
-    }
-    return `${year}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`;
-  }
-  return null;
+const isValidCalendarDate = (y, m, d) => {
+  if (!Number.isSafeInteger(y) || y < 1000 || y > 9999) return false;
+  if (!Number.isSafeInteger(m) || m < 1 || m > 12) return false;
+  if (!Number.isSafeInteger(d) || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && (dt.getUTCMonth() + 1) === m && dt.getUTCDate() === d;
 };
 
-const qifAmount = (v) => {
-  if (!v) return NaN;
+const qifDate = (v, dayFirst = false) => {
+  if (!v) return null;
+  const s = String(v).trim();
+  let y, m, d;
+  const iso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (iso) {
+    y = Number(iso[1]);
+    m = Number(iso[2]);
+    d = Number(iso[3]);
+  } else {
+    const mdy = s.match(/^(\d{1,2})[-/.'](\d{1,2})[-/.'](\d{2,4})$/);
+    if (!mdy) throw new Error('Invalid calendar date in QIF file');
+    const yr = mdy[3].length === 2 ? (Number(mdy[3]) < 70 ? 2000 + Number(mdy[3]) : 1900 + Number(mdy[3])) : Number(mdy[3]);
+    y = yr;
+    if (dayFirst) {
+      d = Number(mdy[1]);
+      m = Number(mdy[2]);
+    } else {
+      m = Number(mdy[1]);
+      d = Number(mdy[2]);
+    }
+  }
+  if (!isValidCalendarDate(y, m, d)) {
+    throw new Error('Invalid calendar date in QIF file');
+  }
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+};
+
+export const qifAmount = (v) => {
+  if (v == null || v === '') throw new Error('Ambiguous or invalid QIF amount');
   const s = String(v).trim().replace(/\s+/g, '');
-  // Commas are thousands separators beside a decimal point or in groups of three (1,234), else the decimal mark.
-  if (s.includes('.') || /^-?\d{1,3}(,\d{3})+$/.test(s)) return Number(s.replace(/,/g, ''));
-  return Number(s.replace(',', '.'));
+  if (!s) throw new Error('Ambiguous or invalid QIF amount');
+
+  const hasComma = s.includes(',');
+  const hasDot = s.includes('.');
+
+  let normalized;
+  if (hasComma && hasDot) {
+    const lastComma = s.lastIndexOf(',');
+    const lastDot = s.lastIndexOf('.');
+    if (lastDot > lastComma) {
+      // rightmost is dot (decimal mark)
+      const beforeDot = s.slice(0, lastDot);
+      const afterDot = s.slice(lastDot + 1);
+      if (beforeDot.includes('.') || afterDot.includes('.') || afterDot.includes(',')) {
+        throw new Error('Ambiguous or invalid QIF amount');
+      }
+      normalized = beforeDot.replace(/,/g, '') + '.' + afterDot;
+    } else {
+      // rightmost is comma (decimal mark)
+      const beforeComma = s.slice(0, lastComma);
+      const afterComma = s.slice(lastComma + 1);
+      if (beforeComma.includes(',') || afterComma.includes(',') || afterComma.includes('.')) {
+        throw new Error('Ambiguous or invalid QIF amount');
+      }
+      normalized = beforeComma.replace(/\./g, '') + '.' + afterComma;
+    }
+  } else if (hasComma) {
+    // Lone comma followed by exactly three digits in groups (1,234 or 1,234,567) is thousands, otherwise lone comma is decimal mark.
+    if (/^[+-]?\d{1,3}(,\d{3})+$/.test(s)) {
+      normalized = s.replace(/,/g, '');
+    } else {
+      const parts = s.split(',');
+      if (parts.length !== 2) throw new Error('Ambiguous or invalid QIF amount');
+      normalized = parts[0] + '.' + parts[1];
+    }
+  } else if (hasDot) {
+    const parts = s.split('.');
+    if (parts.length !== 2) throw new Error('Ambiguous or invalid QIF amount');
+    normalized = s;
+  } else {
+    normalized = s;
+  }
+
+  const num = Number(normalized);
+  if (!Number.isFinite(num)) {
+    throw new Error('Ambiguous or invalid QIF amount');
+  }
+  return num;
 };
 
 /** Transactions of a QIF (Quicken Interchange Format) file as { date, amount, payment_ref, unique_import_id }, or with details. */
 export function parseQif(text, { details = false } = {}) {
   const lines = [];
   const entries = String(text).split(/\r?\n\s*\^\s*(?:\r?\n|$)/);
+
+  let hasDayFirst = false;
+  let hasMonthFirst = false;
+  for (const entry of entries) {
+    for (const raw of entry.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (line.startsWith('D')) {
+        const s = line.slice(1).trim();
+        if (!/^\d{4}[-/]/.test(s)) {
+          const mdy = s.match(/^(\d{1,2})[-/.'](\d{1,2})[-/.']\d{2,4}$/);
+          if (mdy) {
+            const p1 = Number(mdy[1]);
+            const p2 = Number(mdy[2]);
+            if (p1 > 12) hasDayFirst = true;
+            if (p2 > 12) hasMonthFirst = true;
+          }
+        }
+      }
+    }
+  }
+  if (hasDayFirst && hasMonthFirst) {
+    throw new Error('Contradictory date formats in QIF file');
+  }
+  const dayFirst = hasDayFirst;
+
   for (const entry of entries) {
     const rawLines = entry.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     let date = null;
@@ -42,7 +132,7 @@ export function parseQif(text, { details = false } = {}) {
       if (line.startsWith('!')) continue;
       const code = line[0];
       const val = line.slice(1).trim();
-      if (code === 'D') date = qifDate(val);
+      if (code === 'D') date = qifDate(val, dayFirst);
       else if (code === 'T' || (code === 'U' && Number.isNaN(amount))) amount = qifAmount(val);
       else if (code === 'P') payee = val;
       else if (code === 'M') memo = val;
@@ -70,27 +160,33 @@ const ofxTag = (block, tag) => block.match(new RegExp(`<${tag}>([^<\\r\\n]*)`, '
 
 /** Transactions of an OFX/QFX file as { date, amount, payment_ref, unique_import_id }, or with metadata details. */
 export function parseOfx(text, { details = false } = {}) {
-  const fileCurrency = ofxTag(text, 'CURDEF');
-  return [...String(text).matchAll(/<STMTTRN>([\s\S]*?)(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>)/gi)].map(([, b]) => {
-    const memo = ofxTag(b, 'MEMO');
-    const account_number = ofxTag(b, 'ACCTID');
-    const ref = ofxTag(b, 'REFNUM') || ofxTag(b, 'CHECKNUM');
-    const transaction_type = ofxTag(b, 'TRNTYPE');
-    const currency = ofxTag(b, 'CURDEF') || fileCurrency || null;
-    return {
-      date: ofxDate(ofxTag(b, 'DTPOSTED')),
-      ...(currency ? { currency } : {}),
-      amount: Number(ofxTag(b, 'TRNAMT').replace(',', '.')),
-      payment_ref: [ofxTag(b, 'NAME'), memo].filter(Boolean).join(' - '),
-      unique_import_id: ofxTag(b, 'FITID') || null,
-      ...(details ? {
-        ...(account_number ? { account_number } : {}),
-        ...(memo ? { narration: memo } : {}),
-        ...(ref ? { ref } : {}),
-        ...(transaction_type ? { transaction_type } : {}),
-      } : {}),
-    };
-  }).filter((l) => l.date && Number.isFinite(l.amount));
+  const fileCurrency = ofxTag(text, 'CURDEF') || null;
+  const str = String(text);
+  const responseBlocks = [...str.matchAll(/<(?:STMTRS|CCSTMTRS)\b([\s\S]*?)(?=<\/(?:STMTRS|CCSTMTRS)>|<(?:STMTRS|CCSTMTRS)\b|<\/(?:STMTTRNRS|CCSTMTTRNRS|BANKMSGSRSV1|CREDITCARDMSGSRSV1)>|$)/gi)].map((m) => m[1]);
+  const blocks = responseBlocks.length ? responseBlocks : [str];
+  return blocks.flatMap((block) => {
+    const blockCurrency = ofxTag(block, 'CURDEF') || fileCurrency;
+    return [...block.matchAll(/<STMTTRN>([\s\S]*?)(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>|<\/CCBANKTRANLIST>|$)/gi)].map(([, b]) => {
+      const memo = ofxTag(b, 'MEMO');
+      const account_number = ofxTag(b, 'ACCTID');
+      const ref = ofxTag(b, 'REFNUM') || ofxTag(b, 'CHECKNUM');
+      const transaction_type = ofxTag(b, 'TRNTYPE');
+      const currency = ofxTag(b, 'CURDEF') || blockCurrency || null;
+      return {
+        date: ofxDate(ofxTag(b, 'DTPOSTED')),
+        ...(currency ? { currency } : {}),
+        amount: Number(ofxTag(b, 'TRNAMT').replace(',', '.')),
+        payment_ref: [ofxTag(b, 'NAME'), memo].filter(Boolean).join(' - '),
+        unique_import_id: ofxTag(b, 'FITID') || null,
+        ...(details ? {
+          ...(account_number ? { account_number } : {}),
+          ...(memo ? { narration: memo } : {}),
+          ...(ref ? { ref } : {}),
+          ...(transaction_type ? { transaction_type } : {}),
+        } : {}),
+      };
+    }).filter((l) => l.date && Number.isFinite(l.amount));
+  });
 }
 
 const xmlTag = (block, path) => path.reduce((acc, tag) => acc?.match(new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)</(?:\\w+:)?${tag}>`))?.[1], block)?.trim() ?? '';
