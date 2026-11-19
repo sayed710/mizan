@@ -112,7 +112,7 @@ export function reconcileWith(db, line, moveId) {
   }
   const paid = payMove(current, moveId, value, date, { journalId: line.journal_id, statementLineId: line.id, ...(suspense ? { liquidityAccountId: suspense } : { directBank: true }) });
   const paymentMove = read(paid, 'account.move', moveId).payments.at(-1).move_id;
-  const writeoff = hasWriteoff ? settleWriteoff(paid, moveId, writeoffValue, statementCompanyAmount(db, line, Number(line.writeoff_amount)), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id }) : null;
+  const writeoff = hasWriteoff ? settleWriteoff(paid, moveId, writeoffValue, statementCompanyAmount(db, line, Number(line.writeoff_amount)), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id, analyticDistribution: line.writeoff_analytic_distribution ?? null }) : null;
   return write(writeoff?.db ?? paid, 'account.bank.statement.line', line.id, { state: remaining ? 'to_check' : 'reconciled', move_id: moveId, payment_move_id: paymentMove, writeoff_move_id: writeoff?.id ?? null, bank_move_id: bankMoveId ?? paymentMove, open_amount: remaining, allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }], partner_id: line.partner_id ?? move.partner_id });
 }
 
@@ -800,6 +800,7 @@ export const bankModels = {
       payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       writeoff_account_id: { type: 'many2one', relation: 'account.account', label: 'Write-off Account', domain: (account, record) => eligibleCounterpart(account, record?.company_id ?? 1) },
       writeoff_label: { type: 'char', label: 'Write-off Label' },
+      writeoff_analytic_distribution: { type: 'distribution', label: 'Write-off Analytic Distribution', hidden: true },
       writeoff_amount: { type: 'monetary', label: 'Write-off Amount' },
       writeoff_move_id: { type: 'many2one', relation: 'account.move', label: 'Write-off Entry', readonly: true },
       bank_move_id: { type: 'many2one', relation: 'account.move', label: 'Bank Entry', readonly: true, optional: 'hide' },

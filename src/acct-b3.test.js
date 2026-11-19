@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read, search } from './orm.js';
 import { models } from './models/index.js';
 import { accountId } from './models/ledger.js';
+import { postMove } from './models/accounting.js';
 import { applyRule, autoReconcile } from './models/reconcile.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
@@ -164,4 +165,40 @@ test('BANK-15 audit analysis: rule_type in Odoo 20 is hidden/readonly with autom
   assert.equal(def.form.statusbar, 'trigger');
   assert.ok(def.form.buttons.some((b) => b.label === 'Automate' && b.vals.trigger === 'auto_reconcile'));
   assert.ok(def.form.buttons.some((b) => b.label === 'Set Manual' && b.vals.trigger === 'manual'));
+});
+
+test('an underpayment written off within a matching rule tolerance keeps the counterpart analytic distribution', () => {
+  const base = seed();
+  const plan = create(base, 'account.analytic.plan', { name: 'Projects' });
+  const project = create(plan.db, 'account.analytic.account', { name: 'Project Alpha', plan_id: plan.id });
+  const inv = create(project.db, 'account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: '2026-04-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
+  const posted = postMove(inv.db, inv.id);
+  const feeAcc = accountId(posted, '600000');
+  const rule = addRule(posted, {
+    rule_type: 'matching_rule',
+    payment_tolerance: 5,
+    payment_tolerance_type: 'amount',
+    line_ids: [{ account_id: feeAcc, label: 'Short payment', amount_type: 'percentage', amount_string: '100', analytic_distribution: { [project.id]: 100 } }],
+  });
+  const line = addLine(rule.db, { payment_ref: 'Short 96', amount: 96, partner_id: 5 });
+  const after = applyRule(line.db, read(line.db, MODEL, rule.id), read(line.db, LINE, line.id));
+  assert.equal(read(after, 'account.move', inv.id).amount_residual, 0);
+  const writeoffItems = search(after, 'account.move').flatMap((m) => m.line_ids ?? []).filter((l) => l.account_id === feeAcc && l.name === 'Short payment');
+  assert.equal(writeoffItems.length, 1);
+  assert.equal(writeoffItems[0].debit, 4);
+  assert.deepEqual(writeoffItems[0].analytic_distribution, { [project.id]: 100 });
+});
+
+test('a label regex with a repeated group around a repeat is rejected on save and never matched', () => {
+  const base = seed();
+  const feeAcc = accountId(base, '600000');
+  const rule = { id: 9901, name: 'Runaway', active: true, trigger: 'auto_reconcile', rule_type: 'reco_model', match_label: 'match_regex', match_label_param: '(a+)+$', line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }] };
+  const staged = { ...base, records: { ...base.records, [MODEL]: [...(base.records[MODEL] ?? []), rule] } };
+  assert.throws(() => applyDiff(base, diffDb(base, staged), { isAdmin: true }), /Invalid regular expression in label parameter/);
+  // A pattern already stored before this check never matches, so the runner stays responsive.
+  const line = addLine(staged, { payment_ref: `${'a'.repeat(40)}!`, amount: -10 });
+  const started = Date.now();
+  const after = autoReconcile(line.db);
+  assert.ok(Date.now() - started < 2000);
+  assert.equal(read(after, LINE, line.id).state, 'to_check');
 });

@@ -17,10 +17,15 @@ const parseStrictNumber = (raw) => {
   return Number.isFinite(n) ? n : NaN;
 };
 
-/** Compile a regular expression case-insensitively, returning null if invalid or empty. */
+// A repeated group that itself contains a repeat, such as (a+)+ or (\w*x)*, can backtrack for minutes on a
+// near-matching label and block the auto-reconcile run.
+// ponytail: shape check, not a full regex analyser; isolate matching in a worker if patterns ever need nested repeats.
+const NESTED_REPEAT = /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/;
+
+/** Compile a regular expression case-insensitively, returning null if invalid, empty or prone to runaway backtracking. */
 function compileRegex(pattern) {
   const text = String(pattern ?? '');
-  if (!text) return null;
+  if (!text || NESTED_REPEAT.test(text)) return null;
   try {
     return new RegExp(text, 'i');
   } catch {
@@ -422,6 +427,7 @@ export function applyRule(db, rule, line) {
               writeoff_account_id: wo.account_id,
               writeoff_label: wo.label || rule.name || 'Payment Tolerance',
               writeoff_amount: diff,
+              ...(wo.analytic_distribution ? { writeoff_analytic_distribution: wo.analytic_distribution } : {}),
             });
             return reconcileWith(withWo, read(withWo, 'account.bank.statement.line', line.id), match.id);
           }
