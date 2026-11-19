@@ -274,7 +274,7 @@ function Checkout({ site, cart, pricelist }) {
   const [carrierId, setCarrierId] = useState(site.carriers[0]?.id ?? null);
   const [provider, setProvider] = useState(site.providers[0]?.code ?? '');
   const [state, setState] = useState({ busy: false, error: null });
-  const { totals, error } = useCartTotals(cart.lines, { pricelist, carrier_id: step > 0 ? carrierId : null, country: address.country });
+  const { totals, error } = useCartTotals(cart.lines, { pricelist, carrier_id: step > 0 ? carrierId : null, country: address.country, zip: address.zip });
   if (!cart.lines.length) return <div className="shop-empty"><h2>{t('Your cart is empty')}</h2><a className="btn primary" href="#/shop">{t('Continue shopping')}</a></div>;
 
   const placeOrder = async () => {
