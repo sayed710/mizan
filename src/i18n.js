@@ -3219,6 +3219,7 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  Recurring: 'متكرر',
   'Unfold All': 'توسيع الكل',
   'Collapse All': 'طي الكل',
   'Open Account': 'فتح الحساب',
