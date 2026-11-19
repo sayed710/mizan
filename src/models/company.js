@@ -280,6 +280,7 @@ const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
   'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
+  'currency_exchange_journal_id',
   'deferred_revenue_journal_id', 'deferred_expense_journal_id',
   'deferred_revenue_account_id', 'deferred_expense_account_id',
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
@@ -335,9 +336,9 @@ function companyGuard(db, before, r, ctx) {
   ]) {
     if (!r[field]) continue;
     const journal = record(db, 'account.journal', r[field]);
-    const isDeferredOrCashBasis = field.startsWith('deferred_') || field === 'tax_cash_basis_journal_id';
-    if (!journal || (isDeferredOrCashBasis && journal.active === false) || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
-      return `${label} must be ${isDeferredOrCashBasis ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
+    const requiresActive = field.startsWith('deferred_') || field === 'tax_cash_basis_journal_id' || field === 'currency_exchange_journal_id';
+    if (!journal || (requiresActive && journal.active === false) || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
+      return `${label} must be ${requiresActive ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
     }
   }
   for (const field of ['generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method']) {

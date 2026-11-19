@@ -81,20 +81,17 @@ test('currency_exchange_journal_id is defined on res.company and validated via c
   });
   db = dedicatedJournal.db;
 
-  // Setting a valid general journal of the company succeeds via diffDb + applyDiff
+  // Setting a valid general journal of the company succeeds via diffDb + applyDiff as admin
   const validNext = write(db, 'res.company', comp1.id, { currency_exchange_journal_id: dedicatedJournal.id });
   const diff = diffDb(db, validNext);
-  const applied = applyDiff(db, diff);
+  const applied = applyDiff(db, diff, { isAdmin: true });
   assert.equal(read(applied, 'res.company', 1).currency_exchange_journal_id, dedicatedJournal.id);
 
   // Reject setting a non-general journal (e.g. sale journal)
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id === 1 || !j.company_id));
   assert.throws(
-    () => {
-      const invalidNext = write(db, 'res.company', comp1.id, { currency_exchange_journal_id: saleJournal.id });
-      applyDiff(db, diffDb(db, invalidNext));
-    },
-    /Exchange Difference Journal must be a general journal shared with or belonging to this company/i,
+    () => write(db, 'res.company', comp1.id, { currency_exchange_journal_id: saleJournal.id }),
+    /Exchange Difference Journal must be an active general journal shared with or belonging to this company/i,
   );
 
   // Reject setting a general journal belonging to another company
@@ -109,21 +106,137 @@ test('currency_exchange_journal_id is defined on res.company and validated via c
   db = comp2Journal.db;
 
   assert.throws(
-    () => {
-      const foreignCompanyJournalNext = write(db, 'res.company', 1, { currency_exchange_journal_id: comp2Journal.id });
-      applyDiff(db, diffDb(db, foreignCompanyJournalNext));
-    },
-    /Exchange Difference Journal must be a general journal shared with or belonging to this company/i,
+    () => write(db, 'res.company', 1, { currency_exchange_journal_id: comp2Journal.id }),
+    /Exchange Difference Journal must be an active general journal shared with or belonging to this company/i,
   );
 
   // Reject setting non-existent journal id
   assert.throws(
-    () => {
-      const nonExistentNext = write(db, 'res.company', 1, { currency_exchange_journal_id: 999999 });
-      applyDiff(db, diffDb(db, nonExistentNext));
-    },
-    /Exchange Difference Journal must be a general journal shared with or belonging to this company/i,
+    () => write(db, 'res.company', 1, { currency_exchange_journal_id: 999999 }),
+    /Exchange Difference Journal must be an active general journal shared with or belonging to this company/i,
   );
+});
+
+test('Only administrators can change currency_exchange_journal_id via diffDb + applyDiff', () => {
+  let db = seed();
+  const journal = create(db, 'account.journal', {
+    name: 'Admin FX Journal',
+    code: 'AFXJ',
+    type: 'general',
+    company_id: 1,
+  });
+  db = journal.db;
+
+  const attempt = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (
+        c.id === 1 ? { ...c, currency_exchange_journal_id: journal.id } : c
+      )),
+    },
+  };
+  const diff = diffDb(db, attempt);
+
+  assert.throws(
+    () => applyDiff(db, diff, { isAdmin: false }),
+    /Only administrators/i,
+  );
+
+  const applied = applyDiff(db, diff, { isAdmin: true });
+  assert.equal(read(applied, 'res.company', 1).currency_exchange_journal_id, journal.id);
+});
+
+test('Company guard rejects an archived journal as Exchange Difference Journal', () => {
+  let db = seed();
+  const archived = create(db, 'account.journal', {
+    name: 'Archived FX Journal',
+    code: 'ARCFX',
+    type: 'general',
+    company_id: 1,
+    active: false,
+  });
+  db = archived.db;
+
+  assert.throws(
+    () => write(db, 'res.company', 1, { currency_exchange_journal_id: archived.id }),
+    /Exchange Difference Journal must be an active general journal/i,
+  );
+
+  const attempt = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (
+        c.id === 1 ? { ...c, currency_exchange_journal_id: archived.id } : c
+      )),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, attempt), { isAdmin: true }),
+    /Exchange Difference Journal must be an active general journal/i,
+  );
+});
+
+test('A journal referenced as Exchange Difference Journal cannot be archived, retyped or moved to another company', () => {
+  const journal = create(seed(), 'account.journal', {
+    name: 'Locked FX Journal',
+    code: 'LFXJ',
+    type: 'general',
+    company_id: 1,
+  });
+  let db = write(journal.db, 'res.company', 1, { currency_exchange_journal_id: journal.id });
+  const other = createCompany(db, { name: 'Company Two' });
+  db = other.db;
+
+  for (const change of [{ active: false }, { type: 'sale' }, { company_id: other.id }]) {
+    assert.throws(
+      () => write(db, 'account.journal', journal.id, change),
+      /Clear the Exchange Difference Journal of company/i,
+    );
+    const attempt = {
+      ...db,
+      records: {
+        ...db.records,
+        'account.journal': db.records['account.journal'].map((j) => (
+          j.id === journal.id ? { ...j, ...change } : j
+        )),
+      },
+    };
+    assert.throws(
+      () => applyDiff(db, diffDb(db, attempt), { isAdmin: true }),
+      /Clear the Exchange Difference Journal of company/i,
+    );
+  }
+
+  // A shared FX journal cannot be narrowed to one company while another uses it
+  const shared = create(other.db, 'account.journal', {
+    name: 'Shared FX Journal',
+    code: 'SFXJ',
+    type: 'general',
+    company_id: null,
+  });
+  let sharedDb = write(shared.db, 'res.company', 1, { currency_exchange_journal_id: shared.id });
+  sharedDb = write(sharedDb, 'res.company', other.id, { currency_exchange_journal_id: shared.id });
+  for (const companyId of [1, other.id]) {
+    const attempt = {
+      ...sharedDb,
+      records: {
+        ...sharedDb.records,
+        'account.journal': sharedDb.records['account.journal'].map((j) => (
+          j.id === shared.id ? { ...j, company_id: companyId } : j
+        )),
+      },
+    };
+    assert.throws(
+      () => applyDiff(sharedDb, diffDb(sharedDb, attempt), { isAdmin: true }),
+      /Clear the Exchange Difference Journal of company/i,
+    );
+  }
+
+  // Once cleared on the company, the journal can be archived
+  const cleared = write(db, 'res.company', 1, { currency_exchange_journal_id: null });
+  assert.equal(read(write(cleared, 'account.journal', journal.id, { active: false }), 'account.journal', journal.id).active, false);
 });
 
 // ---------------------------------------------------------------------------
