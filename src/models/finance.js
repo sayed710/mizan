@@ -10,7 +10,7 @@ import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
-import { companyCurrencyRecord, documentCurrency, formatCurrency, round, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, round, roundCurrency } from '../money.js';
 import { paymentCompanyAmount, settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
 import { onlineAccountForJournal } from './onlineSync.js';
@@ -865,6 +865,13 @@ export function taxUnitMemberTypeValidation(db, unit, mainTypes = [], requiredCo
   return { error: null, types };
 }
 
+/**
+ * Largest ledger-vs-report difference a tax closing books to the return type's rounding accounts,
+ * in minor units of the company currency (0.05 for a cent-based currency). Per-line tax rounding
+ * leaves differences of a few minor units; anything larger is a real mismatch and still fails.
+ */
+const TAX_CLOSING_ROUNDING_MINOR_UNITS = 5;
+
 /** Calculate the closing from posted tax accounts and the return's payment configuration. */
 export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   const mainType = read(db, 'account.return.type', ret.type_id);
@@ -879,6 +886,9 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   }
   ret = { ...ret, company_id: companyId, tax_unit_id: null };
   const report = validateTaxReturnPeriod(db, ret);
+  const currency = findCompanyCurrencyRecord(db, companyId);
+  const moneyRound = (n) => roundCurrency(n, currency);
+  const tolerance = moneyRound(TAX_CLOSING_ROUNDING_MINOR_UNITS * Number(currency?.rounding ?? 0.01));
   const accounts = taxAccounts(db, ret.company_id);
   const taxIds = new Set([...accounts.sale, ...accounts.purchase]);
   const balances = new Map();
@@ -889,12 +899,13 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   const lines = [];
   let netClosed = 0;
   for (const [id, raw] of balances) {
-    const balance = round(raw);
+    const balance = moneyRound(raw);
     if (!balance) continue;
     lines.push(balance > 0 ? { account_id: id, credit: balance } : { account_id: id, debit: -balance });
-    netClosed = round(netClosed - balance);
+    netClosed = moneyRound(netClosed - balance);
   }
-  if (round(netClosed - report.payable)) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
+  const roundingDiff = moneyRound(netClosed - report.payable);
+  if (Math.abs(roundingDiff) > tolerance) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
   const payableAccount = resolveCompanyTaxAccount(db, type, 'tax_payable_account_id', 'Tax Payable Account', companyId);
   const receivableAccount = resolveCompanyTaxAccount(db, type, 'tax_receivable_account_id', 'Tax Receivable Account', companyId);
   const partner = read(db, 'res.partner', type?.payment_partner_id);
@@ -905,6 +916,13 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
     lines.push({ account_id: payableAccount.id, credit: report.payable, partner_id: partner.id });
   } else if (report.payable < 0) {
     lines.push({ account_id: receivableAccount.id, debit: -report.payable, partner_id: partner.id });
+  }
+  if (roundingDiff > 0) {
+    const account = resolveCompanyTaxAccount(db, type, 'rounding_profit_account_id', 'Rounding Profit Account', companyId);
+    lines.push({ account_id: account.id, credit: roundingDiff });
+  } else if (roundingDiff < 0) {
+    const account = resolveCompanyTaxAccount(db, type, 'rounding_loss_account_id', 'Rounding Loss Account', companyId);
+    lines.push({ account_id: account.id, debit: -roundingDiff });
   }
   if (!lines.length) {
     lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
@@ -926,9 +944,10 @@ export function taxClosingMatchesReturn(db, ret) {
       if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
         || move.date !== ret.date_to || move.invoice_date !== ret.date_to) return false;
       const spec = taxClosingSpec(staged, ret, companyId);
+      const currency = findCompanyCurrencyRecord(staged, companyId);
       payable = round(payable + spec.payable);
       const expected = spec.lines.map((line) => {
-        const net = round((line.debit ?? 0) - (line.credit ?? 0));
+        const net = roundCurrency((line.debit ?? 0) - (line.credit ?? 0), currency);
         return [line.account_id, line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
       });
       const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
