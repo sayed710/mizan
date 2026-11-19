@@ -1188,11 +1188,14 @@ function computeReconciledItems(db, move, index) {
 }
 
 /** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
-export function reconciledJournalItems(db, move) {
+export function reconciledJournalItems(db, move, { partialMatching = false } = {}) {
   const index = reconcileIndex(db);
   return computeReconciledItems(db, move, index).map((item, lineIdx) => {
     const groupCode = item.reconciled ? (index.matchingNumbers.get(lineKey(move.id, lineIdx)) ?? null) : null;
-    return groupCode ? { ...item, matching_number: groupCode } : item;
+    if (groupCode) return { ...item, matching_number: groupCode };
+    if (!partialMatching || item.reconciled) return item;
+    const partialIds = (index.glMatchings.byLine.get(lineKey(move.id, lineIdx)) ?? []).map((g) => g.id);
+    return partialIds.length ? { ...item, matching_number: `P${Math.min(...partialIds)}` } : item;
   });
 }
 
@@ -1269,7 +1272,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
-      return reconciledJournalItems(db, m).map((l) => ({
+      return reconciledJournalItems(db, m, { partialMatching: true }).map((l) => ({
         ...l,
         line_identity: journalItemIdentity(l),
         move_id: m.id,

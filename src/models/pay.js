@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { installmentSettlementState, invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
+import { installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -11,6 +11,7 @@ import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
+import { reconcileLedgerItems } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
@@ -547,6 +548,24 @@ export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today(
   return write(next, 'account.move', invoice.id, { ...invoiceValues, payments: paymentsFinal });
 }
 
+/** Reconcile each open line of a source entry on a reconcilable account with its mirror line on the reversal. */
+export function reconcileReversalLines(db, sourceId, reversalId, date) {
+  const source = read(db, 'account.move', sourceId);
+  const reversal = read(db, 'account.move', reversalId);
+  const reconciled = reconciledJournalItems(db, source);
+  const unique = (move, line) => move.line_ids.filter((l) => journalItemIdentity(l) === journalItemIdentity(line)).length === 1;
+  return source.line_ids.reduce((acc, line, i) => {
+    const mirror = reversal.line_ids?.[i];
+    if (!mirror || mirror.account_id !== line.account_id || (Number(mirror.debit) || 0) !== (Number(line.credit) || 0) || (Number(mirror.credit) || 0) !== (Number(line.debit) || 0)) return acc;
+    if (!isReconcilableAccount(read(acc, 'account.account', line.account_id)) || reconciled[i]?.reconciled) return acc;
+    if (!(Number(line.debit) || Number(line.credit)) || !unique(source, line) || !unique(reversal, mirror)) return acc;
+    return reconcileLedgerItems(acc, [
+      { move_id: source.id, line_identity: journalItemIdentity(line) },
+      { move_id: reversal.id, line_identity: journalItemIdentity(mirror) },
+    ], { date });
+  }, db);
+}
+
 /** Post a linked mirror of an existing entry (optionally in a chosen journal/date, or reverse-and-create a new draft). */
 export function reverseEntry(db, source, dateOrOptions = today(), extraOptions = {}) {
   const opts = typeof dateOrOptions === 'object' && dateOrOptions !== null && !Array.isArray(dateOrOptions)
@@ -609,6 +628,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     next = write(next, 'account.move', source.id, { reversal_move_id: created.id });
   }
   next = postNote(next, 'account.move', source.id, opts.scheduled ? `Reversal scheduled for ${date}` : `Reversed by ${read(next, 'account.move', created.id).name}`);
+  if (!opts.scheduled && !reachesSettlementFx && !opts.reconciliation_reversal) next = reconcileReversalLines(next, source.id, created.id, date);
   if (mode === 'modify') {
     const draft = create(next, 'account.move', {
       move_type: 'entry',

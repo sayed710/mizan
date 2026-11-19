@@ -3,7 +3,7 @@ import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
+import { applyPaymentCredit, reconcileReversalLines, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
@@ -482,6 +482,10 @@ export function postAutoPostMoves(db, at = today(), { onError = null } = {}) {
     for (const { move } of due) {
       attempted.add(move.id);
       next = attemptAutoPostMove(next, move.id, onError);
+      const posted = read(next, 'account.move', move.id);
+      if (posted?.state === 'posted' && move.reversed_entry_id && read(next, 'account.move', move.reversed_entry_id)?.state === 'posted') {
+        next = reconcileReversalLines(next, move.reversed_entry_id, move.id, posted.date);
+      }
     }
   }
   return next;
@@ -2606,7 +2610,9 @@ export const accountingModels = {
             if ((db.records['account.asset'] ?? []).some((a) => (a.depreciation_ids ?? []).some((l) => l.posted && l.move_id === r.id))) {
               return { db: reverseDepreciation(db, r, values) };
             }
-            return reverseEntry(db, r, values);
+            const entryDate = r.invoice_date ?? r.date ?? '';
+            const scheduled = values.scheduled ?? (String(values.date ?? '') > today() && entryDate <= today());
+            return reverseEntry(db, r, scheduled ? { ...values, scheduled: true } : values);
           },
         },
         {
@@ -2703,7 +2709,25 @@ export const accountingModels = {
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
-        { label: 'Reset to Draft', when: (r, db) => canResetMove(r, db), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
+        {
+          label: 'Reset to Draft',
+          when: (r, db) => canResetMove(r, db),
+          run: (db, r) => {
+            const entryDate = r.invoice_date ?? r.date ?? '';
+            const draftReversals = !r.auto_reverse && entryDate <= today()
+              ? (db.records['account.move'] ?? []).filter(
+                  (m) => m.state === 'draft' && m.auto_post === 'at_date' && (m.reversed_entry_id === r.id || m.id === r.reversal_move_id)
+                )
+              : [];
+            const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
+            const nextDb = write(cancelledDb, 'account.move', r.id, {
+              state: 'draft',
+              ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
+              ...(isInvoice(r) ? { line_ids: [] } : {})
+            });
+            return { db: removeAnalytic(nextDb, r.id) };
+          },
+        },
         { label: 'Lock', when: canLockEntry, run: (db, r) => ({ db: secureEntries(db, { throughMoveId: r.id }) }) },
         { label: 'Cancel Entry', when: (r) => r.move_type === 'entry' && r.state === 'draft' && Boolean(r.id) && !r.inalterable_hash, run: cancelMove },
         { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, visible: (r) => isInvoice(r), run: cancelMove },
