@@ -3264,6 +3264,18 @@ const ar = {
   'The open statement amount is too small to match this payment': 'المبلغ المفتوح في كشف الحساب أقل من اللازم لمطابقة هذه الدفعة',
   'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
+  'Opening Debit': 'مدين الافتتاح',
+  'Opening Credit': 'دائن الافتتاح',
+  'Opening Entry': 'قيد الافتتاح',
+  'Automatic Balancing Line': 'بند الموازنة التلقائية',
+  'The opening move is posted; reset it to draft to change opening balances': 'تم ترحيل قيد الافتتاح؛ أعده إلى المسودة لتغيير أرصدة الافتتاح',
+  'Configure the Opening Balance Equity Account on the company before setting opening balances': 'حدِّد حساب حقوق الملكية لرصيد الافتتاح في الشركة قبل تعيين أرصدة الافتتاح',
+  'The opening equity account carries the automatic balancing line and cannot have a manual opening balance': 'يحمل حساب حقوق ملكية الافتتاح بند الموازنة التلقائية ولا يمكن أن يحمل رصيداً افتتاحياً يدوياً',
+  'An account cannot have both a debit and a credit opening balance': 'لا يمكن أن يحمل الحساب رصيداً مديناً ودائناً معاً في الافتتاح',
+  'Configure the Default General Journal on the company before setting opening balances': 'حدِّد دفتر اليومية العام الافتراضي في الشركة قبل تعيين أرصدة الافتتاح',
+  'The opening move is posted; reset it to draft to change the opening date': 'تم ترحيل قيد الافتتاح؛ أعده إلى المسودة لتغيير تاريخ الافتتاح',
+  'Account not found': 'الحساب غير موجود',
+  'Company not found': 'الشركة غير موجودة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

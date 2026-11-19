@@ -25,6 +25,7 @@ import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
 import { onlineAccountForJournal } from './onlineSync.js';
+import { openingAmounts, setOpeningBalance } from './opening.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
@@ -1982,6 +1983,18 @@ export const accountingModels = {
       },
       description: { type: 'text', label: 'Description' },
       current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
+      opening_debit: {
+        type: 'monetary',
+        label: 'Opening Debit',
+        currency: 'company',
+        compute: (r, db) => openingAmounts(db, r).debit,
+      },
+      opening_credit: {
+        type: 'monetary',
+        label: 'Opening Credit',
+        currency: 'company',
+        compute: (r, db) => openingAmounts(db, r).credit,
+      },
     },
     defaults: () => ({ account_type: 'expense', active: true, tax_ids: [] }),
     guard: (db, before, after) => {
@@ -2028,9 +2041,21 @@ export const accountingModels = {
     sort: (a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')),
     groupBys: ['account_type'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
-    list: ['code', 'name', 'account_type', 'reconcile', 'currency_id'],
-    listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') } },
-    editableList: ['reconcile'],
+    list: ['code', 'name', 'account_type', 'opening_debit', 'opening_credit', 'reconcile', 'currency_id'],
+    listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') }, opening_debit: { optional: 'hide' }, opening_credit: { optional: 'hide' } },
+    editableList: ['reconcile', 'opening_debit', 'opening_credit'],
+    prepareWrite: (db, vals, before) => {
+      const hasOpeningDebit = vals && 'opening_debit' in vals;
+      const hasOpeningCredit = vals && 'opening_credit' in vals;
+      if (!hasOpeningDebit && !hasOpeningCredit) return null;
+      const current = openingAmounts(db, before);
+      const d = hasOpeningDebit ? (Number(vals.opening_debit) || 0) : current.debit;
+      const c = hasOpeningCredit ? (Number(vals.opening_credit) || 0) : current.credit;
+      const nextDb = setOpeningBalance(db, before.id, { debit: d, credit: c, companyId: before.company_id ?? null });
+      // The amounts live on the opening entry; the account only computes them.
+      const { opening_debit: _debit, opening_credit: _credit, ...rest } = vals;
+      return { db: nextDb, vals: rest };
+    },
     views: ['list', 'kanban'],
     form: {
       title: 'display_name',
