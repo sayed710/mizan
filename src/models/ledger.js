@@ -1257,12 +1257,72 @@ function computeReconciledItems(db, move, index) {
   });
 }
 
+/** Derive transitive partial matching numbers (P<minLinkId>) over connected components of active partial links. */
+export function partialMatchingNumbers(db, index) {
+  if (index.partialMatchingNumbers) return index.partialMatchingNumbers;
+  const numbers = new Map();
+  const { links } = index.glMatchings ?? {};
+  if (!links?.length) {
+    index.partialMatchingNumbers = numbers;
+    return numbers;
+  }
+  const adj = new Map();
+  const nodeLinks = new Map();
+  const linkEdge = (a, b, linkId) => {
+    if (!a || !b || a === b) return;
+    if (!adj.has(a)) adj.set(a, new Set());
+    if (!adj.has(b)) adj.set(b, new Set());
+    adj.get(a).add(b);
+    adj.get(b).add(a);
+    if (linkId != null) {
+      if (!nodeLinks.has(a)) nodeLinks.set(a, []);
+      if (!nodeLinks.has(b)) nodeLinks.set(b, []);
+      nodeLinks.get(a).push(linkId);
+      nodeLinks.get(b).push(linkId);
+    }
+  };
+  for (const g of links) {
+    linkEdge(lineKey(g.debit_move_id, g.debit_line_index), lineKey(g.credit_move_id, g.credit_line_index), g.id);
+  }
+
+  const visited = new Set();
+  for (const start of adj.keys()) {
+    if (visited.has(start)) continue;
+    const comp = [];
+    const compLinkIds = new Set();
+    const queue = [start];
+    visited.add(start);
+    while (queue.length) {
+      const cur = queue.shift();
+      comp.push(cur);
+      for (const lid of nodeLinks.get(cur) ?? []) compLinkIds.add(lid);
+      for (const nxt of adj.get(cur) ?? []) {
+        if (!visited.has(nxt)) {
+          visited.add(nxt);
+          queue.push(nxt);
+        }
+      }
+    }
+    if (comp.length && compLinkIds.size) {
+      const code = `P${Math.min(...compLinkIds)}`;
+      for (const k of comp) numbers.set(k, code);
+    }
+  }
+  index.partialMatchingNumbers = numbers;
+  return numbers;
+}
+
 /** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
-export function reconciledJournalItems(db, move) {
+export function reconciledJournalItems(db, move, { partialMatching = false } = {}) {
   const index = reconcileIndex(db);
+  const partialNumbers = partialMatching ? partialMatchingNumbers(db, index) : null;
   return computeReconciledItems(db, move, index).map((item, lineIdx) => {
-    const groupCode = item.reconciled ? (index.matchingNumbers.get(lineKey(move.id, lineIdx)) ?? null) : null;
-    return groupCode ? { ...item, matching_number: groupCode } : item;
+    const key = lineKey(move.id, lineIdx);
+    const groupCode = item.reconciled ? (index.matchingNumbers.get(key) ?? null) : null;
+    if (groupCode) return { ...item, matching_number: groupCode };
+    if (!partialMatching) return item;
+    const partialCode = partialNumbers?.get(key);
+    return partialCode ? { ...item, matching_number: partialCode } : item;
   });
 }
 
@@ -1339,7 +1399,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
-      return reconciledJournalItems(db, m).map((l) => ({
+      return reconciledJournalItems(db, m, { partialMatching: true }).map((l) => ({
         ...l,
         line_identity: journalItemIdentity(l),
         move_id: m.id,

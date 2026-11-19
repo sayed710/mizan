@@ -3247,6 +3247,7 @@ const ar = {
   'Contradictory date formats in QIF file': 'صيغ تواريخ متضاربة في ملف QIF',
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
+  'This entry is scheduled to post automatically on {date}': 'هذا القيد مجدول للترحيل تلقائياً في {date}',
   'Configure the Balance Sheet report for this company': 'أعدّ تقرير الميزانية العمومية لهذه الشركة',
   'Configure the Profit and Loss report for this company': 'أعدّ تقرير الأرباح والخسائر لهذه الشركة',
   'The open statement amount is too small to match this payment': 'المبلغ المفتوح في كشف الحساب أقل من اللازم لمطابقة هذه الدفعة',
