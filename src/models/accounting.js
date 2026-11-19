@@ -940,10 +940,44 @@ export function liquidityForeignFields(db, { currencyId, companyAmount, docAmoun
 }
 
 /**
+ * Express an invoice-currency amount in the payment currency at `date`.
+ * Reused by the wizard (default amount, difference) and by payMove (payValue).
+ */
+export function paymentCurrencyAmount(db, r, amount, date = today(), currencyId = null) {
+  const invCurrId = r.currency_id ?? companyCurrencyRecord(db, r.company_id)?.id;
+  const targetId = currencyId ?? invCurrId;
+  if (!targetId || targetId === invCurrId) {
+    return roundCurrency(amount, documentCurrency(db, r));
+  }
+  const rate = conversionRate(db, invCurrId, targetId, date, r.company_id);
+  if (rate == null) throw new Error('Configure currency conversion rate');
+  return roundCurrency(Number(amount) * rate, read(db, 'res.currency', targetId));
+}
+
+/**
+ * Express an entered payment-currency amount in the invoice currency at `date`.
+ * Snaps to the open amount (residual minus available discount at `date`) when within invoice currency rounding.
+ */
+export function invoiceCurrencyAmount(db, r, amount, date = today(), currencyId = null) {
+  const invCurrId = r.currency_id ?? companyCurrencyRecord(db, r.company_id)?.id;
+  const sourceId = currencyId ?? invCurrId;
+  const docCurr = documentCurrency(db, r);
+  if (!sourceId || sourceId === invCurrId) {
+    return roundCurrency(amount, docCurr);
+  }
+  const rate = conversionRate(db, sourceId, invCurrId, date, r.company_id);
+  if (rate == null) throw new Error('Configure currency conversion rate');
+  const converted = roundCurrency(Number(amount) * rate, docCurr);
+  const openAmount = roundCurrency(residual(r, db) - discountAvailable(db, r, date), docCurr);
+  const step = read(db, 'res.currency', invCurrId)?.rounding ?? 0.01;
+  return Math.abs(converted - openAmount) <= step ? openAmount : converted;
+}
+
+/**
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber, memo } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber, memo, currencyId, paymentAmount, partnerBankId } = {}) {
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
@@ -953,6 +987,11 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const payBankError = recipientBankCompanyError(db, payRec);
   if (payBankError) throw new Error(payBankError);
   if (shouldBePaid(db, r) === 'exception') throw new Error('Resolve or approve the three-way matching exception before registering payment');
+  const invCurrId = r.currency_id ?? companyCurrencyRecord(db, r.company_id)?.id;
+  const payCurrId = currencyId ?? invCurrId;
+  const isForeignPayment = payCurrId !== invCurrId;
+  const payCurr = isForeignPayment ? read(db, 'res.currency', payCurrId) : null;
+  const payAmount = isForeignPayment ? Number(paymentAmount ?? amount) : null;
   const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
   amount = docRound(amount);
@@ -975,7 +1014,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   let recipientBankId = null;
   if (isPurchase(r) && !isInbound(r) && !statement) {
     // The bank is only read for the payment record; the posted bill's own (locked) bank field is never written here.
-    recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, payRec?.partner_bank_id, { invoiceBankId: r.partner_bank_id, companyId: r.company_id ?? 1 });
+    const candidateBankId = partnerBankId ?? payRec?.partner_bank_id;
+    recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, candidateBankId, { invoiceBankId: r.partner_bank_id, companyId: r.company_id ?? 1 });
   }
   // Anything paid above the amount due stays on the partner's account as an outstanding credit.
   const excess = docRound(amount - value);
@@ -985,15 +1025,22 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const journal = read(db, 'account.journal', via.id);
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
   const liquidity = liquidityAccountId ?? outstanding ?? via.accountId;
+  const payValue = isForeignPayment
+    ? paymentCurrencyAmount(db, r, value, date, payCurrId)
+    : value;
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
-  const bank = bookedShare ?? toCompany(db, r.currency_id, value, date, r.company_id);
+  const bank = bookedShare ?? (isForeignPayment
+    ? toCompany(db, payCurrId, payValue, date, r.company_id)
+    : toCompany(db, r.currency_id, value, date, r.company_id));
   // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
   const final = value >= residual(r, db);
   const open = settlementCompanyAmount(db, r, value);
   const diff = companyRound(sale ? bank - open : open - bank);
   const fx = exchangeLines(db, r.company_id, diff);
   // The bank line converts what was really received once; the credit is whatever remains after the settled part.
-  const extra = excess > 0 ? companyRound(toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) : 0;
+  const extra = excess > 0 ? (isForeignPayment
+    ? companyRound(toCompany(db, payCurrId, payAmount, date, r.company_id) - bank)
+    : companyRound(toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank)) : 0;
   const foreign = !!r.currency_id && r.currency_id !== companyCurrencyRecord(db, r.company_id)?.id;
   const foreignAmount = (value) => foreign ? { currency_id: r.currency_id, amount_currency: docRound(value) } : {};
   const liquidityForeignAmount = (value) => liquidityForeignFields(db, {
@@ -1009,7 +1056,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id, ...foreignAmount(value) }, ...credit, { account: liquidity, credit: bank + extra, partner_id: r.partner_id, ...liquidityForeignAmount(-value - excess) }, ...fx],
   });
   const paymentMemo = memo !== undefined ? memo : (r.name || '');
-  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: paymentMemo, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: isForeignPayment ? payCurrId : (r.currency_id ?? null), move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, invoice_id: r.id, partner_id: r.partner_id, amount: isForeignPayment ? roundCurrency(payAmount, payCurr) : docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: paymentMemo, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const moveName = read(withEntry, 'account.move', paymentMove).name;
   const name = draftName && draftName !== '/' ? draftName : paymentName(withEntry, journal, date, moveName);
@@ -1465,18 +1512,27 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   const journalIdVal = opts.journalId ?? opts.journal_id ?? null;
   const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
-  amount = docRound(amount);
+  const invCurrId = r.currency_id ?? companyCurrencyRecord(db, r.company_id)?.id;
+  const payCurrId = opts.currencyId ?? invCurrId;
+  const isForeign = payCurrId !== invCurrId;
+  const paymentAmount = isForeign ? Number(amount) : null;
+  const docAmount = isForeign
+    ? invoiceCurrencyAmount(db, r, amount, date, payCurrId)
+    : docRound(amount);
   const due = residual(r, db);
-  const gap = docRound(due - amount);
+  const gap = docRound(due - docAmount);
   const discount = Math.min(discountAvailable(db, r, date), gap);
   const sale = isInbound(r);
   const company = read(db, 'res.company', r.company_id ?? 1);
   const discountAccount = sale ? company?.expense_early_payment_discount_account_id : company?.income_early_payment_discount_account_id;
   if (gap > 0 && discount >= gap && !discountAccount) throw new Error(`Configure the early payment discount ${sale ? 'expense' : 'income'} account on company ${company?.name ?? r.company_id ?? 1}`);
-  const paid = payMove(db, id, amount, date, {
+  const paid = payMove(db, id, docAmount, date, {
     journalId: journalIdVal,
     ...(opts.checkNumber != null ? { checkNumber: opts.checkNumber } : {}),
     ...(opts.memo !== undefined ? { memo: opts.memo } : {}),
+    ...(opts.currencyId ? { currencyId: opts.currencyId } : {}),
+    ...(paymentAmount != null ? { paymentAmount } : {}),
+    ...(opts.partnerBankId ? { partnerBankId: opts.partnerBankId } : {}),
   });
   if (!(gap > 0) || discount < gap) return paid;
   const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
@@ -1527,7 +1583,34 @@ function registerPayment(db, r, values = {}) {
   if (!journalIdVal) throw new Error('Select a payment journal');
   const payment = paymentJournal(db, journalIdVal, r.company_id ?? 1);
   const memo = values.memo !== undefined ? values.memo : invoicePaymentMemo(r);
-  return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id, memo }) };
+
+  const isReconcile = values.payment_difference_handling === 'reconcile';
+  if (isReconcile && !values.writeoff_account_id) throw new Error('Select a write-off account');
+
+  const payCurrencyId = values.currency_id ?? r.currency_id ?? companyCurrencyRecord(db, r.company_id)?.id;
+
+  const paid = payWithDiscount(db, r.id, amount, date, {
+    journalId: payment.id,
+    memo,
+    currencyId: payCurrencyId,
+    partnerBankId: values.partner_bank_id ?? null,
+  });
+  let nextDb = paid;
+
+  if (isReconcile) {
+    const remaining = residual(read(nextDb, 'account.move', r.id), nextDb);
+    if (remaining > 0) {
+      const writeoffLabel = values.writeoff_label || 'Write-Off';
+      const companyRem = toCompany(nextDb, r.currency_id, remaining, date, r.company_id);
+      const writeoffRes = settleWriteoff(nextDb, r.id, remaining, companyRem, date, {
+        accountId: values.writeoff_account_id,
+        label: writeoffLabel,
+        journalId: payment.id,
+      });
+      nextDb = writeoffRes.db;
+    }
+  }
+  return { db: nextDb };
 }
 
 export { registerPayment };
@@ -2771,15 +2854,111 @@ export const accountingModels = {
         { label: 'Digitize Document', upload: 'image/*,application/pdf', server: '/api/integrations/digitize', requires: 'ai', when: (r) => r.state === 'draft' && r.move_type === 'in_invoice' },
         {
           label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid',
-          wizard: (db, r) => ({
-            title: 'Register Payment',
-            fields: [
-              { name: 'amount', type: 'monetary', label: 'Payment Amount', required: true, default: String(roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r))) },
-              { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
-              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Payment Journal', required: true, default: defaultPaymentJournalId(db, r.company_id ?? 1), domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && isLiquidityJournal(j) },
+          wizard: (db, r) => {
+            const initialDate = today();
+            const initialCurrId = r.currency_id ?? companyCurrencyRecord(db, r.company_id)?.id;
+            const openDocAmount = (date) => roundCurrency(residual(r, db) - discountAvailable(db, r, date || today()), documentCurrency(db, r));
+            const computeDiff = (vals) => {
+              const d = vals?.date || today();
+              const c = vals?.currency_id ?? initialCurrId;
+              const open = paymentCurrencyAmount(db, r, openDocAmount(d), d, c);
+              const entered = Number(vals?.amount);
+              if (!Number.isFinite(entered)) return 0;
+              const currRec = read(db, 'res.currency', c);
+              return roundCurrency(Math.max(0, open - entered), currRec);
+            };
+            const hasDiff = (vals) => computeDiff(vals) > 0.000001;
+
+            const fields = [
+              {
+                name: 'amount',
+                type: 'monetary',
+                label: 'Payment Amount',
+                required: true,
+                default: String(paymentCurrencyAmount(db, r, openDocAmount(initialDate), initialDate, initialCurrId)),
+              },
+              {
+                name: 'currency_id',
+                type: 'many2one',
+                relation: 'res.currency',
+                label: 'Currency',
+                required: true,
+                default: initialCurrId,
+                domain: (c) => c.active !== false,
+              },
+              { name: 'date', type: 'date', label: 'Payment Date', required: true, default: initialDate },
+              {
+                name: 'journal_id',
+                type: 'many2one',
+                relation: 'account.journal',
+                label: 'Payment Journal',
+                required: true,
+                default: defaultPaymentJournalId(db, r.company_id ?? 1),
+                domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && isLiquidityJournal(j),
+              },
+            ];
+
+            if (isPurchase(r) && !isInbound(r)) {
+              fields.push({
+                name: 'partner_bank_id',
+                type: 'many2one',
+                relation: 'res.partner.bank',
+                label: 'Recipient Bank Account',
+                default: r.partner_bank_id ?? null,
+                domain: (b) => sameCommercialPartner(db, b.partner_id, r.partner_id) && (!b.company_id || b.company_id === (r.company_id ?? 1)) && b.active !== false,
+              });
+            }
+
+            fields.push(
               { name: 'memo', type: 'char', label: 'Memo', default: invoicePaymentMemo(r) },
-            ],
-          }),
+              {
+                name: 'payment_difference',
+                type: 'monetary',
+                label: 'Payment Difference',
+                readonly: true,
+                default: 0,
+                invisible: (vals) => !hasDiff(vals),
+                compute: (vals) => computeDiff(vals),
+              },
+              {
+                name: 'payment_difference_handling',
+                type: 'selection',
+                label: 'Payment Difference Handling',
+                options: [['open', 'Keep open'], ['reconcile', 'Mark as fully paid']],
+                default: 'open',
+                invisible: (vals) => !hasDiff(vals),
+              },
+              {
+                name: 'writeoff_account_id',
+                type: 'many2one',
+                relation: 'account.account',
+                label: 'Write-off Account',
+                domain: (a) => a.active !== false && (!a.company_id || a.company_id === (r.company_id ?? 1)),
+                invisible: (vals) => !hasDiff(vals) || vals?.payment_difference_handling !== 'reconcile',
+                required: (vals) => hasDiff(vals) && vals?.payment_difference_handling === 'reconcile',
+              },
+              {
+                name: 'writeoff_label',
+                type: 'char',
+                label: 'Label',
+                default: 'Write-Off',
+                invisible: (vals) => !hasDiff(vals) || vals?.payment_difference_handling !== 'reconcile',
+              },
+            );
+
+            return {
+              title: 'Register Payment',
+              fields,
+              onchange: (vals, key) => {
+                if (key === 'date' || key === 'currency_id') {
+                  const d = vals?.date || today();
+                  const c = vals?.currency_id ?? initialCurrId;
+                  return { amount: String(paymentCurrencyAmount(db, r, openDocAmount(d), d, c)) };
+                }
+                return {};
+              },
+            };
+          },
           run: registerPayment,
         },
         { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },

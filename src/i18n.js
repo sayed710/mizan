@@ -3293,6 +3293,12 @@ const ar = {
   'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
   'Deposit slips can only be printed for posted batch payments.': 'يمكن طباعة إشعارات الإيداع لدفعات الدفع المجمعة المرحلة فقط',
+  'Payment Difference': 'فرق الدفعة',
+  'Payment Difference Handling': 'معالجة فرق الدفعة',
+  'Keep open': 'إبقاء الفاتورة مفتوحة',
+  'Mark as fully paid': 'تعليم كمدفوعة بالكامل',
+  'Write-Off': 'شطب',
+  'Configure currency conversion rate': 'حدّد سعر تحويل العملة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
