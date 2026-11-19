@@ -3345,6 +3345,16 @@ const ar = {
   'Deposit slips can only be printed for posted batch payments.': 'يمكن طباعة إشعارات الإيداع لدفعات الدفع المجمعة المرحلة فقط',
   'Key Performance Indicator': 'مؤشر الأداء الرئيسي',
   Metric: 'المؤشر',
+  'Tax payable account must belong to the tax group company': 'حساب الضريبة المستحقة يجب أن ينتمي إلى شركة المجموعة الضريبية',
+  'Tax payable account must be a liability account': 'حساب الضريبة المستحقة يجب أن يكون حساب التزامات',
+  'Tax receivable account must belong to the tax group company': 'حساب الضريبة المستحقة القبض يجب أن ينتمي إلى شركة المجموعة الضريبية',
+  'Tax receivable account must be an asset account': 'حساب الضريبة المستحقة القبض يجب أن يكون حساب أصول',
+  'Tax group payable account does not exist': 'حساب الضريبة المستحقة للمجموعة الضريبية غير موجود',
+  'Tax group payable account is archived': 'حساب الضريبة المستحقة للمجموعة الضريبية مؤرشف',
+  'Tax group receivable account does not exist': 'حساب الضريبة المستحقة القبض للمجموعة الضريبية غير موجود',
+  'Tax group receivable account is archived': 'حساب الضريبة المستحقة القبض للمجموعة الضريبية مؤرشف',
+  'Use in Tax Closing': 'استخدام في الإقفال الضريبي',
+  'Tax Closing': 'الإقفال الضريبي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -753,19 +753,29 @@ export function moveDeleteGuard(db, move, staged = db) {
   return null;
 }
 
+/** All repartition lines of type 'tax' belonging to the company's taxes, paired with their tax. */
+export function companyTaxRepartitionRows(db, companyId) {
+  const taxes = search(db, 'account.tax').filter((x) => !companyId || !x.company_id || (x.company_id ?? 1) === companyId);
+  return taxes.flatMap((tax) => [
+    ...taxRepartitionLines(tax, 'invoice').filter((l) => l.repartition_type === 'tax').map((line) => ({ line, tax })),
+    ...taxRepartitionLines(tax, 'refund').filter((l) => l.repartition_type === 'tax').map((line) => ({ line, tax })),
+  ]);
+}
+
+export function isClosableRepartitionLine(line, tax) {
+  if (line?.use_in_tax_closing != null) return Boolean(line.use_in_tax_closing);
+  return line?.repartition_type === 'tax' && ['sale', 'purchase'].includes(tax?.type_tax_use);
+}
+
 /** Tax accounts per side: the default VAT accounts plus every account a sale / purchase tax books to. */
 export function taxAccounts(db, companyId) {
   // Tax accounts come from repartition lines and from the return types' explicit payable/receivable accounts.
   const returnTypes = search(db, 'account.return.type').filter((t) => !companyId || (t.company_id ?? 1) === companyId);
   const returnField = { sale: 'tax_payable_account_id', purchase: 'tax_receivable_account_id' };
+  const rows = companyTaxRepartitionRows(db, companyId);
   const of = (use) => new Set([
     ...returnTypes.map((t) => t[returnField[use]]),
-    ...search(db, 'account.tax')
-      .filter((x) => x.type_tax_use === use && (!companyId || !x.company_id || (x.company_id ?? 1) === companyId))
-      .flatMap((x) => [
-        ...taxRepartitionLines(x, 'invoice').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
-        ...taxRepartitionLines(x, 'refund').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
-      ]),
+    ...rows.filter(({ tax }) => tax.type_tax_use === use).map(({ line }) => line.account_id),
   ].filter(Boolean));
   return { sale: of('sale'), purchase: of('purchase') };
 }
@@ -857,6 +867,35 @@ function resolveCompanyTaxAccount(db, type, field, label, companyId) {
   return account;
 }
 
+const TAX_GROUP_ACCOUNT_ERRORS = {
+  tax_payable_account_id: {
+    prefix: 'liability_',
+    missing: 'Tax group payable account does not exist',
+    company: 'Tax payable account must belong to the tax group company',
+    type: 'Tax payable account must be a liability account',
+    archived: 'Tax group payable account is archived',
+  },
+  tax_receivable_account_id: {
+    prefix: 'asset_',
+    missing: 'Tax group receivable account does not exist',
+    company: 'Tax receivable account must belong to the tax group company',
+    type: 'Tax receivable account must be an asset account',
+    archived: 'Tax group receivable account is archived',
+  },
+};
+
+function resolveTaxGroupAccount(db, group, field, fallbackAccount, companyId) {
+  const accountId = group?.[field];
+  if (!accountId) return fallbackAccount;
+  const rules = TAX_GROUP_ACCOUNT_ERRORS[field];
+  const account = read(db, 'account.account', accountId);
+  if (!account) throw new Error(rules.missing);
+  if (account.company_id && account.company_id !== companyId) throw new Error(rules.company);
+  if (!account.account_type || !account.account_type.startsWith(rules.prefix)) throw new Error(rules.type);
+  if (account.active === false) throw new Error(rules.archived);
+  return account;
+}
+
 /** Validate explicit return-type mappings configured on a tax unit. */
 export function taxUnitMemberTypeValidation(db, unit, mainTypes = [], requiredCompanyId = null) {
   const companyIds = unit?.company_ids ?? [];
@@ -909,11 +948,41 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   const moneyRound = (n) => roundCurrency(n, currency);
   const tolerance = moneyRound(TAX_CLOSING_ROUNDING_MINOR_UNITS * Number(currency?.rounding ?? 0.01));
   const accounts = taxAccounts(db, ret.company_id);
-  const taxIds = new Set([...accounts.sale, ...accounts.purchase]);
+  const allRows = companyTaxRepartitionRows(db, ret.company_id);
+  const closingRows = allRows.filter(({ line, tax }) => isClosableRepartitionLine(line, tax));
+  const closingRowAccountIds = new Set(closingRows.map(({ line }) => line.account_id).filter(Boolean));
+  const excludedFromClosing = new Set(
+    allRows
+      .filter(({ line, tax }) => line.account_id && !isClosableRepartitionLine(line, tax) && !closingRowAccountIds.has(line.account_id))
+      .map(({ line }) => line.account_id),
+  );
+  const closableTaxAccountIds = new Set([...accounts.sale, ...accounts.purchase].filter((id) => !excludedFromClosing.has(id)));
+
+  const accountClosingGroups = new Map();
+  for (const { line, tax } of closingRows) {
+    if (!line.account_id) continue;
+    if (!accountClosingGroups.has(line.account_id)) {
+      accountClosingGroups.set(line.account_id, new Set());
+    }
+    accountClosingGroups.get(line.account_id).add(tax.tax_group_id ?? null);
+  }
+  const resolveAccountGroup = (accountId) => {
+    const groups = accountClosingGroups.get(accountId);
+    if (!groups || groups.size !== 1) return null;
+    return [...groups][0];
+  };
+
   const balances = new Map();
+  const groupNets = new Map();
   for (const line of journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id })) {
     if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
-    if (taxIds.has(line.account_id)) balances.set(line.account_id, (balances.get(line.account_id) ?? 0) + (Number(line.debit) || 0) - (Number(line.credit) || 0));
+    if (closableTaxAccountIds.has(line.account_id)) {
+      const net = (Number(line.debit) || 0) - (Number(line.credit) || 0);
+      balances.set(line.account_id, (balances.get(line.account_id) ?? 0) + net);
+      const tax = line.tax_id ? read(db, 'account.tax', line.tax_id) : null;
+      const groupId = tax ? (tax.tax_group_id ?? null) : resolveAccountGroup(line.account_id);
+      groupNets.set(groupId, (groupNets.get(groupId) ?? 0) - net);
+    }
   }
   const lines = [];
   let netClosed = 0;
@@ -923,7 +992,17 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
     lines.push(balance > 0 ? { account_id: id, credit: balance } : { account_id: id, debit: -balance });
     netClosed = moneyRound(netClosed - balance);
   }
-  const roundingDiff = moneyRound(netClosed - report.payable);
+
+  let closablePayable = report.payable;
+  if (excludedFromClosing.size) {
+    const closableItems = taxItems(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id })
+      .filter((l) => !excludedFromClosing.has(l.account_id));
+    const closableOutput = moneyRound(closableItems.filter((l) => l.side === 'sale').reduce((s, l) => s + l.tax, 0));
+    const closableInput = moneyRound(closableItems.filter((l) => l.side === 'purchase').reduce((s, l) => s + l.tax, 0));
+    closablePayable = moneyRound(closableOutput - closableInput);
+  }
+
+  const roundingDiff = moneyRound(netClosed - closablePayable);
   if (Math.abs(roundingDiff) > tolerance) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
   const payableAccount = resolveCompanyTaxAccount(db, type, 'tax_payable_account_id', 'Tax Payable Account', companyId);
   const receivableAccount = resolveCompanyTaxAccount(db, type, 'tax_receivable_account_id', 'Tax Receivable Account', companyId);
@@ -931,10 +1010,50 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   if (!partner) {
     throw new Error(`Tax return type "${type?.name ?? ''}" needs a Payment Partner configured (payment_partner_id)`);
   }
-  if (report.payable > 0) {
-    lines.push({ account_id: payableAccount.id, credit: report.payable, partner_id: partner.id });
-  } else if (report.payable < 0) {
-    lines.push({ account_id: receivableAccount.id, debit: -report.payable, partner_id: partner.id });
+  const sortedGroupIds = [...groupNets.keys()].sort((a, b) => {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return a - b;
+  });
+  const nonZeroGroups = sortedGroupIds.filter((gid) => moneyRound(groupNets.get(gid) ?? 0) !== 0);
+  const largestGroupId = nonZeroGroups.length
+    ? nonZeroGroups.reduce(
+      (best, gid) => (Math.abs(moneyRound(groupNets.get(gid) ?? 0)) > Math.abs(moneyRound(groupNets.get(best) ?? 0)) ? gid : best),
+      nonZeroGroups[0],
+    )
+    : null;
+
+  let remainingRounding = roundingDiff;
+  if (!nonZeroGroups.length && closablePayable) {
+    if (closablePayable > 0) {
+      lines.push({ account_id: payableAccount.id, credit: closablePayable, partner_id: partner.id });
+    } else if (closablePayable < 0) {
+      lines.push({ account_id: receivableAccount.id, debit: -closablePayable, partner_id: partner.id });
+    }
+  } else {
+    // Combine groups that resolve to the exact same payable/receivable account (e.g. default fallback) so one line is posted per account.
+    const accountAmounts = new Map();
+    for (const groupId of sortedGroupIds) {
+      let groupAmount = moneyRound(groupNets.get(groupId) ?? 0);
+      if (groupId === largestGroupId && remainingRounding !== 0) {
+        groupAmount = moneyRound(groupAmount - remainingRounding);
+        remainingRounding = 0;
+      }
+      if (!groupAmount) continue;
+      const group = groupId ? read(db, 'account.tax.group', groupId) : null;
+      const targetAccount = groupAmount > 0
+        ? resolveTaxGroupAccount(db, group, 'tax_payable_account_id', payableAccount, companyId)
+        : resolveTaxGroupAccount(db, group, 'tax_receivable_account_id', receivableAccount, companyId);
+      accountAmounts.set(targetAccount.id, moneyRound((accountAmounts.get(targetAccount.id) ?? 0) + groupAmount));
+    }
+    for (const [accountId, amount] of accountAmounts) {
+      if (amount > 0) {
+        lines.push({ account_id: accountId, credit: amount, partner_id: partner.id });
+      } else if (amount < 0) {
+        lines.push({ account_id: accountId, debit: -amount, partner_id: partner.id });
+      }
+    }
   }
   if (roundingDiff > 0) {
     const account = resolveCompanyTaxAccount(db, type, 'rounding_profit_account_id', 'Rounding Profit Account', companyId);
@@ -946,7 +1065,7 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   if (!lines.length) {
     lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
   }
-  return { lines, payable: report.payable, payableAccount, receivableAccount, partner: partner.id };
+  return { lines, payable: closablePayable, payableAccount, receivableAccount, partner: partner.id };
 }
 
 /** Build the representative company payment summary and per-company inter-company settlement entries for a tax unit return. */

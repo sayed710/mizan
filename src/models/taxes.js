@@ -556,8 +556,9 @@ const repartitionField = (label) => ({
     repartition_type: { type: 'selection', label: 'Based On', options: [['base', 'Base'], ['tax', 'of Tax']], required: true },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
     tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Grids', domain: (r) => r.applicability === 'taxes' },
+    use_in_tax_closing: { type: 'boolean', label: 'Use in Tax Closing' },
   },
-  newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] }),
+  newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [], use_in_tax_closing: true }),
 });
 
 /**
@@ -575,11 +576,41 @@ export function isDomesticRecord(record, db) {
 export const taxModels = {
   'account.tax.group': {
     label: 'Tax Groups',
+    guard: (db, _before, after) => {
+      const companyId = after.company_id ?? 1;
+      const checks = [
+        ['tax_payable_account_id', 'Tax payable', 'liability_'],
+        ['tax_receivable_account_id', 'Tax receivable', 'asset_'],
+      ];
+      for (const [field, label, typePrefix] of checks) {
+        if (!after[field]) continue;
+        const acc = read(db, 'account.account', after[field]);
+        if (!acc || (acc.company_id && acc.company_id !== companyId)) {
+          return `${label} account must belong to the tax group company`;
+        }
+        if (!acc.account_type || !acc.account_type.startsWith(typePrefix)) {
+          return `${label} account must be a${typePrefix === 'asset_' ? 'n asset' : ' liability'} account`;
+        }
+      }
+      return null;
+    },
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       country: { type: 'char', label: 'Country', help: 'The country for which this tax group is applicable.' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, multiCompanyOnly: true },
+      tax_payable_account_id: {
+        type: 'many2one',
+        relation: 'account.account',
+        label: 'Tax Payable Account',
+        domain: (a, g) => (!a.company_id || a.company_id === (g?.company_id ?? 1)) && (a.account_type?.startsWith('liability_') ?? false),
+      },
+      tax_receivable_account_id: {
+        type: 'many2one',
+        relation: 'account.account',
+        label: 'Tax Receivable Account',
+        domain: (a, g) => (!a.company_id || a.company_id === (g?.company_id ?? 1)) && (a.account_type?.startsWith('asset_') ?? false),
+      },
       preceding_subtotal: {
         type: 'char',
         label: 'Preceding Subtotal',
@@ -601,6 +632,9 @@ export const taxModels = {
       title: 'name',
       hideTitle: true,
       groups: [['name', 'country', 'company_id', 'sequence', 'pos_receipt_label'], ['preceding_subtotal']],
+      tabs: [
+        { label: 'Tax Closing', fields: ['tax_payable_account_id', 'tax_receivable_account_id'] },
+      ],
       chatter: true,
     },
   },
