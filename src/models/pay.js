@@ -3,7 +3,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { installmentSettlementState, invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
-import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, moveDate, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
+import { datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
@@ -557,8 +557,11 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   if (!source || source.state !== 'posted' || source.move_type !== 'entry' || !validDate(date) || date < sourceDate) {
     throw new Error('A posted entry and valid reversal date are required');
   }
-  if (source.fx_payment_move_id && source.fx_invoice_id && !opts.reconciliation_reversal) {
-    throw new Error('An exchange difference entry linked to a settlement cannot be reversed independently');
+  const reachesSettlementFx = isExchangeEntry(db, source);
+  if (reachesSettlementFx) {
+    if (source.reversed_entry_id || !opts.reconciliation_reversal) {
+      throw new Error('An exchange difference entry linked to a settlement cannot be reversed independently');
+    }
   }
   if (search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === source.id)) {
     throw new Error('This entry has already been reversed');

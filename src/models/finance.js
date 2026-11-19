@@ -244,7 +244,13 @@ const settledByCredit = (inv) => !['in_invoice', 'out_refund'].includes(inv.move
 export const appliedValue = (db, inv, p) => {
   const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
   const source = read(db, 'account.move', p.move_id);
-  const date = source?.move_type !== 'entry' && source?.invoice_date ? source.invoice_date : payment && !payment.invoice_id ? p.date : (inv.invoice_date ?? p.date);
+  const date = p.partial_reconcile_id != null && !payment && source
+    ? (source.invoice_date ?? source.date ?? p.date)
+    : source?.move_type !== 'entry' && source?.invoice_date
+      ? source.invoice_date
+      : payment && !payment.invoice_id
+        ? p.date
+        : (inv.invoice_date ?? p.date);
   return toCompany(db, inv.currency_id, p.amount, date, inv.company_id);
 };
 
@@ -296,7 +302,7 @@ function settlementCapacity(db, entry, inv) {
 /** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
 function backsSettlement(db, id) {
   return (db.records['account.payment'] ?? []).some((p) => p.state === 'posted' && p.move_id === id)
-    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id))
+    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id || g.exchange_move_id === id))
     || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
 }
 
@@ -321,7 +327,15 @@ function hasMatchingPartialLink(db, doc, row, { reversed = false } = {}) {
   const companyRound = (n) => roundCurrency(n, ownCurrency);
   const companyStep = Number(ownCurrency?.rounding ?? 0.01);
   const rowCompany = row.company_amount != null ? companyRound(Number(row.company_amount)) : companyRound(appliedValue(db, doc, row));
-  return Math.abs(companyRound(Number(link.amount)) - rowCompany) <= companyStep + 1e-9;
+  const gapPartials = link.exchange_move_id
+    ? (db.records['account.partial.reconcile'] ?? []).filter((g) => (
+        g && (reversed ? g.reversed : (!g.reversed && g.active !== false))
+        && (g.debit_move_id === doc.id || g.credit_move_id === doc.id)
+        && (g.debit_move_id === link.exchange_move_id || g.credit_move_id === link.exchange_move_id)
+      ))
+    : [];
+  const totalAmount = companyRound(Number(link.amount) + gapPartials.reduce((s, g) => s + Number(g.amount), 0));
+  return Math.abs(totalAmount - rowCompany) <= companyStep + 1e-9;
 }
 
 /**
@@ -381,8 +395,42 @@ function unapplicationError(db, stored, after, before) {
   return null;
 }
 
+/** Check whether a move is a generated currency exchange entry (or a reversal of one). */
+export function isExchangeEntry(db, moveOrId) {
+  // Walk the reversal chain iteratively; a client-supplied cycle ends the walk instead of recursing forever.
+  const seen = new Set();
+  let move = typeof moveOrId === 'object' && moveOrId !== null ? moveOrId : read(db, 'account.move', moveOrId);
+  while (move && move.move_type === 'entry' && !seen.has(move.id)) {
+    seen.add(move.id);
+    const id = move.id;
+    if (move.fx_payment_move_id && move.fx_invoice_id) return true;
+    if ((db.records['account.partial.reconcile'] ?? []).some((g) => g && g.exchange_move_id === id)
+      || (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => p.payment_fx_move_id === id))) return true;
+    move = move.reversed_entry_id ? read(db, 'account.move', move.reversed_entry_id) : null;
+  }
+  return false;
+}
+
 export function moveInvariant(db, after, before, stored = null) {
   if (before?.state === 'posted' && after.state !== 'posted' && backsSettlement(db, after.id)) return 'This entry records a payment; reverse the payment instead';
+  if (after.state === 'posted' && after.reversed_entry_id) {
+    const target = read(db, 'account.move', after.reversed_entry_id);
+    if (target && isExchangeEntry(db, target)) {
+      if (target.reversed_entry_id) {
+        return 'An exchange difference entry linked to a settlement cannot be reversed independently';
+      }
+      const hasActiveSettlement = (
+        Boolean(target.fx_payment_move_id && target.fx_invoice_id)
+        && (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => !p.reversed && !p.unapplied && p.payment_fx_move_id === target.id))
+      ) || (db.records['account.partial.reconcile'] ?? []).some((g) => (
+        g && g.active !== false && !g.reversed
+        && g.exchange_move_id === target.id
+      ));
+      if (hasActiveSettlement) {
+        return 'An exchange difference entry linked to a settlement cannot be reversed independently';
+      }
+    }
+  }
   const was = Array.isArray(before?.payments) ? before.payments : [];
   const now = Array.isArray(after.payments) ? after.payments : [];
   const paidBefore = Number(before?.amount_paid) || 0;
