@@ -157,7 +157,7 @@ export function create(db, model, vals, ctx = undefined) {
     : res;
 }
 
-const LINE_DETAIL_FIELDS = ['account_id', 'account', 'name', 'label', 'debit', 'credit', 'amount', 'amount_currency', 'qty', 'quantity', 'price_unit', 'price', 'tax_id', 'tax_ids', 'tax_name', 'tax'];
+const LINE_DETAIL_FIELDS = ['product_id', 'account_id', 'account', 'name', 'label', 'debit', 'credit', 'amount', 'amount_currency', 'qty', 'quantity', 'price_unit', 'price', 'tax_id', 'tax_ids', 'tax_name', 'tax'];
 
 /**
  * Per-line description of a one2many change. Lines are matched by their stable identity
@@ -244,7 +244,8 @@ function lineChangeDetail(oldDb, newDb, field, oldLines, newLines) {
   }
   for (const c of changed.sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
     const pair = (ks, line, sourceDb) => ks.map((k) => `${labelOf(k)} ${show(k, line[k], sourceDb)}`).join(', ');
-    const ref = `[${c.id}] `;
+    // Lines are matched by id, but shown by what the user sees: label, then account (ids are often UUIDs).
+    const ref = `[${c.o.name || c.o.label || (c.o.account_id != null && keys.includes('account_id') ? show('account_id', c.o.account_id, oldDb) : c.id)}] `;
     out.parts.push(`changed ${ref}${c.ks.map((k) => `${labelOf(k)} ${show(k, c.o[k], oldDb)} → ${show(k, c.n[k], newDb)}`).join(', ')}`);
     out.old.push(`~ ${ref}${pair(c.ks, c.o, oldDb)}`);
     out.new.push(`~ ${ref}${pair(c.ks, c.n, newDb)}`);

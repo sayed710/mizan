@@ -28,8 +28,9 @@ test('line add, remove and change are described per line by stable line_id', () 
   ];
   const r = formatTrackingChange(db, 'account.move', 'line_ids', oldLines, newLines);
   assert.match(r.body, /added \(.*Fee.*\)/);
-  assert.match(r.body, /changed \[a\] Debit 100 → 150/);
-  assert.ok(!r.body.includes('[b]'));
+  assert.match(r.body, /changed \[Cash\] Debit 100 → 150/);
+  assert.ok(!r.body.includes('[Sale]'));
+  assert.ok(!r.body.includes('[a]'));
   assert.ok(!r.body.includes('removed'));
   assert.ok(r.body.includes(nameOf(db, cash)));
   assert.notEqual(r.new_value, 'updated');
@@ -76,8 +77,8 @@ test('matching by line_identity and id works when line_id is absent', () => {
     { line_identity: 'lid-1', account_id: cash, name: 'Deposit', debit: 75, credit: 0 },
   ];
   const r = formatTrackingChange(db, 'account.move', 'line_ids', oldLines, newLines);
-  assert.match(r.body, /changed \[99\] Credit 50 → 75/);
-  assert.match(r.body, /changed \[lid-1\] Debit 50 → 75/);
+  assert.match(r.body, /changed \[Revenue\] Credit 50 → 75/);
+  assert.match(r.body, /changed \[Deposit\] Debit 50 → 75/);
   assert.ok(!r.body.includes('added'));
   assert.ok(!r.body.includes('removed'));
 });
@@ -92,7 +93,7 @@ test('invoice_line_ids tracks quantity, price, taxes and labels', () => {
     { line_id: 'invl-1', account_id: sales, name: 'Super Widget', qty: 3, price_unit: 120, tax_id: tax.id, tax_ids: [tax.id] },
   ];
   const r = formatTrackingChange(db, 'account.move', 'invoice_line_ids', oldLines, newLines);
-  assert.match(r.body, /changed \[invl-1\]/);
+  assert.match(r.body, /changed \[Widget\]/);
   assert.match(r.body, /Label Widget → Super Widget/);
   assert.match(r.body, /Quantity 2 → 3/);
   assert.match(r.body, /Price 100 → 120/);
@@ -159,7 +160,7 @@ test('local write with company audit_trail generates structured tracking message
   const rows = collectAuditTrailRows(updated, updated, null, null);
   const moveRows = rows.filter((r) => r.res_id === inv.id && r.field === 'Journal Items');
   assert.equal(moveRows.length, 1);
-  assert.match(moveRows[0].body, /changed \[item-1\] Debit 50 → 150/);
+  assert.match(moveRows[0].body, /changed \[Item 1\] Debit 50 → 150/);
   assert.match(moveRows[0].body, /added \(.*Item 2.*\)/);
   assert.match(moveRows[0].newValue, /Debit 150/);
   const csv = auditTrailToCsv(rows);
