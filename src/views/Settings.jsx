@@ -359,27 +359,40 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
       )}
 
       {showCurrencies && (
-        <div className="settings-block" data-block="currencies">
-          <h3>{t('Currencies')}</h3>
-          <SettingRow id="currency" label="Main Currency" description="The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.">
-            {company
-              ? <span id="currency" className="readonly">{currentCompany(db).currency}</span>
-              : (
-                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
-                  const currency = e.target.value;
-                  const curId = db.settings?.current_company_id ?? 1;
-                  const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
-                  commit(updateSettings(getDb(), { currency, ...(db.settings?.companies?.length ? { companies } : {}) }));
-                }}>
-                  {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+        <>
+          <div className="settings-block" data-block="currencies">
+            <h3>{t('Currencies')}</h3>
+            <SettingRow id="currency" label="Main Currency" description="The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.">
+              {company
+                ? <span id="currency" className="readonly">{currentCompany(db).currency}</span>
+                : (
+                  <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
+                    const currency = e.target.value;
+                    const curId = db.settings?.current_company_id ?? 1;
+                    const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
+                    commit(updateSettings(getDb(), { currency, ...(db.settings?.companies?.length ? { companies } : {}) }));
+                  }}>
+                    {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                )}
+              <p className="muted setting-links">
+                {appOpen(db, getUser(), 'accounting') ? <a href="#/accounting/currencies">{t('Currencies')}</a> : <span>{t('Currencies')}</span>}
+                {company && <> {' · '} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></>}
+              </p>
+            </SettingRow>
+          </div>
+          {hasField('currency_exchange_journal_id') && (
+            <div className="settings-block">
+              <SettingRow id="currency_exchange_journal_id" label="Exchange Difference Journal" description="Journal used to record realized foreign exchange gains and losses.">
+                <select id="currency_exchange_journal_id" disabled={readOnly || !company} value={company?.currency_exchange_journal_id ?? ''}
+                  onChange={(e) => onWriteCompany({ currency_exchange_journal_id: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">{t('Default general journal')}</option>
+                  {generalJournals.map((j) => <option key={j.id} value={j.id}>{j.name || j.code}</option>)}
                 </select>
-              )}
-            <p className="muted setting-links">
-              {appOpen(db, getUser(), 'accounting') ? <a href="#/accounting/currencies">{t('Currencies')}</a> : <span>{t('Currencies')}</span>}
-              {company && <> {' · '} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></>}
-            </p>
-          </SettingRow>
-        </div>
+              </SettingRow>
+            </div>
+          )}
+        </>
       )}
 
       {showCustomerPayments && (

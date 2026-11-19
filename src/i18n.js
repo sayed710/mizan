@@ -3219,6 +3219,10 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Exchange Difference Journal': 'دفتر فروق أسعار الصرف',
+  'Journal used to record realized foreign exchange gains and losses.': 'الدفتر المستخدم لتسجيل أرباح وخسائر فروق العملة المحققة.',
+  'Default general journal': 'دفتر اليومية الافتراضي',
+  'Exchange Difference Journal must be a general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق العملة دفتراً عاماً مشتركاً أو تابعاً لهذه الشركة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
