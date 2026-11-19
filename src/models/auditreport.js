@@ -17,25 +17,48 @@ const COLUMN_LABELS = { balance: 'Balance', debit: 'Debit', credit: 'Credit' };
 
 const accountKey = (acc) => acc.account?.id ?? acc.account?.code ?? acc.account?.name;
 
-/** Per account, the amounts the line's direct child lines already show in their own account details. */
-function childAccountTotals(rows, index) {
-  const parentDepth = Number(rows[index]?.depth) || 0;
+/** Net coefficient of each line code in an aggregation formula such as `A - B + C`; selectors and earnings have none. */
+function formulaTermCoefficients(formula) {
+  const coefficients = new Map();
+  const text = String(formula ?? '').trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\s*[+-]\s*[A-Za-z_][A-Za-z0-9_]*)*$/.test(text)) return coefficients;
+  for (const term of text.match(/[+-]?\s*[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const code = term.replace(/^[+\-\s]+/, '');
+    coefficients.set(code, (coefficients.get(code) ?? 0) + (term.trim().startsWith('-') ? -1 : 1));
+  }
+  return coefficients;
+}
+
+/**
+ * Per account, the amounts the line's direct child lines already show, as they contribute to this line: the balance
+ * column scales by the child's term coefficient and this line's sign, debit/credit columns by the coefficient only.
+ */
+function childAccountTotals(rows, index, columns) {
+  const parent = rows[index];
+  const parentDepth = Number(parent?.depth) || 0;
+  const coefficients = formulaTermCoefficients(parent?.formula);
+  const parentSign = Number(parent?.sign) || 1;
   const totals = new Map();
   for (let j = index + 1; j < rows.length && (Number(rows[j].depth) || 0) > parentDepth; j += 1) {
     if ((Number(rows[j].depth) || 0) !== parentDepth + 1) continue;
+    const coefficient = coefficients.get(rows[j].code) ?? 0;
+    if (!coefficient) continue;
     for (const acc of rows[j].accountRows ?? []) {
       const key = accountKey(acc);
       if (key == null) continue;
       const sum = totals.get(key) ?? [];
-      totals.set(key, (acc.values ?? []).map((v, i) => (sum[i] ?? 0) + (Number(v) || 0)));
+      totals.set(key, (acc.values ?? []).map((v, i) => {
+        const factor = columns[i % columns.length] === 'balance' ? coefficient * parentSign : coefficient;
+        return (sum[i] ?? 0) + factor * (Number(v) || 0);
+      }));
     }
   }
   return totals;
 }
 
 /** The part of each account's amount on this line that its child lines do not already show (a direct selector in the parent formula). */
-function residualAccountRows(rows, index) {
-  const childTotals = childAccountTotals(rows, index);
+function residualAccountRows(rows, index, columns) {
+  const childTotals = childAccountTotals(rows, index, columns);
   return (rows[index].accountRows ?? [])
     .map((acc) => {
       const shown = childTotals.get(accountKey(acc)) ?? [];
@@ -57,7 +80,7 @@ function renderReportTable(title, reportData, tableClass, valueHeader) {
     const depth = Math.max(0, Number(r.depth) || 0);
     const isLastStrong = Boolean(r.strong && index === rows.length - 1);
     const totalClass = isLastStrong ? 'grand-total-row' : (r.strong ? 'total-row' : '');
-    const visibleAccounts = residualAccountRows(rows, index);
+    const visibleAccounts = residualAccountRows(rows, index, columns);
     if (visibleAccounts.length > 0) {
       const accRows = visibleAccounts.map((acc) =>
         `      <tr><td class="depth-${depth + 1}">${escapeHtml(acc.account?.code ?? '')} ${escapeHtml(acc.account?.name ?? '')}</td>${valueCells(acc.values)}</tr>`

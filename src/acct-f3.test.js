@@ -425,3 +425,25 @@ test('FIN-3: a parent line shows the account amount its formula adds beyond its 
   assert.match(parentBlock, /400000 Product Sales<\/td><td class="text-right">300\.00/, 'parent shows the extra 300 from its direct selector');
   assert.match(pnl, /Parent Sales<\/td><td class="text-right">600\.00/, 'parent total includes child and extra');
 });
+
+test('FIN-3: a parent that subtracts a child line shows no invented account amount for it', () => {
+  let db = seed();
+  const pnlReport = findStatementReport(db, 'pnl', 1);
+  db = write(db, 'account.report', pnlReport.id, {
+    line_ids: [
+      { name: 'Net Margin', code: 'NET', sequence: 10, parent_code: '', formula: 'INC - EXP', sign: 1, foldable: true, strong: true },
+      { name: 'Income Line', code: 'INC', sequence: 20, parent_code: 'NET', formula: '400000', sign: -1, foldable: true, strong: false },
+      { name: 'Expense Line', code: 'EXP', sequence: 30, parent_code: 'NET', formula: '600000', sign: 1, foldable: true, strong: false },
+    ],
+  });
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2037-03-10', lines: [{ account: '101401', debit: 100 }, { account: '400000', credit: 100 }] }).db;
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2037-03-11', lines: [{ account: '600000', debit: 40 }, { account: '101401', credit: 40 }] }).db;
+
+  const html = renderAnnualReportHtml(db, { start_date: '2037-01-01', end_date: '2037-12-31', company_id: 1 });
+  const pnl = html.split('<table class="report-table pnl-table">')[1].split('</table>')[0];
+  const parentBlock = pnl.split('Income Line')[0];
+
+  assert.doesNotMatch(parentBlock, /600000/, 'the subtracted expense child is not repeated as a parent account detail');
+  assert.doesNotMatch(parentBlock, /400000/, 'the income child is not repeated either');
+  assert.match(pnl, /Net Margin<\/td><td class="text-right">60\.00/, 'parent total is income minus expense');
+});
