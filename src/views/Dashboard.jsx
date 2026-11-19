@@ -5,7 +5,7 @@ import { t } from '../i18n.js';
 import { money, display } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
-import { isLiquidityJournal, isStatementJournal } from '../models/ledger.js';
+import { isLiquidityJournal, isOnlineFeedJournal, isStatementJournal } from '../models/ledger.js';
 import { syncOnlineJournal } from '../models/onlineSync.js';
 import { statementLinesWithoutJournal } from '../models/bank.js';
 import { companyViewDb } from '../companyView.js';
@@ -144,9 +144,9 @@ function JournalCard({ card, companyId }) {
       <section className="panel journal-card">
         <h2><a href={list}>{card.journal.name}</a></h2>
         {empty ? (
-          isStatement && card.onlineSync ? (
+          isOnlineFeedJournal(card.kind) && card.onlineSync ? (
             <OnlineSyncControls sync={card.onlineSync} journalId={card.journal.id} primary />
-          ) : isStatement ? (
+          ) : isOnlineFeedJournal(card.kind) ? (
             <>
               <p className="journal-empty muted">{t('Import your bank statements to reconcile them.')}</p>
               <label className="btn primary sm">

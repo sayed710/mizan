@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reconcileReversalLines, reverseEntry, SETTLES } from './pay.js';
@@ -25,6 +25,7 @@ import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
 import { onlineAccountForJournal } from './onlineSync.js';
+import { openingAmounts, setOpeningBalance } from './opening.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
@@ -1806,6 +1807,7 @@ const lineItem = {
     tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },
     tax_grid_release: { type: 'boolean', label: 'Tax Grid Release', hidden: true },
     tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', hidden: true },
+    is_opening_balancing: { type: 'boolean', label: 'Opening Balancing Line', hidden: true },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
   },
   columnsFor: (record) => (record?.move_type === 'entry'
@@ -2065,6 +2067,18 @@ export const accountingModels = {
       },
       description: { type: 'text', label: 'Description' },
       current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
+      opening_debit: {
+        type: 'monetary',
+        label: 'Opening Debit',
+        currency: 'company',
+        compute: (r, db) => openingAmounts(db, r).debit,
+      },
+      opening_credit: {
+        type: 'monetary',
+        label: 'Opening Credit',
+        currency: 'company',
+        compute: (r, db) => openingAmounts(db, r).credit,
+      },
     },
     defaults: () => ({ account_type: 'expense', active: true, tax_ids: [] }),
     guard: (db, before, after) => {
@@ -2105,15 +2119,36 @@ export const accountingModels = {
       }
       const currencyError = accountCurrencyChangeError(db, before, after);
       if (currencyError) return currencyError;
+      if (before && (before.company_id ?? null) !== (after.company_id ?? null)) {
+        const openingMoveIds = new Set((db.records['res.company'] ?? []).map((c) => c.account_opening_move_id).filter(Boolean));
+        const isReferencedInOpeningMove = (db.records['account.move'] ?? []).some(
+          (m) => openingMoveIds.has(m.id) && (m.line_ids ?? []).some((l) => l.account_id === before.id),
+        );
+        if (isReferencedInOpeningMove) {
+          return 'An account referenced by an opening entry cannot be moved to another company';
+        }
+      }
       return null;
     },
     protectDelete: accountDeleteGuard,
     sort: (a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')),
     groupBys: ['account_type'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
-    list: ['code', 'name', 'account_type', 'reconcile', 'currency_id'],
-    listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') } },
-    editableList: ['reconcile'],
+    list: ['code', 'name', 'account_type', 'opening_debit', 'opening_credit', 'reconcile', 'currency_id'],
+    listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') }, opening_debit: { optional: 'hide' }, opening_credit: { optional: 'hide' } },
+    editableList: ['reconcile', 'opening_debit', 'opening_credit'],
+    prepareWrite: (db, vals, before) => {
+      const hasOpeningDebit = vals && 'opening_debit' in vals;
+      const hasOpeningCredit = vals && 'opening_credit' in vals;
+      if (!hasOpeningDebit && !hasOpeningCredit) return null;
+      const current = openingAmounts(db, before);
+      const d = hasOpeningDebit ? (Number(vals.opening_debit) || 0) : current.debit;
+      const c = hasOpeningCredit ? (Number(vals.opening_credit) || 0) : current.credit;
+      const nextDb = setOpeningBalance(db, before.id, { debit: d, credit: c, companyId: before.company_id ?? null });
+      // The amounts live on the opening entry; the account only computes them.
+      const { opening_debit: _debit, opening_credit: _credit, ...rest } = vals;
+      return { db: nextDb, vals: rest };
+    },
     views: ['list', 'kanban'],
     form: {
       title: 'display_name',
@@ -2169,7 +2204,7 @@ export const accountingModels = {
       }
       const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
       if (linkedOnlineAccount) {
-        if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
+        if (!isOnlineFeedJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
         if (after.company_id && after.company_id !== (linkedOnlineAccount.company_id ?? 1)) return 'Cannot change the company of a journal linked to an online account';
         if (before?.bank_statements_source === 'online_sync' && after.bank_statements_source !== 'online_sync') {
           return 'Cannot change the bank feeds source of a journal linked to an online account';
@@ -2439,7 +2474,7 @@ export const accountingModels = {
       return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
     },
     invariant: (db, after, before, stored) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before, stored),
-    protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
+    protectDelete: (db, m, staged) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),

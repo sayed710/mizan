@@ -1,6 +1,6 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
-import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, journalItems, profitAndLoss } from './ledger.js';
+import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { round } from '../money.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
@@ -10,6 +10,17 @@ import { reportingBookedAmount } from './money.js';
 import { isLiquidityJournal } from './ledger.js';
 
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
+
+/**
+ * Canonical review mode resolution for financial statements.
+ * An explicit reviewMode wins, otherwise includeUnposted gives 'all',
+ * otherwise the period's reviewMode, otherwise 'posted'.
+ */
+export function reportReviewMode(periodOrOptions, maybeOptions) {
+  const options = maybeOptions ?? (periodOrOptions && typeof periodOrOptions === 'object' ? periodOrOptions : {});
+  const period = maybeOptions ? (periodOrOptions && typeof periodOrOptions === 'object' ? periodOrOptions : {}) : options;
+  return options?.reviewMode ?? (options?.includeUnposted ? 'all' : period?.reviewMode ?? 'posted');
+}
 const accountIds = (db, type) => new Set(search(db, 'account.account', { includeArchived: true }).filter((a) => a.account_type === type).map((a) => a.id));
 /** Invoice counterpart lines used to classify cash flows, retaining their analytic allocation shares. */
 function cashFlowDocumentSources(db, document) {
@@ -23,18 +34,19 @@ const cashFlowSelectedSources = (sources, analyticAccountIds) => !analyticAccoun
   : sources?.selected ?? [];
 
 /** Journal items dated strictly before `from` (none without a `from`): the opening column of every report. */
-const itemsBefore = (db, from, company_id, analyticAccountIds) => (from ? filterByAnalytic(journalItems(db, { company_id }), analyticAccountIds).filter((l) => l.date < from) : []);
+const itemsBefore = (db, from, company_id, analyticAccountIds, reviewMode = 'posted') => (from ? filterByAnalytic(journalItems(db, { company_id, reviewMode }), analyticAccountIds).filter((l) => l.date < from) : []);
 
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
-export function trialBalance(db, { from, to, company_id, analyticAccountIds } = {}) {
-  const opening = new Map(balances(db, itemsBefore(db, from, company_id, analyticAccountIds)).map((b) => [b.account.id, b.balance]));
+export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
+  const mode = reportReviewMode({ reviewMode, includeUnposted });
+  const opening = new Map(balances(db, itemsBefore(db, from, company_id, analyticAccountIds, mode)).map((b) => [b.account.id, b.balance]));
   const rows = new Map();
   const row = (id) => {
     if (!rows.has(id)) rows.set(id, { account: read(db, 'account.account', id), initial: round(opening.get(id) ?? 0), debit: 0, credit: 0 });
     return rows.get(id);
   };
   for (const id of opening.keys()) row(id);
-  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id }), analyticAccountIds)) {
+  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode }), analyticAccountIds)) {
     const r = row(l.account_id);
     r.debit += reportingBookedAmount(db, l, l.debit);
     r.credit += reportingBookedAmount(db, l, l.credit);
@@ -49,8 +61,8 @@ export function trialBalance(db, { from, to, company_id, analyticAccountIds } = 
 }
 
 /** Period movements grouped by the explicit fiscal category on each trial-balance account. */
-export function fiscalReport(db, { from, to, company_id, analyticAccountIds } = {}) {
-  const trial = trialBalance(db, { from, to, company_id, analyticAccountIds });
+export function fiscalReport(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
+  const trial = trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode });
   const categories = search(db, 'account.fiscal.category', { includeArchived: true });
   const groups = new Map(categories.map((category) => [category.id, { category, accounts: [], debit: 0, credit: 0 }]));
   const uncategorized = { category: null, accounts: [], debit: 0, credit: 0 };
@@ -96,7 +108,8 @@ export function cashflowAnalysis(db, { from, to, company_id }) {
 }
 
 /** Receivable or payable ledger per partner: opening balance, the period's lines with a running balance, sorted by partner name. */
-export function partnerLedger(db, { from, to, company_id, analyticAccountIds, partnerIds, unreconciledOnly = false } = {}, kind = 'receivable') {
+export function partnerLedger(db, { from, to, company_id, analyticAccountIds, partnerIds, unreconciledOnly = false, includeUnposted, reviewMode } = {}, kind = 'receivable') {
+  const mode = reportReviewMode({ reviewMode, includeUnposted });
   const accounts = accountIds(db, kind === 'payable' ? 'liability_payable' : 'asset_receivable');
   const partners = partnerIds?.length ? new Set(partnerIds.map(Number)) : null;
   // Odoo's "unreconciled entries only" keeps items with an open residual, in the period and in the opening alike.
@@ -106,11 +119,11 @@ export function partnerLedger(db, { from, to, company_id, analyticAccountIds, pa
     if (!rows.has(id)) rows.set(id, { partner_id: id, initial: 0, debit: 0, credit: 0, lines: [] });
     return rows.get(id);
   };
-  for (const l of itemsBefore(db, from, company_id, analyticAccountIds).filter(keep)) {
+  for (const l of itemsBefore(db, from, company_id, analyticAccountIds, mode).filter(keep)) {
     const r = row(l.partner_id);
     r.initial += reportingBookedAmount(db, l, netOf(l));
   }
-  const items = filterByAnalytic(journalItems(db, { from, to, company_id }), analyticAccountIds)
+  const items = filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode }), analyticAccountIds)
     .filter(keep)
     .sort((a, b) => a.date.localeCompare(b.date));
   for (const l of items) {
@@ -163,26 +176,29 @@ export function accountCashFlowActivity(db, account) {
  * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
  * equity and loans financing, everything else operating.
  */
-export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) {
+export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, weight } = {}) {
   const targetCompany = company_id;
+  const mode = reportReviewMode({ reviewMode, includeUnposted });
+  // Journal-filtered report databases keep the unfiltered records for the source documents.
+  const documentsDb = db.unfilteredDb ?? db;
   const cash = accountIds(db, 'asset_cash');
   const sum = (items) => round(balances(db, items.filter((l) => cash.has(l.account_id))).reduce((s, b) => s + b.balance, 0));
-  const all = analyticMoveItems(journalItems(db, { company_id: targetCompany }), analyticAccountIds);
+  const all = weighted(analyticMoveItems(journalItems(db, { company_id: targetCompany, reviewMode: mode }), analyticAccountIds), weight);
   const opening = sum(all.filter((l) => from && l.date < from));
   const closing = sum(all.filter((l) => !to || l.date <= to));
   const totals = { operating: 0, investing: 0, financing: 0, unclassified: 0 };
   const attributed = new Map();
   const byMove = new Map();
-  for (const l of analyticMoveItems(journalItems(db, { from, to, company_id: targetCompany }), analyticAccountIds)) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
-  const documents = search(db, 'account.move').filter((m) => m.state === 'posted'
+  for (const l of weighted(analyticMoveItems(journalItems(db, { from, to, company_id: targetCompany, reviewMode: mode }), analyticAccountIds), weight)) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
+  const documents = search(documentsDb, 'account.move').filter((m) => m.state === 'posted'
     && (!targetCompany || (m.company_id ?? 1) === targetCompany)
     && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type));
   const documentSources = new Map(documents.map((document) => {
-    const allSources = cashFlowDocumentSources(db, document);
+    const allSources = cashFlowDocumentSources(documentsDb, document);
     const selectedLines = analyticAccountIds?.length
       ? analyticMoveItems(document.line_ids ?? [], analyticAccountIds)
       : (document.line_ids ?? []);
-    const selectedSources = selectedLines.map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
+    const selectedSources = selectedLines.map((line) => ({ line, account: read(documentsDb, 'account.account', line.account_id) }))
       .filter((source) => source.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(source.account.account_type));
     return [document.id, { all: allSources, selected: selectedSources }];
   }));
@@ -212,7 +228,7 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
           const denominator = cashFlowSourceTotal(source);
           if (!denominator) continue;
           for (const settlement of settlements) {
-            const available = Math.max(0, Math.abs(appliedValue(db, doc, settlement)) - (consumed.get(settlement) ?? 0));
+            const available = Math.max(0, Math.abs(appliedValue(documentsDb, doc, settlement)) - (consumed.get(settlement) ?? 0));
             const portion = Math.min(Math.abs(remaining), available) * Math.sign(amount);
             consumed.set(settlement, (consumed.get(settlement) ?? 0) + Math.abs(portion));
             for (const x of source) add(x.account, portion * netOf(x.line) / denominator, l);
@@ -226,10 +242,10 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
   // Reclassify realized exchange differences on invoice-linked payments with the cash settlement.
   for (const items of byMove.values()) {
     const moveId = items[0].move_id;
-    const original = read(db, 'account.move', moveId);
-    const payment = (db.records['account.payment'] ?? []).find((p) => p.move_id === moveId || (original?.reversed_entry_id && p.move_id === original.reversed_entry_id));
+    const original = read(documentsDb, 'account.move', moveId) ?? read(db, 'account.move', moveId);
+    const payment = (documentsDb.records['account.payment'] ?? db.records['account.payment'] ?? []).find((p) => p.move_id === moveId || (original?.reversed_entry_id && p.move_id === original.reversed_entry_id));
     if (!payment?.invoice_id) continue;
-    const doc = read(db, 'account.move', payment.invoice_id);
+    const doc = read(documentsDb, 'account.move', payment.invoice_id);
     const settlement = (doc?.payments ?? []).find((p) => p.move_id === payment.move_id);
     if (!settlement) continue;
     const source = cashFlowSelectedSources(documentSources.get(doc.id), analyticAccountIds);
@@ -238,10 +254,10 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
     const cashNet = items.filter((l) => cash.has(l.account_id)).reduce((sum, l) => sum + netOf(l), 0);
     if (!denominator || !fullDenominator || !cashNet) continue;
     const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
-    const delta = round((toCompany(db, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(db, doc, settlement)) * Math.sign(cashNet) * share);
+    const delta = round((toCompany(documentsDb, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(documentsDb, doc, settlement)) * Math.sign(cashNet) * share);
     if (!delta) continue;
-    const counterpartAccounts = new Set((doc.line_ids ?? []).filter((line) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', line.account_id)?.account_type)).map((line) => line.account_id));
-    const fxItems = items.filter((line) => !cash.has(line.account_id) && !counterpartAccounts.has(line.account_id)).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }));
+    const counterpartAccounts = new Set((doc.line_ids ?? []).filter((line) => ['asset_receivable', 'liability_payable'].includes(read(documentsDb, 'account.account', line.account_id)?.account_type)).map((line) => line.account_id));
+    const fxItems = items.filter((line) => !cash.has(line.account_id) && !counterpartAccounts.has(line.account_id)).map((line) => ({ line, account: read(documentsDb, 'account.account', line.account_id) }));
     // The exchange difference is the payment entry's single line that is neither cash nor the invoice counterpart; otherwise it stays unattributed.
     if (fxItems.length !== 1 || !fxItems[0].account) continue;
     const fxAmount = fxItems.reduce((sum, x) => sum - netOf(x.line), 0);
@@ -266,7 +282,16 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
     if (!counterpart || !denominator || !fullDenominator) continue;
     const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
     if (!share) continue;
-    const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment)) * share;
+    const counterpartItem = {
+      ...counterpart.line,
+      move_id: entry.id,
+      journal_id: entry.journal_id,
+      company_id: entry.company_id ?? 1,
+      date: entry.date ?? entry.invoice_date,
+    };
+    const entryWeight = weight ? weight(counterpartItem) : 1;
+    if (!entryWeight) continue;
+    const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment)) * share * entryWeight;
     const attribution = { company_id: entry.company_id, date: effDate };
     add(counterpart.account, -amount, attribution);
     for (const x of source) add(x.account, amount * netOf(x.line) / denominator, attribution);
@@ -287,9 +312,10 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
 }
 
 /** Executive KPIs for a period: P&L figures and margins, liquidity at the period end, days sales outstanding. */
-export function executiveSummary(db, { from, to, company_id, analyticAccountIds } = {}) {
-  const pl = profitAndLoss(db, { from, to, company_id }, { analyticAccountIds });
-  const bs = balanceSheet(db, { to, company_id }, { analyticAccountIds });
+export function executiveSummary(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
+  const mode = reportReviewMode({ reviewMode, includeUnposted });
+  const pl = profitAndLoss(db, { from, to, company_id, reviewMode: mode }, { analyticAccountIds });
+  const bs = balanceSheet(db, { to, company_id, reviewMode: mode }, { analyticAccountIds });
   const sum = (rows, types) => round(rows.filter((r) => types.includes(r.account.account_type)).reduce((s, r) => s + r.balance, 0));
   const cash = sum(bs.assets, ['asset_cash']);
   const receivables = sum(bs.assets, ['asset_receivable']);
@@ -309,13 +335,14 @@ export function executiveSummary(db, { from, to, company_id, analyticAccountIds 
 }
 
 /** Receivable statement of one partner: opening balance, the period's lines with a running balance and the move reference, closing balance. */
-export function customerStatement(db, partnerId, { from, to, company_id } = {}) {
+export function customerStatement(db, partnerId, { from, to, company_id, includeUnposted, reviewMode } = {}) {
+  const mode = reportReviewMode({ reviewMode, includeUnposted });
   const company = Number(company_id ?? currentCompany(db));
   const receivable = accountIds(db, 'asset_receivable');
   const mine = (l) => receivable.has(l.account_id) && l.partner_id === partnerId && (l.company_id ?? 1) === company;
-  const opening = round(itemsBefore(db, from, company).filter(mine).reduce((s, l) => s + reportingBookedAmount(db, l, netOf(l)), 0));
+  const opening = round(itemsBefore(db, from, company, undefined, mode).filter(mine).reduce((s, l) => s + reportingBookedAmount(db, l, netOf(l)), 0));
   let run = opening;
-  const lines = journalItems(db, { from, to, company_id: company }).filter(mine)
+  const lines = journalItems(db, { from, to, company_id: company, reviewMode: mode }).filter(mine)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((l) => {
       const debit = reportingBookedAmount(db, l, l.debit);

@@ -11,6 +11,7 @@ import { returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
 import { taxUnitCompatibilityError } from './accounting.js';
+import { fiscalYearStart } from './ledger.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -280,6 +281,8 @@ export function withCompany(models) {
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
   'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
+  'fiscalyear_last_day', 'fiscalyear_last_month',
+  'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
   'currency_exchange_journal_id',
   'deferred_revenue_journal_id', 'deferred_expense_journal_id',
@@ -287,6 +290,7 @@ const CONTROL_FIELDS = [
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
+  'transfer_account_id',
 ];
 
 /**
@@ -308,6 +312,29 @@ function companyGuard(db, before, r, ctx) {
   if (r.tax_periodicity != null && r.tax_periodicity !== '' && !['monthly', 'trimester', 'semester', 'year'].includes(r.tax_periodicity)) return 'Select a valid tax periodicity';
   if (r.tax_calculation_rounding_method != null && r.tax_calculation_rounding_method !== '' && !['round_per_line', 'round_globally'].includes(r.tax_calculation_rounding_method)) return 'Select a valid tax rounding method';
   if (r.invoice_qr != null && r.invoice_qr !== '' && !['zatca', 'epc'].includes(r.invoice_qr)) return 'Select a valid payment QR format';
+  const lastMonth = r.fiscalyear_last_month != null && r.fiscalyear_last_month !== '' ? Number(r.fiscalyear_last_month) : null;
+  const lastDay = r.fiscalyear_last_day != null && r.fiscalyear_last_day !== '' ? Number(r.fiscalyear_last_day) : null;
+  if (lastMonth != null) {
+    if (!Number.isInteger(lastMonth) || lastMonth < 1 || lastMonth > 12) {
+      return 'Fiscal year end month must be between 1 and 12';
+    }
+  }
+  if (lastDay != null) {
+    const month = lastMonth ?? 12;
+    const maxDays = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month] ?? 31;
+    if (!Number.isInteger(lastDay) || lastDay < 1 || lastDay > maxDays) {
+      return 'Fiscal year end day is invalid for the selected month';
+    }
+  }
+  if (r.currency_provider != null && r.currency_provider !== '' && !['none', 'ecb'].includes(r.currency_provider)) {
+    return 'Select a valid currency provider';
+  }
+  if (r.currency_interval_unit != null && r.currency_interval_unit !== '' && !['manually', 'daily', 'weekly', 'monthly'].includes(r.currency_interval_unit)) {
+    return 'Select a valid currency interval unit';
+  }
+  if (r.currency_next_execution_date != null && r.currency_next_execution_date !== '' && !validDate(r.currency_next_execution_date)) {
+    return 'Currency next execution date must be a valid date';
+  }
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => (
@@ -389,6 +416,16 @@ function companyGuard(db, before, r, ctx) {
     const account = record(db, 'account.account', r[field]);
     if (!account || account.company_id !== r.id || account.account_type !== type || account.active === false) return `Select an active ${label} account belonging to this company`;
   }
+  if (r.transfer_account_id) {
+    const account = record(db, 'account.account', r.transfer_account_id);
+    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id) || account.account_type !== 'asset_current' || !account.reconcile) {
+      return 'Internal Transfer Account must be an active, reconcilable current-asset account belonging to this company';
+    }
+    const companyCurrencyId = r.currency_id ?? record(db, 'res.company', r.id)?.currency_id;
+    if (account.currency_id && account.currency_id !== companyCurrencyId) {
+      return 'Internal Transfer Account currency must match the company currency';
+    }
+  }
   if (r.down_payment_account_id) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
@@ -409,7 +446,60 @@ function companyGuard(db, before, r, ctx) {
   }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
+  // Guard account_opening_move_id: once set, cannot change or be cleared (except back to same id).
+  if (before?.account_opening_move_id && r.account_opening_move_id !== before.account_opening_move_id) {
+    return 'The opening entry cannot be changed or cleared';
+  }
+  if (r.account_opening_move_id) {
+    const move = record(db, 'account.move', r.account_opening_move_id);
+    if (!move) return 'Select an existing opening entry';
+    if (move.move_type !== 'entry') return 'The opening entry must be a journal entry';
+    if ((move.company_id ?? 1) !== r.id) return 'The opening entry must belong to this company';
+
+    if (move.state === 'posted') {
+      if (before && (before.account_opening_date ?? null) !== (r.account_opening_date ?? null)) {
+        return 'The opening move is posted; reset it to draft to change the opening date';
+      }
+      if (before && before.opening_equity_account_id !== r.opening_equity_account_id) {
+        return 'The opening move is posted; reset it to draft to change the opening equity account';
+      }
+    } else {
+      const effectiveDate = r.account_opening_date || fiscalYearStart(db, today(), r.id);
+      if (move.date !== effectiveDate) {
+        return 'The opening move date must match the company opening date';
+      }
+      const balLine = (move.line_ids ?? []).find((l) => l.is_opening_balancing);
+      if (balLine && r.opening_equity_account_id && balLine.account_id !== r.opening_equity_account_id) {
+        return 'The opening balancing line must use the company opening equity account';
+      }
+    }
+  }
   return null;
+}
+
+/** Prepare res.company writes: update draft opening move on date or equity account changes. */
+function prepareCompanyWrite(db, vals, before) {
+  let nextDb = db;
+  if (vals && 'account_opening_date' in vals && before.account_opening_move_id) {
+    const move = record(nextDb, 'account.move', before.account_opening_move_id);
+    if (move && move.state !== 'posted') {
+      const effectiveDate = vals.account_opening_date || fiscalYearStart(nextDb, today(), before.id);
+      nextDb = write(nextDb, 'account.move', move.id, { date: effectiveDate });
+    }
+  }
+  if (vals && 'opening_equity_account_id' in vals && vals.opening_equity_account_id !== before.opening_equity_account_id && before.account_opening_move_id) {
+    const move = record(nextDb, 'account.move', before.account_opening_move_id);
+    if (move && move.state !== 'posted') {
+      const balLine = (move.line_ids ?? []).find((l) => l.is_opening_balancing);
+      if (balLine && vals.opening_equity_account_id) {
+        const nextLines = move.line_ids.map((l) =>
+          l.is_opening_balancing ? { ...l, account_id: vals.opening_equity_account_id } : l,
+        );
+        nextDb = write(nextDb, 'account.move', move.id, { line_ids: nextLines });
+      }
+    }
+  }
+  return { db: nextDb, vals };
 }
 
 /** Build per-kind deferred field overrides when legacy shared deferred fields are provided without explicit per-kind values. */
@@ -606,6 +696,7 @@ export const companyModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       account_default_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Default Receivable Account' },
       account_default_payable_id: { type: 'many2one', relation: 'account.account', label: 'Default Payable Account' },
+      transfer_account_id: { type: 'many2one', relation: 'account.account', label: 'Internal Transfer Account' },
       ...Object.fromEntries(Object.entries({ account_stock_valuation_id: 'Stock Valuation Account', account_stock_input_id: 'Stock Input Account', account_stock_output_id: 'Stock Output Account', account_cogs_id: 'Cost of Goods Sold Account', account_price_difference_id: 'Price Difference Account', account_production_id: 'Production Cost Account' }).map(([field, label]) => [field, { type: 'many2one', relation: 'account.account', label }])),
       intercompany_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Inter-company Purchase Journal' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
@@ -616,6 +707,8 @@ export const companyModels = {
       default_payroll_structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Default Payroll Structure' },
       current_year_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account' },
       opening_equity_account_id: { type: 'many2one', relation: 'account.account', label: 'Opening Balance Equity Account' },
+      account_opening_date: { type: 'date', label: 'Opening Date' },
+      account_opening_move_id: { type: 'many2one', relation: 'account.move', label: 'Opening Entry', readonly: true },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
@@ -662,9 +755,27 @@ export const companyModels = {
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
+      fiscalyear_last_day: { type: 'integer', label: 'Fiscal Year End Day' },
+      fiscalyear_last_month: { type: 'integer', label: 'Fiscal Year End Month' },
+      currency_provider: {
+        type: 'selection',
+        label: 'Currency Provider',
+        options: [['none', 'None'], ['ecb', 'European Central Bank']],
+      },
+      currency_interval_unit: {
+        type: 'selection',
+        label: 'Currency Interval Unit',
+        options: [['manually', 'Manually'], ['daily', 'Daily'], ['weekly', 'Weekly'], ['monthly', 'Monthly']],
+      },
+      currency_next_execution_date: { type: 'date', label: 'Next Currency Rates Execution Date' },
     },
     defaults: () => ({
       active: true,
+      fiscalyear_last_day: 31,
+      fiscalyear_last_month: 12,
+      currency_provider: 'none',
+      currency_interval_unit: 'manually',
+      currency_next_execution_date: null,
       intercompany_rule: 'none',
       tax_periodicity: 'monthly',
       deferred_amount_computation_method: 'days',
@@ -675,6 +786,7 @@ export const companyModels = {
       deferred_revenue_periodicity: 'month',
       deferred_expense_periodicity: 'month',
     }),
+    prepareWrite: prepareCompanyWrite,
     guard: companyGuard,
     onWrite: onCompanyWrite,
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},
@@ -688,7 +800,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'currency_exchange_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_journal_id', 'deferred_revenue_account_id', 'generate_deferred_revenue_entries_method', 'deferred_revenue_amount_computation_method', 'deferred_revenue_periodicity', 'deferred_expense_journal_id', 'deferred_expense_account_id', 'generate_deferred_expense_entries_method', 'deferred_expense_amount_computation_method', 'deferred_expense_periodicity'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'tax_return_template', 'account_sale_tax_id', 'account_purchase_tax_id', 'tax_cash_basis_journal_id'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'currency_exchange_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_opening_date', 'account_opening_move_id', 'account_default_receivable_id', 'account_default_payable_id', 'transfer_account_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_journal_id', 'deferred_revenue_account_id', 'generate_deferred_revenue_entries_method', 'deferred_revenue_amount_computation_method', 'deferred_revenue_periodicity', 'deferred_expense_journal_id', 'deferred_expense_account_id', 'generate_deferred_expense_entries_method', 'deferred_expense_amount_computation_method', 'deferred_expense_periodicity'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'tax_return_template', 'account_sale_tax_id', 'account_purchase_tax_id', 'tax_cash_basis_journal_id'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule', 'intercompany_journal_id'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

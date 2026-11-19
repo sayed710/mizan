@@ -2,13 +2,13 @@ import { Fragment, useRef, useState } from 'react';
 import { search } from '../orm.js';
 import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine } from '../models/configurableReports.js';
 import { currentCompany } from '../models/company.js';
-import { today } from '../models/common.js';
+import { today, validDate } from '../models/common.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, tableToRows } from '../csv.js';
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
-import { periodsFor } from './reportCompare.js';
+import { periodsFor, selectedOptionIds } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, PERIODS } from './reportNavigation.js';
 
 function RowCells({ values, variance, showVariance }) {
@@ -52,7 +52,8 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
-  const [journalId, setJournalId] = useState('');
+  const [journalIds, setJournalIds] = useState([]);
+  const [includeUnposted, setIncludeUnposted] = useState(false);
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [from, setFrom] = useState(`${today().slice(0, 4)}-01-01`);
   const [to, setTo] = useState(statementKind ? today() : `${today().slice(0, 4)}-12-31`);
@@ -78,9 +79,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const ledgers = statementKind ? scopedLedgers(companyDb, companyIds) : [];
   const ledger = statementKind ? (ledgers.find((item) => item.id === Number(ledgerId)) ?? null) : null;
   const availableJournals = statementKind ? scopedJournals(companyDb, companyIds, ledger) : [];
-  const journal = statementKind ? (availableJournals.find((item) => item.id === Number(journalId)) ?? null) : null;
-  const targetJournalIds = statementKind && (journal || ledger)
-    ? (journal ? [journal.id] : (ledger.journal_ids ?? []))
+  const selectedJournalIds = statementKind ? journalIds.filter((jId) => availableJournals.some((j) => j.id === jId)) : [];
+  const targetJournalIds = statementKind && (selectedJournalIds.length || ledger)
+    ? (selectedJournalIds.length ? selectedJournalIds : (ledger.journal_ids ?? []))
     : null;
   const onCompanyChange = (nextCompany) => {
     setCompanyId(nextCompany);
@@ -88,8 +89,8 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     const nextIds = selectedCompanyIds(companies, nextCompany);
     const nextLedger = scopedLedgers(companyDb, nextIds).find((item) => item.id === Number(ledgerId)) ?? null;
     if (!nextLedger && ledgerId) setLedgerId('');
-    const nextJournal = scopedJournals(companyDb, nextIds, nextLedger).find((item) => item.id === Number(journalId)) ?? null;
-    if (!nextJournal && journalId) setJournalId('');
+    const allowedJournalIds = new Set(scopedJournals(companyDb, nextIds, nextLedger).map((j) => j.id));
+    setJournalIds((prev) => prev.filter((jId) => allowedJournalIds.has(jId)));
     const nextAnalytic = search(companyDb, 'account.analytic.account').filter((a) => !a.company_id || nextIds.includes(a.company_id));
     const allowedAnalyticIds = new Set(nextAnalytic.map((a) => a.id));
     setAnalyticAccountIds((prev) => prev.filter((id) => allowedAnalyticIds.has(id)));
@@ -107,7 +108,8 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     : companyDb;
 
   const period = statementKind ? (periodKey === 'custom' ? { from, to } : PERIODS[periodKey]()) : { from, to };
-  const comparable = !statementKind || !['all', 'custom'].includes(periodKey);
+  const comparable = !statementKind || periodKey !== 'all';
+  const activePeriodKey = statementKind ? periodKey : 'custom';
   const reportCompany = report.company_id ?? 1;
   const groups = comparable
     ? search(companyDb, 'account.report.horizontal.group').filter((g) => (
@@ -119,8 +121,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const analyticAccounts = search(companyDb, 'account.analytic.account').filter(
     (a) => !a.company_id || (statementKind ? companyIds.includes(a.company_id) : a.company_id === reportCompany),
   );
-  const periods = statementKind && comparable && comparison !== 'none'
-    ? periodsFor(periodKey, comparison, today())
+  const canComputePeriods = activePeriodKey !== 'custom' || (validDate(period.from) && validDate(period.to) && period.from <= period.to);
+  const periods = comparable && comparison !== 'none' && canComputePeriods
+    ? periodsFor(activePeriodKey, comparison, period)
     : [{ ...period, label: '' }];
   const data = compareConfigurableReport(
     db,
@@ -128,7 +131,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     periods,
     period,
     group,
-    { companyIds, analyticAccountIds },
+    { companyIds, analyticAccountIds, includeUnposted },
   );
 
   const expandableCodes = data.rows.filter(isExpandableLine).map((line) => line.code);
@@ -171,15 +174,14 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             )}
             <label className="inline-select">
               {t('Ledger')}
-              <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalId(''); }}>
+              <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
                 <option value="">{t('All Ledgers')}</option>
                 {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
             </label>
             <label className="inline-select">
               {t('Journals')}
-              <select aria-label={t('Journals')} value={journal ? String(journal.id) : ''} onChange={(e) => setJournalId(e.target.value)}>
-                <option value="">{t('All Journals')}</option>
+              <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
                 {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
               </select>
             </label>
@@ -227,11 +229,22 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             <label>{t('To')}<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
             <label>
               {t('Horizontal Group')}
-              <select aria-label={t('Horizontal Group')} value={group?.id ?? ''} onChange={(e) => setGroupId(e.target.value)}>
+              <select aria-label={t('Horizontal Group')} value={group?.id ?? ''} onChange={(e) => { setGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
                 <option value="">{t('No Group')}</option>
                 {groups.map((g) => <option value={g.id} key={g.id}>{g.name}</option>)}
               </select>
             </label>
+            {comparable && (
+              <label className="inline-select">
+                {t('Comparison')}
+                <select aria-label={t('Comparison')} value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setGroupId(''); }}>
+                  <option value="none">{t('No comparison')}</option>
+                  <option value="previous">{t('Previous Period')}</option>
+                  <option value="lastYear">{t('Same Period Last Year')}</option>
+                  <option value="last3">{t('Last 3 Periods')}</option>
+                </select>
+              </label>
+            )}
             {analyticAccounts.length > 0 && (
               <label className="inline-select">
                 {t('Analytic Accounts')}
@@ -247,6 +260,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             )}
           </>
         )}
+        <label className="inline-select">
+          <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
+        </label>
         <span className="spacer" />
         {expandableCodes.length > 0 && (
           <button type="button" className="btn sm" aria-pressed={allUnfolded} onClick={toggleAll}>
