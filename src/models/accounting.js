@@ -2005,9 +2005,10 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after) => {
       const companyId = after.company_id ?? 1;
-      const cashBasisOwner = before?.id ? (db.records['res.company'] ?? []).find((c) => c.tax_cash_basis_journal_id === before.id) : null;
-      if (cashBasisOwner && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== cashBasisOwner.id))) {
-        return `Clear the Cash Basis Journal of company ${cashBasisOwner.name} before archiving this journal or changing its type or company`;
+      const cashBasisOwners = before?.id ? (db.records['res.company'] ?? []).filter((c) => c.tax_cash_basis_journal_id === before.id) : [];
+      const blockedOwner = cashBasisOwners.find((c) => after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id));
+      if (blockedOwner) {
+        return `Clear the Cash Basis Journal of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
       }
       const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
       if (linkedOnlineAccount) {

@@ -295,3 +295,14 @@ test('a company without a cash basis or default general journal keeps posting re
   db = payMove(posted, invoiceId, 110, '2026-06-11');
   assert.ok(search(db, 'account.move').some((m) => m.cash_basis_origin_move_id === invoiceId), 'release posted');
 });
+
+test('a shared cash basis journal cannot be assigned to one of the companies that use it', () => {
+  const other = createCompany(seed(), { name: 'Company 2' });
+  const shared = create(other.db, 'account.journal', { name: 'Shared Cash Basis', code: 'SCB', type: 'general', company_id: null });
+  let db = write(shared.db, 'res.company', 1, { tax_cash_basis_journal_id: shared.id });
+  db = write(db, 'res.company', other.id, { tax_cash_basis_journal_id: shared.id });
+  for (const companyId of [1, other.id]) {
+    const attempt = { ...db, records: { ...db.records, 'account.journal': db.records['account.journal'].map((j) => (j.id === shared.id ? { ...j, company_id: companyId } : j)) } };
+    assert.throws(() => applyDiff(db, diffDb(db, attempt), { isAdmin: true }), /Clear the Cash Basis Journal/);
+  }
+});
