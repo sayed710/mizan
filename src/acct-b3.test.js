@@ -5,6 +5,7 @@ import { models } from './models/index.js';
 import { accountId } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 import { applyRule, autoReconcile } from './models/reconcile.js';
+import { unreconcile } from './models/bank.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 
@@ -187,6 +188,16 @@ test('an underpayment written off within a matching rule tolerance keeps the cou
   assert.equal(writeoffItems.length, 1);
   assert.equal(writeoffItems[0].debit, 4);
   assert.deepEqual(writeoffItems[0].analytic_distribution, { [project.id]: 100 });
+
+  // Once reconciled, the allocation that produced the posted write-off is frozen.
+  const reconciled = read(after, LINE, line.id);
+  const edited = { ...after, records: { ...after.records, [LINE]: after.records[LINE].map((l) => (l.id === line.id ? { ...l, writeoff_analytic_distribution: {} } : l)) } };
+  assert.throws(() => applyDiff(after, diffDb(after, edited), { isAdmin: true }), /A reconciled bank transaction cannot be changed/);
+
+  // Unreconciling drops it, so a later manual write-off cannot inherit the rule's hidden allocation.
+  const reopened = unreconcile(after, reconciled).db;
+  assert.equal(read(reopened, LINE, line.id).writeoff_analytic_distribution ?? null, null);
+  assert.equal(read(applyDiff(after, diffDb(after, reopened), { isAdmin: true }), LINE, line.id).writeoff_analytic_distribution ?? null, null);
 });
 
 test('a label regex with a repeated group around a repeat is rejected on save and never matched', () => {
@@ -274,4 +285,17 @@ test('counterpart line analytic distribution must belong to the model company or
     company_id: 1,
     line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100', analytic_distribution: { [globalAccount.id]: 100 } }],
   }));
+});
+
+test('a bounded repeat of a bounded group is saved and still matches labels', () => {
+  const base = seed();
+  const feeAcc = accountId(base, '600000');
+  const rule = addRule(base, {
+    trigger: 'auto_reconcile',
+    match_label: 'match_regex',
+    match_label_param: '^(a{1,3}){1,2}$',
+    line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }],
+  });
+  const line = addLine(rule.db, { payment_ref: 'aaaa', amount: -10 });
+  assert.equal(read(autoReconcile(line.db), LINE, line.id).state, 'reconciled');
 });

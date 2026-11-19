@@ -18,14 +18,18 @@ const parseStrictNumber = (raw) => {
 };
 
 // A repeated group that contains a quantifier or alternation, such as (a+)+, (\w*x)* or (a|aa)+, can backtrack
-// exponentially on a near-matching label and block the auto-reconcile run.
+// exponentially on a near-matching label and block the auto-reconcile run. Bounded repeats of bounded groups, such as
+// (a{1,3}){1,2}, stay allowed.
 // ponytail: shape check, not a full regex analyser (does not parse character classes or lookarounds); isolate matching in a worker if patterns ever need nested repeats or alternations.
-const NESTED_REPEAT = /\((?:[^()\x5c]|\x5c.)*(?:[+*?|]|\{\d+,?\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/;
+const NESTED_REPEAT = [
+  /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/,
+  /\((?:[^()\x5c]|\x5c.)*(?:[+*?|]|\{\d+,?\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\})/,
+];
 
 /** Compile a regular expression case-insensitively, returning null if invalid, empty or prone to runaway backtracking. */
 function compileRegex(pattern) {
   const text = String(pattern ?? '');
-  if (!text || NESTED_REPEAT.test(text)) return null;
+  if (!text || NESTED_REPEAT.some((shape) => shape.test(text))) return null;
   try {
     return new RegExp(text, 'i');
   } catch {

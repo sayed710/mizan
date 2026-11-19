@@ -477,7 +477,7 @@ function unreconcileError(db, before, after) {
   const lockError = unreconcileLockError(db, before);
   if (lockError) return lockError;
   if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length) return 'Unreconciliation requires reversing entries and clearing the bank links';
-  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'name']);
+  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'writeoff_analytic_distribution', 'name']);
   if ([...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !clearedFields.has(k)).some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) return 'A reconciled bank transaction cannot be changed';
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);
   if (!bankId) return 'Cannot unreconcile a transaction without its bank entry link';
@@ -542,6 +542,7 @@ export function unreconcile(db, line, reversalDate = null) {
     batch_payment_id: null,
     payment_move_id: null,
     writeoff_move_id: null,
+    writeoff_analytic_distribution: null,
     bank_move_id: null,
     open_amount: null,
     allocations: [],
@@ -651,7 +652,7 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
 function lineGuard(db, before, after) {
   if (before && (before.state === 'reconciled' || before.bank_move_id) && after.state === 'to_check' && !after.move_id) return unreconcileError(db, before, after);
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     return changed ? 'A reconciled bank transaction cannot be changed' : null;
   }
   if (before?.bank_move_id) {
@@ -777,7 +778,7 @@ function statementJournalType(db, r) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
-    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
+    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
     protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null),
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
