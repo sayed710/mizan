@@ -106,6 +106,15 @@ test('journalAudit model: orders entries by Date or by Journal Entry Number', ()
   assert.equal(invMovesNumber[3], 'INV/2026/0002');
 });
 
+test('journalAudit model: date sort keeps plain name order for same-day entries; number sort is numeric', () => {
+  const db = createAuditDb();
+  const sameDay = (name, id) => ({ id, name, journal_id: 30, state: 'posted', date: '2026-03-01', company_id: 1, line_ids: [{ id: id * 10, name: 'X', account_id: 5, debit: 1, credit: 0 }] });
+  db.records['account.move'] = [...db.records['account.move'], sameDay('MISC/9', 901), sameDay('MISC/10', 902)];
+  const names = (sort) => journalAudit(db, { sort }).find((g) => g.journal.id === 30).items.map((it) => it.move.name).filter((n) => /^MISC\/\d+$/.test(n));
+  assert.deepEqual(names('date'), ['MISC/10', 'MISC/9']);
+  assert.deepEqual(names('number'), ['MISC/9', 'MISC/10']);
+});
+
 test('JournalAudit view: sort option selector toggles between Date and Journal Entry Number ordering', async () => {
   const { makeEl } = setupDom();
   globalThis.location = { hash: '#/accounting/journal-audit' };

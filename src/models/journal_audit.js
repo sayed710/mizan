@@ -7,7 +7,7 @@ export function journalAudit(db, { from = '', to = '', companyId = null, sort = 
   const journals = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
   const byNumber = (a, b) => (a.move.name ?? '').localeCompare(b.move.name ?? '', undefined, { numeric: true });
   const byDate = (a, b) => a.date.localeCompare(b.date);
-  const compareItems = (a, b) => (sort === 'number' ? byNumber(a, b) || byDate(a, b) : byDate(a, b) || byNumber(a, b)) || (a.move.id ?? 0) - (b.move.id ?? 0);
+  const compareItems = (a, b) => (sort === 'number' ? byNumber(a, b) || byDate(a, b) : byDate(a, b) || (a.move.name ?? '').localeCompare(b.move.name ?? '')) || (a.move.id ?? 0) - (b.move.id ?? 0);
   for (const move of db.records['account.move'] ?? []) {
     const date = move.date ?? move.invoice_date ?? '';
     if (move.state !== 'posted' || (from && date < from) || (to && date > to) || (companyId && (move.company_id ?? 1) !== companyId)) continue;
