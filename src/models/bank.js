@@ -781,7 +781,7 @@ export const bankModels = {
     protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null),
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
-    importFile: { accept: '.ofx,.qfx,.xml', run: importStatement },
+    importFile: { accept: '.ofx,.qfx,.xml,.qif', run: importStatement },
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       date: { type: 'date', label: 'Date', required: true },

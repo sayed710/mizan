@@ -265,7 +265,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
   const [open, setOpen] = useState(false);
   const run = (fn) => { setOpen(false); fn(); };
   const duplicate = () => {
-    const res = create(getDb(), model, duplicateValues(model, rec));
+    const res = create(getDb(), model, duplicateValues(model, rec, getDb()));
     commit(res.db);
     location.hash = `${base}/${res.id}${query}`;
   };

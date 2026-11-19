@@ -1,5 +1,5 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
@@ -1227,12 +1227,18 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     debit: 0,
     credit: 0,
   }));
+  const company = read(db, 'res.company', r.company_id ?? 1);
+  const companyId = company ? company.id : null;
+  // Configured cash basis journal, then the company's default general journal; companies with neither keep the legacy MISC journal.
+  const cashBasisJournalId = company?.tax_cash_basis_journal_id
+    || resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId ?? 1 })?.id
+    || 'MISC';
   const posted = postEntry(db, {
-    journal: 'MISC',
+    journal: cashBasisJournalId,
     date,
     ref: `Cash basis taxes ${r.name}`,
     lines: [...lines, ...baseLines],
-    company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
+    company: companyId,
     system_generated: true,
     archivedOriginIds: [r.id],
     includeCashBasisTargets: true,
@@ -1558,10 +1564,20 @@ const {
   price_unit: invoiceLinePrice,
   discount: invoiceLineDiscount,
   tax_id: invoiceLineTaxId,
+  tax_ids: invoiceLineTaxIds,
   tax: invoiceLineTaxPct,
   analytic_account_id: invoiceLineAnalytic,
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
+
+const invoiceLineTaxDomain = (tax, line, db) => {
+  if (tax.active === false) return false;
+  const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
+  if (tax.company_id && tax.company_id !== docCompany) return false;
+  const expectedUse = isPurchase(line) ? 'purchase' : 'sale';
+  return tax.type_tax_use === expectedUse;
+};
+
 const invoiceLineField = {
   ...invoiceLineBase,
   newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
@@ -1583,9 +1599,9 @@ const invoiceLineField = {
       const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
       if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
     }
-    return isDoc && ['product_id', 'account_id'].includes(key)
+    return withTaxIds(isDoc && ['product_id', 'account_id'].includes(key)
       ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
-      : updated;
+      : updated);
   },
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
@@ -1601,17 +1617,9 @@ const invoiceLineField = {
     price_unit: invoiceLinePrice,
     discount: { ...invoiceLineDiscount, optional: 'hide' },
     // A numeric rate without a tax record (e.g. a digitized bill) still taxes the line: show it rather than an empty selector.
-    tax_id: {
-      ...invoiceLineTaxId,
-      domain: (tax, line, db) => {
-        if (tax.active === false) return false;
-        const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
-        if (tax.company_id && tax.company_id !== docCompany) return false;
-        const expectedUse = isPurchase(line) ? 'purchase' : 'sale';
-        return tax.type_tax_use === expectedUse;
-      },
-      rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null),
-    },
+    // The Taxes tags (tax_ids) are the editable field; tax_id is kept as the first tax and stays hidden.
+    tax_id: { ...invoiceLineTaxId, domain: invoiceLineTaxDomain },
+    tax_ids: { ...invoiceLineTaxIds, domain: invoiceLineTaxDomain, rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null) },
     tax: { ...invoiceLineTaxPct, hidden: true },
     ...invoiceLineExtraBase,
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
@@ -2003,6 +2011,11 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after) => {
       const companyId = after.company_id ?? 1;
+      const cashBasisOwners = before?.id ? (db.records['res.company'] ?? []).filter((c) => c.tax_cash_basis_journal_id === before.id) : [];
+      const blockedOwner = cashBasisOwners.find((c) => after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id));
+      if (blockedOwner) {
+        return `Clear the Cash Basis Journal of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+      }
       const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
       if (linkedOnlineAccount) {
         if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
@@ -2483,6 +2496,7 @@ export const accountingModels = {
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
+        copy: false,
         options: [
           ['no', 'No'],
           ['at_date', 'At Date'],
@@ -2491,7 +2505,7 @@ export const accountingModels = {
           ['yearly', 'Yearly'],
         ],
       },
-      auto_post_until: { type: 'date', label: 'Repeat Until' },
+      auto_post_until: { type: 'date', label: 'Repeat Until', copy: false },
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
