@@ -413,6 +413,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
   'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
+  'to_check', // a review flag belongs to the reviewed entry only
 ]);
 function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
@@ -2491,7 +2492,7 @@ export const accountingModels = {
       incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm', domain: (r) => r.active !== false },
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
-      to_check: { type: 'boolean', label: 'To Check' },
+      to_check: { type: 'boolean', label: 'To Check', copy: false },
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
@@ -2546,6 +2547,7 @@ export const accountingModels = {
       statusbar: 'state',
       statusbarHide: ['cancel'],
       lockedWhen: (r) => r.state !== 'draft' || Boolean(r.inalterable_hash),
+      unlockedFields: ['to_check'],
       smart: [
         {
           label: 'Reversal Entries',

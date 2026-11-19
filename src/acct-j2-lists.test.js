@@ -286,3 +286,25 @@ test('Journal Items Status column, Group By, and header Select-all checkbox', as
     await React.act(async () => root.unmount());
   }
 });
+
+test('a posted entry can be flagged and cleared To Check by a non-admin, and the flag is never copied', async () => {
+  const { duplicateValues } = await import('./duplicate.js');
+  const { postAutoPostMoves } = await import('./models/accounting.js');
+  const base = seed();
+  const posted = postEntry(base, { journal: 'MISC', company: 1, date: '2026-01-15', lines: [{ account: '101401', debit: 10 }, { account: '400000', credit: 10 }] });
+  assert.ok(models['account.move'].form.unlockedFields.includes('to_check'));
+
+  const flagged = write(posted.db, 'account.move', posted.id, { to_check: true });
+  const synced = applyDiff(posted.db, diffDb(posted.db, flagged));
+  assert.equal(read(synced, 'account.move', posted.id).to_check, true);
+  const cleared = write(synced, 'account.move', posted.id, { to_check: false });
+  assert.equal(read(applyDiff(synced, diffDb(synced, cleared)), 'account.move', posted.id).to_check, false);
+
+  assert.equal(duplicateValues('account.move', read(flagged, 'account.move', posted.id), flagged).to_check, undefined);
+
+  const draft = create(base, 'account.move', { move_type: 'entry', date: '2026-01-15', auto_post: 'monthly', to_check: true, line_ids: [{ account_id: search(base, 'account.account').find((a) => a.code === '101401').id, debit: 10 }, { account_id: search(base, 'account.account').find((a) => a.code === '400000').id, credit: 10 }] });
+  const ran = postAutoPostMoves(draft.db, '2026-01-15');
+  const next = search(ran, 'account.move').find((m) => m.auto_post_origin_id === draft.id && m.id !== draft.id);
+  assert.ok(next, 'the next recurring draft is generated');
+  assert.ok(!next.to_check, 'the next recurring draft starts without the review flag');
+});
