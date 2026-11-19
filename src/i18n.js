@@ -3224,6 +3224,7 @@ const ar = {
   'Division tax rate cannot be 100%': 'لا يمكن أن تكون نسبة الضريبة الشاملة في السعر 100%',
   'Cash Basis Journal': 'دفتر الأساس النقدي',
   'General journal used for cash-basis tax release entries.': 'دفتر القيود العامة المستخدم لقيود تحرير ضريبة الأساس النقدي.',
+  'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

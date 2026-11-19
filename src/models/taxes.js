@@ -327,7 +327,8 @@ export const isSectionOrNote = (line) => Boolean(line && ['line_section', 'line_
 
 const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 
-const taxAmount = (base, t) => {
+/** Tax on an untaxed base: a percentage of the base, or for a division tax the share that makes it `amount`% of the taxed price. */
+export const taxAmount = (base, t) => {
   const amt = Number(t.tax) || 0;
   if (t.tax_type === 'division') {
     if (100 - amt === 0) throw new Error('Division tax rate cannot be 100%');
@@ -350,13 +351,6 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null, si
   if (!specs.length) {
     const base = roundPerLine ? roundCurrency(g, currency) : g;
     return { untaxed: base, tax: 0, total: base, taxes: [] };
-  }
-  if (specs.length === 1 && specs[0].tax_type === 'division' && Number(specs[0].tax) === 100 && specs[0].tax_include) {
-    const t = specs[0];
-    const taxAmt = roundPerLine ? roundCurrency(g, currency) : g;
-    const net = taxAmt * taxRowsFactor(t, side);
-    const totalTax = roundPerLine ? roundCurrency(net, currency) : net;
-    return { untaxed: 0, tax: totalTax, total: totalTax, taxes: [{ ...t, base: 0, amount: taxAmt }] };
   }
   // 1. Solve the exact affine relation G = a * B0 + c for price-included taxes in sequence.
   let inclA = 1;
@@ -623,6 +617,7 @@ export const taxModels = {
         ...(after.refund_repartition_line_ids ?? []).flatMap((l) => l.tag_ids ?? []),
       ];
       if (allTags.some((id) => read(db, 'account.account.tag', id)?.applicability !== 'taxes')) return 'Select only tax tags';
+      if (after.amount_type === 'division' && !(Number(after.amount) < 100)) return 'A percentage of price tax included must be below 100%';
       if (after.amount_type === 'group') {
         const children = after.children_tax_ids ?? [];
         if (after.id && children.includes(after.id)) return 'A group tax cannot include itself';
@@ -754,7 +749,9 @@ export const taxModels = {
     label: 'Fiscal Positions',
     guard: (db, _before, after) => {
       // A mapping's source may be any account a line was entered with; the posted destination must be usable by this company.
-      const fpCompany = after.company_id ?? 1;
+      // A position without a company is shared, so its destinations are checked when it is applied to a company.
+      if (!after.company_id) return null;
+      const fpCompany = after.company_id;
       for (const row of after.account_ids ?? []) {
         if (!row.account_dest_id) continue;
         const account = read(db, 'account.account', row.account_dest_id);

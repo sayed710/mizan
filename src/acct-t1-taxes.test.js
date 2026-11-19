@@ -9,7 +9,8 @@ import { menusFor, models } from './models/index.js';
 import { amounts } from './models/common.js';
 import { postMove } from './models/accounting.js';
 import { accountId, isBalanced } from './models/ledger.js';
-import { computeLineTaxes, defaultTaxRepartitionLines, fiscalPositionFor, taxSnapshot } from './models/taxes.js';
+import { computeLineTaxes, defaultTaxRepartitionLines, fiscalPositionFor, lineTaxOf, lineUntaxed, taxSnapshot } from './models/taxes.js';
+import { createCompany, ensureMainCompany, interCompanyRules } from './models/company.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -303,6 +304,9 @@ test('2. fiscal position account mappings reject cross-company source or destina
     () => applyDiff(syncedValid, diffDb(syncedValid, forgedSwitchCompany), { isAdmin: true }),
     /company|belong/i,
   );
+  // A shared position (no company) may map to any company's account; the mapping is checked when it is applied.
+  const shared = create(syncedValid, 'account.fiscal.position', { name: 'Shared FP', account_ids: [{ account_src_id: accC1Src.id, account_dest_id: accC2Dest.id }] });
+  assert.doesNotThrow(() => applyDiff(syncedValid, diffDb(syncedValid, { ...shared.db, records: { ...shared.db.records, 'account.fiscal.position': shared.db.records['account.fiscal.position'].map((fp) => (fp.id === shared.id ? { ...fp, company_id: null } : fp)) } }), { isAdmin: true }));
 });
 
 test('3. auto-apply fiscal position without country acts as fallback only when no country or zip match applies', () => {
@@ -390,4 +394,25 @@ test('4. tax form shows Cash Basis Transition Account only when tax exigibility 
   } finally {
     await ctx.done();
   }
+});
+
+test('5. a division tax must stay below 100% over diffDb + applyDiff', () => {
+  const db = seed();
+  const ok = create(db, 'account.tax', { name: 'Div 99', amount_type: 'division', amount: 99, type_tax_use: 'sale' });
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, ok.db), { isAdmin: true }));
+  const forged = { ...ok.db, records: { ...ok.db.records, 'account.tax': ok.db.records['account.tax'].map((t) => (t.id === ok.id ? { ...t, amount: 100 } : t)) } };
+  assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: true }), /below 100%/);
+});
+
+test('6. an inter-company purchase with a price-included division tax keeps the sold net price', () => {
+  const main = ensureMainCompany(seed());
+  let db = createCompany(main, { name: 'Buyer Co', currency_id: read(main, 'res.company', 1).currency_id, intercompany_rule: 'sale_purchase' }).db;
+  const div = create(db, 'account.tax', { name: 'Div 20 Incl', amount_type: 'division', amount: 20, type_tax_use: 'purchase', price_include: true, company_id: 2 });
+  db = write(div.db, 'product', 2, { company_id: null, supplier_tax_id: div.id });
+  const sale = create(db, 'sale.order', { company_id: 1, partner_id: read(db, 'res.company', 2).partner_id, order_line: [{ product_id: 2, qty: 1, price_unit: 100, discount: 0, tax: 0, tax_type: 'percent', tax_include: false }] });
+  const out = interCompanyRules(write(sale.db, 'sale.order', sale.id, { state: 'sale' }), sale.id);
+  const [line] = read(out, 'purchase.order', read(out, 'sale.order', sale.id).auto_purchase_id).order_line;
+  assert.equal(line.price_unit, 125);
+  assert.equal(Math.round(lineUntaxed(line) * 100) / 100, 100);
+  assert.equal(Math.round(lineTaxOf(line) * 100) / 100, 25);
 });
