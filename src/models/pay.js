@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
+import { exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -11,6 +11,7 @@ import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
+import { reconcileLedgerItems } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
@@ -27,21 +28,34 @@ export function selectedItems(db, selections, { allowMultipleEntryLines = false 
   if (!selections?.length) throw new Error('Select journal items first');
   const seen = new Set();
   const reconciledByMove = new Map();
-  return selections.map(({ move_id, line_identity }) => {
-    const key = JSON.stringify([move_id, line_identity]);
+  return selections.map(({ move_id, line_identity, line_index }) => {
+    const key = JSON.stringify([move_id, line_index ?? line_identity]);
     if (seen.has(key)) throw new Error('Select each journal item only once');
     seen.add(key);
     const move = read(db, 'account.move', move_id);
-    const matches = (move?.line_ids ?? []).filter((line) => journalItemIdentity(line) === line_identity);
-    if (move?.state !== 'posted' || matches.length !== 1) throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
-    const [line] = matches;
+    let line;
+    let lineIndex;
+    if (line_index != null && Number.isInteger(line_index)) {
+      if (move?.state !== 'posted' || line_index < 0 || line_index >= (move?.line_ids ?? []).length) {
+        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      }
+      line = move.line_ids[line_index];
+      if (line_identity && journalItemIdentity(line) !== line_identity) {
+        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      }
+      lineIndex = line_index;
+    } else {
+      const matches = (move?.line_ids ?? []).filter((l) => journalItemIdentity(l) === line_identity);
+      if (move?.state !== 'posted' || matches.length !== 1) throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      [line] = matches;
+      lineIndex = (move.line_ids ?? []).indexOf(line);
+    }
     const account = read(db, 'account.account', line.account_id);
     const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
     if (!account || !(account.reconcile === true || counterpart)) throw new Error('Select items on a reconcilable account');
     // Multi-installment invoices and bills legitimately split one receivable/payable total across dated counterpart lines.
     const sameCounterpart = (move.line_ids ?? []).filter((item) => item.account_id === line.account_id && item.partner_id === line.partner_id);
     if (!allowMultipleEntryLines && sameCounterpart.length !== 1 && !(isInvoice(move) && counterpart)) throw new Error('This entry has multiple counterpart items; settle it from its document workflow');
-    const lineIndex = (move.line_ids ?? []).indexOf(line);
     const multiInstallment = isInvoice(move) && counterpart && sameCounterpart.length > 1;
     let lineResidual = isInvoice(move) ? residual(move, db) : 0;
     if (multiInstallment) {
@@ -548,6 +562,23 @@ export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today(
   return write(next, 'account.move', invoice.id, { ...invoiceValues, payments: paymentsFinal });
 }
 
+/** Reconcile each open line of a source entry on a reconcilable account with its mirror line on the reversal. */
+export function reconcileReversalLines(db, sourceId, reversalId, date) {
+  const source = read(db, 'account.move', sourceId);
+  const reversal = read(db, 'account.move', reversalId);
+  const reconciled = reconciledJournalItems(db, source);
+  return source.line_ids.reduce((acc, line, i) => {
+    const mirror = reversal.line_ids?.[i];
+    if (!mirror || mirror.account_id !== line.account_id || (Number(mirror.debit) || 0) !== (Number(line.credit) || 0) || (Number(mirror.credit) || 0) !== (Number(line.debit) || 0)) return acc;
+    if (!isReconcilableAccount(read(acc, 'account.account', line.account_id)) || reconciled[i]?.reconciled) return acc;
+    if (!(Number(line.debit) || Number(line.credit))) return acc;
+    return reconcileLedgerItems(acc, [
+      { move_id: source.id, line_index: i, line_identity: journalItemIdentity(line) },
+      { move_id: reversal.id, line_index: i, line_identity: journalItemIdentity(mirror) },
+    ], { date });
+  }, db);
+}
+
 /** Post a linked mirror of an existing entry (optionally in a chosen journal/date, or reverse-and-create a new draft). */
 export function reverseEntry(db, source, dateOrOptions = today(), extraOptions = {}) {
   const opts = typeof dateOrOptions === 'object' && dateOrOptions !== null && !Array.isArray(dateOrOptions)
@@ -590,6 +621,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     date,
     ref,
     reversed_entry_id: source.id,
+    ...(opts.scheduled && opts.reconciliation_reversal ? { reconciliation_reversal: true } : {}),
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     ...(source.cash_basis_base_grid ? { cash_basis_base_grid: true } : {}),
     partner_id: source.partner_id ?? null,
@@ -610,6 +642,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     next = write(next, 'account.move', source.id, { reversal_move_id: created.id });
   }
   next = postNote(next, 'account.move', source.id, opts.scheduled ? `Reversal scheduled for ${date}` : `Reversed by ${read(next, 'account.move', created.id).name}`);
+  if (!opts.scheduled && !reachesSettlementFx && !opts.reconciliation_reversal) next = reconcileReversalLines(next, source.id, created.id, date);
   if (mode === 'modify') {
     const draft = create(next, 'account.move', {
       move_type: 'entry',

@@ -4,7 +4,7 @@ import './models/index.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { accountingCompany, createCompanyWithDefaultInvoiceJournals, withDefaultBankJournal } from './test-support/accounting-company.js';
-import { payMove, postMove } from './models/accounting.js';
+import { payMove, postAutoPostMoves, postMove } from './models/accounting.js';
 import { cashFlow } from './models/reports.js';
 import { reversePayment } from './models/pay.js';
 import { closeFiscalYear, reopenFiscalYear, revalueForeignBalances } from './models/closing.js';
@@ -171,7 +171,8 @@ test('reversing a general entry cancels signed tax bases in the tax report', () 
   const before = taxesByTax(posted.db, period).find((row) => row.name === 'Reversal tax');
   assert.deepEqual([before.base, before.tax], [100, 10]);
   const action = models['account.move'].form.buttons.find((button) => button.label === 'Reverse Entry');
-  const reversed = action.run(posted.db, read(posted.db, 'account.move', posted.id), { date: '2043-01-02' }).db;
+  // A future-dated reversal is scheduled (auto-post at its date), so post it on that date.
+  const reversed = postAutoPostMoves(action.run(posted.db, read(posted.db, 'account.move', posted.id), { date: '2043-01-02' }).db, '2043-01-02');
   const after = taxesByTax(reversed, period).find((row) => row.name === 'Reversal tax');
   assert.deepEqual([after.base, after.tax], [0, 0]);
 });

@@ -3258,6 +3258,7 @@ const ar = {
   'Tax return company must match the tax unit main company': 'يجب أن تطابق شركة الإقرار الضريبي الشركة الرئيسية للوحدة الضريبية',
   'Configure a company contact for every company in the tax unit': 'حدّد جهة اتصال لكل شركة في الوحدة الضريبية',
   'Main company is missing from the tax unit': 'الشركة الرئيسية مفقودة من الوحدة الضريبية',
+  'This entry is scheduled to post automatically on {date}': 'هذا القيد مجدول للترحيل تلقائياً في {date}',
   'Configure the Balance Sheet report for this company': 'أعدّ تقرير الميزانية العمومية لهذه الشركة',
   'Configure the Profit and Loss report for this company': 'أعدّ تقرير الأرباح والخسائر لهذه الشركة',
   'The open statement amount is too small to match this payment': 'المبلغ المفتوح في كشف الحساب أقل من اللازم لمطابقة هذه الدفعة',

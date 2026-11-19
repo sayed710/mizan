@@ -6,6 +6,7 @@ import { seed } from './seed.js';
 import { amounts } from './models/common.js';
 import { postMove, payMove } from './models/accounting.js';
 import { taxSnapshot, fiscalPositionFor } from './models/taxes.js';
+import { mapLineAccount } from './models/ledger.js';
 
 test('excluded base-affecting tax participates in included tax solver', () => {
   const line = { qty: 1, price_unit: 100, tax_breakdown: [
@@ -57,14 +58,16 @@ test('changing fiscal position updates existing product tax while preserving ent
   assert.equal(changed.price_unit, 37);
 });
 
-test('fiscal position maps the existing line account when the draft is posted', () => {
+test('fiscal position maps a line account once, and posting keeps the mapped account', () => {
   let db = seed();
   const source = create(db, 'account.account', { name: 'Original income', code: '499101', account_type: 'income' });
   const destination = create(source.db, 'account.account', { name: 'Mapped income', code: '499102', account_type: 'income' });
   const position = create(destination.db, 'account.fiscal.position', { name: 'Account mapping', account_ids: [{ account_src_id: source.id, account_dest_id: destination.id }] });
-  const move = { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-03-01', fiscal_position_id: position.id, invoice_line_ids: [{ qty: 1, price_unit: 100, account_id: source.id }] };
+  // A line's account is stored already mapped, so posting never maps it a second time.
+  const mapped = mapLineAccount(position.db, { fiscal_position_id: position.id }, source.id);
+  const move = { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-03-01', fiscal_position_id: position.id, invoice_line_ids: [{ qty: 1, price_unit: 100, account_id: mapped }] };
   const changed = models['account.move'].onchange(move, 'fiscal_position_id', position.db);
-  assert.equal(changed.invoice_line_ids[0].account_id, source.id);
+  assert.equal(changed.invoice_line_ids[0].account_id, destination.id);
   const draft = create(position.db, 'account.move', { ...move, ...changed });
   db = postMove(draft.db, draft.id);
   assert.ok(read(db, 'account.move', draft.id).line_ids.some((line) => line.account_id === destination.id && line.credit === 100));

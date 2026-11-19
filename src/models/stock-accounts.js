@@ -19,7 +19,8 @@ const ROLES = {
   production: [null, 'account_production_id', 'production cost'],
 };
 
-export function stockAccount(db, p, role, companyId = 1) {
+/** Non-throwing form of `stockAccount`: returns the account or the error message it would throw. */
+export function resolveStockAccount(db, p, role, companyId = 1) {
   const [property, field, label] = ROLES[role];
   const company = read(db, 'res.company', companyId);
   const candidateId = property ? productProperty(db, p, property, companyId) : null;
@@ -27,9 +28,15 @@ export function stockAccount(db, p, role, companyId = 1) {
   const id = (candidateAcc && (candidateAcc.company_id ?? 1) === companyId ? candidateId : null) || company?.[field];
   const category = read(db, 'product.category', p?.categ_id);
   const message = `Configure the ${label} account on category ${category?.name ?? '(none)'} or company ${company?.name ?? companyId}`;
-  if (!id) throw new Error(message);
+  if (!id) return { account: null, error: message };
   const account = read(db, 'account.account', id);
-  if (!account || account.active === false) throw new Error(`${message}: configured account is missing or archived`);
-  if (account.company_id && account.company_id !== companyId) throw new Error(`${message}: account belongs to another company`);
-  return account.id;
+  if (!account || account.active === false) return { account: null, error: `${message}: configured account is missing or archived` };
+  if (account.company_id && account.company_id !== companyId) return { account: null, error: `${message}: account belongs to another company` };
+  return { account: account.id, error: null };
+}
+
+export function stockAccount(db, p, role, companyId = 1) {
+  const { account, error } = resolveStockAccount(db, p, role, companyId);
+  if (error) throw new Error(error);
+  return account;
 }
