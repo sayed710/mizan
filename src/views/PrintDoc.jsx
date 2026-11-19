@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { models } from '../models/index.js';
-import { read } from '../orm.js';
+import { read, search } from '../orm.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { display, formatDate } from '../ui.jsx';
@@ -9,7 +9,7 @@ import { subtotal } from '../models/common.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
 import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
 import { taxInvoiceLabel } from '../models/taxes.js';
-import { documentCurrency } from '../money.js';
+import { documentCurrency, formatCurrency } from '../money.js';
 import { invoiceTermNote } from '../models/terms.js';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
@@ -63,16 +63,129 @@ function Checks({ db, batch }) {
         } catch (e) {
           amounts = { numeric: t(e.message), words: t(e.message) };
         }
+        const settledMoves = payment?.move_id
+          ? search(db, 'account.move').filter((m) =>
+              (m.payments ?? []).some((p) => !p.unapplied && p.move_id === payment.move_id)
+            )
+          : (move ? [move] : []);
+        const stubMoves = settledMoves.length ? settledMoves : (move ? [move] : []);
+
         return (
           <article key={number ?? l.move_id} className="paper check">
             <header className="paper-head"><b className="paper-company">{company.name}</b><span>{t('Check')} #{number}</span></header>
             <p>{t('Date')}: {formatDate(batch.date)}</p>
             <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', payment?.partner_id ?? move?.partner_id)?.name ?? '—'}</b> <span className="num">{amounts.numeric}</span></p>
             <p className="check-words">{amounts.words}</p>
-            <footer className="paper-foot muted">{t('Memo')}: {move?.name}</footer>
+            <footer className="paper-foot muted">{t('Memo')}: {move?.name || payment?.memo}</footer>
+            <section className="remittance-stub">
+              <header className="stub-head"><b>{t('Remittance Advice')}</b></header>
+              <table className="paper-lines stub-table">
+                <thead>
+                  <tr>
+                    <th>{t('Bill')}</th>
+                    <th>{t('Date')}</th>
+                    <th className="num">{t('Original Amount')}</th>
+                    <th className="num">{t('Net Payment')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stubMoves.length ? stubMoves.map((m) => {
+                    const linePaid = (m.payments ?? []).find((p) => !p.unapplied && p.move_id === payment?.move_id)?.amount ?? l.amount;
+                    return (
+                      <tr key={m.id}>
+                        <td>{m.name || m.ref || '—'}</td>
+                        <td>{formatDate(m.invoice_date || m.date)}</td>
+                        <td className="num">{formatCurrency(m.amount_total, amounts.currency)}</td>
+                        <td className="num">{formatCurrency(linePaid, amounts.currency)}</td>
+                      </tr>
+                    );
+                  }) : (
+                    <tr>
+                      <td>{move?.name || payment?.memo || '—'}</td>
+                      <td>{formatDate(payment?.date || batch.date)}</td>
+                      <td className="num">{amounts.numeric}</td>
+                      <td className="num">{amounts.numeric}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </section>
           </article>
         );
       })}
+    </main>
+  );
+}
+
+/** Batch deposit slip for inbound batches. */
+function DepositSlip({ db, batch }) {
+  const company = documentCompany(db, batch);
+  if (!company) return <main className="print-page"><p role="alert">{t('Configure the batch company before printing.')}</p></main>;
+  const journal = batch.journal_id ? read(db, 'account.journal', batch.journal_id) : null;
+  const currency = batch.currency_id ? read(db, 'res.currency', batch.currency_id) : (journal?.currency_id ? read(db, 'res.currency', journal.currency_id) : null);
+  const lines = (batch.lines ?? []).filter((l) => !l.cancelled);
+  const totalAmount = lines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
+
+  return (
+    <main className="print-page">
+      <div className="no-print print-toolbar">
+        <button type="button" className="btn primary" onClick={() => window.print()}>{t('Print')}</button>
+        <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
+      </div>
+      <article className="paper deposit-slip">
+        <header className="paper-head">
+          <div>
+            <b className="paper-company">{company.name}</b>
+            {addressLines(company, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`} className="muted">{line}</div>)}
+          </div>
+          <div>
+            <h1>{t('Batch Deposit')}</h1>
+            <p><b>{batch.name}</b></p>
+          </div>
+        </header>
+        <dl className="paper-info">
+          <div><dt>{t('Date')}</dt><dd>{formatDate(batch.date)}</dd></div>
+          <div><dt>{t('Bank Journal')}</dt><dd>{journal?.name ?? '—'}</dd></div>
+          <div><dt>{t('Number of Items')}</dt><dd>{lines.length}</dd></div>
+          <div><dt>{t('Total Amount')}</dt><dd>{currency ? formatCurrency(totalAmount, currency) : totalAmount}</dd></div>
+        </dl>
+        <table className="paper-lines">
+          <thead>
+            <tr>
+              <th>{t('Date')}</th>
+              <th>{t('Customer')}</th>
+              <th>{t('Payment Reference')}</th>
+              <th className="num">{t('Amount')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!lines.length ? (
+              <tr><td colSpan={4} className="empty">{t('No payment lines in this batch.')}</td></tr>
+            ) : lines.map((l, index) => {
+              const payment = l.payment_id ? read(db, 'account.payment', l.payment_id) : null;
+              const move = l.move_id ? read(db, 'account.move', l.move_id) : null;
+              const partner = read(db, 'res.partner', payment?.partner_id ?? move?.partner_id);
+              const date = payment?.date ?? move?.invoice_date ?? batch.date;
+              const ref = payment?.memo || payment?.name || move?.name || '—';
+              const lineCurrency = (payment ? documentCurrency(db, payment) : null) ?? (move ? documentCurrency(db, move) : null) ?? currency;
+              return (
+                <tr key={l.payment_id ?? l.move_id ?? index}>
+                  <td>{formatDate(date)}</td>
+                  <td>{partner?.name ?? '—'}</td>
+                  <td>{ref}</td>
+                  <td className="num">{lineCurrency ? formatCurrency(Number(l.amount) || 0, lineCurrency) : Number(l.amount) || 0}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={3}><b>{t('Total')}</b></td>
+              <td className="num"><b>{currency ? formatCurrency(totalAmount, currency) : totalAmount}</b></td>
+            </tr>
+          </tfoot>
+        </table>
+      </article>
     </main>
   );
 }
@@ -100,7 +213,7 @@ export function PrintDoc({ model, id }) {
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
   }, [recId]);
-  if (rec && model === 'account.batch.payment') return <Checks db={db} batch={rec} />;
+  if (rec && model === 'account.batch.payment') return rec.batch_type === 'inbound' ? <DepositSlip db={db} batch={rec} /> : <Checks db={db} batch={rec} />;
   if (rec && model === 'account.payment' && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
     const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
     return <Checks db={db} batch={batch} />;

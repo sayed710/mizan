@@ -244,9 +244,71 @@ export function checkAmountDisplay(db, payment, invoice, amount) {
   return { currency, numeric: formatCurrency(amount, currency), words: amountInWords(amount, currency.currency_unit_label ?? currency.unit_name) };
 }
 
+/** Check whether all active payment lines in a batch are matched in bank reconciliation. */
+export function isBatchReconciled(db, batch) {
+  if (!db || !batch) return false;
+  const lines = (batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id);
+  return lines.length > 0 && lines.every((l) => isPaymentMatched(db, l.payment_id));
+}
+
+/** Cancel a draft, posted, or sent batch payment (unless reconciled). */
+export function cancelBatch(db, batch) {
+  const b = typeof batch === 'object' ? batch : read(db, 'account.batch.payment', batch);
+  if (!b) throw new Error('Select an existing batch payment');
+  if (b.state === 'cancel') return db;
+  const lines = b.lines ?? [];
+  const hasMatched = lines.some((l) => l.payment_id && isPaymentMatched(db, l.payment_id));
+  if (hasMatched) {
+    throw new Error('Cannot cancel a batch payment with reconciled payments');
+  }
+  const updatedLines = lines.map((l) => ({ ...l, cancelled: true }));
+  return write(db, 'account.batch.payment', b.id, { state: 'cancel', lines: updatedLines });
+}
+
+/** Reset a cancelled batch payment back to draft. */
+export function draftBatch(db, batch) {
+  const b = typeof batch === 'object' ? batch : read(db, 'account.batch.payment', batch);
+  if (!b) throw new Error('Select an existing batch payment');
+  if (b.state !== 'cancel') throw new Error('Only cancelled batches can be reset to draft');
+  const updatedLines = (b.lines ?? []).map((l) => ({ ...l, cancelled: false }));
+  return write(db, 'account.batch.payment', b.id, { state: 'draft', lines: updatedLines });
+}
+
+/** Void an issued check number on a payment (and cancel the batch line if batched). */
+export function voidCheck(db, paymentId, checkNumber) {
+  const payment = read(db, 'account.payment', paymentId);
+  if (!payment) throw new Error('Select an existing payment to void its check');
+  const number = checkNumber ?? payment.check_number;
+  if (number == null) throw new Error('No check number to void');
+  if (isPaymentMatched(db, payment)) {
+    throw new Error('Cannot void a check that is matched to a bank statement');
+  }
+  let next = db;
+  const batches = next.records['account.batch.payment'] ?? [];
+  for (const b of batches) {
+    let changed = false;
+    const lines = (b.lines ?? []).map((line) => {
+      if (line.payment_id === payment.id && (line.check_number === number || number == null) && !line.cancelled) {
+        changed = true;
+        return { ...line, cancelled: true };
+      }
+      return line;
+    });
+    if (changed) {
+      next = write(next, 'account.batch.payment', b.id, { lines });
+    }
+  }
+  return next;
+}
+
 export const paymentModels = {
   'account.batch.payment': {
     label: 'Batch Payments',
+    records: (db) => (db.records['account.batch.payment'] ?? []).map((r) => (
+      (r.state === 'posted' || r.state === 'sent') && isBatchReconciled(db, r)
+        ? { ...r, state: 'reconciled' }
+        : r
+    )),
     fields: {
       name: { type: 'char', label: 'Reference', required: true },
       batch_type: { type: 'selection', label: 'Batch Type', required: true, options: [['inbound', 'Inbound'], ['outbound', 'Outbound']] },
@@ -255,7 +317,18 @@ export const paymentModels = {
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', compute: (r, db) => batchCurrency(db, r).id },
       currency_warning: { type: 'char', label: 'Currency Status', readonly: true, compute: (r, db) => batchCurrency(db, r).error ?? '' },
-      state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted']] },
+      state: {
+        type: 'selection',
+        label: 'Status',
+        tracking: true,
+        options: [
+          ['draft', 'Draft'],
+          ['posted', 'Posted'],
+          ['sent', 'Sent'],
+          ['reconciled', 'Reconciled'],
+          ['cancel', 'Cancelled'],
+        ],
+      },
       lines: {
         type: 'one2many',
         label: 'Payment Lines',
@@ -288,11 +361,14 @@ export const paymentModels = {
     list: ['name', 'batch_type', 'date', 'amount_total', 'state'],
     form: {
       statusbar: 'state',
-      lockedWhen: (r) => r.state === 'posted',
+      lockedWhen: (r) => ['posted', 'sent', 'reconciled', 'cancel'].includes(r.state),
       buttons: [
         { label: 'Add Open Invoices', when: (r) => r.state === 'draft', run: (db, r) => ({ db: fillOpenInvoices(db, r) }) },
         { label: 'Validate', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postBatch(db, r) }) },
-        { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
+        { label: 'Print Checks', when: (r) => ['posted', 'sent', 'reconciled'].includes(r.state) && r.batch_type === 'outbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
+        { label: 'Print Deposit Slip', when: (r) => ['posted', 'sent', 'reconciled'].includes(r.state) && r.batch_type === 'inbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
+        { label: 'Cancel', when: (r) => ['draft', 'posted', 'sent'].includes(r.state), run: (db, r) => ({ db: cancelBatch(db, r) }) },
+        { label: 'Reset to Draft', when: (r) => r.state === 'cancel', run: (db, r) => ({ db: draftBatch(db, r) }) },
       ],
       title: 'name',
       groups: [['batch_type'], ['date', 'journal_id', 'check_number_start'], ['currency_id', 'amount_total', 'currency_warning']],
