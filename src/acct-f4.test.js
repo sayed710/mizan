@@ -9,7 +9,7 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import { accountId, journalId, postEntry } from './models/ledger.js';
 import { addDays, today } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
-import { configurableReport, normalizeHorizontalGroupVals } from './models/configurableReports.js';
+import { configurableReport, normalizeHorizontalGroupVals, targetCompanyIds } from './models/configurableReports.js';
 import { findStatementReport } from './models/statementReports.js';
 import { cashFlow, executiveSummary, reportReviewMode, trialBalance } from './models/reports.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -753,4 +753,14 @@ test('Qodo 5: Multi-select Journals dropdowns pass value as string array without
     console.warn = origWarn;
     console.error = origError;
   }
+});
+
+test('group restricted to a company that is no longer allowed shows no company amounts', () => {
+  const co2 = createCompanyWithDefaultInvoiceJournals(seed(), { name: 'Archived Branch' });
+  const db = {
+    ...co2.db,
+    records: { ...co2.db.records, 'res.company': co2.db.records['res.company'].map((c) => (c.id === co2.id ? { ...c, active: false } : c)) },
+  };
+  const group = { company_id: 1, rule_ids: [{ field: 'company', company_ids: [co2.id] }] };
+  assert.deepEqual(targetCompanyIds(db, { company_id: 1 }, group, {}), []);
 });

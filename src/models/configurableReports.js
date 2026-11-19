@@ -267,12 +267,13 @@ export function targetCompanyIds(db, report, group, options) {
   if (group) {
     const companyRules = (group.rule_ids ?? []).filter((r) => r.field === 'company');
     if (companyRules.length) {
-      const explicit = companyRules.flatMap((r) => idsFor(r)).filter((id) => allowedCompanyIds.has(id));
+      const explicit = companyRules.flatMap((r) => idsFor(r));
       const baseCompanies = Array.isArray(options?.companyIds) && options.companyIds.length
         ? options.companyIds.map(Number).filter((id) => allowedCompanyIds.has(id))
         : options?.companyId != null && allowedCompanyIds.has(Number(options.companyId))
           ? [Number(options.companyId)]
           : allowedCompanies.map((c) => c.id);
+      // A rule naming companies stays restricted to them, even when none is allowed or selected any more.
       if (explicit.length) {
         const baseSet = new Set(baseCompanies);
         return [...new Set(explicit.filter((id) => baseSet.has(id)))];
