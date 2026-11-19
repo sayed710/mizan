@@ -16,7 +16,7 @@ import {
   setStatementLinePartner,
   statementCompanyAmount,
 } from '../models/bank.js';
-import { applyRule, isWriteoffButtonModel, ruleMatches } from '../models/reconcile.js';
+import { applyRule, isWriteoffButtonModel, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { display, money } from '../ui.jsx';
@@ -45,9 +45,10 @@ export function BankReconcile() {
   const [journalFilter, setJournalFilter] = useState(initialJournalFromHash);
   const [selectedLineId, setSelectedLineId] = useState(null);
   const [activeTab, setActiveTab] = useState('candidates');
-  const [selectedCandidateId, setSelectedCandidateId] = useState(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState(() => new Set());
   const [selectedPaymentIds, setSelectedPaymentIds] = useState([]);
   const [manualAccountId, setManualAccountId] = useState('');
+  const [manualTaxIds, setManualTaxIds] = useState([]);
   const [manualLabel, setManualLabel] = useState('');
   const [manualAmount, setManualAmount] = useState('');
   const [writeoffAccountId, setWriteoffAccountId] = useState('');
@@ -81,9 +82,10 @@ export function BankReconcile() {
   // Synchronize manual form defaults whenever the active statement line changes.
   useEffect(() => {
     if (selectedLineKey == null) return;
-    setSelectedCandidateId(null);
+    setSelectedCandidateIds(new Set());
     setSelectedPaymentIds([]);
     setManualAccountId(selectedCounterpartId);
+    setManualTaxIds([]);
     setManualLabel(selectedPaymentRef);
     setManualAmount(selectedOpenAmount != null ? String(selectedOpenAmount) : '');
     setWriteoffAccountId('');
@@ -97,6 +99,14 @@ export function BankReconcile() {
     [db, selectedLine],
   );
 
+  const firstSelectedMove = useMemo(() => {
+    for (const id of selectedCandidateIds) {
+      const m = read(db, 'account.move', id);
+      if (m) return m;
+    }
+    return null;
+  }, [db, selectedCandidateIds]);
+
   const outstandingPayments = useMemo(
     () => (selectedLine ? eligiblePayments(db, selectedLine) : []),
     [db, selectedLine],
@@ -106,6 +116,15 @@ export function BankReconcile() {
     if (!selectedLine) return [];
     const company = selectedLine.company_id ?? 1;
     return (db.records['account.account'] ?? []).filter((a) => eligibleCounterpart(a, company));
+  }, [db, selectedLine]);
+
+  const taxes = useMemo(() => {
+    if (!selectedLine) return [];
+    const company = selectedLine.company_id ?? 1;
+    const expectedUse = (Number(selectedLine.amount) || 0) > 0 ? 'sale' : 'purchase';
+    return (db.records['account.tax'] ?? [])
+      .filter((t) => t.active !== false && (!t.company_id || t.company_id === company) && t.type_tax_use === expectedUse)
+      .sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.name ?? '').localeCompare(b.name ?? ''));
   }, [db, selectedLine]);
 
   const partners = useMemo(() => {
@@ -175,6 +194,15 @@ export function BankReconcile() {
     }
   };
 
+  const toggleCandidateSelection = (candidateId) => {
+    setSelectedCandidateIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(candidateId)) next.delete(candidateId);
+      else next.add(candidateId);
+      return next;
+    });
+  };
+
   const togglePaymentSelection = (paymentId) => {
     setSelectedPaymentIds((prev) => (prev.includes(paymentId) ? prev.filter((id) => id !== paymentId) : [...prev, paymentId]));
   };
@@ -203,9 +231,11 @@ export function BankReconcile() {
       }
       let nextDb;
       if (activeTab === 'candidates') {
-        const chosenId = selectedCandidateId ?? candidateMoves[0]?.id;
-        if (!chosenId) throw new Error('Select a counterpart candidate to reconcile');
-        nextDb = reconcileWith(currentDb, lineWriteoffFields(freshLine), chosenId);
+        const chosenIds = selectedCandidateIds.size > 0
+          ? Array.from(selectedCandidateIds)
+          : (candidateMoves[0]?.id ? [candidateMoves[0].id] : []);
+        if (!chosenIds.length) throw new Error('Select a counterpart candidate to reconcile');
+        nextDb = reconcileWith(currentDb, lineWriteoffFields(freshLine), chosenIds.length === 1 ? chosenIds[0] : chosenIds);
       } else if (activeTab === 'payments') {
         if (!selectedPaymentIds.length) throw new Error('Select at least one outstanding payment to match');
         const prepared = lineWriteoffFields({
@@ -220,7 +250,7 @@ export function BankReconcile() {
         nextDb = bookToAccount(currentDb, {
           ...freshLine,
           counterpart_account_id: Number(manualAccountId),
-        }, { label: manualLabel, amount: amountNum }).db;
+        }, { label: manualLabel, amount: amountNum, tax_ids: manualTaxIds }).db;
       }
       const res = await commit(nextDb);
       if (res.ok) {
@@ -369,17 +399,18 @@ export function BankReconcile() {
                     ) : (
                       <div className="bank-reconcile-lines">
                         {candidateMoves.map((move) => {
-                          const isSelected = selectedCandidateId === move.id;
+                          const isSelected = selectedCandidateIds.has(move.id);
                           const err = matchError(db, selectedLine, move);
+                          const partnerMismatch = Boolean(firstSelectedMove && !sameCommercialPartner(db, firstSelectedMove.partner_id, move.partner_id));
                           return (
                             <button
                               key={move.id}
                               type="button"
                               className={`bank-reconcile-line-item${isSelected ? ' active' : ''}`}
                               aria-pressed={isSelected}
-                              disabled={Boolean(err)}
+                              disabled={Boolean(err || (!isSelected && partnerMismatch))}
                               aria-label={lineAriaLabel(move.name, partnerName(move.partner_id), formatInCurrency(move.amount_residual, documentCurrency(db, move)))}
-                              onClick={() => setSelectedCandidateId(move.id)}
+                              onClick={() => toggleCandidateSelection(move.id)}
                             >
                               <div className="bank-reconcile-line-top">
                                 <strong>{move.name}</strong>
@@ -464,6 +495,23 @@ export function BankReconcile() {
                       <select aria-label={t('Counterpart Account')} value={manualAccountId} onChange={(e) => setManualAccountId(e.target.value)}>
                         <option value="">{t('Select an account')}</option>
                         {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      {t('Taxes')}
+                      <select
+                        multiple
+                        aria-label={t('Taxes')}
+                        value={manualTaxIds.map(String)}
+                        onChange={(e) => {
+                          const options = e.target.selectedOptions
+                            ? Array.from(e.target.selectedOptions)
+                            : (Array.isArray(e.target.value) ? e.target.value.map((v) => ({ value: v })) : [{ value: e.target.value }]);
+                          const selected = options.map((o) => Number(o.value)).filter(Boolean);
+                          setManualTaxIds(selected);
+                        }}
+                      >
+                        {taxes.map((tx) => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
                       </select>
                     </label>
                     <label>

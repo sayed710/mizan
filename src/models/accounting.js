@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reconcileReversalLines, reverseEntry, SETTLES } from './pay.js';
@@ -2086,7 +2086,7 @@ export const accountingModels = {
       }
       const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
       if (linkedOnlineAccount) {
-        if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
+        if (!isOnlineFeedJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
         if (after.company_id && after.company_id !== (linkedOnlineAccount.company_id ?? 1)) return 'Cannot change the company of a journal linked to an online account';
         if (before?.bank_statements_source === 'online_sync' && after.bank_statements_source !== 'online_sync') {
           return 'Cannot change the bank feeds source of a journal linked to an online account';
