@@ -259,6 +259,7 @@ export function validateCompanySettingWrite(db, company, vals) {
 
 /** Odoo-ordered Accounting settings blocks editing active res.company fields via the ORM write path. */
 function AccountingSection({ db, company, readOnly, onWriteCompany }) {
+  const [rateError, setRateError] = useState(null);
   const fields = models['res.company']?.fields ?? {};
   const hasField = (name) => Boolean(fields[name]);
   const taxesByUse = (use) => (db.records['account.tax'] ?? [])
@@ -390,6 +391,72 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
               </p>
             </SettingRow>
           </div>
+          {isServer() && (hasField('currency_provider') || hasField('currency_interval_unit') || hasField('currency_next_execution_date')) && (
+            <div className="settings-block">
+              {hasField('currency_provider') && (
+                <SettingRow id="currency_provider" label="Currency Provider" description="Service used to automatically download exchange rates.">
+                  <select id="currency_provider" disabled={readOnly || !company} value={company?.currency_provider ?? 'none'}
+                    onChange={(e) => onWriteCompany({ currency_provider: e.target.value })}>
+                    <option value="none">{t('None')}</option>
+                    <option value="ecb">{t('European Central Bank')}</option>
+                  </select>
+                </SettingRow>
+              )}
+              {hasField('currency_interval_unit') && (
+                <SettingRow id="currency_interval_unit" label="Currency Interval Unit" description="Frequency of automatic exchange rate updates.">
+                  <select id="currency_interval_unit" disabled={readOnly || !company} value={company?.currency_interval_unit ?? 'manually'}
+                    onChange={(e) => onWriteCompany({ currency_interval_unit: e.target.value })}>
+                    <option value="manually">{t('Manually')}</option>
+                    <option value="daily">{t('Daily')}</option>
+                    <option value="weekly">{t('Weekly')}</option>
+                    <option value="monthly">{t('Monthly')}</option>
+                  </select>
+                </SettingRow>
+              )}
+              {hasField('currency_next_execution_date') && (
+                <SettingRow id="currency_next_execution_date" label="Next Execution Date" description="Next scheduled execution date for automatic rate update.">
+                  <input id="currency_next_execution_date" type="date" disabled={readOnly || !company} value={company?.currency_next_execution_date ?? ''}
+                    onChange={(e) => onWriteCompany({ currency_next_execution_date: e.target.value || null })} />
+                </SettingRow>
+              )}
+              {hasField('currency_provider') && (
+                <>
+                  <div className="row" style={{ marginTop: '8px' }}>
+                    <button
+                      type="button"
+                      id="update_currency_rates"
+                      className="btn"
+                      disabled={readOnly || !company}
+                      onClick={async () => {
+                        if (!company) return;
+                        setRateError(null);
+                        try {
+                          const res = await fetch('/api/currency-rates/update', {
+                            method: 'POST',
+                            credentials: 'same-origin',
+                            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' },
+                            body: JSON.stringify({ company_id: company.id }),
+                          });
+                          const data = await res.json().catch(() => ({}));
+                          if (!res.ok) {
+                            setRateError(data.error ? t(data.error) : t('Could not update currency rates'));
+                            return;
+                          }
+                          const { reloadDb } = await import('../store.js');
+                          await reloadDb();
+                        } catch (err) {
+                          setRateError(err instanceof Error ? t(err.message) : t('Could not update currency rates'));
+                        }
+                      }}
+                    >
+                      {t('Update Now')}
+                    </button>
+                  </div>
+                  {rateError && <div className="alert" role="alert" style={{ marginTop: '8px' }}>{rateError}</div>}
+                </>
+              )}
+            </div>
+          )}
           {hasField('currency_exchange_journal_id') && (
             <div className="settings-block">
               <SettingRow id="currency_exchange_journal_id" label="Exchange Difference Journal" description="Journal used to record realized foreign exchange gains and losses.">
@@ -441,6 +508,49 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
       {showFiscalPeriods && (
         <div className="settings-block" data-block="fiscal_periods">
           <h3>{t('Fiscal Periods')}</h3>
+          {(hasField('fiscalyear_last_day') || hasField('fiscalyear_last_month')) && (
+            <SettingRow id="fiscal_year_end" label="Fiscal Year End" description="The last day and month of the fiscal year.">
+              <div className="row gap-sm" style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  id="fiscalyear_last_day"
+                  type="number"
+                  min="1"
+                  max="31"
+                  disabled={readOnly || !company}
+                  value={company?.fiscalyear_last_day ?? 31}
+                  onChange={(e) => onWriteCompany({ fiscalyear_last_day: e.target.value ? Number(e.target.value) : null })}
+                />
+                <select
+                  id="fiscalyear_last_month"
+                  disabled={readOnly || !company}
+                  value={String(company?.fiscalyear_last_month ?? 12)}
+                  onChange={(e) => {
+                    const newMonth = Number(e.target.value);
+                    const maxDays = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][newMonth] ?? 31;
+                    const curDay = company?.fiscalyear_last_day ?? 31;
+                    const clampedDay = Math.min(Math.max(1, curDay), maxDays);
+                    onWriteCompany({
+                      fiscalyear_last_month: newMonth,
+                      fiscalyear_last_day: clampedDay,
+                    });
+                  }}
+                >
+                  <option value="1">{t('January')}</option>
+                  <option value="2">{t('February')}</option>
+                  <option value="3">{t('March')}</option>
+                  <option value="4">{t('April')}</option>
+                  <option value="5">{t('May')}</option>
+                  <option value="6">{t('June')}</option>
+                  <option value="7">{t('July')}</option>
+                  <option value="8">{t('August')}</option>
+                  <option value="9">{t('September')}</option>
+                  <option value="10">{t('October')}</option>
+                  <option value="11">{t('November')}</option>
+                  <option value="12">{t('December')}</option>
+                </select>
+              </div>
+            </SettingRow>
+          )}
           {ACCOUNTING_LOCK_FIELDS.filter(([key]) => hasField(key)).map(([key, label, desc]) => (
             <SettingRow key={key} id={key} label={label} description={desc}>
               <input id={key} type="date" disabled={readOnly || !company} value={company?.[key] ?? ''}
