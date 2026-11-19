@@ -274,9 +274,8 @@ export function secureMoveInvariant(db, after, before) {
 export function journalHasSecuredEntries(db, journal) {
   if (!journal) return false;
   if ((journal.secure_chain_heads ?? []).length > 0) return true;
-  return (db?.records?.['account.move'] ?? []).some(
-    (m) => Boolean(m.inalterable_hash) && (m.journal_id === journal.id || (!m.journal_id && resolveDocumentJournal(db, m)?.id === journal.id))
-  );
+  // A hashed move always carries its journal: secureMoveInvariant hashes only against after.journal_id.
+  return (db?.records?.['account.move'] ?? []).some((m) => Boolean(m.inalterable_hash) && m.journal_id === journal.id);
 }
 
 /** A journal head must only advance to a valid chain; it cannot be removed or rewritten. */

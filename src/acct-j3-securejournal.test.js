@@ -218,3 +218,23 @@ test('Arabic translation exists for the guard rejection error message', async ()
     globalThis.localStorage = prevStorage;
   }
 });
+
+test('a diff cannot move a hashed entry out of a journal while turning its hash securing off', () => {
+  let db = seed();
+  const res = create(db, 'account.journal', { name: 'Headless Hashed', code: 'HH', restrict_mode_hash_table: true });
+  db = res.db;
+  const other = create(db, 'account.journal', { name: 'Other General', code: 'OG' });
+  db = other.db;
+  const entry = postEntry(db, { journal: 'HH', date: '2026-01-10', company: 1, lines: [{ account: '600000', debit: 100 }, { account: '211000', credit: 100 }] });
+  db = { ...entry.db, records: { ...entry.db.records, 'account.move': entry.db.records['account.move'].map((m) => (m.id === entry.id ? { ...m, inalterable_hash: 'hash-abc-123', secure_sequence_number: 1 } : m)) } };
+
+  const attempt = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => (m.id === entry.id ? { ...m, journal_id: other.id } : m)),
+      'account.journal': db.records['account.journal'].map((j) => (j.id === res.id ? { ...j, restrict_mode_hash_table: false } : j)),
+    },
+  };
+  assert.throws(() => syncServer(db, attempt), /Secured entries cannot be modified/);
+});
