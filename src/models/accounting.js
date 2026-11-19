@@ -1,16 +1,16 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
-import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
+import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
+import { applyPaymentCredit, reconcileReversalLines, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
 import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
-import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
+import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
 import { hasMultiCurrency } from './money.js';
@@ -458,7 +458,7 @@ function spawnRecurringMove(db, move) {
 
 function attemptAutoPostMove(db, moveId, onError = null) {
   try {
-    return postMove(db, moveId);
+    return postMove(db, moveId, { autoPost: true });
   } catch (e) {
     onError?.(`auto-post move ${moveId}`, e);
     const body = `Auto-post failed: ${e.message}`;
@@ -511,7 +511,7 @@ export function intercompanyBill(db, move) {
     const source = ownAccount?.company_id && ownAccount.company_id !== buyer.id ? { ...product, property_account_expense_id: null } : product;
     const rawAccount = read(db, 'account.account', productProperty(db, source, 'property_account_expense_id', buyer.id));
     if (!rawAccount || (rawAccount.company_id && rawAccount.company_id !== buyer.id)) throw new Error(`Configure an expense account for ${product.name}`);
-    const mappedAccountId = mapAccount(db, fpId, rawAccount.id);
+    const mappedAccountId = mapLineAccount(db, { fiscal_position_id: fpId }, rawAccount.id);
     const account = read(db, 'account.account', mappedAccountId);
     if (!account || (account.company_id && account.company_id !== buyer.id)) {
       throw new Error(`Configure an expense account for ${product.name}`);
@@ -525,7 +525,16 @@ export function intercompanyBill(db, move) {
     } catch {
       throw new Error(`Configure purchase taxes for ${buyer.name} on ${product.name}`);
     }
-    return { name: line.name, product_id: line.product_id, qty: line.qty, price_unit: line.price_unit, discount: line.discount, account_id: account.id, ...(tax ?? { tax: 0 }) };
+    return {
+      name: line.name,
+      product_id: line.product_id,
+      qty: line.qty,
+      price_unit: line.price_unit,
+      discount: line.discount,
+      account_id: account.id,
+      account_fiscal_position_id: fpId ?? null,
+      ...(tax ?? { tax: 0 }),
+    };
   });
   const original = move.move_type === 'out_refund' && move.reversed_entry_id ? read(db, 'account.move', move.reversed_entry_id) : null;
   const originalBill = original?.intercompany_move_id && read(db, 'account.move', original.intercompany_move_id);
@@ -570,7 +579,12 @@ function storeInvoiceLineIds(db, move) {
 }
 
 /** Copy invoice lines as new records, optionally linking each one to its source line. */
-function copyInvoiceLines(lines, { sourceCredit = false, preserveSourceLineId = false, months = null } = {}) {
+function copyInvoiceLines(lines, {
+  sourceCredit = false,
+  preserveSourceLineId = false,
+  months = null,
+  stripOrderLinks = false,
+} = {}) {
   return (lines ?? []).map((line) => {
     const sourceLineId = line.line_id;
     if (sourceCredit && (sourceLineId == null || sourceLineId === '')) {
@@ -579,6 +593,17 @@ function copyInvoiceLines(lines, { sourceCredit = false, preserveSourceLineId = 
     const { line_id: ignoredLineId, source_line_id: ignoredSourceLineId, ...copy } = line;
     void ignoredLineId;
     void ignoredSourceLineId;
+
+    if (stripOrderLinks) {
+      delete copy.sale_line_key;
+      delete copy.purchase_line_key;
+      delete copy.down_payment_key;
+      delete copy.rental_id;
+      delete copy.rental_charge;
+      delete copy.sale_line_id;
+      delete copy.purchase_line_id;
+    }
+
     return {
       ...copy,
       line_id: newInvoiceLineId(),
@@ -612,8 +637,12 @@ export function postedInvoiceLines(db, move, name = move.name) {
 }
 
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
-export function postMove(db, id) {
+export function postMove(db, id, { autoPost = false } = {}) {
   let r = read(db, 'account.move', id);
+  const scheduledDate = r?.move_type === 'entry' && r.date ? r.date : (r?.invoice_date ?? r?.date ?? today());
+  if (!autoPost && r?.state === 'draft' && r.auto_post === 'at_date' && scheduledDate > today()) {
+    throw new Error(t('This entry is scheduled to post automatically on {date}', { date: scheduledDate }));
+  }
   const bankError = recipientBankCompanyError(db, r);
   if (bankError) throw new Error(bankError);
   const order = r.move_type === 'out_invoice' && r.sale_id && !r.correction_of_id && read(db, 'sale.order', r.sale_id);
@@ -659,7 +688,13 @@ export function postMove(db, id) {
       return { ...line, analytic_distribution: normalizeDistribution(distribution, db) };
     });
     checkMandatoryPlans(db, { ...r, line_ids });
-    const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
+    let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
+    if (r.reversed_entry_id && !isExchangeEntry(posted, id) && !r.reconciliation_reversal) {
+      const source = read(posted, 'account.move', r.reversed_entry_id);
+      if (source?.state === 'posted') {
+        posted = reconcileReversalLines(posted, source.id, id, r.date ?? entryDate);
+      }
+    }
     const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id, scheduled: r.reverse_date > today() }).db : posted;
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
@@ -1343,7 +1378,9 @@ export function correctCreditNote(db, note) {
     move_type: purchase ? 'in_invoice' : 'out_invoice', correction_of_id: note.id, company_id: note.company_id,
     partner_id: note.partner_id, currency_id: note.currency_id ?? null, fiscal_position_id: note.fiscal_position_id ?? null,
     invoice_origin: note.name, ref: `Correction of ${note.name}`, invoice_date: today(), invoice_date_due: today(),
-    invoice_line_ids: note.invoice_line_ids.map(({ purchase_line_id, sale_line_id, line_id, source_line_id, ...line }) => ({ ...line, line_id: newInvoiceLineId() })),
+    invoice_line_ids: copyInvoiceLines(note.invoice_line_ids, {
+      stripOrderLinks: true,
+    }),
   }, { archivedOriginIds: [note.id] });
   return { db: postNote(out.db, 'account.move', note.id, `Correction invoice drafted for ${note.name}`), go: `#/accounting/${purchase ? 'bills' : 'invoices'}/${out.id}` };
 }
@@ -1388,7 +1425,9 @@ export function debitNote(db, r, options = {}) {
     ...(r.invoice_cash_rounding_id ? { invoice_cash_rounding_id: r.invoice_cash_rounding_id } : {}),
     // Order and rental links stay on the source: a debit note never counts as a billed rental charge (Qodo 62).
     invoice_line_ids: copyLines
-      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, rental_id, rental_charge, ...line }) => ({ ...line }))
+      ? copyInvoiceLines(r.invoice_line_ids, {
+          stripOrderLinks: true,
+        })
       : [],
     ref,
   }, { archivedOriginIds: copyLines ? [r.id] : [] });
@@ -1566,6 +1605,7 @@ const {
   tax_ids: invoiceLineTaxIds,
   tax: invoiceLineTaxPct,
   analytic_account_id: invoiceLineAnalytic,
+  analytic_distribution: invoiceLineAnalyticDist,
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
 
@@ -1580,7 +1620,7 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 const invoiceLineField = {
   ...invoiceLineBase,
   newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
-  onchange: (line, key, db, move) => {
+  onchange: (line, key, db, move, context = {}) => {
     const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: resolveDocumentJournal(db, move)?.id } : move);
     const base = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
     const isDoc = db && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(moveWithJournal?.move_type);
@@ -1590,17 +1630,35 @@ const invoiceLineField = {
       if (product && !line.name?.trim()) {
         updated = { ...updated, name: product.name || '' };
       }
+      // Show the account the line will post to, before any deferred-account substitution.
+      // Ignore any account already on the line so the product's own resolution wins, and never fail here:
+      // an unresolved or incomplete setup belongs to posting.
+      const journal = resolveDocumentJournal(db, moveWithJournal);
+      if (journal) {
+        const resolved = invoiceLineOriginalAccount(db, moveWithJournal, { ...updated, account_id: null, income_account_id: null }, journal);
+        if (!resolved.error && resolved.account) {
+          updated = { ...updated, account_id: resolved.account, account_fiscal_position_id: moveWithJournal?.fiscal_position_id ?? null };
+        }
+      }
     }
-    if (isDoc && key === 'account_id' && !base.product_id && !isSectionOrNote(base)) {
-      const account = base.account_id ? read(db, 'account.account', base.account_id) : null;
-      const side = isPurchase(moveWithJournal) ? 'purchase' : 'sale';
-      // An account without a default tax for this side keeps the line's current tax.
-      const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
-      if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
+    if (isDoc && key === 'account_id') {
+      updated = { ...updated, account_fiscal_position_id: null };
+      if (!base.product_id && !isSectionOrNote(base)) {
+        const account = base.account_id ? read(db, 'account.account', base.account_id) : null;
+        const side = isPurchase(moveWithJournal) ? 'purchase' : 'sale';
+        // An account without a default tax for this side keeps the line's current tax.
+        const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
+        if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
+      }
     }
-    return withTaxIds(isDoc && ['product_id', 'account_id'].includes(key)
-      ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
-      : updated);
+    if (isDoc && ['product_id', 'account_id'].includes(key)) {
+      return withTaxIds({ ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) });
+    }
+    if (isDoc && ['deferred_start_date', 'deferred_end_date'].includes(key)) {
+      const prevLine = context?.previous ?? (context && !Array.isArray(context.invoice_line_ids) && (context.product_id || context.account_id) ? context : null) ?? (move?.invoice_line_ids?.find((l) => (line.line_id && l.line_id === line.line_id) || (line.id && l.id === line.id))) ?? null;
+      return withTaxIds(syncDeferredAnalyticDistribution(db, updated, line, prevLine, moveWithJournal));
+    }
+    return withTaxIds(updated);
   },
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
@@ -1608,7 +1666,8 @@ const invoiceLineField = {
     product_id: invoiceLineProduct,
     name: { type: 'char', label: 'Label' },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
-    analytic_account_id: { ...invoiceLineAnalytic, optional: 'hide' },
+    analytic_account_id: { ...invoiceLineAnalytic, hidden: true },
+    analytic_distribution: { ...invoiceLineAnalyticDist, label: 'Analytic', hidden: false, optional: 'hide' },
     deferred_start_date: { type: 'date', label: 'Deferred Start Date', optional: 'hide' },
     deferred_end_date: { type: 'date', label: 'Deferred End Date', optional: 'hide' },
     qty: invoiceLineQty,
@@ -1627,6 +1686,7 @@ const invoiceLineField = {
     down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true },
     rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true },
     rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true },
+    account_fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position', readonly: true, hidden: true },
   },
 };
 
@@ -2333,14 +2393,35 @@ export const accountingModels = {
           && selectedBank.active !== false && (!selectedBank.company_id || selectedBank.company_id === (r.company_id ?? 1))
           ? selectedBank.id : null;
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
-        const context = { ...r, ...fiscal, journal_id: journal };
+        const nextContext = { ...r, ...fiscal, journal_id: journal };
+        // The state before this change: the form's previous values, else the stored record.
+        const previous = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null) ?? {};
+        // Accounts filled by a product are already mapped for the fiscal position the document had before this change.
+        const previousContext = {
+          ...r,
+          company_id: previous.company_id ?? r.company_id,
+          journal_id: previous.journal_id ?? r.journal_id,
+          fiscal_position_id: key === 'fiscal_position_id' ? (previous.fiscal_position_id ?? null) : (r.fiscal_position_id ?? null),
+        };
+        const previousJournal = resolveDocumentJournal(db, previousContext);
         const linesUpdate = Array.isArray(r.invoice_line_ids)
           ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
             const remapKey = (key === 'fiscal_position_id' || partnerChange || key === 'company_id') && !['line_section', 'line_note'].includes(line.display_type)
               ? (line.product_id ? 'product_id' : (line.account_id && (read(db, 'account.account', line.account_id)?.tax_ids ?? []).length ? 'account_id' : null))
               : null;
-            const updated = remapKey ? invoiceLineField.onchange(line, remapKey, db, context) : line;
-            return { ...updated, ...(remapKey ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, updated, context, line.analytic_distribution ?? {}) };
+            // A line account still equal to the one this document auto-computed before the change follows the new
+            // fiscal position. Any other account was chosen by the user and is preserved.
+            const autoBefore = line.product_id
+              ? invoiceLineOriginalAccount(db, previousContext, { ...line, account_id: null, income_account_id: null }, previousJournal)
+              : null;
+            const autoFilled = Boolean(autoBefore?.account) && line.account_id === autoBefore.account;
+            const autoAfter = autoFilled
+              ? invoiceLineOriginalAccount(db, nextContext, { ...line, account_id: null, income_account_id: null }, resolveDocumentJournal(db, nextContext))
+              : null;
+            const accountId = autoFilled ? (autoAfter.error ? null : autoAfter.account) : (line.account_id ?? null);
+            const accountFiscalPositionId = autoFilled ? (nextContext.fiscal_position_id ?? null) : (line.account_fiscal_position_id ?? null);
+            const updated = remapKey ? invoiceLineField.onchange(line, remapKey, db, nextContext) : line;
+            return { ...updated, account_id: accountId, account_fiscal_position_id: accountFiscalPositionId, ...(remapKey ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, { ...updated, account_id: accountId }, nextContext, line.analytic_distribution ?? {}) };
           }) }
           : {};
         return {
@@ -2634,7 +2715,8 @@ export const accountingModels = {
             if ((db.records['account.asset'] ?? []).some((a) => (a.depreciation_ids ?? []).some((l) => l.posted && l.move_id === r.id))) {
               return { db: reverseDepreciation(db, r, values) };
             }
-            return reverseEntry(db, r, values);
+            const scheduled = values.scheduled ?? (String(values.date ?? '') > today());
+            return reverseEntry(db, r, scheduled ? { ...values, scheduled: true } : values);
           },
         },
         {
@@ -2731,7 +2813,22 @@ export const accountingModels = {
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
-        { label: 'Reset to Draft', when: (r, db) => canResetMove(r, db), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
+        {
+          label: 'Reset to Draft',
+          when: (r, db) => canResetMove(r, db),
+          run: (db, r) => {
+            const draftReversals = (db.records['account.move'] ?? []).filter(
+              (m) => m.state === 'draft' && m.auto_post === 'at_date' && (m.reversed_entry_id === r.id || m.id === r.reversal_move_id)
+            );
+            const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
+            const nextDb = write(cancelledDb, 'account.move', r.id, {
+              state: 'draft',
+              ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
+              ...(isInvoice(r) ? { line_ids: [] } : {})
+            });
+            return { db: removeAnalytic(nextDb, r.id) };
+          },
+        },
         { label: 'Lock', when: canLockEntry, run: (db, r) => ({ db: secureEntries(db, { throughMoveId: r.id }) }) },
         { label: 'Cancel Entry', when: (r) => r.move_type === 'entry' && r.state === 'draft' && Boolean(r.id) && !r.inalterable_hash, run: cancelMove },
         { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, visible: (r) => isInvoice(r), run: cancelMove },

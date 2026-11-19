@@ -9,7 +9,7 @@ import { isPeriodicValuation, productProperty } from './productconfig-helpers.js
 import { discountTaxComputation, earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
 import { configuredEarningsAccount } from './earnings.js';
-import { stockAccount } from './stock-accounts.js';
+import { resolveStockAccount } from './stock-accounts.js';
 import { models } from '../registry.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
@@ -227,12 +227,22 @@ export function resolveDocumentJournal(db, move, { required = false } = {}) {
   return journal;
 }
 
-/** Invoice base groups, including the source lines used to allocate a posted group. */
-export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
+/**
+ * Map an explicitly configured line account through the document's fiscal position exactly once.
+ * Filled line accounts are stored already mapped, so posting never maps them a second time.
+ */
+export function mapLineAccount(db, move, accountId) {
+  return accountId ? mapAccount(db, move?.fiscal_position_id, accountId) : null;
+}
+
+/**
+ * Resolve the account a line posts to before any deferred-account substitution.
+ * This is exactly the resolution `invoiceBaseGroups` uses; it returns the error message instead of throwing,
+ * so forms can show the account without failing while the document is still incomplete.
+ */
+export function invoiceLineOriginalAccount(db, move, line, journal) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const journal = resolveDocumentJournal(db, move, { required: true });
-  const base = resolveCompanyAccount(db, journal.default_account_id, move.company_id);
-  const byAccount = new Map();
+  const base = resolveCompanyAccount(db, journal?.default_account_id, move.company_id);
   const getSourceAccount = (l) => {
     // Provenance recorded when the source document was posted wins over current configuration.
     if (l.income_account_id) return { accountId: l.income_account_id, configured: true, type: 'line', recorded: true };
@@ -240,36 +250,72 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
     const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
     if (!sale && !dropship && p?.type === 'goods' && !isPeriodicValuation(db, p, move.company_id ?? 1)) {
-      return { accountId: stockAccount(db, p, 'input', move.company_id ?? 1), configured: true, type: 'valuation' };
+      const stock = resolveStockAccount(db, p, 'input', move.company_id ?? 1);
+      return stock.error ? { error: stock.error } : { accountId: stock.account, configured: true, type: 'valuation' };
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id', move.company_id ?? 1);
     if (configured) return { accountId: configured, configured: true, type: 'product' };
-    if (!base) throw new Error(`Journal "${journal.name || journal.code}" has no default account configured for this company`);
+    if (!base) return { error: `Journal "${journal?.name || journal?.code}" has no default account configured for this company` };
     return { accountId: base, configured: true, type: 'journal default' };
   };
+  const source = getSourceAccount(line);
+  if (source.error) return { account: null, error: source.error };
+  if (!source.accountId) return { account: null, error: `No ${source.type} account found` };
+  // A line whose account was already mapped by the document's fiscal position posts as stored.
+  // Every other stored account (from orders, manual selection, import/API, copies) is mapped through the fiscal position.
+  // A line mapped by another fiscal position (a copy whose position changed) restarts from its product's account;
+  // a line without a product keeps the account it was mapped to, since the unmapped original is not recorded.
+  const mappedByOtherPosition = source.type === 'line' && Boolean(line.account_fiscal_position_id) && line.account_fiscal_position_id !== move?.fiscal_position_id;
+  const productSource = mappedByOtherPosition && line.product_id ? getSourceAccount({ ...line, account_id: null, income_account_id: null }) : null;
+  const alreadyMapped = Boolean(
+    source.recorded ||
+    (source.type === 'line' && move?.fiscal_position_id && line.account_fiscal_position_id === move.fiscal_position_id) ||
+    (mappedByOtherPosition && !productSource?.accountId)
+  );
+  const rawAccountId = productSource?.accountId ?? source.accountId;
+  const mapped = alreadyMapped ? source.accountId : mapLineAccount(db, move, rawAccountId);
+  const mappedAccount = read(db, 'account.account', mapped);
+  const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
+  const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);
+  if (!resolved) {
+    if (source.configured) return { account: null, error: `Configured ${source.type} account does not exist for the invoice company` };
+    return { account: null, error: 'No valid account for the invoice company' };
+  }
+  return { account: resolved, error: null };
+}
+
+/**
+ * Full per-line account resolution used by posting: the original account plus any deferred substitution.
+ * Returns the error message instead of throwing, so form code can resolve the same account without failing.
+ */
+export function invoiceLineAccountResult(db, move, line, journal = resolveDocumentJournal(db, move)) {
+  if (!journal) return { account: null, original: null, deferred: false, error: null };
+  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
+  const { account: original, error } = invoiceLineOriginalAccount(db, move, line, journal);
+  if (error) return { account: null, original: null, deferred: false, error };
+  const originalAccount = read(db, 'account.account', original);
+  const deferred = Boolean(line.deferred_start_date || line.deferred_end_date || originalAccount?.is_deferred);
+  if (deferred && (!line.deferred_start_date || !line.deferred_end_date || line.deferred_start_date > line.deferred_end_date)) {
+    return { account: null, original, deferred, error: 'Set valid deferred start and end dates' };
+  }
+  const company = read(db, 'res.company', move.company_id ?? 1);
+  const account = deferred ? (originalAccount?.deferred_account_id || company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id']) : original;
+  if (deferred && !account) return { account: null, original, deferred, error: `Configure the deferred ${sale ? 'revenue' : 'expense'} account on the company` };
+  const selected = read(db, 'account.account', account);
+  if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) {
+    return { account: null, original, deferred, error: 'Deferred account must belong to the document company' };
+  }
+  return { account, original, deferred, error: null };
+}
+
+/** Invoice base groups, including the source lines used to allocate a posted group. */
+export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
+  const journal = resolveDocumentJournal(db, move, { required: true });
+  const byAccount = new Map();
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
     if (isSectionOrNote(l)) continue;
-    const source = getSourceAccount(l);
-    if (!source.accountId) throw new Error(`No ${source.type} account found`);
-    const mapped = source.recorded ? source.accountId : mapAccount(db, move.fiscal_position_id, source.accountId);
-    const mappedAccount = read(db, 'account.account', mapped);
-    const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
-    const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);
-    if (!resolved) {
-      if (source.configured) {
-        throw new Error(`Configured ${source.type} account does not exist for the invoice company`);
-      }
-      throw new Error('No valid account for the invoice company');
-    }
-    const original = resolved;
-    const originalAccount = read(db, 'account.account', original);
-    const deferred = Boolean(l.deferred_start_date || l.deferred_end_date || originalAccount?.is_deferred);
-    if (deferred && (!l.deferred_start_date || !l.deferred_end_date || l.deferred_start_date > l.deferred_end_date)) throw new Error('Set valid deferred start and end dates');
-    const company = read(db, 'res.company', move.company_id ?? 1);
-    const account = deferred ? (originalAccount?.deferred_account_id || company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id']) : original;
-    if (deferred && !account) throw new Error(`Configure the deferred ${sale ? 'revenue' : 'expense'} account on the company`);
-    const selected = read(db, 'account.account', account);
-    if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
+    const { account, original, deferred, error } = invoiceLineAccountResult(db, move, l, journal);
+    if (error) throw new Error(error);
     const docCurrency = documentCurrency(db, move);
     const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod, side: ['out_refund', 'in_refund'].includes(move.move_type) ? 'refund' : 'invoice' });
     const cashBasis = computed.taxes.length ? computed.taxes.some((t) => t.tax_cash_basis) : !!l.tax_cash_basis;
@@ -1214,12 +1260,72 @@ function computeReconciledItems(db, move, index) {
   });
 }
 
+/** Derive transitive partial matching numbers (P<minLinkId>) over connected components of active partial links. */
+export function partialMatchingNumbers(db, index) {
+  if (index.partialMatchingNumbers) return index.partialMatchingNumbers;
+  const numbers = new Map();
+  const { links } = index.glMatchings ?? {};
+  if (!links?.length) {
+    index.partialMatchingNumbers = numbers;
+    return numbers;
+  }
+  const adj = new Map();
+  const nodeLinks = new Map();
+  const linkEdge = (a, b, linkId) => {
+    if (!a || !b || a === b) return;
+    if (!adj.has(a)) adj.set(a, new Set());
+    if (!adj.has(b)) adj.set(b, new Set());
+    adj.get(a).add(b);
+    adj.get(b).add(a);
+    if (linkId != null) {
+      if (!nodeLinks.has(a)) nodeLinks.set(a, []);
+      if (!nodeLinks.has(b)) nodeLinks.set(b, []);
+      nodeLinks.get(a).push(linkId);
+      nodeLinks.get(b).push(linkId);
+    }
+  };
+  for (const g of links) {
+    linkEdge(lineKey(g.debit_move_id, g.debit_line_index), lineKey(g.credit_move_id, g.credit_line_index), g.id);
+  }
+
+  const visited = new Set();
+  for (const start of adj.keys()) {
+    if (visited.has(start)) continue;
+    const comp = [];
+    const compLinkIds = new Set();
+    const queue = [start];
+    visited.add(start);
+    while (queue.length) {
+      const cur = queue.shift();
+      comp.push(cur);
+      for (const lid of nodeLinks.get(cur) ?? []) compLinkIds.add(lid);
+      for (const nxt of adj.get(cur) ?? []) {
+        if (!visited.has(nxt)) {
+          visited.add(nxt);
+          queue.push(nxt);
+        }
+      }
+    }
+    if (comp.length && compLinkIds.size) {
+      const code = `P${Math.min(...compLinkIds)}`;
+      for (const k of comp) numbers.set(k, code);
+    }
+  }
+  index.partialMatchingNumbers = numbers;
+  return numbers;
+}
+
 /** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
-export function reconciledJournalItems(db, move) {
+export function reconciledJournalItems(db, move, { partialMatching = false } = {}) {
   const index = reconcileIndex(db);
+  const partialNumbers = partialMatching ? partialMatchingNumbers(db, index) : null;
   return computeReconciledItems(db, move, index).map((item, lineIdx) => {
-    const groupCode = item.reconciled ? (index.matchingNumbers.get(lineKey(move.id, lineIdx)) ?? null) : null;
-    return groupCode ? { ...item, matching_number: groupCode } : item;
+    const key = lineKey(move.id, lineIdx);
+    const groupCode = item.reconciled ? (index.matchingNumbers.get(key) ?? null) : null;
+    if (groupCode) return { ...item, matching_number: groupCode };
+    if (!partialMatching) return item;
+    const partialCode = partialNumbers?.get(key);
+    return partialCode ? { ...item, matching_number: partialCode } : item;
   });
 }
 
@@ -1296,7 +1402,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
-      return reconciledJournalItems(db, m).map((l) => ({
+      return reconciledJournalItems(db, m, { partialMatching: true }).map((l) => ({
         ...l,
         line_identity: journalItemIdentity(l),
         move_id: m.id,
