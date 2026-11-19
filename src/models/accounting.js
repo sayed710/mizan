@@ -2490,6 +2490,7 @@ export const accountingModels = {
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
+        copy: false,
         options: [
           ['no', 'No'],
           ['at_date', 'At Date'],
@@ -2498,7 +2499,7 @@ export const accountingModels = {
           ['yearly', 'Yearly'],
         ],
       },
-      auto_post_until: { type: 'date', label: 'Repeat Until' },
+      auto_post_until: { type: 'date', label: 'Repeat Until', copy: false },
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
