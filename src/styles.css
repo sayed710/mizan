@@ -358,6 +358,15 @@ html[dir='rtl'] .toggle-switch:checked::before { transform: translateX(-14px); }
   color: var(--muted, #666);
   font-style: italic;
 }
+.annual-report-body .report-table td.depth-0 { padding-inline-start: 10px; }
+.annual-report-body .report-table td.depth-1 { padding-inline-start: 28px; }
+.annual-report-body .report-table td.depth-2 { padding-inline-start: 46px; }
+.annual-report-body .report-table td.depth-3 { padding-inline-start: 64px; }
+.annual-report-body .report-table td.depth-4 { padding-inline-start: 82px; }
+.annual-report-body .report-table td.depth-5 { padding-inline-start: 100px; }
+.annual-report-body .report-table td.depth-6 { padding-inline-start: 118px; }
+.annual-report-body .report-table td.depth-7 { padding-inline-start: 136px; }
+.annual-report-body .report-table td.depth-8 { padding-inline-start: 154px; }
 .lines { width: 100%; border-collapse: collapse; }
 .lines th, .lines td { padding: 6px; border-bottom: 1px solid var(--border); text-align: start; }
 .lines .num { text-align: end; white-space: nowrap; }

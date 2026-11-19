@@ -12,28 +12,55 @@ function formatMoney(n) {
 /** Render HTML tables for Balance Sheet and Profit and Loss scoped to the given period and company. */
 const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+const COLUMN_LABELS = { balance: 'Balance', debit: 'Debit', credit: 'Credit' };
+
+const accountKey = (acc) => acc.account?.id ?? acc.account?.code ?? acc.account?.name;
+
+function descendantAccountKeys(rows, index) {
+  const parentDepth = Number(rows[index]?.depth) || 0;
+  const keys = new Set();
+  for (let j = index + 1; j < rows.length && (Number(rows[j].depth) || 0) > parentDepth; j += 1) {
+    for (const acc of rows[j].accountRows ?? []) {
+      const key = accountKey(acc);
+      if (key != null) keys.add(key);
+    }
+  }
+  return keys;
+}
+
 function renderReportTable(title, reportData, tableClass, valueHeader) {
+  const columns = reportData.columns?.length ? reportData.columns : ['balance'];
+  const headers = columns.map((col) => (columns.length === 1 && col === 'balance' ? valueHeader : COLUMN_LABELS[col] ?? col));
+  const colCount = 1 + columns.length;
+  const valueCells = (values) => columns
+    .map((_, idx) => `<td class="text-right">${formatMoney(values?.[idx] ?? 0)}</td>`)
+    .join('');
+
   const rows = reportData.rows || [];
   const bodyRows = rows.map((r, index) => {
+    const depth = Math.max(0, Number(r.depth) || 0);
     const isLastStrong = Boolean(r.strong && index === rows.length - 1);
     const totalClass = isLastStrong ? 'grand-total-row' : (r.strong ? 'total-row' : '');
-    const hasAccounts = Boolean(r.accountRows && r.accountRows.length > 0);
-    if (hasAccounts) {
-      const accRows = r.accountRows.map((acc) =>
-        `      <tr><td>${escapeHtml(acc.account?.code ?? '')} ${escapeHtml(acc.account?.name ?? '')}</td><td class="text-right">${formatMoney(acc.values?.[0] ?? 0)}</td></tr>`
+    const childKeys = descendantAccountKeys(rows, index);
+    const visibleAccounts = (r.accountRows ?? []).filter((acc) => !childKeys.has(accountKey(acc)));
+    if (visibleAccounts.length > 0) {
+      const accRows = visibleAccounts.map((acc) =>
+        `      <tr><td class="depth-${depth + 1}">${escapeHtml(acc.account?.code ?? '')} ${escapeHtml(acc.account?.name ?? '')}</td>${valueCells(acc.values)}</tr>`
       ).join('\n');
       const totClass = totalClass || 'total-row';
-      return `      <tr class="section-header"><td colspan="2"><strong>${escapeHtml(t(r.name ?? ''))}</strong></td></tr>\n${accRows}\n      <tr class="${totClass}"><td>${escapeHtml(t(r.name ?? ''))}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
+      return `      <tr class="section-header"><td colspan="${colCount}" class="depth-${depth}"><strong>${escapeHtml(t(r.name ?? ''))}</strong></td></tr>\n${accRows}\n      <tr class="${totClass}"><td class="depth-${depth}">${escapeHtml(t(r.name ?? ''))}</td>${valueCells(r.values)}</tr>`;
     }
-    return `      <tr${totalClass ? ` class="${totalClass}"` : ''}><td>${escapeHtml(t(r.name ?? ''))}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
+    return `      <tr${totalClass ? ` class="${totalClass}"` : ''}><td class="depth-${depth}">${escapeHtml(t(r.name ?? ''))}</td>${valueCells(r.values)}</tr>`;
   }).join('\n');
+
+  const headerCells = headers.map((h) => `<th class="text-right">${escapeHtml(t(h))}</th>`).join('\n        ');
 
   return `  <h2>${escapeHtml(t(title))}</h2>
   <table class="report-table ${tableClass}">
     <thead>
       <tr>
         <th class="text-left">${escapeHtml(t('Account'))}</th>
-        <th class="text-right">${escapeHtml(t(valueHeader))}</th>
+        ${headerCells}
       </tr>
     </thead>
     <tbody>

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { seed } from './seed.js';
 import { create, read, write } from './orm.js';
 import { postEntry } from './models/ledger.js';
@@ -258,4 +259,149 @@ test('FIN-3: throws clear error if company lacks required statement report', () 
     () => renderAnnualReportHtml(db, { company_id: 99999 }),
     /Configure the Balance Sheet report for this company/,
   );
+});
+
+test('FIN-3: renderAnnualReportHtml renders Debit and Credit columns when enabled and sizes section-header colspan', () => {
+  let db = seed();
+
+  const pnlReport = findStatementReport(db, 'pnl', 1);
+  db = write(db, 'account.report', pnlReport.id, { show_debit: true, show_credit: true });
+
+  // Post a credit and partial debit (reversal) to 400000 in 2036 so both Debit and Credit are nonzero
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: '2036-04-01',
+    lines: [
+      { account: '101401', debit: 500 },
+      { account: '400000', credit: 500 },
+    ],
+  }).db;
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: '2036-04-05',
+    lines: [
+      { account: '400000', debit: 100 },
+      { account: '101401', credit: 100 },
+    ],
+  }).db;
+
+  const html = renderAnnualReportHtml(db, {
+    start_date: '2036-01-01',
+    end_date: '2036-12-31',
+    company_id: 1,
+  });
+
+  const pnlSection = html.split('<table class="report-table pnl-table">')[1];
+  assert.ok(pnlSection, 'P&L table exists');
+
+  // Table headers include Balance, Debit, Credit
+  assert.ok(pnlSection.includes('<th class="text-right">Balance</th>'), 'P&L header includes Balance column');
+  assert.ok(pnlSection.includes('<th class="text-right">Debit</th>'), 'P&L header includes Debit column');
+  assert.ok(pnlSection.includes('<th class="text-right">Credit</th>'), 'P&L header includes Credit column');
+
+  // Section header colspan spans all 4 columns (Account + Balance + Debit + Credit)
+  assert.ok(pnlSection.includes('<td colspan="4"'), 'P&L section header colspan matches 4-column table width');
+
+  // Account row and report line total both show Balance (400.00), Debit (100.00), Credit (500.00)
+  assert.match(
+    pnlSection,
+    /400000 Product Sales<\/td><td class="text-right">400\.00<\/td><td class="text-right">100\.00<\/td><td class="text-right">500\.00<\/td>/,
+    'Account row renders balance, debit, and credit values',
+  );
+  assert.match(
+    pnlSection,
+    /Operating Income<\/td><td class="text-right">400\.00<\/td><td class="text-right">100\.00<\/td><td class="text-right">500\.00<\/td>/,
+    'Report line renders balance, debit, and credit values',
+  );
+
+  // Balance Sheet (with show_debit/show_credit false) retains colspan="2"
+  const bsSection = html.split('<table class="report-table balance-sheet-table">')[1].split('</table>')[0];
+  assert.ok(bsSection.includes('<td colspan="2"'), 'BS section header colspan stays 2 for single value column');
+});
+
+test('FIN-3: renderAnnualReportHtml prints account rows only on leaf lines and preserves parent totals', () => {
+  let db = seed();
+
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: '2036-06-10',
+    lines: [
+      { account: '101401', debit: 750 },
+      { account: '400000', credit: 750 },
+    ],
+  }).db;
+
+  const html = renderAnnualReportHtml(db, {
+    start_date: '2036-01-01',
+    end_date: '2036-12-31',
+    company_id: 1,
+  });
+
+  const bsSection = html.split('<table class="report-table balance-sheet-table">')[1].split('</table>')[0];
+  const pnlSection = html.split('<table class="report-table pnl-table">')[1].split('</table>')[0];
+
+  // 101401 Bank appears only once in Balance Sheet (under Bank and Cash Accounts, NOT under Current Assets)
+  const bankMatches = bsSection.match(/101401 Bank/g) ?? [];
+  assert.equal(bankMatches.length, 1, `Expected 101401 Bank once in Balance Sheet, found ${bankMatches.length}`);
+
+  // 400000 Product Sales appears only once in P&L (under Operating Income, NOT under Revenue)
+  const salesMatches = pnlSection.match(/400000 Product Sales/g) ?? [];
+  assert.equal(salesMatches.length, 1, `Expected 400000 Product Sales once in P&L, found ${salesMatches.length}`);
+
+  // Parent totals remain visible
+  assert.match(pnlSection, /Revenue<\/td><td class="text-right">750\.00<\/td>/, 'Parent Revenue total remains visible');
+  assert.match(bsSection, /Current Assets<\/td><td class="text-right">/, 'Parent Current Assets total remains visible');
+});
+
+test('FIN-3: renderAnnualReportHtml indents name cells using depth classes and logical padding-inline-start', () => {
+  let db = seed();
+
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: '2036-08-12',
+    lines: [
+      { account: '101401', debit: 250 },
+      { account: '400000', credit: 250 },
+    ],
+  }).db;
+
+  const html = renderAnnualReportHtml(db, {
+    start_date: '2036-01-01',
+    end_date: '2036-12-31',
+    company_id: 1,
+  });
+
+  // Top-level row (depth 0)
+  assert.match(html, /<td class="depth-0">ASSETS<\/td>/, 'Top-level ASSETS line gets depth-0');
+  assert.match(html, /<td class="depth-0">Revenue<\/td>/, 'Top-level Revenue line gets depth-0');
+
+  // Depth 1 parent total (Current Assets) and depth 1 foldable leaf (Operating Income)
+  assert.match(html, /<td class="depth-1">Current Assets<\/td>/, 'Depth-1 Current Assets line gets depth-1');
+  assert.match(
+    html,
+    /<tr class="section-header"><td colspan="2" class="depth-1"><strong>Operating Income<\/strong><\/td><\/tr>/,
+    'Depth-1 section header gets depth-1',
+  );
+  assert.match(html, /<td class="depth-2">400000 Product Sales<\/td>/, 'Account row under depth-1 line gets depth-2');
+
+  // Depth 2 foldable leaf (Bank and Cash Accounts) and depth 3 account row (101401 Bank)
+  assert.match(
+    html,
+    /<tr class="section-header"><td colspan="2" class="depth-2"><strong>Bank and Cash Accounts<\/strong><\/td><\/tr>/,
+    'Depth-2 section header gets depth-2',
+  );
+  assert.match(html, /<td class="depth-3">101401 Bank<\/td>/, 'Account row under depth-2 line gets depth-3');
+
+  // No inline style attribute (must survive strict HTML sanitization)
+  assert.ok(!html.includes('style="'), 'Generated HTML uses classes instead of inline style attributes');
+
+  // CSS rules define logical padding-inline-start indentation for RTL & LTR support
+  const css = fs.readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.annual-report-body \.report-table td\.depth-1\s*\{[^}]*padding-inline-start:/, 'styles.css uses padding-inline-start for depth-1');
+  assert.match(css, /\.annual-report-body \.report-table td\.depth-2\s*\{[^}]*padding-inline-start:/, 'styles.css uses padding-inline-start for depth-2');
+  assert.match(css, /\.annual-report-body \.report-table td\.depth-3\s*\{[^}]*padding-inline-start:/, 'styles.css uses padding-inline-start for depth-3');
 });
