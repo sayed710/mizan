@@ -7,7 +7,7 @@ import { companyCurrencyRecord, currencyDecimalPlaces, findCompanyCurrencyRecord
 /** Units of `currencyId` per 1 base-currency unit on `date`: the latest configured rate on or before it. */
 const applicableRate = (currency, date, companyId = null) => {
   const rows = (currency.rate_ids ?? []).filter((r) => Number.isFinite(Number(r.rate)) && Number(r.rate) > 0 && r.date && r.date <= date);
-  const latest = (id) => rows.filter((r) => (r.company_id || null) === id).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const latest = (id) => rows.filter((r) => (id == null ? r.company_id == null : Number(r.company_id) === Number(id))).sort((a, b) => b.date.localeCompare(a.date))[0];
   return (companyId == null ? null : latest(companyId)) ?? latest(null);
 };
 

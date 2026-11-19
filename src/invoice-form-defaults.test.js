@@ -805,3 +805,26 @@ test('9. Inter-company bill due date: draft without onchange and stale due date 
   const payable2 = postedBill2.line_ids.find((l) => read(db, 'account.account', l.account_id)?.account_type === 'liability_payable');
   assert.equal(payable2.date_maturity, postedInv2.invoice_date_due, 'Intercompany bill payable line maturity equals posted invoice due date');
 });
+
+test('readonly analytic distribution displays analytic account names and percentages instead of raw JSON', () => {
+  const db = seed();
+  const accounts = search(db, 'account.analytic.account');
+  const office = accounts.find((a) => a.name === 'Office Projects');
+  const cairo = accounts.find((a) => a.name === 'Cairo Branch');
+  assert.ok(office && cairo, 'seed has analytic accounts');
+  const officeName = office.display_name ?? office.name;
+  const cairoName = cairo.display_name ?? cairo.name;
+  const unknown = Math.max(...accounts.map((a) => a.id)) + 100;
+  const field = { type: 'distribution', label: 'Analytic Distribution' };
+
+  assert.equal(display(db, field, {}, office), '', 'empty distribution displays blank');
+  assert.equal(display(db, field, null, office), '', 'null distribution displays blank');
+  assert.equal(display(db, field, undefined, office), '', 'undefined distribution displays blank');
+  assert.equal(display(db, field, { [office.id]: 100 }, office), `${officeName} 100%`);
+  assert.equal(display(db, field, { [office.id]: 33.33 }, office), `${officeName} 33.33%`, 'trailing zeros dropped');
+  assert.equal(display(db, field, { [office.id]: 100 / 3 }, office), `${officeName} 33.33%`, 'rounded to two decimals');
+  assert.equal(display(db, field, { [office.id]: 60, [cairo.id]: 40 }, office), `${officeName} 60%, ${cairoName} 40%`, 'entries in insertion order');
+  assert.equal(display(db, field, { [unknown]: 100 }, office), `{"${unknown}":100}`, 'a reference to a missing account is shown as written');
+  assert.equal(display(db, field, { [office.id]: 60, [cairo.id]: 100 }, office), `${officeName} 60%, ${cairoName} 100%`, 'each plan is checked on its own, so 160% across two plans is valid');
+  assert.equal(display(db, field, { abc: '50' }, office), '{"abc":"50"}', 'a malformed stored value is shown as written instead of breaking the view');
+});

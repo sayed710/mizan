@@ -3,7 +3,7 @@ import { read, search } from '../orm.js';
 import { amounts, subtotal } from './common.js';
 import { shippingPrice } from './logistics.js';
 import { priceFor } from './pricelist.js';
-import { lineTaxOf, productTax } from './taxes.js';
+import { autoFiscalPosition, lineTaxOf, productTax } from './taxes.js';
 import { round } from '../money.js';
 
 export const SORTS = ['featured', 'newest', 'name', 'price_asc', 'price_desc'];
@@ -76,12 +76,6 @@ export function productVariants(db, template) {
   return { attributes: namedAttributes(template.attributes), variants };
 }
 
-/** Auto-applied fiscal position for a country (the visitor has no partner record yet). */
-function fiscalPositionOf(db, country, companyId) {
-  const c = String(country ?? '').trim().toLowerCase();
-  return c ? search(db, 'account.fiscal.position').find((fp) => fp.auto_apply && (!fp.company_id || fp.company_id === companyId) && String(fp.country ?? '').trim().toLowerCase() === c)?.id ?? null : null;
-}
-
 /** Order line for a product at its website price (pricelist applied) with its sales tax. */
 export function shopLine(db, productId, qty, { pricelistId = null, fiscalPositionId = null, companyId = db.settings?.current_company_id ?? 1 } = {}) {
   const product = read(db, 'product', productId);
@@ -100,11 +94,11 @@ export function deliveryLine(db, price, fiscalPositionId = null, companyId = db.
 export const websiteCarriers = (db) => search(db, 'delivery.carrier').filter((c) => c.is_published && c.delivery_type !== 'api');
 
 /**
- * Cart summary with server-side prices: pricelist, product taxes (after the country's fiscal position) and delivery.
+ * Cart summary with server-side prices: pricelist, product taxes (after the buyer address's fiscal position) and delivery.
  * @returns {{ lines: { product_id: number, qty: number, price_unit: number, subtotal: number, tax: number }[], untaxed: number, tax: number, delivery: number, total: number, orderLines: object[] }}
  */
-export function cartTotals(db, lines, { pricelistId = null, carrierId = null, partnerCountry = '', companyId = db.settings?.current_company_id ?? 1 } = {}) {
-  const fiscalPositionId = fiscalPositionOf(db, partnerCountry, companyId);
+export function cartTotals(db, lines, { pricelistId = null, carrierId = null, partnerCountry = '', partnerZip = '', companyId = db.settings?.current_company_id ?? 1 } = {}) {
+  const fiscalPositionId = autoFiscalPosition(db, { country: String(partnerCountry ?? ''), zip: String(partnerZip ?? '') }, companyId);
   const productLines = (lines ?? []).map((l) => shopLine(db, l.product_id, l.qty, { pricelistId, fiscalPositionId, companyId }));
   const untaxed = amounts(productLines).untaxed;
   const carrier = carrierId ? read(db, 'delivery.carrier', carrierId) : null;
