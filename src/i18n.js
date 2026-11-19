@@ -3219,6 +3219,13 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Exchange Difference Journal': 'دفتر فروق أسعار الصرف',
+  'Journal used to record realized foreign exchange gains and losses.': 'الدفتر المستخدم لتسجيل أرباح وخسائر فروق العملة المحققة.',
+  'Default general journal': 'دفتر اليومية الافتراضي',
+  'Exchange Difference Journal must be a general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق العملة دفتراً عاماً مشتركاً أو تابعاً لهذه الشركة',
+  'Exchange rate must be strictly positive': 'يجب أن يكون سعر الصرف أكبر من صفر',
+  'Duplicate exchange rate row for the same date and company': 'يوجد صف سعر صرف مكرر لنفس التاريخ والشركة',
+  'Exchange Rate': 'سعر الصرف',
   'Quick Actions': 'إجراءات سريعة',
   'Bank transaction does not exist': 'المعاملة البنكية غير موجودة',
   'Partner belongs to another company': 'الشريك يتبع شركة أخرى',
@@ -3239,6 +3246,8 @@ const ar = {
   'Contradictory date formats in QIF file': 'صيغ تواريخ متضاربة في ملف QIF',
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
+  'The open statement amount is too small to match this payment': 'المبلغ المفتوح في كشف الحساب أقل من اللازم لمطابقة هذه الدفعة',
+  'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
 };
 
