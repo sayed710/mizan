@@ -1,7 +1,7 @@
 import { models } from './models/index.js';
 import { fieldReadonly } from './field-metadata.js';
 import { moveDate, recordLockDate } from './models/finance.js';
-import { today } from './models/common.js';
+import { addDays, today } from './models/common.js';
 
 // Readonly fields are left to the model defaults unless the field is marked `copy: true` (it defines what the record is).
 const editable = (fields, vals, target) => Object.fromEntries(Object.entries(vals).filter(([k]) => fields[k]?.copy !== false && (!fieldReadonly(fields[k], target) || fields[k]?.copy)));
@@ -19,9 +19,14 @@ export function duplicateValues(model, rec, db = null) {
     .map(([k, v]) => [k, def.fields[k]?.type === 'one2many' && Array.isArray(v) ? v.map((line) => editable(def.fields[k].fields ?? {}, line, line)) : v]));
   if (model === 'account.move' && db) {
     const lock = recordLockDate(db, rec);
-    if (lock && moveDate(rec) <= lock) {
-      kept.date = today();
-      if (rec.move_type === 'entry' && 'invoice_date' in kept) kept.invoice_date = today();
+    const original = moveDate(rec);
+    if (lock && original <= lock) {
+      // The first open day: today, unless the lock covers today too.
+      const date = [today(), addDays(lock, 1)].sort().at(-1);
+      kept.date = date;
+      if (rec.move_type === 'entry' && 'invoice_date' in kept) kept.invoice_date = date;
+      // An automatic reversal keeps its distance from the entry, so it still falls after the new date.
+      if (kept.reverse_date) kept.reverse_date = addDays(date, Math.round((Date.parse(kept.reverse_date) - Date.parse(original)) / 86400000));
     }
   }
   return def.fields.name && !fieldReadonly(def.fields.name, target) ? { ...kept, name: `${rec.name ?? ''} (copy)` } : kept;

@@ -4,7 +4,7 @@ import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import './models/index.js';
 import { duplicateValues } from './duplicate.js';
-import { today } from './models/common.js';
+import { addDays, today } from './models/common.js';
 
 test('1. Duplicating an entry does not copy recurrence: auto_post and auto_post_until are excluded', () => {
   let db = seed();
@@ -210,4 +210,22 @@ test('2g. Duplicating an invoice in a locked period defaults accounting date (da
   const invRec = read(lockedInvoice.db, 'account.move', lockedInvoice.id);
   const dupInv = duplicateValues('account.move', invRec, lockedInvoice.db);
   assert.equal(dupInv.date, today(), 'Invoice accounting date (date) defaults to today when locked');
+});
+
+test('3. A lock covering today moves the copy to the day after the lock, and its reversal keeps the same distance', () => {
+  const lock = addDays(today(), 10);
+  let db = write(seed(), 'res.company', 1, { lock_date: lock });
+  const entry = create(db, 'account.move', {
+    move_type: 'entry',
+    date: addDays(today(), -20),
+    company_id: 1,
+    auto_reverse: true,
+    reverse_date: addDays(today(), -15),
+    line_ids: [{ account_id: 1, debit: 100, credit: 0 }, { account_id: 2, debit: 0, credit: 100 }],
+  });
+  db = entry.db;
+  const copy = duplicateValues('account.move', read(db, 'account.move', entry.id), db);
+  assert.equal(copy.date, addDays(lock, 1));
+  assert.equal(copy.invoice_date, addDays(lock, 1));
+  assert.equal(copy.reverse_date, addDays(lock, 6));
 });
