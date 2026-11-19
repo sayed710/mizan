@@ -433,9 +433,10 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
             return (
               <tr key={i}>
                 {cols.map(([k, f]) => {
-                  const cellVal = f.compute ? f.compute(cellRec, db, record) : l[k];
+                  const rawVal = f.compute ? f.compute(cellRec, db, record) : l[k];
+                  const cellVal = f.valueFallback && !(rawVal?.length) ? f.valueFallback(l) : rawVal;
                   // A field may explain a value it has no record for (e.g. a tax rate with no tax record).
-                  const rateText = !cellVal ? f.rateOnlyText?.(l) : null;
+                  const rateText = (Array.isArray(cellVal) ? !cellVal.length : !cellVal) ? f.rateOnlyText?.(l) : null;
                   const cellPlaceholder = k === 'product_id' ? t('Select a product…') : (f.placeholder ? t(f.placeholder) : undefined);
                   return (
                     <td key={k} className={isNumeric(f) ? 'num' : ''}>
