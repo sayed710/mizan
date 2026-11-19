@@ -2,7 +2,8 @@
 import { read } from '../orm.js';
 import { toCsv } from '../csv.js';
 import { round } from '../money.js';
-import { taxBaseTotal, taxReport, taxesByTax } from './finance.js';
+import { taxBaseTotal, taxItemKey, taxItems, taxReport, taxRowsFromItems, taxesByTax } from './finance.js';
+import { deduplicatedTaxBase } from './taxBase.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES } from './taxTemplates.js';
 
 export { TAX_RETURN_TEMPLATE_OPTIONS, TAX_RETURN_TEMPLATES };
@@ -66,19 +67,17 @@ function templateBoxSpec(db, templateSpec, taxItem) {
     ?? null;
 }
 
+/** Per-tax rows with their generic box codes: OUT-n for sales and IN-n for purchases, in report order. */
+export function genericTaxRows(taxRows) {
+  const counts = { sale: 0, purchase: 0 };
+  return taxRows.filter((row) => row.side in counts).map((row) => {
+    counts[row.side] += 1;
+    return { ...row, code: `${row.side === 'sale' ? 'OUT' : 'IN'}-${counts[row.side]}` };
+  });
+}
+
 function buildGenericBoxes(db, period, taxRows, totals) {
-  const boxes = [];
-  let saleIdx = 0;
-  let purchIdx = 0;
-  for (const row of taxRows) {
-    if (row.side === 'sale') {
-      saleIdx += 1;
-      boxes.push({ code: `OUT-${saleIdx}`, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail' });
-    } else if (row.side === 'purchase') {
-      purchIdx += 1;
-      boxes.push({ code: `IN-${purchIdx}`, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail' });
-    }
-  }
+  const boxes = genericTaxRows(taxRows).map((row) => ({ code: row.code, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail' }));
   const saleBase = taxBaseTotal(db, period, (item) => item.side === 'sale');
   const purchBase = taxBaseTotal(db, period, (item) => item.side === 'purchase');
   boxes.push(
@@ -131,6 +130,69 @@ export function taxReturnBoxes(db, ret) {
     boxes,
     totals,
   };
+}
+
+/** Drill down into journal items that contribute to a return box. */
+export function taxBoxItems(db, ret, code) {
+  const period = taxReturnPeriod(db, ret);
+  const template = resolveTaxReturnTemplate(db, ret);
+  const spec = TAX_RETURN_TEMPLATES[template];
+  const allItems = taxItems(db, period);
+
+  let matcher;
+  let isNetPayable = false;
+
+  if (spec.mode === 'boxes') {
+    const boxSpec = spec.boxes.find((b) => b.code === code);
+    if (!boxSpec) return { items: [], tax: 0, base: 0 };
+    if (boxSpec.kind === 'total_output') {
+      matcher = (item) => item.side === 'sale';
+    } else if (boxSpec.kind === 'total_input') {
+      matcher = (item) => item.side === 'purchase';
+    } else if (boxSpec.kind === 'net_payable') {
+      isNetPayable = true;
+      matcher = () => true;
+    } else {
+      matcher = (item) => templateBoxSpec(db, spec, item)?.code === code;
+    }
+  } else {
+    if (code === 'TOTAL-OUT') {
+      matcher = (item) => item.side === 'sale';
+    } else if (code === 'TOTAL-IN') {
+      matcher = (item) => item.side === 'purchase';
+    } else if (code === 'PAYABLE') {
+      isNetPayable = true;
+      matcher = () => true;
+    } else {
+      const targetRow = genericTaxRows(taxRowsFromItems(allItems)).find((row) => row.code === code);
+      if (!targetRow) return { items: [], tax: 0, base: 0 };
+      const targetKey = taxItemKey({ side: targetRow.side, tax_id: targetRow.tax_id, tax_name: targetRow.name });
+      matcher = (item) => taxItemKey(item) === targetKey;
+    }
+  }
+
+  const moves = new Map((db.records?.['account.move'] ?? []).map((m) => [m.id, m]));
+  const matched = allItems.filter(matcher);
+  const items = matched.map((item) => {
+    const move = moves.get(item.move_id);
+    const partnerId = item.partner_id ?? move?.partner_id ?? null;
+    const signedContribution = isNetPayable
+      ? (item.side === 'sale' ? item.tax : -item.tax)
+      : item.tax;
+    return {
+      move_id: item.move_id,
+      move_name: item.move_name,
+      date: item.date,
+      account_id: item.account_id,
+      partner_id: partnerId,
+      name: item.name,
+      tax: signedContribution,
+    };
+  });
+
+  const tax = round(items.reduce((s, it) => s + it.tax, 0));
+  const base = isNetPayable ? 0 : deduplicatedTaxBase(db, allItems, matcher);
+  return { items, tax, base };
 }
 
 /** Build RFC 4180 CSV text of tax return boxes for an `account.return` record. */

@@ -122,6 +122,7 @@ export function BankReconcile() {
       writeoff_account_id: writeoffAccountId ? Number(writeoffAccountId) : null,
       writeoff_label: writeoffLabel,
       writeoff_amount: writeoffAmount !== '' ? Number(writeoffAmount) : null,
+      writeoff_analytic_distribution: null,
     };
   };
 

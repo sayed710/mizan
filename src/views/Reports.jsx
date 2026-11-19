@@ -17,7 +17,7 @@ import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLed
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
-import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
+import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowColumns, periodsFor } from './reportCompare.js';
@@ -137,6 +137,9 @@ export function resolveTaxReportTemplate(db, companyId, companies = null) {
 
 export function TaxReportTable({ db, period, returnRecord = null }) {
   const safeBase = String(returnRecord?.name || 'tax-return').replace(/[^a-zA-Z0-9_-]+/g, '-');
+  const template = returnRecord?.tax_return_template;
+  const isStatutory = Boolean(template && Object.hasOwn(TAX_RETURN_TEMPLATES, template) && TAX_RETURN_TEMPLATES[template].mode === 'boxes');
+  const variant = isStatutory ? template : 'generic';
   return (
     <div className="list-wrap">
       {returnRecord && (
@@ -147,16 +150,75 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
       )}
       <table className="list report">
         <thead>
-          <tr>
-            <th />
-            <th className="num">{t('Base')}</th>
-            <th className="num">{t('Tax')}</th>
-          </tr>
+          {isStatutory ? (
+            <tr>
+              <th>{t('Box')}</th>
+              <th>{t('Description')}</th>
+              <th className="num">{t('Base')}</th>
+              <th className="num">{t('Tax')}</th>
+            </tr>
+          ) : (
+            <tr>
+              <th />
+              <th className="num">{t('Base')}</th>
+              <th className="num">{t('Tax')}</th>
+            </tr>
+          )}
         </thead>
-        <Tax db={db} period={period} variant="generic" />
+        <Tax key={variant} db={db} period={period} variant={variant} />
       </table>
     </div>
   );
+}
+
+/** The posted journal items behind one tax return box, shown under its row. */
+function TaxBoxDetailRow({ db, returnOrPeriod, code, colSpan }) {
+  const { items, tax, base } = taxBoxItems(db, returnOrPeriod, code);
+  const accountDisplay = (accId) => {
+    const acc = read(db, 'account.account', accId);
+    return acc ? `${acc.code} ${acc.name}` : '—';
+  };
+  return (
+    <tr className="tax-drill">
+      <td colSpan={colSpan}>
+        <table className="list report">
+          <thead>
+            <tr>
+              <th>{t('Date')}</th>
+              <th>{t('Journal Entry')}</th>
+              <th>{t('Account')}</th>
+              <th>{t('Partner')}</th>
+              <th>{t('Label')}</th>
+              <th className="num">{t('Tax')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.length === 0
+              ? <tr><td colSpan={6}>{t('No records found.')}</td></tr>
+              : items.map((it, idx) => (
+                <tr key={`${it.move_id}-${it.account_id}-${idx}`}>
+                  <td>{it.date}</td>
+                  <td><a href={`#/open/account.move/${it.move_id}`}>{it.move_name}</a></td>
+                  <td>{accountDisplay(it.account_id)}</td>
+                  <td>{partnerName(db, it.partner_id)}</td>
+                  <td>{it.name || '—'}</td>
+                  <td className="num">{money(it.tax)}</td>
+                </tr>
+              ))}
+          </tbody>
+          <tfoot>
+            <tr className="rep-total"><td colSpan={5}>{t('Total')}</td><td className="num">{money(tax)}</td></tr>
+            <tr><td colSpan={5}>{t('Base')}</td><td className="num">{money(base)}</td></tr>
+          </tfoot>
+        </table>
+      </td>
+    </tr>
+  );
+}
+
+/** A box amount that toggles its drill-down row. */
+function TaxAmountToggle({ value, open, onToggle }) {
+  return <button type="button" className="tax-drill-toggle" aria-expanded={open} onClick={onToggle}>{money(value)}</button>;
 }
 
 export function Tax({ db, period, companyId = 'all', variant = null }) {
@@ -164,20 +226,37 @@ export function Tax({ db, period, companyId = 'all', variant = null }) {
   const effectivePeriod = effectiveCompanyId ? { ...period, company_id: effectiveCompanyId } : period;
   const countryTemplateKey = resolveTaxReportTemplate(db, companyId);
   const activeVariant = variant ?? (countryTemplateKey ?? 'generic');
+  const [openBoxes, setOpenBoxes] = useState(() => new Set());
+  const toggleBox = (code) => setOpenBoxes((prev) => {
+    const next = new Set(prev);
+    if (next.has(code)) next.delete(code);
+    else next.add(code);
+    return next;
+  });
 
   if (activeVariant !== 'generic') {
-    const { boxes } = taxReturnBoxes(db, { ...effectivePeriod, tax_return_template: activeVariant });
+    const returnSpec = { ...effectivePeriod, tax_return_template: activeVariant };
+    const { boxes } = taxReturnBoxes(db, returnSpec);
     const templateSpec = TAX_RETURN_TEMPLATES[activeVariant];
     const payableCode = templateSpec?.boxes?.find((b) => b.kind === 'net_payable')?.code;
     return (
       <tbody>
         {boxes.map((b) => (
-          <tr key={b.code} className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}>
-            <td>{b.code}</td>
-            <td>{t(b.label)}</td>
-            <td className="num">{money(b.base)}</td>
-            <td className="num">{money(b.tax)}</td>
-          </tr>
+          <Fragment key={b.code}>
+            <tr className={b.kind === 'total' ? `rep-total ${b.code === payableCode ? 'strong' : ''}` : 'rep-detail'}>
+              <td>{b.code}</td>
+              <td>{t(b.label)}</td>
+              <td className="num">
+                <TaxAmountToggle value={b.base} open={openBoxes.has(b.code)} onToggle={() => toggleBox(b.code)} />
+              </td>
+              <td className="num">
+                <TaxAmountToggle value={b.tax} open={openBoxes.has(b.code)} onToggle={() => toggleBox(b.code)} />
+              </td>
+            </tr>
+            {openBoxes.has(b.code) && (
+              <TaxBoxDetailRow db={db} returnOrPeriod={returnSpec} code={b.code} colSpan={4} />
+            )}
+          </Fragment>
         ))}
       </tbody>
     );
@@ -186,24 +265,56 @@ export function Tax({ db, period, companyId = 'all', variant = null }) {
   const r = taxReport(db, effectivePeriod);
   const byTax = taxesByTax(db, effectivePeriod);
   const grids = taxesByGrid(db, effectivePeriod);
-  const side = (key, title) => (
+  const genericReturnSpec = { ...effectivePeriod, tax_return_template: 'generic' };
+
+  const rows = genericTaxRows(byTax);
+
+  const renderSection = (title, rows) => (
     <>
       <tr className="rep-section"><td>{t(title)}</td><td /><td /></tr>
-      {byTax.filter((x) => x.side === key).map((x) => (
-        <tr key={x.name} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>
+      {rows.map((x) => (
+        <Fragment key={x.code}>
+          <tr className="rep-detail">
+            <td>{x.name}</td>
+            <td className="num">
+              <TaxAmountToggle value={x.base} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} />
+            </td>
+            <td className="num">
+              <TaxAmountToggle value={x.tax} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} />
+            </td>
+          </tr>
+          {openBoxes.has(x.code) && (
+            <TaxBoxDetailRow db={db} returnOrPeriod={genericReturnSpec} code={x.code} colSpan={3} />
+          )}
+        </Fragment>
       ))}
     </>
   );
-  const line = (label, value, strong) => <tr className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td><td /><td className="num">{money(value)}</td></tr>;
+
+  const renderTotalLine = (label, code, value, strong) => (
+    <Fragment key={code}>
+      <tr className={`rep-total ${strong ? 'strong' : ''}`}>
+        <td>{t(label)}</td>
+        <td />
+        <td className="num">
+          <TaxAmountToggle value={value} open={openBoxes.has(code)} onToggle={() => toggleBox(code)} />
+        </td>
+      </tr>
+      {openBoxes.has(code) && (
+        <TaxBoxDetailRow db={db} returnOrPeriod={genericReturnSpec} code={code} colSpan={3} />
+      )}
+    </Fragment>
+  );
+
   return (
     <tbody>
-      {side('sale', 'Sales')}
-      {side('purchase', 'Purchases')}
+      {renderSection('Sales', rows.filter((x) => x.side === 'sale'))}
+      {renderSection('Purchases', rows.filter((x) => x.side === 'purchase'))}
       {grids.length > 0 && <tr className="rep-section"><td>{t('Tax Grids')}</td><td /><td /></tr>}
       {grids.map((x) => <tr key={x.id} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>)}
-      {line('Output Tax', r.output)}
-      {line('Input Tax', r.input)}
-      {line('Tax Payable', r.payable, true)}
+      {renderTotalLine('Output Tax', 'TOTAL-OUT', r.output)}
+      {renderTotalLine('Input Tax', 'TOTAL-IN', r.input)}
+      {renderTotalLine('Tax Payable', 'PAYABLE', r.payable, true)}
     </tbody>
   );
 }
@@ -459,8 +570,8 @@ function Depreciation({ db, period, companyId }) {
   );
 }
 
-function JournalAudit({ db, period, companyId }) {
-  const groups = journalAudit(db, { ...period, companyId: companyId === 'all' ? null : Number(companyId) });
+function JournalAudit({ db, period, companyId, sort = 'date' }) {
+  const groups = journalAudit(db, { ...period, companyId: companyId === 'all' ? null : Number(companyId), sort });
   if (!groups.length) return <tbody><tr><td colSpan={7} className="muted">{t('No posted entries for this period.')}</td></tr></tbody>;
   return <tbody>{groups.map(({ journal, items, debit, credit, taxes }) => <Fragment key={journal.id}>
     <tr className="rep-section"><td colSpan={5}><strong>{journal.name} ({journal.code})</strong></td><td className="num">{money(debit)}</td><td className="num">{money(credit)}</td></tr>
@@ -505,9 +616,9 @@ function InalterabilityCheck({ db, companyId }) {
 const REPORTS = {
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   fiscal: { title: 'Fiscal Report', Body: FiscalReport, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
   executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
@@ -551,6 +662,9 @@ function ReportPage({ leaf }) {
   const [journalId, setJournalId] = useState('');
   const [horizontalGroupId, setHorizontalGroupId] = useState('');
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
+  const [partnerFilterIds, setPartnerFilterIds] = useState([]);
+  const [unreconciledOnly, setUnreconciledOnly] = useState(false);
+  const [auditSort, setAuditSort] = useState('date');
   const ledgerReports = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit'];
   const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
   const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
@@ -590,9 +704,11 @@ function ReportPage({ leaf }) {
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
+  const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const horizontalGroups = [];
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
+  const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner', { includeArchived: true }).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const data = periods && leaf.report === 'cashflow'
     ? cashflowColumns(db, periods, {
       analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
@@ -652,7 +768,13 @@ function ReportPage({ leaf }) {
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
-        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+        {leaf.report === 'journalAudit' && <label className="inline-select">{t('Sort by')}
+          <select aria-label={t('Sort by')} value={auditSort} onChange={(e) => setAuditSort(e.target.value)}>
+            <option value="date">{t('Date')}</option>
+            <option value="number">{t('Journal Entry Number')}</option>
+          </select>
+        </label>}
+        {(['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
           <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
         )}
         {leaf.report === 'tax' && countryTemplate && (
@@ -675,6 +797,17 @@ function ReportPage({ leaf }) {
             </select>
           </label>
         )}
+        {isPartnerLedger && <>
+          <label className="inline-select">
+            <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
+          </label>
+          <label className="inline-select">
+            {t('Partners')}
+            <select aria-label={t('Partners')} multiple value={partnerFilterIds} onChange={(e) => setPartnerFilterIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}>
+              {partnerChoices.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
+        </>}
         {comparable && <label className="inline-select">
           {t('Comparison')}
           <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setHorizontalGroupId(''); }}>
@@ -706,7 +839,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} />}
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} />}
         </table>
       </div>
     </main>

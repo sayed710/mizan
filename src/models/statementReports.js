@@ -33,9 +33,9 @@ export const STANDARD_BALANCE_LINES = [
   { name: 'EQUITY', code: 'EQUITY', sequence: 140, parent_code: '', formula: 'UNALLOC + RET', sign: 1, foldable: false, strong: true },
   { name: 'Unallocated Earnings', code: 'UNALLOC', sequence: 150, parent_code: 'EQUITY', formula: 'CUR_UNALLOC + PYE', sign: 1, foldable: false, strong: false },
   { name: 'Current Year Unallocated Earnings', code: 'CUR_UNALLOC', sequence: 160, parent_code: 'UNALLOC', formula: 'CYE + CYA', sign: 1, foldable: false, strong: false },
-  { name: 'Current Year Earnings', code: 'CYE', sequence: 170, parent_code: 'CUR_UNALLOC', formula: 'earnings:current_year', sign: -1, foldable: false, strong: false },
+  { name: 'Current Year Earnings', code: 'CYE', sequence: 170, parent_code: 'CUR_UNALLOC', formula: 'earnings:current_year', sign: -1, foldable: true, strong: false },
   { name: 'Current Year Allocated Earnings', code: 'CYA', sequence: 180, parent_code: 'CUR_UNALLOC', formula: 'type:equity_unaffected', sign: -1, foldable: true, strong: false },
-  { name: 'Previous Years Unallocated Earnings', code: 'PYE', sequence: 190, parent_code: 'UNALLOC', formula: 'earnings:prior_years', sign: -1, foldable: false, strong: false },
+  { name: 'Previous Years Unallocated Earnings', code: 'PYE', sequence: 190, parent_code: 'UNALLOC', formula: 'earnings:prior_years', sign: -1, foldable: true, strong: false },
   { name: 'Retained Earnings', code: 'RET', sequence: 200, parent_code: 'EQUITY', formula: 'type:equity', sign: -1, foldable: true, strong: false },
   { name: 'LIABILITIES + EQUITY', code: 'LIAB_EQUITY', sequence: 210, parent_code: '', formula: 'LIAB + EQUITY', sign: 1, foldable: false, strong: true },
 ];

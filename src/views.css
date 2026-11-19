@@ -182,6 +182,10 @@
 .list.report tr.rep-detail td { color: var(--muted); padding-inline-start: 34px; font-size: 13px; }
 .list.report tr.rep-total td { font-weight: 700; border-top: 2px solid var(--border); }
 .list.report tr.rep-total.strong td { font-size: 16px; background: var(--brand-soft); }
+.tax-drill-toggle { background: none; border: 0; padding: 0; font: inherit; color: var(--brand); cursor: pointer; text-decoration: underline; }
+.list.report tr.tax-drill > td { padding: 8px 12px; background: var(--bg); }
+.tax-drill .list.report { inline-size: 100%; background: var(--surface); }
+.tax-drill .list.report tfoot td:first-child { text-align: end; }
 .list.report { max-width: 980px; }
 
 /* Point of Sale */
@@ -258,6 +262,9 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
 .list tr.group-row { background: #f3f4f8; font-weight: 600; }
 .list tr.group-row:hover { background: #eceef5; }
 .caret { display: inline-block; width: 14px; color: var(--muted); }
+.fold-caret::before { content: '▸'; }
+.fold-caret.open::before { content: '▾'; }
+html[dir="rtl"] .fold-caret:not(.open)::before { content: '◂'; }
 .list tr.danger td { color: var(--danger); }
 .list tr.info td { color: #1d6fa5; }
 .list tr.muted td { color: var(--muted); }

@@ -36,7 +36,7 @@ export function setupDom() {
         if (child.tagName === 'OPTION') node.options.push(child);
         return child;
       },
-      setAttribute: () => {},
+      setAttribute: (name, value) => { if (name === 'class') node.className = String(value); },
       removeAttribute: () => {},
       focus: () => {},
       querySelector: () => null,

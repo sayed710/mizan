@@ -5,7 +5,7 @@ import { resolveDocumentJournal } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { stockAccount, valuationModels } from './valuation.js';
-import { productProperty } from './productconfig-helpers.js';
+import { isPeriodicValuation } from './productconfig-helpers.js';
 import { round } from '../money.js';
 import { sameCommercialPartner } from './reconcile.js';
 
@@ -128,7 +128,7 @@ export function priceDifferenceLines(db, bill) {
   const result = [];
   for (const l of bill.invoice_line_ids ?? []) {
     const p = read(db, 'product', l.product_id);
-    if (p?.type !== 'goods' || ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) continue;
+    if (p?.type !== 'goods' || isPeriodicValuation(db, p, bill.company_id ?? 1)) continue;
     const input = stockAccount(db, p, 'input', bill.company_id ?? 1);
     if (l.account_id && l.account_id !== input) continue;
     let skip = totalQty(prior, p.id) + (used.get(p.id) ?? 0), left = number(l.qty), value = 0;

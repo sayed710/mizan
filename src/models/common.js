@@ -187,8 +187,16 @@ export function total(r, db) {
   return base;
 }
 
+/** A line's tax_ids always lists its taxes: a lone tax_id is carried into tax_ids, and tax_id stays the first tax. */
+export const withTaxIds = (line) => {
+  if (!line) return line;
+  const ids = line.tax_ids ?? [];
+  if (ids.length) return line.tax_id === ids[0] ? line : { ...line, tax_id: ids[0] };
+  return line.tax_id != null ? { ...line, tax_ids: [line.tax_id] } : line;
+};
+
 /** One2many product lines; `priceField` is the product field copied into the unit price on product change. */
-export const productLines = (label, priceField, extraFields = {}) => ({
+const rawProductLines = (label, priceField, extraFields = {}) => ({
   type: 'one2many',
   label,
   fields: {
@@ -197,9 +205,10 @@ export const productLines = (label, priceField, extraFields = {}) => ({
     qty: { type: 'float', label: 'Quantity' },
     price_unit: { type: 'monetary', label: 'Unit Price' },
     discount: { type: 'float', label: 'Disc.%' },
-    tax_id: { type: 'many2one', relation: 'account.tax', label: 'Taxes' },
+    tax_id: { type: 'many2one', relation: 'account.tax', label: 'Taxes', hidden: true },
     tax_source_id: { type: 'many2one', relation: 'account.tax', label: 'Taxes', hidden: true },
-    tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', hidden: true },
+    // Lines saved before tax_ids was editable carry only tax_id; show (and extend) that tax.
+    tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', widget: 'many2many_tags', valueFallback: (l) => (l.tax_id != null ? [l.tax_id] : []) },
     tax: { type: 'float', label: 'Tax %', readonly: true },
     // Snapshot of the chosen tax, so totals and postings never need the tax record.
     tax_type: { type: 'char', label: 'Tax Computation', hidden: true },
@@ -228,7 +237,7 @@ export const productLines = (label, priceField, extraFields = {}) => ({
     const tax = db && mapped[0] ? read(db, 'account.tax', mapped[0]) : null;
     const snap = tax ? taxSnapshot(tax, db, remapped ? null : record?.fiscal_position_id) : taxSnapshot(null);
     const multi = mapped.length > 1 ? { tax_ids: mapped, tax_breakdown: expandTaxIds(db, mapped).map((t) => taxSnapshot(t)) } : {};
-    return { product_id: null, qty: 1, price_unit: 0, discount: 0, ...snap, ...multi };
+    return withTaxIds({ product_id: null, qty: 1, price_unit: 0, discount: 0, ...snap, ...multi });
   },
   // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.
   // The product's tax goes through the record's fiscal position; picking a tax by hand applies it as is.
@@ -238,9 +247,11 @@ export const productLines = (label, priceField, extraFields = {}) => ({
       return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', line.tax_id), db)), tax_source_id: null, tax_ids: [] };
     }
     if (key === 'tax_ids') {
-      validateTaxCompany(db, line.tax_ids ?? [], record?.company_id);
-      const expanded = expandTaxIds(db, line.tax_ids ?? []);
-      return { ...line, ...replaceTaxSnapshot(expanded[0] ? taxSnapshot(expanded[0], db) : taxSnapshot(null)), tax_source_id: null, tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
+      const ids = line.tax_ids ?? [];
+      validateTaxCompany(db, ids, record?.company_id);
+      const expanded = expandTaxIds(db, ids);
+      // tax_id stays the first selected tax; the breakdown carries every selected tax for the computations.
+      return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', ids[0]) ?? null, db)), tax_source_id: null, tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
     }
     if (!['product_id', 'uom_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = read(db, 'product', line.product_id);
@@ -253,6 +264,11 @@ export const productLines = (label, priceField, extraFields = {}) => ({
     return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ? { tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(tax) } : {}) };
   },
 });
+
+export const productLines = (label, priceField, extraFields = {}) => {
+  const def = rawProductLines(label, priceField, extraFields);
+  return { ...def, onchange: (line, key, db, record) => withTaxIds(def.onchange(line, key, db, record)) };
+};
 
 export const amountFields = (lineField) => {
   const computeAmount = (r, db, part) => {
