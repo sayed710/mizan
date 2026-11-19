@@ -282,10 +282,11 @@ test('Qodo 6: a scheduled reversal cannot post after its source is cancelled', (
     db = button.run(db, source).db;
   }
   assert.equal(read(db, 'account.move', entry.id).state, 'cancel');
-  assert.throws(() => postMove(db, reversalId), /entry this reverses is no longer posted/i);
+  // Reset to Draft cancels the scheduled reversal (r1): it can no longer be posted, by hand or by auto-post.
+  assert.equal(read(db, 'account.move', reversalId).state, 'cancel');
+  assert.throws(() => postMove(db, reversalId), /Only draft entries can be posted/);
   const after = postAutoPostMoves(db, '2099-01-02');
-  assert.equal(read(after, 'account.move', reversalId).state, 'draft');
-  assert.ok(after.messages.some((m) => m.model === 'account.move' && m.res_id === reversalId && /Auto-post failed: The entry this reverses is no longer posted/.test(m.body)));
+  assert.equal(read(after, 'account.move', reversalId).state, 'cancel');
 });
 
 test('Qodo 2: sync rejects forged settlement reversals while accepting genuine unapplication', () => {

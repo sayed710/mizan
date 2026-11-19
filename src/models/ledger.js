@@ -1215,7 +1215,7 @@ function computeReconciledItems(db, move, index) {
 export function partialMatchingNumbers(db, index) {
   if (index.partialMatchingNumbers) return index.partialMatchingNumbers;
   const numbers = new Map();
-  const { links, activeIds } = index.glMatchings ?? {};
+  const { links } = index.glMatchings ?? {};
   if (!links?.length) {
     index.partialMatchingNumbers = numbers;
     return numbers;
@@ -1237,31 +1237,6 @@ export function partialMatchingNumbers(db, index) {
   };
   for (const g of links) {
     linkEdge(lineKey(g.debit_move_id, g.debit_line_index), lineKey(g.credit_move_id, g.credit_line_index), g.id);
-  }
-  const activePaymentMoves = new Set(links.map((g) => g.debit_move_id).concat(links.map((g) => g.credit_move_id)));
-  for (const m of db?.records?.['account.move'] ?? []) {
-    if (m.state !== 'posted' || !['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(m.move_type) || !activePaymentMoves.has(m.id)) continue;
-    for (const row of m.payments ?? []) {
-      if (row.reversed || row.unapplied || row.partial_reconcile_id == null || !activeIds?.has(row.partial_reconcile_id)) continue;
-      if (Number.isInteger(row.line_index)) {
-        for (const other of m.payments ?? []) {
-          if (!other.reversed && !other.unapplied && other.partial_reconcile_id != null && other !== row) {
-            const sameTarget = (other.line_index ?? row.line_index) === row.line_index;
-            if (sameTarget) {
-              const otherLink = links.find((l) => l.id === other.partial_reconcile_id);
-              if (otherLink) {
-                linkEdge(
-                  lineKey(m.id, row.line_index),
-                  lineKey(otherLink.debit_move_id === m.id ? otherLink.credit_move_id : otherLink.debit_move_id,
-                    otherLink.debit_move_id === m.id ? otherLink.credit_line_index : otherLink.debit_line_index),
-                  otherLink.id,
-                );
-              }
-            }
-          }
-        }
-      }
-    }
   }
 
   const visited = new Set();
