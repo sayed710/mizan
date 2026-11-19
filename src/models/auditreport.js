@@ -4,6 +4,7 @@ import { today } from './common.js';
 import { configurableReport, findStatementReport } from './configurableReports.js';
 import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
+import { round } from '../money.js';
 
 function formatMoney(n) {
   return Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -16,16 +17,31 @@ const COLUMN_LABELS = { balance: 'Balance', debit: 'Debit', credit: 'Credit' };
 
 const accountKey = (acc) => acc.account?.id ?? acc.account?.code ?? acc.account?.name;
 
-function descendantAccountKeys(rows, index) {
+/** Per account, the amounts the line's direct child lines already show in their own account details. */
+function childAccountTotals(rows, index) {
   const parentDepth = Number(rows[index]?.depth) || 0;
-  const keys = new Set();
+  const totals = new Map();
   for (let j = index + 1; j < rows.length && (Number(rows[j].depth) || 0) > parentDepth; j += 1) {
+    if ((Number(rows[j].depth) || 0) !== parentDepth + 1) continue;
     for (const acc of rows[j].accountRows ?? []) {
       const key = accountKey(acc);
-      if (key != null) keys.add(key);
+      if (key == null) continue;
+      const sum = totals.get(key) ?? [];
+      totals.set(key, (acc.values ?? []).map((v, i) => (sum[i] ?? 0) + (Number(v) || 0)));
     }
   }
-  return keys;
+  return totals;
+}
+
+/** The part of each account's amount on this line that its child lines do not already show (a direct selector in the parent formula). */
+function residualAccountRows(rows, index) {
+  const childTotals = childAccountTotals(rows, index);
+  return (rows[index].accountRows ?? [])
+    .map((acc) => {
+      const shown = childTotals.get(accountKey(acc)) ?? [];
+      return { ...acc, values: (acc.values ?? []).map((v, i) => round((Number(v) || 0) - (shown[i] ?? 0))) };
+    })
+    .filter((acc) => acc.values.some((v) => v !== 0));
 }
 
 function renderReportTable(title, reportData, tableClass, valueHeader) {
@@ -41,8 +57,7 @@ function renderReportTable(title, reportData, tableClass, valueHeader) {
     const depth = Math.max(0, Number(r.depth) || 0);
     const isLastStrong = Boolean(r.strong && index === rows.length - 1);
     const totalClass = isLastStrong ? 'grand-total-row' : (r.strong ? 'total-row' : '');
-    const childKeys = descendantAccountKeys(rows, index);
-    const visibleAccounts = (r.accountRows ?? []).filter((acc) => !childKeys.has(accountKey(acc)));
+    const visibleAccounts = residualAccountRows(rows, index);
     if (visibleAccounts.length > 0) {
       const accRows = visibleAccounts.map((acc) =>
         `      <tr><td class="depth-${depth + 1}">${escapeHtml(acc.account?.code ?? '')} ${escapeHtml(acc.account?.name ?? '')}</td>${valueCells(acc.values)}</tr>`

@@ -405,3 +405,23 @@ test('FIN-3: renderAnnualReportHtml indents name cells using depth classes and l
   assert.match(css, /\.annual-report-body \.report-table td\.depth-2\s*\{[^}]*padding-inline-start:/, 'styles.css uses padding-inline-start for depth-2');
   assert.match(css, /\.annual-report-body \.report-table td\.depth-3\s*\{[^}]*padding-inline-start:/, 'styles.css uses padding-inline-start for depth-3');
 });
+
+test('FIN-3: a parent line shows the account amount its formula adds beyond its child lines', () => {
+  let db = seed();
+  const pnlReport = findStatementReport(db, 'pnl', 1);
+  db = write(db, 'account.report', pnlReport.id, {
+    line_ids: [
+      { name: 'Parent Sales', code: 'PAR', sequence: 10, parent_code: '', formula: 'CHILD + EXTRA', sign: 1, foldable: true, strong: true },
+      { name: 'Child Sales', code: 'CHILD', sequence: 20, parent_code: 'PAR', formula: '400000', sign: -1, foldable: true, strong: false },
+      { name: 'Extra Sales', code: 'EXTRA', sequence: 30, parent_code: '', formula: '400000', sign: -1, foldable: true, strong: false },
+    ],
+  });
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2037-03-10', lines: [{ account: '101401', debit: 300 }, { account: '400000', credit: 300 }] }).db;
+
+  const html = renderAnnualReportHtml(db, { start_date: '2037-01-01', end_date: '2037-12-31', company_id: 1 });
+  const pnl = html.split('<table class="report-table pnl-table">')[1].split('</table>')[0];
+  const parentBlock = pnl.split('Parent Sales</strong>')[1].split('Child Sales')[0];
+
+  assert.match(parentBlock, /400000 Product Sales<\/td><td class="text-right">300\.00/, 'parent shows the extra 300 from its direct selector');
+  assert.match(pnl, /Parent Sales<\/td><td class="text-right">600\.00/, 'parent total includes child and extra');
+});
