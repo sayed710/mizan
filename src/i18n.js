@@ -3230,6 +3230,7 @@ const ar = {
   'Contradictory date formats in QIF file': 'صيغ تواريخ متضاربة في ملف QIF',
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
+  'This entry is scheduled to post automatically on {date}': 'هذا القيد مجدول للترحيل تلقائياً في {date}',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

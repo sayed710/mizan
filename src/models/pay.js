@@ -608,6 +608,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     date,
     ref,
     reversed_entry_id: source.id,
+    ...(opts.scheduled && opts.reconciliation_reversal ? { reconciliation_reversal: true } : {}),
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     ...(source.cash_basis_base_grid ? { cash_basis_base_grid: true } : {}),
     partner_id: source.partner_id ?? null,

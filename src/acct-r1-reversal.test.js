@@ -6,7 +6,7 @@ import { models } from './models/index.js';
 import { today } from './models/common.js';
 import { accountId, journalItemIdentity, journalItems, postEntry, reconciledJournalItems } from './models/ledger.js';
 import { reconcileLedgerItems } from './models/glReconcile.js';
-import { postAutoPostMoves } from './models/accounting.js';
+import { postAutoPostMoves, postMove } from './models/accounting.js';
 import { reverseEntry } from './models/pay.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -141,4 +141,125 @@ test('scheduled reversal posted later reconciles source and reversal lines; pair
   assert.equal(b.reconciled, true);
   assert.ok(a.matching_number?.startsWith('A'));
   assert.equal(a.matching_number, b.matching_number);
+});
+
+test('scheduling depends only on reversal date regardless of source date, honoring explicit scheduled option', () => {
+  const { db, ar, rev, partner, misc } = setup();
+  const srcDate = addDays(today(), 5);
+  const revDate = addDays(today(), 10);
+  const futureSrc = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: srcDate, ref: 'FUT-SRC',
+    lines: [{ account_id: ar, partner_id: partner.id, debit: 100 }, { account_id: rev, credit: 100 }],
+  });
+  const scheduled = button('Reverse Entry').run(futureSrc.db, read(futureSrc.db, 'account.move', futureSrc.id), { date: revDate, mode: 'reverse' });
+  const schedRev = read(scheduled.db, 'account.move', scheduled.id);
+  assert.equal(schedRev.state, 'draft');
+  assert.equal(schedRev.auto_post, 'at_date');
+
+  const unscheduled = button('Reverse Entry').run(futureSrc.db, read(futureSrc.db, 'account.move', futureSrc.id), { date: revDate, scheduled: false, mode: 'reverse' });
+  assert.equal(read(unscheduled.db, 'account.move', unscheduled.id).state, 'posted');
+});
+
+test('Reset to Draft cancels linked scheduled draft reversals regardless of auto_reverse or source date', () => {
+  const { db, ar, rev, partner, misc } = setup();
+  const srcDate = addDays(today(), 5);
+  const revDate = addDays(today(), 10);
+
+  // Future-dated source entry reversed into a scheduled draft
+  const futureSrc = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: srcDate, ref: 'FUT-RESET',
+    lines: [{ account_id: ar, partner_id: partner.id, debit: 80 }, { account_id: rev, credit: 80 }],
+  });
+  const reversedFut = button('Reverse Entry').run(futureSrc.db, read(futureSrc.db, 'account.move', futureSrc.id), { date: revDate, mode: 'reverse' });
+  assert.equal(read(reversedFut.db, 'account.move', reversedFut.id).state, 'draft');
+  const resetFut = button('Reset to Draft').run(reversedFut.db, read(reversedFut.db, 'account.move', futureSrc.id));
+  assert.equal(read(resetFut.db, 'account.move', futureSrc.id).state, 'draft');
+  assert.equal(read(resetFut.db, 'account.move', futureSrc.id).reversal_move_id ?? null, null);
+  assert.equal(read(resetFut.db, 'account.move', reversedFut.id).state, 'cancel');
+  assert.equal(read(resetFut.db, 'account.move', reversedFut.id).auto_post, 'no');
+  const replayFut = applyDiff(reversedFut.db, diffDb(reversedFut.db, resetFut.db));
+  assert.equal(read(replayFut, 'account.move', reversedFut.id).state, 'cancel');
+
+  // Auto-reversing source entry
+  const autoDraft = create(db, 'account.move', {
+    move_type: 'entry', journal_id: misc.id, company_id: 1, date: today(), invoice_date: today(),
+    auto_reverse: true, reverse_date: revDate,
+    line_ids: [{ account_id: ar, partner_id: partner.id, debit: 60 }, { account_id: rev, credit: 60 }],
+  });
+  const postedAuto = postMove(autoDraft.db, autoDraft.id);
+  const autoRevId = read(postedAuto, 'account.move', autoDraft.id).reversal_move_id;
+  assert.ok(autoRevId);
+  assert.equal(read(postedAuto, 'account.move', autoRevId).state, 'draft');
+  const resetAuto = button('Reset to Draft').run(postedAuto, read(postedAuto, 'account.move', autoDraft.id));
+  assert.equal(read(resetAuto.db, 'account.move', autoDraft.id).state, 'draft');
+  assert.equal(read(resetAuto.db, 'account.move', autoDraft.id).reversal_move_id ?? null, null);
+  assert.equal(read(resetAuto.db, 'account.move', autoRevId).state, 'cancel');
+  assert.equal(read(resetAuto.db, 'account.move', autoRevId).auto_post, 'no');
+  const replayAuto = applyDiff(postedAuto, diffDb(postedAuto, resetAuto.db));
+  assert.equal(read(replayAuto, 'account.move', autoRevId).state, 'cancel');
+});
+
+test('ordinary Post / postMove reconciles due draft reversal cleanly and respects exclusions', () => {
+  const { db, src, ar } = setup();
+  const dueDraft = reverseEntry(db, read(db, 'account.move', src), { date: today(), scheduled: true });
+  assert.equal(read(dueDraft.db, 'account.move', dueDraft.id).state, 'draft');
+  const posted = postMove(dueDraft.db, dueDraft.id);
+  assert.equal(read(posted, 'account.move', dueDraft.id).state, 'posted');
+  const srcLine = arLine(posted, src, ar);
+  const revLine = arLine(posted, dueDraft.id, ar);
+  assert.equal(srcLine.reconciled, true);
+  assert.equal(revLine.reconciled, true);
+  assert.equal(srcLine.matching_number, revLine.matching_number);
+
+  // Ordinary Post button on a due draft reversal reconciles cleanly
+  const s1b = setup();
+  const dueBtnDraft = reverseEntry(s1b.db, read(s1b.db, 'account.move', s1b.src), { date: today(), scheduled: true });
+  const postedBtn = button('Post').run(dueBtnDraft.db, read(dueBtnDraft.db, 'account.move', dueBtnDraft.id)).db;
+  assert.equal(arLine(postedBtn, s1b.src, s1b.ar).reconciled, true);
+  assert.equal(arLine(postedBtn, dueBtnDraft.id, s1b.ar).reconciled, true);
+
+  // Reconciliation reversal exclusion preserved on draft postMove path
+  const s2 = setup();
+  const excluded = reverseEntry(s2.db, read(s2.db, 'account.move', s2.src), { date: today(), scheduled: true, reconciliation_reversal: true });
+  const postedExcluded = postMove(excluded.db, excluded.id);
+  assert.equal(read(postedExcluded, 'account.move', excluded.id).state, 'posted');
+  assert.equal(arLine(postedExcluded, excluded.id, s2.ar).reconciled, false);
+
+  // Scheduler posting runs shared postMove reconciliation once (no duplicate partial links)
+  const s3 = setup();
+  const schedOut = button('Reverse Entry').run(s3.db, read(s3.db, 'account.move', s3.src), { date: addDays(today(), 5), mode: 'reverse' });
+  const schedPosted = postAutoPostMoves(schedOut.db, addDays(today(), 5));
+  assert.equal(search(schedPosted, 'account.partial.reconcile').length, 1);
+  assert.equal(arLine(schedPosted, s3.src, s3.ar).reconciled, true);
+  assert.equal(arLine(schedPosted, schedOut.id, s3.ar).reconciled, true);
+});
+
+test('future scheduled at_date draft cannot be posted manually before its date, but scheduler posts it when due', () => {
+  const { db, src, ar } = setup();
+  const future = addDays(today(), 10);
+  const out = button('Reverse Entry').run(db, read(db, 'account.move', src), { date: future, mode: 'reverse' });
+  const expectedMsg = new RegExp(`This entry is scheduled to post automatically on ${future}`);
+  assert.throws(() => postMove(out.db, out.id), expectedMsg);
+  assert.throws(() => button('Post').run(out.db, read(out.db, 'account.move', out.id)), expectedMsg);
+
+  const posted = postAutoPostMoves(out.db, future);
+  assert.equal(read(posted, 'account.move', out.id).state, 'posted');
+  assert.equal(arLine(posted, src, ar).reconciled, true);
+  assert.equal(arLine(posted, out.id, ar).reconciled, true);
+});
+
+test('reversing an entry with identical reconcilable lines does not crash; unique lines still reconcile', () => {
+  const s = setup();
+  const dup = s.post(null, () => [
+    { account_id: s.ar, partner_id: s.partner.id, name: 'Dup', debit: 50 },
+    { account_id: s.ar, partner_id: s.partner.id, name: 'Dup', debit: 50 },
+    { account_id: s.ar, partner_id: s.partner.id, name: 'Unique', debit: 25 },
+    { account_id: s.rev, credit: 125 },
+  ]);
+  const out = reverseEntry(s.db, read(s.db, 'account.move', dup), '2026-05-01');
+  assert.equal(read(out.db, 'account.move', out.id).state, 'posted');
+  const lines = reconciledJournalItems(out.db, read(out.db, 'account.move', dup));
+  assert.equal(lines[0].reconciled, false);
+  assert.equal(lines[1].reconciled, false);
+  assert.equal(lines[2].reconciled, true);
 });
