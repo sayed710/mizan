@@ -1068,7 +1068,7 @@ export function appendDocumentSettlement(db, docId, {
 }
 
 /** Settle a document with an explicitly chosen company-currency write-off. */
-export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal, lineIndex = null } = {}) {
+export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal, lineIndex = null, analyticDistribution = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
   if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice) || !Number.isFinite(Number(amount)) || !(amount > 0) || amount > residual(invoice, db)) throw new Error('Write-off exceeds the remaining invoice');
   const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
@@ -1086,10 +1086,11 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   const fx = exchangeLines(db, invoice.company_id, diff);
   const partner_id = invoice.partner_id;
   const via = paymentJournal(db, journal, invoice.company_id ?? 1);
+  const analytic = analyticDistribution ? { analytic_distribution: analyticDistribution } : {};
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, company: invoice.company_id ?? 1, date, ref: label, archivedOriginIds: [invoice.id],
     lines: incoming
-      ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
-      : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });
+      ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label, ...analytic }, { account: counterpart, credit: open, partner_id }, ...fx]
+      : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label, ...analytic }, ...fx] });
   const settled = appendDocumentSettlement(booked.db, invoiceId, {
     amount,
     moveId: booked.id,

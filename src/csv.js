@@ -99,9 +99,12 @@ export function tableToRows(table) {
       const cells = [];
       const extractText = (cellNode) => {
         let txt = '';
+        const isIgnored = (node) => node?.nodeType === 1 && (
+          node.className === 'caret'
+          || (typeof node.className === 'string' && node.className.split(' ').includes('no-export'))
+          || (node.tagName?.toUpperCase() === 'BUTTON' && (node.textContent === '▾' || node.textContent === '▸')));
         const walk = (c) => {
-          if (!c) return;
-          if (c.nodeType === 1 && (c.className === 'caret' || (c.tagName?.toUpperCase() === 'BUTTON' && (c.textContent === '▾' || c.textContent === '▸')))) return;
+          if (!c || isIgnored(c)) return;
           if (c.nodeType === 3) txt += c.nodeValue;
           else if (c.childNodes && c.childNodes.length) c.childNodes.forEach(walk);
           else if (c.textContent) txt += c.textContent;
