@@ -3249,6 +3249,7 @@ const ar = {
   'The open statement amount is too small to match this payment': 'المبلغ المفتوح في كشف الحساب أقل من اللازم لمطابقة هذه الدفعة',
   'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
+  'Select an invoice or bill to match': 'اختر فاتورة أو فاتورة مورد للمطابقة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

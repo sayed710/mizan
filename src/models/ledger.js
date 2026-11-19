@@ -62,7 +62,7 @@ export const JOURNALS = [
 ];
 
 export const LIQUIDITY_JOURNAL_TYPES = ['bank', 'cash', 'credit'];
-export const STATEMENT_JOURNAL_TYPES = ['bank', 'credit'];
+export const STATEMENT_JOURNAL_TYPES = ['bank', 'cash', 'credit'];
 export const LIQUIDITY_ACCOUNT_TYPES = ['asset_cash', 'liability_credit_card'];
 /** True when a journal (or journal type) acts as a liquidity journal (bank, cash, or credit card). */
 export const isLiquidityJournal = (journalOrType) => LIQUIDITY_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);

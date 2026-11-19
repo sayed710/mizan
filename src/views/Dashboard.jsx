@@ -146,7 +146,7 @@ function JournalCard({ card, companyId }) {
         {empty ? (
           isStatement && card.onlineSync ? (
             <OnlineSyncControls sync={card.onlineSync} journalId={card.journal.id} primary />
-          ) : isStatement ? (
+          ) : isStatement && card.kind !== 'cash' ? (
             <>
               <p className="journal-empty muted">{t('Import your bank statements to reconcile them.')}</p>
               <label className="btn primary sm">
