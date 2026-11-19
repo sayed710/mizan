@@ -3222,6 +3222,11 @@ const ar = {
   'Exchange rate must be strictly positive': 'يجب أن يكون سعر الصرف أكبر من صفر',
   'Duplicate exchange rate row for the same date and company': 'يوجد صف سعر صرف مكرر لنفس التاريخ والشركة',
   'Exchange Rate': 'سعر الصرف',
+  'Quick Actions': 'إجراءات سريعة',
+  'Bank transaction does not exist': 'المعاملة البنكية غير موجودة',
+  'Partner belongs to another company': 'الشريك يتبع شركة أخرى',
+  'Partner does not exist': 'الشريك غير موجود',
+  'A reconciled bank transaction cannot be changed': 'لا يمكن تعديل معاملة بنكية تمت تسويتها',
   Recurring: 'متكرر',
   'Unfold All': 'توسيع الكل',
   'Collapse All': 'طي الكل',
@@ -3237,6 +3242,7 @@ const ar = {
   'Contradictory date formats in QIF file': 'صيغ تواريخ متضاربة في ملف QIF',
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
+  'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

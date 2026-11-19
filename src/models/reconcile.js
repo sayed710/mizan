@@ -43,6 +43,14 @@ export const isMatchingRule = (rule) => rule?.rule_type === 'matching_rule' || r
 /** Whether the rule runs automatically during batch auto-reconciliation. */
 export const isAutoRule = (rule) => (rule?.trigger != null ? rule.trigger === 'auto_reconcile' : Boolean(rule?.auto_reconcile));
 
+/** Whether a rule acts as a quick-action writeoff button for manual execution in the widget. */
+export const isWriteoffButtonModel = (rule) => Boolean(
+  rule
+  && !isMatchingRule(rule)
+  && !isAutoRule(rule)
+  && (rule.line_ids ?? []).some((l) => Boolean(l.account_id || l.account_code)),
+);
+
 /** Keep numeric float `amount` synchronized with `amount_string` for non-regex line types. */
 function syncLineAmount(line, index = 0) {
   if (!line || typeof line !== 'object') return line;
@@ -386,6 +394,7 @@ export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) throw new Error('Reconciliation model belongs to another company');
+  if (!ruleMatches(rule, line)) throw new Error('Reconciliation model does not apply to this transaction');
   const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_id);
   if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
     if (new Set(mappings.map((l) => l.partner_id)).size !== 1 || !read(db, 'res.partner', mappings[0].partner_id)) throw new Error('Select one valid partner for the mapping');
