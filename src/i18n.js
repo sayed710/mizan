@@ -188,6 +188,7 @@ const ar = {
   'SMTP timeout': 'انتهت مهلة خادم البريد',
   'Invalid signature': 'توقيع غير صالح',
   // Validation and error messages raised by the models.
+  'Select an analytic account…': 'اختر حساباً تحليلياً…',
   'Select a valid analytic account': 'اختر حساباً تحليلياً صالحاً',
   'A credit note line linked to a deferred invoice must book against the source schedule\'s deferred account': 'بند الإشعار الدائن المرتبط بفاتورة مؤجلة يجب أن يُقيَّد على الحساب المؤجل لجدول المصدر',
   'Analytic distribution must be an object': 'يجب أن يكون التوزيع التحليلي كائناً',
@@ -3257,6 +3258,8 @@ const ar = {
   'Tax return company must match the tax unit main company': 'يجب أن تطابق شركة الإقرار الضريبي الشركة الرئيسية للوحدة الضريبية',
   'Configure a company contact for every company in the tax unit': 'حدّد جهة اتصال لكل شركة في الوحدة الضريبية',
   'Main company is missing from the tax unit': 'الشركة الرئيسية مفقودة من الوحدة الضريبية',
+  'Configure the Balance Sheet report for this company': 'أعدّ تقرير الميزانية العمومية لهذه الشركة',
+  'Configure the Profit and Loss report for this company': 'أعدّ تقرير الأرباح والخسائر لهذه الشركة',
   'The open statement amount is too small to match this payment': 'المبلغ المفتوح في كشف الحساب أقل من اللازم لمطابقة هذه الدفعة',
   'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',

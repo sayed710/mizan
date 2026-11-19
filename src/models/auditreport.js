@@ -1,9 +1,10 @@
 // Annual Report model and body generation (Odoo parity).
 import { read, write } from '../orm.js';
-import { round } from '../money.js';
 import { today } from './common.js';
-import { balanceSheet, profitAndLoss } from './ledger.js';
+import { configurableReport, findStatementReport } from './configurableReports.js';
 import { currentCompany } from './company.js';
+import { t } from '../i18n.js';
+import { round } from '../money.js';
 
 function formatMoney(n) {
   return Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -12,71 +13,117 @@ function formatMoney(n) {
 /** Render HTML tables for Balance Sheet and Profit and Loss scoped to the given period and company. */
 const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+const COLUMN_LABELS = { balance: 'Balance', debit: 'Debit', credit: 'Credit' };
+
+const accountKey = (acc) => acc.account?.id ?? acc.account?.code ?? acc.account?.name;
+
+/** Net coefficient of each line code in an aggregation formula such as `A - B + C`; selectors and earnings have none. */
+function formulaTermCoefficients(formula) {
+  const coefficients = new Map();
+  const text = String(formula ?? '').trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\s*[+-]\s*[A-Za-z_][A-Za-z0-9_]*)*$/.test(text)) return coefficients;
+  for (const term of text.match(/[+-]?\s*[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const code = term.replace(/^[+\-\s]+/, '');
+    coefficients.set(code, (coefficients.get(code) ?? 0) + (term.trim().startsWith('-') ? -1 : 1));
+  }
+  return coefficients;
+}
+
+/**
+ * Per account, the amounts the line's direct child lines already show, as they contribute to this line: the balance
+ * column scales by the child's term coefficient and this line's sign, debit/credit columns by the coefficient only.
+ */
+function childAccountTotals(rows, index, columns) {
+  const parent = rows[index];
+  const parentDepth = Number(parent?.depth) || 0;
+  const coefficients = formulaTermCoefficients(parent?.formula);
+  const parentSign = Number(parent?.sign) || 1;
+  const totals = new Map();
+  for (let j = index + 1; j < rows.length && (Number(rows[j].depth) || 0) > parentDepth; j += 1) {
+    if ((Number(rows[j].depth) || 0) !== parentDepth + 1) continue;
+    const coefficient = coefficients.get(rows[j].code) ?? 0;
+    if (!coefficient) continue;
+    for (const acc of rows[j].accountRows ?? []) {
+      const key = accountKey(acc);
+      if (key == null) continue;
+      const sum = totals.get(key) ?? [];
+      totals.set(key, (acc.values ?? []).map((v, i) => {
+        const factor = columns[i % columns.length] === 'balance' ? coefficient * parentSign : coefficient;
+        return (sum[i] ?? 0) + factor * (Number(v) || 0);
+      }));
+    }
+  }
+  return totals;
+}
+
+/** The part of each account's amount on this line that its child lines do not already show (a direct selector in the parent formula). */
+function residualAccountRows(rows, index, columns) {
+  const childTotals = childAccountTotals(rows, index, columns);
+  return (rows[index].accountRows ?? [])
+    .map((acc) => {
+      const shown = childTotals.get(accountKey(acc)) ?? [];
+      return { ...acc, values: (acc.values ?? []).map((v, i) => round((Number(v) || 0) - (shown[i] ?? 0))) };
+    })
+    .filter((acc) => acc.values.some((v) => v !== 0));
+}
+
+function renderReportTable(title, reportData, tableClass, valueHeader) {
+  const columns = reportData.columns?.length ? reportData.columns : ['balance'];
+  const headers = columns.map((col) => (columns.length === 1 && col === 'balance' ? valueHeader : COLUMN_LABELS[col] ?? col));
+  const colCount = 1 + columns.length;
+  const valueCells = (values) => columns
+    .map((_, idx) => `<td class="text-right">${formatMoney(values?.[idx] ?? 0)}</td>`)
+    .join('');
+
+  const rows = reportData.rows || [];
+  const bodyRows = rows.map((r, index) => {
+    const depth = Math.max(0, Number(r.depth) || 0);
+    const isLastStrong = Boolean(r.strong && index === rows.length - 1);
+    const totalClass = isLastStrong ? 'grand-total-row' : (r.strong ? 'total-row' : '');
+    const visibleAccounts = residualAccountRows(rows, index, columns);
+    if (visibleAccounts.length > 0) {
+      const accRows = visibleAccounts.map((acc) =>
+        `      <tr><td class="depth-${depth + 1}">${escapeHtml(acc.account?.code ?? '')} ${escapeHtml(acc.account?.name ?? '')}</td>${valueCells(acc.values)}</tr>`
+      ).join('\n');
+      const totClass = totalClass || 'total-row';
+      return `      <tr class="section-header"><td colspan="${colCount}" class="depth-${depth}"><strong>${escapeHtml(t(r.name ?? ''))}</strong></td></tr>\n${accRows}\n      <tr class="${totClass}"><td class="depth-${depth}">${escapeHtml(t(r.name ?? ''))}</td>${valueCells(r.values)}</tr>`;
+    }
+    return `      <tr${totalClass ? ` class="${totalClass}"` : ''}><td class="depth-${depth}">${escapeHtml(t(r.name ?? ''))}</td>${valueCells(r.values)}</tr>`;
+  }).join('\n');
+
+  const headerCells = headers.map((h) => `<th class="text-right">${escapeHtml(t(h))}</th>`).join('\n        ');
+
+  return `  <h2>${escapeHtml(t(title))}</h2>
+  <table class="report-table ${tableClass}">
+    <thead>
+      <tr>
+        <th class="text-left">${escapeHtml(t('Account'))}</th>
+        ${headerCells}
+      </tr>
+    </thead>
+    <tbody>
+${bodyRows}
+    </tbody>
+  </table>`;
+}
+
 export function renderAnnualReportHtml(db, { start_date, end_date, company_id }) {
-  const company = company_id ?? 1;
+  const company = company_id ?? (db ? currentCompany(db) : 1);
   const from = start_date || `${today().slice(0, 4)}-01-01`;
   const to = end_date || `${today().slice(0, 4)}-12-31`;
 
-  const pnl = profitAndLoss(db, { from, to, company_id: company });
-  const bs = balanceSheet(db, { to, company_id: company });
+  const bsReport = findStatementReport(db, 'balance', company);
+  if (!bsReport) throw new Error('Configure the Balance Sheet report for this company');
+  const pnlReport = findStatementReport(db, 'pnl', company);
+  if (!pnlReport) throw new Error('Configure the Profit and Loss report for this company');
 
-  const renderRows = (items) => (items && items.length > 0
-    ? items.map((r) => `<tr><td>${escapeHtml(r.account?.code ?? '')} ${escapeHtml(r.account?.name ?? '')}</td><td class="text-right">${formatMoney(r.balance)}</td></tr>`).join('\n')
-    : '<tr><td colspan="2" class="empty-row">No items</td></tr>');
+  const bsData = configurableReport(db, bsReport, { to }, null, { companyId: company });
+  const pnlData = configurableReport(db, pnlReport, { from, to }, null, { companyId: company });
 
-  return `<div class="annual-report-body">
-  <h2>Balance Sheet</h2>
-  <table class="report-table balance-sheet-table">
-    <thead>
-      <tr>
-        <th class="text-left">Account</th>
-        <th class="text-right">Balance</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr class="section-header"><td colspan="2"><strong>Assets</strong></td></tr>
-      ${renderRows(bs.assets)}
-      <tr class="total-row"><td>Total Assets</td><td class="text-right">${formatMoney(bs.totalAssets)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Liabilities</strong></td></tr>
-      ${renderRows(bs.liabilities)}
-      <tr class="total-row"><td>Total Liabilities</td><td class="text-right">${formatMoney(bs.totalLiabilities)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Equity</strong></td></tr>
-      ${renderRows(bs.equity)}
-      <tr><td>Current Year Earnings</td><td class="text-right">${formatMoney(bs.earnings)}</td></tr>
-      <tr class="total-row"><td>Total Equity</td><td class="text-right">${formatMoney(bs.totalEquity)}</td></tr>
-      <tr class="grand-total-row"><td>Total Liabilities &amp; Equity</td><td class="text-right">${formatMoney(round(bs.totalLiabilities + bs.totalEquity))}</td></tr>
-    </tbody>
-  </table>
+  const bsHtml = renderReportTable(bsReport.name || 'Balance Sheet', bsData, 'balance-sheet-table', 'Balance');
+  const pnlHtml = renderReportTable(pnlReport.name || 'Profit and Loss', pnlData, 'pnl-table', 'Total');
 
-  <h2>Profit and Loss</h2>
-  <table class="report-table pnl-table">
-    <thead>
-      <tr>
-        <th class="text-left">Account</th>
-        <th class="text-right">Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr class="section-header"><td colspan="2"><strong>Income</strong></td></tr>
-      ${renderRows(pnl.detail.revenue)}
-      <tr class="total-row"><td>Total Income</td><td class="text-right">${formatMoney(pnl.revenue)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Cost of Goods Sold</strong></td></tr>
-      ${renderRows(pnl.detail.cost)}
-      <tr class="total-row"><td>Gross Profit</td><td class="text-right">${formatMoney(pnl.gross)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Expenses</strong></td></tr>
-      ${renderRows(pnl.detail.expense)}
-      <tr class="total-row"><td>Total Expenses</td><td class="text-right">${formatMoney(pnl.expense)}</td></tr>
-      <tr class="total-row"><td>Net Operating Income</td><td class="text-right">${formatMoney(pnl.operating)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Other Income</strong></td></tr>
-      ${renderRows(pnl.detail.otherIncome)}
-      <tr class="total-row"><td>Total Other Income</td><td class="text-right">${formatMoney(pnl.otherIncome)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Other Expenses</strong></td></tr>
-      ${renderRows(pnl.detail.otherExpense)}
-      <tr class="total-row"><td>Total Other Expenses</td><td class="text-right">${formatMoney(pnl.otherExpense)}</td></tr>
-      <tr class="grand-total-row"><td>Net Income</td><td class="text-right">${formatMoney(pnl.net)}</td></tr>
-    </tbody>
-  </table>
-</div>`;
+  return `<div class="annual-report-body">\n${bsHtml}\n\n${pnlHtml}\n</div>`;
 }
 
 export const auditReportModels = {
@@ -100,7 +147,7 @@ export const auditReportModels = {
       body: { type: 'html', label: 'Body' },
     },
     defaults: (id, db) => ({
-      title: `Annual Report ${today().slice(0, 4)}`,
+      title: `${t('Annual Report')} ${today().slice(0, 4)}`,
       start_date: `${today().slice(0, 4)}-01-01`,
       end_date: `${today().slice(0, 4)}-12-31`,
       status: 'draft',

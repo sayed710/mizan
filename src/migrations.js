@@ -1637,6 +1637,27 @@ MIGRATIONS.push({ version: 57, name: 'balance-sheet-earnings-foldable', up: (db)
   return changed ? { ...db, records: { ...db.records, 'account.report': next } } : db;
 } });
 
+// Invoice lines now edit analytics only through the distribution widget; an unsecured line's single analytic account
+// becomes the same 100% distribution the ledger already derived from it, so it stays visible and editable.
+// Moves already secured with an inalterability hash are skipped so their hash and chain integrity stay valid.
+MIGRATIONS.push({ version: 58, name: 'invoice-line-analytic-account-to-distribution', up: (db) => {
+  const moves = db?.records?.['account.move'];
+  if (!Array.isArray(moves)) return db;
+  let changed = false;
+  const next = moves.map((move) => {
+    if (move?.inalterable_hash) return move;
+    if (!move?.invoice_line_ids?.some((line) => line?.analytic_account_id && line.analytic_distribution == null)) return move;
+    changed = true;
+    return {
+      ...move,
+      invoice_line_ids: move.invoice_line_ids.map((line) => (line?.analytic_account_id && line.analytic_distribution == null
+        ? { ...line, analytic_distribution: { [line.analytic_account_id]: 100 } }
+        : line)),
+    };
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.move': next } } : db;
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
