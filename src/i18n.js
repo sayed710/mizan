@@ -3008,6 +3008,19 @@ const ar = {
   'Debit Line Index': 'فهرس سطر المدين',
   'Credit Entry': 'قيد الدائن',
   'Credit Line Index': 'فهرس سطر الدائن',
+  'Debit Amount Currency': 'مبلغ المدين بعملة السطر',
+  'Credit Amount Currency': 'مبلغ الدائن بعملة السطر',
+  'Exchange Difference Entry': 'قيد فرق العملة',
+  'Selected items must be in the same currency': 'يجب أن تكون البنود المحددة بنفس العملة',
+  'Selected foreign-currency items must have a non-zero currency balance': 'يجب أن يكون لبنود العملات الأجنبية المحددة رصيد غير صفري بالعملة',
+  'Reconciliation matching stalled without progress': 'توقفت عملية مطابقة التسوية دون تقدم',
+  'The applied amount cannot be represented exactly after currency rounding': 'لا يمكن تمثيل المبلغ المطبق بدقة بعد تقريب العملة',
+  'Exchange difference and currency amounts are not valid for company-currency reconciliation': 'قيد فرق العملة ومبالغ العملة غير صالحة لمطابقة عملة الشركة',
+  'Exchange reconciliation requires a matching main partial': 'تتطلب مطابقة فرق العملة تسوية جزئية رئيسية مطابقة',
+  'Exchange reconciliation gap amount does not match the re-derived difference': 'مبلغ فجوة تسوية فرق العملة لا يطابق الفارق المعاد احتسابه',
+  'Gap partial must match the overvalued line of the settlement': 'يجب أن يطابق السطر الجزئي للفجوة السطر ذو القيمة الأعلى في التسوية',
+  'Gap partial must have null exchange currency amount and zero counterpart currency amount': 'يجب أن يحتوي السطر الجزئي للفجوة على مبلغ عملة فارغ لقيد الصرف وصفري للبند المقابل',
+  'Exchange entries cannot be reconciled directly': 'لا يمكن مطابقة قيود فروق العملة مباشرة',
   'Unreconcile Date': 'تاريخ إلغاء التسوية',
   'This removes the matching: payments stay posted with their credit available again, and GL entries (including write-offs created by Reconcile with write-off) stay posted with their open balance restored. Standalone Write Off entries and direct bank matches are reversed on the selected date.': 'يزيل هذا الإجراء المطابقة: تبقى الدفعات مرحّلة مع إتاحة رصيدها الدائن مجدداً، وتبقى قيود الأستاذ العام (بما فيها قيود شطب الفارق المنشأة عبر "مطابقة مع شطب الفارق") مرحّلة مع استعادة أرصدتها المفتوحة، بينما تُعكس قيود الشطب المستقلة والتسويات البنكية المباشرة في التاريخ المحدد.',
   'General-ledger reconciliation requires items in the company currency; reconcile foreign-currency documents from their payment or credit-note workflow': 'تتطلب مطابقة الأستاذ العام بنوداً بعملة الشركة؛ قم بتسوية المستندات بالعملات الأجنبية من مسار الدفعات أو إشعارات الدائن',
@@ -3209,6 +3222,8 @@ const ar = {
   'Percentage of Price Tax Included': 'نسبة من السعر شاملة الضريبة',
   'Fiscal position destination account must belong to the fiscal position company': 'يجب أن يتبع الحساب البديل في الوضع المالي شركة الوضع المالي',
   'Division tax rate cannot be 100%': 'لا يمكن أن تكون نسبة الضريبة الشاملة في السعر 100%',
+  'Cash Basis Journal': 'دفتر الأساس النقدي',
+  'General journal used for cash-basis tax release entries.': 'دفتر القيود العامة المستخدم لقيود تحرير ضريبة الأساس النقدي.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
