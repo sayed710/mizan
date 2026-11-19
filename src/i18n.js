@@ -3206,6 +3206,9 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Exchange rate must be strictly positive': 'يجب أن يكون سعر الصرف أكبر من صفر',
+  'Duplicate exchange rate row for the same date and company': 'يوجد صف سعر صرف مكرر لنفس التاريخ والشركة',
+  'Exchange Rate': 'سعر الصرف',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
