@@ -306,7 +306,8 @@ test('a line closed inside a still-open partial group shows the group P number, 
   assert.equal(arItem(db2, payC, s.ar).matching_number, a.matching_number);
   // Closing C with D (30) completes the group: every line now carries the full (non-P) number.
   const payD = s.post(db2, () => [{ account_id: s.ar, partner_id: s.partner.id, debit: 30 }, { account_id: s.rev, credit: 30 }]);
-  const db3 = reconcileLedgerItems(s.db, [sel(s.db, payC, s.ar), sel(s.db, payD, s.ar)], { date: '2026-04-04' });
+  const withD = s.db; // post() returns the new id and keeps the posted database (built from db2) in s.db
+  const db3 = reconcileLedgerItems(withD, [sel(withD, payC, s.ar), sel(withD, payD, s.ar)], { date: '2026-04-04' });
   const full = arItem(db3, s.src, s.ar).matching_number;
   assert.ok(full && !full.startsWith('P'), `expected a full number, got ${full}`);
   for (const id of [payB, payC, payD]) assert.equal(arItem(db3, id, s.ar).matching_number, full);
