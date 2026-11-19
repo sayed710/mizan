@@ -134,7 +134,7 @@ export function upsertCurrencyRates(db, rates, { date = today(), companyId = nul
   }
   if (rates && typeof rates === 'object') {
     const currencies = nextDb.records['res.currency'] ?? [];
-    const baseId = nextDb.settings?.base_currency_id;
+    const baseId = baseCurrency(nextDb)?.id;
     for (const c of currencies) {
       if (c.active === false || (baseId && c.id === baseId)) continue;
       const rate = rates[c.name] ?? rates[c.id];
@@ -196,8 +196,6 @@ export function convertRatesToBaseCurrency(ecbRates, baseCurrencyCode) {
   }
   return out;
 }
-
-export const convertRatesToCompanyCurrency = convertRatesToBaseCurrency;
 
 /** Advance a date string by the company currency interval unit. */
 export function advanceExecutionDate(date, intervalUnit) {
