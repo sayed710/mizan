@@ -1556,9 +1556,22 @@ export function fiscalYearStart(db, date, companyId) {
   const previous = search(db, 'account.fiscal.year')
     .filter((y) => (y.company_id ?? 1) === companyId && y.date_to < date)
     .sort((a, b) => a.date_from.localeCompare(b.date_from)).at(-1);
-  let start = previous?.date_from ?? `${date.slice(0, 4)}-01-01`;
-  while (shiftMonth(start, 12) <= date) start = shiftMonth(start, 12);
-  return start;
+  if (previous) {
+    let start = previous.date_from;
+    while (shiftMonth(start, 12) <= date) start = shiftMonth(start, 12);
+    return start;
+  }
+  const company = read(db, 'res.company', companyId ?? db?.settings?.current_company_id ?? 1);
+  const lastDay = Number(company?.fiscalyear_last_day) || 31;
+  const lastMonth = Number(company?.fiscalyear_last_month) || 12;
+  const year = Number(date.slice(0, 4));
+  const monthStr = String(lastMonth).padStart(2, '0');
+  const dayStr = String(lastDay).padStart(2, '0');
+  const candidateEnd = `${year}-${monthStr}-${dayStr}`;
+  const yearEndOnOrBefore = date <= candidateEnd
+    ? `${year - 1}-${monthStr}-${dayStr}`
+    : candidateEnd;
+  return addDays(yearEndOnOrBefore, 1);
 }
 
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */

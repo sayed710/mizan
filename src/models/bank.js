@@ -62,26 +62,17 @@ export function bookBankMovement(db, line, company, { date, openAmount }) {
 }
 
 /** Apply the available statement balance to an invoice; an excess is held in bank suspense. */
+const WRITEOFF_FIELDS = ['writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_analytic_distribution'];
+const writeoffFieldsOf = (line) => Object.fromEntries(WRITEOFF_FIELDS.map((key) => [key, line?.[key] ?? null]));
+
 export function reconcileWith(db, line, moveId) {
   if (Array.isArray(moveId)) {
     const ids = [...new Set(moveId.map(Number).filter(Boolean))];
     if (!ids.length) throw new Error('Select an invoice or bill to match');
-    const writeoffFields = typeof line === 'object' && line ? {
-      writeoff_account_id: line.writeoff_account_id ?? null,
-      writeoff_label: line.writeoff_label ?? null,
-      writeoff_amount: line.writeoff_amount ?? null,
-      writeoff_analytic_distribution: line.writeoff_analytic_distribution ?? null,
-    } : {
-      writeoff_account_id: null,
-      writeoff_label: null,
-      writeoff_amount: null,
-      writeoff_analytic_distribution: null,
-    };
-    if (ids.length === 1) {
-      const lineWithWriteoff = typeof line === 'object' && line ? { ...line, ...writeoffFields } : line;
-      return reconcileWith(db, lineWithWriteoff, ids[0]);
-    }
+    if (ids.length === 1) return reconcileWith(db, line, ids[0]);
     const currentLine = typeof line === 'object' && line ? line : read(db, 'account.bank.statement.line', line);
+    // Only the last matched invoice carries the write-off typed on the statement line.
+    const writeoffFields = writeoffFieldsOf(currentLine);
     const moves = ids.map((id) => read(db, 'account.move', id));
     for (const m of moves) {
       if (!m) throw new Error('Select an invoice or bill to match');
@@ -110,12 +101,7 @@ export function reconcileWith(db, line, moveId) {
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       const isLast = i === ids.length - 1;
-      const currentWriteoff = isLast ? writeoffFields : {
-        writeoff_account_id: null,
-        writeoff_label: null,
-        writeoff_amount: null,
-        writeoff_analytic_distribution: null,
-      };
+      const currentWriteoff = isLast ? writeoffFields : writeoffFieldsOf(null);
       const lineToReconcile = { ...runningLine, ...currentWriteoff };
       currentDb = reconcileWith(currentDb, lineToReconcile, id);
       runningLine = read(currentDb, 'account.bank.statement.line', runningLine.id);
@@ -187,12 +173,7 @@ export function reconcileWith(db, line, moveId) {
     open_amount: remaining,
     allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }],
     partner_id: line.partner_id ?? move.partner_id,
-    ...(hasWriteoff ? {
-      writeoff_account_id: line.writeoff_account_id ?? null,
-      writeoff_label: line.writeoff_label ?? null,
-      writeoff_amount: line.writeoff_amount ?? null,
-      writeoff_analytic_distribution: line.writeoff_analytic_distribution ?? null,
-    } : {}),
+    ...(hasWriteoff ? writeoffFieldsOf(line) : {}),
   });
 }
 

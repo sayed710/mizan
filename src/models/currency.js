@@ -1,6 +1,6 @@
 // Foreign currencies with dated rates; amounts convert to the company currency for the ledger.
-import { read } from '../orm.js';
-import { today } from './common.js';
+import { read, write } from '../orm.js';
+import { addDays, shiftMonth, today } from './common.js';
 import { companyCurrencyRecord, currencyDecimalPlaces, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
 
 
@@ -85,6 +85,132 @@ export const toCompany = (db, currencyId, amount, date, companyId = null) => rou
   (Number(amount) || 0) / rateAt(db, currencyId, date, companyId),
   companyCurrencyRecord(db, companyId),
 );
+
+/**
+ * Upsert an exchange rate row on `currencyId` for (currency, date, company).
+ * Applies only for active currencies, never creating duplicates.
+ */
+export function upsertCurrencyRate(db, currencyId, { date = today(), rate, companyId = null } = {}) {
+  const numericRate = Number(rate);
+  if (!Number.isFinite(numericRate) || numericRate <= 0) return db;
+  const currency = read(db, 'res.currency', currencyId);
+  if (!currency || currency.active === false) return db;
+  const rows = currency.rate_ids ?? [];
+  const targetCompany = companyId == null || companyId === '' ? null : Number(companyId);
+  let replaced = false;
+  const nextRows = [];
+  for (const r of rows) {
+    const isMatch = r.date === date && (r.company_id == null ? null : Number(r.company_id)) === targetCompany;
+    if (isMatch) {
+      if (!replaced) {
+        nextRows.push({ ...r, rate: numericRate, date, company_id: targetCompany });
+        replaced = true;
+      }
+    } else {
+      nextRows.push(r);
+    }
+  }
+  if (!replaced) {
+    nextRows.push({ date, rate: numericRate, company_id: targetCompany });
+  }
+  return write(db, 'res.currency', currency.id, { rate_ids: nextRows });
+}
+
+/**
+ * Upsert exchange rates for active currencies in `db` for a date and company.
+ */
+export function upsertCurrencyRates(db, rates, { date = today(), companyId = null } = {}) {
+  let nextDb = db;
+  if (Array.isArray(rates)) {
+    for (const item of rates) {
+      const cId = item.currency_id ?? item.currencyId ?? item.currency;
+      nextDb = upsertCurrencyRate(nextDb, cId, {
+        date: item.date ?? date,
+        rate: item.rate,
+        companyId: item.company_id ?? item.companyId ?? companyId,
+      });
+    }
+    return nextDb;
+  }
+  if (rates && typeof rates === 'object') {
+    const currencies = nextDb.records['res.currency'] ?? [];
+    const baseId = baseCurrency(nextDb)?.id;
+    for (const c of currencies) {
+      if (c.active === false || (baseId && c.id === baseId)) continue;
+      const rate = rates[c.name] ?? rates[c.id];
+      if (rate != null) {
+        nextDb = upsertCurrencyRate(nextDb, c.id, { date, rate, companyId });
+      }
+    }
+  }
+  return nextDb;
+}
+
+/** Parse ECB daily XML into { date, rates } with rates relative to EUR (EUR = 1.0). */
+export function parseEcbXml(xml) {
+  if (typeof xml !== 'string' || !xml) throw new Error('Invalid ECB XML feed: empty response');
+  let date = null;
+  const timeMatch = xml.match(/<Cube[^>]*\stime=['"](\d{4}-\d{2}-\d{2})['"]/i);
+  if (timeMatch) date = timeMatch[1];
+
+  const rates = { EUR: 1.0 };
+  const cubeRegex = /<Cube\s+([^>]+)\/>/gi;
+  let match;
+  while ((match = cubeRegex.exec(xml)) !== null) {
+    const attrs = match[1];
+    const currMatch = attrs.match(/currency=['"]([A-Za-z]{3})['"]/i);
+    const rateMatch = attrs.match(/rate=['"]([0-9.]+)['"]/i);
+    if (currMatch && rateMatch) {
+      const rateVal = Number(rateMatch[1]);
+      if (Number.isFinite(rateVal) && rateVal > 0) {
+        rates[currMatch[1].toUpperCase()] = rateVal;
+      }
+    }
+  }
+  const nonEurRates = Object.keys(rates).filter((k) => k !== 'EUR');
+  if (!date || nonEurRates.length === 0) {
+    throw new Error('Invalid ECB XML feed: missing date or currency rates');
+  }
+  return { date, rates };
+}
+
+/**
+ * Convert EUR-based rates to the database base currency:
+ * rate of currency X in terms of 1 unit of database base currency (rateAt convention).
+ * The base currency itself is omitted as the base currency is always 1 and never has a rate row.
+ */
+export function convertRatesToBaseCurrency(ecbRates, baseCurrencyCode) {
+  if (!ecbRates || typeof ecbRates !== 'object') throw new Error('Invalid ECB rates');
+  const code = (baseCurrencyCode || '').toUpperCase();
+  const baseRateInEur = ecbRates[code];
+  if (baseRateInEur == null || !Number.isFinite(baseRateInEur) || baseRateInEur <= 0) {
+    const msg = 'Base currency ' + code + ' is not in the ECB feed';
+    throw new Error(msg);
+  }
+  const out = {};
+  for (const [curr, eurRate] of Object.entries(ecbRates)) {
+    if (curr === code) continue;
+    if (Number.isFinite(eurRate) && eurRate > 0) {
+      out[curr] = eurRate / baseRateInEur;
+    }
+  }
+  return out;
+}
+
+/** Advance a date string by the company currency interval unit. */
+export function advanceExecutionDate(date, intervalUnit) {
+  if (!date) return today();
+  switch (intervalUnit) {
+    case 'daily':
+      return addDays(date, 1);
+    case 'weekly':
+      return addDays(date, 7);
+    case 'monthly':
+      return shiftMonth(date, 1);
+    default:
+      return date;
+  }
+}
 
 /** Rate rows a write adds or changes must be strictly positive and unique per date and company; rows a write leaves untouched are not rechecked, so a currency with a legacy bad row stays editable. */
 function rateRowsError(beforeRows = [], afterRows = []) {
