@@ -179,3 +179,30 @@ test('FIN-1: ExecutiveSummary view component respects companyId prop and period.
     await React.act(async () => root.unmount());
   }
 });
+
+test('the Executive Summary report page offers a company selector that scopes the figures', async () => {
+  const { db, company2Id } = multiCompanyBooks();
+  const { setupDom, find } = await import('./test-support/dom.js');
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/executive-summary' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+  await React.act(async () => commit({ ...db, settings: { ...db.settings, allowed_company_ids: [1, company2Id] } }));
+  const { Reports } = await import('./views/Reports.jsx');
+  const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { label: 'Executive Summary', report: 'executive' } })));
+    const select = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Company');
+    assert.ok(select, 'Executive Summary shows a company selector in a multi-company database');
+    await React.act(async () => props(select).onChange({ target: { value: String(company2Id) } }));
+    assert.match(textOf(host), /25,000\.00/);
+    assert.doesNotMatch(textOf(host), /35,000\.00/);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
