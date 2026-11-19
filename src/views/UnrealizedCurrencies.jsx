@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import { read } from '../orm.js';
 import { today } from '../models/common.js';
+import { rateAt } from '../models/currency.js';
 import { foreignBalanceReport, revalueForeignBalances } from '../models/closing.js';
 import { commit, getDb, useDb } from '../store.js';
-import { money } from '../ui.jsx';
+import { display, money } from '../ui.jsx';
 import { t } from '../i18n.js';
+
+const RATE_FIELD = { type: 'float', digits: [6, 6] };
 
 export function UnrealizedCurrencies() {
   const db = useDb();
@@ -26,18 +29,23 @@ export function UnrealizedCurrencies() {
     </div>
     {error && <p role="alert">{error}</p>}
     <div className="list-wrap"><table className="list report">
-      <thead><tr>{['Company', 'Entry', 'Partner', 'Account', 'Currency', 'Foreign Balance', 'Booked', 'Current Value', 'Difference'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
-      <tbody>{rows.map((row, i) => <tr key={`${row.company_id}-${row.account_id}-${row.currency_id}-${row.invoice_id ?? i}`}>
-        <td>{read(db, 'res.company', row.company_id)?.name ?? row.company_id}</td>
-        <td>{row.invoice_id ? read(db, 'account.move', row.invoice_id)?.name : '—'}</td>
-        <td>{read(db, 'res.partner', row.partner_id)?.name ?? '—'}</td>
-        <td>{read(db, 'account.account', row.account_id)?.name ?? row.account}</td>
-        <td>{read(db, 'res.currency', row.currency_id)?.name}</td>
-        <td className="num">{money(row.residual ?? row.foreign)}</td>
-        <td className="num">{money(row.booked)}</td>
-        <td className="num">{money(row.value ?? row.booked + row.difference)}</td>
-        <td className="num">{money(row.difference)}</td>
-      </tr>)}</tbody>
+      <thead><tr>{['Company', 'Entry', 'Partner', 'Account', 'Currency', 'Foreign Balance', 'Exchange Rate', 'Booked', 'Current Value', 'Difference'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
+      <tbody>{rows.map((row, i) => {
+        const currency = read(db, 'res.currency', row.currency_id);
+        const rate = rateAt(db, row.currency_id, date, row.company_id);
+        return <tr key={`${row.company_id}-${row.account_id}-${row.currency_id}-${row.invoice_id ?? i}`}>
+          <td>{read(db, 'res.company', row.company_id)?.name ?? row.company_id}</td>
+          <td>{row.invoice_id ? read(db, 'account.move', row.invoice_id)?.name : '—'}</td>
+          <td>{read(db, 'res.partner', row.partner_id)?.name ?? '—'}</td>
+          <td>{read(db, 'account.account', row.account_id)?.name ?? row.account}</td>
+          <td>{currency?.name}</td>
+          <td className="num">{money(row.residual ?? row.foreign, currency?.name ?? null, currency ?? null)}</td>
+          <td className="num">{display(db, RATE_FIELD, rate)}</td>
+          <td className="num">{money(row.booked)}</td>
+          <td className="num">{money(row.value ?? row.booked + row.difference)}</td>
+          <td className="num">{money(row.difference)}</td>
+        </tr>;
+      })}</tbody>
     </table></div>
   </main>;
 }

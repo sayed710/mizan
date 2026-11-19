@@ -7,6 +7,7 @@ import { creditNote, postAutoPostMoves, postMove } from './models/accounting.js'
 import { postPayment } from './models/pay.js';
 import { deferralEntryRef, deferredModels, postDueEntries, registerDeferredPostMoveHook } from './models/deferred.js';
 import { fieldReadonly } from './field-metadata.js';
+import { models } from './registry.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -601,6 +602,62 @@ test('fieldReadonly locks deferral fields once not draft', () => {
     assert.equal(fieldReadonly(fields[f], { state: 'done' }, {}), true, `${f} readonly in done`);
     assert.equal(fieldReadonly(fields[f], { state: 'cancel' }, {}), true, `${f} readonly in cancel`);
   }
+});
+
+test('deferral source fields and system-maintained board subfields have correct readonly and guard protection', (t) => {
+  const fields = models['account.deferral'].fields;
+  const draft = { state: 'draft', start_date: '2026-12-01', end_date: '2027-11-30' };
+  const running = { state: 'running', start_date: '2026-12-01', end_date: '2027-11-30' };
+  const readonly = (field, record) => fieldReadonly(field, record, {});
+
+  assert.equal(fields.source_line, undefined, 'unused source_line field is removed');
+
+  // Guard-protected on an active schedule: editable while draft, readonly once running.
+  for (const name of ['source_move_id', 'source_line_id']) {
+    assert.equal(readonly(fields[name], draft), false, `${name} editable in draft`);
+    assert.equal(readonly(fields[name], running), true, `${name} readonly in running`);
+  }
+
+  // System-maintained board subfields are written only by system actions, never by the user (not even in draft).
+  for (const name of ['posted', 'cancelled', 'move_id', 'reversal_move_id']) {
+    assert.equal(readonly(fields.board.fields[name], draft), true, `board.${name} readonly in draft`);
+    assert.equal(readonly(fields.board.fields[name], running), true, `board.${name} readonly in running`);
+  }
+
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-16T12:00:00Z') });
+  let db = setupCompany(seed(), 'expense');
+  const billDraft = createDeferredBill(db, { startDate: '2026-12-01', endDate: '2027-11-30', amount: 1200 });
+  db = postMove(billDraft.db, billDraft.id);
+  const sched = search(db, 'account.deferral').find((d) => d.source_move_id === billDraft.id);
+  assert.equal(sched.state, 'running');
+  assert.ok(sched.source_move_id, 'running schedule stores source_move_id');
+  assert.ok(sched.source_line_id, 'running schedule stores source_line_id');
+
+  for (const patch of [{ source_move_id: null }, { source_move_id: 9999 }, { source_line_id: null }, { source_line_id: 'tampered_line_id' }]) {
+    assert.throws(
+      () => write(db, 'account.deferral', sched.id, patch),
+      /Core deferral fields cannot be changed on an active schedule/,
+    );
+    const tamperedDb = {
+      ...db,
+      records: {
+        ...db.records,
+        'account.deferral': db.records['account.deferral'].map((d) => (d.id === sched.id ? { ...d, ...patch } : d)),
+      },
+    };
+    assert.throws(
+      () => applyDiff(db, diffDb(db, tamperedDb), { author: 'Admin', isAdmin: true }),
+      /Core deferral fields cannot be changed on an active schedule/,
+    );
+  }
+
+  // On draft schedules, source links can be set and synced through diffDb+applyDiff.
+  const draftSched = create(db, 'account.deferral', { name: 'Draft deferral', kind: 'expense', amount: 100, state: 'draft' });
+  const draftPatch = { source_move_id: billDraft.id, source_line_id: 'line_draft_1' };
+  const patchedDraftDb = write(draftSched.db, 'account.deferral', draftSched.id, draftPatch);
+  assert.equal(read(patchedDraftDb, 'account.deferral', draftSched.id).source_line_id, 'line_draft_1');
+  const appliedDraftDb = applyDiff(draftSched.db, diffDb(draftSched.db, patchedDraftDb), { author: 'Admin', isAdmin: true });
+  assert.equal(read(appliedDraftDb, 'account.deferral', draftSched.id).source_line_id, 'line_draft_1');
 });
 
 test('postEntry rejects unknown state value', () => {

@@ -188,6 +188,7 @@ const ar = {
   'SMTP timeout': 'انتهت مهلة خادم البريد',
   'Invalid signature': 'توقيع غير صالح',
   // Validation and error messages raised by the models.
+  'Select an analytic account…': 'اختر حساباً تحليلياً…',
   'Select a valid analytic account': 'اختر حساباً تحليلياً صالحاً',
   'A credit note line linked to a deferred invoice must book against the source schedule\'s deferred account': 'بند الإشعار الدائن المرتبط بفاتورة مؤجلة يجب أن يُقيَّد على الحساب المؤجل لجدول المصدر',
   'Analytic distribution must be an object': 'يجب أن يكون التوزيع التحليلي كائناً',
@@ -3219,6 +3220,18 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Exchange Difference Journal': 'دفتر فروق أسعار الصرف',
+  'Journal used to record realized foreign exchange gains and losses.': 'الدفتر المستخدم لتسجيل أرباح وخسائر فروق العملة المحققة.',
+  'Default general journal': 'دفتر اليومية الافتراضي',
+  'Exchange Difference Journal must be a general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق العملة دفتراً عاماً مشتركاً أو تابعاً لهذه الشركة',
+  'Exchange rate must be strictly positive': 'يجب أن يكون سعر الصرف أكبر من صفر',
+  'Duplicate exchange rate row for the same date and company': 'يوجد صف سعر صرف مكرر لنفس التاريخ والشركة',
+  'Exchange Rate': 'سعر الصرف',
+  'Quick Actions': 'إجراءات سريعة',
+  'Bank transaction does not exist': 'المعاملة البنكية غير موجودة',
+  'Partner belongs to another company': 'الشريك يتبع شركة أخرى',
+  'Partner does not exist': 'الشريك غير موجود',
+  'A reconciled bank transaction cannot be changed': 'لا يمكن تعديل معاملة بنكية تمت تسويتها',
   Recurring: 'متكرر',
   'Unfold All': 'توسيع الكل',
   'Collapse All': 'طي الكل',
@@ -3237,6 +3250,11 @@ const ar = {
   'Include Unposted Entries': 'تضمين القيود غير المرحّلة',
   'Select partner, analytic account, journal, or company': 'اختر شريكاً أو حساباً تحليلياً أو يوميةً أو شركةً',
   'Rule IDs must match the selected grouping field': 'يجب أن تطابق معرّفات القاعدة حقل التجميع المحدد',
+  'Configure the Balance Sheet report for this company': 'أعدّ تقرير الميزانية العمومية لهذه الشركة',
+  'Configure the Profit and Loss report for this company': 'أعدّ تقرير الأرباح والخسائر لهذه الشركة',
+  'The open statement amount is too small to match this payment': 'المبلغ المفتوح في كشف الحساب أقل من اللازم لمطابقة هذه الدفعة',
+  'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
+  'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

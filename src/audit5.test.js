@@ -95,7 +95,7 @@ test('annual report explains other income and expenses with escaped account name
   const html = renderAnnualReportHtml(db, { start_date: '2035-01-01', end_date: '2035-12-31', company_id: 1 });
   assert.match(html, /Other &lt;income&gt;<\/td><td[^>]*>50\.00/);
   assert.match(html, /Interest Expense<\/td><td[^>]*>20\.00/);
-  for (const [label, value] of [['Net Operating Income', '100.00'], ['Total Other Income', '50.00'], ['Total Other Expenses', '20.00'], ['Net Income', '130.00']]) {
+  for (const [label, value] of [['Operating Income', '100.00'], ['Other Income', '50.00'], ['Other Expenses', '20.00'], ['Net Profit', '130.00']]) {
     assert.ok(html.includes(`${label}</td><td class="text-right">${value}`));
   }
 });
