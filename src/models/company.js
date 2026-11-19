@@ -11,6 +11,7 @@ import { returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
 import { taxUnitCompatibilityError } from './accounting.js';
+import { fiscalYearStart } from './ledger.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -434,12 +435,60 @@ function companyGuard(db, before, r, ctx) {
   }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
-  // Guard changing account_opening_date when the opening move is already posted.
-  if (before && (before.account_opening_date ?? null) !== (r.account_opening_date ?? null) && r.account_opening_move_id) {
+  // Guard account_opening_move_id: once set, cannot change or be cleared (except back to same id).
+  if (before?.account_opening_move_id && r.account_opening_move_id !== before.account_opening_move_id) {
+    return 'The opening entry cannot be changed or cleared';
+  }
+  if (r.account_opening_move_id) {
     const move = record(db, 'account.move', r.account_opening_move_id);
-    if (move && move.state === 'posted') return 'The opening move is posted; reset it to draft to change the opening date';
+    if (!move) return 'Select an existing opening entry';
+    if (move.move_type !== 'entry') return 'The opening entry must be a journal entry';
+    if ((move.company_id ?? 1) !== r.id) return 'The opening entry must belong to this company';
+
+    if (move.state === 'posted') {
+      if (before && (before.account_opening_date ?? null) !== (r.account_opening_date ?? null)) {
+        return 'The opening move is posted; reset it to draft to change the opening date';
+      }
+      if (before && before.opening_equity_account_id !== r.opening_equity_account_id) {
+        return 'The opening move is posted; reset it to draft to change the opening equity account';
+      }
+    } else {
+      const effectiveDate = r.account_opening_date || fiscalYearStart(db, today(), r.id);
+      if (move.date !== effectiveDate) {
+        return 'The opening move date must match the company opening date';
+      }
+      const balLine = (move.line_ids ?? []).find((l) => l.is_opening_balancing);
+      if (balLine && r.opening_equity_account_id && balLine.account_id !== r.opening_equity_account_id) {
+        return 'The opening balancing line must use the company opening equity account';
+      }
+    }
   }
   return null;
+}
+
+/** Prepare res.company writes: update draft opening move on date or equity account changes. */
+function prepareCompanyWrite(db, vals, before) {
+  let nextDb = db;
+  if (vals && 'account_opening_date' in vals && before.account_opening_move_id) {
+    const move = record(nextDb, 'account.move', before.account_opening_move_id);
+    if (move && move.state !== 'posted') {
+      const effectiveDate = vals.account_opening_date || fiscalYearStart(nextDb, today(), before.id);
+      nextDb = write(nextDb, 'account.move', move.id, { date: effectiveDate });
+    }
+  }
+  if (vals && 'opening_equity_account_id' in vals && vals.opening_equity_account_id !== before.opening_equity_account_id && before.account_opening_move_id) {
+    const move = record(nextDb, 'account.move', before.account_opening_move_id);
+    if (move && move.state !== 'posted') {
+      const balLine = (move.line_ids ?? []).find((l) => l.is_opening_balancing);
+      if (balLine && vals.opening_equity_account_id) {
+        const nextLines = move.line_ids.map((l) =>
+          l.is_opening_balancing ? { ...l, account_id: vals.opening_equity_account_id } : l,
+        );
+        nextDb = write(nextDb, 'account.move', move.id, { line_ids: nextLines });
+      }
+    }
+  }
+  return { db: nextDb, vals };
 }
 
 /** Build per-kind deferred field overrides when legacy shared deferred fields are provided without explicit per-kind values. */
@@ -466,13 +515,6 @@ function onCompanyWrite(db, after, _before, vals) {
   if (vals) {
     const patch = legacyDeferredFieldPatch(after, vals);
     if (Object.keys(patch).length) next = write(next, 'res.company', after.id, patch);
-  }
-  // When account_opening_date changes, move the draft opening move's date.
-  if (vals && 'account_opening_date' in vals && after.account_opening_move_id) {
-    const move = read(next, 'account.move', after.account_opening_move_id);
-    if (move && move.state !== 'posted' && after.account_opening_date) {
-      next = write(next, 'account.move', after.account_opening_move_id, { date: after.account_opening_date });
-    }
   }
   return next;
 }
@@ -732,6 +774,7 @@ export const companyModels = {
       deferred_revenue_periodicity: 'month',
       deferred_expense_periodicity: 'month',
     }),
+    prepareWrite: prepareCompanyWrite,
     guard: companyGuard,
     onWrite: onCompanyWrite,
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},

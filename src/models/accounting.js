@@ -1724,6 +1724,7 @@ const lineItem = {
     tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },
     tax_grid_release: { type: 'boolean', label: 'Tax Grid Release', hidden: true },
     tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', hidden: true },
+    is_opening_balancing: { type: 'boolean', label: 'Opening Balancing Line', hidden: true },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
   },
   columnsFor: (record) => (record?.move_type === 'entry'
@@ -2035,6 +2036,15 @@ export const accountingModels = {
       }
       const currencyError = accountCurrencyChangeError(db, before, after);
       if (currencyError) return currencyError;
+      if (before && (before.company_id ?? null) !== (after.company_id ?? null)) {
+        const openingMoveIds = new Set((db.records['res.company'] ?? []).map((c) => c.account_opening_move_id).filter(Boolean));
+        const isReferencedInOpeningMove = (db.records['account.move'] ?? []).some(
+          (m) => openingMoveIds.has(m.id) && (m.line_ids ?? []).some((l) => l.account_id === before.id),
+        );
+        if (isReferencedInOpeningMove) {
+          return 'An account referenced by an opening entry cannot be moved to another company';
+        }
+      }
       return null;
     },
     protectDelete: accountDeleteGuard,
@@ -2381,7 +2391,7 @@ export const accountingModels = {
       return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
     },
     invariant: (db, after, before, stored) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before, stored),
-    protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
+    protectDelete: (db, m, staged) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),

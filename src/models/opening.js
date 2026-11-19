@@ -31,6 +31,11 @@ export function setOpeningBalance(db, accountId, { debit = 0, credit = 0, compan
   const company = read(db, 'res.company', cId);
   if (!company) throw new Error('Company not found');
 
+  const companyCurrency = companyCurrencyRecord(db, cId);
+  if (account.currency_id && (!companyCurrency || account.currency_id !== companyCurrency.id)) {
+    throw new Error('Opening balances on accounts in another currency are not supported yet');
+  }
+
   if (!company.opening_equity_account_id) {
     throw new Error('Configure the Opening Balance Equity Account on the company before setting opening balances');
   }
@@ -41,8 +46,8 @@ export function setOpeningBalance(db, accountId, { debit = 0, credit = 0, compan
     throw new Error('An account cannot have both a debit and a credit opening balance');
   }
 
-  const d = Math.max(0, Number(debit) || 0);
-  const c = Math.max(0, Number(credit) || 0);
+  const d = roundCurrency(Math.max(0, Number(debit) || 0), companyCurrency);
+  const c = roundCurrency(Math.max(0, Number(credit) || 0), companyCurrency);
   const equityId = company.opening_equity_account_id;
 
   // --- Ensure the opening move exists ---
@@ -81,9 +86,9 @@ export function setOpeningBalance(db, accountId, { debit = 0, credit = 0, compan
   const moveId = move.id;
   const existing = move.line_ids ?? [];
 
-  // All lines except the ones for this account and the balancing equity line.
+  // All lines except the ones for this account and the balancing line.
   const otherLines = existing.filter(
-    (l) => l.account_id !== accountId && l.account_id !== equityId,
+    (l) => !l.is_opening_balancing && l.account_id !== accountId,
   );
 
   // The new line for this account (omit when both 0).
@@ -103,6 +108,7 @@ export function setOpeningBalance(db, accountId, { debit = 0, credit = 0, compan
       debit: totalNet < 0 ? -totalNet : 0,
       credit: totalNet > 0 ? totalNet : 0,
       name: 'Automatic Balancing Line',
+      is_opening_balancing: true,
     }]
     : [];
 

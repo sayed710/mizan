@@ -3355,6 +3355,17 @@ const ar = {
   'Invalid ECB XML feed: missing date or currency rates': 'موجز XML للبنك المركزي الأوروبي غير صالح: تاريخ أو أسعار العملات مفقودة',
   'Invalid ECB rates': 'أسعار البنك المركزي الأوروبي غير صالحة',
   'Deposit slips can only be printed for posted batch payments.': 'يمكن طباعة إشعارات الإيداع لدفعات الدفع المجمعة المرحلة فقط',
+  'The opening entry cannot be changed or cleared': 'لا يمكن تغيير قيد الافتتاح أو مسحه',
+  'Select an existing opening entry': 'حدد قيد افتتاح موجوداً',
+  'The opening entry must be a journal entry': 'يجب أن يكون قيد الافتتاح قيد يومية',
+  'The opening entry must belong to this company': 'يجب أن ينتمي قيد الافتتاح إلى هذه الشركة',
+  'The opening move date must match the company opening date': 'يجب أن يطابق تاريخ قيد الافتتاح تاريخ افتتاح الشركة',
+  'The opening move is posted; reset it to draft to change the opening equity account': 'تم ترحيل قيد الافتتاح؛ أعده إلى المسودة لتغيير حساب حقوق ملكية الافتتاح',
+  'The opening balancing line must use the company opening equity account': 'يجب أن يستخدم بند موازنة الافتتاح حساب حقوق ملكية الافتتاح للشركة',
+  'Opening entries cannot be deleted': 'لا يمكن حذف قيود الافتتاح',
+  'Opening balances on accounts in another currency are not supported yet': 'الأرصدة الافتتاحية للحسابات بعملة أخرى غير مدعومة بعد',
+  'An account referenced by an opening entry cannot be moved to another company': 'لا يمكن نقل حساب مشار إليه في قيد افتتاح إلى شركة أخرى',
+  'Opening Balancing Line': 'بند موازنة الافتتاح',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -3,11 +3,13 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write } from './orm.js';
+import { create, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { setOpeningBalance, openingAmounts } from './models/opening.js';
 import { createCompany } from './models/company.js';
+import { fiscalYearStart } from './models/ledger.js';
+import { today } from './models/common.js';
 
 const synced = (db, next) => applyDiff(db, diffDb(db, next), { isAdmin: false, author: 'Clerk' });
 
@@ -382,4 +384,200 @@ test('opening equity account reflects the balancing line and total opening debit
   const sumCredit = allAccounts.reduce((s, a) => s + openingAmounts(after, a).credit, 0);
   assert.equal(sumDebit, 1200);
   assert.equal(sumCredit, 1200);
+});
+
+// ─── Regression Tests for Qodo Review Findings (Items 1-8) ──────────────────────────────────────
+
+test('regression 1: account_opening_move_id cannot be cleared or redirected (ORM and sync)', () => {
+  const db = seed();
+  const acc = pickExpenseAccount(db);
+  const after = setOpeningBalance(db, acc.id, { debit: 100 });
+  const co = read(after, 'res.company', 1);
+  assert.ok(co.account_opening_move_id);
+
+  // Clearing via write is refused
+  assert.throws(
+    () => write(after, 'res.company', 1, { account_opening_move_id: null }),
+    /cannot be changed or cleared/i,
+  );
+
+  // Redirecting via write is refused
+  const otherMove = search(after, 'account.move').find((m) => m.id !== co.account_opening_move_id);
+  assert.throws(
+    () => write(after, 'res.company', 1, { account_opening_move_id: otherMove.id }),
+    /cannot be changed or cleared/i,
+  );
+
+  // Clearing via sync diff is refused
+  assert.throws(
+    () => applyDiff(after, { upserts: { 'res.company': [{ ...co, account_opening_move_id: null }] } }, { isAdmin: true }),
+    /cannot be changed or cleared/i,
+  );
+
+  // Pointing to another company's move or non-entry on company create is refused
+  assert.throws(
+    () => createCompany(after, { name: 'Bad Move Co', account_opening_move_id: otherMove.id }),
+    /opening entry must belong to this company|journal entry/i,
+  );
+});
+
+test('regression 2: amounts are rounded to company currency (sub-increment removes line, half-increment posts)', () => {
+  const db = seed();
+  const acc = pickExpenseAccount(db);
+
+  // Sub-increment: 0.004 in USD rounds to 0
+  const afterSub = setOpeningBalance(db, acc.id, { debit: 0.004 });
+  assert.equal(openingAmounts(afterSub, acc).debit, 0);
+  const coSub = read(afterSub, 'res.company', 1);
+  const moveSub = read(afterSub, 'account.move', coSub.account_opening_move_id);
+  const accLine = moveSub.line_ids.find((l) => l.account_id === acc.id);
+  assert.ok(!accLine, 'sub-increment debit should produce no line');
+
+  // Half-increment: 100.005 in USD rounds to 100.01
+  const afterHalf = setOpeningBalance(db, acc.id, { debit: 100.005 });
+  assert.equal(openingAmounts(afterHalf, acc).debit, 100.01);
+  const coHalf = read(afterHalf, 'res.company', 1);
+  const moveHalf = read(afterHalf, 'account.move', coHalf.account_opening_move_id);
+  const halfLine = moveHalf.line_ids.find((l) => l.account_id === acc.id);
+  assert.equal(halfLine?.debit, 100.01);
+  const balLine = moveHalf.line_ids.find((l) => l.account_id === coHalf.opening_equity_account_id);
+  assert.equal(balLine?.credit, 100.01);
+
+  // The entry can be posted because debit and credit are cleanly balanced
+  const postedDb = write(afterHalf, 'account.move', moveHalf.id, { state: 'posted', name: 'MISC/2026/00001' });
+  assert.equal(read(postedDb, 'account.move', moveHalf.id).state, 'posted');
+});
+
+test('regression 3: synced opening-date change without move date change is refused by guard', () => {
+  const db = seed();
+  const acc = pickExpenseAccount(db);
+  const after = setOpeningBalance(db, acc.id, { debit: 100 });
+  const co = read(after, 'res.company', 1);
+
+  // Synced date-only change on res.company without updating the draft move is refused
+  assert.throws(
+    () => applyDiff(after, { upserts: { 'res.company': [{ ...co, account_opening_date: '2026-06-15' }] } }, { isAdmin: true }),
+    /The opening move date must match the company opening date/,
+  );
+
+  // Normal write() updates the move date and diff syncs cleanly
+  const updated = write(after, 'res.company', 1, { account_opening_date: '2026-06-15' });
+  const move = read(updated, 'account.move', co.account_opening_move_id);
+  assert.equal(move.date, '2026-06-15');
+  assert.doesNotThrow(() => synced(after, updated));
+});
+
+test('regression 4: deleting draft opening move is refused (ORM and sync)', () => {
+  const db = seed();
+  const acc = pickExpenseAccount(db);
+  const after = setOpeningBalance(db, acc.id, { debit: 100 });
+  const co = read(after, 'res.company', 1);
+  const moveId = co.account_opening_move_id;
+  assert.ok(moveId);
+
+  // ORM unlink is refused
+  assert.throws(
+    () => unlink(after, 'account.move', [moveId]),
+    /Opening entries cannot be deleted/,
+  );
+
+  // Sync delete is refused
+  assert.throws(
+    () => applyDiff(after, { deletes: { 'account.move': [moveId] } }, { isAdmin: true }),
+    /Opening entries cannot be deleted/,
+  );
+});
+
+test('regression 5: accounts in another currency refuse setOpeningBalance', () => {
+  const db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(eur, 'EUR exists');
+  const makeAcc = create(db, 'account.account', {
+    code: '999991',
+    name: 'EUR Account',
+    account_type: 'expense',
+    currency_id: eur.id,
+    company_id: 1,
+  });
+
+  assert.throws(
+    () => setOpeningBalance(makeAcc.db, makeAcc.id, { debit: 100 }),
+    /Opening balances on accounts in another currency are not supported yet/,
+  );
+});
+
+test('regression 6: changing opening_equity_account_id moves balancing line on draft move, refuses when posted', () => {
+  const db = seed();
+  const acc = pickExpenseAccount(db);
+  const after1 = setOpeningBalance(db, acc.id, { debit: 200 });
+  const co1 = read(after1, 'res.company', 1);
+  const move1 = read(after1, 'account.move', co1.account_opening_move_id);
+
+  // Verify balancing line is stamped with is_opening_balancing: true
+  const balLine1 = move1.line_ids.find((l) => l.account_id === co1.opening_equity_account_id);
+  assert.ok(balLine1?.is_opening_balancing, 'balancing line should have is_opening_balancing flag');
+
+  // Create a second equity account
+  const madeEquity = create(after1, 'account.account', {
+    code: '999992',
+    name: 'Secondary Opening Equity',
+    account_type: 'equity',
+    company_id: 1,
+  });
+  const eq2 = read(madeEquity.db, 'account.account', madeEquity.id);
+
+  // Change opening_equity_account_id on res.company
+  const after2 = write(madeEquity.db, 'res.company', 1, { opening_equity_account_id: eq2.id });
+  const move2 = read(after2, 'account.move', co1.account_opening_move_id);
+
+  // The balancing line should now be on eq2, and old equity account has no line
+  const oldEqLine = move2.line_ids.find((l) => l.account_id === co1.opening_equity_account_id);
+  const newEqLine = move2.line_ids.find((l) => l.account_id === eq2.id);
+  assert.ok(!oldEqLine, 'old equity account line should be replaced');
+  assert.ok(newEqLine, 'new equity account line should exist');
+  assert.equal(newEqLine.credit, 200);
+  assert.ok(newEqLine.is_opening_balancing);
+
+  // Post the move, then changing opening_equity_account_id is refused
+  const postedDb = write(after2, 'account.move', move2.id, { state: 'posted', name: 'MISC/2026/00001' });
+  assert.throws(
+    () => write(postedDb, 'res.company', 1, { opening_equity_account_id: co1.opening_equity_account_id }),
+    /The opening move is posted; reset it to draft to change the opening equity account/,
+  );
+});
+
+test('regression 7: clearing account_opening_date recomputes effective date with fallback and updates draft move', () => {
+  const db = seed();
+  const acc = pickExpenseAccount(db);
+  const withDate = write(db, 'res.company', 1, { account_opening_date: '2026-06-01' });
+  const after1 = setOpeningBalance(withDate, acc.id, { debit: 100 });
+  const co1 = read(after1, 'res.company', 1);
+  const move1 = read(after1, 'account.move', co1.account_opening_move_id);
+  assert.equal(move1.date, '2026-06-01');
+
+  // Clearing opening date falls back to fiscalYearStart
+  const after2 = write(after1, 'res.company', 1, { account_opening_date: null });
+  const co2 = read(after2, 'res.company', 1);
+  assert.equal(co2.account_opening_date, null);
+  const move2 = read(after2, 'account.move', co2.account_opening_move_id);
+  const expectedFallback = fiscalYearStart(after2, today(), 1);
+  assert.equal(move2.date, expectedFallback);
+});
+
+test('regression 8: moving an account referenced in an opening entry to another company is refused', () => {
+  const db = seed();
+  const acc = pickExpenseAccount(db);
+  const after = setOpeningBalance(db, acc.id, { debit: 100 });
+
+  // Refused via write()
+  assert.throws(
+    () => write(after, 'account.account', acc.id, { company_id: 2 }),
+    /An account referenced by an opening entry cannot be moved to another company/,
+  );
+
+  // Refused via applyDiff
+  assert.throws(
+    () => applyDiff(after, { upserts: { 'account.account': [{ ...acc, company_id: 2 }] } }, { isAdmin: true }),
+    /An account referenced by an opening entry cannot be moved to another company/,
+  );
 });
