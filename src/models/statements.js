@@ -121,12 +121,13 @@ export function parseCamt(text, { details = false } = {}) {
     const amount = Number(xmlTag(b, ['Amt']));
     const amountTag = b.match(/<(?:\w+:)?Amt\b[^>]*>/)?.[0] ?? '';
     const ref = xmlTag(b, ['Ustrd']) || xmlTag(b, ['AddtlNtryInf']) || xmlTag(b, ['Nm']);
-    const rawDebit = xmlTag(b, ['CdtDbtInd']) === 'DBIT';
+    // CdtDbtInd is the direction actually booked. A reversal (RvslInd) keeps the parties of the original
+    // operation, which ran the other way, so the counterpart is taken from the opposite side.
+    const isDebit = xmlTag(b, ['CdtDbtInd']) === 'DBIT';
     const reversed = /^(true|1)$/i.test(xmlTag(b, ['RvslInd']));
-    const isDebit = reversed ? !rawDebit : rawDebit;
     // A batch entry (several TxDtls) books one total: transaction-level details would describe only one of them.
     const single = (b.match(/<(?:\w+:)?TxDtls\b/g) ?? []).length <= 1;
-    const account_number = details && single ? camtAccount(b, isDebit) : '';
+    const account_number = details && single ? camtAccount(b, reversed ? !isDebit : isDebit) : '';
     const narration = details ? unescapeXml((single ? xmlTag(b, ['AddtlTxInf']) : '') || xmlTag(b, ['AddtlNtryInf'])) : '';
     const lineRef = details ? unescapeXml([
       xmlTag(b, ['NtryRef']),
@@ -230,9 +231,12 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false, e
     const key = b.sanitized_account_number || sanitizeAccountNumber(b.account_number);
     partnerByAccount.set(key, partnerByAccount.has(key) && partnerByAccount.get(key) !== b.partner_id ? null : b.partner_id);
   }
+  // The journal's own account (online sync stamps it on every line) is not a counterparty.
+  const ownBank = journal?.bank_account_id ? read(db, 'res.partner.bank', journal.bank_account_id) : null;
+  const ownKey = ownBank ? ownBank.sanitized_account_number || sanitizeAccountNumber(ownBank.account_number) : null;
   const next = fresh.reduce((acc, { currency: _currency, ...l }) => {
     let partnerId = l.partner_id ?? defaults.partner_id ?? null;
-    if (!partnerId && l.account_number) {
+    if (!partnerId && l.account_number && sanitizeAccountNumber(l.account_number) !== ownKey) {
       partnerId = partnerByAccount.get(sanitizeAccountNumber(l.account_number)) ?? null;
     }
     return create(acc, 'account.bank.statement.line', {

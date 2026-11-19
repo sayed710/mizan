@@ -1,11 +1,11 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { importStatement, importStatementLines, parseCamt, parseOfx, parseQif } from './models/statements.js';
 import { seed } from './seed.js';
 
-test('BANK-9: CAMT.053 RvslInd inverts credit/debit polarity', () => {
+test('BANK-9: CAMT.053 reversal keeps the booked direction and takes the counterpart of the original operation', () => {
   const xml = `<?xml version="1.0"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt>
 <Ntry><Amt Ccy="USD">150.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><RvslInd>true</RvslInd><BookgDt><Dt>2026-05-06</Dt></BookgDt><AcctSvcrRef>REV1</AcctSvcrRef><AddtlNtryInf>Reversal of incoming transfer</AddtlNtryInf>
 <NtryDtls><TxDtls><CdtrAcct><Id><IBAN>IBAN-CREDITOR-1</IBAN></Id></CdtrAcct><DbtrAcct><Id><IBAN>IBAN-DEBTOR-1</IBAN></Id></DbtrAcct></TxDtls></NtryDtls></Ntry>
@@ -15,12 +15,12 @@ test('BANK-9: CAMT.053 RvslInd inverts credit/debit polarity', () => {
 
   const entries = parseCamt(xml, { details: true });
   assert.equal(entries.length, 3);
-  // CRDT reversed should be negative (debit) and use CdtrAcct for counterpart
-  assert.equal(entries[0].amount, -150);
+  // A booked credit that reverses an outgoing payment: cash comes in, the counterpart is the original creditor
+  assert.equal(entries[0].amount, 150);
   assert.equal(entries[0].unique_import_id, 'REV1');
   assert.equal(entries[0].account_number, 'IBAN-CREDITOR-1');
-  // DBIT reversed should be positive (credit)
-  assert.equal(entries[1].amount, 45);
+  // A booked debit that reverses a credit: cash goes out
+  assert.equal(entries[1].amount, -45);
   assert.equal(entries[1].unique_import_id, 'REV2');
   // Normal CRDT with RvslInd false remains positive
   assert.equal(entries[2].amount, 75);
@@ -161,4 +161,18 @@ test('QIF amounts read thousands commas, and an account number shared by two par
   const journal = db.records['account.journal'].find((j) => j.type === 'bank');
   const out = importStatementLines(db, [{ date: '2026-01-05', amount: 10, payment_ref: 'X', account_number: 'EG-SHARED-1' }], { journal_id: journal.id });
   assert.equal(out.db.records['account.bank.statement.line'].at(-1).partner_id ?? null, null);
+});
+
+test('the journal own bank account on synced lines does not set the company as partner', () => {
+  const initial = seed();
+  const journal = search(initial, 'account.journal').find((j) => j.type === 'bank');
+  const companyPartner = read(initial, 'res.company', 1).partner_id;
+  const own = create(initial, 'res.partner.bank', { partner_id: companyPartner, account_number: 'EG-OWN-777', company_id: 1 });
+  const db = write(own.db, 'account.journal', journal.id, { bank_account_id: own.id });
+  const { db: next } = importStatementLines(db, [
+    { unique_import_id: 'SYNC-1', date: '2026-05-01', amount: 50, payment_ref: 'Customer transfer', account_number: 'EG-OWN-777' },
+  ], { journal_id: journal.id });
+  const line = search(next, 'account.bank.statement.line').find((l) => l.unique_import_id === 'SYNC-1');
+  assert.ok(line);
+  assert.equal(line.partner_id ?? null, null);
 });
