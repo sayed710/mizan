@@ -476,7 +476,7 @@ function unreconcileLockError(db, line) {
 function unreconcileError(db, before, after) {
   const lockError = unreconcileLockError(db, before);
   if (lockError) return lockError;
-  if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length) return 'Unreconciliation requires reversing entries and clearing the bank links';
+  if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length || after.writeoff_analytic_distribution != null) return 'Unreconciliation requires reversing entries and clearing the bank links';
   const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'writeoff_analytic_distribution', 'name']);
   if ([...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !clearedFields.has(k)).some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) return 'A reconciled bank transaction cannot be changed';
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);

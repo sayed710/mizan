@@ -198,6 +198,9 @@ test('an underpayment written off within a matching rule tolerance keeps the cou
   const reopened = unreconcile(after, reconciled).db;
   assert.equal(read(reopened, LINE, line.id).writeoff_analytic_distribution ?? null, null);
   assert.equal(read(applyDiff(after, diffDb(after, reopened), { isAdmin: true }), LINE, line.id).writeoff_analytic_distribution ?? null, null);
+  // A synced unreconciliation cannot slip in a different hidden allocation.
+  const injected = { ...reopened, records: { ...reopened.records, [LINE]: reopened.records[LINE].map((l) => (l.id === line.id ? { ...l, writeoff_analytic_distribution: { [project.id]: 50 } } : l)) } };
+  assert.throws(() => applyDiff(after, diffDb(after, injected), { isAdmin: true }), /Unreconciliation requires reversing entries and clearing the bank links/);
 });
 
 test('a label regex with a repeated group around a repeat is rejected on save and never matched', () => {
