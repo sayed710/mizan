@@ -1768,7 +1768,9 @@ export const journalEntriesView = {
     [
       { id: 'reversed', label: 'Reversed', fn: (r, db) => Boolean(r.reversed_entry_id || r.reversal_move_id || (db?.records?.['account.move'] ?? []).some((m) => m.state !== 'cancel' && m.reversed_entry_id === r.id)) },
       { id: 'manual', label: 'Manual', fn: (r) => !((r.auto_post && r.auto_post !== 'no') || r.auto_post_origin_id) },
+      { id: 'recurring', label: 'Recurring', fn: (r) => Boolean(RECURRENCE_MONTHS[r.auto_post] || r.auto_post_origin_id) },
     ],
+    [{ id: 'to_check', label: 'To Check', fn: (r) => r.to_check === true }],
     [
       { id: 'sales', label: 'Sales', fn: (r, db) => moveJournalType(db, r) === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r, db) => moveJournalType(db, r) === 'purchase' },
@@ -2476,6 +2478,7 @@ export const accountingModels = {
       incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm', domain: (r) => r.active !== false },
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
+      to_check: { type: 'boolean', label: 'To Check' },
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
@@ -2779,6 +2782,7 @@ export const accountingModels = {
                 ...(r?.auto_reverse ? ['reverse_date', 'reverse_journal_id'] : []),
                 'fiscal_position_id',
                 'currency_id',
+                'to_check',
               ],
               ['narration'],
             ],
