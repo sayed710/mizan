@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { ONLINE_FEED_JOURNAL_TYPES, STATEMENT_JOURNAL_TYPES, isOnlineFeedJournal, isStatementJournal, accountId } from './models/ledger.js';
-import { bookToAccount, reconcileWith, unreconcile } from './models/bank.js';
+import { bookBankMovement, bookToAccount, reconcileWith, unreconcile } from './models/bank.js';
 import { counterpartTaxLines } from './models/reconcile.js';
 import { journalCards, taxReport, taxesByGrid } from './models/finance.js';
 import { postMove } from './models/accounting.js';
@@ -554,14 +554,15 @@ test('BANK-7, BANK-12, BANK-14: operations replay cleanly through diffDb + apply
 
 test('BANK-12: counterpartTaxLines extracts canonical tax split logic for both directions', () => {
   const db = seed();
-  const tax = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'sale');
+  const saleTax = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'sale');
+  const purchaseTax = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'purchase');
   const account = accountId(db, '400000', 1);
 
   // Seeded 14% sale tax on 114 amount gives 100 net + 14 tax
   // Incoming (receipt): net line credit, tax line credit, tax_side: sale
   const inLines = counterpartTaxLines(db, {
     company: 1,
-    tax_ids: [tax.id],
+    tax_ids: [saleTax.id],
     amount: 114,
     account_id: account,
     incoming: true,
@@ -575,7 +576,7 @@ test('BANK-12: counterpartTaxLines extracts canonical tax split logic for both d
   // Outgoing (payment): net line debit, tax line debit, tax_side: purchase
   const outLines = counterpartTaxLines(db, {
     company: 1,
-    tax_ids: [tax.id],
+    tax_ids: [purchaseTax.id],
     amount: 114,
     account_id: account,
     incoming: false,
@@ -585,4 +586,310 @@ test('BANK-12: counterpartTaxLines extracts canonical tax split logic for both d
   assert.equal(outLines[0].tax_side, 'purchase');
   assert.equal(outLines[1].debit, 14);
   assert.equal(outLines[1].tax_side, 'purchase');
+});
+
+test('Qodo Issue 1: foreign receipt rounding remainder is assigned to net line while foreign amounts stay exact', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  // Configure EUR (currency 2) rate to 2.7 units per company currency unit
+  db = write(db, 'res.currency', 2, {
+    rate_ids: [{ date: '2020-01-01', rate: 2.7, company_id: null }],
+  });
+  const incomeAccount = accountId(db, '400000', 1);
+  const foreignJournal = create(db, 'account.journal', {
+    name: 'EUR Bank',
+    type: 'bank',
+    code: 'EBANK',
+    company_id: 1,
+    currency_id: 2,
+    default_account_id: bankJournal.default_account_id,
+    suspense_account_id: bankJournal.suspense_account_id,
+  });
+  db = foreignJournal.db;
+  const tax = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'sale' && t.amount === 14);
+
+  // Foreign receipt of 114 EUR at rate 2.7 with 14% included tax:
+  // Expected company liquidity = 114 / 2.7 = 42.22
+  // Separately rounded net = 100 / 2.7 = 37.04, tax = 14 / 2.7 = 5.19 (sum 42.23, difference -0.01)
+  // Adjusted net in company currency must be 37.03 so total balances to 42.22
+  const line = create(db, 'account.bank.statement.line', {
+    journal_id: foreignJournal.id,
+    company_id: 1,
+    counterpart_account_id: incomeAccount,
+    foreign_currency_id: 2,
+    amount_currency: 114,
+    amount: 114,
+    date: '2026-03-10',
+    payment_ref: 'Foreign Receipt 114',
+    state: 'to_check',
+  });
+  db = line.db;
+
+  const booked = bookToAccount(db, read(db, 'account.bank.statement.line', line.id), {
+    tax_ids: [tax.id],
+  });
+  const reconciledLine = read(booked.db, 'account.bank.statement.line', line.id);
+  assert.equal(reconciledLine.state, 'reconciled');
+  const move = read(booked.db, 'account.move', reconciledLine.move_id);
+  assert.ok(move, 'Move must be posted without balance rejection');
+
+  const liquidityLine = move.line_ids.find((l) => l.debit > 0);
+  const netLine = move.line_ids.find((l) => l.account_id === incomeAccount);
+  const taxLine = move.line_ids.find((l) => l !== liquidityLine && l !== netLine);
+
+  assert.equal(liquidityLine.debit, 42.22);
+  assert.equal(liquidityLine.amount_currency, 114);
+
+  assert.equal(netLine.credit, 37.03);
+  assert.equal(netLine.amount_currency, -100);
+
+  assert.equal(taxLine.credit, 5.19);
+  assert.equal(taxLine.amount_currency, -14);
+});
+
+test('Qodo Issue 2: in-memory write-off fields are retained in multi-invoice reconciliation, with and without prebooked movement', () => {
+  for (const withPrebooked of [false, true]) {
+    let db = seed();
+    const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+    const partner = search(db, 'res.partner')[0];
+    const expenseAccount = accountId(db, '600000', 1);
+
+    const invA = makeInvoice(db, { partnerId: partner.id, price: 100, date: '2026-03-01' });
+    db = invA.db;
+    const invB = makeInvoice(db, { partnerId: partner.id, price: 50, date: '2026-03-01' });
+    db = invB.db;
+
+    // Statement line of 140 (settles 100 on invA, 40 on invB, and 10 writeoff on invB)
+    const lineRes = create(db, 'account.bank.statement.line', {
+      journal_id: bankJournal.id,
+      company_id: 1,
+      partner_id: partner.id,
+      amount: 140,
+      date: '2026-03-02',
+      payment_ref: `Writeoff test prebooked=${withPrebooked}`,
+      state: 'to_check',
+    });
+    db = lineRes.db;
+
+    if (withPrebooked) {
+      const booked = bookBankMovement(db, read(db, 'account.bank.statement.line', lineRes.id), 1, {
+        date: '2026-03-02',
+        openAmount: 140,
+      });
+      db = booked.db;
+    }
+
+    // In-memory line carrying writeoff fields (like BankReconcile widget passes)
+    const inMemoryLine = {
+      ...read(db, 'account.bank.statement.line', lineRes.id),
+      writeoff_account_id: expenseAccount,
+      writeoff_amount: 10,
+      writeoff_label: 'Settlement discount',
+    };
+
+    const nextDb = reconcileWith(db, inMemoryLine, [invA.id, invB.id]);
+    const finalLine = read(nextDb, 'account.bank.statement.line', lineRes.id);
+    const finalA = read(nextDb, 'account.move', invA.id);
+    const finalB = read(nextDb, 'account.move', invB.id);
+
+    assert.equal(finalLine.state, 'reconciled');
+    assert.equal(finalA.amount_residual, 0);
+    assert.equal(finalB.amount_residual, 0);
+    assert.ok(finalLine.writeoff_move_id, 'Write-off move id must be recorded on statement line');
+    assert.equal(finalLine.allocations.length, 2);
+    assert.equal(finalLine.allocations[0].amount, 100);
+    assert.equal(finalLine.allocations[0].writeoff_move_id, undefined);
+    assert.equal(finalLine.allocations[1].amount, 40);
+    assert.equal(finalLine.allocations[1].writeoff_move_id, finalLine.writeoff_move_id);
+  }
+});
+
+test('Qodo Issue 3: BankReconcile widget Taxes multi-select has no None option and binds array of string values', async () => {
+  let db = seed();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { BankReconcile } = await import('./views/BankReconcile.jsx');
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+
+  const line = create(db, 'account.bank.statement.line', {
+    journal_id: bank.id,
+    company_id: 1,
+    date: '2026-03-05',
+    payment_ref: 'UI Taxes Select Check',
+    amount: 100,
+    state: 'to_check',
+  });
+  db = line.db;
+
+  const { makeEl } = setupDom();
+  await initStore();
+  await commit(db);
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(BankReconcile)));
+
+    const stLineBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('UI Taxes Select Check'));
+    await React.act(async () => props(stLineBtn).onClick());
+
+    const manualTab = find(host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab' && n.textContent.includes('Manual Operation'));
+    await React.act(async () => props(manualTab).onClick());
+
+    const taxesSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Taxes');
+    assert.ok(taxesSelect, 'Taxes select must exist');
+    assert.equal(props(taxesSelect)?.multiple, true);
+    assert.deepEqual(props(taxesSelect)?.value, [], 'Initial value must be empty array');
+
+    const options = taxesSelect.options ?? [];
+    assert.ok(options.length > 0, 'Options list must have taxes');
+    assert.equal(options.some((o) => props(o)?.value === '' || o.textContent === 'None'), false, 'Must not contain None option');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Qodo Issue 4: counterpartTaxLines validates tax direction matches transaction and throws clear error', () => {
+  const db = seed();
+  const saleTax = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'sale');
+  const purchaseTax = search(db, 'account.tax').find((t) => (t.company_id ?? 1) === 1 && t.type_tax_use === 'purchase');
+  const account = accountId(db, '400000', 1);
+
+  // Incoming transaction with purchase tax must throw
+  assert.throws(
+    () => counterpartTaxLines(db, {
+      company: 1,
+      tax_ids: [purchaseTax.id],
+      amount: 100,
+      account_id: account,
+      incoming: true,
+    }),
+    /Incoming transactions only accept sale taxes/,
+  );
+
+  // Outgoing transaction with sale tax must throw
+  assert.throws(
+    () => counterpartTaxLines(db, {
+      company: 1,
+      tax_ids: [saleTax.id],
+      amount: 100,
+      account_id: account,
+      incoming: false,
+    }),
+    /Outgoing transactions only accept purchase taxes/,
+  );
+});
+
+test('Qodo Issue 5: multi-invoice matching rejects candidate invoices from different commercial partners and widget disables mismatched partner buttons', async () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partners = search(db, 'res.partner');
+  const p1 = partners[0];
+  const p2 = partners[1];
+
+  const inv1 = makeInvoice(db, { partnerId: p1.id, price: 100, date: '2026-03-01' });
+  db = inv1.db;
+  const inv2 = makeInvoice(db, { partnerId: p2.id, price: 100, date: '2026-03-01' });
+  db = inv2.db;
+  const inv2b = makeInvoice(db, { partnerId: p2.id, price: 100, date: '2026-03-01' });
+  db = inv2b.db;
+
+  const lineNoPartner = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    company_id: 1,
+    amount: 200,
+    date: '2026-03-02',
+    payment_ref: 'Line No Partner Test',
+    state: 'to_check',
+  });
+  db = lineNoPartner.db;
+
+  assert.throws(
+    () => reconcileWith(db, read(db, 'account.bank.statement.line', lineNoPartner.id), [inv1.id, inv2.id]),
+    /All selected invoices must belong to the same commercial partner/,
+  );
+
+  const lineWithP1 = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    company_id: 1,
+    partner_id: p1.id,
+    amount: 200,
+    date: '2026-03-02',
+    payment_ref: 'Line With P1 Test',
+    state: 'to_check',
+  });
+  db = lineWithP1.db;
+
+  assert.throws(
+    () => reconcileWith(db, read(db, 'account.bank.statement.line', lineWithP1.id), [inv2.id, inv2b.id]),
+    /All selected invoices must match the partner on the statement line/,
+  );
+
+  // Widget test: selecting inv1 disables inv2 (different partner)
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { BankReconcile } = await import('./views/BankReconcile.jsx');
+
+  const { makeEl } = setupDom();
+  await initStore();
+  await commit(db);
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(BankReconcile)));
+
+    const stLineBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Line No Partner Test'));
+    await React.act(async () => props(stLineBtn).onClick());
+
+    const m1 = read(db, 'account.move', inv1.id);
+    const m2 = read(db, 'account.move', inv2.id);
+    const btn1 = find(host, (n) => n.tagName === 'BUTTON' && n.className?.includes('bank-reconcile-line-item') && n.textContent.includes(m1.name));
+    const btn2 = find(host, (n) => n.tagName === 'BUTTON' && n.className?.includes('bank-reconcile-line-item') && n.textContent.includes(m2.name));
+    assert.equal(Boolean(props(btn1)?.disabled), false);
+    assert.equal(Boolean(props(btn2)?.disabled), false);
+
+    await React.act(async () => props(btn1).onClick());
+
+    const btn1After = find(host, (n) => n.tagName === 'BUTTON' && n.className?.includes('bank-reconcile-line-item') && n.textContent.includes(m1.name));
+    const btn2After = find(host, (n) => n.tagName === 'BUTTON' && n.className?.includes('bank-reconcile-line-item') && n.textContent.includes(m2.name));
+    assert.equal(Boolean(props(btn1After)?.disabled), false);
+    assert.equal(Boolean(props(btn2After)?.disabled), true, 'Candidate with different partner must be disabled');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Qodo Issue 6: reconcileWith throws when statement amount is exhausted before last selected invoice is matched', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partner = search(db, 'res.partner')[0];
+
+  const inv1 = makeInvoice(db, { partnerId: partner.id, price: 100, date: '2026-03-01' });
+  db = inv1.db;
+  const inv2 = makeInvoice(db, { partnerId: partner.id, price: 100, date: '2026-03-01' });
+  db = inv2.db;
+
+  // Statement line of 100 matched against two 100 invoices
+  const line100 = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    company_id: 1,
+    partner_id: partner.id,
+    amount: 100,
+    date: '2026-03-02',
+    payment_ref: 'Exhausted Statement Line',
+    state: 'to_check',
+  });
+  db = line100.db;
+
+  assert.throws(
+    () => reconcileWith(db, read(db, 'account.bank.statement.line', line100.id), [inv1.id, inv2.id]),
+    /The statement amount is fully used before all selected invoices are matched/,
+  );
 });

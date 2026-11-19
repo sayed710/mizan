@@ -16,7 +16,7 @@ import {
   setStatementLinePartner,
   statementCompanyAmount,
 } from '../models/bank.js';
-import { applyRule, isWriteoffButtonModel, ruleMatches } from '../models/reconcile.js';
+import { applyRule, isWriteoffButtonModel, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { display, money } from '../ui.jsx';
@@ -99,6 +99,14 @@ export function BankReconcile() {
     [db, selectedLine],
   );
 
+  const firstSelectedMove = useMemo(() => {
+    for (const id of selectedCandidateIds) {
+      const m = read(db, 'account.move', id);
+      if (m) return m;
+    }
+    return null;
+  }, [db, selectedCandidateIds]);
+
   const outstandingPayments = useMemo(
     () => (selectedLine ? eligiblePayments(db, selectedLine) : []),
     [db, selectedLine],
@@ -113,8 +121,9 @@ export function BankReconcile() {
   const taxes = useMemo(() => {
     if (!selectedLine) return [];
     const company = selectedLine.company_id ?? 1;
+    const expectedUse = (Number(selectedLine.amount) || 0) > 0 ? 'sale' : 'purchase';
     return (db.records['account.tax'] ?? [])
-      .filter((t) => t.active !== false && (!t.company_id || t.company_id === company))
+      .filter((t) => t.active !== false && (!t.company_id || t.company_id === company) && t.type_tax_use === expectedUse)
       .sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.name ?? '').localeCompare(b.name ?? ''));
   }, [db, selectedLine]);
 
@@ -392,13 +401,14 @@ export function BankReconcile() {
                         {candidateMoves.map((move) => {
                           const isSelected = selectedCandidateIds.has(move.id);
                           const err = matchError(db, selectedLine, move);
+                          const partnerMismatch = Boolean(firstSelectedMove && !sameCommercialPartner(db, firstSelectedMove.partner_id, move.partner_id));
                           return (
                             <button
                               key={move.id}
                               type="button"
                               className={`bank-reconcile-line-item${isSelected ? ' active' : ''}`}
                               aria-pressed={isSelected}
-                              disabled={Boolean(err)}
+                              disabled={Boolean(err || (!isSelected && partnerMismatch))}
                               aria-label={lineAriaLabel(move.name, partnerName(move.partner_id), formatInCurrency(move.amount_residual, documentCurrency(db, move)))}
                               onClick={() => toggleCandidateSelection(move.id)}
                             >
@@ -492,17 +502,15 @@ export function BankReconcile() {
                       <select
                         multiple
                         aria-label={t('Taxes')}
-                        value={manualTaxIds.length === 0 ? [''] : manualTaxIds.map(String)}
+                        value={manualTaxIds.map(String)}
                         onChange={(e) => {
                           const options = e.target.selectedOptions
                             ? Array.from(e.target.selectedOptions)
                             : (Array.isArray(e.target.value) ? e.target.value.map((v) => ({ value: v })) : [{ value: e.target.value }]);
-                          const hasNone = options.some((o) => o.value === '' || o.value == null);
                           const selected = options.map((o) => Number(o.value)).filter(Boolean);
-                          setManualTaxIds(hasNone ? [] : selected);
+                          setManualTaxIds(selected);
                         }}
                       >
-                        <option value="">{t('None')}</option>
                         {taxes.map((tx) => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
                       </select>
                     </label>

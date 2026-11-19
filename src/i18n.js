@@ -3265,6 +3265,11 @@ const ar = {
   'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
   'Select an invoice or bill to match': 'اختر فاتورة أو فاتورة مورد للمطابقة',
+  'The statement amount is fully used before all selected invoices are matched': 'تم استخدام مبلغ كشف الحساب بالكامل قبل مطابقة جميع الفواتير المحددة',
+  'All selected invoices must belong to the same commercial partner': 'يجب أن تنتمي جميع الفواتير المحددة إلى نفس الشريك التجاري',
+  'All selected invoices must match the partner on the statement line': 'يجب أن تتطابق جميع الفواتير المحددة مع الشريك في بند كشف الحساب',
+  'Incoming transactions only accept sale taxes': 'المعاملات الواردة تقبل ضرائب المبيعات فقط',
+  'Outgoing transactions only accept purchase taxes': 'المعاملات الصادرة تقبل ضرائب المشتريات فقط',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

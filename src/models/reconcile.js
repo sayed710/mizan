@@ -245,6 +245,7 @@ export function counterpartTaxLines(db, {
   partner_id = null,
   name = '',
   analytic_distribution = null,
+  validateTaxUse = true,
 } = {}) {
   const compId = typeof company === 'object' && company ? company.id : (company ?? 1);
   const compCurrency = companyCurrencyRecord(db, compId);
@@ -254,9 +255,16 @@ export function counterpartTaxLines(db, {
   const rawTaxIds = tax_ids ?? [];
   const taxIds = (Array.isArray(rawTaxIds) ? rawTaxIds : [rawTaxIds]).map(Number).filter(Boolean);
   const taxRecs = taxIds.length > 0 ? expandTaxIds(db, taxIds) : [];
+  const isCredit = Boolean(incoming);
+  const expectedUse = isCredit ? 'sale' : 'purchase';
   for (const tax of taxRecs) {
     if (tax.company_id && tax.company_id !== compId) {
       throw new Error('Tax belongs to another company');
+    }
+    if (validateTaxUse && tax.type_tax_use && tax.type_tax_use !== expectedUse) {
+      throw new Error(expectedUse === 'sale'
+        ? 'Incoming transactions only accept sale taxes'
+        : 'Outgoing transactions only accept purchase taxes');
     }
     const repart = taxRepartitionLines(tax, 'invoice');
     for (const row of repart.filter((r) => r.repartition_type === 'tax')) {
@@ -268,15 +276,22 @@ export function counterpartTaxLines(db, {
     }
   }
 
-  const isCredit = Boolean(incoming);
   const bal = balance != null && Number(balance) !== 0 ? Math.abs(Number(balance)) : absValue;
-  const compVal = companyValue != null ? Math.abs(Number(companyValue)) : absValue;
+  const compVal = companyValue != null
+    ? Math.abs(Number(companyValue))
+    : (foreignCurrency ? toCompany(db, foreignCurrency, absValue, date, compId) : absValue);
+  const expectedCompany = roundCurrency(compVal * absValue / bal, compCurrency);
 
-  const side = (val, debit, extra = {}) => ({
-    ...extra,
-    [debit ? 'debit' : 'credit']: roundCurrency(compVal * val / bal, compCurrency),
-    ...(foreignCurrency ? { currency_id: foreignCurrency, amount_currency: (debit ? 1 : -1) * val } : {}),
-  });
+  const side = (val, debit, extra = {}) => {
+    const compAmount = foreignCurrency && taxRecs.length > 0
+      ? toCompany(db, foreignCurrency, val, date, compId)
+      : roundCurrency(compVal * val / bal, compCurrency);
+    return {
+      ...extra,
+      [debit ? 'debit' : 'credit']: compAmount,
+      ...(foreignCurrency ? { currency_id: foreignCurrency, amount_currency: (debit ? 1 : -1) * val } : {}),
+    };
+  };
 
   if (!taxRecs.length) {
     return [
@@ -332,7 +347,16 @@ export function counterpartTaxLines(db, {
     tax_tag_ids: allBaseTags,
   });
 
-  return [netLine, ...taxLines];
+  const counterpartSide = !isCredit ? 'debit' : 'credit';
+  const opposingSide = isCredit ? 'debit' : 'credit';
+  const allLines = [netLine, ...taxLines];
+  const counterpartTotal = roundCurrency(allLines.reduce((sum, item) => sum + (Number(item[counterpartSide]) || 0) - (Number(item[opposingSide]) || 0), 0), compCurrency);
+  const companyRemainder = roundCurrency(expectedCompany - counterpartTotal, compCurrency);
+  if (companyRemainder) {
+    netLine[counterpartSide] = roundCurrency((Number(netLine[counterpartSide]) || 0) + companyRemainder, compCurrency);
+  }
+
+  return allLines;
 }
 
 function writeOff(db, rule, line) {
@@ -385,6 +409,7 @@ function writeOff(db, rule, line) {
       partner_id: l.partner_id ?? partner_id,
       name: l.label || line.payment_ref,
       analytic_distribution: l.analytic_distribution,
+      validateTaxUse: false,
     });
   });
   const counterpartSide = incoming ? 'credit' : 'debit';

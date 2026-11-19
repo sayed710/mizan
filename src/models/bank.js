@@ -66,34 +66,63 @@ export function reconcileWith(db, line, moveId) {
   if (Array.isArray(moveId)) {
     const ids = [...new Set(moveId.map(Number).filter(Boolean))];
     if (!ids.length) throw new Error('Select an invoice or bill to match');
-    if (ids.length === 1) return reconcileWith(db, line, ids[0]);
+    const writeoffFields = typeof line === 'object' && line ? {
+      writeoff_account_id: line.writeoff_account_id ?? null,
+      writeoff_label: line.writeoff_label ?? null,
+      writeoff_amount: line.writeoff_amount ?? null,
+      writeoff_analytic_distribution: line.writeoff_analytic_distribution ?? null,
+    } : {
+      writeoff_account_id: null,
+      writeoff_label: null,
+      writeoff_amount: null,
+      writeoff_analytic_distribution: null,
+    };
+    if (ids.length === 1) {
+      const lineWithWriteoff = typeof line === 'object' && line ? { ...line, ...writeoffFields } : line;
+      return reconcileWith(db, lineWithWriteoff, ids[0]);
+    }
+    const currentLine = typeof line === 'object' && line ? line : read(db, 'account.bank.statement.line', line);
+    const moves = ids.map((id) => read(db, 'account.move', id));
+    for (const m of moves) {
+      if (!m) throw new Error('Select an invoice or bill to match');
+    }
+    if (currentLine?.partner_id) {
+      for (const m of moves) {
+        if (!sameCommercialPartner(db, currentLine.partner_id, m.partner_id)) {
+          throw new Error('All selected invoices must match the partner on the statement line');
+        }
+      }
+    }
+    for (let i = 1; i < moves.length; i++) {
+      if (!sameCommercialPartner(db, moves[0].partner_id, moves[i].partner_id)) {
+        throw new Error('All selected invoices must belong to the same commercial partner');
+      }
+    }
     let currentDb = db;
-    let currentLine = typeof line === 'object' && line ? line : read(db, 'account.bank.statement.line', line);
-    if (!currentLine.bank_move_id) {
-      const company = currentLine.company_id ?? 1;
-      const open = roundCurrency(currentLine.open_amount ?? statementCompanyAmount(currentDb, currentLine), companyCurrencyRecord(currentDb, company));
-      const bookedBank = bookBankMovement(currentDb, currentLine, company, { date: currentLine.date ?? today(), openAmount: open });
+    let runningLine = currentLine;
+    if (!runningLine.bank_move_id) {
+      const company = runningLine.company_id ?? 1;
+      const open = roundCurrency(runningLine.open_amount ?? statementCompanyAmount(currentDb, runningLine), companyCurrencyRecord(currentDb, company));
+      const bookedBank = bookBankMovement(currentDb, runningLine, company, { date: runningLine.date ?? today(), openAmount: open });
       currentDb = bookedBank.db;
-      currentLine = read(currentDb, 'account.bank.statement.line', currentLine.id);
+      runningLine = read(currentDb, 'account.bank.statement.line', runningLine.id);
     }
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       const isLast = i === ids.length - 1;
-      const writeoffFields = isLast ? {
-        writeoff_account_id: currentLine.writeoff_account_id,
-        writeoff_label: currentLine.writeoff_label,
-        writeoff_amount: currentLine.writeoff_amount,
-        writeoff_analytic_distribution: currentLine.writeoff_analytic_distribution,
-      } : {
+      const currentWriteoff = isLast ? writeoffFields : {
         writeoff_account_id: null,
         writeoff_label: null,
         writeoff_amount: null,
         writeoff_analytic_distribution: null,
       };
-      const lineToReconcile = { ...currentLine, ...writeoffFields };
+      const lineToReconcile = { ...runningLine, ...currentWriteoff };
       currentDb = reconcileWith(currentDb, lineToReconcile, id);
-      currentLine = read(currentDb, 'account.bank.statement.line', currentLine.id);
-      if (currentLine.state === 'reconciled' || !(currentLine.open_amount > 0)) {
+      runningLine = read(currentDb, 'account.bank.statement.line', runningLine.id);
+      if (runningLine.state === 'reconciled' || !(runningLine.open_amount > 0)) {
+        if (!isLast) {
+          throw new Error('The statement amount is fully used before all selected invoices are matched');
+        }
         break;
       }
     }
@@ -149,7 +178,22 @@ export function reconcileWith(db, line, moveId) {
   const paid = payMove(current, moveId, value, date, { journalId: line.journal_id, statementLineId: line.id, ...(suspense ? { liquidityAccountId: suspense } : { directBank: true }) });
   const paymentMove = read(paid, 'account.move', moveId).payments.at(-1).move_id;
   const writeoff = hasWriteoff ? settleWriteoff(paid, moveId, writeoffValue, statementCompanyAmount(db, line, Number(line.writeoff_amount)), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id, analyticDistribution: line.writeoff_analytic_distribution ?? null }) : null;
-  return write(writeoff?.db ?? paid, 'account.bank.statement.line', line.id, { state: remaining ? 'to_check' : 'reconciled', move_id: moveId, payment_move_id: paymentMove, writeoff_move_id: writeoff?.id ?? null, bank_move_id: bankMoveId ?? paymentMove, open_amount: remaining, allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }], partner_id: line.partner_id ?? move.partner_id });
+  return write(writeoff?.db ?? paid, 'account.bank.statement.line', line.id, {
+    state: remaining ? 'to_check' : 'reconciled',
+    move_id: moveId,
+    payment_move_id: paymentMove,
+    writeoff_move_id: writeoff?.id ?? null,
+    bank_move_id: bankMoveId ?? paymentMove,
+    open_amount: remaining,
+    allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }],
+    partner_id: line.partner_id ?? move.partner_id,
+    ...(hasWriteoff ? {
+      writeoff_account_id: line.writeoff_account_id ?? null,
+      writeoff_label: line.writeoff_label ?? null,
+      writeoff_amount: line.writeoff_amount ?? null,
+      writeoff_analytic_distribution: line.writeoff_analytic_distribution ?? null,
+    } : {}),
+  });
 }
 
 /** A journal-less batch belongs to the common company of its active payments. */
