@@ -262,6 +262,9 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
 .list tr.group-row { background: #f3f4f8; font-weight: 600; }
 .list tr.group-row:hover { background: #eceef5; }
 .caret { display: inline-block; width: 14px; color: var(--muted); }
+.fold-caret::before { content: '▸'; }
+.fold-caret.open::before { content: '▾'; }
+html[dir="rtl"] .fold-caret:not(.open)::before { content: '◂'; }
 .list tr.danger td { color: var(--danger); }
 .list tr.info td { color: #1d6fa5; }
 .list tr.muted td { color: var(--muted); }

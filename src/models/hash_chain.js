@@ -270,8 +270,21 @@ export function secureMoveInvariant(db, after, before) {
   return null;
 }
 
+/** Whether a journal has secured entries: non-empty secure_chain_heads or any moves with inalterable_hash. */
+export function journalHasSecuredEntries(db, journal) {
+  if (!journal) return false;
+  if ((journal.secure_chain_heads ?? []).length > 0) return true;
+  // A hashed move always carries its journal: secureMoveInvariant hashes only against after.journal_id.
+  return (db?.records?.['account.move'] ?? []).some((m) => Boolean(m.inalterable_hash) && m.journal_id === journal.id);
+}
+
 /** A journal head must only advance to a valid chain; it cannot be removed or rewritten. */
 export function secureHeadsGuard(db, before, after, ctx) {
+  if (before?.restrict_mode_hash_table && !after.restrict_mode_hash_table) {
+    if (journalHasSecuredEntries(db, before) || journalHasSecuredEntries(db, after)) {
+      return 'Cannot turn off Secure Posted Entries with Hash on a journal with secured entries';
+    }
+  }
   const oldHeads = before?.secure_chain_heads ?? [];
   const heads = after.secure_chain_heads ?? [];
   if (new Set(heads.map((h) => h.company_id)).size !== heads.length) return 'Duplicate secure chain head';
