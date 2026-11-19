@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -86,7 +85,18 @@ async function renderSettingsView(initialDb) {
 
 async function withTestServer(env, fn) {
   const directory = await mkdtemp(join(tmpdir(), 'mizan-rates-test-'));
-  const child = spawn(process.execPath, ['server/index.js'], {
+  const runnerScript = `
+    const SAMPLE = ${JSON.stringify(SAMPLE_ECB_XML)};
+    const orig = globalThis.fetch;
+    globalThis.fetch = async (url, ...args) => {
+      if (String(url).includes('ecb.europa.eu')) {
+        return new Response(SAMPLE, { headers: { 'Content-Type': 'application/xml' } });
+      }
+      return orig(url, ...args);
+    };
+    import('./server/index.js');
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', runnerScript], {
     cwd: new URL('..', import.meta.url),
     env: {
       ...process.env,
@@ -382,64 +392,52 @@ test('Settings in local mode hides automatic rate controls', async () => {
 // ---------------------------------------------------------------------------
 
 test('POST /api/currency-rates/update: non-admin gets 403, admin with stubbed fetch gets rates written and response ok', async () => {
-  const fakeEcb = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/xml' });
-    res.end(SAMPLE_ECB_XML);
-  });
-  await new Promise((resolve) => fakeEcb.listen(0, '127.0.0.1', resolve));
-  const ecbPort = fakeEcb.address().port;
-  const ecbUrl = `http://127.0.0.1:${ecbPort}/rates.xml`;
+  await withTestServer({}, async (origin, adminHeaders) => {
+    const publicHeaders = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
 
-  try {
-    await withTestServer({ ECB_URL: ecbUrl }, async (origin, adminHeaders) => {
-      const publicHeaders = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
-
-      // 1. Non-admin user gets 403
-      await fetch(`${origin}/api/users`, {
-        method: 'POST',
-        headers: adminHeaders,
-        body: JSON.stringify({ login: 'clerk', name: 'Clerk', password: 'clerk-password' }),
-      });
-      const clerkLoginRes = await fetch(`${origin}/api/login`, {
-        method: 'POST',
-        headers: publicHeaders,
-        body: JSON.stringify({ login: 'clerk', password: 'clerk-password' }),
-      });
-      const clerkHeaders = { ...publicHeaders, Cookie: clerkLoginRes.headers.get('set-cookie').split(';')[0] };
-
-      const nonAdminRes = await fetch(`${origin}/api/currency-rates/update`, {
-        method: 'POST',
-        headers: clerkHeaders,
-        body: JSON.stringify({ company_id: 1 }),
-      });
-      assert.equal(nonAdminRes.status, 403);
-      const nonAdminBody = await nonAdminRes.json();
-      assert.equal(nonAdminBody.error, 'Admins only');
-
-      // 2. Admin request gets 200 and rates written
-      const adminRes = await fetch(`${origin}/api/currency-rates/update`, {
-        method: 'POST',
-        headers: adminHeaders,
-        body: JSON.stringify({ company_id: 1 }),
-      });
-      assert.equal(adminRes.status, 200);
-      const adminBody = await adminRes.json();
-      assert.equal(adminBody.ok, true);
-      assert.equal(adminBody.date, '2026-11-18');
-
-      // 3. Verify in database that rates were written for company 1
-      const dbRes = await fetch(`${origin}/api/db`, { headers: adminHeaders });
-      assert.equal(dbRes.status, 200);
-      const serverDb = await dbRes.json();
-      const eur = search(serverDb, 'res.currency').find((c) => c.name === 'EUR');
-      assert.ok(eur, 'EUR currency must exist');
-      const rateRow = (eur.rate_ids ?? []).find((r) => r.date === '2026-11-18' && r.company_id === 1);
-      assert.ok(rateRow, 'Rate row for company 1 must be written to server database');
-      assert.ok(rateRow.rate > 0);
+    // 1. Non-admin user gets 403
+    await fetch(`${origin}/api/users`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ login: 'clerk', name: 'Clerk', password: 'clerk-password' }),
     });
-  } finally {
-    fakeEcb.close();
-  }
+    const clerkLoginRes = await fetch(`${origin}/api/login`, {
+      method: 'POST',
+      headers: publicHeaders,
+      body: JSON.stringify({ login: 'clerk', password: 'clerk-password' }),
+    });
+    const clerkHeaders = { ...publicHeaders, Cookie: clerkLoginRes.headers.get('set-cookie').split(';')[0] };
+
+    const nonAdminRes = await fetch(`${origin}/api/currency-rates/update`, {
+      method: 'POST',
+      headers: clerkHeaders,
+      body: JSON.stringify({ company_id: 1 }),
+    });
+    assert.equal(nonAdminRes.status, 403);
+    const nonAdminBody = await nonAdminRes.json();
+    assert.equal(nonAdminBody.error, 'Admins only');
+
+    // 2. Admin request gets 200 and rates written
+    const adminRes = await fetch(`${origin}/api/currency-rates/update`, {
+      method: 'POST',
+      headers: adminHeaders,
+      body: JSON.stringify({ company_id: 1 }),
+    });
+    assert.equal(adminRes.status, 200);
+    const adminBody = await adminRes.json();
+    assert.equal(adminBody.ok, true);
+    assert.equal(adminBody.date, '2026-11-18');
+
+    // 3. Verify in database that rates were written for company 1
+    const dbRes = await fetch(`${origin}/api/db`, { headers: adminHeaders });
+    assert.equal(dbRes.status, 200);
+    const serverDb = await dbRes.json();
+    const eur = search(serverDb, 'res.currency').find((c) => c.name === 'EUR');
+    assert.ok(eur, 'EUR currency must exist');
+    const rateRow = (eur.rate_ids ?? []).find((r) => r.date === '2026-11-18' && r.company_id === 1);
+    assert.ok(rateRow, 'Rate row for company 1 must be written to server database');
+    assert.ok(rateRow.rate > 0);
+  });
 });
 
 // ---------------------------------------------------------------------------

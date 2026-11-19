@@ -3,7 +3,7 @@ import { today } from '../src/models/common.js';
 import { companyCurrencyRecord } from '../src/money.js';
 import { advanceExecutionDate, convertRatesToCompanyCurrency, parseEcbXml, upsertCurrencyRates } from '../src/models/currency.js';
 
-export const ECB_URL = process.env.ECB_URL || 'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml';
+export const ECB_URL = 'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml';
 
 /** Fetch and parse ECB rates. */
 export async function fetchEcbRates(fetchFn = globalThis.fetch) {
