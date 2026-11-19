@@ -639,7 +639,7 @@ function reverseCashBasis(db, allocation, invoice, date) {
     tax_base: (l.tax_base_signed || !(Number(l.debit) || Number(l.credit)) ? -1 : 1) * (Number(l.tax_base) || 0),
   }));
   const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;
-  const reversal = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company, archivedOriginIds: [original.id, invoice.id], includeCashBasisTargets: true });
+  const reversal = postEntry(db, { journal: original.journal_id ?? 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company, archivedOriginIds: [original.id, invoice.id], includeCashBasisTargets: true });
   return write(reversal.db, 'account.move', reversal.id, {
     reversed_entry_id: original.id,
     cash_basis_origin_move_id: invoice.id,
