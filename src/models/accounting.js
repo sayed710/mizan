@@ -1,5 +1,5 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
@@ -1554,10 +1554,20 @@ const {
   price_unit: invoiceLinePrice,
   discount: invoiceLineDiscount,
   tax_id: invoiceLineTaxId,
+  tax_ids: invoiceLineTaxIds,
   tax: invoiceLineTaxPct,
   analytic_account_id: invoiceLineAnalytic,
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
+
+const invoiceLineTaxDomain = (tax, line, db) => {
+  if (tax.active === false) return false;
+  const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
+  if (tax.company_id && tax.company_id !== docCompany) return false;
+  const expectedUse = isPurchase(line) ? 'purchase' : 'sale';
+  return tax.type_tax_use === expectedUse;
+};
+
 const invoiceLineField = {
   ...invoiceLineBase,
   newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
@@ -1579,9 +1589,9 @@ const invoiceLineField = {
       const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
       if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
     }
-    return isDoc && ['product_id', 'account_id'].includes(key)
+    return withTaxIds(isDoc && ['product_id', 'account_id'].includes(key)
       ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
-      : updated;
+      : updated);
   },
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
@@ -1597,17 +1607,9 @@ const invoiceLineField = {
     price_unit: invoiceLinePrice,
     discount: { ...invoiceLineDiscount, optional: 'hide' },
     // A numeric rate without a tax record (e.g. a digitized bill) still taxes the line: show it rather than an empty selector.
-    tax_id: {
-      ...invoiceLineTaxId,
-      domain: (tax, line, db) => {
-        if (tax.active === false) return false;
-        const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
-        if (tax.company_id && tax.company_id !== docCompany) return false;
-        const expectedUse = isPurchase(line) ? 'purchase' : 'sale';
-        return tax.type_tax_use === expectedUse;
-      },
-      rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null),
-    },
+    // The Taxes tags (tax_ids) are the editable field; tax_id is kept as the first tax and stays hidden.
+    tax_id: { ...invoiceLineTaxId, domain: invoiceLineTaxDomain },
+    tax_ids: { ...invoiceLineTaxIds, domain: invoiceLineTaxDomain, rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null) },
     tax: { ...invoiceLineTaxPct, hidden: true },
     ...invoiceLineExtraBase,
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
