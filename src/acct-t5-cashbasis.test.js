@@ -10,6 +10,7 @@ import { applyDiff, diffDb } from './sync.js';
 import { payMove, postMove } from './models/accounting.js';
 import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { accountId } from './models/ledger.js';
+import { reversePayment } from './models/pay.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -248,4 +249,49 @@ test('Item 4: When tax_cash_basis_journal_id is not set, default misc journal is
   const relMove = search(db, 'account.move').find((m) => m.cash_basis_origin_move_id === inv.id);
   assert.ok(relMove, 'Cash basis release entry generated');
   assert.equal(relMove.journal_id, defGeneralId, 'Release entry posted into resolved default general journal');
+});
+
+function cashBasisInvoice(db, date) {
+  const taxAcc = accountId(db, '251000');
+  const tax = create(db, 'account.tax', {
+    name: `Cash Basis Tax ${date}`, type_tax_use: 'sale', amount: 10, amount_type: 'percent', tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: accountId(db, '251100'), ...defaultTaxRepartitionLines(taxAcc),
+  });
+  const inv = create(tax.db, 'account.move', {
+    move_type: 'out_invoice', partner_id: 1, invoice_date: date,
+    invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }],
+  });
+  return { db: postMove(inv.db, inv.id), invoiceId: inv.id };
+}
+
+test('reversing a cash basis payment posts the reversal into the release journal', () => {
+  const journal = create(seed(), 'account.journal', { name: 'Cash Basis Ops', code: 'CBOPS', type: 'general', company_id: 1 });
+  let db = write(journal.db, 'res.company', 1, { tax_cash_basis_journal_id: journal.id });
+  const { db: posted, invoiceId } = cashBasisInvoice(db, '2026-06-01');
+  db = payMove(posted, invoiceId, 110, '2026-06-02');
+  const payment = search(db, 'account.payment').find((p) => p.invoice_id === invoiceId && p.state === 'posted');
+  db = reversePayment(db, payment, '2026-06-05');
+  const releases = search(db, 'account.move').filter((m) => m.cash_basis_origin_move_id === invoiceId);
+  assert.equal(releases.length, 2, 'release and its reversal');
+  assert.ok(releases.every((m) => m.journal_id === journal.id));
+});
+
+test('a journal used as a cash basis journal cannot be archived, retyped or moved to another company', () => {
+  const journal = create(seed(), 'account.journal', { name: 'Cash Basis Ops', code: 'CBOPS', type: 'general', company_id: 1 });
+  const db = write(journal.db, 'res.company', 1, { tax_cash_basis_journal_id: journal.id });
+  const other = createCompany(db, { name: 'Company 2' });
+  for (const change of [{ active: false }, { type: 'sale' }, { company_id: other.id }]) {
+    const attempt = { ...other.db, records: { ...other.db.records, 'account.journal': other.db.records['account.journal'].map((j) => (j.id === journal.id ? { ...j, ...change } : j)) } };
+    assert.throws(() => applyDiff(other.db, diffDb(other.db, attempt), { isAdmin: true }), /Clear the Cash Basis Journal/);
+  }
+  const cleared = write(db, 'res.company', 1, { tax_cash_basis_journal_id: null });
+  assert.equal(read(write(cleared, 'account.journal', journal.id, { active: false }), 'account.journal', journal.id).active, false);
+});
+
+test('a company without a cash basis or default general journal keeps posting releases', () => {
+  const extra = create(seed(), 'account.journal', { name: 'Second General', code: 'GEN2', type: 'general', company_id: 1 });
+  let db = write(extra.db, 'res.company', 1, { default_general_journal_id: null });
+  const { db: posted, invoiceId } = cashBasisInvoice(db, '2026-06-10');
+  db = payMove(posted, invoiceId, 110, '2026-06-11');
+  assert.ok(search(db, 'account.move').some((m) => m.cash_basis_origin_move_id === invoiceId), 'release posted');
 });

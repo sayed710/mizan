@@ -1225,8 +1225,10 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   }));
   const company = read(db, 'res.company', r.company_id ?? 1);
   const companyId = company ? company.id : null;
+  // Configured cash basis journal, then the company's default general journal; companies with neither keep the legacy MISC journal.
   const cashBasisJournalId = company?.tax_cash_basis_journal_id
-    || resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId ?? 1 }, { required: true }).id;
+    || resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId ?? 1 })?.id
+    || 'MISC';
   const posted = postEntry(db, {
     journal: cashBasisJournalId,
     date,
@@ -2003,6 +2005,10 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after) => {
       const companyId = after.company_id ?? 1;
+      const cashBasisOwner = before?.id ? (db.records['res.company'] ?? []).find((c) => c.tax_cash_basis_journal_id === before.id) : null;
+      if (cashBasisOwner && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== cashBasisOwner.id))) {
+        return `Clear the Cash Basis Journal of company ${cashBasisOwner.name} before archiving this journal or changing its type or company`;
+      }
       const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
       if (linkedOnlineAccount) {
         if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
