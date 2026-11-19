@@ -157,7 +157,10 @@ export function create(db, model, vals, ctx = undefined) {
     : res;
 }
 
-const LINE_DETAIL_FIELDS = ['product_id', 'account_id', 'account', 'name', 'label', 'debit', 'credit', 'amount', 'amount_currency', 'qty', 'quantity', 'price_unit', 'price', 'tax_id', 'tax_ids', 'tax_name', 'tax'];
+// Hidden line fields that still matter in an audit: the taxes behind a line's amounts.
+const AUDITED_HIDDEN_LINE_FIELDS = ['tax_id', 'tax_ids', 'tax_name'];
+// Stable line identities, used only when the line schema declares them (the server drops undeclared fields).
+const LINE_IDENTITY_FIELDS = ['line_id', 'id', 'line_identity', 'sale_line_key', 'purchase_line_key'];
 
 /**
  * Per-line description of a one2many change. Lines are matched by their stable identity
@@ -166,11 +169,15 @@ const LINE_DETAIL_FIELDS = ['product_id', 'account_id', 'account', 'name', 'labe
  * Returns null when no described field changed.
  */
 function lineChangeDetail(oldDb, newDb, field, oldLines, newLines) {
-  const keys = LINE_DETAIL_FIELDS.filter((k) => field.fields?.[k]);
+  // Every stored field the user can see on the line, in schema order, plus the audited hidden ones.
+  const keys = Object.entries(field.fields ?? {})
+    .filter(([k, f]) => f.type !== 'one2many' && !f.compute && !LINE_IDENTITY_FIELDS.includes(k) && (!f.hidden || AUDITED_HIDDEN_LINE_FIELDS.includes(k)))
+    .map(([k]) => k);
+  const identityKeys = LINE_IDENTITY_FIELDS.filter((k) => field.fields?.[k]);
   if (!keys.length) return null;
 
   const show = (k, v, sourceDb) => {
-    if (v === null || v === undefined || v === '') return '—';
+    if (v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length)) return '—';
     const sub = field.fields?.[k];
     if (!sub) return String(v);
     if (sub.options) return String(sub.options.find((o) => o[0] === v)?.[1] ?? v);
@@ -186,7 +193,7 @@ function lineChangeDetail(oldDb, newDb, field, oldLines, newLines) {
       }).join(', ');
     }
     if (Array.isArray(v)) return v.join(', ');
-    return String(v);
+    return typeof v === 'object' ? JSON.stringify(v) : String(v);
   };
 
   const labelOf = (k) => field.fields?.[k]?.label ?? k;
@@ -198,8 +205,8 @@ function lineChangeDetail(oldDb, newDb, field, oldLines, newLines) {
 
   const sig = (line) => JSON.stringify(keys.map((k) => line[k] ?? null));
   const idOf = (line) => {
-    const id = line?.line_id ?? line?.id ?? line?.line_identity ?? line?.sale_line_key ?? line?.purchase_line_key;
-    return id === null || id === undefined || id === '' ? null : String(id);
+    const id = identityKeys.map((k) => line?.[k]).find((v) => v !== null && v !== undefined && v !== '');
+    return id === undefined ? null : String(id);
   };
 
   const newById = new Map(newLines.filter((l) => idOf(l) !== null).map((l) => [idOf(l), l]));
