@@ -692,6 +692,13 @@ test('Qodo 4: groupError allows saving groups with existing archived records but
     });
   }, /Rule IDs must identify records available to the group company/);
 
+  // A second rule referencing already-used archived partner 5 MUST be blocked
+  assert.throws(() => {
+    write(db, 'account.report.horizontal.group', group.id, {
+      rule_ids: [{ field: 'partner', partner_ids: [5] }, { field: 'partner', partner_ids: [5] }],
+    });
+  }, /Rule IDs must identify records available to the group company/);
+
   // Creating a new group with archived partner 6 MUST be blocked
   assert.throws(() => {
     create(db, 'account.report.horizontal.group', {
@@ -763,4 +770,12 @@ test('group restricted to a company that is no longer allowed shows no company a
   };
   const group = { company_id: 1, rule_ids: [{ field: 'company', company_ids: [co2.id] }] };
   assert.deepEqual(targetCompanyIds(db, { company_id: 1 }, group, {}), []);
+});
+
+test('compared cash flow keeps the review mode each period asks for', () => {
+  const { db, yr } = cleanReportingFixture();
+  const period = { from: `${yr}-01-01`, to: `${yr}-12-31`, reviewMode: 'all' };
+  assert.equal(cashFlow(db, { ...period, company_id: 1 }).closing, 350);
+  const cols = cashflowColumns(db, [period], { company_id: 1 });
+  assert.deepEqual(cols.totals.find((t) => t.label === 'Cash at End').values, [350]);
 });

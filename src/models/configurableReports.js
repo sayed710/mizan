@@ -155,14 +155,25 @@ function groupError(db, before, group) {
     if (relIds != null && (!Array.isArray(relIds) || relIds.some((id) => !Number.isSafeInteger(id) || id < 1))) {
       return 'Rule IDs must identify records available to the group company';
     }
-    // Archived records may stay on a rule that already used them, but cannot be newly added.
-    const beforeIds = new Set((before?.rule_ids ?? []).filter((r) => r?.field === rule.field).flatMap(idsFor));
     if (idsFor(rule).some((id) => {
       const record = read(db, cfg.model, id);
-      if (!id || !record || (record.company_id && record.company_id !== (group.company_id ?? 1))) return true;
-      if (record.active === false && !beforeIds.has(id)) return true;
-      return false;
+      return !id || !record || (record.company_id && record.company_id !== (group.company_id ?? 1));
     })) return 'Rule IDs must identify records available to the group company';
+  }
+  // Archived records may keep the references they already had, but cannot gain new ones.
+  const references = (rules) => {
+    const counts = new Map();
+    for (const rule of rules ?? []) {
+      for (const id of idsFor(rule)) counts.set(`${rule.field}:${id}`, (counts.get(`${rule.field}:${id}`) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const beforeRefs = references(before?.rule_ids);
+  for (const [key, count] of references(group.rule_ids)) {
+    const [field, id] = key.split(':');
+    if (read(db, HORIZONTAL_GROUP_RULES[field].model, Number(id))?.active === false && count > (beforeRefs.get(key) ?? 0)) {
+      return 'Rule IDs must identify records available to the group company';
+    }
   }
   return null;
 }
