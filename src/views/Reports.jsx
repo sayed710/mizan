@@ -137,6 +137,9 @@ export function resolveTaxReportTemplate(db, companyId, companies = null) {
 
 export function TaxReportTable({ db, period, returnRecord = null }) {
   const safeBase = String(returnRecord?.name || 'tax-return').replace(/[^a-zA-Z0-9_-]+/g, '-');
+  const template = returnRecord?.tax_return_template;
+  const isStatutory = Boolean(template && Object.hasOwn(TAX_RETURN_TEMPLATES, template) && TAX_RETURN_TEMPLATES[template].mode === 'boxes');
+  const variant = isStatutory ? template : 'generic';
   return (
     <div className="list-wrap">
       {returnRecord && (
@@ -147,13 +150,22 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
       )}
       <table className="list report">
         <thead>
-          <tr>
-            <th />
-            <th className="num">{t('Base')}</th>
-            <th className="num">{t('Tax')}</th>
-          </tr>
+          {isStatutory ? (
+            <tr>
+              <th>{t('Box')}</th>
+              <th>{t('Description')}</th>
+              <th className="num">{t('Base')}</th>
+              <th className="num">{t('Tax')}</th>
+            </tr>
+          ) : (
+            <tr>
+              <th />
+              <th className="num">{t('Base')}</th>
+              <th className="num">{t('Tax')}</th>
+            </tr>
+          )}
         </thead>
-        <Tax db={db} period={period} variant="generic" />
+        <Tax key={variant} db={db} period={period} variant={variant} />
       </table>
     </div>
   );

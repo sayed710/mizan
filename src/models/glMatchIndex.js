@@ -31,6 +31,12 @@ export function indexGlMatchings(db) {
     addLine(lineKey(g.credit_move_id, g.credit_line_index), g);
     addMove(g.debit_move_id, g.credit_move_id);
     addMove(g.credit_move_id, g.debit_move_id);
+    if (g.exchange_move_id) {
+      addMove(g.debit_move_id, g.exchange_move_id);
+      addMove(g.credit_move_id, g.exchange_move_id);
+      addMove(g.exchange_move_id, g.debit_move_id);
+      addMove(g.exchange_move_id, g.credit_move_id);
+    }
   }
   return { byLine, byMove, activeIds, links };
 }
@@ -63,6 +69,16 @@ export function entryMatchedAmounts(db, move, index) {
     const absBal = roundOwn(Math.abs((Number(line.debit) || 0) - (Number(line.credit) || 0)));
     const glLinks = index.glMatchings.byLine.get(lineKey(move.id, lineIdx)) ?? [];
     const glMatched = roundOwn(glLinks.reduce((s, g) => s + (Number(g.amount) || 0), 0));
+    const foreign = Boolean(line.currency_id && ownCurrency && line.currency_id !== ownCurrency.id);
+    const foreignCurr = foreign ? read(db, 'res.currency', line.currency_id) : null;
+    const roundForeign = (v) => (foreignCurr ? roundCurrency(v, foreignCurr) : roundOwn(v));
+    const isDebit = (Number(line.debit) || 0) - (Number(line.credit) || 0) > 0;
+    const hasCurrencyLinks = foreign && glLinks.length > 0 && glLinks.every((g) => (
+      isDebit ? g.debit_amount_currency != null : g.credit_amount_currency != null
+    ));
+    const glMatchedCurrency = hasCurrencyLinks
+      ? roundForeign(glLinks.reduce((s, g) => s + (Number(isDebit ? g.debit_amount_currency : g.credit_amount_currency) || 0), 0))
+      : null;
     let leftCap = Math.max(0, roundOwn(absBal - glMatched));
     let legacyMatched = 0;
     const account = read(db, 'account.account', line.account_id);
@@ -78,11 +94,19 @@ export function entryMatchedAmounts(db, move, index) {
         if (isCurrencyZero(leftCap, ownCurrency)) break;
       }
     }
+    const origCurrAbs = foreign ? Math.abs(Number(line.amount_currency) || 0) : 0;
+    const legacyMatchedCurrency = (foreign && absBal > 1e-9 && legacyMatched > 0)
+      ? roundForeign(legacyMatched * origCurrAbs / absBal)
+      : 0;
     return {
       absBal,
       glMatched,
+      legacyMatched,
+      legacyMatchedCurrency,
       matchedTotal: roundOwn(glMatched + legacyMatched),
       hasAnyLink: glLinks.length > 0 || legacyMatched > 0,
+      hasCurrencyLinks,
+      glMatchedCurrency,
     };
   });
 }
