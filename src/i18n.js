@@ -3222,6 +3222,7 @@ const ar = {
   'Percentage of Price Tax Included': 'نسبة من السعر شاملة الضريبة',
   'Fiscal position destination account must belong to the fiscal position company': 'يجب أن يتبع الحساب البديل في الوضع المالي شركة الوضع المالي',
   'Division tax rate cannot be 100%': 'لا يمكن أن تكون نسبة الضريبة الشاملة في السعر 100%',
+  'Journal Entry Number': 'رقم قيد اليومية',
   'Cannot turn off Secure Posted Entries with Hash on a journal with secured entries': 'لا يمكن إيقاف تأمين القيود المرحلة بالتجزئة في دفتر يحتوي على قيود مؤمَّنة',
   'Cash Basis Journal': 'دفتر الأساس النقدي',
   'General journal used for cash-basis tax release entries.': 'دفتر القيود العامة المستخدم لقيود تحرير ضريبة الأساس النقدي.',

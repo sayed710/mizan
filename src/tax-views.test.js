@@ -297,6 +297,34 @@ test('invoice tax line labels and print breakdown use invoice_label when set whi
   }
 });
 
+test('printed invoice Taxes column shows the invoice label for legacy tax_id-only lines and every selected tax', async () => {
+  const base = seed();
+  const vat = create(base, 'account.tax', { name: 'Internal VAT', invoice_label: '14% VAT', type_tax_use: 'sale', amount: 14 });
+  const stamp = create(vat.db, 'account.tax', { name: 'Internal Stamp', invoice_label: 'Stamp', type_tax_use: 'sale', amount: 1 });
+  const vatSnap = taxSnapshot(read(stamp.db, 'account.tax', vat.id));
+  const stampSnap = taxSnapshot(read(stamp.db, 'account.tax', stamp.id));
+  const inv = create(stamp.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_line_ids: [
+      { product_id: 1, qty: 1, price_unit: 100, ...vatSnap },
+      { product_id: 1, qty: 1, price_unit: 50, ...vatSnap, tax_ids: [vat.id, stamp.id], tax_breakdown: [vatSnap, stampSnap] },
+    ],
+  });
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+  const ctx = await mountView((React) => React.createElement(PrintDoc, { model: 'account.move', id: inv.id }), inv.db);
+  try {
+    const all = (node, tag) => [...(node.tagName === tag ? [node] : []), ...(node.childNodes ?? []).flatMap((c) => all(c, tag))];
+    const head = all(ctx.host, 'TH').map((th) => th.textContent);
+    const col = head.indexOf('Taxes');
+    assert.ok(col >= 0, 'printed lines have a Taxes column');
+    const cells = all(find(ctx.host, (n) => n.tagName === 'TBODY'), 'TR').map((tr) => all(tr, 'TD')[col].textContent);
+    assert.deepEqual(cells, ['14% VAT', '14% VAT, Stamp']);
+  } finally {
+    await ctx.done();
+  }
+});
+
 test('taxSnapshot carries invoice_label for invoice presentation while keeping tax_name and grouping by tax_id', async () => {
   const base = seed();
   const taxA = create(base, 'account.tax', {
