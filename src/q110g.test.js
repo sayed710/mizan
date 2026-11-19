@@ -5,7 +5,7 @@ import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
-import { accountId } from './models/ledger.js';
+import { accountId, mapLineAccount } from './models/ledger.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -301,7 +301,8 @@ test('finding 16: fiscal account rules apply to original selected account before
   });
   db = fp.db;
 
-  // Invoice in Company 2 with line referencing inc1.id
+  // Invoice in Company 2 with the selected Company 1 account mapped once, before company resolution.
+  const mappedInc1 = mapLineAccount(db, { fiscal_position_id: fp.id }, inc1.id);
   const inv = create(db, 'account.move', {
     move_type: 'out_invoice',
     company_id: company2Id,
@@ -309,7 +310,7 @@ test('finding 16: fiscal account rules apply to original selected account before
     partner_id: 1,
     fiscal_position_id: fp.id,
     invoice_date: '2026-11-01',
-    invoice_line_ids: [{ name: 'Export Goods', qty: 1, price_unit: 100, tax: 0, account_id: inc1.id }],
+    invoice_line_ids: [{ name: 'Export Goods', qty: 1, price_unit: 100, tax: 0, account_id: mappedInc1 }],
   });
   db = inv.db;
 

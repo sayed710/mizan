@@ -12,6 +12,8 @@ import { recipientBankCompanyError } from './company.js';
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
 
+export const CHECK_REGISTER_STATES = ['Posted', 'Issued', 'Voided', 'Reversed', 'Cancelled'];
+
 /** Normalize posted batch checks and individual check payment history for the register. */
 export function checkRegisterRows(db, batches = db.records['account.batch.payment'] ?? [], payments = db.records['account.payment'] ?? []) {
   const postedBatches = batches.filter((batch) => batch.state === 'posted' && batch.batch_type === 'outbound');
@@ -68,7 +70,7 @@ export function checkRegisterRows(db, batches = db.records['account.batch.paymen
   return [...batchRows, ...individualRows];
 }
 
-function batchCurrency(db, batch) {
+export function batchCurrency(db, batch) {
   const lines = batch.lines ?? [];
   if (!lines.length) {
     const companyId = batch.company_id ?? read(db, 'account.journal', batch.journal_id)?.company_id;
@@ -244,6 +246,13 @@ export function checkAmountDisplay(db, payment, invoice, amount) {
   return { currency, numeric: formatCurrency(amount, currency), words: amountInWords(amount, currency.currency_unit_label ?? currency.unit_name) };
 }
 
+/** Check whether all active payment lines in a batch are matched in bank reconciliation. */
+export function isBatchReconciled(db, batch) {
+  if (!db || !batch) return false;
+  const lines = (batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id);
+  return lines.length > 0 && lines.every((l) => isPaymentMatched(db, l.payment_id));
+}
+
 export const paymentModels = {
   'account.batch.payment': {
     label: 'Batch Payments',
@@ -255,7 +264,32 @@ export const paymentModels = {
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', compute: (r, db) => batchCurrency(db, r).id },
       currency_warning: { type: 'char', label: 'Currency Status', readonly: true, compute: (r, db) => batchCurrency(db, r).error ?? '' },
-      state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted']] },
+      state: {
+        type: 'selection',
+        label: 'Status',
+        tracking: true,
+        options: [
+          ['draft', 'Draft'],
+          ['posted', 'Posted'],
+        ],
+      },
+      reconciled: {
+        type: 'boolean',
+        label: 'Reconciled',
+        readonly: true,
+        compute: (r, db) => r.state === 'posted' && isBatchReconciled(db, r),
+      },
+      status: {
+        type: 'selection',
+        label: 'Status',
+        readonly: true,
+        options: [
+          ['draft', 'Draft'],
+          ['posted', 'Posted'],
+          ['reconciled', 'Reconciled'],
+        ],
+        compute: (r, db) => (r.state === 'posted' && isBatchReconciled(db, r) ? 'reconciled' : r.state),
+      },
       lines: {
         type: 'one2many',
         label: 'Payment Lines',
@@ -284,15 +318,16 @@ export const paymentModels = {
       } },
     },
     defaults: () => ({ name: 'New', date: today(), state: 'draft', lines: [] }),
-    kanban: { title: 'name', lines: ['batch_type', 'date', 'amount_total'], badge: 'state' },
-    list: ['name', 'batch_type', 'date', 'amount_total', 'state'],
+    kanban: { title: 'name', lines: ['batch_type', 'date', 'amount_total'], badge: 'status' },
+    list: ['name', 'batch_type', 'date', 'amount_total', 'status'],
     form: {
-      statusbar: 'state',
+      statusbar: 'status',
       lockedWhen: (r) => r.state === 'posted',
       buttons: [
         { label: 'Add Open Invoices', when: (r) => r.state === 'draft', run: (db, r) => ({ db: fillOpenInvoices(db, r) }) },
         { label: 'Validate', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postBatch(db, r) }) },
         { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
+        { label: 'Print Deposit Slip', when: (r) => r.state === 'posted' && r.batch_type === 'inbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],
       title: 'name',
       groups: [['batch_type'], ['date', 'journal_id', 'check_number_start'], ['currency_id', 'amount_total', 'currency_warning']],

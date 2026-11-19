@@ -326,7 +326,7 @@ test('incoterms: seeded 11 Incoterms 2020, order to invoice flow, and print layo
 
 test('tax units: validation requires >= 2 companies and main company inclusion', () => {
   let db = seed();
-  db = create(db, 'res.company', { name: 'Second company' }).db;
+  db = create(db, 'res.company', { name: 'Second company', currency_id: read(db, 'res.company', 1).currency_id }).db;
   const taxUnitModel = models['account.tax.unit'];
   assert.ok(taxUnitModel);
 
