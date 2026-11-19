@@ -3296,6 +3296,8 @@ const ar = {
   'Exchange Difference Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر فروق أسعار الصرف دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Reconciliation model does not apply to this transaction': 'نموذج التسوية لا ينطبق على هذه المعاملة',
   'Deposit slips can only be printed for posted batch payments.': 'يمكن طباعة إشعارات الإيداع لدفعات الدفع المجمعة المرحلة فقط',
+  'Key Performance Indicator': 'مؤشر الأداء الرئيسي',
+  Metric: 'المؤشر',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

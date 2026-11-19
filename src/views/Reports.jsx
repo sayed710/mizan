@@ -20,7 +20,7 @@ import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
-import { cashflowColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
+import { cashflowAnalyticColumns, cashflowColumns, executiveColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage } from './reportNavigation.js';
 export { PERIODS };
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -34,13 +34,28 @@ import { ConfigurableReportPage } from './ConfigurableReport.jsx';
 
 // Periods are defined in reportNavigation.js and re-exported above.
 
-function ComparisonCells({ values, variance, showVariance = true }) {
-  const cells = values.map((value, i) => <td key={i} className="num">{money(value)}</td>);
+function ComparisonCells({ values, variance, showVariance = true, format = null }) {
+  const formatVal = (v) => {
+    if (v == null) return '—';
+    if (format === 'ratio') return Number(v).toFixed(2);
+    if (format === 'pct') return `${v}${t('%')}`;
+    if (format === 'int') return String(v);
+    return money(v);
+  };
+  const formatDiff = (amt) => {
+    if (amt == null) return '';
+    if (format === 'ratio') return `${amt > 0 ? '+' : ''}${Number(amt).toFixed(2)}`;
+    if (format === 'pct') return `${amt > 0 ? '+' : ''}${amt}${t('%')}`;
+    if (format === 'int') return `${amt > 0 ? '+' : ''}${amt}`;
+    return money(amt);
+  };
+  const cells = values.map((value, i) => <td key={i} className="num">{formatVal(value)}</td>);
   if (!showVariance) return <>{cells}</>;
   const previous = values.at(-2);
-  const amount = variance?.amount ?? Math.round((values.at(-1) - previous) * 100) / 100;
-  const pct = variance ? variance.pct : previous ? Math.round(amount / Math.abs(previous) * 10000) / 100 : null;
-  return <>{cells}<td className="num">{money(amount)}</td><td className="num">{pct == null ? t('n/a') : `${pct}${t('%')}`}</td></>;
+  const current = values.at(-1);
+  const amount = variance?.amount ?? (previous == null || current == null ? null : Math.round((current - previous) * 100) / 100);
+  const pct = variance ? variance.pct : (amount != null && previous ? Math.round(amount / Math.abs(previous) * 10000) / 100 : null);
+  return <>{cells}<td className="num">{formatDiff(amount)}</td><td className="num">{pct == null ? t('n/a') : `${pct}${t('%')}`}</td></>;
 }
 
 function Section({ title, total, rows, sign = 1, totals, variance, showVariance = true }) {
@@ -61,8 +76,11 @@ function Section({ title, total, rows, sign = 1, totals, variance, showVariance 
   );
 }
 
-const Total = ({ label, value, strong, values, variance, showVariance = true }) => (
-  <tr className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td>{values ? <ComparisonCells values={values} variance={variance} showVariance={showVariance} /> : <td className="num">{money(value)}</td>}</tr>
+const Total = ({ label, value, strong, values, variance, showVariance = true, format = null }) => (
+  <tr className={`rep-total ${strong ? 'strong' : ''}`}>
+    <td>{t(label)}</td>
+    {values ? <ComparisonCells values={values} variance={variance} showVariance={showVariance} format={format} /> : <td className="num">{money(value)}</td>}
+  </tr>
 );
 
 function Comparison({ data }) {
@@ -708,21 +726,34 @@ function ReportPage({ leaf }) {
   const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : cols;
   const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
-  const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && periodKey !== 'all';
+  const comparable = ['pnl', 'balance', 'cashflow', 'executive'].includes(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
   const effectivePeriod = showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period;
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
-  const horizontalGroups = [];
+  const primaryCompanyId = selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany);
+  // Like the statement reports, the cash flow offers the groups not limited to specific reports.
+  const horizontalGroups = comparable && leaf.report === 'cashflow'
+    ? search(companyDb, 'account.report.horizontal.group').filter((g) => (g.company_id ?? 1) === primaryCompanyId && !(g.report_ids ?? []).length)
+    : [];
   const canComputePeriods = periodKey !== 'custom' || (validDate(period.from) && validDate(period.to) && period.from <= period.to);
   const periods = comparable && comparison !== 'none' && canComputePeriods ? periodsFor(periodKey, comparison, period) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
   const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner', { includeArchived: true }).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
+  const horizontalGroup = horizontalGroups.find((g) => g.id === Number(horizontalGroupId));
   const data = periods && leaf.report === 'cashflow'
     ? cashflowColumns(db, periods, {
       analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
     })
-    : null;
+    : periods && leaf.report === 'executive'
+      ? executiveColumns(db, periods, {
+        analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
+      })
+      : horizontalGroup && leaf.report === 'cashflow'
+        ? cashflowAnalyticColumns(db, horizontalGroup, period, {
+          analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
+        })
+        : null;
   const tableRef = useRef(null);
   const isAudit = leaf.report === 'audit';
   const [serverAuditLog, setServerAuditLog] = useState(undefined);
