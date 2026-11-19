@@ -1,9 +1,9 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
-import { create, postNote, read, search, write } from '../orm.js';
+import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
-import { appendDocumentSettlement, applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
-import { datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
+import { appendDocumentSettlement, applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
+import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
@@ -18,6 +18,7 @@ import { openActivitiesText } from './mail.js';
 import { hasMultiCurrency } from './money.js';
 
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+const shared = (id) => id == null || id === false || id === '';
 
 // Which open documents a payment settles, by direction and partner side.
 const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
@@ -253,10 +254,128 @@ const invoiceAfterPayment = (move, date) => Boolean(move.invoice_date && move.in
 
 /**
  * Post a draft payment. With an invoice it pays that invoice; otherwise one entry is booked for the whole amount
- * and, when `autoAllocate` is true (default), applied to the partner's open documents, oldest due first. Any rest stays as an outstanding credit.
+ * and stays as unapplied credit (matching happens explicitly via reconciliation or credit widgets).
  */
-export function postPayment(db, p, { autoAllocate = true } = {}) {
+export function postPayment(db, p) {
   if (p.state !== 'draft') throw new Error('Only draft payments can be confirmed');
+
+  if (p.is_internal_transfer) {
+    if (!Number.isFinite(Number(p.amount)) || !(Number(p.amount) > 0)) {
+      throw new Error('The amount must be a finite positive number');
+    }
+    const companyId = p.company_id ?? 1;
+    const company = read(db, 'res.company', companyId);
+    if (!company?.transfer_account_id) {
+      throw new Error('Internal transfer account is not set for this company');
+    }
+    const transferAccount = read(db, 'account.account', company.transfer_account_id);
+    if (!transferAccount || transferAccount.active === false || (!shared(transferAccount.company_id) && transferAccount.company_id !== companyId) || transferAccount.account_type !== 'asset_current' || !transferAccount.reconcile) {
+      throw new Error('Internal transfer account must be an active, reconcilable current-asset account of the company');
+    }
+    if (!p.journal_id) throw new Error('Select a source journal');
+    if (!p.destination_journal_id) throw new Error('Select a destination journal');
+    if (p.journal_id === p.destination_journal_id) {
+      throw new Error('The destination journal must be different from the source journal');
+    }
+
+    const sourceJournal = read(db, 'account.journal', p.journal_id);
+    const destJournal = read(db, 'account.journal', p.destination_journal_id);
+    if (!sourceJournal || !['bank', 'cash'].includes(sourceJournal.type)) {
+      throw new Error('The source journal must be a bank or cash journal');
+    }
+    if (!destJournal || !['bank', 'cash'].includes(destJournal.type)) {
+      throw new Error('The destination journal must be a bank or cash journal');
+    }
+    if ((sourceJournal.company_id ?? 1) !== companyId || (destJournal.company_id ?? 1) !== companyId) {
+      throw new Error('The destination journal must belong to the same company');
+    }
+
+    const date = p.date ?? today();
+    const companyCurrency = companyCurrencyRecord(db, companyId);
+    const companyRound = (n) => roundCurrency(n, companyCurrency);
+    const isForeignCurrency = !!p.currency_id && p.currency_id !== companyCurrency.id;
+    const rawAmount = Number(p.amount);
+    const amount = isForeignCurrency
+      ? toCompany(db, p.currency_id, rawAmount, date, companyId)
+      : companyRound(rawAmount);
+
+    const sourceVia = paymentJournal(db, sourceJournal.id, companyId);
+    const sourceOutstanding = outstandingAccount(db, sourceJournal, companyId, false);
+    const sourceLiquidity = sourceOutstanding ?? sourceVia.accountId;
+
+    const destVia = paymentJournal(db, destJournal.id, companyId);
+    const destOutstanding = outstandingAccount(db, destJournal, companyId, true);
+    const destLiquidity = destOutstanding ?? destVia.accountId;
+
+    const explicitName = p.name && p.name !== '/' ? p.name : null;
+    const preName = explicitName ?? paymentName(db, sourceJournal, date);
+
+    const payCurrency = isForeignCurrency ? read(db, 'res.currency', p.currency_id) : null;
+    const foreignDocAmount = isForeignCurrency ? roundCurrency(rawAmount, payCurrency) : null;
+    const transferFx = (sign) =>
+      isForeignCurrency ? { currency_id: p.currency_id, amount_currency: sign * foreignDocAmount } : {};
+
+    const sourceLiqCurrency = sourceJournal.currency_id ?? p.currency_id ?? null;
+    const sourceLiqFx = (sign) => liquidityForeignFields(db, {
+      currencyId: sourceLiqCurrency, companyAmount: amount * sign, date, companyId,
+      docAmount: isForeignCurrency && sourceLiqCurrency === p.currency_id ? sign * foreignDocAmount : null,
+    });
+
+    const destLiqCurrency = destJournal.currency_id ?? p.currency_id ?? null;
+    const destLiqFx = (sign) => liquidityForeignFields(db, {
+      currencyId: destLiqCurrency, companyAmount: amount * sign, date, companyId,
+      docAmount: isForeignCurrency && destLiqCurrency === p.currency_id ? sign * foreignDocAmount : null,
+    });
+
+    const { db: sourceBooked, id: sourceMoveId } = postEntry(db, {
+      journal: sourceVia.code,
+      journal_id: sourceJournal.id,
+      date,
+      ref: p.memo || preName,
+      company: companyId,
+      lines: [
+        { account: transferAccount.id, debit: amount, credit: 0, partner_id: null, ...transferFx(1) },
+        { account: sourceLiquidity, debit: 0, credit: amount, partner_id: null, ...sourceLiqFx(-1) },
+      ],
+    });
+
+    const { db: destBooked, id: destMoveId } = postEntry(sourceBooked, {
+      journal: destVia.code,
+      journal_id: destJournal.id,
+      date,
+      ref: p.memo || preName,
+      company: companyId,
+      lines: [
+        { account: destLiquidity, debit: amount, credit: 0, partner_id: null, ...destLiqFx(1) },
+        { account: transferAccount.id, debit: 0, credit: amount, partner_id: null, ...transferFx(-1) },
+      ],
+    });
+
+    let recDb = destBooked;
+
+    const sourceEntry = read(recDb, 'account.move', sourceMoveId);
+    const destEntry = read(recDb, 'account.move', destMoveId);
+    const sourceLineIdx = sourceEntry.line_ids.findIndex((l) => l.account_id === transferAccount.id && Number(l.debit) > 0);
+    const destLineIdx = destEntry.line_ids.findIndex((l) => l.account_id === transferAccount.id && Number(l.credit) > 0);
+
+    recDb = reconcileLedgerItems(recDb, [
+      { move_id: sourceMoveId, line_index: sourceLineIdx, line_identity: journalItemIdentity(sourceEntry.line_ids[sourceLineIdx]) },
+      { move_id: destMoveId, line_index: destLineIdx, line_identity: journalItemIdentity(destEntry.line_ids[destLineIdx]) },
+    ], { date });
+
+    const name = explicitName ?? paymentName(recDb, sourceJournal, date, read(recDb, 'account.move', sourceMoveId).name);
+
+    return write(recDb, 'account.payment', p.id, {
+      name,
+      state: 'posted',
+      move_id: sourceMoveId,
+      destination_move_id: destMoveId,
+      journal_id: sourceJournal.id,
+      outstanding_account_id: sourceOutstanding,
+      unapplied: 0,
+    });
+  }
+
   if (!p.partner_id) throw new Error('Set the partner');
   if (!Number.isFinite(Number(p.amount)) || !(Number(p.amount) > 0)) throw new Error('The amount must be a finite positive number');
   const bankError = recipientBankCompanyError(db, p);
@@ -283,13 +402,6 @@ export function postPayment(db, p, { autoAllocate = true } = {}) {
   const explicitName = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : null;
   const preName = explicitName ?? paymentName(db, journalRecord, date);
   const isTaxOrDirect = currentPayment.is_tax_payment || currentPayment.return_id || currentPayment.destination_account_id || currentPayment.destination_account_code;
-  const open = !autoAllocate || isTaxOrDirect
-    ? []
-    : search(db, 'account.move')
-        .filter((m) => m.state === 'posted' && m.partner_id === currentPayment.partner_id && (m.company_id ?? 1) === (currentPayment.company_id ?? 1) && m.invoice_date <= date && m.amount_residual > 0 && SETTLES[currentPayment.partner_type]?.[currentPayment.payment_type]?.includes(m.move_type)
-          && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id)
-          && shouldBePaid(db, m) !== 'exception')
-        .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = currentPayment.payment_type === 'inbound';
   const journal = read(db, 'account.journal', via.id);
   const outstanding = outstandingAccount(db, journal, currentPayment.company_id ?? 1, inbound);
@@ -352,19 +464,14 @@ export function postPayment(db, p, { autoAllocate = true } = {}) {
     tax_return_id: currentPayment.return_id ?? null,
   });
   const name = explicitName ?? paymentName(booked, journal, date, read(booked, 'account.move', moveId).name);
-  // Register the source before allocations so all callers can derive its currency semantics.
-  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, journal_id: via.id, outstanding_account_id: outstanding, unapplied: isTaxOrDirect ? 0 : amount });
-  // Apply a company-currency payment against the recorded company balance of each document.
-  const { db: applied, left } = open.reduce((acc, m) => {
-    if (!(acc.left > 0)) return acc;
-    const res = allocatePaymentToInvoice(acc.db, { ...currentPayment, name, move_id: moveId }, m, acc.left, date);
-    return { db: res.db, left: res.left };
-  }, { db: registered, left: amount });
-  const settled = taxClosing ? write(applied, 'account.move', taxClosing.move.id, {
+  const settled = taxClosing ? write(booked, 'account.move', taxClosing.move.id, {
     amount_paid: amount, payment_date: date,
     payments: [...(taxClosing.move.payments ?? []), { date, amount, move_id: moveId, company_amount: amount, line_index: taxClosing.index }],
-  }) : applied;
-  return write(settled, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: isTaxOrDirect ? 0 : left });
+  }) : booked;
+  return write(settled, 'account.payment', p.id, {
+    name, state: 'posted', move_id: moveId, journal_id: via.id, outstanding_account_id: outstanding,
+    unapplied: isTaxOrDirect ? 0 : amount,
+  });
 }
 
 /**
@@ -698,6 +805,40 @@ export function reverseWriteoff(db, invoiceId, moveId, date, { lineIndex = null 
 export function reversePayment(db, p, date = today(), options = {}) {
   if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   if (p.return_id || p.is_tax_payment) throw new Error('Tax return payments cannot be reversed independently');
+
+  if (p.is_internal_transfer) {
+    if (!p.destination_move_id) throw new Error('Internal transfer destination entry is missing');
+    const sourceEntry = read(db, 'account.move', p.move_id);
+    const destEntry = read(db, 'account.move', p.destination_move_id);
+    if (!sourceEntry || !destEntry) throw new Error('Transfer entries not found');
+
+    const fromBank = isPaymentMatched(db, p, options?.excludeLineId);
+    if (fromBank) throw new Error('This payment is linked to a reconciled bank transaction; unreconcile the transaction before reversing it');
+    if (date < (p.date ?? sourceEntry.invoice_date)) throw new Error('Reversal date cannot be before the payment date');
+
+    const partials = (db.records['account.partial.reconcile'] ?? []).filter(
+      (g) => g && g.active !== false && !g.reversed
+        && ((g.debit_move_id === sourceEntry.id && g.credit_move_id === destEntry.id)
+          || (g.debit_move_id === destEntry.id && g.credit_move_id === sourceEntry.id)),
+    );
+    let next = db;
+    for (const g of partials) {
+      next = write(next, 'account.partial.reconcile', g.id, {
+        reversed: true,
+        active: false,
+        reversal_date: date,
+      });
+    }
+
+    const reversedSource = reverseEntry(next, sourceEntry, date);
+    next = reversedSource.db;
+    const reversedDest = reverseEntry(next, destEntry, date);
+    next = reversedDest.db;
+
+    next = write(next, 'account.payment', p.id, { state: 'reversed', unapplied: 0 });
+    return postNote(next, 'account.payment', p.id, `Internal transfer reversed by ${read(next, 'account.move', reversedSource.id).name} and ${read(next, 'account.move', reversedDest.id).name}`);
+  }
+
   const entry = read(db, 'account.move', p.move_id);
   const fromBank = isPaymentMatched(db, p, options?.excludeLineId);
   const missingBankLink = p.invoice_id && search(db, 'account.bank.statement.line').some((l) => l.state === 'reconciled' && l.move_id === p.invoice_id && !l.payment_move_id && (!options?.excludeLineId || l.id !== options.excludeLineId));
@@ -760,6 +901,74 @@ export function reversePayment(db, p, date = today(), options = {}) {
     next = write(next, 'account.batch.payment', batch.id, { lines: batch.lines.map((l) => l.payment_id === p.id ? { ...l, cancelled: true } : l) });
   }
   return postNote(next, 'account.payment', p.id, `Reversed by ${reversal.name}`);
+}
+
+const inPostedBatch = (db, payment) => (db.records['account.batch.payment'] ?? [])
+  .some((b) => b.state === 'posted' && (b.lines ?? []).some((l) => !l.cancelled && l.payment_id === payment.id));
+
+/** Entries of a payment that a reset to draft would undo. */
+const paymentEntries = (db, payment) => [payment.move_id, payment.destination_move_id].filter(Boolean)
+  .map((id) => read(db, 'account.move', id)).filter(Boolean);
+
+/**
+ * Why a payment cannot go back to draft, or null. Cancelled payments always can; posted ones only while
+ * nothing is matched, batched, bank-matched, hashed or locked. Reconciled payments keep only Reverse.
+ */
+export function resetToDraftError(db, payment) {
+  if (!payment) return 'Payment not found';
+  if (payment.state === 'cancel') return null;
+  if (payment.state === 'reversed') return 'Reversed payments cannot be reset to draft';
+  if (payment.state !== 'posted') return 'Only posted or cancelled payments can be reset to draft';
+  const entries = paymentEntries(db, payment);
+  if (isPaymentMatched(db, payment) || entries.some((m) => bookedByBank(db, m.id))) return 'A payment linked to a reconciled bank transaction cannot be reset to draft';
+  if (inPostedBatch(db, payment)) return 'A payment in a posted batch cannot be reset to draft';
+  const lock = recordLockDate(db, payment);
+  if (lock && String(payment.date ?? today()) <= lock) return `The period up to ${lock} is locked`;
+  for (const move of entries) {
+    if (move.inalterable_hash) return 'Secured entries cannot be reset to draft or cancelled';
+    const moveLock = recordLockDate(db, move);
+    if (moveLock && moveDate(move) <= moveLock) return `The period up to ${moveLock} is locked`;
+  }
+  const settling = settlingEntries(db);
+  const ids = new Set(entries.map((m) => m.id));
+  const reconciled = paymentSettledMoves(db, payment).length > 0
+    || entries.some((m) => settling.has(m.id) || reconciledJournalItems(db, m).some((l) => l.reconciled === true))
+    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (ids.has(g.debit_move_id) || ids.has(g.credit_move_id)))
+    || (!payment.is_internal_transfer && Number(payment.amount) > 0 && Number(payment.unapplied) < Number(payment.amount));
+  return reconciled ? 'Reconciled payments cannot be reset to draft' : null;
+}
+
+/** Reset a payment back to draft: its entries are deleted, or cancelled where the move rules keep them. */
+export function resetPaymentToDraft(db, paymentOrId) {
+  const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
+  if (payment?.state === 'draft') return db;
+  const error = resetToDraftError(db, payment);
+  if (error) throw new Error(error);
+
+  let next = db;
+  const movesToUndo = [payment.move_id, payment.destination_move_id].filter(Boolean);
+  for (const moveId of movesToUndo) {
+    const move = read(next, 'account.move', moveId);
+    if (!move) continue;
+    if (move.state === 'posted') {
+      next = write(next, 'account.move', move.id, { state: 'draft' });
+    }
+    const delErr = moveDeleteGuard(next, read(next, 'account.move', move.id));
+    if (!delErr) {
+      next = unlink(next, 'account.move', [move.id]);
+    } else {
+      next = write(next, 'account.move', move.id, { state: 'cancel' });
+    }
+  }
+
+  next = write(next, 'account.payment', payment.id, {
+    state: 'draft',
+    move_id: null,
+    ...(payment.destination_move_id ? { destination_move_id: null } : {}),
+    unapplied: 0,
+  });
+
+  return postNote(next, 'account.payment', payment.id, 'Reset to draft');
 }
 
 /** Every check number a journal has ever consumed: issued, printed on a batch line, or voided by a reprint. */
@@ -949,19 +1158,71 @@ const validCheckWrite = (db, before, after) => {
     && after.check_number === nextCheckNumber(restored, before.journal_id);
 };
 
+function internalTransferInvariant(db, after) {
+  if (after.state !== 'posted') return null;
+  if (!Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) {
+    return 'An internal transfer needs a positive amount';
+  }
+  if (!after.move_id || !after.destination_move_id) {
+    return 'A posted internal transfer needs source and destination journal entries';
+  }
+  const sourceEntry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
+  const destEntry = (db.records['account.move'] ?? []).find((m) => m.id === after.destination_move_id);
+  if (sourceEntry?.state !== 'posted' || sourceEntry.move_type !== 'entry' || destEntry?.state !== 'posted' || destEntry.move_type !== 'entry') {
+    return 'A posted internal transfer needs its posted journal entries';
+  }
+  const co = read(db, 'res.company', after.company_id ?? 1);
+  if (!co?.transfer_account_id) return 'Internal transfer account is not set for this company';
+  const ta = read(db, 'account.account', co.transfer_account_id);
+  if (!ta || ta.active === false || ta.account_type !== 'asset_current') {
+    return 'Internal transfer account must be an active current-asset account of the company';
+  }
+  const partials = (db.records['account.partial.reconcile'] ?? []).filter(
+    (g) => g && g.active !== false && !g.reversed
+      && ((g.debit_move_id === sourceEntry.id && g.credit_move_id === destEntry.id)
+        || (g.debit_move_id === destEntry.id && g.credit_move_id === sourceEntry.id)),
+  );
+  if (!partials.length) return 'Transfer account entries must be reconciled together';
+  return null;
+}
+
 export const payModels = {
   'account.payment': {
     label: 'Payments',
     auditDelete: true,
-    guard: (db, before, after, ctx) => (!validCheckWrite(db, before, after) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
+    guard: (db, before, after, ctx) => {
+      if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
+      if (before && before.state !== 'draft' && after.state === 'draft') {
+        const resetError = resetToDraftError(db, before);
+        if (resetError) return resetError;
+      }
+      return datedLockGuard([
+        'name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id',
+        'partner_type', 'journal_id', 'move_id', 'destination_move_id', 'destination_journal_id',
+        'is_internal_transfer', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active',
+      ], (p) => p.state === 'posted')(db, before, after, ctx);
+    },
     protectDelete: (db, payment, staged) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged),
-    invariant: paymentInvariant,
+    invariant: (db, after, before, stored) => (
+      after.is_internal_transfer
+        ? internalTransferInvariant(db, after)
+        : paymentInvariant(db, after, before, stored)
+    ),
     fields: {
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       payment_type: { type: 'selection', label: 'Payment Type', tracking: true, widget: 'radio', options: [['outbound', 'Send'], ['inbound', 'Receive']] },
       partner_type: { type: 'selection', label: 'Partner Type', tracking: true, options: [['customer', 'Customer'], ['supplier', 'Vendor']] },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
+      is_internal_transfer: { type: 'boolean', label: 'Internal Transfer', tracking: true },
+      destination_journal_id: {
+        type: 'many2one',
+        relation: 'account.journal',
+        label: 'Destination Journal',
+        tracking: true,
+        domain: (j, r) => ['bank', 'cash'].includes(j.type) && j.active !== false && (j.company_id ?? 1) === (r?.company_id ?? 1) && j.id !== r?.journal_id,
+      },
+      destination_move_id: { type: 'many2one', relation: 'account.move', label: 'Destination Entry', readonly: true },
       amount: { type: 'monetary', label: 'Amount', tracking: true },
       amount_signed: { type: 'monetary', label: 'Amount in Currency', compute: paymentSignedAmount },
       amount_company_currency_signed: { type: 'monetary', label: 'Amount', currency: 'company', compute: (r, db) => paymentCompanySignedAmount(r, db) },
@@ -1000,7 +1261,7 @@ export const payModels = {
         compute: (r, db) => (r.state === 'posted' && db && isPaymentMatched(db, r) ? 'reconciled' : r.state),
       },
     },
-    defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0 }),
+    defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0, is_internal_transfer: false }),
     onchange: (r, key, db) => (key === 'invoice_id' && r.invoice_id && db ? { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null } : {}),
     groupBys: PAYMENT_GROUP_BYS,
     groupByLabels: PAYMENT_GROUP_BY_LABELS,
@@ -1042,9 +1303,20 @@ export const payModels = {
           value: () => '',
           target: (r) => `accounting/entries/${r.move_id}`,
         },
+        {
+          label: 'Destination Entry',
+          when: (r) => Boolean(r.destination_move_id),
+          value: () => '',
+          target: (r) => `accounting/entries/${r.destination_move_id}`,
+        },
       ],
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postPayment(db, read(db, 'account.payment', r.id)) }) },
+        {
+          label: 'Reset to Draft',
+          when: (r, db) => r.state !== 'draft' && Boolean(db) && !resetToDraftError(db, r),
+          run: (db, r) => ({ db: resetPaymentToDraft(db, read(db, 'account.payment', r.id)) }),
+        },
         {
           label: 'Apply Credit',
           when: (r) => r.state === 'posted' && Number(r.unapplied) > 0,
@@ -1082,14 +1354,15 @@ export const payModels = {
       groups: (r) => [
         [
           'payment_type',
-          { field: 'partner_id', label: r?.partner_type === 'supplier' ? 'Vendor' : 'Customer' },
+          'is_internal_transfer',
+          ...(r?.is_internal_transfer ? [] : [{ field: 'partner_id', label: r?.partner_type === 'supplier' ? 'Vendor' : 'Customer' }]),
           { label: 'Amount', fields: ['amount', 'currency_id'] },
           'date',
           'memo',
         ],
         [
           'journal_id',
-          { field: 'partner_bank_id', label: paymentBankLabel(r) },
+          ...(r?.is_internal_transfer ? ['destination_journal_id'] : [{ field: 'partner_bank_id', label: paymentBankLabel(r) }]),
         ],
         ...(r?.invoice_id || r?.state === 'draft' || Number(r?.unapplied) > 0
           ? [[...(r?.invoice_id || r?.state === 'draft' ? ['invoice_id'] : []), ...(Number(r?.unapplied) > 0 ? ['unapplied'] : [])]]
