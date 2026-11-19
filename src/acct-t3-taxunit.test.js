@@ -8,7 +8,7 @@ import { round } from './money.js';
 import { postMove } from './models/accounting.js';
 import { ensureCurrencyRecord } from './models/company.js';
 import { today } from './models/common.js';
-import { journalItems } from './models/ledger.js';
+import { journalItems, postEntry } from './models/ledger.js';
 import { postPayment } from './models/pay.js';
 import { taxSnapshot } from './models/taxes.js';
 import { ensureReturnTypes, payReturn, reviewReturn, submitReturn } from './models/taxreturn.js';
@@ -921,5 +921,87 @@ test('tax unit paid return replays through diffDb + applyDiff and rejects ordina
   assert.throws(
     () => applyDiff(submittedDb, diffDb(submittedDb, missingMemberSettlementDb), { isAdmin: true }),
     /Tax return payment requires a posted payment/i,
+  );
+
+  // 4. Pointing a unit tax payment at an unrelated balanced entry with the right destination line is rejected
+  {
+    const unrelated = postEntry(paidDb, {
+      journal: 'MISC',
+      date: today(),
+      ref: 'Unrelated balanced entry with destination line',
+      company: mainCompanyId,
+      lines: [
+        { account_id: mainType.tax_payable_account_id, partner_id: mainType.payment_partner_id, debit: 42 },
+        { account_id: mainIcRec.id, credit: 42 },
+      ],
+    });
+    const forgedEntryDb = {
+      ...unrelated.db,
+      records: {
+        ...unrelated.db.records,
+        'account.payment': unrelated.db.records['account.payment'].map((p) => (
+          p.id === replayedRet.payment_id ? { ...p, move_id: unrelated.id } : p
+        )),
+      },
+    };
+    assert.throws(
+      () => applyDiff(submittedDb, diffDb(submittedDb, forgedEntryDb), { isAdmin: true }),
+      /The journal entry must book this payment amount and direction|Tax return payment requires a posted payment/i,
+    );
+  }
+});
+
+test('Finding 2: a member with no currency next to a base-currency company is rejected', () => {
+  const { db, memberId } = setupTaxUnitEnv({ mainCountry: 'Egypt', memberCountry: 'Egypt' });
+  const dbWithoutMemberCurr = write(db, 'res.company', memberId, { currency_id: null });
+  const nextId = (dbWithoutMemberCurr.seq['account.tax.unit'] ?? 0) + 1;
+  const draft = {
+    ...dbWithoutMemberCurr,
+    seq: { ...dbWithoutMemberCurr.seq, 'account.tax.unit': nextId },
+    records: {
+      ...dbWithoutMemberCurr.records,
+      'account.tax.unit': [
+        ...(dbWithoutMemberCurr.records['account.tax.unit'] ?? []),
+        {
+          id: nextId,
+          name: 'Missing Currency Unit',
+          country: 'Egypt',
+          company_ids: [1, memberId],
+          main_company_id: 1,
+          member_return_type_ids: [],
+        },
+      ],
+    },
+  };
+  assert.throws(
+    () => applyDiff(dbWithoutMemberCurr, diffDb(dbWithoutMemberCurr, draft), { isAdmin: true }),
+    /Set a currency on every company in the tax unit/i,
+  );
+});
+
+test('Finding 3: an Egypt unit with a member without a country is rejected', () => {
+  const { db, memberId } = setupTaxUnitEnv({ mainCountry: 'Egypt', memberCountry: '' });
+  const nextId = (db.seq['account.tax.unit'] ?? 0) + 1;
+  const draft = {
+    ...db,
+    seq: { ...db.seq, 'account.tax.unit': nextId },
+    records: {
+      ...db.records,
+      'account.tax.unit': [
+        ...(db.records['account.tax.unit'] ?? []),
+        {
+          id: nextId,
+          name: 'Blank Member Country Unit',
+          country: 'Egypt',
+          company_ids: [1, memberId],
+          main_company_id: 1,
+          member_return_type_ids: [],
+        },
+      ],
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, draft), { isAdmin: true }),
+    /Set a country on every company in the tax unit/i,
   );
 });

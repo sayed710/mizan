@@ -4,7 +4,7 @@ import { round } from '../money.js';
 import { addDays, today } from './common.js';
 import { postPayment } from './pay.js';
 import { postEntry, resolveDocumentJournal } from './ledger.js';
-import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, taxUnitSettlementSpec, validateTaxReturnPeriod } from './finance.js';
+import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, taxUnitPaymentEntryError, taxUnitSettlementSpec, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 
@@ -511,7 +511,8 @@ function taxPaymentsMatchReturn(db, after) {
         || payment.destination_account_id !== destinationAccount.id
         || payment.payment_type !== (netPayable < 0 ? 'inbound' : 'outbound')
         || round(Number(payment.amount) || 0) !== Math.abs(netPayable)
-        || payMove?.state !== 'posted') {
+        || !payMove
+        || taxUnitPaymentEntryError(db, payment, payMove, { mainCompanyId, mainSpec, destinationAccount, netPayable })) {
         return false;
       }
     }

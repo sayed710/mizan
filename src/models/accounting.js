@@ -2913,12 +2913,25 @@ Object.assign(accountingModels, {
       const mainCompany = read(db, 'res.company', after.main_company_id);
       const normCountry = (v) => String(v ?? '').trim().toLowerCase();
       const unitCountry = normCountry(after.country) || normCountry(mainCompany?.country);
-      if (unitCountry && companyRecords.some((company) => normCountry(company.country) && normCountry(company.country) !== unitCountry)) {
-        return 'All companies in a tax unit must have the same country';
+      const hasAnyCompanyCountry = companyRecords.some((company) => normCountry(company?.country));
+      if (unitCountry && hasAnyCompanyCountry) {
+        if (companyRecords.some((company) => !normCountry(company?.country))) {
+          return 'Set a country on every company in the tax unit';
+        }
+        if (companyRecords.some((company) => normCountry(company.country) !== unitCountry)) {
+          return 'All companies in a tax unit must have the same country';
+        }
       }
-      const baseCurrencyId = findCompanyCurrencyRecord(db, 1)?.id ?? 1;
-      const companyCurrId = (id) => findCompanyCurrencyRecord(db, id)?.id ?? baseCurrencyId;
-      if (new Set(companies.map(companyCurrId)).size > 1) {
+      const currencyRecords = companyRecords.map((company) => {
+        if (company?.currency_id === null) return null;
+        if (company?.currency_id !== undefined) return findCompanyCurrencyRecord(db, company.id);
+        if (hasAnyCompanyCountry) return null;
+        return findCompanyCurrencyRecord(db, 1);
+      });
+      if (currencyRecords.some((c) => !c?.id)) {
+        return 'Set a currency on every company in the tax unit';
+      }
+      if (new Set(currencyRecords.map((c) => c.id)).size > 1) {
         return 'All companies in a tax unit must use the same currency';
       }
       const mainTypes = unitReturns.map((ret) => read(db, 'account.return.type', ret.type_id)).filter(Boolean);

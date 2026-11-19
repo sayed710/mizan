@@ -589,7 +589,8 @@ export function paymentInvariant(db, after) {
     const ret = (db.records['account.return'] ?? []).find((r) => r.id === after.return_id && r.state === 'paid');
     if (!ret) return 'The tax payment must settle its closing entry';
     if (ret.tax_unit_id) {
-      const { mainCompanyId, mainSpec, destinationAccount, netPayable } = taxUnitSettlementSpec(db, ret);
+      const spec = taxUnitSettlementSpec(db, ret);
+      const { mainCompanyId, mainSpec, destinationAccount, netPayable } = spec;
       if (!netPayable
         || (after.company_id ?? 1) !== mainCompanyId
         || (entry.company_id ?? 1) !== mainCompanyId
@@ -599,10 +600,8 @@ export function paymentInvariant(db, after) {
         || after.destination_account_id !== destinationAccount?.id) {
         return 'The tax payment must settle its closing entry';
       }
-      const paidToDest = (after.payment_type === 'inbound' ? 1 : -1) * (entry.line_ids ?? [])
-        .filter((l) => l.account_id === destinationAccount.id && l.partner_id === mainSpec.partner)
-        .reduce((s, l) => s + (Number(l.credit) || 0) - (Number(l.debit) || 0), 0);
-      if (round(paidToDest) !== Math.abs(netPayable)) return 'The tax payment must settle its closing entry';
+      const entryErr = taxUnitPaymentEntryError(db, after, entry, spec);
+      if (entryErr) return entryErr;
     } else {
       const closings = (ret?.closing_move_ids ?? []).map((id) => (db.records['account.move'] ?? []).find((m) => m.id === id));
       if (!closings.some((closing) => closing && settlementCapacity(db, entry, closing) >= round(Number(after.amount) || 0))) {
@@ -1035,6 +1034,36 @@ export function taxUnitSettlementSpec(db, ret) {
     ...memberEntries,
   ];
   return { mainCompanyId, mainCompany, mainSpec, destinationAccount, netPayable, entries };
+}
+
+/** Validate the journal entry backing a tax unit return payment. */
+export function taxUnitPaymentEntryError(db, payment, entry, spec = null) {
+  if (!entry || entry.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
+  const { mainCompanyId, mainSpec, destinationAccount, netPayable } = spec ?? taxUnitSettlementSpec(db, read(db, 'account.return', payment.return_id));
+  if ((entry.company_id ?? 1) !== (payment.company_id ?? 1) || (entry.company_id ?? 1) !== mainCompanyId) {
+    return 'The journal entry does not belong to this payment';
+  }
+  const inbound = payment.payment_type === 'inbound';
+  const companyCurrency = companyCurrencyRecord(db, mainCompanyId);
+  const companyRound = (n) => roundCurrency(n, companyCurrency);
+  const companyStep = Number(companyCurrency?.rounding ?? 0.01);
+  const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === mainSpec.partner).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+  const expected = companyRound(Math.abs(netPayable));
+  let bank;
+  try {
+    bank = payment.outstanding_account_id ?? paymentJournal(db, payment.journal_id, mainCompanyId).accountId;
+  } catch (error) {
+    return error.message;
+  }
+  const counterpart = (inbound ? -1 : 1) * net(destinationAccount.id);
+  if (counterpart < 0 || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
+    || Math.abs(counterpart - expected) > companyStep + 1e-9) {
+    return 'The journal entry must book this payment amount and direction';
+  }
+  if ((db.records['account.payment'] ?? []).some((p) => p.id !== payment.id && p.state === 'posted' && p.move_id === entry.id)) {
+    return 'The journal entry already records another payment';
+  }
+  return null;
 }
 
 /** Validate a submitted closing against its linked return and the posted ledger. */
