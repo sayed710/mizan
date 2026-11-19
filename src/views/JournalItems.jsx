@@ -4,6 +4,7 @@ import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, jou
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
 import { RateNote } from './RateNote.jsx';
 import { read } from '../orm.js';
+import { models } from '../models/index.js';
 import { commit, companiesOf, getDb, useDb } from '../store.js';
 import { writeoffJournalItem } from '../models/pay.js';
 import { reconcileLedgerItems, unreconcileLedgerItems } from '../models/glReconcile.js';
@@ -20,6 +21,7 @@ const ITEM_COLUMNS = [
   { key: 'company_id', label: 'Company', optional: 'hide', multiCompanyOnly: true },
   { key: 'journal_id', label: 'Journal', optional: 'hide' },
   { key: 'move_id', label: 'Journal Entry', optional: false },
+  { key: 'status', label: 'Status', optional: 'hide' },
   { key: 'account_id', label: 'Account', optional: false },
   { key: 'partner_id', label: 'Partner', optional: 'show' },
   { key: 'ref', label: 'Reference', optional: 'hide' },
@@ -47,6 +49,8 @@ const GROUP_OPTIONS = [
   { key: 'account', label: 'Account' },
   { key: 'partner', label: 'Partner' },
   { key: 'journal', label: 'Journal' },
+  { key: 'company', label: 'Company' },
+  { key: 'status', label: 'Status' },
   { key: 'date', label: 'Date' },
   { key: 'invoice_date', label: 'Invoice Date' },
   { key: 'taxes', label: 'Taxes' },
@@ -60,6 +64,9 @@ const ITEM_FILTER_GROUPS = [
   [
     { id: 'unposted', label: 'Unposted', fn: (line) => line.move_state === 'draft' },
     { id: 'posted', label: 'Posted', fn: (line) => line.move_state === 'posted' },
+  ],
+  [
+    { id: 'to_check', label: 'To Check', fn: (line) => line.to_check === true },
   ],
   [
     { id: 'not_secured', label: 'Not Secured', fn: (line) => line.move_state === 'posted' && !line.inalterable_hash },
@@ -139,7 +146,7 @@ function resolveLineTaxInfo(db, line, move) {
   };
 }
 
-function matchesItemSearch(line, rawQuery) {
+export function matchesItemSearch(line, rawQuery) {
   const trimmed = rawQuery.trim();
   if (!trimmed) return true;
   const q = trimmed.toLowerCase();
@@ -159,6 +166,7 @@ function groupKeyForLine(line, group) {
   if (group === 'taxes') return line.taxKey;
   if (group === 'tax_grids') return line.gridKey;
   if (group === 'matching') return line.matchingText;
+  if (group === 'status') return line.move_state ?? null;
   if (group) return line[`${group}_id`] ?? null;
   return null;
 }
@@ -231,6 +239,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const matchedMoves = reconciledOf ? matchedMoveIds(db, reconciledOf) : null;
   const multiCompany = companiesOf(db).length > 1;
   const multiCurrency = hasMultiCurrency(db);
+  const stateField = models['account.move'].fields.state;
   const enriched = journalItems(db, { from, to, reviewMode: 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
     .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!matchedMoves || (matchedMoves.has(line.move_id) && line.reconciled)))
     .map((line) => {
@@ -259,6 +268,8 @@ export function JournalItems({ leaf = {} } = {}) {
         tax_grids: names('account.account.tag', gridIds),
         matchingText,
         company: name('res.company', line.company_id),
+        to_check: move?.to_check === true,
+        status: stateField.options.find(([value]) => value === line.move_state)?.[1] ?? '',
         balance: (Number(line.debit) || 0) - (Number(line.credit) || 0),
       };
     });
@@ -281,6 +292,7 @@ export function JournalItems({ leaf = {} } = {}) {
     if (group === 'taxes') return lines[0].taxes || t('Undefined');
     if (group === 'tax_grids') return lines[0].tax_grids || t('Undefined');
     if (group === 'matching') return lines[0].matchingText || t('Undefined');
+    if (group === 'status') return t(lines[0].status) || t('Undefined');
     return lines[0][group] || t('Undefined');
   };
 
@@ -296,6 +308,10 @@ export function JournalItems({ leaf = {} } = {}) {
   const totalBalance = roundCurrency(totalDebit - totalCredit, sumCurrency);
   const totalResidual = sumField(rows, 'amount_residual');
   const todayDate = today();
+  const selectableRows = rows.filter((line) => line.move_state !== 'draft');
+  const visibleKeys = new Set(selectableRows.map(keyOf));
+  const selectedKeys = new Set(selected.map(keyOf));
+  const allSelected = selectableRows.length > 0 && selectableRows.every((line) => selectedKeys.has(keyOf(line)));
 
   const renderCell = (line, col) => {
     switch (col.key) {
@@ -304,6 +320,7 @@ export function JournalItems({ leaf = {} } = {}) {
       case 'company_id': return line.company;
       case 'journal_id': return line.journal;
       case 'move_id': return <a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a>;
+      case 'status': return line.status ? <span className={`badge badge-${stateField.badge[line.move_state]}`}>{t(line.status)}</span> : '';
       case 'account_id': return line.account;
       case 'partner_id': return line.partner;
       case 'ref': return line.ref ?? '';
@@ -361,7 +378,7 @@ export function JournalItems({ leaf = {} } = {}) {
       <button className="btn primary" disabled={busy}>{t('Confirm')}</button><button type="button" className="btn" disabled={busy} onClick={() => setAction('')}>{t('Cancel')}</button>
       {error && <p role="alert">{t(error)}</p>}
     </form>}
-    <div className="list-wrap"><table className="list report"><thead><tr><th>{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
+    <div className="list-wrap"><table className="list report"><thead><tr><th><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
       <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
         {group && <tr className="group-row"><th /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th /></tr>}
         {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>

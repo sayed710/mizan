@@ -77,7 +77,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm audit --audit-level=high
+      # Block on advisories in packages that ship to production.
+      - run: npm audit --omit=dev --audit-level=high
+      # Report dev-tool advisories (e.g. unfixed upstream) without blocking merges.
+      - name: Full audit (report only)
+        run: npm audit --audit-level=high
+        continue-on-error: true
 
   browser:
     name: Browser smoke tests

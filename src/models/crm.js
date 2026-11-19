@@ -180,8 +180,14 @@ export const crmModels = {
         { label: 'Invoiced', model: 'account.move', field: 'partner_id', target: 'accounting/invoices', sum: 'amount_total' },
       ],
       buttons: [{ label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
-      groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'zip', 'country', 'pricelist_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'credit_limit', 'tag_ids']],
-      tabs: [{ label: 'Bank Accounts', fields: ['bank_ids'] }],
+      groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'zip', 'country', 'pricelist_id', 'credit_limit', 'tag_ids']],
+      tabs: [
+        {
+          label: 'Accounting',
+          fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id'],
+        },
+        { label: 'Bank Accounts', fields: ['bank_ids'] },
+      ],
       chatter: true,
     },
   },

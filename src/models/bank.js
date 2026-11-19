@@ -112,7 +112,7 @@ export function reconcileWith(db, line, moveId) {
   }
   const paid = payMove(current, moveId, value, date, { journalId: line.journal_id, statementLineId: line.id, ...(suspense ? { liquidityAccountId: suspense } : { directBank: true }) });
   const paymentMove = read(paid, 'account.move', moveId).payments.at(-1).move_id;
-  const writeoff = hasWriteoff ? settleWriteoff(paid, moveId, writeoffValue, statementCompanyAmount(db, line, Number(line.writeoff_amount)), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id }) : null;
+  const writeoff = hasWriteoff ? settleWriteoff(paid, moveId, writeoffValue, statementCompanyAmount(db, line, Number(line.writeoff_amount)), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id, analyticDistribution: line.writeoff_analytic_distribution ?? null }) : null;
   return write(writeoff?.db ?? paid, 'account.bank.statement.line', line.id, { state: remaining ? 'to_check' : 'reconciled', move_id: moveId, payment_move_id: paymentMove, writeoff_move_id: writeoff?.id ?? null, bank_move_id: bankMoveId ?? paymentMove, open_amount: remaining, allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }], partner_id: line.partner_id ?? move.partner_id });
 }
 
@@ -476,8 +476,8 @@ function unreconcileLockError(db, line) {
 function unreconcileError(db, before, after) {
   const lockError = unreconcileLockError(db, before);
   if (lockError) return lockError;
-  if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length) return 'Unreconciliation requires reversing entries and clearing the bank links';
-  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'name']);
+  if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length || after.writeoff_analytic_distribution != null) return 'Unreconciliation requires reversing entries and clearing the bank links';
+  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'writeoff_analytic_distribution', 'name']);
   if ([...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !clearedFields.has(k)).some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) return 'A reconciled bank transaction cannot be changed';
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);
   if (!bankId) return 'Cannot unreconcile a transaction without its bank entry link';
@@ -542,11 +542,29 @@ export function unreconcile(db, line, reversalDate = null) {
     batch_payment_id: null,
     payment_move_id: null,
     writeoff_move_id: null,
+    writeoff_analytic_distribution: null,
     bank_move_id: null,
     open_amount: null,
     allocations: [],
   });
   return { db: current };
+}
+
+/** Assign or clear the partner of an unreconciled bank statement line. */
+export function setStatementLinePartner(db, line, partnerId) {
+  const lineId = typeof line === 'object' && line ? line.id : line;
+  const target = read(db, 'account.bank.statement.line', lineId);
+  if (!target) throw new Error('Bank transaction does not exist');
+  if (target.state === 'reconciled') throw new Error('A reconciled bank transaction cannot be changed');
+  const pid = partnerId ? Number(partnerId) : null;
+  if (pid) {
+    const partner = read(db, 'res.partner', pid);
+    if (!partner) throw new Error('Partner does not exist');
+    if (partner.company_id && target.company_id && partner.company_id !== target.company_id) {
+      throw new Error('Partner belongs to another company');
+    }
+  }
+  return write(db, 'account.bank.statement.line', lineId, { partner_id: pid });
 }
 
 /** Validate the booked bank entry and payment allocations against the statement line amount and journal. */
@@ -618,7 +636,13 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
     return null;
   }
 
-  if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(incoming ? bankLines[0].debit : bankLines[0].credit) !== referenceAmount || (bankLines[0].currency_id && roundCurrency(bankLines[0].amount_currency, read(db, 'res.currency', bankLines[0].currency_id)) !== roundCurrency(after.amount, read(db, 'res.currency', bankLines[0].currency_id)))) {
+  const bankLine = bankLines[0];
+  const bankCurrency = bankLine?.currency_id ? read(db, 'res.currency', bankLine.currency_id) : null;
+  // A journal-currency statement is booked in its own units; an account-currency line converts the company amount.
+  const currencyAmountMatches = !bankCurrency
+    || roundCurrency(bankLine.amount_currency, bankCurrency) === roundCurrency(after.amount, bankCurrency)
+    || toCompany(db, bankCurrency.id, bankLine.amount_currency, after.date ?? today(), company) === referenceAmount;
+  if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(incoming ? bankLine.debit : bankLine.credit) !== referenceAmount || !currencyAmountMatches) {
     return 'The bank entry must book the transaction amount once';
   }
   const suspense = allocations.some((a) => a.payment_move_id !== after.bank_move_id) ? ensureBankSuspense(db, company, via.id).id : null;
@@ -645,7 +669,7 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
 function lineGuard(db, before, after) {
   if (before && (before.state === 'reconciled' || before.bank_move_id) && after.state === 'to_check' && !after.move_id) return unreconcileError(db, before, after);
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     return changed ? 'A reconciled bank transaction cannot be changed' : null;
   }
   if (before?.bank_move_id) {
@@ -771,11 +795,11 @@ function statementJournalType(db, r) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
-    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
+    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
     protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null),
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
-    importFile: { accept: '.ofx,.qfx,.xml', run: importStatement },
+    importFile: { accept: '.ofx,.qfx,.xml,.qif', run: importStatement },
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       date: { type: 'date', label: 'Date', required: true },
@@ -794,6 +818,7 @@ export const bankModels = {
       payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       writeoff_account_id: { type: 'many2one', relation: 'account.account', label: 'Write-off Account', domain: (account, record) => eligibleCounterpart(account, record?.company_id ?? 1) },
       writeoff_label: { type: 'char', label: 'Write-off Label' },
+      writeoff_analytic_distribution: { type: 'distribution', label: 'Write-off Analytic Distribution', hidden: true },
       writeoff_amount: { type: 'monetary', label: 'Write-off Amount' },
       writeoff_move_id: { type: 'many2one', relation: 'account.move', label: 'Write-off Entry', readonly: true },
       bank_move_id: { type: 'many2one', relation: 'account.move', label: 'Bank Entry', readonly: true, optional: 'hide' },

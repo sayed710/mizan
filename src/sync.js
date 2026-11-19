@@ -3,7 +3,8 @@
 // to different records don't overwrite each other.
 import { models } from './registry.js';
 import { analyticAccountKey } from './analytic_distribution.js';
-import { formatTrackingChange, postTracking, referenceTo, validate, SHARED_MODELS } from './orm.js';
+import { formatTrackingChange, postTracking, read, referenceTo, validate, SHARED_MODELS } from './orm.js';
+import { itemCurrencyId } from './models/glReconcile.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
@@ -750,6 +751,26 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   }
   const settlementOrigins = new Map();
   for (const [model, record] of changed) {
+    if (model === 'account.partial.reconcile' && record.exchange_move_id && !oldMoves.has(record.exchange_move_id)) {
+      const isGap = record.debit_move_id === record.exchange_move_id || record.credit_move_id === record.exchange_move_id;
+      const debitMove = read(staged, 'account.move', record.debit_move_id);
+      const creditMove = read(staged, 'account.move', record.credit_move_id);
+      const ownCurr = companyCurrencyRecord(staged, record.company_id ?? 1);
+      const ownId = ownCurr?.id ?? null;
+      const currD = debitMove && itemCurrencyId(staged, { move: debitMove, line: debitMove.line_ids?.[record.debit_line_index] }, ownCurr);
+      const currC = creditMove && itemCurrencyId(staged, { move: creditMove, line: creditMove.line_ids?.[record.credit_line_index] }, ownCurr);
+      const isForeignReconcile = !isGap
+        ? Boolean(currD && currC && currD !== ownId && currD === currC && record.debit_amount_currency != null && record.credit_amount_currency != null)
+        : Boolean(isGap && ((record.debit_move_id === record.exchange_move_id && currC && currC !== ownId) || (record.credit_move_id === record.exchange_move_id && currD && currD !== ownId)));
+
+      if (isForeignReconcile) {
+        const ids = settlementOrigins.get(record.exchange_move_id) ?? [];
+        for (const mId of [record.debit_move_id, record.credit_move_id]) {
+          if (mId && !ids.includes(mId)) ids.push(mId);
+        }
+        settlementOrigins.set(record.exchange_move_id, ids);
+      }
+    }
     if (model !== 'account.move') continue;
     const oldRows = oldMoves.get(record.id)?.payments ?? [];
     for (const row of (record.payments ?? []).slice(oldRows.length)) {

@@ -46,22 +46,31 @@ function PartnerRows({ db, p }) {
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
         <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')}</td>
+        <td /><td /><td />
         {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}<td />
       </tr>
       {open && p.lines.map((l, i) => (
-        <tr key={i} className="rep-detail"><td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a></td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}<td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td></tr>
+        <tr key={i} className="rep-detail">
+          <td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a></td>
+          <td>{l.dueDate}</td>
+          <td>{l.matchingNumber ?? ''}</td>
+          <td>{l.label}{l.ref ? ` · ${l.ref}` : ''}</td>
+          <td />
+          {num(l.debit)}{num(l.credit)}{num(l.balance)}
+          <td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td>
+        </tr>
       ))}
     </>
   );
 }
 
-export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, companyId, analyticAccountIds }) {
+export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly }) {
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
-  const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds }, kind);
+  const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, kind);
   return (
     <tbody>
       {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} />)}
-      <tr className="rep-total strong"><td>{t('Total')}</td>{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{money(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
+      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td />{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{money(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
 };
@@ -109,12 +118,13 @@ export function CashFlow({ db, period, companyId, analyticAccountIds }) {
   );
 }
 
-export function ExecutiveSummary({ db, period, analyticAccountIds }) {
-  const s = executiveSummary(db, { ...period, analyticAccountIds });
+export function ExecutiveSummary({ db, period, companyId, analyticAccountIds }) {
+  const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
+  const s = executiveSummary(db, { ...period, ...(currentCo ? { company_id: currentCo } : {}), analyticAccountIds });
   const rows = [
     ['Revenue', money(s.revenue)], ['Gross Profit', money(s.grossProfit)], ['Net Profit', money(s.netProfit)],
     ['Cash', money(s.cash)], ['Receivables', money(s.receivables)], ['Payables', money(s.payables)],
-    ['Current Ratio', s.currentRatio ?? '—'], ['Gross Margin', pct(s.grossMargin)], ['Net Margin', pct(s.netMargin)],
+    ['Current Ratio', s.currentRatio == null ? '—' : s.currentRatio.toFixed(2)], ['Gross Margin', pct(s.grossMargin)], ['Net Margin', pct(s.netMargin)],
     ['Days Sales Outstanding', s.dso ?? '—'],
   ];
   return <tbody>{rows.map(([label, value]) => <tr key={label} className="rep-detail"><td>{t(label)}</td><td className="num">{value}</td></tr>)}</tbody>;

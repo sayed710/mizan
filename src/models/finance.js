@@ -10,7 +10,7 @@ import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
-import { companyCurrencyRecord, documentCurrency, formatCurrency, round, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, round, roundCurrency } from '../money.js';
 import { paymentCompanyAmount, settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
 import { onlineAccountForJournal } from './onlineSync.js';
@@ -165,6 +165,38 @@ export function accountsError(db, before, after) {
   return bad < 0 ? null : `Journal item ${bad + 1} needs an existing account`;
 }
 
+/**
+ * Whether `line` is stated in a currency other than its account's currency. A line without an explicit currency is
+ * stated in the entry company's currency; an empty line without a currency has no amount to state.
+ */
+function lineCurrencyMismatch(db, line, account, companyId) {
+  if (!account?.currency_id) return false;
+  const amount = (Number(line.debit) || 0) + (Number(line.credit) || 0);
+  if (!amount && !line.currency_id) return false;
+  const currencyId = line.currency_id ?? companyCurrencyRecord(db, companyId).id;
+  return currencyId !== account.currency_id;
+}
+
+/** A posted entry keeps every journal item in its account's currency. */
+export function accountCurrencyError(db, before, after) {
+  if (after.state !== 'posted') return null;
+  if (before?.state === 'posted' && JSON.stringify(before.line_ids) === JSON.stringify(after.line_ids)) return null;
+  const companyId = after.company_id ?? 1;
+  const accounts = new Map((db.records?.['account.account'] ?? []).map((account) => [account.id, account]));
+  const bad = (after.line_ids ?? []).some((line) => lineCurrencyMismatch(db, line, accounts.get(line.account_id), companyId));
+  return bad ? 'The account forces journal items in its currency' : null;
+}
+
+/** An account cannot adopt a currency that its already posted journal items do not use. */
+export function accountCurrencyChangeError(db, before, after) {
+  if ((before?.currency_id ?? null) === (after?.currency_id ?? null) || !after.currency_id) return null;
+  const moves = db.records?.['account.move'] ?? [];
+  const bad = moves.some((move) => move.state === 'posted'
+    && (move.line_ids ?? []).some((line) => line.account_id === after.id
+      && lineCurrencyMismatch(db, line, after, move.company_id ?? after.company_id ?? 1)));
+  return bad ? 'The account has journal items in another currency' : null;
+}
+
 /** Accounts used by journal items cannot be deleted (archive them instead): their balances would vanish from reports. */
 export function accountDeleteGuard(db, account, pending = db) {
   // `pending` is the database as the diff leaves it, so moves created in the same diff count too.
@@ -212,7 +244,13 @@ const settledByCredit = (inv) => !['in_invoice', 'out_refund'].includes(inv.move
 export const appliedValue = (db, inv, p) => {
   const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
   const source = read(db, 'account.move', p.move_id);
-  const date = source?.move_type !== 'entry' && source?.invoice_date ? source.invoice_date : payment && !payment.invoice_id ? p.date : (inv.invoice_date ?? p.date);
+  const date = p.partial_reconcile_id != null && !payment && source
+    ? (source.invoice_date ?? source.date ?? p.date)
+    : source?.move_type !== 'entry' && source?.invoice_date
+      ? source.invoice_date
+      : payment && !payment.invoice_id
+        ? p.date
+        : (inv.invoice_date ?? p.date);
   return toCompany(db, inv.currency_id, p.amount, date, inv.company_id);
 };
 
@@ -264,7 +302,7 @@ function settlementCapacity(db, entry, inv) {
 /** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
 function backsSettlement(db, id) {
   return (db.records['account.payment'] ?? []).some((p) => p.state === 'posted' && p.move_id === id)
-    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id))
+    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id || g.exchange_move_id === id))
     || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
 }
 
@@ -289,7 +327,15 @@ function hasMatchingPartialLink(db, doc, row, { reversed = false } = {}) {
   const companyRound = (n) => roundCurrency(n, ownCurrency);
   const companyStep = Number(ownCurrency?.rounding ?? 0.01);
   const rowCompany = row.company_amount != null ? companyRound(Number(row.company_amount)) : companyRound(appliedValue(db, doc, row));
-  return Math.abs(companyRound(Number(link.amount)) - rowCompany) <= companyStep + 1e-9;
+  const gapPartials = link.exchange_move_id
+    ? (db.records['account.partial.reconcile'] ?? []).filter((g) => (
+        g && (reversed ? g.reversed : (!g.reversed && g.active !== false))
+        && (g.debit_move_id === doc.id || g.credit_move_id === doc.id)
+        && (g.debit_move_id === link.exchange_move_id || g.credit_move_id === link.exchange_move_id)
+      ))
+    : [];
+  const totalAmount = companyRound(Number(link.amount) + gapPartials.reduce((s, g) => s + Number(g.amount), 0));
+  return Math.abs(totalAmount - rowCompany) <= companyStep + 1e-9;
 }
 
 /**
@@ -349,8 +395,42 @@ function unapplicationError(db, stored, after, before) {
   return null;
 }
 
+/** Check whether a move is a generated currency exchange entry (or a reversal of one). */
+export function isExchangeEntry(db, moveOrId) {
+  // Walk the reversal chain iteratively; a client-supplied cycle ends the walk instead of recursing forever.
+  const seen = new Set();
+  let move = typeof moveOrId === 'object' && moveOrId !== null ? moveOrId : read(db, 'account.move', moveOrId);
+  while (move && move.move_type === 'entry' && !seen.has(move.id)) {
+    seen.add(move.id);
+    const id = move.id;
+    if (move.fx_payment_move_id && move.fx_invoice_id) return true;
+    if ((db.records['account.partial.reconcile'] ?? []).some((g) => g && g.exchange_move_id === id)
+      || (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => p.payment_fx_move_id === id))) return true;
+    move = move.reversed_entry_id ? read(db, 'account.move', move.reversed_entry_id) : null;
+  }
+  return false;
+}
+
 export function moveInvariant(db, after, before, stored = null) {
   if (before?.state === 'posted' && after.state !== 'posted' && backsSettlement(db, after.id)) return 'This entry records a payment; reverse the payment instead';
+  if (after.state === 'posted' && after.reversed_entry_id) {
+    const target = read(db, 'account.move', after.reversed_entry_id);
+    if (target && isExchangeEntry(db, target)) {
+      if (target.reversed_entry_id) {
+        return 'An exchange difference entry linked to a settlement cannot be reversed independently';
+      }
+      const hasActiveSettlement = (
+        Boolean(target.fx_payment_move_id && target.fx_invoice_id)
+        && (db.records['account.move'] ?? []).some((m) => (m.payments ?? []).some((p) => !p.reversed && !p.unapplied && p.payment_fx_move_id === target.id))
+      ) || (db.records['account.partial.reconcile'] ?? []).some((g) => (
+        g && g.active !== false && !g.reversed
+        && g.exchange_move_id === target.id
+      ));
+      if (hasActiveSettlement) {
+        return 'An exchange difference entry linked to a settlement cannot be reversed independently';
+      }
+    }
+  }
   const was = Array.isArray(before?.payments) ? before.payments : [];
   const now = Array.isArray(after.payments) ? after.payments : [];
   const paidBefore = Number(before?.amount_paid) || 0;
@@ -561,7 +641,7 @@ function securedMoveRule(before, after) {
 }
 
 export function moveGuard(db, before, after, _ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
@@ -584,10 +664,13 @@ function lockRule(db, before, after) {
   if (!before && after.system_generated && after.state === 'draft') return 'Draft moves cannot be system generated';
   if (!before && after.system_generated && after.move_type !== 'entry') return 'Invoices cannot be system generated';
   // A year's own closing or reopening entry is booked into it once, as it is created.
-  const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, companyId);
-  const taxLock = !before && isReturnEntry(db, after) ? returnTaxLock(db, companyId, after.tax_return_id) : taxLockFor(db, after);
-  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before), yearLock].sort().at(-1) : '';
-  const afterLock = [companyLockDate(db, after), taxLock, yearLock].sort().at(-1);
+  const beforeCompanyId = before?.company_id ?? 1;
+  const afterCompanyId = after?.company_id ?? beforeCompanyId;
+  const beforeYearLock = before ? closedYearLock(db, beforeCompanyId) : '';
+  const afterYearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, afterCompanyId);
+  const afterTaxLock = !before && isReturnEntry(db, after) ? returnTaxLock(db, afterCompanyId, after.tax_return_id) : taxLockFor(db, after);
+  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before), beforeYearLock].sort().at(-1) : '';
+  const afterLock = [companyLockDate(db, after), afterTaxLock, afterYearLock].sort().at(-1);
   const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;
   const afterLocked = after.state === 'posted' && afterLock && moveDate(after) <= afterLock;
   if (!beforeLocked && !afterLocked) return null;
@@ -669,7 +752,7 @@ export function taxAccounts(db, companyId) {
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
-function taxItems(db, period) {
+export function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
   const companyId = period?.company_id ?? period?.company;
   const accounts = taxAccounts(db, companyId);
@@ -782,6 +865,13 @@ export function taxUnitMemberTypeValidation(db, unit, mainTypes = [], requiredCo
   return { error: null, types };
 }
 
+/**
+ * Largest ledger-vs-report difference a tax closing books to the return type's rounding accounts,
+ * in minor units of the company currency (0.05 for a cent-based currency). Per-line tax rounding
+ * leaves differences of a few minor units; anything larger is a real mismatch and still fails.
+ */
+const TAX_CLOSING_ROUNDING_MINOR_UNITS = 5;
+
 /** Calculate the closing from posted tax accounts and the return's payment configuration. */
 export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   const mainType = read(db, 'account.return.type', ret.type_id);
@@ -796,6 +886,9 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   }
   ret = { ...ret, company_id: companyId, tax_unit_id: null };
   const report = validateTaxReturnPeriod(db, ret);
+  const currency = findCompanyCurrencyRecord(db, companyId);
+  const moneyRound = (n) => roundCurrency(n, currency);
+  const tolerance = moneyRound(TAX_CLOSING_ROUNDING_MINOR_UNITS * Number(currency?.rounding ?? 0.01));
   const accounts = taxAccounts(db, ret.company_id);
   const taxIds = new Set([...accounts.sale, ...accounts.purchase]);
   const balances = new Map();
@@ -806,12 +899,13 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   const lines = [];
   let netClosed = 0;
   for (const [id, raw] of balances) {
-    const balance = round(raw);
+    const balance = moneyRound(raw);
     if (!balance) continue;
     lines.push(balance > 0 ? { account_id: id, credit: balance } : { account_id: id, debit: -balance });
-    netClosed = round(netClosed - balance);
+    netClosed = moneyRound(netClosed - balance);
   }
-  if (round(netClosed - report.payable)) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
+  const roundingDiff = moneyRound(netClosed - report.payable);
+  if (Math.abs(roundingDiff) > tolerance) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
   const payableAccount = resolveCompanyTaxAccount(db, type, 'tax_payable_account_id', 'Tax Payable Account', companyId);
   const receivableAccount = resolveCompanyTaxAccount(db, type, 'tax_receivable_account_id', 'Tax Receivable Account', companyId);
   const partner = read(db, 'res.partner', type?.payment_partner_id);
@@ -822,6 +916,13 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
     lines.push({ account_id: payableAccount.id, credit: report.payable, partner_id: partner.id });
   } else if (report.payable < 0) {
     lines.push({ account_id: receivableAccount.id, debit: -report.payable, partner_id: partner.id });
+  }
+  if (roundingDiff > 0) {
+    const account = resolveCompanyTaxAccount(db, type, 'rounding_profit_account_id', 'Rounding Profit Account', companyId);
+    lines.push({ account_id: account.id, credit: roundingDiff });
+  } else if (roundingDiff < 0) {
+    const account = resolveCompanyTaxAccount(db, type, 'rounding_loss_account_id', 'Rounding Loss Account', companyId);
+    lines.push({ account_id: account.id, debit: -roundingDiff });
   }
   if (!lines.length) {
     lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
@@ -843,9 +944,10 @@ export function taxClosingMatchesReturn(db, ret) {
       if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
         || move.date !== ret.date_to || move.invoice_date !== ret.date_to) return false;
       const spec = taxClosingSpec(staged, ret, companyId);
+      const currency = findCompanyCurrencyRecord(staged, companyId);
       payable = round(payable + spec.payable);
       const expected = spec.lines.map((line) => {
-        const net = round((line.debit ?? 0) - (line.credit ?? 0));
+        const net = roundCurrency((line.debit ?? 0) - (line.credit ?? 0), currency);
         return [line.account_id, line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
       });
       const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
@@ -874,15 +976,25 @@ export function postTaxReturnClosing(db, returnId) {
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
 
+/** Per-tax report row a tax item belongs to: its side and tax, or its tax name when it has no tax. */
+export function taxItemKey(l) {
+  return JSON.stringify([l.side, l.tax_id ?? null, l.tax_id == null ? (l.tax_name || 'Untagged') : null]);
+}
+
 /**
  * Base and tax per tax from the same journal items as the totals, so the rows always add up to them:
  * invoices, POS, expenses and cash-basis releases alike, in company currency; refunds come out negative.
  */
 export function taxesByTax(db, period = {}) {
+  return taxRowsFromItems(taxItems(db, period));
+}
+
+/** Group tax items into per-tax rows (side, tax, base, tax amount), sorted by side then name. */
+export function taxRowsFromItems(items) {
   const rows = new Map();
-  for (const l of taxItems(db, period)) {
+  for (const l of items) {
     const name = l.tax_name || 'Untagged';
-    const key = JSON.stringify([l.side, l.tax_id ?? null, l.tax_id == null ? name : null]);
+    const key = taxItemKey(l);
     const row = rows.get(key) ?? { side: l.side, tax_id: l.tax_id ?? null, name, base: 0, tax: 0 };
     rows.set(key, { ...row, base: round(row.base + taxItemBase(l)), tax: round(row.tax + l.tax) });
   }

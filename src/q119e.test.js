@@ -438,13 +438,17 @@ test('Requirement 2 invariant (a): when no line carries multiple matching taxes,
   const fa = makeTax(db, { name: 'FA 14%', amount: 14, type_tax_use: 'sale', accountCode: '251000' });
   const fb = makeTax(fa.db, { name: 'FB 5%', amount: 5, type_tax_use: 'sale', accountCode: '251000' });
   db = fb.db;
+  // Fixed dates before the seed's relative data, with their own EUR rate, keep this test independent of the current date.
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  assert.ok(eur, 'seed must provide EUR');
+  db = { ...db, records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === eur.id ? { ...c, rate_ids: [{ date: '2023-01-01', rate: 0.92, company_id: null }, ...c.rate_ids] } : c)) } };
 
   for (let k = 0; k < 8; k += 1) {
     const inv = postedInvoice(db, {
       partnerId: 1,
       moveType: 'out_invoice',
-      date: '2026-10-05',
-      currencyId: 2,
+      date: '2023-10-05',
+      currencyId: eur.id,
       lines: [
         { product_id: 5, qty: 1, price_unit: 10.01 + k * 3.33, ...combineTaxSnapshots(db, [fa.id]) },
         { product_id: 5, qty: 1, price_unit: 7.77 + k * 1.11, ...combineTaxSnapshots(db, [fb.id]) },
@@ -453,15 +457,15 @@ test('Requirement 2 invariant (a): when no line carries multiple matching taxes,
     db = inv.db;
   }
 
-  const periodEur = { from: '2026-10-04', to: '2026-10-06', company_id: 1 };
+  const periodEur = { from: '2023-10-04', to: '2023-10-06', company_id: 1 };
   const eurRows = taxesByTax(db, periodEur).filter((r) => r.side === 'sale');
   assert.equal(eurRows.find((r) => r.tax_id === fa.id)?.base, 188.40);
   assert.equal(eurRows.find((r) => r.tax_id === fb.id)?.base, 101.35);
 
-  const retEur = makeReturn(db, { from: '2026-10-04', to: '2026-10-06', template: 'generic' });
+  const retEur = makeReturn(db, { from: '2023-10-04', to: '2023-10-06', template: 'generic' });
   const boxesEur = taxReturnBoxes(retEur.db, retEur.ret);
   assert.equal(boxesEur.boxes.find((b) => b.code === 'TOTAL-OUT').base, 289.75);
-  assert.equal(taxBaseTotal(db, { from: '2026-10-01', to: '2026-10-31', company_id: 1 }, (item) => item.side === 'sale' && [fa.id, fb.id].includes(item.tax_id)), 289.75);
+  assert.equal(taxBaseTotal(db, { from: '2023-10-01', to: '2023-10-31', company_id: 1 }, (item) => item.side === 'sale' && [fa.id, fb.id].includes(item.tax_id)), 289.75);
 
   // Company-currency single-tax lines also match the exact sum of detail rows.
   let coDb = seed();
@@ -471,13 +475,13 @@ test('Requirement 2 invariant (a): when no line carries multiple matching taxes,
   coDb = postedInvoice(coDb, {
     partnerId: 1,
     moveType: 'out_invoice',
-    date: '2026-04-05',
+    date: '2023-04-05',
     lines: [
       { product_id: 5, qty: 1, price_unit: 123.45, ...combineTaxSnapshots(coDb, [cfa.id]) },
       { product_id: 5, qty: 1, price_unit: 67.89, ...combineTaxSnapshots(coDb, [cfb.id]) },
     ],
   }).db;
-  const periodCo = { from: '2026-04-01', to: '2026-04-30', company_id: 1 };
+  const periodCo = { from: '2023-04-01', to: '2023-04-30', company_id: 1 };
   const coRows = taxesByTax(coDb, periodCo).filter((r) => r.side === 'sale');
   const coSum = Math.round(coRows.reduce((s, r) => s + r.base, 0) * 100) / 100;
   assert.equal(coSum, 191.34);

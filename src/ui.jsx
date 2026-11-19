@@ -9,7 +9,7 @@ import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, for
 import { currentCompany } from './models/company.js';
 import { parseAmount, today } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
-import { parseDistributionInput } from './analytic_distribution.js';
+import { analyticAccountKey, distributionError, normalizeDistribution, parseDistributionInput } from './analytic_distribution.js';
 import { fieldReadonly, fieldRequired } from './field-metadata.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
@@ -113,7 +113,13 @@ export function display(db, field, value, rec = null) {
     case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
-    case 'distribution': return JSON.stringify(value);
+    // Validated exactly as on save (per-plan totals need the db); a value outside that contract still shows as written rather than breaking the view.
+    case 'distribution': return distributionError({ analytic_distribution: field }, { analytic_distribution: value }, db) ? JSON.stringify(value) : Object.entries(normalizeDistribution(value, db)).map(([id, percent]) => {
+      const accountId = analyticAccountKey(id);
+      const account = read(db, 'account.analytic.account', accountId);
+      const name = account?.display_name ?? account?.name ?? accountId;
+      return `${name} ${Number(percent.toFixed(2))}%`;
+    }).join(', ');
     case 'binary': return value?.name ?? '';
     case 'html': return String(value ?? '');
     case 'date': return field.widget === 'remaining_days' ? formatRelativeDate(value) : formatDate(value);
@@ -427,9 +433,10 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
             return (
               <tr key={i}>
                 {cols.map(([k, f]) => {
-                  const cellVal = f.compute ? f.compute(cellRec, db, record) : l[k];
+                  const rawVal = f.compute ? f.compute(cellRec, db, record) : l[k];
+                  const cellVal = f.valueFallback && !(rawVal?.length) ? f.valueFallback(l) : rawVal;
                   // A field may explain a value it has no record for (e.g. a tax rate with no tax record).
-                  const rateText = !cellVal ? f.rateOnlyText?.(l) : null;
+                  const rateText = (Array.isArray(cellVal) ? !cellVal.length : !cellVal) ? f.rateOnlyText?.(l) : null;
                   const cellPlaceholder = k === 'product_id' ? t('Select a product…') : (f.placeholder ? t(f.placeholder) : undefined);
                   return (
                     <td key={k} className={isNumeric(f) ? 'num' : ''}>

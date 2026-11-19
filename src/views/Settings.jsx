@@ -220,7 +220,7 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
   }
-  for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id']) {
+  for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id', 'tax_cash_basis_journal_id']) {
     if (vals[field] === undefined || vals[field] === null) continue;
     const journal = (db.records['account.journal'] ?? []).find((x) => x.id === vals[field]);
     if (!journal || journal.active === false || journal.type !== 'general' || (journal.company_id && journal.company_id !== company.id)) {
@@ -263,7 +263,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const hasField = (name) => Boolean(fields[name]);
   const taxesByUse = (use) => (db.records['account.tax'] ?? [])
     .filter((tax) => tax.active !== false && tax.type_tax_use === use && (!tax.company_id || !company || tax.company_id === company.id));
-  const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
+  const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
   const showCurrencies = hasField('currency_id') || !company;
   const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
   const showVendorBills = hasField('three_way_matching');
@@ -332,6 +332,15 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
               <select id="tax_calculation_rounding_method" disabled={readOnly || !company} value={company?.tax_calculation_rounding_method ?? 'round_per_line'}
                 onChange={(e) => onWriteCompany({ tax_calculation_rounding_method: e.target.value })}>
                 {roundingOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+              </select>
+            </SettingRow>
+          )}
+          {hasField('tax_cash_basis_journal_id') && (
+            <SettingRow id="tax_cash_basis_journal_id" label="Cash Basis Journal" description="General journal used for cash-basis tax release entries.">
+              <select id="tax_cash_basis_journal_id" disabled={readOnly || !company} value={company?.tax_cash_basis_journal_id ?? ''}
+                onChange={(e) => onWriteCompany({ tax_cash_basis_journal_id: e.target.value ? Number(e.target.value) : null })}>
+                <option value="">{t('None')}</option>
+                {generalJournals.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
               </select>
             </SettingRow>
           )}

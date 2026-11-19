@@ -1,5 +1,5 @@
 import { create, read, updateSettings, write } from '../orm.js';
-import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
+import { fiscalPositionFor, lineTaxOf, productTax, taxAmount, taxGroups, taxSnapshot } from './taxes.js';
 import { DEFERRED_COMPUTATION_OPTIONS, DEFERRED_EXPENSE_GENERATION_OPTIONS, DEFERRED_PERIODICITY_OPTIONS, DEFERRED_REVENUE_GENERATION_OPTIONS, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod, postCompanyDeferrals } from './deferred.js';
 import { companyRoundingMethod, today, validDate } from './common.js';
 import { companyCurrencyRecord, documentCurrency } from '../money.js';
@@ -279,7 +279,7 @@ export function withCompany(models) {
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
   'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
-  'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method',
+  'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
   'deferred_revenue_journal_id', 'deferred_expense_journal_id',
   'deferred_revenue_account_id', 'deferred_expense_account_id',
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
@@ -330,12 +330,13 @@ function companyGuard(db, before, r, ctx) {
     ['default_general_journal_id', 'general', 'Default General Journal'],
     ['deferred_revenue_journal_id', 'general', 'Deferred Revenue Journal'],
     ['deferred_expense_journal_id', 'general', 'Deferred Expense Journal'],
+    ['tax_cash_basis_journal_id', 'general', 'Cash Basis Journal'],
   ]) {
     if (!r[field]) continue;
     const journal = record(db, 'account.journal', r[field]);
-    const isDeferredJournal = field.startsWith('deferred_');
-    if (!journal || (isDeferredJournal && journal.active === false) || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
-      return `${label} must be ${isDeferredJournal ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
+    const isDeferredOrCashBasis = field.startsWith('deferred_') || field === 'tax_cash_basis_journal_id';
+    if (!journal || (isDeferredOrCashBasis && journal.active === false) || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
+      return `${label} must be ${isDeferredOrCashBasis ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
     }
   }
   for (const field of ['generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method']) {
@@ -548,12 +549,12 @@ function purchaseLine(db, line, fpId, companyId) {
   const included = line.tax_include && factor ? lineTaxOf(line) / factor : 0;
   const net = Math.round(((Number(line.price_unit) || 0) - included) * 1e6) / 1e6;
   const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId, companyId) ?? taxSnapshot(null);
-  // A price-included tax is part of the price: a percentage scales it, a fixed amount per unit is added back (it sits
+  // A price-included tax is part of the price: a percentage or division tax adds its amount on the net price, a fixed amount per unit is added back (it sits
   // inside the discounted price, so the discount is undone for it).
   const kept_share = 1 - (Number(line.discount) || 0) / 100;
   const price_unit = !tax.tax_include ? net
     : tax.tax_type === 'fixed' ? Math.round((net + (kept_share > 0 ? (Number(tax.tax) || 0) / kept_share : 0)) * 1e6) / 1e6
-      : Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6;
+      : Math.round((net + taxAmount(net, tax)) * 1e6) / 1e6;
   return { ...kept, price_unit, ...tax };
 }
 
@@ -638,6 +639,7 @@ export const companyModels = {
       tax_return_template: { type: 'selection', label: 'Tax Return Template', options: TAX_RETURN_TEMPLATE_OPTIONS },
       account_sale_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Sales Tax' },
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
+      tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
     },
@@ -666,7 +668,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_journal_id', 'deferred_revenue_account_id', 'generate_deferred_revenue_entries_method', 'deferred_revenue_amount_computation_method', 'deferred_revenue_periodicity', 'deferred_expense_journal_id', 'deferred_expense_account_id', 'generate_deferred_expense_entries_method', 'deferred_expense_amount_computation_method', 'deferred_expense_periodicity'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'tax_return_template', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_journal_id', 'deferred_revenue_account_id', 'generate_deferred_revenue_entries_method', 'deferred_revenue_amount_computation_method', 'deferred_revenue_periodicity', 'deferred_expense_journal_id', 'deferred_expense_account_id', 'generate_deferred_expense_entries_method', 'deferred_expense_amount_computation_method', 'deferred_expense_periodicity'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'tax_return_template', 'account_sale_tax_id', 'account_purchase_tax_id', 'tax_cash_basis_journal_id'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule', 'intercompany_journal_id'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },
