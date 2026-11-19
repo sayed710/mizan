@@ -1,8 +1,7 @@
 // Annual Report model and body generation (Odoo parity).
 import { read, write } from '../orm.js';
-import { round } from '../money.js';
 import { today } from './common.js';
-import { balanceSheet, profitAndLoss } from './ledger.js';
+import { configurableReport, findStatementReport } from './configurableReports.js';
 import { currentCompany } from './company.js';
 
 function formatMoney(n) {
@@ -12,71 +11,53 @@ function formatMoney(n) {
 /** Render HTML tables for Balance Sheet and Profit and Loss scoped to the given period and company. */
 const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+function renderReportTable(title, reportData, tableClass, valueHeader) {
+  const rows = reportData.rows || [];
+  const bodyRows = rows.map((r, index) => {
+    const isLastStrong = Boolean(r.strong && index === rows.length - 1);
+    const totalClass = isLastStrong ? 'grand-total-row' : (r.strong ? 'total-row' : '');
+    const hasAccounts = Boolean(r.accountRows && r.accountRows.length > 0);
+    if (hasAccounts) {
+      const accRows = r.accountRows.map((acc) =>
+        `      <tr><td>${escapeHtml(acc.account?.code ?? '')} ${escapeHtml(acc.account?.name ?? '')}</td><td class="text-right">${formatMoney(acc.values?.[0] ?? 0)}</td></tr>`
+      ).join('\n');
+      const totClass = totalClass || 'total-row';
+      return `      <tr class="section-header"><td colspan="2"><strong>${escapeHtml(r.name ?? '')}</strong></td></tr>\n${accRows}\n      <tr class="${totClass}"><td>${escapeHtml(r.name ?? '')}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
+    }
+    return `      <tr${totalClass ? ` class="${totalClass}"` : ''}><td>${escapeHtml(r.name ?? '')}</td><td class="text-right">${formatMoney(r.values?.[0] ?? 0)}</td></tr>`;
+  }).join('\n');
+
+  return `  <h2>${escapeHtml(title)}</h2>
+  <table class="report-table ${tableClass}">
+    <thead>
+      <tr>
+        <th class="text-left">Account</th>
+        <th class="text-right">${valueHeader}</th>
+      </tr>
+    </thead>
+    <tbody>
+${bodyRows}
+    </tbody>
+  </table>`;
+}
+
 export function renderAnnualReportHtml(db, { start_date, end_date, company_id }) {
-  const company = company_id ?? 1;
+  const company = company_id ?? (db ? currentCompany(db) : 1);
   const from = start_date || `${today().slice(0, 4)}-01-01`;
   const to = end_date || `${today().slice(0, 4)}-12-31`;
 
-  const pnl = profitAndLoss(db, { from, to, company_id: company });
-  const bs = balanceSheet(db, { to, company_id: company });
+  const bsReport = findStatementReport(db, 'balance', company);
+  if (!bsReport) throw new Error('Configure the Balance Sheet report for this company');
+  const pnlReport = findStatementReport(db, 'pnl', company);
+  if (!pnlReport) throw new Error('Configure the Profit and Loss report for this company');
 
-  const renderRows = (items) => (items && items.length > 0
-    ? items.map((r) => `<tr><td>${escapeHtml(r.account?.code ?? '')} ${escapeHtml(r.account?.name ?? '')}</td><td class="text-right">${formatMoney(r.balance)}</td></tr>`).join('\n')
-    : '<tr><td colspan="2" class="empty-row">No items</td></tr>');
+  const bsData = configurableReport(db, bsReport, { to }, null, { companyId: company });
+  const pnlData = configurableReport(db, pnlReport, { from, to }, null, { companyId: company });
 
-  return `<div class="annual-report-body">
-  <h2>Balance Sheet</h2>
-  <table class="report-table balance-sheet-table">
-    <thead>
-      <tr>
-        <th class="text-left">Account</th>
-        <th class="text-right">Balance</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr class="section-header"><td colspan="2"><strong>Assets</strong></td></tr>
-      ${renderRows(bs.assets)}
-      <tr class="total-row"><td>Total Assets</td><td class="text-right">${formatMoney(bs.totalAssets)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Liabilities</strong></td></tr>
-      ${renderRows(bs.liabilities)}
-      <tr class="total-row"><td>Total Liabilities</td><td class="text-right">${formatMoney(bs.totalLiabilities)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Equity</strong></td></tr>
-      ${renderRows(bs.equity)}
-      <tr><td>Current Year Earnings</td><td class="text-right">${formatMoney(bs.earnings)}</td></tr>
-      <tr class="total-row"><td>Total Equity</td><td class="text-right">${formatMoney(bs.totalEquity)}</td></tr>
-      <tr class="grand-total-row"><td>Total Liabilities &amp; Equity</td><td class="text-right">${formatMoney(round(bs.totalLiabilities + bs.totalEquity))}</td></tr>
-    </tbody>
-  </table>
+  const bsHtml = renderReportTable(bsReport.name || 'Balance Sheet', bsData, 'balance-sheet-table', 'Balance');
+  const pnlHtml = renderReportTable(pnlReport.name || 'Profit and Loss', pnlData, 'pnl-table', 'Total');
 
-  <h2>Profit and Loss</h2>
-  <table class="report-table pnl-table">
-    <thead>
-      <tr>
-        <th class="text-left">Account</th>
-        <th class="text-right">Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr class="section-header"><td colspan="2"><strong>Income</strong></td></tr>
-      ${renderRows(pnl.detail.revenue)}
-      <tr class="total-row"><td>Total Income</td><td class="text-right">${formatMoney(pnl.revenue)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Cost of Goods Sold</strong></td></tr>
-      ${renderRows(pnl.detail.cost)}
-      <tr class="total-row"><td>Gross Profit</td><td class="text-right">${formatMoney(pnl.gross)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Expenses</strong></td></tr>
-      ${renderRows(pnl.detail.expense)}
-      <tr class="total-row"><td>Total Expenses</td><td class="text-right">${formatMoney(pnl.expense)}</td></tr>
-      <tr class="total-row"><td>Net Operating Income</td><td class="text-right">${formatMoney(pnl.operating)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Other Income</strong></td></tr>
-      ${renderRows(pnl.detail.otherIncome)}
-      <tr class="total-row"><td>Total Other Income</td><td class="text-right">${formatMoney(pnl.otherIncome)}</td></tr>
-      <tr class="section-header"><td colspan="2"><strong>Other Expenses</strong></td></tr>
-      ${renderRows(pnl.detail.otherExpense)}
-      <tr class="total-row"><td>Total Other Expenses</td><td class="text-right">${formatMoney(pnl.otherExpense)}</td></tr>
-      <tr class="grand-total-row"><td>Net Income</td><td class="text-right">${formatMoney(pnl.net)}</td></tr>
-    </tbody>
-  </table>
-</div>`;
+  return `<div class="annual-report-body">\n${bsHtml}\n\n${pnlHtml}\n</div>`;
 }
 
 export const auditReportModels = {
