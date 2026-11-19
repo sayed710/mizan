@@ -2922,12 +2922,7 @@ Object.assign(accountingModels, {
           return 'All companies in a tax unit must have the same country';
         }
       }
-      const currencyRecords = companyRecords.map((company) => {
-        if (company?.currency_id === null) return null;
-        if (company?.currency_id !== undefined) return findCompanyCurrencyRecord(db, company.id);
-        if (hasAnyCompanyCountry) return null;
-        return findCompanyCurrencyRecord(db, 1);
-      });
+      const currencyRecords = companies.map((id) => findCompanyCurrencyRecord(db, id));
       if (currencyRecords.some((c) => !c?.id)) {
         return 'Set a currency on every company in the tax unit';
       }
