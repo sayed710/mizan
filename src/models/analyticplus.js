@@ -5,7 +5,7 @@ import { conversionRate, toCompany } from './currency.js';
 import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
-import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems, registerAnalyticPostingHooks } from './ledger.js';
+import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, invoiceLineAccountResult, journalItems, registerAnalyticPostingHooks } from './ledger.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { hasMultiCurrency } from './money.js';
 import { currentCompany } from './company.js';
@@ -38,14 +38,44 @@ export { normalizeDistribution } from '../analytic_distribution.js';
 import { normalizeDistribution, storedLineDistribution } from '../analytic_distribution.js';
 export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
-/** Resolve a fresh default using the same account that will be posted. */
+const canonicalDistribution = (distribution) => Object.entries(distribution ?? {})
+  .filter(([, percent]) => Number(percent) > 0)
+  .map(([id, percent]) => [String(id), Number(percent)])
+  .sort(([a], [b]) => a.localeCompare(b));
+
+/** Whether two analytic distributions allocate exactly the same plans and shares. */
+export function sameDistribution(a, b) {
+  return JSON.stringify(canonicalDistribution(a)) === JSON.stringify(canonicalDistribution(b));
+}
+
+/**
+ * Resolve a fresh default using the same account that will be posted, without throwing on incomplete lines.
+ * When the posting account cannot be resolved yet, only the partner, product and company rules apply.
+ */
 export function defaultDistributionForLine(db, line, move, fallback = {}) {
+  const accountId = move?.move_type === 'entry'
+    ? (line.account_id ?? line.account)
+    : (invoiceLineAccountResult(db, move, line).account ?? null);
   return findAnalyticDistribution(db, {
     partner_id: line?.partner_id ?? move?.partner_id,
     product_id: line.product_id,
-    account_id: move?.move_type === 'entry' ? (line.account_id ?? line.account) : invoiceLineAccount(db, move, line),
+    account_id: accountId,
     company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : (line?.company_id ?? 1),
   }, fallback);
+}
+
+/**
+ * Update a line's analytic distribution when deferral dates change:
+ * if the distribution before the edit was auto-filled from the line's previous state,
+ * update it to the new auto-filled default for the updated line.
+ */
+export function syncDeferredAnalyticDistribution(db, updated, line, previousLine, move) {
+  const current = line.analytic_distribution ?? (line.analytic_account_id ? { [line.analytic_account_id]: 100 } : {});
+  const autoBefore = previousLine
+    ? defaultDistributionForLine(db, previousLine, move)
+    : defaultDistributionForLine(db, { ...line, deferred_start_date: null, deferred_end_date: null }, move);
+  if (!sameDistribution(current, autoBefore)) return updated;
+  return { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, move) };
 }
 
 /** Read a distribution, preserving the legacy single-account allocation. */
@@ -63,7 +93,7 @@ export function planApplicability(db, plan, line, move = null) {
     ? (['out_invoice', 'out_refund'].includes(move.move_type) ? 'invoice' : 'bill')
     : move?.move_type === 'entry' ? 'general' : null;
 
-  const accountId = line?.account_id || (isInvoiceDoc ? invoiceLineAccount(db, move, line) : null);
+  const accountId = isInvoiceDoc ? (invoiceLineAccount(db, move, line) ?? line?.account_id ?? null) : (line?.account_id ?? null);
   const code = accountId ? read(db, 'account.account', accountId)?.code || '' : '';
 
   const product = line?.product_id ? read(db, 'product', line.product_id) : null;
