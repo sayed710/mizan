@@ -48,7 +48,7 @@ export function Checks() {
     const payment = read(db, 'account.payment', row.paymentId);
     const invoice = read(db, 'account.move', row.invoiceId);
     const canPrint = ['Posted', 'Issued'].includes(row.state);
-    const printUrl = row.batchId ? `#/print/account.batch.payment/${row.batchId}` : `#/print/account.payment/${row.paymentId}`;
+    const printUrl = row.paymentId ? `#/print/account.payment/${row.paymentId}` : `#/print/account.batch.payment/${row.batchId}`;
     return (
       <tr key={row.key}>
         <td>{row.checkNumber}</td>

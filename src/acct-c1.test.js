@@ -399,3 +399,165 @@ test('PAY-18 (Points 2 & 3): Checks register drops Void, filters directly on che
     await React.act(async () => root.unmount());
   }
 });
+
+test('Finding 1: check register row print link targets that row payment and prints only that check', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb, commit } = await import('./store.js');
+  const { create, read, search } = await import('./orm.js');
+  const { postMove } = await import('./models/accounting.js');
+  const { postBatch } = await import('./models/payments.js');
+  const { Checks } = await import('./views/Checks.jsx');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+
+  await initStore();
+  let db = getDb();
+  const journal = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+
+  // Create two vendor bills
+  const bill1 = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 3,
+    ref: 'BILL-MULTI-1',
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(bill1.db, bill1.id);
+
+  const bill2 = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 3,
+    ref: 'BILL-MULTI-2',
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ qty: 1, price_unit: 200, tax: 0 }],
+  });
+  db = postMove(bill2.db, bill2.id);
+
+  // Create outbound batch with both bills
+  const batchRes = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: journal.id,
+    check_number_start: 9300,
+    date: '2026-01-02',
+    lines: [
+      { move_id: bill1.id, amount: 100 },
+      { move_id: bill2.id, amount: 200 },
+    ],
+  });
+  db = postBatch(batchRes.db, read(batchRes.db, 'account.batch.payment', batchRes.id));
+  const postedBatch = read(db, 'account.batch.payment', batchRes.id);
+  const payment1Id = postedBatch.lines[0].payment_id;
+  const payment2Id = postedBatch.lines[1].payment_id;
+  assert.ok(payment1Id && payment2Id);
+
+  await React.act(async () => commit(db));
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    // 1. In Checks register, row Print link must point to account.payment, NOT account.batch.payment
+    await React.act(async () => root.render(React.createElement(Checks)));
+    const printLinks = findAll(host, (n) => n.tagName === 'A' && props(n)?.href?.includes('/print/'));
+    const link1 = printLinks.find((l) => props(l)?.href?.includes(String(payment1Id)));
+    assert.ok(link1, 'Print link for check 1 targets row payment');
+    assert.equal(props(link1)?.href, `#/print/account.payment/${payment1Id}`);
+
+    // 2. Rendering PrintDoc for account.payment prints only ONE check
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: payment1Id })));
+    const singleCheckText = textOf(host);
+    assert.match(singleCheckText, /Check #9300/);
+    assert.doesNotMatch(singleCheckText, /Check #9301/);
+
+    // 3. Rendering PrintDoc for account.batch.payment prints BOTH checks
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.batch.payment', id: postedBatch.id })));
+    const batchCheckText = textOf(host);
+    assert.match(batchCheckText, /Check #9300/);
+    assert.match(batchCheckText, /Check #9301/);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Finding 2: draft inbound batch direct print URL does not render deposit slip and does not auto-print', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb, commit } = await import('./store.js');
+  const { create, read, search } = await import('./orm.js');
+  const { postMove } = await import('./models/accounting.js');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+
+  await initStore();
+  let db = getDb();
+  const journal = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 3,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  // Draft inbound batch
+  const batchRes = create(db, 'account.batch.payment', {
+    batch_type: 'inbound',
+    journal_id: journal.id,
+    date: '2026-01-02',
+    lines: [{ move_id: inv.id, amount: 100 }],
+  });
+  const draftBatch = read(batchRes.db, 'account.batch.payment', batchRes.id);
+  assert.equal(draftBatch.state, 'draft');
+
+  let printCalls = 0;
+  const originalPrint = globalThis.window.print;
+  globalThis.window.print = () => { printCalls++; };
+
+  await React.act(async () => commit(batchRes.db));
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.batch.payment', id: draftBatch.id })));
+    const text = textOf(host);
+    // Must NOT render deposit slip
+    assert.doesNotMatch(text, /Batch Deposit/i);
+    assert.doesNotMatch(text, /Number of Items/i);
+    // Must show alert / restriction message
+    assert.match(text, /Deposit slips can only be printed for posted batch payments|posted/i);
+    // Must not auto-print
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(printCalls, 0, 'window.print was not called for draft inbound batch');
+  } finally {
+    globalThis.window.print = originalPrint;
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Finding 3: Arabic coverage for register headers, CHECK_REGISTER_STATES, and Actions/Cancelled', async () => {
+  const prevStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem() {}, removeItem() {}, clear() {} };
+  try {
+    const { t } = await import('./i18n.js?lang=ar-c1-check');
+    const { CHECK_REGISTER_STATES } = await import('./models/payments.js');
+
+    const headers = ['Check Number', 'Date', 'Payment', 'Vendor', 'Amount', 'Status', 'Actions'];
+    for (const h of headers) {
+      const tr = t(h);
+      assert.notEqual(tr, h, `Missing Arabic translation for header ${h}`);
+      assert.ok(/[\u0600-\u06FF]/.test(tr), `Translation for ${h} must contain Arabic text`);
+    }
+
+    for (const s of CHECK_REGISTER_STATES) {
+      const tr = t(s);
+      assert.notEqual(tr, s, `Missing Arabic translation for state ${s}`);
+      assert.ok(/[\u0600-\u06FF]/.test(tr), `Translation for ${s} must contain Arabic text`);
+    }
+
+    assert.notEqual(t('Actions'), 'Actions');
+    assert.notEqual(t('Cancelled'), 'Cancelled');
+  } finally {
+    globalThis.localStorage = prevStorage;
+  }
+});

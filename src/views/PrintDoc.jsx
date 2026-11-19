@@ -213,12 +213,25 @@ export function PrintDoc({ model, id }) {
   const layout = LAYOUTS[model];
   const rec = read(db, model, Number(id));
   const recId = rec?.id;
+  const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
-    if (!recId) return undefined;
+    if (!recId || isDraftInboundBatch) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
-  }, [recId]);
-  if (rec && model === 'account.batch.payment') return rec.batch_type === 'inbound' ? <DepositSlip db={db} batch={rec} /> : <Checks db={db} batch={rec} />;
+  }, [recId, isDraftInboundBatch]);
+  if (rec && model === 'account.batch.payment') {
+    if (rec.batch_type === 'inbound') {
+      if (rec.state !== 'posted') {
+        return (
+          <main className="action">
+            <p className="empty" role="alert">{t('Deposit slips can only be printed for posted batch payments.')}</p>
+          </main>
+        );
+      }
+      return <DepositSlip db={db} batch={rec} />;
+    }
+    return <Checks db={db} batch={rec} />;
+  }
   if (rec && model === 'account.payment' && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
     const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
     return <Checks db={db} batch={batch} />;
