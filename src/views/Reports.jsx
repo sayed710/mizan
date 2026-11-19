@@ -570,8 +570,8 @@ function Depreciation({ db, period, companyId }) {
   );
 }
 
-function JournalAudit({ db, period, companyId }) {
-  const groups = journalAudit(db, { ...period, companyId: companyId === 'all' ? null : Number(companyId) });
+function JournalAudit({ db, period, companyId, sort = 'date' }) {
+  const groups = journalAudit(db, { ...period, companyId: companyId === 'all' ? null : Number(companyId), sort });
   if (!groups.length) return <tbody><tr><td colSpan={7} className="muted">{t('No posted entries for this period.')}</td></tr></tbody>;
   return <tbody>{groups.map(({ journal, items, debit, credit, taxes }) => <Fragment key={journal.id}>
     <tr className="rep-section"><td colSpan={5}><strong>{journal.name} ({journal.code})</strong></td><td className="num">{money(debit)}</td><td className="num">{money(credit)}</td></tr>
@@ -664,6 +664,7 @@ function ReportPage({ leaf }) {
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [partnerFilterIds, setPartnerFilterIds] = useState([]);
   const [unreconciledOnly, setUnreconciledOnly] = useState(false);
+  const [auditSort, setAuditSort] = useState('date');
   const ledgerReports = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit'];
   const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
   const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
@@ -767,6 +768,12 @@ function ReportPage({ leaf }) {
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
+        {leaf.report === 'journalAudit' && <label className="inline-select">{t('Sort by')}
+          <select aria-label={t('Sort by')} value={auditSort} onChange={(e) => setAuditSort(e.target.value)}>
+            <option value="date">{t('Date')}</option>
+            <option value="number">{t('Journal Entry Number')}</option>
+          </select>
+        </label>}
         {(['journalAudit', 'inalterability', 'cashflow', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
           <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
         )}
@@ -832,7 +839,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} />}
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} />}
         </table>
       </div>
     </main>

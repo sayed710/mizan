@@ -1,10 +1,13 @@
 import { round } from '../money.js';
 import { isNonZeroBaseGridLine } from './taxes.js';
 
-/** Journal items and signed tax totals in the requested period and company. */
-export function journalAudit(db, { from = '', to = '', companyId = null } = {}) {
+/** Journal items and signed tax totals in the requested period and company, ordered by date or by entry number. */
+export function journalAudit(db, { from = '', to = '', companyId = null, sort = 'date' } = {}) {
   const groups = new Map();
   const journals = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
+  const byNumber = (a, b) => (a.move.name ?? '').localeCompare(b.move.name ?? '', undefined, { numeric: true });
+  const byDate = (a, b) => a.date.localeCompare(b.date);
+  const compareItems = (a, b) => (sort === 'number' ? byNumber(a, b) || byDate(a, b) : byDate(a, b) || (a.move.name ?? '').localeCompare(b.move.name ?? '')) || (a.move.id ?? 0) - (b.move.id ?? 0);
   for (const move of db.records['account.move'] ?? []) {
     const date = move.date ?? move.invoice_date ?? '';
     if (move.state !== 'posted' || (from && date < from) || (to && date > to) || (companyId && (move.company_id ?? 1) !== companyId)) continue;
@@ -30,7 +33,7 @@ export function journalAudit(db, { from = '', to = '', companyId = null } = {}) 
   }
   return [...groups.values()].map((g) => ({
     ...g,
-    items: g.items.sort((a, b) => a.date.localeCompare(b.date) || a.move.name.localeCompare(b.move.name)),
+    items: g.items.sort(compareItems),
     taxes: [...g.taxes.values()].sort((a, b) => a.name.localeCompare(b.name) || (a.tax_id ?? 0) - (b.tax_id ?? 0)).map(({ tax_id, ...row }) => {
       Object.defineProperty(row, 'tax_id', { value: tax_id });
       return row;

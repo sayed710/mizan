@@ -1,5 +1,5 @@
 // Complete Audit Trail collection, lock-date filtering, and CSV export across financial models.
-import { read } from '../orm.js';
+import { read, formatTrackingChange } from '../orm.js';
 import { toCsv } from '../csv.js';
 import { scopeAuditRows } from '../companyView.js';
 import { auditSummary } from '../audit.js';
@@ -11,6 +11,28 @@ export { AUDIT_MODELS, LOCK_DATE_FIELDS, isAuditTrackingMessage };
 /** True when `date` falls within the inclusive `[period.from, period.to]` bounds. */
 const inPeriod = (date, period) => (!period?.from || String(date ?? '').slice(0, 10) >= period.from)
   && (!period?.to || String(date ?? '').slice(0, 10) <= period.to);
+
+/** Old/new display values and summary for a server-logged change; line collections get per-line detail. */
+const changeDetailOf = (db, model, key, oldVal, newVal) => {
+  const field = fieldLabelOf(model, key);
+  if ((newVal && typeof newVal === 'object') || Array.isArray(oldVal)) {
+    const d = formatTrackingChange(db, model, key, oldVal, newVal);
+    if (d && d.new_value !== 'updated') {
+      return {
+        oldValue: d.old_value || '—',
+        newValue: d.new_value || '—',
+        body: d.body,
+      };
+    }
+  }
+  const a = shownValue(oldVal);
+  const b = shownValue(newVal);
+  return {
+    oldValue: a,
+    newValue: b,
+    body: `${field}: ${a} → ${b}`,
+  };
+};
 
 /** Format a tracked field value for audit-trail display. */
 const shownValue = (v) => (v === null || v === undefined || v === '' ? '—' : typeof v === 'object' ? JSON.stringify(v).slice(0, 60) : String(v));
@@ -40,17 +62,16 @@ export function collectAuditTrailRows(db, sourceDb, period, serverLog = null) {
         const lockChanges = entries.filter(([k]) => LOCK_DATE_FIELDS.includes(k));
         for (const [k, [oldVal, newVal]] of lockChanges) {
           const field = fieldLabelOf(e.model, k);
-          const a = shownValue(oldVal);
-          const b = shownValue(newVal);
+          const { oldValue, newValue, body } = changeDetailOf(db, e.model, k, oldVal, newVal);
           rows.push({
             id: `${e.id}:${k}`,
             model: e.model,
             res_id: e.res_id,
             recordName,
             field,
-            oldValue: a,
-            newValue: b,
-            body: `${field}: ${a} → ${b}`,
+            oldValue,
+            newValue,
+            body,
             author: e.actor,
             date: e.at,
           });
@@ -60,17 +81,16 @@ export function collectAuditTrailRows(db, sourceDb, period, serverLog = null) {
       if (e.action === 'write' && entries.length) {
         for (const [k, [oldVal, newVal]] of entries) {
           const field = fieldLabelOf(e.model, k);
-          const a = shownValue(oldVal);
-          const b = shownValue(newVal);
+          const { oldValue, newValue, body } = changeDetailOf(db, e.model, k, oldVal, newVal);
           rows.push({
             id: `${e.id}:${k}`,
             model: e.model,
             res_id: e.res_id,
             recordName,
             field,
-            oldValue: a,
-            newValue: b,
-            body: `${field}: ${a} → ${b}`,
+            oldValue,
+            newValue,
+            body,
             author: e.actor,
             date: e.at,
           });
