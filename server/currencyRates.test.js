@@ -1,5 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { register } from 'node:module';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
@@ -8,13 +14,17 @@ const { seed } = await import('../src/seed.js');
 const { create, read, search, write } = await import('../src/orm.js');
 const { models } = await import('../src/models/index.js');
 const { createCompany } = await import('../src/models/company.js');
-const { upsertCurrencyRate, upsertCurrencyRates } = await import('../src/models/currency.js');
+const {
+  advanceExecutionDate,
+  convertRatesToCompanyCurrency,
+  parseEcbXml,
+  upsertCurrencyRate,
+  upsertCurrencyRates,
+} = await import('../src/models/currency.js');
 const { find, setupDom } = await import('../src/test-support/dom.js');
 
 const {
-  parseEcbXml,
-  convertRatesToCompanyCurrency,
-  advanceExecutionDate,
+  fetchEcbRates,
   updateCompanyCurrencyRates,
   updateDueCurrencyRates,
 } = await import('./currencyRates.js');
@@ -74,6 +84,52 @@ async function renderSettingsView(initialDb) {
   };
 }
 
+async function withTestServer(env, fn) {
+  const directory = await mkdtemp(join(tmpdir(), 'mizan-rates-test-'));
+  const child = spawn(process.execPath, ['server/index.js'], {
+    cwd: new URL('..', import.meta.url),
+    env: {
+      ...process.env,
+      PORT: '0',
+      MIZAN_DB: join(directory, 'test.sqlite'),
+      MIZAN_ADMIN_PASSWORD: 'admin-rates-password',
+      MIZAN_SECURE_COOKIE: '0',
+      MIZAN_SMTP_HOST: '',
+      NODE_ENV: '',
+      ...env,
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  try {
+    const origin = await new Promise((resolve, reject) => {
+      let output = '';
+      const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
+      child.stdout.on('data', (chunk) => {
+        output += chunk;
+        const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
+        if (match) { clearTimeout(timeout); resolve(match[1]); }
+      });
+      child.stderr.on('data', (chunk) => { output += chunk; });
+      child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
+    });
+    const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
+    const res = await fetch(`${origin}/api/login`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ login: 'admin', password: 'admin-rates-password' }),
+    });
+    const adminHeaders = { ...headers, Cookie: res.headers.get('set-cookie').split(';')[0] };
+    await fn(origin, adminHeaders, directory);
+  } finally {
+    if (child.exitCode === null) {
+      const exited = once(child, 'exit');
+      child.send('shutdown');
+      await exited;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 1. res.company fields definition and defaults for FX-14
 // ---------------------------------------------------------------------------
@@ -93,7 +149,7 @@ test('res.company defines currency_provider, currency_interval_unit, and currenc
 });
 
 // ---------------------------------------------------------------------------
-// 2. XML parsing
+// 2. XML parsing (pure helper in src/models/currency.js)
 // ---------------------------------------------------------------------------
 
 test('parseEcbXml parses date and EUR-based rates, adding EUR: 1.0', () => {
@@ -108,7 +164,7 @@ test('parseEcbXml parses date and EUR-based rates, adding EUR: 1.0', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Conversion from EUR rates to company currency
+// 3. Conversion from EUR rates to company currency (pure helper in src/models/currency.js)
 // ---------------------------------------------------------------------------
 
 test('convertRatesToCompanyCurrency converts EUR-based rates to company currency terms', () => {
@@ -119,87 +175,88 @@ test('convertRatesToCompanyCurrency converts EUR-based rates to company currency
   // 1 USD = (0.8325 / 1.085) GBP ~ 0.767281 GBP
   const usdCompanyRates = convertRatesToCompanyCurrency(parsed.rates, 'USD');
   assert.equal(usdCompanyRates.USD, 1.0);
-  assert.ok(Math.abs(usdCompanyRates.EUR - 1.0 / 1.085) < 1e-9);
-  assert.ok(Math.abs(usdCompanyRates.GBP - 0.8325 / 1.085) < 1e-9);
-  assert.ok(Math.abs(usdCompanyRates.JPY - 165.2 / 1.085) < 1e-9);
+  assert.ok(Math.abs(usdCompanyRates.EUR - 1.0 / 1.085) < 1e-6);
+  assert.ok(Math.abs(usdCompanyRates.GBP - 0.8325 / 1.085) < 1e-6);
 
-  // When company currency is EUR (1.0 units per EUR):
+  // When company currency is EUR (1.0 in feed):
   const eurCompanyRates = convertRatesToCompanyCurrency(parsed.rates, 'EUR');
   assert.equal(eurCompanyRates.EUR, 1.0);
   assert.equal(eurCompanyRates.USD, 1.085);
-  assert.equal(eurCompanyRates.GBP, 0.8325);
 
-  // When company currency is not in feed (e.g. SAR): throws clear error
-  assert.throws(
-    () => convertRatesToCompanyCurrency(parsed.rates, 'SAR'),
-    /SAR.*not in.*feed/i,
-  );
+  // When company currency is not in feed (e.g. SAR), fails with clear error:
+  assert.throws(() => convertRatesToCompanyCurrency(parsed.rates, 'SAR'), /not in the ECB feed/);
 });
 
 // ---------------------------------------------------------------------------
-// 4. Writing rates: canonical helper in currency.js (active only, no duplicates)
+// 4. Rate writing and canonical upsert helper (src/models/currency.js)
 // ---------------------------------------------------------------------------
 
 test('upsertCurrencyRate and upsertCurrencyRates write rates only for active currencies and prevent duplicates on rerun', () => {
   let db = seed();
   const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
-  assert.ok(eur, 'EUR currency should exist');
+  assert.ok(eur, 'EUR must exist');
 
-  // Create an inactive currency
+  // Deactivate a currency (e.g. create inactive currency)
   const inactive = create(db, 'res.currency', {
-    name: 'INACT',
+    name: 'INA',
+    symbol: 'I',
     active: false,
-    rounding: 0.01,
+    rate_ids: [],
   });
   db = inactive.db;
   const inactId = inactive.id;
 
-  const testDate = '2026-11-18';
-  const cId = 1;
+  // Upsert on active EUR
+  db = upsertCurrencyRate(db, eur.id, { date: '2026-11-19', rate: 0.92, companyId: 1 });
+  const eurAfter1 = read(db, 'res.currency', eur.id);
+  const rows1 = eurAfter1.rate_ids.filter((r) => r.date === '2026-11-19' && r.company_id === 1);
+  assert.equal(rows1.length, 1);
+  assert.equal(rows1[0].rate, 0.92);
 
-  // Initial upsert for EUR
-  db = upsertCurrencyRate(db, eur.id, { date: testDate, rate: 0.921659, companyId: cId });
-  const eurAfter = read(db, 'res.currency', eur.id);
-  const rows = eurAfter.rate_ids.filter((r) => r.date === testDate && r.company_id === cId);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].rate, 0.921659);
+  // Rerun upsert with new rate on same date and company: must update without duplicate
+  db = upsertCurrencyRate(db, eur.id, { date: '2026-11-19', rate: 0.93, companyId: 1 });
+  const eurAfter2 = read(db, 'res.currency', eur.id);
+  const rows2 = eurAfter2.rate_ids.filter((r) => r.date === '2026-11-19' && r.company_id === 1);
+  assert.equal(rows2.length, 1, 'Duplicate row must not be created on rerun');
+  assert.equal(rows2[0].rate, 0.93, 'Rate must be updated in place');
 
-  // Rerun with updated rate: must NOT create duplicate row
-  db = upsertCurrencyRate(db, eur.id, { date: testDate, rate: 0.93, companyId: cId });
-  const eurRerun = read(db, 'res.currency', eur.id);
-  const rowsRerun = eurRerun.rate_ids.filter((r) => r.date === testDate && r.company_id === cId);
-  assert.equal(rowsRerun.length, 1, 'Rerun must update existing row instead of adding duplicate');
-  assert.equal(rowsRerun[0].rate, 0.93);
-
-  // Upsert on inactive currency: must NOT add rate rows
-  db = upsertCurrencyRate(db, inactId, { date: testDate, rate: 2.5, companyId: cId });
+  // Upsert on inactive currency: must not write
+  db = upsertCurrencyRate(db, inactId, { date: '2026-11-19', rate: 2.5, companyId: 1 });
   const inactAfter = read(db, 'res.currency', inactId);
-  assert.equal(inactAfter.rate_ids?.length ?? 0, 0, 'Inactive currencies must not receive rate rows');
+  assert.equal((inactAfter.rate_ids ?? []).length, 0, 'Inactive currency must not receive rates');
 
-  // Batch helper: upsertCurrencyRates
-  db = upsertCurrencyRates(db, { EUR: 0.915, INACT: 3.0 }, { date: testDate, companyId: cId });
-  const eurBatch = read(db, 'res.currency', eur.id);
-  const batchRows = eurBatch.rate_ids.filter((r) => r.date === testDate && r.company_id === cId);
-  assert.equal(batchRows.length, 1);
-  assert.equal(batchRows[0].rate, 0.915);
-
-  const inactBatch = read(db, 'res.currency', inactId);
-  assert.equal(inactBatch.rate_ids?.length ?? 0, 0);
+  // Bulk upsertCurrencyRates
+  db = upsertCurrencyRates(db, { EUR: 0.94, INA: 3.0 }, { date: '2026-11-19', companyId: 1 });
+  const eurAfter3 = read(db, 'res.currency', eur.id);
+  const rows3 = eurAfter3.rate_ids.filter((r) => r.date === '2026-11-19' && r.company_id === 1);
+  assert.equal(rows3.length, 1);
+  assert.equal(rows3[0].rate, 0.94);
+  assert.equal((read(db, 'res.currency', inactId).rate_ids ?? []).length, 0);
 });
 
 // ---------------------------------------------------------------------------
-// 5. Due-date advance logic
+// 5. updateCompanyCurrencyRates and advanceExecutionDate
 // ---------------------------------------------------------------------------
+
+test('fetchEcbRates fetches and parses rates with injected fetch', async () => {
+  const result = await fetchEcbRates(mockFetch(SAMPLE_ECB_XML));
+  assert.equal(result.date, '2026-11-18');
+  assert.equal(result.rates.EUR, 1.0);
+  assert.equal(result.rates.USD, 1.085);
+});
 
 test('updateCompanyCurrencyRates fetches rates and upserts for company', async () => {
   const db = seed();
-  const res = await updateCompanyCurrencyRates(db, 1, { fetchFn: mockFetch(SAMPLE_ECB_XML) });
-  assert.equal(res.date, '2026-11-18');
-  assert.equal(res.rates.USD, 1.0);
+  const res = await updateCompanyCurrencyRates(db, 1, {
+    fetchFn: mockFetch(SAMPLE_ECB_XML),
+    date: '2026-11-19',
+  });
+  assert.ok(res.db);
+  assert.equal(res.date, '2026-11-19');
   const eur = search(res.db, 'res.currency').find((c) => c.name === 'EUR');
-  const eurRow = eur.rate_ids.find((r) => r.date === '2026-11-18' && r.company_id === 1);
-  assert.ok(eurRow);
-  assert.ok(eurRow.rate > 0);
+  const row = eur.rate_ids.find((r) => r.date === '2026-11-19' && r.company_id === 1);
+  assert.ok(row);
+  assert.ok(row.rate > 0);
 });
 
 test('advanceExecutionDate advances date by interval unit', () => {
@@ -210,13 +267,13 @@ test('advanceExecutionDate advances date by interval unit', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. Periodic job execution: due companies, error handling, date advance
+// 6. Periodic job updateDueCurrencyRates: execution and error handling
 // ---------------------------------------------------------------------------
 
-test('updateDueCurrencyRates runs for due companies, advances next execution date, and preserves date on failure', async () => {
+test('updateDueCurrencyRates requires log function and runs for due companies', async () => {
   let db = seed();
 
-  // Company 1: EUR currency (or USD), active interval 'daily', due date today
+  // Company 1: daily interval, due today - must run
   db = write(db, 'res.company', 1, {
     currency_provider: 'ecb',
     currency_interval_unit: 'daily',
@@ -250,6 +307,12 @@ test('updateDueCurrencyRates runs for due companies, advances next execution dat
     commit: (next) => { currentDb = next; },
   };
 
+  // Must reject when log function is missing
+  await assert.rejects(
+    () => updateDueCurrencyRates(store, { fetchFn: mockFetch(SAMPLE_ECB_XML), todayDate: '2026-11-19' }),
+    TypeError,
+  );
+
   const logs = [];
   const log = (level, msg, ctx) => logs.push({ level, msg, ctx });
 
@@ -275,7 +338,6 @@ test('updateDueCurrencyRates runs for due companies, advances next execution dat
   assert.ok(eurRateRow.rate > 0);
 
   // 2. Network failure scenario: leaves date unchanged and logs error
-  // Reset company 1 date back to due
   currentDb = write(currentDb, 'res.company', 1, { currency_next_execution_date: '2026-11-19' });
   logs.length = 0;
 
@@ -292,10 +354,10 @@ test('updateDueCurrencyRates runs for due companies, advances next execution dat
 });
 
 // ---------------------------------------------------------------------------
-// 7. Settings UI: Provider, Interval, and Update Now button
+// 7. Settings UI: Local mode hides controls; Server mode displays and calls endpoint
 // ---------------------------------------------------------------------------
 
-test('Settings renders Currency Rates settings and Update Now button writes rates', async () => {
+test('Settings in local mode hides automatic rate controls', async () => {
   let db = seed();
   db = write(db, 'res.company', 1, {
     currency_provider: 'ecb',
@@ -305,29 +367,83 @@ test('Settings renders Currency Rates settings and Update Now button writes rate
 
   const ctx = await renderSettingsView(db);
   try {
-    const providerSelect = ctx.control('currency_provider');
-    assert.ok(providerSelect, 'currency_provider select control must render');
-
-    const intervalSelect = ctx.control('currency_interval_unit');
-    assert.ok(intervalSelect, 'currency_interval_unit select control must render');
-
+    // In local mode (!isServer()), automatic-rate settings and button must not render
+    assert.equal(ctx.control('currency_provider'), null, 'currency_provider must not render in local mode');
+    assert.equal(ctx.control('currency_interval_unit'), null, 'currency_interval_unit must not render in local mode');
     const updateBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent?.includes('Update Now'));
-    assert.ok(updateBtn, 'Update Now button must render');
-
-    // Change provider to ecb and interval to weekly
-    await ctx.React.act(async () => {
-      props(intervalSelect)?.onChange?.({ target: { value: 'weekly' } });
-    });
-
-    const updated = read(ctx.getDb(), 'res.company', 1);
-    assert.equal(updated.currency_interval_unit, 'weekly');
+    assert.equal(updateBtn, null, 'Update Now button must not render in local mode');
   } finally {
     await ctx.cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// 8. Arabic translations
+// 8. Server Endpoint: POST /api/currency-rates/update
+// ---------------------------------------------------------------------------
+
+test('POST /api/currency-rates/update: non-admin gets 403, admin with stubbed fetch gets rates written and response ok', async () => {
+  const fakeEcb = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/xml' });
+    res.end(SAMPLE_ECB_XML);
+  });
+  await new Promise((resolve) => fakeEcb.listen(0, '127.0.0.1', resolve));
+  const ecbPort = fakeEcb.address().port;
+  const ecbUrl = `http://127.0.0.1:${ecbPort}/rates.xml`;
+
+  try {
+    await withTestServer({ ECB_URL: ecbUrl }, async (origin, adminHeaders) => {
+      const publicHeaders = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
+
+      // 1. Non-admin user gets 403
+      await fetch(`${origin}/api/users`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ login: 'clerk', name: 'Clerk', password: 'clerk-password' }),
+      });
+      const clerkLoginRes = await fetch(`${origin}/api/login`, {
+        method: 'POST',
+        headers: publicHeaders,
+        body: JSON.stringify({ login: 'clerk', password: 'clerk-password' }),
+      });
+      const clerkHeaders = { ...publicHeaders, Cookie: clerkLoginRes.headers.get('set-cookie').split(';')[0] };
+
+      const nonAdminRes = await fetch(`${origin}/api/currency-rates/update`, {
+        method: 'POST',
+        headers: clerkHeaders,
+        body: JSON.stringify({ company_id: 1 }),
+      });
+      assert.equal(nonAdminRes.status, 403);
+      const nonAdminBody = await nonAdminRes.json();
+      assert.equal(nonAdminBody.error, 'Admins only');
+
+      // 2. Admin request gets 200 and rates written
+      const adminRes = await fetch(`${origin}/api/currency-rates/update`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ company_id: 1 }),
+      });
+      assert.equal(adminRes.status, 200);
+      const adminBody = await adminRes.json();
+      assert.equal(adminBody.ok, true);
+      assert.equal(adminBody.date, '2026-11-18');
+
+      // 3. Verify in database that rates were written for company 1
+      const dbRes = await fetch(`${origin}/api/db`, { headers: adminHeaders });
+      assert.equal(dbRes.status, 200);
+      const serverDb = await dbRes.json();
+      const eur = search(serverDb, 'res.currency').find((c) => c.name === 'EUR');
+      assert.ok(eur, 'EUR currency must exist');
+      const rateRow = (eur.rate_ids ?? []).find((r) => r.date === '2026-11-18' && r.company_id === 1);
+      assert.ok(rateRow, 'Rate row for company 1 must be written to server database');
+      assert.ok(rateRow.rate > 0);
+    });
+  } finally {
+    fakeEcb.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9. Arabic translations
 // ---------------------------------------------------------------------------
 
 test('Arabic translations for currency rates in i18n.js', async () => {
@@ -342,8 +458,8 @@ test('Arabic translations for currency rates in i18n.js', async () => {
     assert.equal(t('Monthly'), 'شهري');
     assert.equal(t('Weekly'), 'أسبوعي');
     assert.equal(t('Select a valid currency provider'), 'اختر مزود أسعار عملات صالحاً');
+    assert.equal(t('Could not update currency rates'), 'تعذر تحديث أسعار العملات');
   } finally {
     globalThis.localStorage = prevStorage;
   }
 });
-

@@ -954,6 +954,21 @@ async function api(req, res, path) {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     return send(res, 200, blobs.inline(db), { 'Content-Disposition': `attachment; filename="mizan-backup-${new Date().toISOString().slice(0, 10)}.json"` });
   }
+  if (path === '/api/currency-rates/update' && req.method === 'POST') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    try {
+      const body = await readJson(req);
+      const companyId = body?.company_id ?? body?.companyId;
+      if (!companyId) return send(res, 400, { error: 'company_id is required' });
+      const { updateCompanyCurrencyRates } = await import('./currencyRates.js');
+      const store = storeFor(writeOptions(user), user.login);
+      const { db: updatedDb, date } = await updateCompanyCurrencyRates(store.get(), companyId);
+      store.commit(updatedDb);
+      return send(res, 200, { ok: true, date });
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     if (!RESET_ALLOWED) return send(res, 403, { error: 'Reset is disabled on this server (set MIZAN_ALLOW_RESET=1 to allow it)' });

@@ -259,6 +259,7 @@ export function validateCompanySettingWrite(db, company, vals) {
 
 /** Odoo-ordered Accounting settings blocks editing active res.company fields via the ORM write path. */
 function AccountingSection({ db, company, readOnly, onWriteCompany }) {
+  const [rateError, setRateError] = useState(null);
   const fields = models['res.company']?.fields ?? {};
   const hasField = (name) => Boolean(fields[name]);
   const taxesByUse = (use) => (db.records['account.tax'] ?? [])
@@ -390,7 +391,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
               </p>
             </SettingRow>
           </div>
-          {(hasField('currency_provider') || hasField('currency_interval_unit') || hasField('currency_next_execution_date')) && (
+          {isServer() && (hasField('currency_provider') || hasField('currency_interval_unit') || hasField('currency_next_execution_date')) && (
             <div className="settings-block">
               {hasField('currency_provider') && (
                 <SettingRow id="currency_provider" label="Currency Provider" description="Service used to automatically download exchange rates.">
@@ -419,26 +420,40 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
                 </SettingRow>
               )}
               {hasField('currency_provider') && (
-                <div className="row" style={{ marginTop: '8px' }}>
-                  <button
-                    type="button"
-                    id="update_currency_rates"
-                    className="btn"
-                    disabled={readOnly || !company}
-                    onClick={async () => {
-                      if (!company) return;
-                      try {
-                        const { updateCompanyCurrencyRates } = await import('../../server/currencyRates.js');
-                        const res = await updateCompanyCurrencyRates(getDb(), company.id);
-                        commit(res.db);
-                      } catch (err) {
-                        alert(err.message);
-                      }
-                    }}
-                  >
-                    {t('Update Now')}
-                  </button>
-                </div>
+                <>
+                  <div className="row" style={{ marginTop: '8px' }}>
+                    <button
+                      type="button"
+                      id="update_currency_rates"
+                      className="btn"
+                      disabled={readOnly || !company}
+                      onClick={async () => {
+                        if (!company) return;
+                        setRateError(null);
+                        try {
+                          const res = await fetch('/api/currency-rates/update', {
+                            method: 'POST',
+                            credentials: 'same-origin',
+                            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' },
+                            body: JSON.stringify({ company_id: company.id }),
+                          });
+                          const data = await res.json().catch(() => ({}));
+                          if (!res.ok) {
+                            setRateError(data.error ? t(data.error) : t('Could not update currency rates'));
+                            return;
+                          }
+                          const { reloadDb } = await import('../store.js');
+                          await reloadDb();
+                        } catch (err) {
+                          setRateError(err instanceof Error ? t(err.message) : t('Could not update currency rates'));
+                        }
+                      }}
+                    >
+                      {t('Update Now')}
+                    </button>
+                  </div>
+                  {rateError && <div className="alert" role="alert" style={{ marginTop: '8px' }}>{rateError}</div>}
+                </>
               )}
             </div>
           )}

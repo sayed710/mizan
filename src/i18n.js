@@ -3284,6 +3284,11 @@ const ar = {
   'Select a valid currency provider': 'اختر مزود أسعار عملات صالحاً',
   'Select a valid currency interval unit': 'اختر وحدة تكرار صالحة لتحديث أسعار العملات',
   'Currency next execution date must be a valid date': 'يجب أن يكون تاريخ التنفيذ التالي لأسعار العملات تاريخاً صالحاً',
+  'Could not update currency rates': 'تعذر تحديث أسعار العملات',
+  'company_id is required': 'معرّف الشركة مطلوب',
+  'log function is required': 'دالة السجل مطلوبة',
+  'Invalid ECB XML feed: empty response': 'موجز XML للبنك المركزي الأوروبي غير صالح: استجابة فارغة',
+  'Invalid ECB rates': 'أسعار البنك المركزي الأوروبي غير صالحة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

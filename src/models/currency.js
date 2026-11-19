@@ -1,6 +1,6 @@
 // Foreign currencies with dated rates; amounts convert to the company currency for the ledger.
 import { read, write } from '../orm.js';
-import { today } from './common.js';
+import { addDays, shiftMonth, today } from './common.js';
 import { companyCurrencyRecord, currencyDecimalPlaces, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
 
 
@@ -134,6 +134,66 @@ export function upsertCurrencyRates(db, rates, { date = today(), companyId = nul
     }
   }
   return nextDb;
+}
+
+/** Parse ECB daily XML into { date, rates } with rates relative to EUR (EUR = 1.0). */
+export function parseEcbXml(xml) {
+  if (typeof xml !== 'string' || !xml) throw new Error('Invalid ECB XML feed: empty response');
+  let date = null;
+  const timeMatch = xml.match(/<Cube[^>]*\stime=['"](\d{4}-\d{2}-\d{2})['"]/i);
+  if (timeMatch) date = timeMatch[1];
+
+  const rates = { EUR: 1.0 };
+  const cubeRegex = /<Cube\s+([^>]+)\/>/gi;
+  let match;
+  while ((match = cubeRegex.exec(xml)) !== null) {
+    const attrs = match[1];
+    const currMatch = attrs.match(/currency=['"]([A-Za-z]{3})['"]/i);
+    const rateMatch = attrs.match(/rate=['"]([0-9.]+)['"]/i);
+    if (currMatch && rateMatch) {
+      const rateVal = Number(rateMatch[1]);
+      if (Number.isFinite(rateVal) && rateVal > 0) {
+        rates[currMatch[1].toUpperCase()] = rateVal;
+      }
+    }
+  }
+  return { date, rates };
+}
+
+/**
+ * Convert EUR-based rates to the company currency:
+ * rate of currency X in terms of 1 unit of company currency (rateAt convention).
+ */
+export function convertRatesToCompanyCurrency(ecbRates, companyCurrencyCode) {
+  if (!ecbRates || typeof ecbRates !== 'object') throw new Error('Invalid ECB rates');
+  const code = (companyCurrencyCode || '').toUpperCase();
+  const compRateInEur = ecbRates[code];
+  if (compRateInEur == null || !Number.isFinite(compRateInEur) || compRateInEur <= 0) {
+    const msg = `Company currency ${code} is not in the ECB feed`;
+    throw new Error(msg);
+  }
+  const out = {};
+  for (const [curr, eurRate] of Object.entries(ecbRates)) {
+    if (Number.isFinite(eurRate) && eurRate > 0) {
+      out[curr] = eurRate / compRateInEur;
+    }
+  }
+  return out;
+}
+
+/** Advance a date string by the company currency interval unit. */
+export function advanceExecutionDate(date, intervalUnit) {
+  if (!date) return today();
+  switch (intervalUnit) {
+    case 'daily':
+      return addDays(date, 1);
+    case 'weekly':
+      return addDays(date, 7);
+    case 'monthly':
+      return shiftMonth(date, 1);
+    default:
+      return date;
+  }
 }
 
 /** Rate rows a write adds or changes must be strictly positive and unique per date and company; rows a write leaves untouched are not rechecked, so a currency with a legacy bad row stays editable. */
