@@ -272,6 +272,10 @@ export function postPayment(db, p) {
     if (!transferAccount || transferAccount.active === false || (!shared(transferAccount.company_id) && transferAccount.company_id !== companyId) || transferAccount.account_type !== 'asset_current' || !transferAccount.reconcile) {
       throw new Error('Internal transfer account must be an active, reconcilable current-asset account of the company');
     }
+    const companyCurrency = companyCurrencyRecord(db, companyId);
+    if (transferAccount.currency_id && transferAccount.currency_id !== companyCurrency.id) {
+      throw new Error('Internal transfer account currency must match the company currency');
+    }
     if (!p.journal_id) throw new Error('Select a source journal');
     if (!p.destination_journal_id) throw new Error('Select a destination journal');
     if (p.journal_id === p.destination_journal_id) {
@@ -291,7 +295,6 @@ export function postPayment(db, p) {
     }
 
     const date = p.date ?? today();
-    const companyCurrency = companyCurrencyRecord(db, companyId);
     const companyRound = (n) => roundCurrency(n, companyCurrency);
     const isForeignCurrency = !!p.currency_id && p.currency_id !== companyCurrency.id;
     const rawAmount = Number(p.amount);
@@ -364,15 +367,31 @@ export function postPayment(db, p) {
     ], { date });
 
     const name = explicitName ?? paymentName(recDb, sourceJournal, date, read(recDb, 'account.move', sourceMoveId).name);
+    const destName = paymentName(recDb, destJournal, date, read(recDb, 'account.move', destMoveId).name);
 
-    return write(recDb, 'account.payment', p.id, {
+    const destVals = {
+      name: destName, payment_type: 'inbound', partner_type: null, partner_id: null, is_internal_transfer: true,
+      journal_id: destJournal.id, destination_journal_id: sourceJournal.id, amount: p.amount, currency_id: p.currency_id ?? null,
+      date, memo: p.memo || null, state: 'posted', move_id: destMoveId, destination_move_id: sourceMoveId,
+      outstanding_account_id: destOutstanding, unapplied: 0, company_id: companyId, paired_internal_transfer_payment_id: p.id,
+    };
+    const existingPaired = p.paired_internal_transfer_payment_id ? read(recDb, 'account.payment', p.paired_internal_transfer_payment_id) : null;
+    const created = existingPaired?.state === 'draft' ? null : create(recDb, 'account.payment', destVals);
+    const destPaymentId = created ? created.id : existingPaired.id;
+    const withDestPayment = created ? created.db : write(recDb, 'account.payment', destPaymentId, destVals);
+
+    return write(withDestPayment, 'account.payment', p.id, {
       name,
       state: 'posted',
+      payment_type: 'outbound',
+      partner_type: null,
+      partner_id: null,
       move_id: sourceMoveId,
       destination_move_id: destMoveId,
       journal_id: sourceJournal.id,
       outstanding_account_id: sourceOutstanding,
       unapplied: 0,
+      paired_internal_transfer_payment_id: destPaymentId,
     });
   }
 
@@ -813,14 +832,18 @@ export function reversePayment(db, p, date = today(), options = {}) {
     const destEntry = read(db, 'account.move', p.destination_move_id);
     if (!sourceEntry || !destEntry) throw new Error('Transfer entries not found');
 
-    const fromBank = isPaymentMatched(db, p, options?.excludeLineId);
+    const paired = p.paired_internal_transfer_payment_id ? read(db, 'account.payment', p.paired_internal_transfer_payment_id) : null;
+    const fromBank = isPaymentMatched(db, p, options?.excludeLineId)
+      || (paired && isPaymentMatched(db, paired, options?.excludeLineId))
+      || bookedByBank(db, p.move_id)
+      || bookedByBank(db, p.destination_move_id);
     if (fromBank) throw new Error('This payment is linked to a reconciled bank transaction; unreconcile the transaction before reversing it');
     if (date < (p.date ?? sourceEntry.invoice_date)) throw new Error('Reversal date cannot be before the payment date');
 
+    const moveIds = new Set([sourceEntry.id, destEntry.id]);
     const partials = (db.records['account.partial.reconcile'] ?? []).filter(
       (g) => g && g.active !== false && !g.reversed
-        && ((g.debit_move_id === sourceEntry.id && g.credit_move_id === destEntry.id)
-          || (g.debit_move_id === destEntry.id && g.credit_move_id === sourceEntry.id)),
+        && moveIds.has(g.debit_move_id) && moveIds.has(g.credit_move_id),
     );
     let next = db;
     for (const g of partials) {
@@ -837,6 +860,10 @@ export function reversePayment(db, p, date = today(), options = {}) {
     next = reversedDest.db;
 
     next = write(next, 'account.payment', p.id, { state: 'reversed', unapplied: 0 });
+    if (paired) {
+      next = write(next, 'account.payment', paired.id, { state: 'reversed', unapplied: 0 });
+      next = postNote(next, 'account.payment', paired.id, `Internal transfer reversed by ${read(next, 'account.move', reversedSource.id).name} and ${read(next, 'account.move', reversedDest.id).name}`);
+    }
     return postNote(next, 'account.payment', p.id, `Internal transfer reversed by ${read(next, 'account.move', reversedSource.id).name} and ${read(next, 'account.move', reversedDest.id).name}`);
   }
 
@@ -917,12 +944,17 @@ const paymentEntries = (db, payment) => [payment.move_id, payment.destination_mo
  */
 export function resetToDraftError(db, payment) {
   if (!payment) return 'Payment not found';
-  if (payment.state === 'cancel') return null;
-  if (payment.state === 'reversed') return 'Reversed payments cannot be reset to draft';
-  if (payment.state !== 'posted') return 'Only posted or cancelled payments can be reset to draft';
   const entries = paymentEntries(db, payment);
-  if (isPaymentMatched(db, payment) || entries.some((m) => bookedByBank(db, m.id))) return 'A payment linked to a reconciled bank transaction cannot be reset to draft';
-  if (inPostedBatch(db, payment)) return 'A payment in a posted batch cannot be reset to draft';
+  if (payment.state === 'cancel' && entries.every((m) => m.state !== 'posted')) return null;
+  if (payment.state === 'reversed') return 'Reversed payments cannot be reset to draft';
+  if (payment.state !== 'posted' && payment.state !== 'cancel') return 'Only posted or cancelled payments can be reset to draft';
+  const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
+  if (isPaymentMatched(db, payment) || (paired && isPaymentMatched(db, paired)) || entries.some((m) => bookedByBank(db, m.id))) {
+    return 'A payment linked to a reconciled bank transaction cannot be reset to draft';
+  }
+  if (inPostedBatch(db, payment) || (paired && inPostedBatch(db, paired))) {
+    return 'A payment in a posted batch cannot be reset to draft';
+  }
   const lock = recordLockDate(db, payment);
   if (lock && String(payment.date ?? today()) <= lock) return `The period up to ${lock} is locked`;
   for (const move of entries) {
@@ -932,10 +964,37 @@ export function resetToDraftError(db, payment) {
   }
   const settling = settlingEntries(db);
   const ids = new Set(entries.map((m) => m.id));
+
+  const isSelfPartial = (g) =>
+    payment.is_internal_transfer
+    && ids.has(g.debit_move_id)
+    && ids.has(g.credit_move_id);
+
+  const hasExternalPartial = (db.records['account.partial.reconcile'] ?? []).some(
+    (g) => g && g.active !== false && !g.reversed
+      && (ids.has(g.debit_move_id) || ids.has(g.credit_move_id))
+      && !isSelfPartial(g),
+  );
+
+  const co = read(db, 'res.company', payment.company_id ?? 1);
+  const transferAccId = co?.transfer_account_id;
+
+  const hasExternalReconciledItem = entries.some((m) => {
+    if (!payment.is_internal_transfer && settling.has(m.id)) return true;
+    const items = reconciledJournalItems(db, m);
+    return items.some((l) => {
+      if (!l.reconciled) return false;
+      if (payment.is_internal_transfer && transferAccId && l.account_id === transferAccId && !hasExternalPartial) {
+        return false;
+      }
+      return true;
+    });
+  });
+
   const reconciled = paymentSettledMoves(db, payment).length > 0
-    || entries.some((m) => settling.has(m.id) || reconciledJournalItems(db, m).some((l) => l.reconciled === true))
-    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (ids.has(g.debit_move_id) || ids.has(g.credit_move_id)))
-    || (!payment.is_internal_transfer && Number(payment.amount) > 0 && Number(payment.unapplied) < Number(payment.amount));
+    || hasExternalReconciledItem
+    || hasExternalPartial;
+
   return reconciled ? 'Reconciled payments cannot be reset to draft' : null;
 }
 
@@ -946,15 +1005,56 @@ export function resetPaymentToDraft(db, paymentOrId) {
   const error = resetToDraftError(db, payment);
   if (error) throw new Error(error);
 
+  const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
+  if (paired && paired.state !== 'draft') {
+    const pairedError = resetToDraftError(db, paired);
+    if (pairedError) throw new Error(pairedError);
+  }
+
   let next = db;
+
+  if (payment.is_internal_transfer) {
+    const moveIds = new Set([payment.move_id, payment.destination_move_id].filter(Boolean));
+    const partials = (next.records['account.partial.reconcile'] ?? []).filter(
+      (g) => g && g.active !== false && !g.reversed && moveIds.has(g.debit_move_id) && moveIds.has(g.credit_move_id),
+    );
+    for (const g of partials) {
+      next = write(next, 'account.partial.reconcile', g.id, {
+        reversed: true,
+        active: false,
+        reversal_date: today(),
+      });
+      next = unlink(next, 'account.partial.reconcile', [g.id]);
+    }
+  }
+
   const movesToUndo = [payment.move_id, payment.destination_move_id].filter(Boolean);
   for (const moveId of movesToUndo) {
     const move = read(next, 'account.move', moveId);
-    if (!move) continue;
-    if (move.state === 'posted') {
+    if (move && move.state === 'posted') {
       next = write(next, 'account.move', move.id, { state: 'draft' });
     }
-    const delErr = moveDeleteGuard(next, read(next, 'account.move', move.id));
+  }
+
+  next = write(next, 'account.payment', payment.id, {
+    state: 'draft',
+    move_id: null,
+    destination_move_id: null,
+    unapplied: 0,
+  });
+  if (paired && paired.state !== 'draft') {
+    next = write(next, 'account.payment', paired.id, {
+      state: 'draft',
+      move_id: null,
+      destination_move_id: null,
+      unapplied: 0,
+    });
+  }
+
+  for (const moveId of movesToUndo) {
+    const move = read(next, 'account.move', moveId);
+    if (!move) continue;
+    const delErr = moveDeleteGuard(next, move);
     if (!delErr) {
       next = unlink(next, 'account.move', [move.id]);
     } else {
@@ -962,14 +1062,11 @@ export function resetPaymentToDraft(db, paymentOrId) {
     }
   }
 
-  next = write(next, 'account.payment', payment.id, {
-    state: 'draft',
-    move_id: null,
-    ...(payment.destination_move_id ? { destination_move_id: null } : {}),
-    unapplied: 0,
-  });
-
-  return postNote(next, 'account.payment', payment.id, 'Reset to draft');
+  next = postNote(next, 'account.payment', payment.id, 'Reset to draft');
+  if (paired && paired.state !== 'draft') {
+    next = postNote(next, 'account.payment', paired.id, 'Reset to draft');
+  }
+  return next;
 }
 
 /** Every check number a journal has ever consumed: issued, printed on a batch line, or voided by a reprint. */
@@ -1193,14 +1290,33 @@ export const payModels = {
     auditDelete: true,
     guard: (db, before, after, ctx) => {
       if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
-      if (before && before.state !== 'draft' && after.state === 'draft') {
+      if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && after.state === 'cancel'))) {
         const resetError = resetToDraftError(db, before);
         if (resetError) return resetError;
+      }
+      if (after.state === 'draft' && after.move_id) {
+        const m = read(db, 'account.move', after.move_id);
+        if (m?.state === 'posted') return 'A draft payment cannot be linked to a posted journal entry';
+      }
+      if (before && before.state === 'posted' && after.state === 'posted' && before.is_internal_transfer) {
+        const transferFields = [
+          'amount', 'currency_id', 'journal_id', 'destination_journal_id',
+          'date', 'company_id', 'is_internal_transfer', 'move_id', 'destination_move_id',
+          'paired_internal_transfer_payment_id',
+        ];
+        if (transferFields.some((f) => (
+          f === 'amount'
+            ? Number(before.amount) !== Number(after.amount)
+            : (before[f] ?? null) !== (after[f] ?? null)
+        ))) {
+          return 'Accounting-defining fields of a posted transfer cannot be modified';
+        }
       }
       return datedLockGuard([
         'name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id',
         'partner_type', 'journal_id', 'move_id', 'destination_move_id', 'destination_journal_id',
         'is_internal_transfer', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active',
+        'paired_internal_transfer_payment_id',
       ], (p) => p.state === 'posted')(db, before, after, ctx);
     },
     protectDelete: (db, payment, staged) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged),
@@ -1224,6 +1340,7 @@ export const payModels = {
         domain: (j, r) => ['bank', 'cash'].includes(j.type) && j.active !== false && (j.company_id ?? 1) === (r?.company_id ?? 1) && j.id !== r?.journal_id,
       },
       destination_move_id: { type: 'many2one', relation: 'account.move', label: 'Destination Entry', readonly: true },
+      paired_internal_transfer_payment_id: { type: 'many2one', relation: 'account.payment', label: 'Paired Internal Transfer Payment', readonly: true },
       amount: { type: 'monetary', label: 'Amount', tracking: true },
       amount_signed: { type: 'monetary', label: 'Amount in Currency', compute: paymentSignedAmount },
       amount_company_currency_signed: { type: 'monetary', label: 'Amount', currency: 'company', compute: (r, db) => paymentCompanySignedAmount(r, db) },
@@ -1355,7 +1472,8 @@ export const payModels = {
       groups: (r) => [
         [
           'payment_type',
-          ...(r?.is_internal_transfer ? ['is_internal_transfer'] : [{ field: 'partner_id', label: r?.partner_type === 'supplier' ? 'Vendor' : 'Customer' }]),
+          ...(!r?.state || r?.state === 'draft' ? ['is_internal_transfer'] : (r?.is_internal_transfer ? [{ field: 'is_internal_transfer', readonly: true }] : [])),
+          ...(r?.is_internal_transfer ? [] : [{ field: 'partner_id', label: r?.partner_type === 'supplier' ? 'Vendor' : 'Customer' }]),
           { label: 'Amount', fields: ['amount', 'currency_id'] },
           'date',
           'memo',

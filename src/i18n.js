@@ -3367,6 +3367,12 @@ const ar = {
   'Select a destination journal': 'اختر دفتر يومية الوجهة',
   'The destination journal must belong to the same company': 'يجب أن ينتمي دفتر يومية الوجهة إلى نفس الشركة',
   'Internal transfer destination entry is missing': 'قيد وجهة التحويل الداخلي مفقود',
+  'Internal Transfer Account currency must match the company currency': 'يجب أن تتطابق عملة حساب التحويل الداخلي مع عملة الشركة',
+  'Internal transfer account currency must match the company currency': 'يجب أن تتطابق عملة حساب التحويل الداخلي مع عملة الشركة',
+  'Accounting-defining fields of a posted transfer cannot be modified': 'لا يمكن تعديل الحقول المحددة محاسبياً للتحويل المرحل',
+  'Posted internal transfers cannot be modified': 'لا يمكن تعديل التحويلات الداخلية المرحلة',
+  'A draft payment cannot be linked to a posted journal entry': 'لا يمكن ربط دفعة في حالة مسودة بقيد يومية مرحل',
+  'Paired Internal Transfer Payment': 'الدفعة المقترنة للتحويل الداخلي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

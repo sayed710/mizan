@@ -3,13 +3,8 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { isBalanced } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
-import {
-  applyPaymentCredit,
-  resetToDraftError,
-  postPayment,
-  resetPaymentToDraft,
-  reversePayment,
-} from './models/pay.js';
+import { applyPaymentCredit, payModels, postPayment, resetPaymentToDraft, resetToDraftError, reversePayment } from './models/pay.js';
+import { paymentMatchError } from './models/bank.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 
@@ -354,4 +349,365 @@ test('PAY-14: reset to draft is blocked for payments in posted batch, bank-match
   const lockedDb = write(postedDb, 'res.company', 1, { lock_date: '2026-02-01' });
   assert.ok(resetToDraftError(lockedDb, postedPmt));
   assert.throws(() => resetPaymentToDraft(lockedDb, postedPmt), /lock/i);
+});
+
+// ===========================================================================
+// QODO CODE REVIEW FINDINGS (PR #183)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Finding 1: Show is_internal_transfer on draft payments always; switch partner vs destination journal
+// ---------------------------------------------------------------------------
+test('Qodo #1: draft payment form shows is_internal_transfer toggle always; toggling switches partner vs destination journal', () => {
+  const db = seed();
+  const draftDefault = create(db, 'account.payment', { is_internal_transfer: false, state: 'draft' });
+  const groupsDefault = payModels['account.payment'].form.groups(read(draftDefault.db, 'account.payment', draftDefault.id));
+  // Group 0 should have is_internal_transfer even when false
+  assert.ok(groupsDefault[0].includes('is_internal_transfer'), 'draft payment form must include is_internal_transfer');
+  assert.ok(groupsDefault[0].some((f) => (typeof f === 'object' ? f.field : f) === 'partner_id'), 'non-transfer has partner_id in group 0');
+  assert.ok(groupsDefault[1].some((f) => (typeof f === 'object' ? f.field : f) === 'partner_bank_id'), 'non-transfer has partner_bank_id in group 1');
+
+  // When is_internal_transfer is true
+  const draftTransfer = create(db, 'account.payment', { is_internal_transfer: true, state: 'draft' });
+  const groupsTransfer = payModels['account.payment'].form.groups(read(draftTransfer.db, 'account.payment', draftTransfer.id));
+  assert.ok(groupsTransfer[0].includes('is_internal_transfer'));
+  assert.ok(!groupsTransfer[0].some((f) => (typeof f === 'object' ? f.field : f) === 'partner_id'), 'transfer hides partner_id');
+  assert.ok(groupsTransfer[1].includes('destination_journal_id'), 'transfer has destination_journal_id in group 1');
+
+  // When posted
+  const postedNonTransfer = { state: 'posted', is_internal_transfer: false };
+  const groupsPostedNon = payModels['account.payment'].form.groups(postedNonTransfer);
+  assert.ok(!groupsPostedNon[0].some((f) => (typeof f === 'object' ? f.field : f) === 'is_internal_transfer'), 'posted non-transfer hides toggle');
+
+  const postedTransfer = { state: 'posted', is_internal_transfer: true };
+  const groupsPostedTransfer = payModels['account.payment'].form.groups(postedTransfer);
+  assert.ok(groupsPostedTransfer[0].some((f) => typeof f === 'object' && f.field === 'is_internal_transfer' && f.readonly), 'posted transfer shows readonly toggle');
+});
+
+// ---------------------------------------------------------------------------
+// Finding 2: Non-admins cannot redirect transfer postings (transfer_account_id in CONTROL_FIELDS)
+// ---------------------------------------------------------------------------
+test('Qodo #2: transfer_account_id is in CONTROL_FIELDS and non-admin edits are rejected', () => {
+  let db = seed();
+  const transferAcc1 = create(db, 'account.account', {
+    code: '101701', name: 'Transfer 1', account_type: 'asset_current', reconcile: true, company_id: 1,
+  });
+  const transferAcc2 = create(transferAcc1.db, 'account.account', {
+    code: '101702', name: 'Transfer 2', account_type: 'asset_current', reconcile: true, company_id: 1,
+  });
+  db = write(transferAcc2.db, 'res.company', 1, { transfer_account_id: transferAcc1.id });
+
+  // Non-admin attempting to change transfer_account_id via diffDb + applyDiff
+  const forged = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, transfer_account_id: transferAcc2.id } : c)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, forged), { isAdmin: false }),
+    /Only administrators can change lock dates or the audit trail or other company accounting settings/i,
+  );
+
+  // Admin can change it
+  const adminApplied = applyDiff(db, diffDb(db, forged), { isAdmin: true });
+  assert.equal(read(adminApplied, 'res.company', 1).transfer_account_id, transferAcc2.id);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 3: Destination transfers create paired inbound payment on destination journal
+// ---------------------------------------------------------------------------
+test('Qodo #3: posting internal transfer creates paired inbound payment on destination journal', () => {
+  let db = seed();
+  const bank1 = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+  const transferAcc = create(db, 'account.account', {
+    code: '101700', name: 'Transfers', account_type: 'asset_current', reconcile: true, company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+
+  const pmt = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    journal_id: bank1.id,
+    destination_journal_id: cash.id,
+    amount: 150,
+    date: '2026-06-10',
+  });
+  const postedDb = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id));
+  const sourcePayment = read(postedDb, 'account.payment', pmt.id);
+  assert.ok(sourcePayment.paired_internal_transfer_payment_id, 'source payment must have paired_internal_transfer_payment_id');
+
+  const destPayment = read(postedDb, 'account.payment', sourcePayment.paired_internal_transfer_payment_id);
+  assert.ok(destPayment, 'paired destination payment must exist');
+  assert.equal(destPayment.paired_internal_transfer_payment_id, sourcePayment.id);
+  assert.equal(destPayment.payment_type, 'inbound');
+  assert.equal(destPayment.journal_id, cash.id);
+  assert.equal(destPayment.destination_journal_id, bank1.id);
+  assert.equal(destPayment.move_id, sourcePayment.destination_move_id);
+  assert.equal(destPayment.amount, 150);
+  assert.equal(destPayment.state, 'posted');
+  assert.equal(destPayment.is_internal_transfer, true);
+
+  // Bank matching on destination journal recognizes the paired destination payment
+  const destStatementLine = create(postedDb, 'account.bank.statement.line', {
+    journal_id: cash.id,
+    date: '2026-06-10',
+    amount: 150,
+    payment_ref: 'Transfer deposit',
+  });
+  assert.equal(paymentMatchError(destStatementLine.db, read(destStatementLine.db, 'account.bank.statement.line', destStatementLine.id), destPayment), null);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 4: Accounting-defining fields of a posted transfer cannot be modified
+// ---------------------------------------------------------------------------
+test('Qodo #4: accounting-defining fields of a posted transfer cannot be modified after posting', () => {
+  let db = seed();
+  const bank1 = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+  const transferAcc = create(db, 'account.account', {
+    code: '101700', name: 'Transfers', account_type: 'asset_current', reconcile: true, company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+
+  const pmt = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    journal_id: bank1.id,
+    destination_journal_id: cash.id,
+    amount: 100,
+    date: '2026-06-15',
+  });
+  const postedDb = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id));
+  const postedPmt = read(postedDb, 'account.payment', pmt.id);
+
+  // Attempt to edit amount directly via write
+  assert.throws(
+    () => write(postedDb, 'account.payment', postedPmt.id, { amount: 200 }),
+    /cannot be modified/i,
+  );
+
+  // Attempt to edit journal_id via applyDiff
+  const forgedJournal = {
+    ...postedDb,
+    records: {
+      ...postedDb.records,
+      'account.payment': postedDb.records['account.payment'].map((p) => (p.id === postedPmt.id ? { ...p, journal_id: cash.id } : p)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(postedDb, diffDb(postedDb, forgedJournal), { isAdmin: true }),
+    /cannot be modified/i,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Finding 5: Bank-matched destination leg blocks reversal; reversing undoes both legs
+// ---------------------------------------------------------------------------
+test('Qodo #5: bank-matched destination leg blocks reversal; reversing unmatched transfer undoes both legs', () => {
+  let db = seed();
+  const bank1 = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+  const transferAcc = create(db, 'account.account', {
+    code: '101700', name: 'Transfers', account_type: 'asset_current', reconcile: true, company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+
+  const pmt = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    journal_id: bank1.id,
+    destination_journal_id: cash.id,
+    amount: 120,
+    date: '2026-06-20',
+  });
+  const postedDb = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id));
+  const sourcePayment = read(postedDb, 'account.payment', pmt.id);
+  const destPayment = read(postedDb, 'account.payment', sourcePayment.paired_internal_transfer_payment_id);
+
+  // Match the destination entry with a bank statement line
+  const matchedDb = create(postedDb, 'account.bank.statement.line', {
+    journal_id: cash.id,
+    payment_ref: 'Transfer deposit',
+    date: '2026-06-20',
+    amount: 120,
+    state: 'reconciled',
+    move_id: sourcePayment.destination_move_id,
+    payment_move_id: sourcePayment.destination_move_id,
+  }).db;
+
+  // Reversing from either source or dest leg is blocked
+  assert.throws(
+    () => reversePayment(matchedDb, sourcePayment),
+    /bank transaction/i,
+  );
+  assert.throws(
+    () => reversePayment(matchedDb, destPayment),
+    /bank transaction/i,
+  );
+
+  // Reversing without bank match reverses both payments and both moves
+  const reversedDb = reversePayment(postedDb, sourcePayment, '2026-06-21');
+  assert.equal(read(reversedDb, 'account.payment', sourcePayment.id).state, 'reversed');
+  assert.equal(read(reversedDb, 'account.payment', destPayment.id).state, 'reversed');
+});
+
+// ---------------------------------------------------------------------------
+// Finding 6: Cancelled payment with deletable entry can be reset to draft without FK failure
+// ---------------------------------------------------------------------------
+test('Qodo #6: cancelled payment with deletable move clears references before unlinking move', () => {
+  const db = seed();
+  const draftMove = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'draft',
+    date: '2026-06-25',
+    line_ids: [{ account_id: 1, debit: 50, credit: 0 }, { account_id: 2, debit: 0, credit: 50 }],
+  });
+  const cancelledPmt = create(draftMove.db, 'account.payment', {
+    partner_id: 1,
+    amount: 50,
+    state: 'cancel',
+    move_id: draftMove.id,
+  });
+
+  // resetPaymentToDraft must clear payment's move_id before unlinking the move, not throw FK error
+  const resetDb = resetPaymentToDraft(cancelledPmt.db, read(cancelledPmt.db, 'account.payment', cancelledPmt.id));
+  assert.equal(read(resetDb, 'account.payment', cancelledPmt.id).state, 'draft');
+  assert.equal(read(resetDb, 'account.payment', cancelledPmt.id).move_id, null);
+  assert.equal(read(resetDb, 'account.move', draftMove.id), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 7: transfer_account_id with currency different from company currency is rejected
+// ---------------------------------------------------------------------------
+test('Qodo #7: company transfer_account_id with foreign currency is rejected by companyGuard', () => {
+  const db = seed();
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(usd && eur && usd.id !== eur.id);
+
+  // Create an account fixed in EUR while company 1 is in USD
+  const eurAccount = create(db, 'account.account', {
+    code: '101709',
+    name: 'EUR Transfers',
+    account_type: 'asset_current',
+    reconcile: true,
+    currency_id: eur.id,
+    company_id: 1,
+  });
+
+  assert.throws(
+    () => write(eurAccount.db, 'res.company', 1, { transfer_account_id: eurAccount.id }),
+    /currency must match the company currency/i,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Finding 8: Unmatched foreign-currency payment can be reset to draft
+// ---------------------------------------------------------------------------
+test('Qodo #8: unmatched foreign-currency payment where company amount < face amount can reset to draft', () => {
+  let db = seed();
+  const partner = create(db, 'res.partner', { name: 'Customer FX-Reset' });
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  // Configure exchange rate so 100 EUR = 80 USD (converted < face)
+  db = write(partner.db, 'res.currency', eur.id, {
+    rate_ids: [{ date: '2026-01-01', rate: 1.25, company_id: 1 }],
+  });
+
+  const pmt = create(db, 'account.payment', {
+    partner_id: partner.id,
+    amount: 100,
+    currency_id: eur.id,
+    date: '2026-06-01',
+    payment_type: 'inbound',
+    partner_type: 'customer',
+  });
+  const postedDb = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id));
+  const postedPmt = read(postedDb, 'account.payment', pmt.id);
+  assert.equal(postedPmt.state, 'posted');
+  assert.equal(postedPmt.amount, 100);
+  assert.equal(postedPmt.unapplied, 80); // converted amount in company currency
+
+  // resetToDraftError must be null despite unapplied (80) < amount (100)
+  assert.equal(resetToDraftError(postedDb, postedPmt), null);
+  const resetDb = resetPaymentToDraft(postedDb, postedPmt);
+  assert.equal(read(resetDb, 'account.payment', postedPmt.id).state, 'draft');
+});
+
+// ---------------------------------------------------------------------------
+// Finding 9: Internal transfers can be reset to draft
+// ---------------------------------------------------------------------------
+test('Qodo #9: internal transfer can be reset to draft, unlinking entries and deactivating self-partial', () => {
+  let db = seed();
+  const bank1 = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+  const transferAcc = create(db, 'account.account', {
+    code: '101700', name: 'Transfers', account_type: 'asset_current', reconcile: true, company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+
+  const pmt = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    journal_id: bank1.id,
+    destination_journal_id: cash.id,
+    amount: 175,
+    date: '2026-06-25',
+  });
+  const postedDb = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id));
+  const postedPmt = read(postedDb, 'account.payment', pmt.id);
+
+  // Self-reconciliation between transfer entries must not block reset
+  assert.equal(resetToDraftError(postedDb, postedPmt), null);
+  const resetDb = resetPaymentToDraft(postedDb, postedPmt);
+  const draftPmt = read(resetDb, 'account.payment', postedPmt.id);
+  assert.equal(draftPmt.state, 'draft');
+  assert.equal(draftPmt.move_id, null);
+
+  // Self-partial reconcile is deactivated
+  const activePartials = (resetDb.records['account.partial.reconcile'] ?? []).filter(
+    (g) => g && g.active !== false && !g.reversed,
+  );
+  assert.equal(activePartials.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 10: Cancelled payments retaining posted entries cannot skip reset checks
+// ---------------------------------------------------------------------------
+test('Qodo #10: cancelled payment retaining posted entry cannot skip reset-to-draft checks', () => {
+  const seeded = seed();
+  const partner = create(seeded, 'res.partner', { name: 'Customer Q10' });
+  const inv = postInvoice(partner.db, {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: '2026-07-01',
+  });
+  const pmt = create(inv.db, 'account.payment', {
+    partner_id: partner.id,
+    amount: 100,
+    date: '2026-07-05',
+    payment_type: 'inbound',
+    partner_type: 'customer',
+  });
+  const postedDb = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id));
+  const reconciledDb = applyPaymentCredit(postedDb, pmt.id, inv.id, '2026-07-06');
+  const reconciledPmt = read(reconciledDb, 'account.payment', pmt.id);
+
+  // Suppose state is changed to 'cancel' while retaining its posted/reconciled move
+  const cancelledWithPostedEntry = {
+    ...reconciledPmt,
+    state: 'cancel',
+  };
+  const forgedDb = {
+    ...reconciledDb,
+    records: {
+      ...reconciledDb.records,
+      'account.payment': reconciledDb.records['account.payment'].map((p) => (p.id === pmt.id ? cancelledWithPostedEntry : p)),
+    },
+  };
+
+  // resetToDraftError must NOT return null because it retains a posted, reconciled entry
+  assert.ok(resetToDraftError(forgedDb, read(forgedDb, 'account.payment', pmt.id)));
+  assert.throws(
+    () => resetPaymentToDraft(forgedDb, read(forgedDb, 'account.payment', pmt.id)),
+    /reconcil/i,
+  );
 });

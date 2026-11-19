@@ -289,6 +289,7 @@ const CONTROL_FIELDS = [
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
+  'transfer_account_id',
 ];
 
 /**
@@ -418,6 +419,10 @@ function companyGuard(db, before, r, ctx) {
     const account = record(db, 'account.account', r.transfer_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id) || account.account_type !== 'asset_current' || !account.reconcile) {
       return 'Internal Transfer Account must be an active, reconcilable current-asset account belonging to this company';
+    }
+    const companyCurrencyId = r.currency_id ?? record(db, 'res.company', r.id)?.currency_id;
+    if (account.currency_id && account.currency_id !== companyCurrencyId) {
+      return 'Internal Transfer Account currency must match the company currency';
     }
   }
   if (r.down_payment_account_id) {
