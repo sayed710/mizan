@@ -1,0 +1,167 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { create, read, search } from './orm.js';
+import { models } from './models/index.js';
+import { accountId } from './models/ledger.js';
+import { applyRule, autoReconcile } from './models/reconcile.js';
+import { applyDiff, diffDb } from './sync.js';
+import { seed } from './seed.js';
+
+const MODEL = 'account.reconcile.model';
+const LINE = 'account.bank.statement.line';
+
+const bankJournals = (db) => search(db, 'account.journal').filter((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+const addLine = (db, vals) => create(db, LINE, { journal_id: bankJournals(db)[0].id, date: '2026-10-01', state: 'to_check', ...vals });
+const addRule = (db, vals) => create(db, MODEL, { name: 'B3 Test Rule', ...vals });
+
+test('BANK-20: counterpart lines of reconciliation models declare analytic_distribution and flow into write-off move lines and analytic items', () => {
+  const base = seed();
+  const feeAcc = accountId(base, '600000');
+  const plan = create(base, 'account.analytic.plan', { name: 'Projects' });
+  const analyticAcc = create(plan.db, 'account.analytic.account', { name: 'Project Alpha', plan_id: plan.id });
+  let db = analyticAcc.db;
+
+  // 1. Counterpart field is declared in model metadata
+  assert.ok(models[MODEL].fields.line_ids.fields.analytic_distribution, 'analytic_distribution field declared on counterpart items');
+  assert.equal(models[MODEL].fields.line_ids.fields.analytic_distribution.type, 'distribution');
+
+  // 2. Creating a model preserves analytic_distribution on line_ids
+  const r = addRule(db, {
+    name: 'Fee with Analytic',
+    line_ids: [{
+      sequence: 10,
+      account_id: feeAcc,
+      label: 'Bank Service Fee',
+      amount_type: 'percentage',
+      amount_string: '100',
+      analytic_distribution: { [analyticAcc.id]: 100 },
+    }],
+  });
+  db = r.db;
+  const savedRule = read(db, MODEL, r.id);
+  assert.deepEqual(savedRule.line_ids[0].analytic_distribution, { [analyticAcc.id]: 100 });
+
+  // 3. Applying the rule creates a write-off entry carrying the analytic distribution
+  const stLine = addLine(db, { payment_ref: 'Service Charge Oct', amount: -75 });
+  db = stLine.db;
+  const after = applyRule(db, savedRule, read(db, LINE, stLine.id));
+  const updatedLine = read(after, LINE, stLine.id);
+  assert.equal(updatedLine.state, 'reconciled');
+
+  const move = read(after, 'account.move', updatedLine.move_id);
+  assert.ok(move, 'Write-off move created');
+  const counterpartItem = move.line_ids.find((l) => l.account_id === feeAcc);
+  assert.ok(counterpartItem, 'Counterpart fee line exists in move');
+  assert.deepEqual(counterpartItem.analytic_distribution, { [analyticAcc.id]: 100 }, 'Move line receives analytic distribution');
+
+  // 4. Analytic line item is posted to account.analytic.line
+  const analyticLines = search(after, 'account.analytic.line').filter((l) => l.move_id === move.id);
+  assert.equal(analyticLines.length, 1, 'Analytic line posted');
+  assert.equal(analyticLines[0].account_id, analyticAcc.id);
+  assert.equal(analyticLines[0].amount, -75);
+
+  // 5. diffDb + applyDiff accepts valid distribution and rejects invalid distribution
+  const validStaged = addRule(db, {
+    name: 'Valid Staged',
+    line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100', analytic_distribution: { [analyticAcc.id]: 100 } }],
+  });
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, validStaged.db), { isAdmin: true }));
+
+  // Value > 100% caught by cleanRecord / validate.js
+  const over100Staged = {
+    ...db,
+    records: {
+      ...db.records,
+      [MODEL]: [...(db.records[MODEL] ?? []), {
+        id: 9999,
+        name: 'Invalid Dist Rule Over 100',
+        sequence: 10,
+        trigger: 'manual',
+        rule_type: 'reco_model',
+        line_ids: [{ sequence: 10, account_id: feeAcc, amount_type: 'percentage', amount_string: '100', analytic_distribution: { [analyticAcc.id]: 150 } }],
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, over100Staged), { isAdmin: true }), /Invalid value for account\.reconcile\.model\.line_ids\[0\]\.analytic_distribution/);
+
+  // Total exceeding 100% for plan caught by distributionError
+  const secondAcc = create(analyticAcc.db, 'account.analytic.account', { name: 'Project Beta', plan_id: plan.id });
+  const planOver100Staged = {
+    ...secondAcc.db,
+    records: {
+      ...secondAcc.db.records,
+      [MODEL]: [...(secondAcc.db.records[MODEL] ?? []), {
+        id: 9998,
+        name: 'Invalid Plan Total',
+        sequence: 10,
+        trigger: 'manual',
+        rule_type: 'reco_model',
+        line_ids: [{ sequence: 10, account_id: feeAcc, amount_type: 'percentage', amount_string: '100', analytic_distribution: { [analyticAcc.id]: 60, [secondAcc.id]: 60 } }],
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(secondAcc.db, diffDb(secondAcc.db, planOver100Staged), { isAdmin: true }), /Analytic distribution cannot exceed 100% per plan/);
+});
+
+test('BANK-23: regex conditions are applied by the autoReconcile runner and invalid regex is rejected on save', () => {
+  const base = seed();
+  const feeAcc = accountId(base, '600000');
+
+  // 1. autoReconcile runner evaluates regex label conditions
+  const rAutoRegex = addRule(base, {
+    name: 'Auto Regex Label Rule',
+    sequence: 1,
+    trigger: 'auto_reconcile',
+    match_label: 'match_regex',
+    match_label_param: '^AUTO-FEES?-\\d+$',
+    line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100', label: 'Auto Fee' }],
+  });
+  const stMatch = addLine(rAutoRegex.db, { payment_ref: 'AUTO-FEE-99', amount: -35 });
+  const stNoMatch = addLine(stMatch.db, { payment_ref: 'OTHER-REF-99', amount: -35 });
+
+  const reconciledDb = autoReconcile(stNoMatch.db);
+  assert.equal(read(reconciledDb, LINE, stMatch.id).state, 'reconciled', 'Regex match is auto-reconciled');
+  assert.equal(read(reconciledDb, LINE, stNoMatch.id).state, 'to_check', 'Non-matching label is left to_check');
+
+  // 2. Invalid regex pattern in label parameter is rejected on save (create, write, applyDiff)
+  assert.throws(() => addRule(base, {
+    match_label: 'match_regex',
+    match_label_param: '[unclosed',
+    line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }],
+  }), /Invalid regular expression in label parameter/);
+
+  // 3. Invalid regex pattern in counterpart amount is rejected on save (create, write, applyDiff)
+  assert.throws(() => addRule(base, {
+    line_ids: [{ account_id: feeAcc, amount_type: 'regex', amount_string: '(?<invalid' }],
+  }), /Invalid regular expression in counterpart line amount/);
+
+  // 4. Server-side rejection through diffDb + applyDiff
+  const forgedBadRegex = {
+    ...base,
+    records: {
+      ...base.records,
+      [MODEL]: [...(base.records[MODEL] ?? []), {
+        id: 9998,
+        name: 'Forged Bad Regex',
+        sequence: 10,
+        trigger: 'manual',
+        rule_type: 'reco_model',
+        match_label: 'match_regex',
+        match_label_param: '*bad',
+        line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }],
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(base, diffDb(base, forgedBadRegex), { isAdmin: true }), /Invalid regular expression in label parameter/);
+});
+
+test('BANK-15 audit analysis: rule_type in Odoo 20 is hidden/readonly with automation driven by trigger', () => {
+  const def = models[MODEL];
+  // In Odoo 20, rule_type is internal ('matching_rule' | 'reco_model') and hidden/readonly in the form
+  assert.equal(def.fields.rule_type.hidden, true);
+  assert.equal(def.fields.rule_type.readonly, true);
+  // Automation is controlled by trigger (Manual vs Automated) with statusbar buttons
+  assert.equal(def.form.statusbar, 'trigger');
+  assert.ok(def.form.buttons.some((b) => b.label === 'Automate' && b.vals.trigger === 'auto_reconcile'));
+  assert.ok(def.form.buttons.some((b) => b.label === 'Set Manual' && b.vals.trigger === 'manual'));
+});

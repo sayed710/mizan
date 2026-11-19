@@ -306,6 +306,7 @@ function writeOff(db, rule, line) {
         account: l.account_id,
         partner_id: partner,
         name: l.label || line.payment_ref,
+        ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}),
         ...(taxRecs.length ? {
           tax_side: (sameAsCounterpart ? incoming : !incoming) ? 'sale' : 'purchase',
           tax_grid_base: true,
@@ -448,7 +449,7 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
  * rules and manual matching remain available for the remainder.
  */
 export function autoReconcile(db) {
-  const rules = activeRules(db).filter((r) => isAutoRule(r) && r.match_label !== 'match_regex' && !(r.line_ids ?? []).some((l) => l.amount_type === 'regex'));
+  const rules = activeRules(db).filter((r) => isAutoRule(r) && !(r.line_ids ?? []).some((l) => l.amount_type === 'regex'));
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
     const line = read(acc, 'account.bank.statement.line', l.id);
     const rule = rules.find((r) => ruleMatches(r, line) && !(line.allocations ?? []).some((a) => a.reconcile_model_id === r.id));
@@ -591,6 +592,7 @@ export const reconcileModels = {
           amount_string: { type: 'char', label: 'Amount' },
           amount: { type: 'float', label: 'Numeric Amount', hidden: true },
           tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', optional: 'hide' },
+          analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', optional: 'hide' },
           label: { type: 'char', label: 'Label' },
         },
         newLine: () => ({ sequence: 10, partner_id: null, account_id: null, amount_type: 'percentage', amount_string: '100', amount: 100, tax_ids: [], label: '' }),
