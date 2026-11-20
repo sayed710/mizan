@@ -3497,6 +3497,11 @@ const ar = {
   'Select at least one record first': 'اختر سجلًا واحدًا على الأقل أولًا',
   'None of the selected records match the current filter': 'لا يطابق أي من السجلات المحددة عامل التصفية الحالي',
   'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
+  'Auto Sync': 'مزامنة تلقائية',
+  'Sync Interval (hours)': 'فترة المزامنة (بالساعات)',
+  'Sync Interval': 'فترة المزامنة',
+  'Next Refresh': 'التحديث القادم',
+  'Sync interval must be a positive number': 'يجب أن تكون فترة المزامنة رقماً موجباً',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

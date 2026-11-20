@@ -1,6 +1,6 @@
 import { create, read, unlink, write } from '../orm.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
-import { validDate } from './common.js';
+import { today, validDate } from './common.js';
 import { importStatementLines } from './statements.js';
 import { isOnlineFeedJournal, journalCompany } from './ledger.js';
 
@@ -249,6 +249,9 @@ function linkGuard(db, before, after, _ctx, vals) {
     const linked = (db.records?.[ACCOUNT_MODEL] ?? []).some((a) => a.link_id === after.id && a.active !== false);
     if (linked) return 'Cannot change company while online accounts exist on this connection';
   }
+  if (after.sync_interval != null && after.sync_interval !== '' && (!Number.isFinite(Number(after.sync_interval)) || Number(after.sync_interval) <= 0)) {
+    return 'Sync interval must be a positive number';
+  }
   return null;
 }
 
@@ -358,10 +361,13 @@ function runSyncForAccounts(db, link, accounts, { now = new Date().toISOString()
       });
     }
 
+    const intervalMs = linkSyncIntervalMs(link);
+    const nextRefresh = new Date(new Date(now).getTime() + intervalMs).toISOString();
     stagedDb = write(stagedDb, LINK_MODEL, link.id, {
       state: 'connected',
       error_message: '',
       last_refresh: now,
+      next_refresh: nextRefresh,
     });
     return { db: stagedDb, count: totalCreated, error: null };
   } catch (error) {
@@ -435,6 +441,9 @@ export const onlineSyncModels = {
         ],
       },
       last_refresh: { type: 'datetime', label: 'Last Refresh', readonly: true },
+      next_refresh: { type: 'datetime', label: 'Next Refresh', readonly: true },
+      auto_sync: { type: 'boolean', label: 'Auto Sync' },
+      sync_interval: { type: 'integer', label: 'Sync Interval (hours)' },
       error_message: { type: 'text', label: 'Error Message', readonly: true },
       demo_transactions: { type: 'json', label: 'Demo Feed Payload', hidden: true },
       account_ids: {
@@ -464,6 +473,9 @@ export const onlineSyncModels = {
       provider: 'demo',
       state: 'not_synchronized',
       last_refresh: null,
+      next_refresh: null,
+      auto_sync: true,
+      sync_interval: 24,
       error_message: '',
       demo_transactions: null,
     }),
@@ -490,7 +502,7 @@ export const onlineSyncModels = {
         { label: 'Disconnect', when: (r) => Boolean(r?.id) && r.state !== 'disconnected', vals: { state: 'disconnected' } },
         { label: 'Reconnect', when: (r) => Boolean(r?.id) && r.state === 'disconnected', run: (db, r) => ({ db: reconnectOnlineConnection(db, r.id) }) },
       ],
-      groups: [['name', 'provider'], ['last_refresh', 'error_message']],
+      groups: [['name', 'provider'], ['auto_sync', 'sync_interval'], ['last_refresh', 'next_refresh', 'error_message']],
       tabs: [{ label: 'Online Accounts', fields: ['account_ids'] }],
       chatter: true,
     },
@@ -530,3 +542,77 @@ export const onlineSyncModels = {
     },
   },
 };
+
+export function linkSyncIntervalMs(link) {
+  if (!link || typeof link !== 'object') return 24 * 3600 * 1000;
+  if (link.interval_type || link.interval_unit) {
+    const unit = link.interval_type || link.interval_unit;
+    const count = Number(link.interval_number ?? link.sync_interval ?? link.interval ?? 1) || 1;
+    if (['minute', 'minutes'].includes(unit)) return count * 60 * 1000;
+    if (['hour', 'hours'].includes(unit)) return count * 3600 * 1000;
+    if (['day', 'days'].includes(unit)) return count * 24 * 3600 * 1000;
+    if (['week', 'weeks'].includes(unit)) return count * 7 * 24 * 3600 * 1000;
+    if (['month', 'months'].includes(unit)) return count * 30 * 24 * 3600 * 1000;
+  }
+  const raw = link.sync_interval ?? link.auto_sync_interval ?? link.interval ?? link.sync_frequency;
+  if (typeof raw === 'string') {
+    if (raw === 'hourly') return 3600 * 1000;
+    if (raw === 'daily') return 24 * 3600 * 1000;
+    if (raw === 'weekly') return 7 * 24 * 3600 * 1000;
+    if (raw === 'monthly') return 30 * 24 * 3600 * 1000;
+  }
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) {
+    if (n >= 100000) return n;
+    if (['day', 'days'].includes(link.sync_unit)) return n * 24 * 3600 * 1000;
+    return n * 3600 * 1000;
+  }
+  return 24 * 3600 * 1000;
+}
+
+export function isOnlineLinkDue(link, at = today()) {
+  if (!link || link.active === false || link.state === 'disconnected' || link.auto_sync === false) {
+    return false;
+  }
+  if (!link.last_refresh) return true;
+  const intervalMs = linkSyncIntervalMs(link);
+  const atTime = typeof at === 'string'
+    ? (at.includes('T') ? new Date(at).getTime() : (at === today() ? Date.now() : new Date(`${at}T00:00:00Z`).getTime()))
+    : (at instanceof Date ? at.getTime() : Number(at) || Date.now());
+  const lastTime = new Date(link.last_refresh).getTime();
+  if (!Number.isFinite(lastTime)) return true;
+  return (atTime - lastTime) >= intervalMs;
+}
+
+/**
+ * Scheduled job to fetch transactions for every connected online synchronization link due for sync.
+ * Skips disconnected or archived links and links synced recently. Records errors on failing links
+ * without stopping other links.
+ */
+export function syncDueOnlineLinks(db, at = today()) {
+  const links = (db?.records?.[LINK_MODEL] ?? [])
+    .filter((link) => link.active !== false && link.state !== 'disconnected' && link.auto_sync !== false);
+
+  let currentDb = db;
+  for (const link of links) {
+    const freshLink = read(currentDb, LINK_MODEL, link.id) ?? link;
+    if (!isOnlineLinkDue(freshLink, at)) continue;
+
+    const now = typeof at === 'string' && at.includes('T') ? at : new Date().toISOString();
+    try {
+      const res = syncOnlineConnection(currentDb, freshLink.id, { now });
+      currentDb = res.db;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      currentDb = write(currentDb, LINK_MODEL, freshLink.id, {
+        state: 'error',
+        error_message: message,
+      });
+    }
+  }
+  return currentDb;
+}
+
+export const scheduledOnlineSync = syncDueOnlineLinks;
+export const cronFetchOnlineTransactions = syncDueOnlineLinks;
+
