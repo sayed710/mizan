@@ -48,7 +48,7 @@ export function expenseDebits(db, report, expenses, postingJournal = null) {
     const taxLines = splits.map(({ row, amount, base: taxBase }) => {
       const taxAccount = read(db, 'account.account', row.account_id ?? account.id);
       if (!taxAccount || taxAccount.active === false || (taxAccount.company_id && taxAccount.company_id !== company)) throw new Error('Configure the expense tax and its account');
-      return { account: taxAccount.id, debit: Math.max(amount, 0), credit: Math.max(-amount, 0), tax_id: tax.id, tax_name: tax.name, tax_side: 'purchase', tax_base: taxBase, tax_tag_ids: row.tag_ids ?? [] };
+      return { account: taxAccount.id, debit: Math.max(amount, 0), credit: Math.max(-amount, 0), tax_id: tax.id, tax_name: tax.name, tax_side: 'purchase', tax_base: taxBase, tax_tag_ids: row.tag_ids ?? [], use_in_tax_closing: row.use_in_tax_closing !== false };
     });
     const baseTags = taxRepartitionLine(tax, 'invoice', 'base')?.tag_ids ?? [];
     return [{

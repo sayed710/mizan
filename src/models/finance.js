@@ -313,10 +313,10 @@ function settlementCapacity(db, entry, inv) {
   const taxReturn = (db.records['account.return'] ?? []).find((r) => (r.closing_move_ids ?? []).includes(inv.id) && ['submitted', 'paid'].includes(r.state));
   if (taxReturn) {
     const invCompanyId = inv.company_id ?? 1;
-    let expected;
+    let obligations;
     try {
       if (!returnCompanies(db, taxReturn).includes(invCompanyId)) return 0;
-      expected = taxClosingSpec(db, taxReturn, invCompanyId).payable;
+      obligations = taxClosingSpec(db, taxReturn, invCompanyId).obligations ?? [];
     } catch { return 0; }
     const payment = (db.records['account.payment'] ?? []).find((p) => p.state === 'posted' && p.is_tax_payment && p.return_id === taxReturn.id && p.move_id === entry.id);
     const settlement = (inv.payments ?? []).find((p) => p.move_id === entry.id && !p.reversed);
@@ -324,9 +324,10 @@ function settlementCapacity(db, entry, inv) {
     if (!payment || !closingLine || closingLine.account_id !== payment.destination_account_id || closingLine.partner_id !== payment.partner_id
       || (payment.company_id ?? 1) !== invCompanyId) return 0;
     const signed = round((Number(closingLine.credit) || 0) - (Number(closingLine.debit) || 0));
+    const obligation = obligations.find((o) => o.account_id === closingLine.account_id && o.partner_id === closingLine.partner_id);
     const paid = round((entry.line_ids ?? []).filter((line) => line.account_id === closingLine.account_id && line.partner_id === payment.partner_id)
       .reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0));
-    if (!signed || signed !== expected || Math.sign(signed) !== Math.sign(paid)) return 0;
+    if (!signed || !obligation || signed !== obligation.amount || Math.sign(signed) !== Math.sign(paid)) return 0;
     return Math.min(Math.abs(signed), Math.abs(paid));
   }
   // A credit note and an invoice of matching partner, company, account and currency settle each other through their opposite receivable/payable lines.
@@ -805,19 +806,29 @@ export function moveDeleteGuard(db, move, staged = db, ctx = null) {
   return null;
 }
 
+/** All repartition lines of type 'tax' belonging to the company's taxes, paired with their tax. */
+export function companyTaxRepartitionRows(db, companyId) {
+  const taxes = search(db, 'account.tax').filter((x) => !companyId || !x.company_id || (x.company_id ?? 1) === companyId);
+  return taxes.flatMap((tax) => [
+    ...taxRepartitionLines(tax, 'invoice').filter((l) => l.repartition_type === 'tax').map((line) => ({ line, tax })),
+    ...taxRepartitionLines(tax, 'refund').filter((l) => l.repartition_type === 'tax').map((line) => ({ line, tax })),
+  ]);
+}
+
+/** Stored closing eligibility of a repartition row (`use_in_tax_closing` must be explicitly true). */
+export function isClosableRepartitionLine(line) {
+  return line?.use_in_tax_closing === true;
+}
+
 /** Tax accounts per side: the default VAT accounts plus every account a sale / purchase tax books to. */
 export function taxAccounts(db, companyId) {
   // Tax accounts come from repartition lines and from the return types' explicit payable/receivable accounts.
   const returnTypes = search(db, 'account.return.type').filter((t) => !companyId || (t.company_id ?? 1) === companyId);
   const returnField = { sale: 'tax_payable_account_id', purchase: 'tax_receivable_account_id' };
+  const rows = companyTaxRepartitionRows(db, companyId);
   const of = (use) => new Set([
     ...returnTypes.map((t) => t[returnField[use]]),
-    ...search(db, 'account.tax')
-      .filter((x) => x.type_tax_use === use && (!companyId || !x.company_id || (x.company_id ?? 1) === companyId))
-      .flatMap((x) => [
-        ...taxRepartitionLines(x, 'invoice').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
-        ...taxRepartitionLines(x, 'refund').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
-      ]),
+    ...rows.filter(({ tax }) => tax.type_tax_use === use).map(({ line }) => line.account_id),
   ].filter(Boolean));
   return { sale: of('sale'), purchase: of('purchase') };
 }
@@ -909,6 +920,35 @@ function resolveCompanyTaxAccount(db, type, field, label, companyId) {
   return account;
 }
 
+const TAX_GROUP_ACCOUNT_ERRORS = {
+  tax_payable_account_id: {
+    prefix: 'liability_',
+    missing: 'Tax group payable account does not exist',
+    company: 'Tax payable account must belong to the tax group company',
+    type: 'Tax payable account must be a liability account',
+    archived: 'Tax group payable account is archived',
+  },
+  tax_receivable_account_id: {
+    prefix: 'asset_',
+    missing: 'Tax group receivable account does not exist',
+    company: 'Tax receivable account must belong to the tax group company',
+    type: 'Tax receivable account must be an asset account',
+    archived: 'Tax group receivable account is archived',
+  },
+};
+
+function resolveTaxGroupAccount(db, group, field, fallbackAccount, companyId) {
+  const accountId = group?.[field];
+  if (!accountId) return fallbackAccount;
+  const rules = TAX_GROUP_ACCOUNT_ERRORS[field];
+  const account = read(db, 'account.account', accountId);
+  if (!account) throw new Error(rules.missing);
+  if (account.company_id && account.company_id !== companyId) throw new Error(rules.company);
+  if (!account.account_type || !account.account_type.startsWith(rules.prefix)) throw new Error(rules.type);
+  if (account.active === false) throw new Error(rules.archived);
+  return account;
+}
+
 /** Validate explicit return-type mappings configured on a tax unit. */
 export function taxUnitMemberTypeValidation(db, unit, mainTypes = [], requiredCompanyId = null) {
   const companyIds = unit?.company_ids ?? [];
@@ -943,6 +983,81 @@ export function taxUnitMemberTypeValidation(db, unit, mainTypes = [], requiredCo
  */
 const TAX_CLOSING_ROUNDING_MINOR_UNITS = 5;
 
+/**
+ * Shared read-only closable calculation for one company's period: determines per-line closing eligibility,
+ * closable ledger balances by account and tax group, and the matching closable report payable.
+ */
+function closingPeriodCalculation(db, ret, companyId) {
+  const currency = findCompanyCurrencyRecord(db, companyId);
+  const moneyRound = (n) => roundCurrency(n, currency);
+  const accounts = taxAccounts(db, companyId);
+  const allRows = companyTaxRepartitionRows(db, companyId);
+  const closingRows = allRows.filter(({ line }) => isClosableRepartitionLine(line));
+  const closingRowAccountIds = new Set(closingRows.map(({ line }) => line.account_id).filter(Boolean));
+  const excludedOnlyAccounts = new Set(
+    allRows
+      .filter(({ line }) => line.account_id && !isClosableRepartitionLine(line) && !closingRowAccountIds.has(line.account_id))
+      .map(({ line }) => line.account_id),
+  );
+  const fallbackClosableAccountIds = new Set([...accounts.sale, ...accounts.purchase].filter((id) => !excludedOnlyAccounts.has(id)));
+
+  const transitions = new Set(cashBasisTransitionAccounts(db, companyId));
+  const taxAccountIds = new Set([...accounts.sale, ...accounts.purchase, ...closingRowAccountIds]);
+
+  // Per-item eligibility: honor stored journal item `use_in_tax_closing` when present;
+  // fall back to closable tax account membership only for untagged manual/legacy items without the flag.
+  // Transition accounts and accounts outside closable tax accounts are never closable.
+  const isItemClosable = (line) => (
+    !transitions.has(line.account_id) &&
+    (line.use_in_tax_closing != null
+      ? (Boolean(line.use_in_tax_closing) && taxAccountIds.has(line.account_id))
+      : (fallbackClosableAccountIds.has(line.account_id) && !line.tax_grid_base))
+  );
+
+  const accountClosingGroups = new Map();
+  for (const { line, tax } of closingRows) {
+    if (!line.account_id) continue;
+    if (!accountClosingGroups.has(line.account_id)) {
+      accountClosingGroups.set(line.account_id, new Set());
+    }
+    accountClosingGroups.get(line.account_id).add(tax.tax_group_id ?? null);
+  }
+  const resolveAccountGroup = (accountId) => {
+    const groups = accountClosingGroups.get(accountId);
+    if (!groups || groups.size !== 1) return null;
+    return [...groups][0];
+  };
+
+  const balances = new Map();
+  const groupNets = new Map();
+  for (const line of journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: companyId })) {
+    if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
+    if (isItemClosable(line)) {
+      const net = (Number(line.debit) || 0) - (Number(line.credit) || 0);
+      balances.set(line.account_id, (balances.get(line.account_id) ?? 0) + net);
+      const tax = line.tax_id ? read(db, 'account.tax', line.tax_id) : null;
+      const groupId = tax ? (tax.tax_group_id ?? null) : resolveAccountGroup(line.account_id);
+      groupNets.set(groupId, (groupNets.get(groupId) ?? 0) - net);
+    }
+  }
+
+  const periodItems = taxItems(db, { from: ret.date_from, to: ret.date_to, company_id: companyId });
+  const closableItems = periodItems.filter(isItemClosable);
+  const closableOutput = moneyRound(closableItems.filter((l) => l.side === 'sale').reduce((s, l) => s + l.tax, 0));
+  const closableInput = moneyRound(closableItems.filter((l) => l.side === 'purchase').reduce((s, l) => s + l.tax, 0));
+  const closablePayable = moneyRound(closableOutput - closableInput);
+
+  return { currency, moneyRound, balances, groupNets, closablePayable };
+}
+
+/** Closable payable/recoverable total for a return (single company or tax unit), without posting a closing entry. */
+export function closableTaxPayable(db, ret) {
+  return round(returnCompanies(db, ret).reduce(
+    (sum, companyId) => sum + closingPeriodCalculation(db, ret, companyId).closablePayable,
+    0,
+  ));
+}
+
 /** Calculate the closing from posted tax accounts and the return's payment configuration. */
 export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   const mainType = read(db, 'account.return.type', ret.type_id);
@@ -956,17 +1071,10 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
     type = types.get(companyId);
   }
   ret = { ...ret, company_id: companyId, tax_unit_id: null };
-  const report = validateTaxReturnPeriod(db, ret);
-  const currency = findCompanyCurrencyRecord(db, companyId);
-  const moneyRound = (n) => roundCurrency(n, currency);
+  validateTaxReturnPeriod(db, ret);
+  const { currency, moneyRound, balances, groupNets, closablePayable } = closingPeriodCalculation(db, ret, companyId);
   const tolerance = moneyRound(TAX_CLOSING_ROUNDING_MINOR_UNITS * Number(currency?.rounding ?? 0.01));
-  const accounts = taxAccounts(db, ret.company_id);
-  const taxIds = new Set([...accounts.sale, ...accounts.purchase]);
-  const balances = new Map();
-  for (const line of journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id })) {
-    if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
-    if (taxIds.has(line.account_id)) balances.set(line.account_id, (balances.get(line.account_id) ?? 0) + (Number(line.debit) || 0) - (Number(line.credit) || 0));
-  }
+
   const lines = [];
   let netClosed = 0;
   for (const [id, raw] of balances) {
@@ -975,7 +1083,8 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
     lines.push(balance > 0 ? { account_id: id, credit: balance } : { account_id: id, debit: -balance });
     netClosed = moneyRound(netClosed - balance);
   }
-  const roundingDiff = moneyRound(netClosed - report.payable);
+
+  const roundingDiff = moneyRound(netClosed - closablePayable);
   if (Math.abs(roundingDiff) > tolerance) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
   const payableAccount = resolveCompanyTaxAccount(db, type, 'tax_payable_account_id', 'Tax Payable Account', companyId);
   const receivableAccount = resolveCompanyTaxAccount(db, type, 'tax_receivable_account_id', 'Tax Receivable Account', companyId);
@@ -983,10 +1092,54 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   if (!partner) {
     throw new Error(`Tax return type "${type?.name ?? ''}" needs a Payment Partner configured (payment_partner_id)`);
   }
-  if (report.payable > 0) {
-    lines.push({ account_id: payableAccount.id, credit: report.payable, partner_id: partner.id });
-  } else if (report.payable < 0) {
-    lines.push({ account_id: receivableAccount.id, debit: -report.payable, partner_id: partner.id });
+  const sortedGroupIds = [...groupNets.keys()].sort((a, b) => {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return a - b;
+  });
+  const nonZeroGroups = sortedGroupIds.filter((gid) => moneyRound(groupNets.get(gid) ?? 0) !== 0);
+  const largestGroupId = nonZeroGroups.length
+    ? nonZeroGroups.reduce(
+      (best, gid) => (Math.abs(moneyRound(groupNets.get(gid) ?? 0)) > Math.abs(moneyRound(groupNets.get(best) ?? 0)) ? gid : best),
+      nonZeroGroups[0],
+    )
+    : null;
+
+  const obligations = [];
+  let remainingRounding = roundingDiff;
+  if (!nonZeroGroups.length && closablePayable) {
+    const account = closablePayable > 0 ? payableAccount : receivableAccount;
+    obligations.push({ account_id: account.id, account, amount: closablePayable, partner_id: partner.id });
+    lines.push(closablePayable > 0
+      ? { account_id: account.id, credit: closablePayable, partner_id: partner.id }
+      : { account_id: account.id, debit: -closablePayable, partner_id: partner.id });
+  } else {
+    // Combine groups that resolve to the exact same payable/receivable account (e.g. default fallback) so one line is posted per account.
+    const accountAmounts = new Map();
+    const resolvedAccounts = new Map();
+    for (const groupId of sortedGroupIds) {
+      let groupAmount = moneyRound(groupNets.get(groupId) ?? 0);
+      if (groupId === largestGroupId && remainingRounding !== 0) {
+        groupAmount = moneyRound(groupAmount - remainingRounding);
+        remainingRounding = 0;
+      }
+      if (!groupAmount) continue;
+      const group = groupId ? read(db, 'account.tax.group', groupId) : null;
+      const targetAccount = groupAmount > 0
+        ? resolveTaxGroupAccount(db, group, 'tax_payable_account_id', payableAccount, companyId)
+        : resolveTaxGroupAccount(db, group, 'tax_receivable_account_id', receivableAccount, companyId);
+      resolvedAccounts.set(targetAccount.id, targetAccount);
+      accountAmounts.set(targetAccount.id, moneyRound((accountAmounts.get(targetAccount.id) ?? 0) + groupAmount));
+    }
+    for (const [accountId, amount] of accountAmounts) {
+      if (!amount) continue;
+      const account = resolvedAccounts.get(accountId);
+      obligations.push({ account_id: accountId, account, amount, partner_id: partner.id });
+      lines.push(amount > 0
+        ? { account_id: accountId, credit: amount, partner_id: partner.id }
+        : { account_id: accountId, debit: -amount, partner_id: partner.id });
+    }
   }
   if (roundingDiff > 0) {
     const account = resolveCompanyTaxAccount(db, type, 'rounding_profit_account_id', 'Rounding Profit Account', companyId);
@@ -998,7 +1151,7 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   if (!lines.length) {
     lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
   }
-  return { lines, payable: report.payable, payableAccount, receivableAccount, partner: partner.id };
+  return { lines, obligations, payable: closablePayable, payableAccount, receivableAccount, partner: partner.id };
 }
 
 /** Build the representative company payment summary and per-company inter-company settlement entries for a tax unit return. */
@@ -1027,57 +1180,61 @@ export function taxUnitSettlementSpec(db, ret) {
   const mainLines = [];
   const memberEntries = [];
 
-  // If the main company's own closing amount sits in the other tax account (payable vs receivable) than the destination,
-  // transfer it into the destination account in the same entry.
-  if (destinationAccount.id === mainSpec.payableAccount.id && mainSpec.payable < 0) {
-    const amount = Math.abs(mainSpec.payable);
-    mainLines.push(
-      { account_id: destinationAccount.id, debit: amount, partner_id: mainSpec.partner },
-      { account_id: mainSpec.receivableAccount.id, credit: amount, partner_id: mainSpec.partner },
-    );
-  } else if (destinationAccount.id === mainSpec.receivableAccount.id && mainSpec.payable > 0) {
-    const amount = mainSpec.payable;
-    mainLines.push(
-      { account_id: mainSpec.payableAccount.id, debit: amount, partner_id: mainSpec.partner },
-      { account_id: destinationAccount.id, credit: amount, partner_id: mainSpec.partner },
-    );
+  // Reclassify every main-company obligation sitting outside `destinationAccount` (group accounts or opposite side) into `destinationAccount`.
+  for (const o of mainSpec.obligations ?? []) {
+    if (!o.amount || o.account_id === destinationAccount.id) continue;
+    const absAmt = Math.abs(o.amount);
+    if (o.amount > 0) {
+      mainLines.push(
+        { account_id: o.account_id, debit: absAmt, partner_id: o.partner_id },
+        { account_id: destinationAccount.id, credit: absAmt, partner_id: mainSpec.partner },
+      );
+    } else {
+      mainLines.push(
+        { account_id: destinationAccount.id, debit: absAmt, partner_id: mainSpec.partner },
+        { account_id: o.account_id, credit: absAmt, partner_id: o.partner_id },
+      );
+    }
   }
 
   for (const { companyId: memberId, spec } of specs) {
-    if (memberId === mainCompanyId || !spec.payable) continue;
+    if (memberId === mainCompanyId) continue;
+    const memberObligations = spec.obligations ?? [];
+    if (!memberObligations.length && !spec.payable) continue;
     const memberCompany = read(db, 'res.company', memberId);
-    if (!memberCompany?.partner_id || !read(db, 'res.partner', memberCompany.partner_id)) {
+    if (spec.payable && (!memberCompany?.partner_id || !read(db, 'res.partner', memberCompany.partner_id))) {
       throw new Error('Configure a company contact for every company in the tax unit');
     }
-    const amount = Math.abs(spec.payable);
-    const positive = spec.payable > 0;
-    const mainIcAccount = partnerAccount(db, memberCompany.partner_id, mainCompanyId, positive ? 'receivable' : 'payable');
-    const memberIcAccount = partnerAccount(db, mainCompany.partner_id, memberId, positive ? 'payable' : 'receivable');
 
-    if (positive) {
-      mainLines.push(
-        { account_id: mainIcAccount, debit: amount, partner_id: memberCompany.partner_id },
-        { account_id: destinationAccount.id, credit: amount, partner_id: mainSpec.partner },
-      );
-      memberEntries.push({
-        companyId: memberId,
-        lines: [
-          { account_id: spec.payableAccount.id, debit: amount, partner_id: spec.partner },
-          { account_id: memberIcAccount, credit: amount, partner_id: mainCompany.partner_id },
-        ],
-      });
-    } else {
-      mainLines.push(
-        { account_id: destinationAccount.id, debit: amount, partner_id: mainSpec.partner },
-        { account_id: mainIcAccount, credit: amount, partner_id: memberCompany.partner_id },
-      );
-      memberEntries.push({
-        companyId: memberId,
-        lines: [
-          { account_id: memberIcAccount, debit: amount, partner_id: mainCompany.partner_id },
-          { account_id: spec.receivableAccount.id, credit: amount, partner_id: spec.partner },
-        ],
-      });
+    // Clear every affected group/default tax obligation line in the member's closing.
+    const memberLines = memberObligations.map((o) => (
+      o.amount > 0
+        ? { account_id: o.account_id, debit: o.amount, partner_id: o.partner_id }
+        : { account_id: o.account_id, credit: -o.amount, partner_id: o.partner_id }
+    ));
+
+    if (spec.payable) {
+      const amount = Math.abs(spec.payable);
+      const positive = spec.payable > 0;
+      const mainIcAccount = partnerAccount(db, memberCompany.partner_id, mainCompanyId, positive ? 'receivable' : 'payable');
+      const memberIcAccount = partnerAccount(db, mainCompany.partner_id, memberId, positive ? 'payable' : 'receivable');
+      if (positive) {
+        mainLines.push(
+          { account_id: mainIcAccount, debit: amount, partner_id: memberCompany.partner_id },
+          { account_id: destinationAccount.id, credit: amount, partner_id: mainSpec.partner },
+        );
+        memberLines.push({ account_id: memberIcAccount, credit: amount, partner_id: mainCompany.partner_id });
+      } else {
+        mainLines.push(
+          { account_id: destinationAccount.id, debit: amount, partner_id: mainSpec.partner },
+          { account_id: mainIcAccount, credit: amount, partner_id: memberCompany.partner_id },
+        );
+        memberLines.push({ account_id: memberIcAccount, debit: amount, partner_id: mainCompany.partner_id });
+      }
+    }
+
+    if (memberLines.length) {
+      memberEntries.push({ companyId: memberId, lines: memberLines });
     }
   }
 
