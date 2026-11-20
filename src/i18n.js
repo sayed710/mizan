@@ -3511,6 +3511,12 @@ const ar = {
   'The net payment amount must be greater than zero': 'يجب أن يكون صافي مبلغ الدفعة أكبر من صفر',
   'Credit notes can only be paid when Group Payments is enabled': 'لا يمكن دفع إشعارات الدائن إلا عند تفعيل تجميع الدفعات',
   'Only customer invoices, credit notes and vendor bills can be paid together': 'يمكن دفع فواتير العملاء وإشعارات الدائن وفواتير الموردين فقط معاً',
+  'Country Group': 'مجموعة الدول',
+  'Country Groups': 'مجموعات الدول',
+  Countries: 'الدول',
+  'Federal States': 'الولايات الاتحادية',
+  'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
+  'Country group name is required': 'اسم مجموعة الدول مطلوب',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
