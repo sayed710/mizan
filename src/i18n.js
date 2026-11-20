@@ -3501,6 +3501,12 @@ const ar = {
   'Sync Interval (hours)': 'فترة المزامنة (بالساعات)',
   'Next Refresh': 'التحديث القادم',
   'Sync interval must be a positive number': 'يجب أن تكون فترة المزامنة رقماً موجباً',
+  'Country Group': 'مجموعة الدول',
+  'Country Groups': 'مجموعات الدول',
+  Countries: 'الدول',
+  'Federal States': 'الولايات الاتحادية',
+  'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
+  'Country group name is required': 'اسم مجموعة الدول مطلوب',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
