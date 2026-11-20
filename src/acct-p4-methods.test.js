@@ -556,3 +556,19 @@ test('Bug 4: journal method line edits and new journals are saved through applyD
   assert.equal(newBank.outbound_payment_method_line_ids.length, 2);
 });
 
+
+test('Qodo PR #190: seeding default lines ignores the active company and never duplicates another company\'s lines', async () => {
+  const { setActiveCompany, getActiveCompany } = await import('./orm.js');
+  const { migratePaymentMethods } = await import('./models/paymentmethod.js');
+  const db = migratePaymentMethods(seed());
+  const lines = (d) => (d.records['account.payment.method.line'] ?? []).length;
+  const before = lines(db);
+  assert.ok(before > 0, 'the seed has bank/cash journal method lines');
+  const previous = getActiveCompany();
+  setActiveCompany(999);
+  try {
+    assert.equal(lines(migratePaymentMethods(db)), before, 'no duplicate default lines while another company is active');
+  } finally {
+    setActiveCompany(previous);
+  }
+});
