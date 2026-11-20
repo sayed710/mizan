@@ -461,14 +461,16 @@ function partialReconcileInvariant(db, after) {
       return 'Total partial reconciliations cannot exceed the open journal line balance';
     }
 
-    if (after.debit_amount_currency != null || after.credit_amount_currency != null || after.exchange_move_id != null) {
+    const dLine = debitItem;
+    const cLine = creditItem;
+    const ownId = ownCurrency?.id ?? null;
+    const currD = dLine ? itemCurrencyId(baseDb, { move: debitMove, line: dLine }, ownCurrency) : ownId;
+    const currC = cLine ? itemCurrencyId(baseDb, { move: creditMove, line: cLine }, ownCurrency) : ownId;
+    const hasForeign = currD !== ownId || currC !== ownId;
+
+    if (hasForeign || after.debit_amount_currency != null || after.credit_amount_currency != null || after.exchange_move_id != null) {
       if (!debitMove || !creditMove) return 'Partial reconciliation entries must exist in base database';
-      const dLine = reconciledJournalItems(baseDb, debitMove)[after.debit_line_index];
-      const cLine = reconciledJournalItems(baseDb, creditMove)[after.credit_line_index];
       if (!dLine || !cLine) return 'Partial reconciliation lines must exist in base database';
-      const currD = itemCurrencyId(baseDb, { move: debitMove, line: dLine }, ownCurrency);
-      const currC = itemCurrencyId(baseDb, { move: creditMove, line: cLine }, ownCurrency);
-      const ownId = ownCurrency?.id ?? null;
       if (currD !== ownId && currC !== ownId) {
         if (currD !== currC) return 'Selected items must be in the same currency';
         if (after.debit_amount_currency == null || after.credit_amount_currency == null || after.debit_amount_currency !== after.credit_amount_currency || !(Number(after.debit_amount_currency) > 0)) {

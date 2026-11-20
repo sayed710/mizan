@@ -257,15 +257,28 @@ test('Case 2: Guards: cross-company, different accounts, non-reconcilable, draft
     /Partial reconciliation requires posted debit and credit journal entries/,
   );
 
-  // 4e. Mixed currency (USD vs EUR)
-  assert.throws(
-    () => reconcileLedgerItems(db, [itemSelection(db, move1.id, ar), itemSelection(db, eurMove.id, ar)], { date: '2026-04-01' }),
-    /General-ledger reconciliation requires items in the company currency/,
-  );
+  // 4e. Mixed currency (USD vs EUR): matches on company currency with proportional foreign residual
+  const mixedDb = reconcileLedgerItems(db, [itemSelection(db, move1.id, ar), itemSelection(db, eurMove.id, ar)], { date: '2026-04-01' });
+  const mixedPartials = (mixedDb.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
+  assert.equal(mixedPartials.length, 1);
+  assert.equal(mixedPartials[0].amount, 100);
+  assert.equal(mixedPartials[0].debit_amount_currency, null);
+  assert.equal(mixedPartials[0].credit_amount_currency, 50); // 100 USD / 200 USD * 100 EUR = 50 EUR
+  assert.equal(mixedPartials[0].exchange_move_id, null);
+
+  const dItem = reconciledJournalItems(mixedDb, read(mixedDb, 'account.move', move1.id)).find((l) => l.account_id === ar);
+  const cItem = reconciledJournalItems(mixedDb, read(mixedDb, 'account.move', eurMove.id)).find((l) => l.account_id === ar);
+  assert.equal(dItem.amount_residual, 0);
+  assert.equal(dItem.amount_residual_currency, 0);
+  assert.equal(cItem.amount_residual, -100);
+  assert.equal(cItem.amount_residual_currency, -50);
+
+  // Forged mixed partial with missing credit currency amount is rejected through applyDiff
   assert.throws(
     () => applyDiff(db, diffDb(db, forged({ credit_move_id: eurMove.id })), { isAdmin: true }),
-    /General-ledger reconciliation requires items in the company currency/,
+    /Currency amounts on foreign partial reconciliation must match and be positive/,
   );
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, mixedDb), { isAdmin: true }));
 });
 
 test('Case 3: Journal Items reconcile action reconciles through the ledger model', async () => {
