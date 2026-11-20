@@ -1284,7 +1284,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
-    const tagged = final ? released.taxes.get(releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids, g.use_in_tax_closing !== false)) : null;
+    const tagged = final ? released.taxes.get(releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids, g.use_in_tax_closing === true)) : null;
     const legacy = final ? released.taxes.get(`${g.account}:`) : null;
     const legacyShare = accountTotal ? g.amount / accountTotal : 0;
     const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
@@ -1297,11 +1297,11 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const lines = due.flatMap(({ account, amount, base, tax_id, tax_name, tax_tag_ids, use_in_tax_closing }) => {
     // The base is signed independently of the tax amount, including reversals and refunds.
     const transition = cashBasisTransitionAccount(db, tax_id, r.company_id, { allowArchived: true });
-    const tax = { account_id: account, partner_id: r.partner_id, name: tax_name, tax_id, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase', use_in_tax_closing: use_in_tax_closing !== false };
+    const tax = { account_id: account, partner_id: r.partner_id, name: tax_name, tax_id, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase', use_in_tax_closing: use_in_tax_closing === true };
     const value = Math.abs(amount);
     return ((sale !== refund) === (share > 0)) !== (amount < 0)
-      ? [{ account: transition, debit: value, partner_id: r.partner_id }, { ...tax, credit: value }]
-      : [{ ...tax, debit: value }, { account: transition, credit: value, partner_id: r.partner_id }];
+      ? [{ account: transition, debit: value, partner_id: r.partner_id, use_in_tax_closing: false }, { ...tax, credit: value }]
+      : [{ ...tax, debit: value }, { account: transition, credit: value, partner_id: r.partner_id, use_in_tax_closing: false }];
   });
   const remainingLegacyByTag = final ? new Map(released.legacyTagBases) : null;
   const dueBases = final

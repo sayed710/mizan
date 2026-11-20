@@ -1001,12 +1001,17 @@ function closingPeriodCalculation(db, ret, companyId) {
   );
   const fallbackClosableAccountIds = new Set([...accounts.sale, ...accounts.purchase].filter((id) => !excludedOnlyAccounts.has(id)));
 
+  const transitions = new Set(cashBasisTransitionAccounts(db, companyId));
+  const taxAccountIds = new Set([...accounts.sale, ...accounts.purchase, ...closingRowAccountIds]);
+
   // Per-item eligibility: honor stored journal item `use_in_tax_closing` when present;
   // fall back to closable tax account membership only for untagged manual/legacy items without the flag.
+  // Transition accounts and accounts outside closable tax accounts are never closable.
   const isItemClosable = (line) => (
-    line.use_in_tax_closing != null
-      ? Boolean(line.use_in_tax_closing)
-      : (fallbackClosableAccountIds.has(line.account_id) && !line.tax_grid_base)
+    !transitions.has(line.account_id) &&
+    (line.use_in_tax_closing != null
+      ? (Boolean(line.use_in_tax_closing) && taxAccountIds.has(line.account_id))
+      : (fallbackClosableAccountIds.has(line.account_id) && !line.tax_grid_base))
   );
 
   const accountClosingGroups = new Map();

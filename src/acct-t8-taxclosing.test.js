@@ -9,10 +9,10 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { createCompany } from './models/company.js';
 import { models } from './models/index.js';
-import { postMove } from './models/accounting.js';
+import { payMove, postMove } from './models/accounting.js';
 import { journalItems, postEntry } from './models/ledger.js';
 import { postPayment } from './models/pay.js';
-import { taxSnapshot } from './models/taxes.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { isClosableRepartitionLine, taxClosingMatchesReturn, taxClosingSpec, taxReport } from './models/finance.js';
 import { ensureReturnTypes, payReturn, reviewReturn, submitReturn } from './models/taxreturn.js';
 
@@ -1228,4 +1228,203 @@ test('TAX-13: use_in_tax_closing stored defaults on create, migration v60, and s
   assert.strictEqual(migratedTax.invoice_repartition_line_ids[2].use_in_tax_closing, false);
   assert.strictEqual(migratedTax.invoice_repartition_line_ids[3].use_in_tax_closing, false);
   assert.strictEqual(migrate(migrated), migrated, 'migration v60 is idempotent');
+});
+
+test('TAX-13 / Qodo 1: pre-migration cash-basis invoice with an expense tax row migrated then paid releases non-closable tax', () => {
+  const env = setupBaseTaxClosingEnv(seed());
+  let { db } = env;
+
+  const expAcc = create(db, 'account.account', { code: '651921', name: 'Non-Deductible Tax Expense', account_type: 'expense', company_id: 1 });
+  db = expAcc.db;
+  const transAcc = create(db, 'account.account', { code: '251199', name: 'Cash Basis Transition', account_type: 'liability_current', company_id: 1 });
+  db = transAcc.db;
+
+  const taxRes = create(db, 'account.tax', {
+    name: 'CB Expense Tax 10%', company_id: 1, type_tax_use: 'sale', amount: 10, amount_type: 'percent',
+    tax_exigibility: 'on_payment', cash_basis_transition_account_id: transAcc.id,
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: expAcc.id, tag_ids: [] },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: expAcc.id, tag_ids: [] },
+    ],
+  });
+  db = taxRes.db;
+  const tax = read(db, 'account.tax', taxRes.id);
+
+  // Post invoice with this tax
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-08-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, ...taxSnapshot(tax) }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  // Strip use_in_tax_closing from invoice snapshot to simulate pre-migration legacy invoice
+  const stripClosing = (lines) => (lines ?? []).map(({ use_in_tax_closing: _drop, ...rest }) => rest);
+  const legacyDb = {
+    ...db,
+    schema_version: 59,
+    records: {
+      ...db.records,
+      'account.move': (db.records['account.move'] ?? []).map((m) => m.id === inv.id ? {
+        ...m,
+        invoice_line_ids: (m.invoice_line_ids ?? []).map((l) => ({
+          ...l,
+          invoice_repartition_line_ids: stripClosing(l.invoice_repartition_line_ids),
+          refund_repartition_line_ids: stripClosing(l.refund_repartition_line_ids),
+        })),
+      } : m),
+    },
+  };
+
+  // Migrate database to v60
+  const migratedDb = migrate(legacyDb, 60);
+  const migratedInv = read(migratedDb, 'account.move', inv.id);
+  assert.strictEqual(migratedInv.invoice_line_ids[0].invoice_repartition_line_ids[1].use_in_tax_closing, false, 'migrated invoice snapshot has use_in_tax_closing: false for expense account');
+
+  // Pay the invoice via payMove -> cash-basis tax is released
+  const paidDb = payMove(migratedDb, inv.id, 110, '2026-08-15');
+
+  // Find the cash basis release move
+  const releaseMoves = (paidDb.records['account.move'] ?? []).filter((m) => (m.ref ?? '').includes(`Cash basis taxes ${migratedInv.name}`));
+  assert.ok(releaseMoves.length > 0, 'Cash basis release move exists');
+  const releaseMove = releaseMoves[0];
+  const releasedTaxLine = releaseMove.line_ids.find((l) => l.account_id === expAcc.id);
+  assert.ok(releasedTaxLine, 'Released tax line on expense account exists');
+  assert.strictEqual(releasedTaxLine.use_in_tax_closing, false, 'Released tax line is NOT closable');
+
+  // Closing the period leaves this release out of the tax closing entry
+  const ret = create(paidDb, 'account.return', {
+    name: 'VAT Aug 2026', type_id: env.vatType.id, date_from: '2026-08-01', date_to: '2026-08-31', company_id: 1,
+  });
+  const reviewed = reviewReturn(ret.db, ret.id);
+  const revRet = read(reviewed, 'account.return', ret.id);
+  assert.equal(revRet.total_amount_to_pay, 0, 'No closable tax payable because expense tax was excluded');
+  const submitted = submitReturn(reviewed, ret.id);
+  const subRet = read(submitted, 'account.return', ret.id);
+  const closingMove = read(submitted, 'account.move', subRet.closing_move_ids[0]);
+  assert.ok(!closingMove.line_ids.some((l) => l.account_id === expAcc.id), 'Expense account stays out of closing entry');
+});
+
+test('TAX-13 / Qodo 2: defaultTaxRepartitionLines helper leaves use_in_tax_closing unset without db and resolves correctly on tax create', () => {
+  const env = setupBaseTaxClosingEnv(seed());
+  let { db } = env;
+
+  const expAcc = create(db, 'account.account', { code: '651922', name: 'Expense For Tax', account_type: 'expense', company_id: 1 });
+  db = expAcc.db;
+  const liabAcc = create(db, 'account.account', { code: '251922', name: 'Liability For Tax', account_type: 'liability_current', company_id: 1 });
+  db = liabAcc.db;
+
+  // 1. Without db, defaultTaxRepartitionLines leaves use_in_tax_closing unset on tax lines
+  const helperExp = defaultTaxRepartitionLines(expAcc.id, []);
+  assert.strictEqual(helperExp.invoice_repartition_line_ids[1].use_in_tax_closing, undefined, 'helper omits use_in_tax_closing without db');
+  assert.strictEqual(helperExp.invoice_repartition_line_ids[0].use_in_tax_closing, false, 'base line is always false');
+
+  // 2. Creating a tax using the helper output with expense account derives use_in_tax_closing: false
+  const expTaxRes = create(db, 'account.tax', {
+    name: 'Helper Expense Tax', company_id: 1, type_tax_use: 'purchase', amount: 5, amount_type: 'percent',
+    ...helperExp,
+  });
+  db = expTaxRes.db;
+  const expTax = read(db, 'account.tax', expTaxRes.id);
+  assert.strictEqual(expTax.invoice_repartition_line_ids[1].use_in_tax_closing, false, 'tax creation derived false for expense account');
+  assert.strictEqual(expTax.refund_repartition_line_ids[1].use_in_tax_closing, false, 'refund repartition derived false for expense account');
+
+  // 3. Creating a tax using the helper output with liability account derives use_in_tax_closing: true
+  const liabTaxRes = create(db, 'account.tax', {
+    name: 'Helper Liability Tax', company_id: 1, type_tax_use: 'sale', amount: 10, amount_type: 'percent',
+    ...defaultTaxRepartitionLines(liabAcc.id, []),
+  });
+  db = liabTaxRes.db;
+  const liabTax = read(db, 'account.tax', liabTaxRes.id);
+  assert.strictEqual(liabTax.invoice_repartition_line_ids[1].use_in_tax_closing, true, 'tax creation derived true for liability account');
+
+  // 4. Explicit choice is preserved even with expense account
+  const explicitTaxRes = create(db, 'account.tax', {
+    name: 'Explicit Override Tax', company_id: 1, type_tax_use: 'purchase', amount: 5, amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [], use_in_tax_closing: false },
+      { repartition_type: 'tax', factor_percent: 100, account_id: expAcc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [], use_in_tax_closing: false },
+      { repartition_type: 'tax', factor_percent: 100, account_id: expAcc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+  });
+  db = explicitTaxRes.db;
+  const explicitTax = read(db, 'account.tax', explicitTaxRes.id);
+  assert.strictEqual(explicitTax.invoice_repartition_line_ids[1].use_in_tax_closing, true, 'explicit true is preserved');
+});
+
+test('TAX-8 / Qodo 3: period with unpaid and paid cash-basis invoices closes successfully without unbalanced tax error', () => {
+  const env = setupBaseTaxClosingEnv(seed());
+  let { db } = env;
+
+  const cbTaxOut = create(db, 'account.account', { code: '251923', name: 'CB Output Tax', account_type: 'liability_current', company_id: 1 });
+  db = cbTaxOut.db;
+  const cbTrans = create(db, 'account.account', { code: '251123', name: 'CB Transition Acc', account_type: 'liability_current', company_id: 1 });
+  db = cbTrans.db;
+
+  const cbTaxRes = create(db, 'account.tax', {
+    name: 'CB Sale 10%', company_id: 1, type_tax_use: 'sale', amount: 10, amount_type: 'percent',
+    tax_exigibility: 'on_payment', cash_basis_transition_account_id: cbTrans.id,
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: cbTaxOut.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: cbTaxOut.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+  });
+  db = cbTaxRes.db;
+  const cbTax = read(db, 'account.tax', cbTaxRes.id);
+
+  // Invoice 1: Posted in period (2026-09-05) and remains UNPAID (tax = 20 on transition account)
+  const unpaidInv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-09-05', company_id: 1,
+    invoice_line_ids: [{ name: 'Unpaid Item', qty: 1, price_unit: 200, ...taxSnapshot(cbTax) }],
+  });
+  db = postMove(unpaidInv.db, unpaidInv.id);
+
+  // Invoice 2: Posted in period (2026-09-10) and PAID in the same period via payMove (tax = 10 released to cbTaxOut)
+  const paidInv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-09-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Paid Item', qty: 1, price_unit: 100, ...taxSnapshot(cbTax) }],
+  });
+  db = postMove(paidInv.db, paidInv.id);
+  db = payMove(db, paidInv.id, 110, '2026-09-12');
+
+  // Run review and submit for the period
+  const ret = create(db, 'account.return', {
+    name: 'VAT Sep 2026', type_id: env.vatType.id, date_from: '2026-09-01', date_to: '2026-09-30', company_id: 1,
+  });
+  const reviewed = reviewReturn(ret.db, ret.id);
+  const revRet = read(reviewed, 'account.return', ret.id);
+
+  // Only the paid cash-basis tax (10.00) is due; the unpaid invoice's tax (20.00) is waiting on transition
+  assert.equal(revRet.total_amount_to_pay, 10);
+
+  const submitted = submitReturn(reviewed, ret.id);
+  const subRet = read(submitted, 'account.return', ret.id);
+  assert.equal(subRet.state, 'submitted');
+  assert.equal(taxClosingMatchesReturn(submitted, subRet), true);
+
+  const closingMove = read(submitted, 'account.move', subRet.closing_move_ids[0]);
+  // Closing entry balances
+  const debit = round(closingMove.line_ids.reduce((s, l) => s + (Number(l.debit) || 0), 0));
+  const credit = round(closingMove.line_ids.reduce((s, l) => s + (Number(l.credit) || 0), 0));
+  assert.equal(debit, credit, 'Closing move balances');
+
+  // The released tax account (cbTaxOut) is closed with debit 10
+  const taxCloseLine = closingMove.line_ids.find((l) => l.account_id === cbTaxOut.id);
+  assert.ok(taxCloseLine, 'Released tax account is closed');
+  assert.equal(taxCloseLine.debit, 10);
+
+  // The cash basis transition account (cbTrans) is NOT closed or touched by closing
+  assert.ok(!closingMove.line_ids.some((l) => l.account_id === cbTrans.id), 'Transition account stays untouched in closing');
+  // Transition account still has the 20.00 credit balance from the unpaid invoice
+  assert.equal(accountBalanceUpTo(submitted, cbTrans.id, '2099-12-31'), -20);
 });

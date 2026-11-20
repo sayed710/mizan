@@ -427,7 +427,7 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
         const tax_name = taxLabel(t);
         const tax_id = t.tax_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
-        const use_in_tax_closing = row.use_in_tax_closing !== false;
+        const use_in_tax_closing = t.tax_cash_basis ? false : (row.use_in_tax_closing === true);
         const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}|${use_in_tax_closing}`;
         const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, use_in_tax_closing, cash_basis: !!t.tax_cash_basis, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + docBase, document_amount: g.document_amount + docAmt });
@@ -578,7 +578,7 @@ export function invoiceLines(db, move) {
   return [
     ...counterparts,
     ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true, tax_side: sale ? 'sale' : 'purchase' } : {}) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, use_in_tax_closing: g.use_in_tax_closing, ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, use_in_tax_closing: g.cash_basis ? false : (g.use_in_tax_closing === true), ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
 }
