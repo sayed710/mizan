@@ -13,6 +13,7 @@ import { Graph } from './Graph.jsx';
 import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
 import { Gantt } from './Gantt.jsx';
+import { Wizard } from './Wizard.jsx';
 import { actionRecords } from '../companyView.js';
 import { pageWindow } from './paging.js';
 import { statementImportJournalChoices, withSelectedStatementJournal } from '../models/statements.js';
@@ -71,6 +72,7 @@ export function ActionView({ leaf, base, params }) {
   });
   const [selected, setSelected] = useState(() => new Set());
   const [selectedImportJournalId, setSelectedImportJournalId] = useState('');
+  const [wizard, setWizard] = useState(null);
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => setSelected(new Set()), [companyScope]);
 
@@ -131,12 +133,38 @@ export function ActionView({ leaf, base, params }) {
       <button type="button" className="btn sm" aria-label={t('Next page')} disabled={win.next == null} onClick={() => goTo(win.next)}>›</button>
     </span>
   );
+  const listActions = leaf?.listActions ?? def.listActions ?? [];
+  const confirmWizard = (values) => {
+    try {
+      const res = wizard.action.run(getDb(), wizard.ids, values, { defaults: leaf?.defaults ?? {} });
+      setWizard(null);
+      if (res?.go) {
+        if (res.db) commit(res.db);
+        location.hash = res.go;
+        return;
+      }
+      if (res) commit(res.db ?? res);
+      setSelected(new Set());
+    } catch (e) {
+      setWizard((w) => ({ ...w, error: t(e.message) }));
+    }
+  };
   const extra = view === 'list' ? (
     <>
-      {(def.listActions ?? []).map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
+      {listActions.map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
         try {
-          const ids = selected.size ? records.filter((r) => selected.has(r.id)).map((r) => r.id) : records.map((r) => r.id);
+          const visibleSelection = records.filter((r) => selected.has(r.id)).map((r) => r.id);
+          // Actions that change each record never fall back to "every filtered record".
+          if (action.requiresSelection && !visibleSelection.length) throw new Error(selected.size ? 'None of the selected records match the current filter' : 'Select at least one record first');
+          const ids = selected.size ? visibleSelection : records.map((r) => r.id);
           if (!ids.length && !action.noSelection) return;
+          if (action.wizard) {
+            const spec = typeof action.wizard === 'function' ? action.wizard(getDb(), ids) : action.wizard;
+            if (spec) {
+              setWizard({ action, ids, spec, error: null });
+              return;
+            }
+          }
           let options;
           if (action.ask) {
             const promptDefault = typeof action.ask.default === 'function' ? action.ask.default() : (action.ask.default ?? '');
@@ -190,6 +218,7 @@ export function ActionView({ leaf, base, params }) {
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}
       {view === 'gantt' && <Gantt db={db} model={model} records={records} open={open} />}
+      {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
     </main>
   );
 }

@@ -67,6 +67,7 @@ function expenseLineKey(line) {
     line.account ?? line.account_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0,
     line.tax_id ?? null, line.tax_name || null, line.tax_side || null, Number(line.tax_base) || 0,
     Boolean(line.tax_base_signed), Boolean(line.tax_zero), Boolean(line.tax_grid_base), Boolean(line.tax_grid_release),
+    line.use_in_tax_closing !== false,
     line.type_tax_use || null, [...(line.tax_tag_ids ?? [])].sort((a, b) => a - b),
   ]);
 }

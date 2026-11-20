@@ -22,6 +22,7 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
+import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1672,6 +1673,103 @@ MIGRATIONS.push({ version: 59, name: 'horizontal-group-rules-to-relational-ids',
     return normalized;
   });
   return changed ? { ...db, records: { ...db.records, 'account.report.horizontal.group': next } } : db;
+} });
+
+// Tax repartition rows and invoice repartition snapshots now store explicit boolean `use_in_tax_closing`:
+// true for tax rows unless the linked account is an income or expense account, and false for base rows.
+MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (db) => {
+  const taxes = db?.records?.['account.tax'];
+  let taxesChanged = false;
+  const fixLines = (lines, fallbackAccId = null) => {
+    if (!Array.isArray(lines)) return lines;
+    let sideChanged = false;
+    const next = lines.map((l) => {
+      const updated = withRepartitionUseInTaxClosing(db, l, fallbackAccId);
+      if (updated !== l) sideChanged = true;
+      return updated;
+    });
+    return sideChanged ? next : lines;
+  };
+  const nextTaxes = Array.isArray(taxes) ? taxes.map((tax) => {
+    if (!tax) return tax;
+    const inv = fixLines(tax.invoice_repartition_line_ids);
+    const ref = fixLines(tax.refund_repartition_line_ids);
+    if (inv !== tax.invoice_repartition_line_ids || ref !== tax.refund_repartition_line_ids) {
+      taxesChanged = true;
+      return { ...tax, invoice_repartition_line_ids: inv, refund_repartition_line_ids: ref };
+    }
+    return tax;
+  }) : taxes;
+
+  const moves = db?.records?.['account.move'];
+  let movesChanged = false;
+  const nextMoves = Array.isArray(moves) ? moves.map((move) => {
+    if (!Array.isArray(move?.invoice_line_ids)) return move;
+    let moveChanged = false;
+    const nextLines = move.invoice_line_ids.map((line) => {
+      if (!line || typeof line !== 'object') return line;
+      let lineChanged = false;
+      let inv = line.invoice_repartition_line_ids;
+      if (Array.isArray(inv)) {
+        const nextInv = fixLines(inv, line.account_id);
+        if (nextInv !== inv) { inv = nextInv; lineChanged = true; }
+      }
+      let ref = line.refund_repartition_line_ids;
+      if (Array.isArray(ref)) {
+        const nextRef = fixLines(ref, line.account_id);
+        if (nextRef !== ref) { ref = nextRef; lineChanged = true; }
+      }
+      let breakdown = line.tax_breakdown;
+      if (Array.isArray(breakdown)) {
+        let bdChanged = false;
+        const nextBd = breakdown.map((child) => {
+          if (!child || typeof child !== 'object') return child;
+          let childChanged = false;
+          let cInv = child.invoice_repartition_line_ids;
+          if (Array.isArray(cInv)) {
+            const nextCInv = fixLines(cInv, line.account_id);
+            if (nextCInv !== cInv) { cInv = nextCInv; childChanged = true; }
+          }
+          let cRef = child.refund_repartition_line_ids;
+          if (Array.isArray(cRef)) {
+            const nextCRef = fixLines(cRef, line.account_id);
+            if (nextCRef !== cRef) { cRef = nextCRef; childChanged = true; }
+          }
+          if (childChanged) {
+            bdChanged = true;
+            return { ...child, ...(cInv ? { invoice_repartition_line_ids: cInv } : {}), ...(cRef ? { refund_repartition_line_ids: cRef } : {}) };
+          }
+          return child;
+        });
+        if (bdChanged) { breakdown = nextBd; lineChanged = true; }
+      }
+      if (lineChanged) {
+        moveChanged = true;
+        return {
+          ...line,
+          ...(inv ? { invoice_repartition_line_ids: inv } : {}),
+          ...(ref ? { refund_repartition_line_ids: ref } : {}),
+          ...(breakdown ? { tax_breakdown: breakdown } : {}),
+        };
+      }
+      return line;
+    });
+    if (moveChanged) {
+      movesChanged = true;
+      return { ...move, invoice_line_ids: nextLines };
+    }
+    return move;
+  }) : moves;
+
+  if (!taxesChanged && !movesChanged) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(taxesChanged ? { 'account.tax': nextTaxes } : {}),
+      ...(movesChanged ? { 'account.move': nextMoves } : {}),
+    },
+  };
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
