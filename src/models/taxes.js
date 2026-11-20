@@ -504,7 +504,7 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
         const tax_id = t.tax_id ?? null;
         const tax_group_id = t.tax_group_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
-        const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
+        const key = `${account_id}|${tax_id ?? `label:${tax_name}`}|${tax_group_id ?? ''}|${tax_tag_ids.join(',')}`;
         const g = by.get(key) ?? { account_id, tax_id, tax_group_id, tax_name, invoice_label, tax_tag_ids, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
       }

@@ -258,7 +258,7 @@ function CartPage({ site, cart, pricelist }) {
 }
 
 const STEPS = ['Address', 'Delivery Method', 'Payment', 'Confirmation'];
-const ADDRESS_FIELDS = [['name', 'Name', 'text', true, 120], ['email', 'Email', 'email', true, 254], ['phone', 'Phone', 'tel', false, 40], ['street', 'Street', 'text', true, 120], ['city', 'City', 'text', true, 80], ['zip', 'Zip', 'text', false, 20], ['country', 'Country', 'text', true, 80]];
+const ADDRESS_FIELDS = [['name', 'Name', 'text', true, 120], ['email', 'Email', 'email', true, 254], ['phone', 'Phone', 'tel', false, 40], ['street', 'Street', 'text', true, 120], ['city', 'City', 'text', true, 80], ['state', 'State', 'text', false, 80], ['zip', 'Zip', 'text', false, 20], ['country', 'Country', 'text', true, 80]];
 
 function Progress({ step }) {
   return (
@@ -274,7 +274,7 @@ function Checkout({ site, cart, pricelist }) {
   const [carrierId, setCarrierId] = useState(site.carriers[0]?.id ?? null);
   const [provider, setProvider] = useState(site.providers[0]?.code ?? '');
   const [state, setState] = useState({ busy: false, error: null });
-  const { totals, error } = useCartTotals(cart.lines, { pricelist, carrier_id: step > 0 ? carrierId : null, country: address.country, zip: address.zip });
+  const { totals, error } = useCartTotals(cart.lines, { pricelist, carrier_id: step > 0 ? carrierId : null, country: address.country, state: address.state, zip: address.zip });
   if (!cart.lines.length) return <div className="shop-empty"><h2>{t('Your cart is empty')}</h2><a className="btn primary" href="#/shop">{t('Continue shopping')}</a></div>;
 
   const placeOrder = async () => {
@@ -295,7 +295,7 @@ function Checkout({ site, cart, pricelist }) {
             <form className="checkout" onSubmit={(e) => { e.preventDefault(); setStep(site.carriers.length ? 1 : 2); }}>
               <h2>{t('Address')}</h2>
               {ADDRESS_FIELDS.map(([k, label, type, required, max]) => (
-                <label key={k}>{t(label)}<input name={k} type={type} required={required} maxLength={max} value={address[k]} autoComplete={k === 'zip' ? 'postal-code' : k === 'street' ? 'street-address' : k === 'country' ? 'country-name' : k}
+                <label key={k}>{t(label)}<input name={k} type={type} required={required} maxLength={max} value={address[k]} autoComplete={k === 'zip' ? 'postal-code' : k === 'street' ? 'street-address' : k === 'country' ? 'country-name' : k === 'state' ? 'address-level1' : k}
                   onChange={(e) => setAddress({ ...address, [k]: e.target.value })} /></label>
               ))}
               <button type="submit" className="btn primary">{t('Next')}</button>

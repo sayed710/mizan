@@ -1,7 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
-import { amounts, appliedCashRounding, companyRoundingMethod, nextName, shiftMonth, today, addDays, total as moveTotal } from './common.js';
+import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
@@ -475,18 +475,12 @@ export function invoiceTaxTotals(db, move) {
     ? rawItems
     : rawItems.map((g) => ({ ...g, amount: roundCurrency(g.document_amount * discountFactor, docCurrency) }));
   const nonZeroItems = scaledItems.filter((g) => g.amount !== 0);
-
-  const rounding = db && move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
-  const appliedRounding = appliedCashRounding(rounding, rounding?.strategy === 'biggest_tax' && nonZeroItems.length > 0);
-  if (appliedRounding?.strategy === 'biggest_tax' && nonZeroItems.length) {
-    const rawTaxSum = roundCurrency(nonZeroItems.reduce((s, g) => s + g.amount, 0), docCurrency);
-    const rawTotal = roundCurrency(untaxed + rawTaxSum, docCurrency);
-    const roundedTotal = roundCurrency(cashRound(rawTotal, appliedRounding.rounding, appliedRounding.rounding_method), docCurrency);
-    const diff = roundCurrency(roundedTotal - rawTotal, docCurrency);
-    if (diff !== 0) {
-      const largestIdx = nonZeroItems.reduce((best, g, i) => (Math.abs(g.amount) > Math.abs(nonZeroItems[best].amount) ? i : best), 0);
-      nonZeroItems[largestIdx] = { ...nonZeroItems[largestIdx], amount: roundCurrency(nonZeroItems[largestIdx].amount + diff, docCurrency) };
-    }
+  // The stored tax (with any biggest-tax cash rounding) is canonical: the breakdown's rounding gap goes to its biggest tax.
+  const storedTax = invoiceTaxAmount(move, db, roundingMethod) ?? 0;
+  const diff = roundCurrency(storedTax - nonZeroItems.reduce((s, g) => s + g.amount, 0), docCurrency);
+  if (diff !== 0 && nonZeroItems.length) {
+    const largestIdx = nonZeroItems.reduce((best, g, i) => (Math.abs(g.amount) > Math.abs(nonZeroItems[best].amount) ? i : best), 0);
+    nonZeroItems[largestIdx] = { ...nonZeroItems[largestIdx], amount: roundCurrency(nonZeroItems[largestIdx].amount + diff, docCurrency) };
   }
 
   const byGroup = new Map();
