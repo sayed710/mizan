@@ -165,7 +165,11 @@ function JournalCard({ card, companyId }) {
           ) : (
             <>
               <p className="journal-empty muted">{t('Record your cash transactions.')}</p>
-              <a className="btn primary sm" href={list}>{t('Cash Transactions')}</a>
+              <div className="journal-cash-actions">
+                <a className="btn primary sm" href={`#/open/account.journal/${card.journal.id}`}>{t('Put Money In')}</a>
+                <a className="btn sm" href={`#/open/account.journal/${card.journal.id}`}>{t('Take Money Out')}</a>
+                <a className="btn sm" href={list}>{t('Cash Transactions')}</a>
+              </div>
             </>
           )
         ) : (
@@ -183,6 +187,12 @@ function JournalCard({ card, companyId }) {
               )}
             </dl>
             <RateNote count={card.unratedCount} />
+            {card.kind === 'cash' && (
+              <div className="journal-cash-actions">
+                <a className="btn sm" href={`#/open/account.journal/${card.journal.id}`}>{t('Put Money In')}</a>
+                <a className="btn sm" href={`#/open/account.journal/${card.journal.id}`}>{t('Take Money Out')}</a>
+              </div>
+            )}
             {isStatement && card.onlineSync && <OnlineSyncControls sync={card.onlineSync} journalId={card.journal.id} />}
             {isStatement && card.toReconcile > 0 && (
               <>
