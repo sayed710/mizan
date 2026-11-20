@@ -572,3 +572,21 @@ test('Qodo PR #190: seeding default lines ignores the active company and never d
     setActiveCompany(previous);
   }
 });
+
+test('Qodo PR #190: a shared journal\'s method lines all carry its company, so no company can own lines hidden from another', () => {
+  let db = seed();
+  const bnk = create(db, 'account.journal', {
+    name: 'Shared Bank', code: 'SHB', type: 'bank', company_id: null,
+    default_account_id: accountId(db, '101401'), suspense_account_id: accountId(db, '101404'),
+  });
+  db = bnk.db;
+  const own = (d) => (d.records['account.payment.method.line'] ?? []).filter((l) => l.journal_id === bnk.id);
+  assert.ok(own(db).length > 0);
+  assert.ok(own(db).every((l) => l.company_id === 1), 'default lines of a company-less journal belong to company 1');
+
+  const manualIn = search(db, 'account.payment.method').find((m) => m.code === 'manual' && m.payment_type === 'inbound');
+  const added = create(db, 'account.payment.method.line', { journal_id: bnk.id, payment_method_id: manualIn.id, name: 'Other company line' });
+  assert.equal(read(added.db, 'account.payment.method.line', added.id).company_id, 1, 'a new line defaults to its journal company');
+  const foreign = { ...added.db, records: { ...added.db.records, 'account.payment.method.line': added.db.records['account.payment.method.line'].map((l) => (l.id === added.id ? { ...l, company_id: 2 } : l)) } };
+  assert.throws(() => sync(db, foreign), /journal company/, 'a line of another company on a shared journal is refused on a plain diff');
+});

@@ -112,7 +112,9 @@ export function paymentMethodLineGuard(db, before, after) {
   const method = after.payment_method_id ? read(db, 'account.payment.method', after.payment_method_id) : null;
   if (!method) return 'Select an existing payment method';
   if (after.payment_type !== method.payment_type) return 'Payment method line direction must match its payment method';
-  if (after.company_id && journal.company_id && after.company_id !== journal.company_id) {
+  // A line always belongs to its journal's company (a shared journal's lines are company 1, as journals default to it),
+  // so every line of one journal is visible to exactly the same users and a journal save never touches hidden lines.
+  if ((after.company_id ?? 1) !== (journal.company_id ?? 1)) {
     return 'Payment method line must belong to the journal company';
   }
   if (before && (after.journal_id !== before.journal_id || after.payment_type !== before.payment_type)) {
@@ -407,7 +409,7 @@ export const paymentMethodModels = {
       const journal = vals.journal_id ? read(db, 'account.journal', vals.journal_id) : null;
       const method = vals.payment_method_id ? read(db, 'account.payment.method', vals.payment_method_id) : null;
       return {
-        company_id: journal?.company_id ?? currentCompany(db),
+        company_id: journal ? (journal.company_id ?? 1) : currentCompany(db),
         ...(method?.payment_type ? { payment_type: method.payment_type } : {}),
         ...(vals.name === undefined && method?.name ? { name: method.name } : {}),
       };
