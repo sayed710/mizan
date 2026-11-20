@@ -293,7 +293,7 @@ export const appliedValue = (db, inv, p) => {
 };
 
 /** Reason a credit note cannot settle an invoice (direction/type, link, company, partner, account, currency), or null. */
-export function creditNotePairError(db, note, invoice) {
+export function creditNotePairError(db, note, invoice, { allowDifferentCurrencies = false } = {}) {
   if (!note || note.state !== 'posted' || !['out_refund', 'in_refund'].includes(note.move_type)) return 'A posted credit note or refund is required';
   if (!invoice || invoice.state !== 'posted' || !['out_invoice', 'in_invoice'].includes(invoice.move_type)) return 'A posted invoice or bill is required';
   const expectedNoteType = invoice.move_type === 'out_invoice' ? 'out_refund' : 'in_refund';
@@ -302,7 +302,7 @@ export function creditNotePairError(db, note, invoice) {
   if ((note.company_id ?? 1) !== (invoice.company_id ?? 1)) return 'The credit note and invoice must belong to the same company';
   if (!sameCommercialPartner(db, note.partner_id, invoice.partner_id)) return 'The credit note and invoice must belong to the same partner';
   if (invoiceCounterpartAccount(db, note) !== invoiceCounterpartAccount(db, invoice)) return 'The credit note and invoice must share the same receivable or payable account';
-  if ((note.currency_id ?? null) !== (invoice.currency_id ?? null)) return 'The credit note and invoice must use the same currency';
+  if (!allowDifferentCurrencies && (note.currency_id ?? null) !== (invoice.currency_id ?? null)) return 'The credit note and invoice must use the same currency';
   return null;
 }
 

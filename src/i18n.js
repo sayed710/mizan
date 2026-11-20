@@ -3497,6 +3497,7 @@ const ar = {
   'Select at least one record first': 'اختر سجلًا واحدًا على الأقل أولًا',
   'None of the selected records match the current filter': 'لا يطابق أي من السجلات المحددة عامل التصفية الحالي',
   'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
+  'Partial reconciliation currency amount does not match the expected foreign residual': 'مبلغ العملة للمطابقة الجزئية لا يطابق الرصيد الأجنبي المتبقي المتوقع',
   'Group Payments': 'تجميع الدفعات',
   'Applied Payments': 'الدفعات المطبقة',
   'Only posted invoices and bills have payments to unreconcile': 'الفواتير المرحلة فقط هي التي يمكن إلغاء تسوية دفعاتها',
@@ -3522,6 +3523,8 @@ const ar = {
   'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
   'Country group name is required': 'اسم مجموعة الدول مطلوب',
   'The currency amount sign must match the debit/credit balance': 'يجب أن تتطابق إشارة المبلغ بالعملة مع رصيد المدين/الدائن',
+  'The applied amount cannot be represented in the foreign currency after rounding': 'لا يمكن تمثيل المبلغ المطبق بالعملة الأجنبية بعد التقريب',
+  'This credit note is linked to another invoice': 'إشعار الدائن هذا مرتبط بفاتورة أخرى',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
