@@ -201,7 +201,7 @@ function cartLines(db, raw) {
 
 const pricelistOf = (db, id) => selectablePricelists(db).find((p) => p.id === id)?.id ?? null;
 /** Totals without the internal order lines. */
-const publicTotals = ({ orderLines, ...totals }) => totals;
+const publicTotals = ({ orderLines, fiscalPositionId, ...totals }) => totals;
 
 /** Cart prices computed on the server (client prices are never used), with the price of each website carrier. */
 export function publicCart(db, body) {
@@ -266,7 +266,7 @@ export function publicOrder(db, body) {
     const token = randomBytes(24).toString('base64url');
     const order = create(withPartner, 'sale.order', {
       company_id: companyId,
-      partner_id: partnerId, partner_invoice_id: partnerId, partner_shipping_id: shippingId, pricelist_id: pricelistId, carrier_id: carrier?.id ?? null,
+      partner_id: partnerId, partner_invoice_id: partnerId, partner_shipping_id: shippingId, pricelist_id: pricelistId, fiscal_position_id: totals.fiscalPositionId ?? null, carrier_id: carrier?.id ?? null,
       order_line: totals.orderLines, state: 'sent', source: 'website', payment_provider: provider.code, payment_state: 'pending', access_token_hash: hashToken(token),
     });
     let next = postNote(order.db, 'sale.order', order.id, `Payment method: ${provider.name}`);

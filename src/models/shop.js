@@ -95,7 +95,7 @@ export const websiteCarriers = (db) => search(db, 'delivery.carrier').filter((c)
 
 /**
  * Cart summary with server-side prices: pricelist, product taxes (after the buyer address's fiscal position) and delivery.
- * @returns {{ lines: { product_id: number, qty: number, price_unit: number, subtotal: number, tax: number }[], untaxed: number, tax: number, delivery: number, total: number, orderLines: object[] }}
+ * @returns {{ lines: { product_id: number, qty: number, price_unit: number, subtotal: number, tax: number }[], untaxed: number, tax: number, delivery: number, total: number, orderLines: object[], fiscalPositionId: number | null }}
  */
 export function cartTotals(db, lines, { pricelistId = null, carrierId = null, partnerCountry = '', partnerState = '', partnerZip = '', companyId = db.settings?.current_company_id ?? 1 } = {}) {
   const fiscalPositionId = autoFiscalPosition(db, { country: String(partnerCountry ?? ''), state: String(partnerState ?? ''), zip: String(partnerZip ?? '') }, companyId);
@@ -107,6 +107,6 @@ export function cartTotals(db, lines, { pricelistId = null, carrierId = null, pa
   const all = amounts(orderLines);
   return {
     lines: productLines.map((l) => ({ product_id: l.product_id, qty: l.qty, price_unit: l.price_unit, subtotal: round(subtotal(l)), tax: round(lineTaxOf(l)) })),
-    untaxed, tax: all.tax, delivery, total: all.total, orderLines,
+    untaxed, tax: all.tax, delivery, total: all.total, orderLines, fiscalPositionId,
   };
 }

@@ -101,4 +101,5 @@ test('website cart and checkout apply a state-scoped fiscal position from the bu
   const sale = search(order.db, 'sale.order').find((o) => o.name === order.body.order);
   assert.equal(sale.order_line.find((l) => l.product_id === 1).tax_id, mapped.id);
   assert.equal(read(order.db, 'res.partner', sale.partner_id).state, 'Alexandria');
+  assert.equal(sale.fiscal_position_id, fp.id, 'the order keeps the position so its invoice maps accounts too');
 });
