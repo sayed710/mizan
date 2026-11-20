@@ -2,7 +2,7 @@
 import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
-import { appendDocumentSettlement, applyCreditNote, isInvoice, isPurchase, isRefund, liquidityForeignFields, payMove, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
+import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payMove, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -11,7 +11,7 @@ import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
-import { reconcileLedgerItems } from './glReconcile.js';
+import { reconcileLedgerItems, unreconcilePartialReconcile } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, currentCompany, recipientBankCompanyError } from './company.js';
 import { defaultPaymentMethodLineId, isMethodLineJournal, paymentMethodLineError } from './paymentmethod.js';
@@ -626,10 +626,11 @@ export function applyPaymentCredit(db, paymentIdOrRec, invoiceIdOrRec, date = to
 }
 
 /** Validate an exact application inverse before any journal entry or balance is changed. */
-export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineIndex = null, partialReconcileId = null, ctx = null } = {}) {
+export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineIndex = null, partialReconcileId = null, rowId = null, ctx = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
   const byPartial = partialReconcileId != null;
   const matches = (invoice?.payments ?? []).filter((row) => !row.reversed
+    && (rowId != null ? row.id === rowId : true)
     && (byPartial ? row.partial_reconcile_id === partialReconcileId && (paymentMoveId == null || row.move_id === paymentMoveId) : row.move_id === paymentMoveId)
     && (!Number.isInteger(lineIndex) || row.line_index === lineIndex));
   const targetMoveId = byPartial ? (paymentMoveId ?? matches[0]?.move_id) : paymentMoveId;
@@ -721,17 +722,23 @@ export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today(
  * credit is released through unapplyPaymentCredit, as unreconciling from journal items does: a bank match or a posted
  * batch stays on the payment, which simply becomes outstanding again. Nothing dated inside a lock period changes.
  */
-export function unreconcileInvoicePayment(db, invoiceId, paymentMoveId, { date = null, lineIndex = null, ctx = null } = {}) {
+export function unreconcileInvoicePayment(db, invoiceId, paymentMoveId, { date = null, lineIndex = null, rowId = null, ctx = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
   if (!isInvoice(invoice) || invoice.state !== 'posted') throw new Error('Only posted invoices and bills have payments to unreconcile');
-  const row = (invoice.payments ?? []).find((r) => !r.reversed && r.move_id === paymentMoveId && (!Number.isInteger(lineIndex) || r.line_index === lineIndex));
+  const row = (invoice.payments ?? []).find((r) => !r.reversed
+    && (rowId != null ? r.id === rowId : true)
+    && (paymentMoveId != null ? r.move_id === paymentMoveId : true)
+    && (!Number.isInteger(lineIndex) || r.line_index === lineIndex));
   if (!row) throw new Error('Select one active application of a posted payment');
   const on = date ?? [today(), row.date].filter(Boolean).sort().at(-1);
+  if (row.partial_reconcile_id != null) {
+    return unreconcilePartialReconcile(db, row.partial_reconcile_id, { date: on, rowId: row.id });
+  }
   for (const move of [invoice, read(db, 'account.move', paymentMoveId)].filter(Boolean)) {
     const lock = recordLockDate(db, move, ctx);
     if (lock && on <= lock) throw new Error(`The period up to ${lock} is locked`);
   }
-  return unapplyPaymentCredit(db, invoiceId, paymentMoveId, on, { lineIndex: Number.isInteger(lineIndex) ? lineIndex : null, ctx });
+  return unapplyPaymentCredit(db, invoiceId, paymentMoveId, on, { lineIndex: Number.isInteger(lineIndex) ? lineIndex : null, rowId: row.id, ctx });
 }
 
 /** Open documents a grouped or single Register Payment can settle: customer invoices/refunds or vendor bills/refunds. */
@@ -772,12 +779,12 @@ export function registerPayments(db, ids, values = {}) {
   for (const group of groups.values()) {
     const invoices = group.filter((d) => !isRefund(d));
     const creditNotes = group.filter((d) => isRefund(d));
-    const invTotal = invoices.reduce((sum, d) => sum + residual(d, next), 0);
+    const paymentDate = values.date || today();
+    const invTotal = invoices.reduce((sum, d) => sum + Math.max(0, residual(d, next) - discountAvailable(next, d, paymentDate)), 0);
     const noteTotal = creditNotes.reduce((sum, d) => sum + residual(d, next), 0);
     const net = invTotal - noteTotal;
     if (!(net > 0)) throw new Error('The net payment amount must be greater than zero');
 
-    const paymentDate = values.date || today();
     for (const note of creditNotes) {
       const candidateInvoices = note.reversed_entry_id
         ? [...invoices.filter((i) => i.id === note.reversed_entry_id), ...invoices.filter((i) => i.id !== note.reversed_entry_id)]
@@ -793,21 +800,40 @@ export function registerPayments(db, ids, values = {}) {
     }
 
     const openInvoices = invoices.filter((d) => residual(read(next, 'account.move', d.id), next) > 0);
-    const [lead, ...rest] = openInvoices;
-    const amount = roundCurrency(openInvoices.reduce((sum, d) => sum + residual(read(next, 'account.move', d.id), next), 0), documentCurrency(next, lead));
+    const invSpecs = openInvoices.map((inv) => {
+      const currentInv = read(next, 'account.move', inv.id);
+      const openAmount = residual(currentInv, next);
+      const discount = Math.min(openAmount, discountAvailable(next, currentInv, paymentDate));
+      const docCurr = documentCurrency(next, currentInv);
+      const cash = roundCurrency(openAmount - discount, docCurr);
+      return { id: inv.id, openAmount, discount, cash };
+    });
+    const [leadSpec, ...restSpecs] = invSpecs;
+    const lead = read(next, 'account.move', leadSpec.id);
+    const totalCashAmount = roundCurrency(invSpecs.reduce((sum, s) => sum + s.cash, 0), documentCurrency(next, lead));
+    const restCash = roundCurrency(restSpecs.reduce((sum, s) => sum + s.cash, 0), documentCurrency(next, lead));
     const memo = values.memo || (group.length > 1 ? group.map((d) => d.name).join(', ') : undefined);
-    next = registerPayment(next, read(next, 'account.move', lead.id), {
-      amount: String(amount),
+    next = registerPayment(next, lead, {
+      amount: String(totalCashAmount),
       date: values.date,
       journal_id: values.journal_id,
       currency_id: lead.currency_id ?? undefined,
       partner_bank_id: values.partner_bank_id ?? null,
+      settleAmount: leadSpec.cash,
+      excessAmount: restCash,
       ...(memo !== undefined ? { memo } : {}),
     }).db;
-    if (rest.length) {
-      const moveId = read(next, 'account.move', lead.id).payments.at(-1).move_id;
+    if (restSpecs.length) {
+      const moveId = read(next, 'account.move', lead.id).payments.filter((p) => !p.discount).at(-1).move_id;
       const payment = search(next, 'account.payment').find((p) => p.move_id === moveId && p.state === 'posted');
-      for (const doc of rest) next = applyPaymentCredit(next, payment.id, doc.id, values.date, residual(read(next, 'account.move', doc.id), next));
+      for (const spec of restSpecs) {
+        if (spec.cash > 0) {
+          next = applyPaymentCredit(next, payment.id, spec.id, values.date, spec.cash);
+        }
+        if (spec.discount > 0) {
+          next = bookEarlyDiscount(next, spec.id, spec.discount, paymentDate, payment.move_id);
+        }
+      }
     }
     for (const doc of group) {
       if (residual(read(next, 'account.move', doc.id), next) > 0) throw new Error('The payment could not settle every selected document; nothing was registered');

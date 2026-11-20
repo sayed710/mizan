@@ -3502,6 +3502,7 @@ const ar = {
   'Only posted invoices and bills have payments to unreconcile': 'الفواتير المرحلة فقط هي التي يمكن إلغاء تسوية دفعاتها',
   'Select posted invoices or bills to register a payment': 'اختر فواتير أو فواتير موردين مرحلة لتسجيل دفعة',
   'Select one active application of a posted payment': 'اختر تطبيقًا واحدًا نشطًا لدفعة مرحلة',
+  'The selected settlement has no active reconciliation to remove': 'التسوية المحددة ليس لها مطابقة نشطة لإزالتها',
   'Only customer invoices and vendor bills can be paid together': 'يمكن دفع فواتير العملاء وفواتير الموردين فقط معاً',
   'Customer invoices and vendor bills cannot be paid together': 'لا يمكن دفع فواتير العملاء وفواتير الموردين معاً',
   'Only posted invoices and bills can be paid; remove drafts and cancelled documents from the selection': 'يمكن دفع الفواتير المرحلة فقط؛ أزل المسودات والمستندات الملغاة من التحديد',
