@@ -14,6 +14,7 @@ import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, for
 import { paymentCompanyAmount, settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
 import { onlineAccountForJournal } from './onlineSync.js';
+import { effectiveCompanyLockDates } from './lockexception.js';
 
 export { applicationEffectiveDate };
 
@@ -100,53 +101,90 @@ function settlesAfterLock(db, before, after, lock) {
  * The latest lock date configured on the move's company: general and hard locks always apply, then
  * the sales or purchase lock by journal type. Empty when nothing is locked.
  */
-export function lockDateFor(company = {}, move = {}, journal = null) {
-  const sales = String(move.move_type ?? '').startsWith('out_') || journal?.type === 'sale';
-  const purchases = String(move.move_type ?? '').startsWith('in_') || journal?.type === 'purchase';
-  return [company.lock_date, company.hard_lock_date, sales && company.sale_lock_date, purchases && company.purchase_lock_date].filter(Boolean).sort().at(-1) ?? '';
+/** Whether a move carries any tax line, tax identifier/rate, or tax-grid indicator. */
+export function hasTaxLines(move = {}) {
+  return (move.line_ids ?? []).some((line) => Boolean(
+    line.tax_name
+    || line.tax_id
+    || (Array.isArray(line.tax_ids) && line.tax_ids.length > 0)
+    || line.tax_grid_base
+    || line.tax_grid_release
+    || (Array.isArray(line.tax_tag_ids) && line.tax_tag_ids.length > 0)
+    || Number(line.tax),
+  ))
+  || (move.invoice_line_ids ?? []).some((line) => Boolean(
+    line.tax_id
+    || line.tax_name
+    || (Array.isArray(line.tax_ids) && line.tax_ids.length > 0)
+    || (Array.isArray(line.tax_breakdown) && line.tax_breakdown.length > 0)
+    || Number(line.tax),
+  ));
 }
 
-const companyLockDate = (db, move) => {
+/**
+ * The strictest lock date configured on the move's company: general and hard locks always apply, then
+ * the sales or purchase lock by journal type, and tax lock for taxable moves. Empty when nothing is locked.
+ */
+export function lockDateFor(company = {}, move = {}, journal = null) {
+  const globalLock = company.lock_date ?? '';
+  const hardLock = company.hard_lock_date ?? '';
+  const sales = String(move.move_type ?? '').startsWith('out_') || journal?.type === 'sale';
+  const purchases = String(move.move_type ?? '').startsWith('in_') || journal?.type === 'purchase';
+  const salesLock = sales ? (company.sale_lock_date ?? '') : '';
+  const purchasesLock = purchases ? (company.purchase_lock_date ?? '') : '';
+  const taxable = hasTaxLines(move);
+  const taxLock = taxable ? (company.tax_lock_date ?? '') : '';
+
+  return [globalLock, hardLock, salesLock, purchasesLock, taxLock].filter(Boolean).sort().at(-1) ?? '';
+}
+
+export const companyLockDate = (db, move, ctx = null) => {
   if (!move) return '';
   const compId = move.company_id ?? 1;
-  const comp = (db.records['res.company'] ?? []).find((c) => c.id === compId) ?? {};
-  const journal = (db.records['account.journal'] ?? []).find((j) => j.id === move.journal_id);
+  const rawComp = read(db, 'res.company', compId) ?? {};
+  const comp = effectiveCompanyLockDates(rawComp, db, ctx);
+  const journal = move.journal_id ? read(db, 'account.journal', move.journal_id) : null;
   return lockDateFor(comp, move, journal);
 };
 
 /** The applicable lock date for an entry or record: company lock, tax lock, and closed fiscal-year lock. */
-export function recordLockDate(db, record) {
+export function recordLockDate(db, record, ctx = null) {
   if (!record) return '';
   const compId = record.company_id ?? 1;
-  return [companyLockDate(db, record), taxLockFor(db, record), closedYearLock(db, compId)].filter(Boolean).sort().at(-1) ?? '';
+  return [companyLockDate(db, record, ctx), taxLockFor(db, record, ctx), closedYearLock(db, compId)].filter(Boolean).sort().at(-1) ?? '';
 }
-export const companyTaxLock = (db, companyId) => {
-  const comp = (db.records?.['res.company'] ?? []).find((c) => c.id === companyId);
-  return comp?.tax_lock_date ?? null;
+
+export const companyTaxLock = (db, companyId, ctx = null) => {
+  const comp = read(db, 'res.company', companyId);
+  const effComp = effectiveCompanyLockDates(comp, db, ctx);
+  return effComp?.tax_lock_date ?? null;
 };
+
 export function returnCompanies(db, ret) {
   if (!ret.tax_unit_id) return [ret.company_id ?? 1];
   const unit = read(db, 'account.tax.unit', ret.tax_unit_id);
   if (!unit || !(unit.company_ids ?? []).includes(ret.company_id ?? 1)) throw new Error('Tax unit must contain the return company');
   return [...new Set(unit.company_ids)];
 }
+
 export const returnTaxLock = (db, companyId, excludeId = null) => (db.records?.['account.return'] ?? [])
   .filter((r) => r.id !== excludeId && ['submitted', 'paid'].includes(r.state) && returnCompanies(db, r).includes(companyId))
   .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
+
 export const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
+
 /** Tax locks apply only to entries carrying tax information or touching a tax account. */
-export function taxLockFor(db, move) {
+export function taxLockFor(db, move, ctx = null) {
   if (!move) return '';
   const compId = move?.company_id ?? 1;
   // A submitted or paid return keeps its period locked even if the company setting is lowered below it.
   // A return's own closing entry is unlocked by resetting that return, so it is not held by the floor.
-  const lock = [companyTaxLock(db, compId), returnTaxLock(db, compId, isReturnEntry(db, move) ? move.tax_return_id : null)].filter(Boolean).sort().at(-1);
+  const lock = [companyTaxLock(db, compId, ctx), returnTaxLock(db, compId, isReturnEntry(db, move) ? move.tax_return_id : null)].filter(Boolean).sort().at(-1);
   if (!lock) return '';
   const accounts = taxAccounts(db, compId);
   const ids = new Set([...accounts.sale, ...accounts.purchase,
     ...cashBasisTransitionAccounts(db, compId)]);
-  const taxable = (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || ids.has(line.account_id))
-    || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || Number(line.tax));
+  const taxable = hasTaxLines(move) || (move.line_ids ?? []).some((line) => ids.has(line.account_id));
   return taxable ? lock : '';
 }
 
@@ -659,8 +697,8 @@ function securedMoveRule(before, after) {
   return null;
 }
 
-export function moveGuard(db, before, after, _ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+export function moveGuard(db, before, after, ctx) {
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
@@ -669,7 +707,7 @@ function pendingReversalRule(db, before, after) {
   return read(db, 'account.move', after.reversed_entry_id)?.state === 'posted' ? null : 'The entry this reverses is no longer posted';
 }
 
-function lockRule(db, before, after) {
+function lockRule(db, before, after, ctx = null) {
   if ((before?.closing_fiscal_year_id ?? null) !== (after.closing_fiscal_year_id ?? null)) {
     if (before || !after.closing_fiscal_year_id || read(db, 'account.fiscal.year', after.closing_fiscal_year_id)?.closing_move_id !== after.id) return 'Closing provenance is set only by closing the fiscal year';
   }
@@ -687,15 +725,29 @@ function lockRule(db, before, after) {
   const afterCompanyId = after?.company_id ?? beforeCompanyId;
   const beforeYearLock = before ? closedYearLock(db, beforeCompanyId) : '';
   const afterYearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, afterCompanyId);
-  const afterTaxLock = !before && isReturnEntry(db, after) ? returnTaxLock(db, afterCompanyId, after.tax_return_id) : taxLockFor(db, after);
-  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before), beforeYearLock].sort().at(-1) : '';
-  const afterLock = [companyLockDate(db, after), afterTaxLock, afterYearLock].sort().at(-1);
-  const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;
-  const afterLocked = after.state === 'posted' && afterLock && moveDate(after) <= afterLock;
-  if (!beforeLocked && !afterLocked) return null;
-  const lock = [beforeLocked && beforeLock, afterLocked && afterLock].filter(Boolean).sort().at(-1);
+  const afterTaxLock = !before && isReturnEntry(db, after) ? returnTaxLock(db, afterCompanyId, after.tax_return_id) : taxLockFor(db, after, ctx);
+  const beforeLock = before ? [companyLockDate(db, before, ctx), taxLockFor(db, before, ctx), beforeYearLock].sort().at(-1) : '';
+  const afterLock = [companyLockDate(db, after, ctx), afterTaxLock, afterYearLock].sort().at(-1);
+
+  const beforePostedLocked = before?.state === 'posted' && Boolean(beforeLock && moveDate(before) <= beforeLock);
+  const afterPostedLocked = after?.state === 'posted' && Boolean(afterLock && moveDate(after) <= afterLock);
+  const movedIntoLock = Boolean(
+    before
+    && (!beforeLock || moveDate(before) > beforeLock)
+    && moveDate(before) !== moveDate(after)
+    && afterLock
+    && moveDate(after) <= afterLock,
+  );
+
+  if (movedIntoLock) {
+    return `The period up to ${afterLock} is locked`;
+  }
+
+  if (!beforePostedLocked && !afterPostedLocked) return null;
+
+  const lock = [beforePostedLocked && beforeLock, afterPostedLocked && afterLock].filter(Boolean).sort().at(-1);
   const changed = !before || changedFields(before, after, LOCKED_FIELDS)
-    || (beforeLocked && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(db, before, after, beforeLock));
+    || (beforePostedLocked && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(db, before, after, beforeLock));
   return changed ? `The period up to ${lock} is locked` : null;
 }
 
@@ -703,8 +755,8 @@ function lockRule(db, before, after) {
  * Checked once the whole change set is applied: payments that settle a locked entry must point at posted journal
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
-export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && recordLockDate(db, before);
+export function lockedSettlementInvariant(db, after, before, ctx = null) {
+  const lock = before && recordLockDate(db, before, ctx);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -720,9 +772,9 @@ export function lockedSettlementInvariant(db, after, before) {
  * Lock guard for records that carry their own date (payments, reconciled bank lines): once dated on or before the
  * lock they cannot change, and nothing new can be booked into the locked period.
  */
-export const datedLockGuard = (fields, booked) => (db, before, after) => {
+export const datedLockGuard = (fields, booked) => (db, before, after, ctx) => {
   const locks = [before, after].filter((r) => r && booked(r))
-    .map((r) => ({ record: r, lock: recordLockDate(db, r) }))
+    .map((r) => ({ record: r, lock: recordLockDate(db, r, ctx) }))
     .filter(({ record, lock }) => lock && String(record.date ?? today()) <= lock)
     .map(({ lock }) => lock);
   if (!locks.length) return null;
@@ -731,20 +783,20 @@ export const datedLockGuard = (fields, booked) => (db, before, after) => {
 };
 
 /** Delete guard to pair with datedLockGuard: booked records dated inside the lock stay. */
-export const datedLockDelete = (booked) => (db, r) => {
-  const lock = recordLockDate(db, r);
+export const datedLockDelete = (booked) => (db, r, staged, ctx) => {
+  const lock = recordLockDate(db, r, ctx);
   return lock && booked(r) && String(r.date ?? today()) <= lock ? `The period up to ${lock} is locked` : null;
 };
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
-export function moveDeleteGuard(db, move, staged = db) {
+export function moveDeleteGuard(db, move, staged = db, ctx = null) {
   if (move.inalterable_hash || staged?.inalterable_hash) return 'Secured entries with an inalterability hash cannot be deleted';
   // `staged` is the database as the change set leaves it: a year that starts naming this entry in the same set counts.
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
   if (isReturnEntry(db, move) || isReturnEntry(staged, move)) return 'Tax return closing entries are kept';
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
-  const lock = recordLockDate(db, move);
-  if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
+  const lock = recordLockDate(db, move, ctx);
+  if (move.state === 'posted' && lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   // The trail counts if it is on before or after the change set (enabling it alongside a deletion still protects).
   const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
   if (audited && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';

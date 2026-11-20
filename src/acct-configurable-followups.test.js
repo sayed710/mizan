@@ -8,7 +8,7 @@ import { seed } from './seed.js';
 import { today } from './models/common.js';
 import { migrate } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
-import { reversePayment } from './models/pay.js';
+import { applyPaymentCredit, reversePayment } from './models/pay.js';
 
 const press = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -23,7 +23,8 @@ test('standalone payment allocations use company-configured exchange accounts an
       const invoice = create(currency.db, 'account.move', { move_type: 'out_invoice', company_id: company, partner_id: 1, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
       const posted = press(invoice.db, 'account.move', invoice.id, 'Confirm');
       const draft = create(posted, 'account.payment', { company_id: company, partner_id: 1, partner_type: 'customer', payment_type: 'inbound', amount: 20, date: '2026-02-01' });
-      const paid = press(draft.db, 'account.payment', draft.id, 'Confirm');
+      const confirmed = press(draft.db, 'account.payment', draft.id, 'Confirm');
+      const paid = applyPaymentCredit(confirmed, draft.id, invoice.id, '2026-02-01');
       const allocation = read(paid, 'account.move', invoice.id).payments[0];
       const fx = read(paid, 'account.move', allocation.payment_fx_move_id);
       assert.ok(fx.line_ids.some((line) => line.account_id === account.id && line[side] > 0));
