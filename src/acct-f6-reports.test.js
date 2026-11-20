@@ -916,3 +916,17 @@ test('CodeQL PR #189: exported text decodes entities once and strips nested tags
     if (saved) globalThis.document = saved;
   }
 });
+
+test('Qodo PR #189: annual report export without a DOM keeps literal brackets and decodes nbsp and numeric entities', async () => {
+  const { annualReportToRows } = await import('./models/auditreport.js');
+  const saved = globalThis.document;
+  delete globalThis.document;
+  try {
+    assert.deepEqual(
+      annualReportToRows('<table><tr><td>2 &lt; 3 &gt; 1</td><td>A&nbsp;B &#39;q&#39; &#x41;</td></tr></table>'),
+      [['2 < 3 > 1', 'A B \'q\' A']],
+    );
+  } finally {
+    if (saved) globalThis.document = saved;
+  }
+});

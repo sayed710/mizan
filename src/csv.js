@@ -106,10 +106,15 @@ export function extractTableCellText(cellNode) {
   return txt.trim();
 }
 
-const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" };
-/** Decode the basic HTML/XML entities in one pass, so "&amp;lt;" stays the literal text "&lt;". */
+// Named entities an HTML serializer (innerHTML) or XML writer emits; anything else is spelled as a numeric reference.
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+/** Decode HTML/XML entities in one pass (named and numeric), so "&amp;lt;" stays the literal text "&lt;". */
 export function decodeEntities(text) {
-  return String(text ?? '').replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name) => ENTITIES[name]);
+  return String(text ?? '').replace(/&(?:(amp|lt|gt|quot|apos|nbsp)|#(\d+)|#x([0-9a-f]+));/gi, (match, name, dec, hex) => {
+    if (name) return ENTITIES[name.toLowerCase()];
+    const code = dec ? Number(dec) : parseInt(hex, 16);
+    return code > 0 && code <= 0x10FFFF ? String.fromCodePoint(code) : match;
+  });
 }
 
 /** Plain text of an HTML fragment: tags removed until none are left, then entities decoded once. */
