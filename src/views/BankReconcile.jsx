@@ -43,6 +43,7 @@ export function BankReconcile() {
   const storeDb = useDb();
   const db = companyViewDb(storeDb);
   const [journalFilter, setJournalFilter] = useState(initialJournalFromHash);
+  const [statementFilter, setStatementFilter] = useState('');
   const [selectedLineId, setSelectedLineId] = useState(null);
   const [activeTab, setActiveTab] = useState('candidates');
   const [selectedCandidateIds, setSelectedCandidateIds] = useState(() => new Set());
@@ -62,17 +63,33 @@ export function BankReconcile() {
     [db],
   );
 
+  const statements = useMemo(
+    () => companyFilter(db, search(db, 'account.bank.statement'), 'account.bank.statement')
+      .filter((s) => !journalFilter || String(s.journal_id) === journalFilter)
+      .sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')) || b.id - a.id),
+    [db, journalFilter],
+  );
+
+  const hasStatementFilter = Boolean(statementFilter && statements.some((s) => String(s.id) === statementFilter));
+
   const openLines = useMemo(
     () => companyFilter(db, search(db, 'account.bank.statement.line'), 'account.bank.statement.line')
-      .filter((l) => l.state === 'to_check' && (!journalFilter || String(l.journal_id) === journalFilter))
+      .filter((l) => l.state === 'to_check'
+        && (!journalFilter || String(l.journal_id) === journalFilter)
+        && (!hasStatementFilter || String(l.statement_id) === statementFilter))
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id),
-    [db, journalFilter],
+    [db, journalFilter, hasStatementFilter, statementFilter],
   );
 
   const selectedLine = useMemo(
     () => openLines.find((l) => l.id === selectedLineId) ?? openLines[0] ?? null,
     [openLines, selectedLineId],
   );
+
+  const selectedStatement = useMemo(() => {
+    if (!selectedLine?.statement_id) return null;
+    return read(db, 'account.bank.statement', selectedLine.statement_id);
+  }, [db, selectedLine?.statement_id]);
 
   const selectedLineKey = selectedLine?.id ?? null;
   const selectedCounterpartId = selectedLine?.counterpart_account_id ? String(selectedLine.counterpart_account_id) : '';
@@ -285,9 +302,16 @@ export function BankReconcile() {
         <h1>{t('Bank Reconciliation')}</h1>
         <label className="inline-select">
           {t('Journal')}
-          <select aria-label={t('Journal')} value={journalFilter} onChange={(e) => { setJournalFilter(e.target.value); setSelectedLineId(null); }}>
+          <select aria-label={t('Journal')} value={journalFilter} onChange={(e) => { setJournalFilter(e.target.value); setStatementFilter(''); setSelectedLineId(null); }}>
             <option value="">{t('All Journals')}</option>
             {journals.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+          </select>
+        </label>
+        <label className="inline-select">
+          {t('Statement')}
+          <select aria-label={t('Statement')} value={statementFilter} onChange={(e) => { setStatementFilter(e.target.value); setSelectedLineId(null); }}>
+            <option value="">{t('All Statements')}</option>
+            {statements.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </label>
         <a className="btn sm" href="#/accounting/bank">{t('Bank Transactions')}</a>
@@ -359,6 +383,24 @@ export function BankReconcile() {
                   <span>{t('Statement Amount')}: <strong>{formatInCurrency(selectedLine.amount, selectedLineCurrency)}</strong></span>
                   <span>{t('Open Balance')}: <strong>{formatInCurrency(openBalance(selectedLine), findCompanyCurrencyRecord(db, selectedLine.company_id ?? null))}</strong></span>
                 </div>
+                {selectedStatement && (
+                  <div className="bank-reconcile-statement-card">
+                    <div className="bank-reconcile-statement-header">
+                      <span>{t('Statement')}: <strong>{selectedStatement.name}</strong></span>
+                      {!selectedStatement.is_valid && (
+                        <span className="badge badge-danger">{t('Invalid')}</span>
+                      )}
+                      {!selectedStatement.is_complete && (
+                        <span className="badge badge-warning">{t('Incomplete')}</span>
+                      )}
+                    </div>
+                    <div className="bank-reconcile-statement-balances muted">
+                      <span>{t('Starting Balance')}: <strong>{formatInCurrency(selectedStatement.balance_start, selectedLineCurrency)}</strong></span>
+                      <span>{t('Ending Balance')}: <strong>{formatInCurrency(selectedStatement.balance_end, selectedLineCurrency)}</strong></span>
+                      <span>{t('Real Ending Balance')}: <strong>{formatInCurrency(selectedStatement.balance_end_real, selectedLineCurrency)}</strong></span>
+                    </div>
+                  </div>
+                )}
               </header>
 
               {quickActionModels.length > 0 && (

@@ -2390,6 +2390,43 @@ export const purchaseInvoiceView = {
   groupBys: INVOICE_GROUP_BYS,
 };
 
+/** Create a statement line for cash moved into or out of a cash journal. */
+export function cashMove(db, journalId, { amount, label, date, statementId } = {}, sign = 1) {
+  const journal = read(db, 'account.journal', journalId);
+  if (!journal || journal.type !== 'cash') throw new Error('Cash operations are only available for cash journals');
+  const num = typeof amount === 'number' ? amount : promptedAmount(amount);
+  if (!Number.isFinite(num) || !(num > 0)) throw new Error('Enter a valid amount greater than 0');
+  const moveLabel = (label ? String(label).trim() : '') || (sign >= 0 ? 'Put Money In' : 'Take Money Out');
+  const moveDate = date || today();
+
+  let resolvedStatementId = statementId ?? null;
+  if (resolvedStatementId) {
+    const stmt = read(db, 'account.bank.statement', resolvedStatementId);
+    if (!stmt || stmt.journal_id !== journal.id || (stmt.company_id ?? 1) !== (journal.company_id ?? 1)) {
+      throw new Error('Statement does not exist or belongs to another journal');
+    }
+    if (stmt.state === 'closed') throw new Error('Cannot add lines to a closed statement');
+  } else {
+    const openStmt = search(db, 'account.bank.statement').find(
+      (s) => s.journal_id === journal.id && s.state === 'open' && s.active !== false
+    );
+    if (openStmt) resolvedStatementId = openStmt.id;
+  }
+
+  return create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
+    company_id: journal.company_id ?? 1,
+    date: moveDate,
+    payment_ref: moveLabel,
+    amount: sign * Math.abs(num),
+    state: 'to_check',
+    ...(resolvedStatementId ? { statement_id: resolvedStatementId } : {}),
+  });
+}
+
+export const putMoneyIn = (db, journalId, args) => cashMove(db, journalId, args, 1);
+export const takeMoneyOut = (db, journalId, args) => cashMove(db, journalId, args, -1);
+
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
@@ -2736,6 +2773,28 @@ export const accountingModels = {
     form: {
       title: 'name',
       chatter: true,
+      buttons: [
+        {
+          label: 'Put Money In',
+          when: (j) => j?.type === 'cash',
+          ask: [{ label: 'Amount', type: 'number' }],
+          run: (db, j, input) => {
+            const amount = Array.isArray(input) ? input[0] : input;
+            const res = putMoneyIn(db, j.id, { amount });
+            return { db: res.db };
+          },
+        },
+        {
+          label: 'Take Money Out',
+          when: (j) => j?.type === 'cash',
+          ask: [{ label: 'Amount', type: 'number' }],
+          run: (db, j, input) => {
+            const amount = Array.isArray(input) ? input[0] : input;
+            const res = takeMoneyOut(db, j.id, { amount });
+            return { db: res.db };
+          },
+        },
+      ],
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
       groups: [['type', 'code']],
       tabs: (j) => {
