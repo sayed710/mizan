@@ -1,5 +1,6 @@
 // Partner Bank Accounts (Odoo 20 parity).
 import { create, writeManyAtomic } from '../orm.js';
+import { sameCommercialPartner } from './common.js';
 
 export function sanitizeAccountNumber(val) {
   return String(val ?? '').replace(/\s+/g, '').toUpperCase();
@@ -92,26 +93,37 @@ export function syncPartnerBankAccounts(db, partnerId, bankLines) {
   return next;
 }
 
+/** Whether `bank` is eligible for outbound payments to `partnerId` in `companyId`. */
+export function isEligibleRecipientBank(db, bank, partnerId, companyId = 1) {
+  return Boolean(
+    bank
+    && bank.active !== false
+    && sameCommercialPartner(db, bank.partner_id, partnerId)
+    && (!bank.company_id || bank.company_id === companyId)
+    && bank.allow_out_payment
+  );
+}
+
 /** Resolve and validate recipient bank account for outbound payments. */
-export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, { invoiceBankId = null, companyId = 1 } = {}) {
+export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, { invoiceBankId = null, companyId = 1, allowOverride = false } = {}) {
   const allBanks = db?.records?.['res.partner.bank'] ?? [];
-  if (requestedBankId && invoiceBankId && requestedBankId !== invoiceBankId) {
+  if (!allowOverride && requestedBankId && invoiceBankId && requestedBankId !== invoiceBankId) {
     throw new Error('Payment and invoice bank accounts must match');
   }
   requestedBankId = requestedBankId || invoiceBankId;
 
   if (requestedBankId) {
     const chosen = allBanks.find((b) => b.id === requestedBankId);
-    if (!chosen || chosen.active === false) {
-      throw new Error('The selected bank account is invalid or inactive');
-    }
-    if (chosen.partner_id !== partnerId) {
-      throw new Error('The bank account does not belong to the partner');
-    }
-    if (chosen.company_id && chosen.company_id !== companyId) {
-      throw new Error('The bank account belongs to another company');
-    }
-    if (!chosen.allow_out_payment) {
+    if (!isEligibleRecipientBank(db, chosen, partnerId, companyId)) {
+      if (!chosen || chosen.active === false) {
+        throw new Error('The selected bank account is invalid or inactive');
+      }
+      if (!sameCommercialPartner(db, chosen.partner_id, partnerId)) {
+        throw new Error('The bank account does not belong to the partner');
+      }
+      if (chosen.company_id && chosen.company_id !== companyId) {
+        throw new Error('The bank account belongs to another company');
+      }
       throw new Error('The bank account does not allow outbound payments');
     }
     return chosen.id;

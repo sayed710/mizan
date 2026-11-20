@@ -305,7 +305,7 @@ export function processPaymentWebhook(db, { providerCode = null, rawBody = null,
         company_id: move.company_id ?? 1,
         memo: `${move.name} (${tx.reference})`,
       });
-      settledDb = postPayment(draft.db, read(draft.db, 'account.payment', draft.id), { autoAllocate: false });
+      settledDb = postPayment(draft.db, read(draft.db, 'account.payment', draft.id));
       const posted = read(settledDb, 'account.payment', draft.id);
       if (posted?.state === 'posted') createdPayment = posted;
     }

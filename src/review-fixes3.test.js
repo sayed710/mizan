@@ -5,7 +5,7 @@ import { create, read, search } from './orm.js';
 import { cleanRecord } from './validate.js';
 import { accountId, journalItems } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
-import { postPayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment } from './models/pay.js';
 import { confirmAsset } from './models/assets.js';
 import { runScheduledJobs } from './models/scheduler.js';
 import { applyRule } from './models/reconcile.js';
@@ -49,7 +49,8 @@ test('a manual payment releases cash-basis tax of the invoices it settles', () =
   const inv = post(fresh.db, { move_type: 'out_invoice', partner_id: fresh.id, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, discount: 0, ...taxSnapshot(cashTax(base)) }] });
   const { db, id } = create(inv.db, 'account.payment', { partner_id: fresh.id, amount: 1140, payment_type: 'inbound', partner_type: 'customer', date: '2026-03-10' });
   const done = postPayment(db, read(db, 'account.payment', id));
-  assert.equal(Math.round(balanceOf(done, '251100') * 100) / 100, 0);
+  const applied = applyPaymentCredit(done, id, inv.id, '2026-03-10');
+  assert.equal(Math.round(balanceOf(applied, '251100') * 100) / 100, 0);
 });
 
 test('a locked depreciation line does not stop the other scheduled jobs', () => {

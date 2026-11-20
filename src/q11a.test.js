@@ -4,7 +4,7 @@ import { create, read, search, write } from './orm.js';
 import { models } from './registry.js';
 import { seed } from './seed.js';
 import { creditNote, postMove } from './models/accounting.js';
-import { postPayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment } from './models/pay.js';
 import { postDueEntries } from './models/deferred.js';
 
 const move = (db, id) => read(db, 'account.move', id);
@@ -35,6 +35,7 @@ function deferredInvoice(amount = 120, opts = {}) {
     date: '2026-01-05',
   });
   db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, created.id, '2026-01-05');
   db = write(db, 'account.move', created.id, { amount_paid: amount });
 
   const invoice = move(db, created.id);
