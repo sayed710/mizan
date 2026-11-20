@@ -332,6 +332,7 @@ export function counterpartTaxLines(db, {
         tax_side: isCredit ? 'sale' : 'purchase',
         tax_base: toCompany(db, foreignCurrency ?? calcCurrency.id, base, date, compId),
         tax_tag_ids: row.tag_ids ?? [],
+        use_in_tax_closing: row.use_in_tax_closing !== false,
       }));
     }
   }
