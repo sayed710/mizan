@@ -3495,6 +3495,22 @@ const ar = {
   'Select at least one record first': 'اختر سجلًا واحدًا على الأقل أولًا',
   'None of the selected records match the current filter': 'لا يطابق أي من السجلات المحددة عامل التصفية الحالي',
   'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
+  'Manual Numbering': 'ترقيم يدوي',
+  'Check Layout': 'تخطيط الشيك',
+  'Top': 'أعلى',
+  'Middle': 'وسط',
+  'Bottom': 'أسفل',
+  'Net Total': 'صافي الإجمالي',
+  'To Print': 'للطباعة',
+  'Printed': 'مطبوع',
+  'Payments not paying by check cannot have a check number': 'المدفوعات التي لا تسدد بشيك لا يمكن أن يكون لها رقم شيك',
+  'Check number must be unique per journal': 'يجب أن يكون رقم الشيك فريداً لكل دفتر يومية',
+  'Only issued checks can be voided': 'يمكن فقط إلغاء الشيكات المصدرة',
+  'Check is already voided': 'الشيك ملغى بالفعل',
+  'Only posted outbound payments can be printed': 'يمكن فقط طباعة المدفوعات الصادرة المرحلة',
+  'Payment does not pay by check': 'الدفعة لا تسدد بشيك',
+  'Check has already been printed': 'تمت طباعة الشيك بالفعل',
+  'Check number is required for manual numbering': 'رقم الشيك مطلوب للترقيم اليدوي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

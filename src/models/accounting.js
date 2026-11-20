@@ -2812,6 +2812,16 @@ export const accountingModels = {
         onchange: methodLineOnchange,
       },
       check_next_number: { type: 'integer', label: 'Next Check Number' },
+      check_manual_sequencing: { type: 'boolean', label: 'Manual Numbering' },
+      check_printing_layout: {
+        type: 'selection',
+        label: 'Check Layout',
+        options: [
+          ['top', 'Top'],
+          ['middle', 'Middle'],
+          ['bottom', 'Bottom'],
+        ],
+      },
       bank_account_id: {
         type: 'many2one', relation: 'res.partner.bank', label: 'Bank Account Number',
         domain: (b, j, db) => {
@@ -2861,6 +2871,7 @@ export const accountingModels = {
     defaults: () => ({
       type: 'general', active: true, sequence: 10,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
+      check_manual_sequencing: false, check_printing_layout: 'top',
     }),
     prepareCreate: (db, vals) => {
       let nextVals = { ...vals };
@@ -2980,7 +2991,7 @@ export const accountingModels = {
           { label: 'Journal Entries', groups: entryGroups },
           ...(liquidity ? [
             { label: 'Incoming Payments', ...(cashOrBank ? { fields: ['inbound_payment_method_line_ids'] } : {}), groups: [['outstanding_receipts_account_id']] },
-            { label: 'Outgoing Payments', ...(cashOrBank ? { fields: ['outbound_payment_method_line_ids'] } : {}), groups: [['outstanding_payments_account_id', 'check_next_number']] },
+            { label: 'Outgoing Payments', ...(cashOrBank ? { fields: ['outbound_payment_method_line_ids'] } : {}), groups: [['outstanding_payments_account_id', 'check_next_number', 'check_manual_sequencing', 'check_printing_layout']] },
           ] : []),
           ...(advancedGroups.length ? [{ label: 'Advanced Settings', groups: advancedGroups }] : []),
         ];

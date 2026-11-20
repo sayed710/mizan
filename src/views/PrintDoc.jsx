@@ -5,7 +5,7 @@ import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { display, formatDate } from '../ui.jsx';
 import { batchCurrency, checkAmountDisplay } from '../models/payments.js';
-import { paymentSettledMoves } from '../models/pay.js';
+import { paymentRemittanceLines } from '../models/pay.js';
 import { subtotal } from '../models/common.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
 import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
@@ -64,55 +64,73 @@ function Checks({ db, batch }) {
         } catch (e) {
           amounts = { numeric: t(e.message), words: t(e.message) };
         }
-        const settledMoves = payment ? paymentSettledMoves(db, payment) : [];
-        const stubMoves = settledMoves.length ? settledMoves : (move ? [move] : []);
+        const journal = (payment?.journal_id ?? batch.journal_id) ? read(db, 'account.journal', payment?.journal_id ?? batch.journal_id) : null;
+        const layout = journal?.check_printing_layout || 'top';
+        const stubLines = payment
+          ? paymentRemittanceLines(db, payment)
+          : (move ? [{ move, name: move.name || move.ref || '—', date: move.invoice_date || move.date, original_amount: move.amount_total, paid_amount: l.amount }] : []);
+        const netTotal = stubLines.length
+          ? stubLines.reduce((sum, item) => sum + (Number(item.paid_amount) || 0), 0)
+          : (payment?.amount ?? l.amount);
+        const docCurrency = (stubLines[0]?.move ? documentCurrency(db, stubLines[0].move) : null) ?? amounts.currency;
 
-        return (
-          <article key={number ?? l.move_id} className="paper check">
+        const checkBody = (
+          <section key="check-main" className="check-main-area">
             <header className="paper-head"><b className="paper-company">{company.name}</b><span>{t('Check')} #{number}</span></header>
             <p>{t('Date')}: {formatDate(batch.date)}</p>
             <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', payment?.partner_id ?? move?.partner_id)?.name ?? '—'}</b> <span className="num">{amounts.numeric}</span></p>
             <p className="check-words">{amounts.words}</p>
             <footer className="paper-foot muted">{t('Memo')}: {move?.name || payment?.memo}</footer>
-            <section className="remittance-stub">
-              <header className="stub-head"><b>{t('Remittance Advice')}</b></header>
-              <table className="paper-lines stub-table">
-                <thead>
-                  <tr>
-                    <th>{t('Document')}</th>
-                    <th>{t('Date')}</th>
-                    <th className="num">{t('Original Amount')}</th>
-                    <th className="num">{t('Net Payment')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stubMoves.length ? stubMoves.map((m) => {
-                    const docCurrency = documentCurrency(db, m) ?? amounts.currency;
-                    const matchingRows = payment?.move_id
-                      ? (m.payments ?? []).filter((p) => !p.reversed && p.move_id === payment.move_id)
-                      : [];
-                    const linePaid = matchingRows.length
-                      ? matchingRows.reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
-                      : l.amount;
-                    return (
-                      <tr key={m.id}>
-                        <td>{m.name || m.ref || '—'}</td>
-                        <td>{formatDate(m.invoice_date || m.date)}</td>
-                        <td className="num">{docCurrency ? formatCurrency(m.amount_total, docCurrency) : m.amount_total}</td>
-                        <td className="num">{docCurrency ? formatCurrency(linePaid, docCurrency) : linePaid}</td>
-                      </tr>
-                    );
-                  }) : (
-                    <tr>
-                      <td>{move?.name || payment?.memo || '—'}</td>
-                      <td>{formatDate(payment?.date || batch.date)}</td>
-                      <td className="num">{amounts.numeric}</td>
-                      <td className="num">{amounts.numeric}</td>
+          </section>
+        );
+
+        const stubSection = (key = 'remittance-stub') => (
+          <section key={key} className="remittance-stub">
+            <header className="stub-head"><b>{t('Remittance Advice')}</b></header>
+            <table className="paper-lines stub-table">
+              <thead>
+                <tr>
+                  <th>{t('Document')}</th>
+                  <th>{t('Date')}</th>
+                  <th className="num">{t('Original Amount')}</th>
+                  <th className="num">{t('Net Payment')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stubLines.length ? stubLines.map((item, idx) => {
+                  const lineCurrency = (item.move ? documentCurrency(db, item.move) : null) ?? docCurrency;
+                  return (
+                    <tr key={item.move?.id ?? idx}>
+                      <td>{item.name}</td>
+                      <td>{formatDate(item.date)}</td>
+                      <td className="num">{lineCurrency ? formatCurrency(item.original_amount, lineCurrency) : item.original_amount}</td>
+                      <td className="num">{lineCurrency ? formatCurrency(item.paid_amount, lineCurrency) : item.paid_amount}</td>
                     </tr>
-                  )}
-                </tbody>
-              </table>
-            </section>
+                  );
+                }) : (
+                  <tr>
+                    <td>{move?.name || payment?.memo || '—'}</td>
+                    <td>{formatDate(payment?.date || batch.date)}</td>
+                    <td className="num">{amounts.numeric}</td>
+                    <td className="num">{amounts.numeric}</td>
+                  </tr>
+                )}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan="3"><b>{t('Net Total')}</b></td>
+                  <td className="num"><b>{docCurrency ? formatCurrency(netTotal, docCurrency) : netTotal}</b></td>
+                </tr>
+              </tfoot>
+            </table>
+          </section>
+        );
+
+        return (
+          <article key={number ?? l.move_id} className={`paper check check-layout-${layout}`}>
+            {layout === 'bottom' && [stubSection('stub-top'), checkBody]}
+            {layout === 'middle' && [stubSection('stub-top'), checkBody, stubSection('stub-bottom')]}
+            {layout === 'top' && [checkBody, stubSection('stub-bottom')]}
           </article>
         );
       })}
