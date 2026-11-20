@@ -1,5 +1,5 @@
 // RFC 4180-style CSV: quoted fields, doubled quotes, CRLF/LF line breaks.
-import { models } from './models/index.js';
+import { models } from './registry.js';
 import { create, search } from './orm.js';
 import { fieldReadonly } from './field-metadata.js';
 import { t } from './i18n.js';
@@ -88,47 +88,70 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
   return { db: next, count };
 }
 
+/** Extract trimmed cell text from a TH/TD node, omitting UI-only carets and `.no-export` elements. */
+export function extractTableCellText(cellNode) {
+  let txt = '';
+  const isIgnored = (node) => node?.nodeType === 1 && (
+    node.tagName?.toUpperCase() === 'TABLE'
+    || node.className === 'caret'
+    || (typeof node.className === 'string' && node.className.split(' ').includes('no-export'))
+    || (node.tagName?.toUpperCase() === 'BUTTON' && (node.textContent === '▾' || node.textContent === '▸')));
+  const walk = (c) => {
+    if (!c || isIgnored(c)) return;
+    if (c.nodeType === 3) txt += c.nodeValue;
+    else if (c.childNodes && c.childNodes.length) c.childNodes.forEach(walk);
+    else if (c.textContent) txt += c.textContent;
+  };
+  walk(cellNode);
+  return txt.trim();
+}
+
+// Named entities an HTML serializer (innerHTML) or XML writer emits; anything else is spelled as a numeric reference.
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+/** Decode HTML/XML entities in one pass (named and numeric), so "&amp;lt;" stays the literal text "&lt;". */
+export function decodeEntities(text) {
+  return String(text ?? '').replace(/&(?:(amp|lt|gt|quot|apos|nbsp)|#(\d+)|#x([0-9a-f]+));/gi, (match, name, dec, hex) => {
+    if (name) return ENTITIES[name.toLowerCase()];
+    const code = dec ? Number(dec) : parseInt(hex, 16);
+    return code > 0 && code <= 0x10FFFF ? String.fromCodePoint(code) : match;
+  });
+}
+
+/**
+ * Plain text of an HTML fragment: tags removed until none are left, then entities decoded once. Like an HTML parser, a
+ * "<" only opens a tag when a letter, "/", "!" or "?" follows it, so literal text such as "2 < 3 > 1" is kept.
+ */
+export function htmlToText(html) {
+  let text = String(html ?? '');
+  for (let prev = null; prev !== text;) { prev = text; text = text.replace(/<[a-zA-Z/!?][^>]*>/g, ''); }
+  return decodeEntities(text);
+}
+
+const isNoExport = (node) => typeof node?.className === 'string' && node.className.split(' ').includes('no-export');
+
+/** The rows that belong to `table` itself: nested tables (e.g. expanded detail panels) and no-export rows are left out. */
+export function tableRows(table) {
+  const rows = [];
+  const walk = (node) => {
+    for (const child of node?.childNodes ?? node?.children ?? []) {
+      const tag = child.tagName?.toUpperCase();
+      if (tag === 'TR') { if (!isNoExport(child)) rows.push(child); }
+      else if (tag !== 'TABLE') walk(child);
+    }
+  };
+  walk(table);
+  return rows;
+}
+
+/** The TH/TD cells of a row, in order. */
+export function rowCells(tr) {
+  return Array.from(tr?.childNodes ?? tr?.children ?? []).filter((c) => ['TH', 'TD'].includes(c.tagName?.toUpperCase()));
+}
+
 /** Extracts 2D array of string cells from a table element or tree. */
 export function tableToRows(table) {
   if (!table) return [];
-  const rows = [];
-  const collect = (node) => {
-    if (!node) return;
-    const tag = node.tagName?.toUpperCase();
-    if (tag === 'TR') {
-      const cells = [];
-      const extractText = (cellNode) => {
-        let txt = '';
-        const isIgnored = (node) => node?.nodeType === 1 && (
-          node.className === 'caret'
-          || (typeof node.className === 'string' && node.className.split(' ').includes('no-export'))
-          || (node.tagName?.toUpperCase() === 'BUTTON' && (node.textContent === '▾' || node.textContent === '▸')));
-        const walk = (c) => {
-          if (!c || isIgnored(c)) return;
-          if (c.nodeType === 3) txt += c.nodeValue;
-          else if (c.childNodes && c.childNodes.length) c.childNodes.forEach(walk);
-          else if (c.textContent) txt += c.textContent;
-        };
-        walk(cellNode);
-        return txt.trim();
-      };
-      const findCells = (trChild) => {
-        if (!trChild) return;
-        const ctag = trChild.tagName?.toUpperCase();
-        if (ctag === 'TH' || ctag === 'TD') {
-          cells.push(extractText(trChild));
-          return;
-        }
-        for (const child of trChild.childNodes ?? []) findCells(child);
-      };
-      for (const child of node.childNodes ?? []) findCells(child);
-      if (cells.length > 0) rows.push(cells);
-      return;
-    }
-    for (const child of node.childNodes ?? []) collect(child);
-  };
-  collect(table);
-  return rows;
+  return tableRows(table).map((tr) => rowCells(tr).map(extractTableCellText)).filter((cells) => cells.length > 0);
 }
 
 /** Downloads text content as a file via a dynamic link in browser, returns the text. */
