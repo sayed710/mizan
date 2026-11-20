@@ -26,6 +26,19 @@ import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
 import { onlineAccountForJournal } from './onlineSync.js';
 import { openingAmounts, setOpeningBalance } from './opening.js';
+import {
+  computeJournalMethodLines,
+  defaultJournalLinesForForm,
+  defaultNewJournalMethodLine,
+  defaultPaymentMethodLineId,
+  isMethodLineJournal,
+  journalMethodLineGuard,
+  methodLineAccountDomain,
+  methodLineOnchange,
+  protectMethodLineDelete,
+  syncJournalMethodLines,
+  unlinkJournalMethodLines,
+} from './paymentmethod.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
@@ -984,7 +997,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const counterpartCode = invoiceCounterpartAccount(db, r);
   const via = paymentJournal(db, payJournal, r.company_id ?? 1);
   const journal = read(db, 'account.journal', via.id);
-  const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
+  const methodLineId = payRec?.payment_method_line_id ?? defaultPaymentMethodLineId(db, via.id, sale ? 'inbound' : 'outbound');
+  const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale, methodLineId);
   const liquidity = liquidityAccountId ?? outstanding ?? via.accountId;
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   const bank = bookedShare ?? toCompany(db, r.currency_id, value, date, r.company_id);
@@ -1010,7 +1024,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id, ...foreignAmount(value) }, ...credit, { account: liquidity, credit: bank + extra, partner_id: r.partner_id, ...liquidityForeignAmount(-value - excess) }, ...fx],
   });
   const paymentMemo = memo !== undefined ? memo : (r.name || '');
-  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: paymentMemo, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, ...(methodLineId ? { payment_method_line_id: methodLineId } : {}), invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: paymentMemo, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const moveName = read(withEntry, 'account.move', paymentMove).name;
   const name = draftName && draftName !== '/' ? draftName : paymentName(withEntry, journal, date, moveName);
@@ -2105,7 +2119,7 @@ export const accountingModels = {
 
   'account.journal': {
     label: 'Journals',
-    guard: (db, before, after) => {
+    guard: (db, before, after, _ctx, vals) => {
       const companyId = after.company_id ?? 1;
       if (before?.id) {
         const companies = db.records['res.company'] ?? [];
@@ -2156,9 +2170,10 @@ export const accountingModels = {
           return 'Select an active bank account belonging to this journal company';
         }
       }
-      return journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after);
+      return journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after) ?? journalMethodLineGuard(db, before, after, vals);
     },
-    protectDelete: (db, journal) => (journal.secure_chain_heads ?? []).length ? 'Journals with secure chains cannot be deleted' : null,
+    protectDelete: (db, journal, staged) => ((journal.secure_chain_heads ?? []).length ? 'Journals with secure chains cannot be deleted' : null)
+      ?? (db.records?.['account.payment.method.line'] ?? []).filter((l) => l.journal_id === journal.id).map((l) => protectMethodLineDelete(db, l, staged)).find(Boolean),
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       name: { type: 'char', label: 'Journal', required: true },
@@ -2200,6 +2215,62 @@ export const accountingModels = {
       default_for_payments: { type: 'boolean', label: 'Default Payment Journal' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
+      inbound_payment_method_line_ids: {
+        type: 'one2many',
+        relation: 'account.payment.method.line',
+        label: 'Incoming Payments',
+        editable: true,
+        copy: false,
+        compute: (r, db) => computeJournalMethodLines(r, db, 'inbound'),
+        fields: {
+          id: { type: 'integer', label: 'ID', hidden: true },
+          sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+          payment_method_id: {
+            type: 'many2one',
+            relation: 'account.payment.method',
+            label: 'Payment Method',
+            required: true,
+            domain: (m) => m.payment_type === 'inbound',
+          },
+          name: { type: 'char', label: 'Name', required: true },
+          payment_account_id: {
+            type: 'many2one',
+            relation: 'account.account',
+            label: 'Outstanding Receipts Account',
+            domain: methodLineAccountDomain,
+          },
+        },
+        newLine: (_r, db) => defaultNewJournalMethodLine(db, 'inbound'),
+        onchange: methodLineOnchange,
+      },
+      outbound_payment_method_line_ids: {
+        type: 'one2many',
+        relation: 'account.payment.method.line',
+        label: 'Outgoing Payments',
+        editable: true,
+        copy: false,
+        compute: (r, db) => computeJournalMethodLines(r, db, 'outbound'),
+        fields: {
+          id: { type: 'integer', label: 'ID', hidden: true },
+          sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+          payment_method_id: {
+            type: 'many2one',
+            relation: 'account.payment.method',
+            label: 'Payment Method',
+            required: true,
+            domain: (m) => m.payment_type === 'outbound',
+          },
+          name: { type: 'char', label: 'Name', required: true },
+          payment_account_id: {
+            type: 'many2one',
+            relation: 'account.account',
+            label: 'Outstanding Payments Account',
+            domain: methodLineAccountDomain,
+          },
+        },
+        newLine: (_r, db) => defaultNewJournalMethodLine(db, 'outbound'),
+        onchange: methodLineOnchange,
+      },
       check_next_number: { type: 'integer', label: 'Next Check Number' },
       bank_account_id: {
         type: 'many2one', relation: 'res.partner.bank', label: 'Bank Account Number',
@@ -2261,6 +2332,13 @@ export const accountingModels = {
     }),
     onchange: (r, key, db) => {
       if (key === 'type') {
+        const cashOrBank = isMethodLineJournal(r);
+        const methodLines = db && !r.id
+          ? {
+              inbound_payment_method_line_ids: cashOrBank ? defaultJournalLinesForForm(db, r.type, 'inbound') : [],
+              outbound_payment_method_line_ids: cashOrBank ? defaultJournalLinesForForm(db, r.type, 'outbound') : [],
+            }
+          : {};
         return {
           ...(isLiquidityJournal(r) && !r.company_id ? { company_id: db ? currentCompany(db) : 1 } : {}),
           ...(r.type === 'bank' && !r.bank_statements_source ? { bank_statements_source: 'undefined' } : {}),
@@ -2268,10 +2346,14 @@ export const accountingModels = {
           ...(r.type === 'sale' && !r.invoice_reference_model ? { invoice_reference_model: 'odoo' } : {}),
           payment_sequence: isLiquidityJournal(r),
           ...(r.refund_sequence ? {} : derivedRefundSequence(r)),
+          ...methodLines,
         };
       }
       return {};
     },
+    onCreate: (db, after, _before, vals) => syncJournalMethodLines(db, after, vals),
+    onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
+    onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
@@ -2326,8 +2408,8 @@ export const accountingModels = {
         return [
           { label: 'Journal Entries', groups: entryGroups },
           ...(liquidity ? [
-            { label: 'Incoming Payments', groups: [['outstanding_receipts_account_id']] },
-            { label: 'Outgoing Payments', groups: [['outstanding_payments_account_id', 'check_next_number']] },
+            { label: 'Incoming Payments', ...(cashOrBank ? { fields: ['inbound_payment_method_line_ids'] } : {}), groups: [['outstanding_receipts_account_id']] },
+            { label: 'Outgoing Payments', ...(cashOrBank ? { fields: ['outbound_payment_method_line_ids'] } : {}), groups: [['outstanding_payments_account_id', 'check_next_number']] },
           ] : []),
           ...(advancedGroups.length ? [{ label: 'Advanced Settings', groups: advancedGroups }] : []),
         ];

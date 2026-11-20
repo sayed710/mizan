@@ -22,6 +22,7 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
+import { migratePaymentMethods } from './models/paymentmethod.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1673,6 +1674,8 @@ MIGRATIONS.push({ version: 59, name: 'horizontal-group-rules-to-relational-ids',
   });
   return changed ? { ...db, records: { ...db.records, 'account.report.horizontal.group': next } } : db;
 } });
+
+MIGRATIONS.push({ version: 60, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

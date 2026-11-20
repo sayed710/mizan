@@ -793,10 +793,11 @@ export function ensureBankSuspense(db, company, journalId) {
   return { db, id: account.id };
 }
 
-/** Resolve an optional journal outstanding account, falling back to the company setting. */
-export function outstandingAccount(db, journal, company, inbound) {
+/** Resolve a payment method line's override account, else the optional journal/company outstanding account. */
+export function outstandingAccount(db, journal, company, inbound, methodLine = null) {
+  const line = typeof methodLine === 'number' ? read(db, 'account.payment.method.line', methodLine) : methodLine;
   const field = inbound ? 'outstanding_receipts_account_id' : 'outstanding_payments_account_id';
-  const id = journal?.[field] || read(db, 'res.company', company)?.[field];
+  const id = line?.payment_account_id || journal?.[field] || read(db, 'res.company', company)?.[field];
   if (!id) return null;
   const account = read(db, 'account.account', id);
   if (!account || (account.company_id && account.company_id !== company)) throw new Error('Outstanding account must belong to the payment company');
