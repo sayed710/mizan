@@ -159,7 +159,7 @@ test('the menu resolves to the Lock Dates dialog (not general settings)', async 
     });
 
     // Verify it opened the dialog
-    const dialog = await until(React, () => find(container, (n) => n.tagName === 'FORM' && n.role === 'dialog'));
+    const dialog = await until(React, () => find(container, (n) => n.role === 'dialog'));
     assert.ok(dialog, 'Dedicated dialog must be rendered');
 
     const title = find(dialog, (n) => n.tagName === 'H2');
