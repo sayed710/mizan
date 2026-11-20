@@ -1,9 +1,9 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
-import { amounts, appliedCashRounding, companyRoundingMethod, nextName, shiftMonth, today, addDays } from './common.js';
+import { amounts, appliedCashRounding, companyRoundingMethod, nextName, shiftMonth, today, addDays, total as moveTotal } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
-import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
+import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
 import { discountTaxComputation, earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
@@ -449,6 +449,88 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
     const docAmt = docRound(g.document_amount * discountFactor);
     return { ...g, document_amount: docAmt, amount: companyRound(docAmt / rate), base: companyRound(docBase / rate) };
   });
+}
+
+/**
+ * Invoice tax breakdown grouped by `account.tax.group` with `preceding_subtotal` lines (Odoo 20 TaxTotals).
+ * Totals stay identical to `amount_untaxed`, `amount_tax`, and `amount_total`.
+ */
+export function invoiceTaxTotals(db, move) {
+  if (!move || !['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type)) return null;
+  let docCurrency;
+  try {
+    docCurrency = documentCurrency(db, move);
+  } catch (err) {
+    if (/configure.*currency/i.test(err?.message)) return null;
+    throw err;
+  }
+  const roundingMethod = companyRoundingMethod(db, move.company_id);
+  const side = ['out_refund', 'in_refund'].includes(move.move_type) ? 'refund' : 'invoice';
+  const lines = move.invoice_line_ids ?? [];
+  const untaxed = amounts(lines, docCurrency, { roundingMethod, side }).untaxed;
+  const rawItems = taxGroups(lines, () => null, 1, docCurrency, docCurrency, { roundingMethod, side });
+  const term = db && move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
+  const discountFactor = mixedDiscountFactor(term);
+  const scaledItems = discountFactor === 1
+    ? rawItems
+    : rawItems.map((g) => ({ ...g, amount: roundCurrency(g.document_amount * discountFactor, docCurrency) }));
+  const nonZeroItems = scaledItems.filter((g) => g.amount !== 0);
+
+  const rounding = db && move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
+  const appliedRounding = appliedCashRounding(rounding, rounding?.strategy === 'biggest_tax' && nonZeroItems.length > 0);
+  if (appliedRounding?.strategy === 'biggest_tax' && nonZeroItems.length) {
+    const rawTaxSum = roundCurrency(nonZeroItems.reduce((s, g) => s + g.amount, 0), docCurrency);
+    const rawTotal = roundCurrency(untaxed + rawTaxSum, docCurrency);
+    const roundedTotal = roundCurrency(cashRound(rawTotal, appliedRounding.rounding, appliedRounding.rounding_method), docCurrency);
+    const diff = roundCurrency(roundedTotal - rawTotal, docCurrency);
+    if (diff !== 0) {
+      const largestIdx = nonZeroItems.reduce((best, g, i) => (Math.abs(g.amount) > Math.abs(nonZeroItems[best].amount) ? i : best), 0);
+      nonZeroItems[largestIdx] = { ...nonZeroItems[largestIdx], amount: roundCurrency(nonZeroItems[largestIdx].amount + diff, docCurrency) };
+    }
+  }
+
+  const byGroup = new Map();
+  for (const item of nonZeroItems) {
+    const groupId = item.tax_group_id ?? (db && item.tax_id ? read(db, 'account.tax', item.tax_id)?.tax_group_id ?? null : null);
+    const groupRec = db && groupId ? read(db, 'account.tax.group', groupId) : null;
+    const key = groupRec ? groupRec.id : 'none';
+    const existing = byGroup.get(key) ?? {
+      tax_group_id: groupRec?.id ?? null,
+      name: groupRec?.name ?? 'Taxes',
+      sequence: groupRec ? Number(groupRec.sequence ?? 10) : Number.MAX_SAFE_INTEGER,
+      id: groupRec?.id ?? Number.MAX_SAFE_INTEGER,
+      preceding_subtotal: String(groupRec?.preceding_subtotal ?? '').trim(),
+      amount: 0,
+    };
+    byGroup.set(key, { ...existing, amount: roundCurrency(existing.amount + item.amount, docCurrency) });
+  }
+
+  const orderedGroups = [...byGroup.values()]
+    .filter((g) => g.amount !== 0)
+    .sort((a, b) => (a.sequence - b.sequence) || (a.id - b.id));
+
+  const subtotals = [];
+  let runningTotal = untaxed;
+  if (!orderedGroups.length) {
+    subtotals.push({ name: 'Untaxed Amount', amount: untaxed, groups: [] });
+  } else {
+    for (const group of orderedGroups) {
+      const label = group.preceding_subtotal || (subtotals.length === 0 ? 'Untaxed Amount' : null);
+      if (subtotals.length === 0) {
+        subtotals.push({ name: label, amount: untaxed, groups: [group] });
+      } else if (label && label !== subtotals[subtotals.length - 1].name) {
+        subtotals.push({ name: label, amount: runningTotal, groups: [group] });
+      } else {
+        subtotals[subtotals.length - 1].groups.push(group);
+      }
+      runningTotal = roundCurrency(runningTotal + group.amount, docCurrency);
+    }
+  }
+
+  const taxTotal = roundCurrency(orderedGroups.reduce((s, g) => s + g.amount, 0), docCurrency);
+  const totalAmount = moveTotal(move, db) ?? roundCurrency(untaxed + taxTotal, docCurrency);
+  const roundingAmount = roundCurrency(totalAmount - roundCurrency(untaxed + taxTotal, docCurrency), docCurrency);
+  return { untaxed, tax: taxTotal, total: totalAmount, rounding_amount: roundingAmount, subtotals };
 }
 
 /** Journal items for a customer invoice / vendor bill in document and company units. */

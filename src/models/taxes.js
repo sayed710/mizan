@@ -107,6 +107,7 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
     invoice_repartition_line_ids: invRepart,
     refund_repartition_line_ids: refRepart,
     ...(invoiceLabel ? { tax_invoice_label: invoiceLabel } : {}),
+    ...(tax.tax_group_id != null ? { tax_group_id: tax.tax_group_id } : {}),
     ...(tax.include_base_amount ? { tax_include_base_amount: true } : {}),
     ...(tax.is_base_affected === false ? { tax_is_base_affected: false } : {}),
     ...(tax.sequence != null && Number(tax.sequence) !== 1 ? { tax_sequence: Number(tax.sequence) } : {}),
@@ -121,7 +122,7 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
 };
 
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
-export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', tax_group_id: null, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
 
 /** All tax IDs carried by a line (scalar tax_id, multi tax_ids, and tax_breakdown). */
 export function lineTaxIds(line) {
@@ -225,6 +226,7 @@ export function resolveLineTaxes(l) {
       tax_cash_basis: !!l.tax_cash_basis,
       tax_name: l.tax_name || '',
       ...(l.tax_invoice_label ? { tax_invoice_label: l.tax_invoice_label } : {}),
+      ...(l.tax_group_id != null ? { tax_group_id: l.tax_group_id } : {}),
       tax_include_base_amount: !!l.tax_include_base_amount,
       tax_is_base_affected: l.tax_is_base_affected !== false,
       tax_sequence: Number(l.tax_sequence ?? 1),
@@ -267,12 +269,15 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
 }
 
 /**
- * The auto-applied fiscal position for an address ({ country, zip, vat }): a position for its country first, else a
- * position without a country (zip-specific first). Also used for website visitors, who have no partner record yet.
+ * The auto-applied fiscal position for an address ({ country, state, zip, vat }): matches country, country group,
+ * federal states, and zip range, preferring the most specific match (country + state + zip > country + state >
+ * country + zip > country > country group > fallback), then sequence. Also used for website visitors without a partner.
  */
 export function autoFiscalPosition(db, address, companyId = null) {
   const p = address ?? {};
-  const country = (p.country ?? '').trim().toLowerCase();
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+  const country = norm(p.country);
+  const state = norm(p.state);
   const pZip = String(p.zip ?? '').trim();
   const isNumericZip = (s) => /^\d+$/.test(s);
   const zipMatches = (fp) => {
@@ -282,24 +287,47 @@ export function autoFiscalPosition(db, address, companyId = null) {
     if (!pZip) return false;
     if (isNumericZip(pZip) && (!from || isNumericZip(from)) && (!to || isNumericZip(to))) {
       const width = Math.max(pZip.length, from.length, to.length);
-      const norm = (s) => s.padStart(width, '0');
-      return (!from || norm(pZip) >= norm(from)) && (!to || norm(pZip) <= norm(to));
+      const pad = (s) => s.padStart(width, '0');
+      return (!from || pad(pZip) >= pad(from)) && (!to || pad(pZip) <= pad(to));
     }
     return (!from || pZip >= from) && (!to || pZip <= to);
   };
   const hasZip = (fp) => Boolean(String(fp.zip_from ?? '').trim() || String(fp.zip_to ?? '').trim());
-  const baseMatches = search(db, 'account.fiscal.position').filter(
-    (fp) => (!companyId || !fp.company_id || fp.company_id === companyId) && fp.auto_apply && (!fp.vat_required || String(p.vat ?? '').trim()) && zipMatches(fp),
-  );
-  const bySeq = (a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || a.id - b.id;
-  const countryMatches = country ? baseMatches.filter((fp) => (fp.country ?? '').trim().toLowerCase() === country) : [];
-  if (countryMatches.length) {
-    countryMatches.sort(bySeq);
-    return countryMatches[0].id;
-  }
-  const fallbackMatches = baseMatches.filter((fp) => !(fp.country ?? '').trim());
-  fallbackMatches.sort((a, b) => (Number(hasZip(b)) - Number(hasZip(a))) || bySeq(a, b));
-  return fallbackMatches[0]?.id ?? null;
+  const fpStates = (fp) => (fp.state_ids ?? []).map(norm).filter(Boolean);
+  const matchesCountryGroup = (groupId) => {
+    const group = groupId ? read(db, 'res.country.group', groupId) : null;
+    if (!group || group.active === false || !country) return false;
+    return (group.country_ids ?? []).map(norm).filter(Boolean).includes(country);
+  };
+  const matchesPosition = (fp) => {
+    if (companyId && fp.company_id && fp.company_id !== companyId) return false;
+    if (!fp.auto_apply) return false;
+    if (fp.vat_required && !String(p.vat ?? '').trim()) return false;
+    if (!zipMatches(fp)) return false;
+    const fpCountry = norm(fp.country);
+    if (fpCountry && fpCountry !== country) return false;
+    if (fp.country_group_id && !matchesCountryGroup(fp.country_group_id)) return false;
+    const states = fpStates(fp);
+    if (states.length && (!state || !states.includes(state))) return false;
+    return true;
+  };
+  const specificity = (fp) => [
+    Number(Boolean(norm(fp.country))),
+    Number(Boolean(fp.country_group_id)),
+    Number(fpStates(fp).length > 0),
+    Number(hasZip(fp)),
+  ];
+  const bySpecificityThenSeq = (a, b) => {
+    const sa = specificity(a);
+    const sb = specificity(b);
+    for (let i = 0; i < sa.length; i++) {
+      if (sb[i] !== sa[i]) return sb[i] - sa[i];
+    }
+    return (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || (a.id - b.id);
+  };
+  const matches = search(db, 'account.fiscal.position').filter(matchesPosition);
+  matches.sort(bySpecificityThenSeq);
+  return matches[0]?.id ?? null;
 }
 
 /** Map and snapshot explicit tax IDs (sales or purchase side) through the fiscal position. */
@@ -474,9 +502,10 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
         const tax_name = taxLabel(t);
         const invoice_label = taxInvoiceLabel(t);
         const tax_id = t.tax_id ?? null;
+        const tax_group_id = t.tax_group_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
         const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
-        const g = by.get(key) ?? { account_id, tax_id, tax_name, invoice_label, tax_tag_ids, document_base: 0, document_amount: 0 };
+        const g = by.get(key) ?? { account_id, tax_id, tax_group_id, tax_name, invoice_label, tax_tag_ids, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
       }
     }
@@ -759,7 +788,7 @@ export const taxModels = {
         type: 'many2one',
         relation: 'account.account',
         label: 'Cash Basis Transition Account',
-        hideWhen: (r) => r?.amount_type !== 'group' && r?.tax_exigibility !== 'on_payment',
+        hideWhen: (r) => r?.tax_exigibility !== 'on_payment',
       },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group', domain: (g, tax) => !g.company_id || g.company_id === (tax?.company_id ?? 1) },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
@@ -864,6 +893,9 @@ export const taxModels = {
   'account.fiscal.position': {
     label: 'Fiscal Positions',
     guard: (db, _before, after) => {
+      if (after.country_group_id && !read(db, 'res.country.group', after.country_group_id)) {
+        return 'Selected country group does not exist';
+      }
       // A mapping's source may be any account a line was entered with; the posted destination must be usable by this company.
       // A position without a company is shared, so its destinations are checked when it is applied to a company.
       if (!after.company_id) return null;
@@ -882,6 +914,8 @@ export const taxModels = {
       vat_required: { type: 'boolean', label: 'VAT Required' },
       foreign_vat: { type: 'char', label: 'Foreign Tax ID' },
       country: { type: 'char', label: 'Country' },
+      country_group_id: { type: 'many2one', relation: 'res.country.group', label: 'Country Group' },
+      state_ids: { type: 'tags', label: 'Federal States' },
       zip_from: { type: 'char', label: 'Zip From' },
       zip_to: { type: 'char', label: 'Zip To' },
       note: { type: 'text', label: 'Legal Notes' },
@@ -894,7 +928,7 @@ export const taxModels = {
       },
       excluded_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Excluded Taxes' },
     },
-    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, active: true, account_ids: [], excluded_tax_ids: [] }),
+    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, active: true, state_ids: [], account_ids: [], excluded_tax_ids: [] }),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     views: ['list', 'kanban'],
     searchFields: ['name'],
@@ -903,7 +937,7 @@ export const taxModels = {
     list: ['sequence', 'name', 'company_id'],
     form: {
       title: 'name',
-      groups: [['auto_apply', 'vat_required', 'foreign_vat', 'country', { label: 'Zip Range', fields: ['zip_from', 'zip_to'] }], []],
+      groups: [['auto_apply', 'vat_required', 'foreign_vat', 'country', { label: 'Zip Range', fields: ['zip_from', 'zip_to'] }], ['country_group_id', 'state_ids']],
       // Odoo 20 has no removal rules; only positions upgraded with one show their excluded taxes.
       tabs: (r) => [{ label: 'Account Mapping', fields: ['account_ids'] }, ...(r?.excluded_tax_ids?.length ? [{ label: 'Excluded Taxes', fields: ['excluded_tax_ids'] }] : []), { label: 'Legal Notes', fields: ['note'] }],
       chatter: true,

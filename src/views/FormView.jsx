@@ -4,6 +4,7 @@ import { fieldReadonly, fieldRequired } from '../field-metadata.js';
 import { aggregate, create, isMultiCompany, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
+import { invoiceTaxTotals } from '../models/ledger.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { myEmployeeId } from '../access.js';
 import { dateLocale, t } from '../i18n.js';
@@ -701,12 +702,55 @@ export function FormView({ leaf, id, base, params }) {
                             )}
                             {footer.length > 0 && tab === 0 && (
                               <dl className="totals">
-                                {footer.map((f) => (
-                                  <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
-                                    <dt>{t(def.fields[f].label)}</dt>
-                                    <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
-                                  </div>
-                                ))}
+                                {(() => {
+                                  const taxTotals = model === 'account.move' && footer.includes('amount_tax') ? invoiceTaxTotals(db, current) : null;
+                                  if (!taxTotals) {
+                                    return footer.map((f) => (
+                                      <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
+                                        <dt>{t(def.fields[f].label)}</dt>
+                                        <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
+                                      </div>
+                                    ));
+                                  }
+                                  const fmt = (val) => display(db, def.fields.amount_untaxed, val, current) || money(0, currencyCode(db, current));
+                                  const hasTaxGroups = taxTotals.subtotals.some((s) => s.groups.length > 0);
+                                  return (
+                                    <>
+                                      {taxTotals.subtotals.map((sub, si) => (
+                                        <Fragment key={`sub-${si}`}>
+                                          <div>
+                                            <dt>{t(sub.name)}</dt>
+                                            <dd>{fmt(sub.amount)}</dd>
+                                          </div>
+                                          {sub.groups.map((g) => (
+                                            <div key={`grp-${g.tax_group_id ?? 'none'}`}>
+                                              <dt>{g.tax_group_id ? g.name : t(g.name)}</dt>
+                                              <dd>{fmt(g.amount)}</dd>
+                                            </div>
+                                          ))}
+                                        </Fragment>
+                                      ))}
+                                      {!hasTaxGroups && (
+                                        <div>
+                                          <dt>{t(def.fields.amount_tax.label)}</dt>
+                                          <dd>{display(db, def.fields.amount_tax, current.amount_tax, current) || money(0, currencyCode(db, current))}</dd>
+                                        </div>
+                                      )}
+                                      {taxTotals.rounding_amount !== 0 && (
+                                        <div>
+                                          <dt>{t('Cash Rounding')}</dt>
+                                          <dd>{fmt(taxTotals.rounding_amount)}</dd>
+                                        </div>
+                                      )}
+                                      {footer.filter((f) => !['amount_untaxed', 'amount_tax'].includes(f)).map((f) => (
+                                        <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
+                                          <dt>{t(def.fields[f].label)}</dt>
+                                          <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
+                                        </div>
+                                      ))}
+                                    </>
+                                  );
+                                })()}
                               </dl>
                             )}
                           </div>
