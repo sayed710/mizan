@@ -217,6 +217,56 @@ function OutstandingCredits({ db, spec, current, onApply }) {
   );
 }
 
+/** Model-driven payments field rendering with Unreconcile action on eligible rows. */
+function PaymentsFieldTable({ db, def, current, spec, onUnreconcile }) {
+  const field = def.fields.payments;
+  const value = current.payments ?? [];
+  const multiCompany = (db.records['res.company'] ?? []).length > 1;
+  const cols = (field.columnsFor?.(current, db) ?? Object.entries(field.fields)).filter(([, f]) => !f.hidden && (!f.multiCompanyOnly || multiCompany));
+  return (
+    <div className="lines-wrap">
+      <table className="lines">
+        <thead>
+          <tr>
+            {cols.map(([k, f]) => (
+              <th key={k} className={['integer', 'float', 'monetary'].includes(f.type) ? 'num' : ''}>
+                {f.hideHeader ? '' : t(f.label)}
+              </th>
+            ))}
+            <th className="o2m-cols-th"><span className="sr-only">{t('Actions')}</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {value.map((l, i) => {
+            const cellRec = { ...l, move_type: l.move_type ?? current?.move_type, company_id: l.company_id ?? current?.company_id, currency_id: l.currency_id ?? current?.currency_id };
+            const canUnrec = spec?.canUnreconcile ? spec.canUnreconcile(db, current, l) : false;
+            return (
+              <tr key={l.id ?? i}>
+                {cols.map(([k, f]) => {
+                  const rawVal = f.compute ? f.compute(cellRec, db, current) : l[k];
+                  const cellVal = f.valueFallback && !(rawVal?.length) ? f.valueFallback(l) : rawVal;
+                  return (
+                    <td key={k} className={['integer', 'float', 'monetary'].includes(f.type) ? 'num' : ''}>
+                      {display(db, f, cellVal, cellRec)}
+                    </td>
+                  );
+                })}
+                <td>
+                  {canUnrec ? (
+                    <button type="button" className="btn sm" onClick={() => onUnreconcile(l)}>
+                      {t(spec?.unreconcileLabel ?? 'Unreconcile')}
+                    </button>
+                  ) : null}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Activities({ db, model, id, name }) {
   const [form, setForm] = useState(null);
   const acts = search(db, 'mail.activity').filter((a) => a.res_model === model && a.res_id === id && !a.done);
@@ -659,6 +709,26 @@ export function FormView({ leaf, id, base, params }) {
                     const activeTab = tabs[tab] ?? tabs[0];
                     const tabReadonly = locked || activeTab.readonly;
                     const renderTabField = (f, placeholder) => {
+                      if (f === 'payments' && activeTab.widget && def.form[activeTab.widget]) {
+                        return (
+                          <PaymentsFieldTable
+                            key={f}
+                            db={db}
+                            def={def}
+                            current={current}
+                            spec={def.form[activeTab.widget]}
+                            onUnreconcile={(row) => {
+                              const savedId = current.id && !dirty ? current.id : save();
+                              if (savedId == null) return;
+                              try {
+                                const res = def.form[activeTab.widget].unreconcile(getDb(), read(getDb(), model, savedId), row);
+                                commit(res.db);
+                                setError(null);
+                              } catch (e) { fail(e); }
+                            }}
+                          />
+                        );
+                      }
                       const resolvedPlaceholder = placeholder ?? (def.fields[f].placeholder ? t(def.fields[f].placeholder) : undefined);
                       return (['one2many', 'text', 'html'].includes(def.fields[f].type)
                         ? (
