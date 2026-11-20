@@ -5,6 +5,27 @@ import { bookToAccount } from './bank.js';
 import { today } from './common.js';
 import { roundCurrency } from '../money.js';
 
+const statementLinesCache = new WeakMap();
+
+export function linesByStatement(db) {
+  if (!db) return new Map();
+  let map = statementLinesCache.get(db);
+  if (map) return map;
+  map = new Map();
+  const lines = search(db, 'account.bank.statement.line');
+  for (const l of lines) {
+    if (!l.statement_id) continue;
+    let list = map.get(l.statement_id);
+    if (!list) {
+      list = [];
+      map.set(l.statement_id, list);
+    }
+    list.push(l);
+  }
+  statementLinesCache.set(db, map);
+  return map;
+}
+
 export function roundStatementAmount(db, statement, amount) {
   if (amount == null) return 0;
   const num = Number(amount) || 0;
@@ -18,7 +39,7 @@ export function roundStatementAmount(db, statement, amount) {
 
 /** Computed ending balance: balance_start + sum of its lines' amounts. */
 export function computeBalanceEnd(r, db) {
-  const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === r.id && l.active !== false);
+  const lines = linesByStatement(db).get(r.id) ?? [];
   const linesSum = lines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
   const total = (Number(r.balance_start) || 0) + linesSum;
   return roundStatementAmount(db, r, total);
@@ -26,9 +47,9 @@ export function computeBalanceEnd(r, db) {
 
 /** Computed completeness: has lines and balance_end equals balance_end_real at the journal currency rounding. */
 export function computeIsComplete(r, db) {
-  const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === r.id && l.active !== false);
+  const lines = linesByStatement(db).get(r.id) ?? [];
   if (!lines.length) return false;
-  const balanceEnd = roundStatementAmount(db, r, computeBalanceEnd(r, db));
+  const balanceEnd = computeBalanceEnd(r, db);
   const balanceEndReal = roundStatementAmount(db, r, r.balance_end_real);
   return balanceEnd === balanceEndReal;
 }
@@ -39,11 +60,11 @@ export function computeIsValid(r, db) {
   if (!db || !r.journal_id || inComputeIsValid) return true;
   inComputeIsValid = true;
   try {
-    const statements = search(db, 'account.bank.statement')
-      .filter((s) => s.journal_id === r.journal_id && s.active !== false)
+    const rawStatements = search(db, 'account.bank.statement')
+      .filter((s) => s.journal_id === r.journal_id)
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id);
-    const idx = statements.findIndex((s) => s.id === r.id);
-    const prev = idx > 0 ? statements[idx - 1] : null;
+    const idx = rawStatements.findIndex((s) => s.id === r.id);
+    const prev = idx > 0 ? rawStatements[idx - 1] : null;
     if (!prev) return true;
     return roundStatementAmount(db, r, r.balance_start) === roundStatementAmount(db, prev, prev.balance_end_real);
   } finally {
@@ -72,7 +93,7 @@ function statementGuard(db, before, after) {
   const company = after.company_id ?? journal.company_id ?? 1;
   if (journal.company_id && journal.company_id !== company) return 'The bank journal belongs to another company';
 
-  const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === after.id && l.active !== false);
+  const lines = linesByStatement(db).get(after.id) ?? [];
   if (lines.some((l) => l.journal_id !== after.journal_id || (l.company_id ?? 1) !== company)) {
     return 'Statement lines must belong to the statement journal and company';
   }
@@ -128,7 +149,6 @@ export function closeStatement(db, statementId) {
     const createdLine = read(currentDb, 'account.bank.statement.line', lineRes.id);
     const booked = bookToAccount(currentDb, createdLine, {
       label: isSurplus ? 'Cash Difference Gain' : 'Cash Difference Loss',
-      amount: Math.abs(diff),
     });
     currentDb = booked.db;
   }
@@ -175,7 +195,7 @@ export const bankStatementModels = {
           partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
           amount: { type: 'monetary', label: 'Amount' },
         },
-        compute: (r, db) => search(db, 'account.bank.statement.line').filter((l) => l.statement_id === r.id && l.active !== false),
+        compute: (r, db) => linesByStatement(db).get(r.id) ?? [],
       },
       is_complete: { type: 'boolean', label: 'Complete', readonly: true, compute: computeIsComplete },
       is_valid: { type: 'boolean', label: 'Valid', readonly: true, compute: computeIsValid },

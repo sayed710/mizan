@@ -2059,6 +2059,20 @@ export function cashMove(db, journalId, { amount, label, date, statementId } = {
   const moveLabel = (label ? String(label).trim() : '') || (sign >= 0 ? 'Put Money In' : 'Take Money Out');
   const moveDate = date || today();
 
+  let resolvedStatementId = statementId ?? null;
+  if (resolvedStatementId) {
+    const stmt = read(db, 'account.bank.statement', resolvedStatementId);
+    if (!stmt || stmt.journal_id !== journal.id || (stmt.company_id ?? 1) !== (journal.company_id ?? 1)) {
+      throw new Error('Statement does not exist or belongs to another journal');
+    }
+    if (stmt.state === 'closed') throw new Error('Cannot add lines to a closed statement');
+  } else {
+    const openStmt = search(db, 'account.bank.statement').find(
+      (s) => s.journal_id === journal.id && s.state === 'open' && s.active !== false
+    );
+    if (openStmt) resolvedStatementId = openStmt.id;
+  }
+
   return create(db, 'account.bank.statement.line', {
     journal_id: journal.id,
     company_id: journal.company_id ?? 1,
@@ -2066,7 +2080,7 @@ export function cashMove(db, journalId, { amount, label, date, statementId } = {
     payment_ref: moveLabel,
     amount: sign * Math.abs(num),
     state: 'to_check',
-    ...(statementId ? { statement_id: statementId } : {}),
+    ...(resolvedStatementId ? { statement_id: resolvedStatementId } : {}),
   });
 }
 
@@ -2423,18 +2437,20 @@ export const accountingModels = {
         {
           label: 'Put Money In',
           when: (j) => j?.type === 'cash',
-          prompt: 'Amount',
+          ask: [{ label: 'Amount', type: 'number' }],
           run: (db, j, input) => {
-            const res = putMoneyIn(db, j.id, { amount: input });
+            const amount = Array.isArray(input) ? input[0] : input;
+            const res = putMoneyIn(db, j.id, { amount });
             return { db: res.db };
           },
         },
         {
           label: 'Take Money Out',
           when: (j) => j?.type === 'cash',
-          prompt: 'Amount',
+          ask: [{ label: 'Amount', type: 'number' }],
           run: (db, j, input) => {
-            const res = takeMoneyOut(db, j.id, { amount: input });
+            const amount = Array.isArray(input) ? input[0] : input;
+            const res = takeMoneyOut(db, j.id, { amount });
             return { db: res.db };
           },
         },

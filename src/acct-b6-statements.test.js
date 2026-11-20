@@ -7,8 +7,8 @@ register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 import { create, read, search, write, unlink } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
-import { importStatement, importStatementLines } from './models/statements.js';
-import { bookToAccount, reconcileWith } from './models/bank.js';
+import { importStatement, importStatementLines, parseCamtBalances } from './models/statements.js';
+import { bookToAccount, reconcileWith, unreconcile } from './models/bank.js';
 import { closeStatement, roundStatementAmount } from './models/bankstatement.js';
 import { cashMove, postMove, putMoneyIn, takeMoneyOut } from './models/accounting.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -572,3 +572,592 @@ test('BANK-18: Dashboard cash journal card renders Put Money In and Take Money O
   assert.match(html, /Take Money Out|سحب أموال/, 'Take Money Out link exists on dashboard cash card');
   assert.match(html, new RegExp(`#/open/account\\.journal/${cashJournal.id}`), 'Links point directly to the cash journal form');
 });
+
+// -------------------------------------------------------------------------
+// QODO Review Findings 1 - 13 Verification Tests
+// -------------------------------------------------------------------------
+
+test('Finding 1: Closing gains and losses cannot be reversed afterward on closed statements', () => {
+  let db = seed();
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash');
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '450000');
+  const lossAccount = search(db, 'account.account').find((a) => a.code === '690000');
+  db = write(db, 'account.journal', cashJournal.id, {
+    profit_account_id: profitAccount.id,
+    loss_account_id: lossAccount.id,
+  });
+
+  // A. Surplus line
+  const stmtSurplus = create(db, 'account.bank.statement', {
+    name: 'CSH-SURPLUS',
+    journal_id: cashJournal.id,
+    date: '2026-09-01',
+    balance_start: 100,
+    balance_end_real: 120, // 20 surplus
+  });
+  db = stmtSurplus.db;
+  db = closeStatement(db, stmtSurplus.id);
+  const surplusLine = search(db, 'account.bank.statement.line').find((l) => l.statement_id === stmtSurplus.id);
+  assert.ok(surplusLine, 'Surplus difference line created');
+  assert.equal(surplusLine.state, 'reconciled');
+  assert.throws(
+    () => unreconcile(db, surplusLine),
+    /Cannot unreconcile lines of a closed statement/
+  );
+
+  // B. Shortage line
+  const stmtShortage = create(db, 'account.bank.statement', {
+    name: 'CSH-SHORTAGE',
+    journal_id: cashJournal.id,
+    date: '2026-09-02',
+    balance_start: 120,
+    balance_end_real: 110, // 10 shortage
+  });
+  db = stmtShortage.db;
+  db = closeStatement(db, stmtShortage.id);
+  const shortageLine = search(db, 'account.bank.statement.line').find((l) => l.statement_id === stmtShortage.id);
+  assert.ok(shortageLine, 'Shortage difference line created');
+  assert.equal(shortageLine.state, 'reconciled');
+  assert.throws(
+    () => unreconcile(db, shortageLine),
+    /Cannot unreconcile lines of a closed statement/
+  );
+
+  // C. Direct state edit rejected
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', surplusLine.id, { state: 'to_check' }),
+    /reconciled|closed/i
+  );
+});
+
+test('Finding 2: Put Money In and Take Money Out use ask and work through FormView button runner', () => {
+  let db = seed();
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash');
+  const buttons = models['account.journal'].form.buttons;
+  const putBtn = buttons.find((b) => b.label === 'Put Money In');
+  const takeBtn = buttons.find((b) => b.label === 'Take Money Out');
+
+  assert.ok(putBtn && Array.isArray(putBtn.ask) && putBtn.ask.length > 0, 'Put Money In has ask config');
+  assert.ok(takeBtn && Array.isArray(takeBtn.ask) && takeBtn.ask.length > 0, 'Take Money Out has ask config');
+
+  // FormView collects answers into array and passes to run(db, record, answers)
+  const putRes = putBtn.run(db, cashJournal, [175]);
+  db = putRes.db;
+  const putLine = search(db, 'account.bank.statement.line').find((l) => l.amount === 175);
+  assert.ok(putLine, 'Line with 175 created by FormView button runner');
+
+  const takeRes = takeBtn.run(db, cashJournal, [85]);
+  db = takeRes.db;
+  const takeLine = search(db, 'account.bank.statement.line').find((l) => l.amount === -85);
+  assert.ok(takeLine, 'Line with -85 created by FormView button runner');
+});
+
+test('Finding 3: Closed statements cannot lose lines via protectDelete or lineGuard active changes', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const stmtRes = create(db, 'account.bank.statement', {
+    name: 'STMT-PROT-DEL',
+    journal_id: bankJournal.id,
+    date: '2026-09-05',
+    balance_start: 0,
+    balance_end_real: 50,
+  });
+  db = stmtRes.db;
+  const lineRes = create(db, 'account.bank.statement.line', {
+    statement_id: stmtRes.id,
+    journal_id: bankJournal.id,
+    company_id: 1,
+    date: '2026-09-05',
+    payment_ref: 'Unbooked line',
+    amount: 50,
+    state: 'to_check',
+  });
+  db = lineRes.db;
+
+  // Close statement
+  db = write(db, 'account.bank.statement', stmtRes.id, { state: 'closed' });
+
+  // 1. Direct delete via unlink rejected by protectDelete
+  assert.throws(
+    () => unlink(db, 'account.bank.statement.line', [lineRes.id]),
+    /Cannot remove lines from a closed statement/
+  );
+
+  // 2. Unlinking via statement_id: null rejected by lineGuard
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', lineRes.id, { statement_id: null }),
+    /Cannot remove lines from a closed statement/
+  );
+
+  // 3. Archiving line (active: false) rejected by lineGuard
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', lineRes.id, { active: false }),
+    /Cannot change lines linked to a closed statement/
+  );
+});
+
+test('Finding 4: Multi-account / multi-statement CAMT and OFX imports partition responses', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const defaults = { journal_id: bankJournal.id };
+
+  // Multi-statement CAMT with 2 <Stmt> blocks
+  const MULTI_CAMT = `<?xml version="1.0"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt>
+<Stmt>
+<Bal><Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">100.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">150.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Ntry><Amt Ccy="USD">50.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-09-06</Dt></BookgDt><AcctSvcrRef>MCAMT-1</AcctSvcrRef><AddtlNtryInf>Stmt 1 Tx</AddtlNtryInf></Ntry>
+</Stmt>
+<Stmt>
+<Bal><Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">150.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">220.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Ntry><Amt Ccy="USD">70.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-09-07</Dt></BookgDt><AcctSvcrRef>MCAMT-2</AcctSvcrRef><AddtlNtryInf>Stmt 2 Tx</AddtlNtryInf></Ntry>
+</Stmt>
+</BkToCstmrStmt></Document>`;
+
+  const camtRes = importStatement(db, 'multi_camt.xml', MULTI_CAMT, defaults);
+  assert.equal(camtRes.count, 2);
+  db = camtRes.db;
+  assert.ok(Array.isArray(camtRes.statement_ids) && camtRes.statement_ids.length === 2, '2 statements created for 2 Stmt blocks');
+  const s1 = read(db, 'account.bank.statement', camtRes.statement_ids[0]);
+  const s2 = read(db, 'account.bank.statement', camtRes.statement_ids[1]);
+  assert.equal(s1.balance_start, 100);
+  assert.equal(s1.balance_end_real, 150);
+  assert.equal(s2.balance_start, 150);
+  assert.equal(s2.balance_end_real, 220);
+
+  // Multi-statement OFX with 2 <STMTRS> blocks
+  const MULTI_OFX = `OFXHEADER:100
+<OFX><BANKMSGSRSV1>
+<STMTTRNRS><STMTRS><CURDEF>USD
+<BANKTRANLIST><STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260908<TRNAMT>40.00<FITID>MOFX-1<NAME>Tx 1</STMTTRN></BANKTRANLIST>
+<LEDGERBAL><BALAMT>300.00</LEDGERBAL></STMTRS></STMTTRNRS>
+<STMTTRNRS><STMTRS><CURDEF>USD
+<BANKTRANLIST><STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260909<TRNAMT>60.00<FITID>MOFX-2<NAME>Tx 2</STMTTRN></BANKTRANLIST>
+<LEDGERBAL><BALAMT>360.00</LEDGERBAL></STMTRS></STMTTRNRS>
+</BANKMSGSRSV1></OFX>`;
+
+  const ofxRes = importStatement(db, 'multi_ofx.ofx', MULTI_OFX, defaults);
+  assert.equal(ofxRes.count, 2);
+  assert.ok(Array.isArray(ofxRes.statement_ids) && ofxRes.statement_ids.length === 2, '2 statements created for 2 STMTRS blocks');
+  const sOfx1 = read(ofxRes.db, 'account.bank.statement', ofxRes.statement_ids[0]);
+  const sOfx2 = read(ofxRes.db, 'account.bank.statement', ofxRes.statement_ids[1]);
+  assert.equal(sOfx1.balance_end_real, 300);
+  assert.equal(sOfx2.balance_end_real, 360);
+});
+
+test('Finding 5: Reconciled lines cannot leave or enter closed statements', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const stmtClosedRes = create(db, 'account.bank.statement', {
+    name: 'STMT-CLOSED-REC',
+    journal_id: bankJournal.id,
+    date: '2026-09-10',
+    balance_start: 0,
+    balance_end_real: 100,
+  });
+  db = stmtClosedRes.db;
+  const lineRes = create(db, 'account.bank.statement.line', {
+    statement_id: stmtClosedRes.id,
+    journal_id: bankJournal.id,
+    company_id: 1,
+    date: '2026-09-10',
+    payment_ref: 'Reconciled closed line',
+    amount: 100,
+    state: 'to_check',
+  });
+  db = lineRes.db;
+
+  // Reconcile line
+  const inv = makeInvoice(db, { price: 100, date: '2026-09-01' });
+  db = inv.db;
+  db = reconcileWith(db, read(db, 'account.bank.statement.line', lineRes.id), inv.id);
+
+  // Close statement
+  db = write(db, 'account.bank.statement', stmtClosedRes.id, { state: 'closed' });
+
+  // 1. Moving reconciled line out of closed statement rejected
+  const otherStmt = create(db, 'account.bank.statement', {
+    name: 'OTHER-STMT',
+    journal_id: bankJournal.id,
+    date: '2026-09-12',
+    balance_start: 100,
+    balance_end_real: 200,
+  });
+  db = otherStmt.db;
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', lineRes.id, { statement_id: otherStmt.id }),
+    /Cannot remove lines from a closed statement|A reconciled bank transaction cannot be changed/
+  );
+
+  // 2. Unlinking statement_id from reconciled line on closed statement rejected
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', lineRes.id, { statement_id: null }),
+    /Cannot remove lines from a closed statement|A reconciled bank transaction cannot be changed/
+  );
+
+  // 3. Moving an existing reconciled line INTO a closed statement rejected
+  const freeLine = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    company_id: 1,
+    date: '2026-09-11',
+    payment_ref: 'Free line',
+    amount: 50,
+    state: 'to_check',
+  });
+  db = freeLine.db;
+  const inv2 = makeInvoice(db, { price: 50, date: '2026-09-01' });
+  db = inv2.db;
+  db = reconcileWith(db, read(db, 'account.bank.statement.line', freeLine.id), inv2.id);
+
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', freeLine.id, { statement_id: stmtClosedRes.id }),
+    /Cannot add lines to a closed statement|A reconciled bank transaction cannot be changed/
+  );
+});
+
+test('Finding 6: Cash moves associate with open cash statement avoiding false count difference', () => {
+  let db = seed();
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash');
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '450000');
+  const lossAccount = search(db, 'account.account').find((a) => a.code === '690000');
+  db = write(db, 'account.journal', cashJournal.id, {
+    profit_account_id: profitAccount.id,
+    loss_account_id: lossAccount.id,
+  });
+
+  // Open statement on cash journal
+  const stmtRes = create(db, 'account.bank.statement', {
+    name: 'CSH-OPEN-01',
+    journal_id: cashJournal.id,
+    date: '2026-09-15',
+    balance_start: 50,
+    balance_end_real: 150, // includes the 100 cash move
+  });
+  db = stmtRes.db;
+
+  // Put Money In without specifying statementId should link to the open statement
+  const putRes = putMoneyIn(db, cashJournal.id, { amount: 100, label: 'Add 100 cash' });
+  db = putRes.db;
+  const line = read(db, 'account.bank.statement.line', putRes.id);
+  assert.equal(line.statement_id, stmtRes.id, 'Cash move links to current open statement of cash journal');
+
+  // Closing statement at counted balance (150) should balance with diff 0
+  db = closeStatement(db, stmtRes.id);
+  const closedStmt = read(db, 'account.bank.statement', stmtRes.id);
+  assert.equal(closedStmt.state, 'closed');
+  assert.equal(closedStmt.balance_end, 150);
+  const stmtLines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === stmtRes.id);
+  assert.equal(stmtLines.length, 1, 'No diff line created because cash move was included');
+});
+
+test('Finding 7: CAMT CLBD booked balance is preferred over CLAV available balance', () => {
+  // Case A: CLBD then CLAV
+  const CAMT_CLBD_THEN_CLAV = `<BkToCstmrStmt><Stmt>
+<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">700.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Bal><Tp><CdOrPrtry><Cd>CLAV</Cd></CdOrPrtry></Tp><Amt Ccy="USD">650.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+</Stmt></BkToCstmrStmt>`;
+  const resA = parseCamtBalances(CAMT_CLBD_THEN_CLAV);
+  assert.equal(resA.balance_end_real, 700, 'CLBD booked balance preferred when CLAV comes after');
+
+  // Case B: CLAV then CLBD
+  const CAMT_CLAV_THEN_CLBD = `<BkToCstmrStmt><Stmt>
+<Bal><Tp><CdOrPrtry><Cd>CLAV</Cd></CdOrPrtry></Tp><Amt Ccy="USD">650.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">700.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+</Stmt></BkToCstmrStmt>`;
+  const resB = parseCamtBalances(CAMT_CLAV_THEN_CLBD);
+  assert.equal(resB.balance_end_real, 700, 'CLBD booked balance preferred when CLAV comes before');
+
+  // Case C: Only CLAV
+  const CAMT_ONLY_CLAV = `<BkToCstmrStmt><Stmt>
+<Bal><Tp><CdOrPrtry><Cd>CLAV</Cd></CdOrPrtry></Tp><Amt Ccy="USD">650.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+</Stmt></BkToCstmrStmt>`;
+  const resC = parseCamtBalances(CAMT_ONLY_CLAV);
+  assert.equal(resC.balance_end_real, 650, 'Fallback to CLAV if CLBD absent');
+});
+
+test('Finding 8: Changing journalFilter resets statementFilter in BankReconcile view', async () => {
+  const { makeEl } = setupDom();
+  const { BankReconcile } = await import('./views/BankReconcile.jsx');
+  const React = await import('react');
+  const ReactDOM = await import('react-dom/client');
+  const { act } = await import('react');
+  const { initStore, commit } = await import('./store.js');
+
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash');
+
+  const sBank = create(db, 'account.bank.statement', {
+    name: 'STMT-BNK-F8',
+    journal_id: bankJournal.id,
+    date: '2026-09-18',
+    balance_start: 0,
+    balance_end_real: 100,
+  });
+  db = sBank.db;
+
+  const lBank = create(db, 'account.bank.statement.line', {
+    statement_id: sBank.id,
+    journal_id: bankJournal.id,
+    company_id: 1,
+    date: '2026-09-18',
+    payment_ref: 'Line on bank',
+    amount: 100,
+    state: 'to_check',
+  });
+  db = lBank.db;
+
+  const lCash = create(db, 'account.bank.statement.line', {
+    journal_id: cashJournal.id,
+    company_id: 1,
+    date: '2026-09-18',
+    payment_ref: 'Line on cash',
+    amount: 50,
+    state: 'to_check',
+  });
+  db = lCash.db;
+
+  await initStore();
+  await commit(db);
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = ReactDOM.createRoot(host);
+
+  try {
+    await act(async () => {
+      root.render(React.createElement(BankReconcile));
+    });
+
+    const journalSelect = find(host, (n) => n.tagName === 'SELECT' && n.options?.some((o) => o.textContent?.includes(bankJournal.name)));
+    const statementSelect = find(host, (n) => n.tagName === 'SELECT' && n.options?.some((o) => o.textContent?.includes('STMT-BNK-F8')));
+
+    assert.ok(journalSelect, 'Journal select found');
+    assert.ok(statementSelect, 'Statement select found');
+
+    const reactProps = (n) => {
+      const key = Object.keys(n).find((k) => k.startsWith('__reactProps$'));
+      return key ? n[key] : null;
+    };
+
+    // Select bank journal and statement
+    await act(async () => {
+      reactProps(journalSelect)?.onChange?.({ target: { value: String(bankJournal.id) } });
+    });
+    await act(async () => {
+      reactProps(statementSelect)?.onChange?.({ target: { value: String(sBank.id) } });
+    });
+
+    // Switch journal to cash journal
+    await act(async () => {
+      reactProps(journalSelect)?.onChange?.({ target: { value: String(cashJournal.id) } });
+    });
+
+    // Cash transaction must not be hidden
+    assert.ok(host.textContent.includes('Line on cash'), 'Switching journals shows new journal transactions');
+  } finally {
+    await act(async () => {
+      root.unmount();
+    });
+  }
+});
+
+test('Finding 9: Older imports do not inherit balances from future statements', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const defaults = { journal_id: bankJournal.id };
+
+  // 1. Import a future statement on 2026-10-01 with balance 500
+  const FUTURE_OFX = `OFXHEADER:100
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD
+<BANKTRANLIST><STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20261001<TRNAMT>100.00<FITID>FUT-1<NAME>Future</STMTTRN></BANKTRANLIST>
+<LEDGERBAL><BALAMT>500.00</BALAMT></LEDGERBAL></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`;
+
+  const res1 = importStatement(db, 'future.ofx', FUTURE_OFX, defaults);
+  db = res1.db;
+
+  // 2. Import an older statement on 2026-08-01 without balances
+  const OLD_OFX = `OFXHEADER:100
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD
+<BANKTRANLIST><STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260801<TRNAMT>50.00<FITID>OLD-1<NAME>Older</STMTTRN></BANKTRANLIST>
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`;
+
+  const res2 = importStatement(db, 'older.ofx', OLD_OFX, defaults);
+  db = res2.db;
+
+  const oldStmt = read(db, 'account.bank.statement', res2.statement_id);
+  assert.notEqual(oldStmt.balance_start, 500, 'Older statement must NOT inherit balance from later statement');
+  assert.equal(oldStmt.balance_start, 150000, 'Starts from booked account balance (150,000) not future statement (500)');
+});
+
+test('Finding 10: Closed statements refuse arbitrary line creation and reassignments', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '450000');
+  db = write(db, 'account.journal', bankJournal.id, { profit_account_id: profitAccount.id });
+
+  const stmtRes = create(db, 'account.bank.statement', {
+    name: 'STMT-F10',
+    journal_id: bankJournal.id,
+    date: '2026-09-20',
+    balance_start: 0,
+    balance_end_real: 50,
+  });
+  db = stmtRes.db;
+  db = write(db, 'account.bank.statement', stmtRes.id, { state: 'closed' });
+
+  // 1. Creating a line on bank journal matching profit account on closed statement is refused
+  assert.throws(
+    () => create(db, 'account.bank.statement.line', {
+      statement_id: stmtRes.id,
+      journal_id: bankJournal.id,
+      company_id: 1,
+      date: '2026-09-20',
+      payment_ref: 'Backdoor attempt',
+      amount: 10,
+      counterpart_account_id: profitAccount.id,
+      state: 'to_check',
+    }),
+    /Cannot add lines to a closed statement/
+  );
+
+  // 2. Reassigning an existing line onto closed statement is refused
+  const existingLine = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    company_id: 1,
+    date: '2026-09-20',
+    payment_ref: 'Existing line',
+    amount: 10,
+    counterpart_account_id: profitAccount.id,
+    state: 'to_check',
+  });
+  db = existingLine.db;
+
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', existingLine.id, { statement_id: stmtRes.id }),
+    /Cannot add lines to a closed statement/
+  );
+});
+
+test('Finding 11: Overlapping partial re-imports create statements that balance', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const defaults = { journal_id: bankJournal.id };
+
+  // First import: Tx 1 ($100)
+  const FILE1 = `<?xml version="1.0"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt>
+<Bal><Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">1000.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">1100.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Ntry><Amt Ccy="USD">100.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-09-22</Dt></BookgDt><AcctSvcrRef>DUP-TX-1</AcctSvcrRef><AddtlNtryInf>Tx 1</AddtlNtryInf></Ntry>
+</Stmt></BkToCstmrStmt></Document>`;
+
+  const res1 = importStatement(db, 'file1.xml', FILE1, defaults);
+  db = res1.db;
+
+  // Second import: Overlaps Tx 1 and adds Tx 2 ($50), with ending balance 1150
+  const FILE2 = `<?xml version="1.0"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt>
+<Bal><Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">1000.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="USD">1150.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+<Ntry><Amt Ccy="USD">100.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-09-22</Dt></BookgDt><AcctSvcrRef>DUP-TX-1</AcctSvcrRef><AddtlNtryInf>Tx 1 duplicate</AddtlNtryInf></Ntry>
+<Ntry><Amt Ccy="USD">50.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-09-23</Dt></BookgDt><AcctSvcrRef>FRESH-TX-2</AcctSvcrRef><AddtlNtryInf>Tx 2 fresh</AddtlNtryInf></Ntry>
+</Stmt></BkToCstmrStmt></Document>`;
+
+  const res2 = importStatement(db, 'file2.xml', FILE2, defaults);
+  assert.equal(res2.count, 1, 'Only 1 fresh transaction imported');
+  db = res2.db;
+
+  const s2 = read(db, 'account.bank.statement', res2.statement_id);
+  assert.equal(s2.balance_start, 1100, 'Starting balance derived to match fresh-only lines (1150 - 50)');
+  assert.equal(s2.balance_end_real, 1150);
+  assert.equal(s2.balance_end, 1150);
+  assert.equal(s2.is_complete, true, 'Partial re-import statement balances and is complete');
+});
+
+test('Finding 12: linesByStatement groups lines without quadratic scans', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const s = create(db, 'account.bank.statement', {
+    name: 'STMT-F12',
+    journal_id: bankJournal.id,
+    date: '2026-09-25',
+    balance_start: 0,
+    balance_end_real: 30,
+  });
+  db = s.db;
+  db = create(db, 'account.bank.statement.line', {
+    statement_id: s.id,
+    journal_id: bankJournal.id,
+    company_id: 1,
+    date: '2026-09-25',
+    payment_ref: 'L1',
+    amount: 10,
+    state: 'to_check',
+  }).db;
+  db = create(db, 'account.bank.statement.line', {
+    statement_id: s.id,
+    journal_id: bankJournal.id,
+    company_id: 1,
+    date: '2026-09-25',
+    payment_ref: 'L2',
+    amount: 20,
+    state: 'to_check',
+  }).db;
+
+  const stmt = read(db, 'account.bank.statement', s.id);
+  assert.equal(stmt.line_ids.length, 2);
+  assert.equal(stmt.balance_end, 30);
+  assert.equal(stmt.is_complete, true);
+});
+
+test('Finding 13: Closing foreign-currency cash statement books difference properly', () => {
+  let db = seed();
+  // Ensure EUR currency exists
+  let eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  if (!eur) {
+    const res = create(db, 'res.currency', { name: 'EUR', symbol: '€', rounding: 0.01 });
+    db = res.db;
+    eur = read(db, 'res.currency', res.id);
+  }
+
+  const baseCash = search(db, 'account.journal').find((j) => j.type === 'cash');
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '450000');
+  const lossAccount = search(db, 'account.account').find((a) => a.code === '690000');
+
+  // Create foreign currency cash journal
+  const fxJournalRes = create(db, 'account.journal', {
+    name: 'EUR Cash',
+    code: 'CSHEUR',
+    type: 'cash',
+    currency_id: eur.id,
+    company_id: 1,
+    profit_account_id: profitAccount.id,
+    loss_account_id: lossAccount.id,
+    default_account_id: baseCash.default_account_id,
+    suspense_account_id: baseCash.suspense_account_id,
+  });
+  db = fxJournalRes.db;
+  const fxJournal = read(db, 'account.journal', fxJournalRes.id);
+
+  const stmtRes = create(db, 'account.bank.statement', {
+    name: 'FX-CSH-01',
+    journal_id: fxJournal.id,
+    date: '2026-09-28',
+    balance_start: 100, // 100 EUR
+    balance_end_real: 125, // 125 EUR (diff +25 EUR)
+  });
+  db = stmtRes.db;
+
+  const closedDb = closeStatement(db, stmtRes.id);
+  const closedStmt = read(closedDb, 'account.bank.statement', stmtRes.id);
+  assert.equal(closedStmt.state, 'closed');
+  assert.equal(closedStmt.balance_end, 125);
+  assert.equal(closedStmt.is_complete, true);
+
+  const diffLine = search(closedDb, 'account.bank.statement.line').find((l) => l.statement_id === stmtRes.id);
+  assert.ok(diffLine, 'Difference line created on foreign currency cash journal');
+  assert.equal(diffLine.state, 'reconciled');
+  assert.equal(diffLine.amount, 25);
+  assert.equal(diffLine.open_amount, 0);
+});
+

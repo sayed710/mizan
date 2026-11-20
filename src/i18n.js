@@ -3388,6 +3388,8 @@ const ar = {
   'Cannot add lines to a closed statement': 'لا يمكن إضافة بنود إلى كشف حساب مغلق',
   'Cannot remove lines from a closed statement': 'لا يمكن إزالة بنود من كشف حساب مغلق',
   'Cannot change lines linked to a closed statement': 'لا يمكن تعديل بنود مرتبطة بكشف حساب مغلق',
+  'Cannot unreconcile lines of a closed statement': 'لا يمكن إلغاء تسوية بنود كشف حساب مغلق',
+  'Statement does not exist or belongs to another journal': 'كشف الحساب غير موجود أو ينتمي إلى دفتر يومية آخر',
   'Cash operations are only available for cash journals': 'عمليات النقدية متاحة فقط لدفاتر يومية النقدية',
   'Enter a valid amount greater than 0': 'أدخل مبلغاً صالحاً أكبر من 0',
   'Payment Difference': 'فرق الدفعة',

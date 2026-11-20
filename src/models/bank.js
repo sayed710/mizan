@@ -7,6 +7,7 @@ import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, counterpartTaxLines, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
+import { roundStatementAmount } from './bankstatement.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
@@ -637,6 +638,10 @@ function unreconcileLockError(db, line) {
 function unreconcileError(db, before, after) {
   const lockError = unreconcileLockError(db, before);
   if (lockError) return lockError;
+  if (before.statement_id) {
+    const stmt = read(db, 'account.bank.statement', before.statement_id);
+    if (stmt?.state === 'closed') return 'Cannot unreconcile lines of a closed statement';
+  }
   if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length || WRITEOFF_FIELDS.some((k) => after[k] != null)) return 'Unreconciliation requires reversing entries and clearing the bank links';
   const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', ...WRITEOFF_FIELDS, 'name']);
   if ([...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !clearedFields.has(k)).some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) return 'A reconciled bank transaction cannot be changed';
@@ -675,6 +680,10 @@ export function unreconcile(db, line, reversalDate = null) {
   const target = read(db, 'account.bank.statement.line', line.id) ?? line;
   const lockErr = unreconcileLockError(db, target);
   if (lockErr) throw new Error(lockErr);
+  if (target.statement_id) {
+    const stmt = read(db, 'account.bank.statement', target.statement_id);
+    if (stmt?.state === 'closed') throw new Error('Cannot unreconcile lines of a closed statement');
+  }
   const bankId = target.bank_move_id ?? (target.payment_id ? target.move_id : null);
   if (!bankId) throw new Error('Cannot unreconcile a transaction without its bank entry link');
   const allocations = target.allocations ?? [];
@@ -831,45 +840,68 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
 function lineGuard(db, before, after) {
   const clearingBooking = before?.bank_move_id && (!after.bank_move_id || after.open_amount == null || (after.allocations ?? []).length < (before.allocations ?? []).length);
   if (before && after.state === 'to_check' && !after.move_id && (before.state === 'reconciled' || clearingBooking)) return unreconcileError(db, before, after);
-  if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
-    return changed ? 'A reconciled bank transaction cannot be changed' : null;
-  }
-  if (before?.bank_move_id) {
-    const changed = ['amount', 'date', 'payment_ref', 'company_id', 'journal_id', 'bank_move_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
-    if (changed) return 'A booked bank transaction cannot be changed';
-  }
-  const company = after.company_id ?? 1;
-  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
-  if (!after.journal_id) return 'Bank Journal is required';
-  const journal = read(db, 'account.journal', after.journal_id);
-  if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
-  if (!isLiquidityJournal(journal)) return 'Bank transactions need a bank or cash journal';
-  if (after.statement_id) {
-    const statement = read(db, 'account.bank.statement', after.statement_id);
-    if (!statement) return 'The bank statement does not exist';
-    if (statement.journal_id !== after.journal_id || (statement.company_id ?? 1) !== company) {
-      return 'Statement lines must belong to the statement journal and company';
-    }
-    if (statement.state === 'closed' && (!before || before.statement_id !== after.statement_id)) {
-      const isDiffLine = after.counterpart_account_id && (after.counterpart_account_id === journal?.profit_account_id || after.counterpart_account_id === journal?.loss_account_id);
-      if (!isDiffLine) {
-        return 'Cannot add lines to a closed statement';
-      }
-    }
-  }
+
   if (before?.statement_id) {
     const prevStmt = read(db, 'account.bank.statement', before.statement_id);
     if (prevStmt?.state === 'closed') {
       if (after.statement_id !== before.statement_id) {
         return 'Cannot remove lines from a closed statement';
       }
-      const changed = ['amount', 'date', 'journal_id', 'company_id'].find(
+      const changed = ['amount', 'date', 'journal_id', 'company_id', 'active', 'state'].find(
         (k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)
       );
       if (changed) return 'Cannot change lines linked to a closed statement';
     }
   }
+
+  if (after.statement_id) {
+    const statement = read(db, 'account.bank.statement', after.statement_id);
+    if (!statement) return 'The bank statement does not exist';
+    const comp = (before?.state === 'reconciled' ? before.company_id : after.company_id) ?? 1;
+    if (statement.journal_id !== after.journal_id || (statement.company_id ?? 1) !== comp) {
+      return 'Statement lines must belong to the statement journal and company';
+    }
+    if (statement.state === 'closed' && (!before || before.statement_id !== after.statement_id)) {
+      if (before) return 'Cannot add lines to a closed statement';
+      const journal = read(db, 'account.journal', after.journal_id);
+      const isCash = journal?.type === 'cash';
+      const expectedAccount = after.amount > 0 ? journal?.profit_account_id : journal?.loss_account_id;
+      const validAccount = expectedAccount && after.counterpart_account_id === expectedAccount;
+      if (!isCash || !validAccount) return 'Cannot add lines to a closed statement';
+      const otherLines = search(db, 'account.bank.statement.line').filter(
+        (l) => l.statement_id === statement.id && l.id !== after.id
+      );
+      const hasExistingDiff = otherLines.some(
+        (l) => l.counterpart_account_id === journal?.profit_account_id || l.counterpart_account_id === journal?.loss_account_id
+      );
+      if (hasExistingDiff) return 'Cannot add lines to a closed statement';
+      const otherSum = otherLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
+      const expectedDiff = roundStatementAmount(
+        db,
+        statement,
+        Number(statement.balance_end_real || 0) - (Number(statement.balance_start || 0) + otherSum)
+      );
+      if (roundStatementAmount(db, statement, after.amount) !== expectedDiff) {
+        return 'Cannot add lines to a closed statement';
+      }
+    }
+  }
+
+  if (before?.state === 'reconciled') {
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    return changed ? 'A reconciled bank transaction cannot be changed' : null;
+  }
+  if (before?.bank_move_id) {
+    const changed = ['amount', 'date', 'payment_ref', 'company_id', 'journal_id', 'bank_move_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    if (changed) return 'A booked bank transaction cannot be changed';
+  }
+
+  const company = after.company_id ?? 1;
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
+  if (!after.journal_id) return 'Bank Journal is required';
+  const journal = read(db, 'account.journal', after.journal_id);
+  if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
+  if (!isLiquidityJournal(journal)) return 'Bank transactions need a bank or cash journal';
   if (after.unique_import_id && (db.records['account.bank.statement.line'] ?? []).some((l) => l.id !== after.id && l.active !== false && l.journal_id === after.journal_id && l.unique_import_id === after.unique_import_id)) {
     return 'A bank transaction with this Import ID already exists on this journal';
   }
@@ -992,7 +1024,13 @@ export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
     guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
-    protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null),
+    protectDelete: (db, l) => {
+      if (l.statement_id) {
+        const stmt = read(db, 'account.bank.statement', l.statement_id);
+        if (stmt?.state === 'closed') return 'Cannot remove lines from a closed statement';
+      }
+      return datedLockDelete((rec) => rec.state === 'reconciled' || Boolean(rec.bank_move_id) || Boolean(rec.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null);
+    },
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
     importFile: { accept: '.ofx,.qfx,.xml,.qif', run: importStatement },

@@ -70,13 +70,15 @@ export function BankReconcile() {
     [db, journalFilter],
   );
 
+  const hasStatementFilter = Boolean(statementFilter && statements.some((s) => String(s.id) === statementFilter));
+
   const openLines = useMemo(
     () => companyFilter(db, search(db, 'account.bank.statement.line'), 'account.bank.statement.line')
       .filter((l) => l.state === 'to_check'
         && (!journalFilter || String(l.journal_id) === journalFilter)
-        && (!statementFilter || String(l.statement_id) === statementFilter))
+        && (!hasStatementFilter || String(l.statement_id) === statementFilter))
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id),
-    [db, journalFilter, statementFilter],
+    [db, journalFilter, hasStatementFilter, statementFilter],
   );
 
   const selectedLine = useMemo(
@@ -300,7 +302,7 @@ export function BankReconcile() {
         <h1>{t('Bank Reconciliation')}</h1>
         <label className="inline-select">
           {t('Journal')}
-          <select aria-label={t('Journal')} value={journalFilter} onChange={(e) => { setJournalFilter(e.target.value); setSelectedLineId(null); }}>
+          <select aria-label={t('Journal')} value={journalFilter} onChange={(e) => { setJournalFilter(e.target.value); setStatementFilter(''); setSelectedLineId(null); }}>
             <option value="">{t('All Journals')}</option>
             {journals.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
           </select>
