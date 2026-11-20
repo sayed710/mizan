@@ -582,11 +582,35 @@ test('Qodo PR #190: a shared journal\'s method lines all carry its company, so n
   db = bnk.db;
   const own = (d) => (d.records['account.payment.method.line'] ?? []).filter((l) => l.journal_id === bnk.id);
   assert.ok(own(db).length > 0);
-  assert.ok(own(db).every((l) => l.company_id === 1), 'default lines of a company-less journal belong to company 1');
+  assert.ok(own(db).every((l) => l.company_id == null), 'default lines of a company-less journal are shared like the journal');
 
   const manualIn = search(db, 'account.payment.method').find((m) => m.code === 'manual' && m.payment_type === 'inbound');
   const added = create(db, 'account.payment.method.line', { journal_id: bnk.id, payment_method_id: manualIn.id, name: 'Other company line' });
-  assert.equal(read(added.db, 'account.payment.method.line', added.id).company_id, 1, 'a new line defaults to its journal company');
+  assert.equal(read(added.db, 'account.payment.method.line', added.id).company_id, null, 'a new line takes its journal company');
   const foreign = { ...added.db, records: { ...added.db.records, 'account.payment.method.line': added.db.records['account.payment.method.line'].map((l) => (l.id === added.id ? { ...l, company_id: 2 } : l)) } };
   assert.throws(() => sync(db, foreign), /journal company/, 'a line of another company on a shared journal is refused on a plain diff');
+});
+
+test('Qodo PR #190: shared bank journal offers its Checks line to every company, and a company change saves with inline rows', async () => {
+  const { viewRecords } = await import('./companyView.js');
+  const { setCompanies } = await import('./models/company.js');
+  let db = seed();
+  const company2 = create(db, 'res.company', { name: 'Second Co', currency_id: read(db, 'res.company', 1).currency_id });
+  db = company2.db;
+  const bnk = create(db, 'account.journal', {
+    name: 'Shared Bank', code: 'SHB', type: 'bank', company_id: null,
+    default_account_id: accountId(db, '101401'), suspense_account_id: accountId(db, '101404'),
+  });
+  db = bnk.db;
+  const asCompany2 = setCompanies(db, { current: company2.id, allowed: [company2.id] });
+  const outbound = viewRecords(asCompany2, 'account.payment.method.line').filter((l) => l.journal_id === bnk.id && l.payment_type === 'outbound');
+  assert.deepEqual(outbound.map((l) => read(db, 'account.payment.method', l.payment_method_id).code).sort(), ['check_printing', 'manual']);
+
+  const journal = read(db, 'account.journal', bnk.id);
+  const moved = { ...journal, company_id: 1, outbound_payment_method_line_ids: journal.outbound_payment_method_line_ids.map((l) => ({ ...l, sequence: l.sequence + 1 })) };
+  const next = write(db, 'account.journal', bnk.id, { company_id: 1, outbound_payment_method_line_ids: moved.outbound_payment_method_line_ids });
+  const lines = (next.records['account.payment.method.line'] ?? []).filter((l) => l.journal_id === bnk.id);
+  assert.ok(lines.length > 0 && lines.every((l) => l.company_id === 1), 'lines follow the journal to its new company');
+  const synced = sync(db, next);
+  assert.ok((synced.records['account.payment.method.line'] ?? []).filter((l) => l.journal_id === bnk.id).every((l) => l.company_id === 1));
 });

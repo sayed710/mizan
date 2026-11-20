@@ -62,6 +62,9 @@ export function ensurePaymentMethods(db) {
  * Every method line owned by `journalId`, whatever company is active. Journals are shared across companies, so
  * ownership checks must not go through the company-scoped search() or another company's lines look missing.
  */
+/** The company of a journal's method lines: the journal's own, or none (shared) for a company-less journal. */
+const lineCompany = (journal) => journal?.company_id || null;
+
 function ownedMethodLines(db, journalId, { includeArchived = false } = {}) {
   return (db?.records?.['account.payment.method.line'] ?? [])
     .filter((l) => l.journal_id === journalId && (includeArchived || l.active !== false));
@@ -112,9 +115,9 @@ export function paymentMethodLineGuard(db, before, after) {
   const method = after.payment_method_id ? read(db, 'account.payment.method', after.payment_method_id) : null;
   if (!method) return 'Select an existing payment method';
   if (after.payment_type !== method.payment_type) return 'Payment method line direction must match its payment method';
-  // A line always belongs to its journal's company (a shared journal's lines are company 1, as journals default to it),
-  // so every line of one journal is visible to exactly the same users and a journal save never touches hidden lines.
-  if ((after.company_id ?? 1) !== (journal.company_id ?? 1)) {
+  // A line always has its journal's company (none for a shared journal), so every line of a journal is visible to
+  // exactly the users who can use the journal and a journal save never touches lines hidden from the editor.
+  if ((after.company_id || null) !== lineCompany(journal)) {
     return 'Payment method line must belong to the journal company';
   }
   if (before && (after.journal_id !== before.journal_id || after.payment_type !== before.payment_type)) {
@@ -155,7 +158,7 @@ export function ensureJournalDefaultMethodLines(db, journal, direction = null) {
         journal_id: journal.id,
         payment_type: method.payment_type,
         sequence: spec.sequence,
-        company_id: journal.company_id ?? 1,
+        company_id: lineCompany(journal),
       }).db;
     }
   }
@@ -317,7 +320,7 @@ function syncDirectionLines(db, journal, lines, direction) {
       next = create(next, 'account.payment.method.line', {
         ...payload,
         journal_id: journal.id,
-        company_id: journal.company_id ?? 1,
+        company_id: lineCompany(journal),
       }).db;
     }
   }
@@ -327,17 +330,17 @@ function syncDirectionLines(db, journal, lines, direction) {
 /** Synchronize `account.payment.method.line` records after `account.journal` create or write. */
 export function syncJournalMethodLines(db, journal, vals, before = null) {
   let next = stripJournalMethodLineFields(db, journal.id);
+  // Lines follow a company change first, so the submitted rows below are checked against the new company.
+  if (before && before.company_id !== journal.company_id) {
+    for (const line of ownedMethodLines(next, journal.id, { includeArchived: true })) {
+      if ((line.company_id || null) !== lineCompany(journal)) next = write(next, 'account.payment.method.line', line.id, { company_id: lineCompany(journal) });
+    }
+  }
   for (const [field, direction] of METHOD_LINE_FIELDS) {
     if (vals && Object.hasOwn(vals, field)) {
       next = syncDirectionLines(next, journal, vals[field], direction);
     } else if (isMethodLineJournal(journal) && (!before || before.type !== journal.type)) {
       next = ensureJournalDefaultMethodLines(next, journal, direction);
-    }
-  }
-  if (before && before.company_id !== journal.company_id) {
-    const companyId = journal.company_id ?? 1;
-    for (const line of ownedMethodLines(next, journal.id, { includeArchived: true })) {
-      if (line.company_id !== companyId) next = write(next, 'account.payment.method.line', line.id, { company_id: companyId });
     }
   }
   return next;
@@ -409,7 +412,7 @@ export const paymentMethodModels = {
       const journal = vals.journal_id ? read(db, 'account.journal', vals.journal_id) : null;
       const method = vals.payment_method_id ? read(db, 'account.payment.method', vals.payment_method_id) : null;
       return {
-        company_id: journal ? (journal.company_id ?? 1) : currentCompany(db),
+        company_id: journal ? lineCompany(journal) : currentCompany(db),
         ...(method?.payment_type ? { payment_type: method.payment_type } : {}),
         ...(vals.name === undefined && method?.name ? { name: method.name } : {}),
       };
