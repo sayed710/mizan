@@ -798,6 +798,41 @@ export function reverseDepreciation(db, move, options = {}) {
   return write(linked, 'account.asset', asset.id, { state: 'open', depreciation_ids: asset.depreciation_ids.map((l) => l.move_id === move.id ? { ...l, posted: false, move_id: null } : l) });
 }
 
+/** Reverse one posted journal entry: the action behind the form button and the list action. */
+function reverseOneEntry(db, r, values = {}) {
+  // A reversed entry is reconciled with its reversal, so report the reversal before the settlement.
+  if (r && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === r.id)) throw new Error('This entry has already been reversed');
+  if (settlingEntries(db).has(r.id)) throw new Error('A settlement entry cannot be reversed directly');
+  if (search(db, 'account.asset').some((a) => (a.depreciation_ids ?? []).some((l) => l.posted && l.move_id === r.id))) {
+    // Depreciation reversals reopen the board line at once, so they cannot be scheduled or turned into a new draft.
+    if (String(values.date ?? '') > today() || (values.mode ?? 'reverse') !== 'reverse') {
+      throw new Error('A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode');
+    }
+    return { db: reverseDepreciation(db, r, values) };
+  }
+  const scheduled = values.scheduled ?? (String(values.date ?? '') > today());
+  return reverseEntry(db, r, scheduled ? { ...values, scheduled: true } : values);
+}
+
+/** Fields of the reversal wizard, shared by the single and the batch reversal. */
+const reversalWizardFields = (journalId, companyId) => [
+  { name: 'date', type: 'date', label: 'Reversal Date', required: true, default: today() },
+  { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Use Specific Journal', default: journalId, domain: (j) => !j.company_id || j.company_id === companyId },
+  { name: 'mode', type: 'selection', label: 'Reversal Mode', options: [['reverse', 'Reverse'], ['modify', 'Reverse and Create Draft']], default: 'reverse' },
+  { name: 'reason', type: 'char', label: 'Reason', default: '' },
+];
+
+/** Reverse several entries at once; any refused entry aborts the whole batch, since nothing is committed until the end. */
+export function reverseEntries(db, ids, values = {}) {
+  const createdIds = [];
+  const next = [...new Set(Array.isArray(ids) ? ids : [ids])].reduce((current, id) => {
+    const res = reverseOneEntry(current, read(current, 'account.move', id), values);
+    if (res.id) createdIds.push(res.id);
+    return res.db;
+  }, db);
+  return { db: next, ids: createdIds };
+}
+
 /** Issued credit notes of an invoice, other than `exceptId`; drafts do not consume credit. */
 const creditNotesOf = (db, invoiceId, exceptId = null) => (db.records['account.move'] ?? [])
   .filter((m) => m.reversed_entry_id === invoiceId && m.id !== exceptId && m.state === 'posted');
@@ -2295,6 +2330,14 @@ export const journalEntriesView = {
   optionalList: ['invoice_date', 'activities'],
   listLabels: { display_name: 'Number', accounting_date: 'Date', invoice_date: 'Invoice Date', amount_total_signed: 'Total', state: 'Status' },
   searchFields: ['name', 'display_name', 'ref', 'partner_id', 'journal_id'],
+  listActions: [
+    {
+      label: 'Reverse Entries',
+      requiresSelection: true,
+      wizard: (db) => ({ title: 'Reverse Entries', fields: reversalWizardFields(null, db?.settings?.current_company_id ?? 1) }),
+      run: (db, ids, values = {}) => reverseEntries(db, ids, values),
+    },
+  ],
   filters: [
     [{ id: 'unposted', label: 'Unposted', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
     [
@@ -3278,23 +3321,8 @@ export const accountingModels = {
         {
           label: 'Reverse Entry',
           when: (r, db) => r.state === 'posted' && r.move_type === 'entry' && (!r.reversal_move_id || (db?.records['account.move'] ?? []).some((m) => m.id === r.reversal_move_id && m.state === 'cancel')) && !(db?.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === r.id) && !(db && settlingEntries(db).has(r.id)),
-          wizard: (db, r) => ({
-            title: 'Reverse Entry',
-            fields: [
-              { name: 'date', type: 'date', label: 'Reversal Date', required: true, default: today() },
-              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Use Specific Journal', default: r.journal_id ?? null, domain: (j) => !j.company_id || j.company_id === (r?.company_id ?? 1) },
-              { name: 'mode', type: 'selection', label: 'Reversal Mode', options: [['reverse', 'Reverse'], ['modify', 'Reverse and Create Draft']], default: 'reverse' },
-              { name: 'reason', type: 'char', label: 'Reason', default: '' },
-            ],
-          }),
-          run: (db, r, values = {}) => {
-            if (settlingEntries(db).has(r.id)) throw new Error('A settlement entry cannot be reversed directly');
-            if ((db.records['account.asset'] ?? []).some((a) => (a.depreciation_ids ?? []).some((l) => l.posted && l.move_id === r.id))) {
-              return { db: reverseDepreciation(db, r, values) };
-            }
-            const scheduled = values.scheduled ?? (String(values.date ?? '') > today());
-            return reverseEntry(db, r, scheduled ? { ...values, scheduled: true } : values);
-          },
+          wizard: (db, r) => ({ title: 'Reverse Entry', fields: reversalWizardFields(r.journal_id ?? null, r?.company_id ?? 1) }),
+          run: (db, r, values = {}) => reverseOneEntry(db, r, values),
         },
         {
           label: 'Apply Outstanding Credit',
