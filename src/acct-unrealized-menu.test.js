@@ -22,7 +22,7 @@ test('Unrealized Currencies menu renders dated invoice and bank positions and re
   db = create(db, 'account.journal', { code: 'MISC', name: 'Other journal', type: 'general', company_id: second.id }).db;
   const other = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: second.id, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other', qty: 1, price_unit: 200, tax: 0 }] });
   db = updateSettings(postMove(other.db, other.id), { current_company_id: 1, allowed_company_ids: [1] });
-  const leaf = menusFor('accounting').find((m) => m.label === 'Review').children.find((m) => m.label === 'Regularization Entries').children[0];
+  const leaf = menusFor('accounting').find((m) => m.label === 'Reporting').children.find((m) => m.label === 'Management').children.find((m) => m.report === 'unrealizedCurrencies');
   assert.equal(leaf.report, 'unrealizedCurrencies');
   const rows = foreignBalanceReport(db, '2026-02-28');
   assert.equal(rows.find((r) => r.invoice_id === invoice.id).difference, 50);

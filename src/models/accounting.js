@@ -3262,7 +3262,7 @@ export const accountingModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
-      ref: { type: 'char', label: 'Reference' },
+      ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
       invoice_date: { type: 'date', label: 'Date', tracking: true },
@@ -3400,7 +3400,7 @@ export const accountingModels = {
       },
       auto_post_until: { type: 'date', label: 'Repeat Until', copy: false },
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
-      narration: { type: 'text', label: 'Terms and Conditions' },
+      narration: { type: 'text', label: 'Terms and Conditions', tracking: true },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {

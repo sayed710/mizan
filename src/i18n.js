@@ -3524,6 +3524,8 @@ const ar = {
   'Country group name is required': 'اسم مجموعة الدول مطلوب',
   'The applied amount cannot be represented in the foreign currency after rounding': 'لا يمكن تمثيل المبلغ المطبق بالعملة الأجنبية بعد التقريب',
   'This credit note is linked to another invoice': 'إشعار الدائن هذا مرتبط بفاتورة أخرى',
+  'Fiscal position source account must belong to the fiscal position company': 'يجب أن يتبع الحساب الأصلي في الوضع المالي شركة الوضع المالي',
+  'Both accounts of a fiscal position mapping line must belong to the same company': 'يجب أن ينتمي كلا الحسابين في سطر تعيين الوضع المالي إلى نفس الشركة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
