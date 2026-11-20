@@ -911,7 +911,7 @@ test('CodeQL PR #189: exported text decodes entities once and strips nested tags
   const saved = globalThis.document;
   delete globalThis.document;
   try {
-    assert.deepEqual(annualReportToRows('<table><tr><td>R&amp;D &amp;lt;x&amp;gt;</td><td><<b>b</b>script>1</td></tr></table>'), [['R&D &lt;x&gt;', 'bscript>1']]);
+    assert.deepEqual(annualReportToRows('<table><tr><td>R&amp;D &amp;lt;x&amp;gt;</td><td><<b>b</b>script>1</td></tr></table>'), [['R&D &lt;x&gt;', '1']]);
   } finally {
     if (saved) globalThis.document = saved;
   }
