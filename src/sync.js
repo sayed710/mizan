@@ -783,6 +783,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     }
   }
   const seen = { ...db, records };
+  const baseCtx = { isAdmin, login, name: author, companies };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
     // An origin link only unlocks archived accounts for verified workflows: generated moves, server-rebuilt exchange
@@ -802,7 +803,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec, seen, !before, before) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets }, submittedByRecord.get(`${model}:${rec.id}`));
+      ?? models[model].guard?.(seen, before, rec, { ...baseCtx, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets }, submittedByRecord.get(`${model}:${rec.id}`));
     if (err) throw new Error(err);
     if (model === 'account.move') {
       const generated = generatedMoves.has(rec.id);
@@ -830,7 +831,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records })).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records }, baseCtx)).find(Boolean);
     if (blocked) throw new Error(blocked);
     const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
     if (unauthorized) throw new Error(unauthorized);
@@ -844,7 +845,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const kept = byId(records[model]);
     for (const raw of recs) {
       const rec = kept.get(raw.id);
-      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db, baseCtx);
       if (err) throw new Error(err);
     }
   }
