@@ -3498,6 +3498,12 @@ const ar = {
   'None of the selected records match the current filter': 'لا يطابق أي من السجلات المحددة عامل التصفية الحالي',
   'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
   'Partial reconciliation currency amount does not match the expected foreign residual': 'مبلغ العملة للمطابقة الجزئية لا يطابق الرصيد الأجنبي المتبقي المتوقع',
+  'Country Group': 'مجموعة الدول',
+  'Country Groups': 'مجموعات الدول',
+  Countries: 'الدول',
+  'Federal States': 'الولايات الاتحادية',
+  'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
+  'Country group name is required': 'اسم مجموعة الدول مطلوب',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

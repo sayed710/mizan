@@ -201,7 +201,7 @@ function cartLines(db, raw) {
 
 const pricelistOf = (db, id) => selectablePricelists(db).find((p) => p.id === id)?.id ?? null;
 /** Totals without the internal order lines. */
-const publicTotals = ({ orderLines, ...totals }) => totals;
+const publicTotals = ({ orderLines, fiscalPositionId, ...totals }) => totals;
 
 /** Cart prices computed on the server (client prices are never used), with the price of each website carrier. */
 export function publicCart(db, body) {
@@ -209,7 +209,7 @@ export function publicCart(db, body) {
   const { lines, error } = cartLines(db, b.lines);
   if (error) return { status: 400, body: { error } };
   const companyId = db.settings?.current_company_id ?? 1;
-  const options = { pricelistId: pricelistOf(db, b.pricelist), partnerCountry: clip(b.country, 80), partnerZip: clip(b.zip, 20), companyId };
+  const options = { pricelistId: pricelistOf(db, b.pricelist), partnerCountry: clip(b.country, 80), partnerState: clip(b.state, 80), partnerZip: clip(b.zip, 20), companyId };
   const carriers = websiteCarriers(db);
   try {
     const totals = cartTotals(db, lines, { ...options, carrierId: carriers.find((c) => c.id === b.carrier_id)?.id ?? null });
@@ -250,7 +250,7 @@ export function publicOrder(db, body) {
   const v = visitor(b);
   if (!v.name) return { status: 400, body: { error: 'Name is required' } };
   if (!EMAIL.test(v.email)) return { status: 400, body: { error: 'Enter a valid email address' } };
-  const address = { street: clip(b.street, 120), city: clip(b.city, 80), zip: clip(b.zip, 20), country: clip(b.country, 80) };
+  const address = { street: clip(b.street, 120), city: clip(b.city, 80), state: clip(b.state, 80), zip: clip(b.zip, 20), country: clip(b.country, 80) };
   const { lines, error } = cartLines(db, b.lines);
   if (error) return { status: 400, body: { error } };
   const carriers = websiteCarriers(db);
@@ -261,12 +261,12 @@ export function publicOrder(db, body) {
   const pricelistId = pricelistOf(db, b.pricelist);
   const companyId = db.settings?.current_company_id ?? 1;
   try {
-    const totals = cartTotals(db, lines, { pricelistId, carrierId: carrier?.id ?? null, partnerCountry: address.country, partnerZip: address.zip, companyId });
+    const totals = cartTotals(db, lines, { pricelistId, carrierId: carrier?.id ?? null, partnerCountry: address.country, partnerState: address.state, partnerZip: address.zip, companyId });
     const { db: withPartner, partnerId, shippingId } = checkoutPartners(db, v, address);
     const token = randomBytes(24).toString('base64url');
     const order = create(withPartner, 'sale.order', {
       company_id: companyId,
-      partner_id: partnerId, partner_invoice_id: partnerId, partner_shipping_id: shippingId, pricelist_id: pricelistId, carrier_id: carrier?.id ?? null,
+      partner_id: partnerId, partner_invoice_id: partnerId, partner_shipping_id: shippingId, pricelist_id: pricelistId, fiscal_position_id: totals.fiscalPositionId ?? null, carrier_id: carrier?.id ?? null,
       order_line: totals.orderLines, state: 'sent', source: 'website', payment_provider: provider.code, payment_state: 'pending', access_token_hash: hashToken(token),
     });
     let next = postNote(order.db, 'sale.order', order.id, `Payment method: ${provider.name}`);
