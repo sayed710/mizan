@@ -1911,7 +1911,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
     const docAmount = (isForeign && foreignAmount != null) ? foreignAmount : baseAmount;
 
     if (!taxIds.length || docAmount === 0) {
-      const hadTaxGeneratedTags = existingForBase.length > 0 || Boolean(baseLine.tax_grid_base);
+      const hadTaxGeneratedTags = existingForBase.length > 0;
       const updatedBase = {
         ...baseLine,
         tax_tag_ids: hadTaxGeneratedTags ? [] : (baseLine.tax_tag_ids ?? []),
