@@ -700,7 +700,7 @@ export const reconcileModels = {
           amount_string: { type: 'char', label: 'Amount' },
           amount: { type: 'float', label: 'Numeric Amount', hidden: true },
           tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', optional: 'hide' },
-          analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', optional: 'hide' },
+          analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
           label: { type: 'char', label: 'Label' },
         },
         newLine: () => ({ sequence: 10, partner_id: null, account_id: null, amount_type: 'percentage', amount_string: '100', amount: 100, tax_ids: [], label: '' }),
