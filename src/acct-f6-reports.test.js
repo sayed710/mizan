@@ -496,3 +496,386 @@ test('FIN-10 PDF: Print on reports renders printable layout with company header 
     await React.act(async () => root.unmount());
   }
 });
+
+function createMockDomParser() {
+  return class MockDOMParser {
+    parseFromString(markup) {
+      const makeNode = (tagName, attrs = {}, children = []) => {
+        const node = {
+          nodeType: 1,
+          tagName: tagName.toUpperCase(),
+          childNodes: [...children],
+          attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
+          removeAttribute(name) { this.attributes = this.attributes.filter((a) => a.name !== name); },
+          remove() {
+            if (this.parent) {
+              const idx = this.parent.childNodes.indexOf(this);
+              if (idx >= 0) this.parent.childNodes.splice(idx, 1);
+            }
+          },
+          replaceWith(...nodes) {
+            if (this.parent) {
+              const idx = this.parent.childNodes.indexOf(this);
+              if (idx >= 0) this.parent.childNodes.splice(idx, 1, ...nodes);
+              for (const n of nodes) n.parent = this.parent;
+            }
+          },
+          get innerHTML() {
+            return this.childNodes
+              .map((c) => (c.nodeType === 3 ? c.nodeValue : `<${c.tagName.toLowerCase()}${c.attributes.length ? ' ' + c.attributes.map((a) => `${a.name}="${a.value}"`).join(' ') : ''}>${c.innerHTML}</${c.tagName.toLowerCase()}>`))
+              .join('');
+          },
+        };
+        for (const child of children) child.parent = node;
+        return node;
+      };
+      const textNode = (value) => ({ nodeType: 3, nodeValue: value });
+      const parseTokens = (str) => {
+        const nodes = [];
+        const regex = /<(\/)?([a-zA-Z0-9]+)([^>]*)>|([^<]+)/g;
+        const stack = [{ childNodes: nodes }];
+        let match;
+        while ((match = regex.exec(str)) !== null) {
+          const [, isClosing, tagName, attrStr, text] = match;
+          if (text) {
+            const tNode = textNode(text);
+            stack[stack.length - 1].childNodes.push(tNode);
+            tNode.parent = stack[stack.length - 1];
+          } else if (isClosing) {
+            if (stack.length > 1 && stack[stack.length - 1].tagName === tagName.toUpperCase()) stack.pop();
+          } else {
+            const attrs = {};
+            if (attrStr) {
+              const attrRegex = /([a-zA-Z0-9_-]+)(?:=["']([^"']*)["'])?/g;
+              let aMatch;
+              while ((aMatch = attrRegex.exec(attrStr)) !== null) attrs[aMatch[1]] = aMatch[2] ?? '';
+            }
+            const el = makeNode(tagName, attrs, []);
+            stack[stack.length - 1].childNodes.push(el);
+            el.parent = stack[stack.length - 1];
+            if (!['BR', 'HR', 'IMG', 'INPUT'].includes(tagName.toUpperCase())) stack.push(el);
+          }
+        }
+        return nodes;
+      };
+      return { body: makeNode('BODY', {}, parseTokens(String(markup ?? ''))) };
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Qodo review fixes (PR #189):
+// 1. Multi-company prints name all companies
+// 2. Exported totals with colspan never covered by merge cells (Total 100)
+// 3. Annual report print sanitizes HTML body
+// 4 & 6. Column-aware cell typing (tax box codes stay text, currency amounts become numbers)
+// 5. Failed currency report prints error alert, disables print button
+// 7. Print dialog opens once per user action, never re-opens on re-render or reload
+// ---------------------------------------------------------------------------
+test('PR #189 review fixes: multi-company header, totals in merged ranges, HTML sanitizer, numeric parsing, error in print, print once', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  const { ReportPrintView } = await import('./views/ReportPrintView.jsx');
+  const { buildXlsx, parseZip, parseCellNumber } = await import('./xlsx.js');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+
+  // Finding 1: Multi-company print header and footer name all companies
+  {
+    const host = makeEl('div');
+    host.ownerDocument = globalThis.document;
+    const root = createRoot(host);
+    const multiCompanies = [
+      { id: 1, name: 'Acme Corp', currency: 'USD' },
+      { id: 2, name: 'Beta Ltd', currency: 'EUR' },
+    ];
+    try {
+      await React.act(async () => {
+        root.render(React.createElement(ReportPrintView, {
+          active: true,
+          company: multiCompanies[0],
+          companies: multiCompanies,
+          title: 'Consolidated Balance Sheet',
+          autoPrint: false,
+        }, React.createElement('div', null, 'Report Content')));
+      });
+
+      const paperCompany = find(host, (n) => n.className?.includes('paper-company'));
+      assert.ok(paperCompany, 'paper-company rendered');
+      assert.equal(paperCompany.textContent, 'Acme Corp, Beta Ltd', 'Multi-company header names all companies');
+
+      const paperFoot = find(host, (n) => n.className?.includes('paper-foot'));
+      assert.ok(paperFoot, 'paper-foot rendered');
+      assert.ok(paperFoot.textContent.includes('Acme Corp, Beta Ltd'), 'Multi-company footer names all companies');
+    } finally {
+      await React.act(async () => root.unmount());
+    }
+  }
+
+  // Finding 2: Totals in merged ranges never covered (Total 100 row test)
+  {
+    const table = makeEl('table');
+    table.ownerDocument = globalThis.document;
+    const tr1 = makeEl('tr');
+    const th1 = makeEl('th'); th1.textContent = 'Account';
+    const th2 = makeEl('th'); th2.textContent = 'Code';
+    const th3 = makeEl('th'); th3.textContent = 'Debit'; th3.className = 'num';
+    const th4 = makeEl('th'); th4.textContent = 'Credit'; th4.className = 'num';
+    tr1.appendChild(th1); tr1.appendChild(th2); tr1.appendChild(th3); tr1.appendChild(th4);
+    table.appendChild(tr1);
+
+    const tr2 = makeEl('tr');
+    const td1 = makeEl('td'); td1.textContent = 'Total'; td1.colSpan = 2; td1.setAttribute('colspan', '2');
+    const td2 = makeEl('td'); td2.textContent = '100.00'; td2.className = 'num';
+    const td3 = makeEl('td'); td3.textContent = '0.00'; td3.className = 'num';
+    tr2.appendChild(td1); tr2.appendChild(td2); tr2.appendChild(td3);
+    table.appendChild(tr2);
+
+    const xlsxBytes = buildXlsx(table);
+    const { files } = parseZip(xlsxBytes);
+    const sheetXml = new TextDecoder().decode(files['xl/worksheets/sheet1.xml'].data);
+
+    // Merge must be A2:B2
+    assert.match(sheetXml, /<mergeCell ref="A2:B2"\/>/, 'Row 2 merges columns A and B');
+    // C2 must contain the value 100 as a numeric cell, NOT hidden or shifted
+    assert.match(sheetXml, /<c r="C2" s="2"><v>100<\/v><\/c>/, 'C2 contains Total 100 as numeric value');
+    assert.match(sheetXml, /<c r="D2" s="2"><v>0<\/v><\/c>/, 'D2 contains Credit 0 as numeric value');
+    // A2 has 'Total'
+    assert.match(sheetXml, /<c r="A2"(?: s="0")? t="inlineStr"><is><t>Total<\/t><\/is><\/c>/, 'A2 contains Total label');
+
+    // Multi-level merged header (colspan + rowspan) never covers total or data cells
+    const multiHeaderTable = makeEl('table');
+    multiHeaderTable.ownerDocument = globalThis.document;
+    const thead = makeEl('thead');
+    const hRow1 = makeEl('tr');
+    const h1 = makeEl('th'); h1.textContent = 'Line'; h1.rowSpan = 2;
+    const h2 = makeEl('th'); h2.textContent = '2026'; h2.colSpan = 2;
+    hRow1.appendChild(h1); hRow1.appendChild(h2);
+    const hRow2 = makeEl('tr');
+    const h3 = makeEl('th'); h3.textContent = 'Debit'; h3.className = 'num';
+    const h4 = makeEl('th'); h4.textContent = 'Credit'; h4.className = 'num';
+    hRow2.appendChild(h3); hRow2.appendChild(h4);
+    thead.appendChild(hRow1);
+    thead.appendChild(hRow2);
+    multiHeaderTable.appendChild(thead);
+
+    const tbody = makeEl('tbody');
+    const dRow = makeEl('tr');
+    const d1 = makeEl('td'); d1.textContent = 'Total';
+    const d2 = makeEl('td'); d2.textContent = '100.00'; d2.className = 'num';
+    const d3 = makeEl('td'); d3.textContent = '0.00'; d3.className = 'num';
+    dRow.appendChild(d1); dRow.appendChild(d2); dRow.appendChild(d3);
+    tbody.appendChild(dRow);
+    multiHeaderTable.appendChild(tbody);
+
+    const mhXml = new TextDecoder().decode(parseZip(buildXlsx(multiHeaderTable)).files['xl/worksheets/sheet1.xml'].data);
+    assert.match(mhXml, /<mergeCell ref="A1:A2"\/>/, 'Rowspan header merges A1:A2');
+    assert.match(mhXml, /<mergeCell ref="B1:C1"\/>/, 'Colspan header merges B1:C1');
+    assert.match(mhXml, /<c r="A3" t="inlineStr"><is><t>Total<\/t><\/is><\/c>/, 'Total label is at A3 below merged header');
+    assert.match(mhXml, /<c r="B3" s="2"><v>100<\/v><\/c>/, 'Total 100 is at B3 outside merged header');
+    assert.match(mhXml, /<c r="C3" s="2"><v>0<\/v><\/c>/, 'Credit 0 is at C3 outside merged header');
+  }
+
+  // Finding 3: Annual report print sanitizes HTML body
+  {
+    const origParser = globalThis.DOMParser;
+    globalThis.DOMParser = createMockDomParser();
+    const db = seed();
+    const created = create(db, 'audit.report', {
+      title: 'XSS Test Annual Report',
+      start_date: '2026-01-01',
+      end_date: '2026-12-31',
+      company_id: 1,
+      body: '<p class="report-table">Safe Content</p><script>window.__pwned = true;</script><div onclick="alert(1)">Clickable</div>',
+    });
+    await React.act(async () => store.commit(created.db));
+
+    const host = makeEl('div');
+    host.ownerDocument = globalThis.document;
+    const root = createRoot(host);
+    try {
+      await React.act(async () => {
+        root.render(React.createElement(PrintDoc, { model: 'audit.report', id: created.id }));
+      });
+      const bodyEl = find(host, (n) => n.className?.includes('annual-report-body'));
+      assert.ok(bodyEl, 'annual-report-body is rendered');
+      const html = props(bodyEl)?.dangerouslySetInnerHTML?.__html ?? bodyEl.textContent ?? '';
+      assert.ok(!html.includes('<script>'), 'script tags must be stripped by sanitizer');
+      assert.ok(!html.includes('onclick'), 'onclick attribute must be stripped by sanitizer');
+      assert.ok(html.includes('Safe Content'), 'safe report text is preserved');
+    } finally {
+      if (origParser) globalThis.DOMParser = origParser;
+      else delete globalThis.DOMParser;
+      await React.act(async () => root.unmount());
+    }
+  }
+
+  // Finding 4 & 6: parseCellNumber accepts SAR, EUR, EGP, unconfigured warnings, and columnTypes keeps tax box codes as text
+  {
+    assert.equal(parseCellNumber('1,234.56 ﷼'), 1234.56, '1,234.56 ﷼ parsed as 1234.56');
+    assert.equal(parseCellNumber('-12.50 €'), -12.5, '-12.50 € parsed as -12.5');
+    assert.equal(parseCellNumber('ج.م1,000.00'), 1000, 'ج.م1,000.00 parsed as 1000');
+    assert.equal(parseCellNumber('SAR 1,234.56'), 1234.56, 'SAR 1,234.56 parsed as 1234.56');
+    assert.equal(parseCellNumber('SAR -1,234.56'), -1234.56, 'SAR -1,234.56 parsed as -1234.56');
+    assert.equal(parseCellNumber('-CA$1,234.56'), -1234.56, '-CA$1,234.56 parsed as -1234.56');
+    assert.equal(parseCellNumber('1,234.56 ر.س.'), 1234.56, '1,234.56 ر.س. parsed as 1234.56');
+    assert.equal(parseCellNumber('١٬٢٣٤٫٥٦ ﷼'), 1234.56, 'Arabic digits and separators parsed as 1234.56');
+    assert.equal(parseCellNumber('(١٬٢٣٤٫٥٦ ﷼)'), -1234.56, 'Arabic negative parens parsed as -1234.56');
+    assert.equal(parseCellNumber('1,234.56 ريال', { allowAnyCurrency: true }), 1234.56, 'Column-typed custom currency parsed as 1234.56');
+    assert.equal(parseCellNumber('15.5%', { allowAnyCurrency: true }), null, 'Percentages stay text even in numeric columns');
+    assert.equal(parseCellNumber('2026-01'), null, 'Hyphenated year-month stays text');
+    assert.equal(parseCellNumber('1-30'), null, 'Hyphenated aging bucket stays text');
+    assert.equal(parseCellNumber('1,234.56 (currency not configured)'), 1234.56, 'unconfigured currency warning stripped');
+    assert.equal(parseCellNumber('1,234.56 (عملة غير مضبوطة)'), 1234.56, 'Arabic unconfigured warning stripped');
+    assert.equal(parseCellNumber('(1,234.56 ﷼)'), -1234.56, 'parentheses with Riyal parsed as negative');
+    assert.equal(parseCellNumber('01'), null, 'code with leading zero stays text');
+    assert.equal(parseCellNumber('٠١'), null, 'Arabic code with leading zero stays text');
+    assert.equal(parseCellNumber('002'), null, 'code with leading zeros stays text');
+    assert.equal(parseCellNumber('0'), 0, 'zero is numeric');
+    assert.equal(parseCellNumber('0.00'), 0, '0.00 is numeric');
+
+    // Column-aware typing: tax box codes 1 and 12 stay text
+    const taxRows = [
+      ['Box', 'Description', 'Base', 'Tax'],
+      ['1', 'Standard Rate Sales', '1,234.56 ﷼', '185.18 ﷼'],
+      ['12', 'Total Sales', '1,234.56 ﷼', '185.18 ﷼'],
+    ];
+    const taxBytes = buildXlsx(taxRows, { columnTypes: ['text', 'text', 'number', 'number'] });
+    const { files: taxFiles } = parseZip(taxBytes);
+    const taxXml = new TextDecoder().decode(taxFiles['xl/worksheets/sheet1.xml'].data);
+
+    // Box codes '1' and '12' must be inlineStr, not numeric <v>1</v>
+    assert.match(taxXml, /<c r="A2" t="inlineStr"><is><t>1<\/t><\/is><\/c>/, 'Box code 1 is emitted as text inlineStr');
+    assert.match(taxXml, /<c r="A3" t="inlineStr"><is><t>12<\/t><\/is><\/c>/, 'Box code 12 is emitted as text inlineStr');
+    // Base and Tax amounts must be numeric <v>1234.56</v> and <v>185.18</v>
+    assert.match(taxXml, /<c r="C2" s="2"><v>1234\.56<\/v><\/c>/, 'Base is emitted as numeric cell');
+    assert.match(taxXml, /<c r="D2" s="2"><v>185\.18<\/v><\/c>/, 'Tax is emitted as numeric cell');
+  }
+
+  // Finding 5: UnrealizedCurrencies print mode displays error alert and disables Print button on failure
+  {
+    const { UnrealizedCurrencies } = await import('./views/UnrealizedCurrencies.jsx');
+    const host = makeEl('div');
+    host.ownerDocument = globalThis.document;
+    const root = createRoot(host);
+    try {
+      await React.act(async () => {
+        root.render(React.createElement(UnrealizedCurrencies));
+      });
+
+      // Initially valid date -> print button enabled
+      const printBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Print');
+      assert.ok(printBtn, 'Print button exists');
+      assert.equal(Boolean(props(printBtn)?.disabled), false, 'Print button is enabled for valid date');
+
+      // Change date to invalid date -> foreignBalanceReport throws -> error alert shown & print disabled
+      const dateInput = find(host, (n) => n.tagName === 'INPUT');
+      assert.ok(dateInput, 'Date input exists');
+      await React.act(async () => {
+        props(dateInput)?.onChange?.({ target: { value: 'invalid-date' } });
+      });
+
+      // Error must be visible on screen with role="alert"
+      const alert = find(host, (n) => props(n)?.role === 'alert');
+      assert.ok(alert, 'Error alert is rendered on calculation failure');
+      assert.ok(alert.textContent.includes('valid date'), 'Alert contains error message');
+
+      // Print button must now be disabled
+      const printBtnDisabled = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Print');
+      assert.equal(Boolean(props(printBtnDisabled)?.disabled), true, 'Print button is disabled when calculation fails');
+    } finally {
+      await React.act(async () => root.unmount());
+    }
+  }
+
+  // Finding 7: Print dialog opens once per user action, never re-opens on re-render or preview reload
+  {
+    let printCalls = 0;
+    const origPrint = globalThis.window.print;
+    globalThis.window.print = () => { printCalls += 1; };
+
+    const host = makeEl('div');
+    host.ownerDocument = globalThis.document;
+    const root = createRoot(host);
+
+    try {
+      const company = { id: 1, name: 'Print Test Co', currency: 'USD' };
+
+      // Case A: Initial mount with active=false (report view loaded)
+      await React.act(async () => {
+        root.render(React.createElement(ReportPrintView, {
+          active: false,
+          company,
+          title: 'Report',
+          autoPrint: true,
+        }));
+      });
+      assert.equal(printCalls, 0, 'No print call when inactive');
+
+      // User action: toggle active to true (clicks Print)
+      await React.act(async () => {
+        root.render(React.createElement(ReportPrintView, {
+          active: true,
+          company: { ...company }, // New object reference!
+          title: 'Report',
+          autoPrint: true,
+        }));
+      });
+      assert.equal(printCalls, 1, 'Print called once when active becomes true');
+
+      // Parent re-renders with fresh company object while active remains true
+      await React.act(async () => {
+        root.render(React.createElement(ReportPrintView, {
+          active: true,
+          company: { ...company }, // Fresh object reference again!
+          title: 'Report',
+          autoPrint: true,
+        }));
+      });
+      assert.equal(printCalls, 1, 'Print is NOT called again on re-render with new company object');
+
+      // User clicks Back (active=false), then clicks Print again (active=true) -> opens once more
+      await React.act(async () => {
+        root.render(React.createElement(ReportPrintView, {
+          active: false,
+          company,
+          title: 'Report',
+          autoPrint: true,
+        }));
+      });
+      await React.act(async () => {
+        root.render(React.createElement(ReportPrintView, {
+          active: true,
+          company,
+          title: 'Report',
+          autoPrint: true,
+        }));
+      });
+      assert.equal(printCalls, 2, 'Print opens once on a second explicit Print action after Back');
+
+      // Case B: Preview tab reload (initial mount with active=true)
+      const host2 = makeEl('div');
+      host2.ownerDocument = globalThis.document;
+      const root2 = createRoot(host2);
+      try {
+        await React.act(async () => {
+          root2.render(React.createElement(ReportPrintView, {
+            active: true,
+            company,
+            title: 'Preview Reload',
+            autoPrint: true,
+          }));
+        });
+        assert.equal(printCalls, 2, 'Initial mount with active=true does NOT auto-print (preview reload guard)');
+      } finally {
+        await React.act(async () => root2.unmount());
+      }
+    } finally {
+      globalThis.window.print = origPrint;
+      await React.act(async () => root.unmount());
+    }
+  }
+});

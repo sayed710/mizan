@@ -158,7 +158,9 @@ function annualReportExportData(db, r) {
 
 export function exportAnnualReportXlsx(db, r) {
   const { rows, baseName } = annualReportExportData(db, r);
-  return downloadXlsx(`${baseName}.xlsx`, rows, { sheetName: 'Annual Report' });
+  const maxCols = rows.reduce((m, row) => Math.max(m, row.length), 1);
+  const columnTypes = ['text', ...Array(Math.max(0, maxCols - 1)).fill('number')];
+  return downloadXlsx(`${baseName}.xlsx`, rows, { sheetName: 'Annual Report', columnTypes });
 }
 
 export function exportAnnualReportCsv(db, r) {

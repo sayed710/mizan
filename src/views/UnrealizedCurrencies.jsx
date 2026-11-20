@@ -28,39 +28,47 @@ export function UnrealizedCurrencies() {
       <label>{t('Date')} <input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
       <button type="button" className="btn sm" disabled={!!error} onClick={revalue}>{t('Revalue Foreign Currency')}</button>
       <span className="spacer" />
-      <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+      <button type="button" className="btn sm" disabled={!!error} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
     </div>
   );
-  const printCompany = isPrinting ? documentCompany(db, { company_id: currentCompany(db) }) : null;
+  const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  const printCompanies = isPrinting
+    ? allowedIds.map((cId) => documentCompany(db, { company_id: cId })).filter(Boolean)
+    : null;
+  const printCompany = isPrinting ? (printCompanies?.[0] ?? documentCompany(db, { company_id: currentCompany(db) })) : null;
   return (
     <ReportPrintView
       active={isPrinting}
       company={printCompany}
+      companies={printCompanies}
       title={t('Unrealized Currencies')}
       subtitle={`≤ ${date}`}
       controls={controls}
+      autoPrint={!error}
       onBack={() => setIsPrinting(false)}
     >
-      {!isPrinting && error && <p role="alert">{error}</p>}
-      <div className="list-wrap"><table className="list report">
-        <thead><tr>{['Company', 'Entry', 'Partner', 'Account', 'Currency', 'Foreign Balance', 'Exchange Rate', 'Booked', 'Current Value', 'Difference'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
-        <tbody>{rows.map((row, i) => {
-          const currency = read(db, 'res.currency', row.currency_id);
-          const rate = rateAt(db, row.currency_id, date, row.company_id);
-          return <tr key={`${row.company_id}-${row.account_id}-${row.currency_id}-${row.invoice_id ?? i}`}>
-            <td>{read(db, 'res.company', row.company_id)?.name ?? row.company_id}</td>
-            <td>{row.invoice_id ? read(db, 'account.move', row.invoice_id)?.name : '—'}</td>
-            <td>{read(db, 'res.partner', row.partner_id)?.name ?? '—'}</td>
-            <td>{read(db, 'account.account', row.account_id)?.name ?? row.account}</td>
-            <td>{currency?.name}</td>
-            <td className="num">{money(row.residual ?? row.foreign, currency?.name ?? null, currency ?? null)}</td>
-            <td className="num">{display(db, RATE_FIELD, rate)}</td>
-            <td className="num">{money(row.booked)}</td>
-            <td className="num">{money(row.value ?? row.booked + row.difference)}</td>
-            <td className="num">{money(row.difference)}</td>
-          </tr>;
-        })}</tbody>
-      </table></div>
+      {error && <p role="alert">{error}</p>}
+      {!error && (
+        <div className="list-wrap"><table className="list report">
+          <thead><tr>{['Company', 'Entry', 'Partner', 'Account', 'Currency', 'Foreign Balance', 'Exchange Rate', 'Booked', 'Current Value', 'Difference'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
+          <tbody>{rows.map((row, i) => {
+            const currency = read(db, 'res.currency', row.currency_id);
+            const rate = rateAt(db, row.currency_id, date, row.company_id);
+            return <tr key={`${row.company_id}-${row.account_id}-${row.currency_id}-${row.invoice_id ?? i}`}>
+              <td>{read(db, 'res.company', row.company_id)?.name ?? row.company_id}</td>
+              <td>{row.invoice_id ? read(db, 'account.move', row.invoice_id)?.name : '—'}</td>
+              <td>{read(db, 'res.partner', row.partner_id)?.name ?? '—'}</td>
+              <td>{read(db, 'account.account', row.account_id)?.name ?? row.account}</td>
+              <td>{currency?.name}</td>
+              <td className="num">{money(row.residual ?? row.foreign, currency?.name ?? null, currency ?? null)}</td>
+              <td className="num">{display(db, RATE_FIELD, rate)}</td>
+              <td className="num">{money(row.booked)}</td>
+              <td className="num">{money(row.value ?? row.booked + row.difference)}</td>
+              <td className="num">{money(row.difference)}</td>
+            </tr>;
+          })}</tbody>
+        </table></div>
+      )}
     </ReportPrintView>
   );
 }

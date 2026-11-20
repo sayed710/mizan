@@ -12,6 +12,7 @@ import { documentCompany, addressLines, documentTaxBreakdown } from '../models/c
 import { taxInvoiceLabel } from '../models/taxes.js';
 import { documentCurrency, formatCurrency } from '../money.js';
 import { invoiceTermNote } from '../models/terms.js';
+import { SafeHtml } from '../HtmlEditor.jsx';
 import { ReportPrintView } from './ReportPrintView.jsx';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
@@ -247,7 +248,7 @@ export function PrintDoc({ model, id }) {
         subtitle={`${rec.start_date} → ${rec.end_date}`}
         autoPrint={false}
       >
-        <div className="annual-report-body" dangerouslySetInnerHTML={{ __html: rec.body }} />
+        <div className="annual-report-body"><SafeHtml html={rec.body} /></div>
       </ReportPrintView>
     );
   }

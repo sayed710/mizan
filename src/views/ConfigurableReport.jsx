@@ -1,6 +1,6 @@
 import { Fragment, useRef, useState } from 'react';
 import { search } from '../orm.js';
-import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine } from '../models/configurableReports.js';
+import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, targetCompanyIds } from '../models/configurableReports.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { today, validDate } from '../models/common.js';
 import { useDb } from '../store.js';
@@ -156,14 +156,27 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const exportXlsx = () => {
     const baseName = statementKind || report.code || report.name || 'report';
     const sheetName = title || report.name || baseName;
+    const columnTypes = [
+      'text',
+      ...data.headers.map(() => 'number'),
+      ...(data.showVariance ? ['number', 'text'] : []),
+    ];
     downloadXlsx(
       `${String(baseName).toLowerCase().replace(/\s+/g, '_')}.xlsx`,
-      tableToRows(tableRef.current),
-      { table: tableRef.current, sheetName },
+      tableRef.current,
+      { sheetName, columnTypes },
     );
   };
 
   const printCompany = isPrinting ? documentCompany(companyDb, { company_id: statementKind ? primaryCompanyId : reportCompany }) : null;
+  const scopedCompanyIds = isPrinting
+    ? targetCompanyIds(companyDb, { ...report, company_id: reportCompany }, group, { companyIds })
+    : [];
+  const printCompanies = isPrinting
+    ? (scopedCompanyIds.length
+        ? scopedCompanyIds.map((cId) => documentCompany(companyDb, { company_id: cId }) || companies.find((c) => c.id === cId)).filter(Boolean)
+        : (printCompany ? [printCompany] : []))
+    : null;
   const controls = (
     <div className="control-panel">
       <h1 className="cp-title">{statementKind ? t(title || report.name) : report.name}</h1>
@@ -292,6 +305,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     <ReportPrintView
       active={isPrinting}
       company={printCompany}
+      companies={printCompanies}
       title={statementKind ? t(title || report.name) : report.name}
       subtitle={period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`}
       controls={controls}

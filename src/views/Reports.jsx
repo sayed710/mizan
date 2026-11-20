@@ -165,7 +165,7 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
       {returnRecord && (
         <div className="row" style={{ marginBottom: 8 }}>
           <button type="button" className="btn sm" onClick={() => downloadCsv(`${safeBase}.csv`, taxReturnToCsv(db, returnRecord))}>{t('Export CSV')}</button>
-          <button type="button" className="btn sm" onClick={() => downloadXlsx(`${safeBase}.xlsx`, taxReturnToCsv(db, returnRecord), { sheetName: safeBase })}>{t('Export XLSX')}</button>
+          <button type="button" className="btn sm" onClick={() => downloadXlsx(`${safeBase}.xlsx`, taxReturnToCsv(db, returnRecord), { sheetName: safeBase, columnTypes: ['text', 'text', 'number', 'number'] })}>{t('Export XLSX')}</button>
           <button type="button" className="btn sm" onClick={() => downloadXml(`${safeBase}.xml`, taxReturnToXml(db, returnRecord))}>{t('Export XML')}</button>
         </div>
       )}
@@ -787,15 +787,20 @@ function ReportPage({ leaf }) {
   };
   const exportXlsx = () => {
     if (isAudit) {
-      downloadXlsx('audit.xlsx', auditTrailToCsv(auditAllRows), { sheetName: 'Audit Trail' });
+      downloadXlsx('audit.xlsx', auditTrailToCsv(auditAllRows), { sheetName: 'Audit Trail', columnTypes: Array(8).fill('text') });
       return;
     }
     const name = leaf.report || 'report';
     const sheetName = title || name;
-    downloadXlsx(`${name}.xlsx`, tableToRows(tableRef.current), { table: tableRef.current, sheetName });
+    downloadXlsx(`${name}.xlsx`, tableRef.current, { sheetName });
   };
   const activeCompanyId = selectedCompany === 'all' ? currentCompany(companyDb) : Number(selectedCompany);
   const printCompany = isPrinting ? documentCompany(companyDb, { company_id: activeCompanyId }) : null;
+  const printCompanies = isPrinting
+    ? (selectedCompany === 'all'
+        ? companies.map((c) => documentCompany(companyDb, { company_id: c.id }) || c)
+        : (printCompany ? [printCompany] : []))
+    : null;
   const subtitle = leaf.report === 'inalterability'
     ? t('Chain verification always covers all secured entries.')
     : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
@@ -901,6 +906,7 @@ function ReportPage({ leaf }) {
     <ReportPrintView
       active={isPrinting}
       company={printCompany}
+      companies={printCompanies}
       title={t(title)}
       subtitle={subtitle}
       controls={controls}

@@ -1,5 +1,6 @@
 // Zero-dependency OpenXML Spreadsheet (XLSX) writer and store-only ZIP generator.
 import { downloadBlob, extractTableCellText, fromCsv, tableToRows } from './csv.js';
+import { parseAmount } from './models/common.js';
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -194,26 +195,71 @@ export function colName(c) {
   return s;
 }
 
+const CURRENCY_AFFIX_RE = /(?:[A-Za-z]{1,3}\p{Sc}|\p{Sc}|[A-Z]{3}|[\u0621-\u064A]\.[\u0621-\u064A]\.?)/u;
+const LEAD_AFFIX_RE = new RegExp(`^${CURRENCY_AFFIX_RE.source}\\s*`, 'u');
+const TRAIL_AFFIX_RE = new RegExp(`\\s*${CURRENCY_AFFIX_RE.source}$`, 'u');
+const GENERIC_LEAD_AFFIX_RE = /^[^\d\u0660-\u0669\u06F0-\u06F9+\-%.,\s]+\s*/;
+const GENERIC_TRAIL_AFFIX_RE = /\s*[^\d\u0660-\u0669\u06F0-\u06F9+\-%.,\s]+$/;
+const LEADING_ZERO_CODE_RE = /^[0\u0660\u06F0][0-9\u0660-\u0669\u06F0-\u06F9]/;
+
 /** Parse an amount or numeric string into a JavaScript number, or null if not a numeric cell. */
-export function parseCellNumber(val) {
+export function parseCellNumber(val, { allowAnyCurrency = false } = {}) {
   if (typeof val === 'number' && Number.isFinite(val)) return val;
   if (typeof val !== 'string') return null;
-  const s = val.replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '').trim();
+  let s = val.replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '').trim();
   if (!s) return null;
-  // If it has leading zero and is not "0" or "0.xx", treat as code (e.g. "01", "002")
-  if (/^0\d+/.test(s)) return null;
-  // Accounting negative format: ($1,234.56) or (1,234.56)
+
+  // Leading zero guard: codes like "01", "002", "٠١" stay text (unless "0" or "0.xx")
+  if (LEADING_ZERO_CODE_RE.test(s)) return null;
+
+  // Strip unconfigured currency warning suffix (English and Arabic)
+  s = s.replace(/\s*\((?:currency not configured|عملة غير مضبوطة)\)\s*$/i, '').trim();
+
+  // Accounting negative format: ($1,234.56), (1,234.56), (1,234.56 ﷼), etc.
   const parenMatch = s.match(/^\((.*)\)$/);
   if (parenMatch) {
-    const inner = parseCellNumber(parenMatch[1]);
+    const inner = parseCellNumber(parenMatch[1], { allowAnyCurrency });
     return inner != null ? -Math.abs(inner) : null;
   }
-  // Strip leading/trailing currency symbols or 3-letter ISO currency codes (e.g. $, SAR, EGP, AED)
-  const match = s.match(/^([-+])?\s*(?:[A-Z]{3}|[$€£¥])?\s*([-+])?\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(?:[A-Z]{3}|[$€£¥])?$/);
-  if (!match || (match[1] && match[2])) return null;
-  const sign = match[1] || match[2] || '';
-  const num = Number(`${sign}${match[3].replace(/,/g, '')}`);
-  return Number.isFinite(num) ? num : null;
+
+  // Normalize Unicode minus \u2212
+  s = s.replace(/\u2212/g, '-');
+
+  // Extract sign only at start (never from inside codes/dates like "2026-01" or "1-30")
+  let isNegative = false;
+  let hasSign = false;
+  if (s.startsWith('-') || s.startsWith('+')) {
+    hasSign = true;
+    isNegative = s.startsWith('-');
+    s = s.slice(1).trim();
+  }
+
+  // Strip leading currency affix
+  const leadRe = allowAnyCurrency ? GENERIC_LEAD_AFFIX_RE : LEAD_AFFIX_RE;
+  const leadMatch = s.match(leadRe);
+  if (leadMatch) {
+    s = s.slice(leadMatch[0].length).trim();
+  }
+
+  // Support sign placed after leading currency affix (e.g., "SAR -1,234.56" or "$-12.50")
+  if (!hasSign && (s.startsWith('-') || s.startsWith('+'))) {
+    isNegative = s.startsWith('-');
+    s = s.slice(1).trim();
+  }
+
+  // Strip trailing currency affix
+  const trailRe = allowAnyCurrency ? GENERIC_TRAIL_AFFIX_RE : TRAIL_AFFIX_RE;
+  const trailMatch = s.match(trailRe);
+  if (trailMatch) {
+    s = s.slice(0, s.length - trailMatch[0].length).trim();
+  }
+
+  // Recheck leading zero guard after stripping sign and affixes
+  if (!s || LEADING_ZERO_CODE_RE.test(s)) return null;
+
+  const num = parseAmount(s);
+  if (!Number.isFinite(num)) return null;
+  return isNegative ? -Math.abs(num) : num;
 }
 
 const CONTENT_TYPES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -279,34 +325,56 @@ function buildWorkbookXml(sheetName) {
  * Extract 2D cell grid, merged ranges, and header count from a DOM table element.
  */
 export function extractTableGrid(table) {
-  if (!table) return { rows: [], merges: [], headerRowCount: 1 };
+  if (!table) return { rows: [], merges: [], headerRowCount: 1, numericCols: new Set(), cellTypes: [] };
   const rows = [];
+  const cellTypes = [];
   const merges = [];
   const occupied = new Set();
+  const numericCols = new Set();
   let headerRowCount = 0;
   let maxCols = 0;
-  const setCell = (r, c, value) => {
+  const setCell = (r, c, value, isNum, isHeaderRow = false) => {
     while (rows.length <= r) rows.push([]);
     while (rows[r].length <= c) rows[r].push('');
+    while (cellTypes.length <= r) cellTypes.push([]);
+    while (cellTypes[r].length <= c) cellTypes[r].push(null);
     rows[r][c] = value;
+    cellTypes[r][c] = isNum;
+    if (!isHeaderRow && isNum) numericCols.add(c);
     if (c + 1 > maxCols) maxCols = c + 1;
   };
 
-  const trs = Array.from(table.querySelectorAll?.('tr') ?? []);
+  const findTrs = (root) => {
+    const list = Array.from(root.querySelectorAll?.('tr') ?? []);
+    if (list.length) return list;
+    const res = [];
+    const walk = (n) => {
+      for (const child of n.childNodes ?? n.children ?? []) {
+        if (child.tagName?.toUpperCase() === 'TR') res.push(child);
+        else walk(child);
+      }
+    };
+    walk(root);
+    return res;
+  };
+
+  const trs = findTrs(table);
   for (let rIdx = 0; rIdx < trs.length; rIdx += 1) {
     const tr = trs[rIdx];
-    const cells = Array.from(tr.children).filter((c) => ['TH', 'TD'].includes(c.tagName?.toUpperCase()));
-    const isHeaderRow = tr.parentElement?.tagName?.toUpperCase() === 'THEAD'
+    const cellList = (tr.children && tr.children.length > 0 ? Array.from(tr.children) : (tr.childNodes ?? []));
+    const cells = cellList.filter((c) => ['TH', 'TD'].includes(c.tagName?.toUpperCase()));
+    const isHeaderRow = (tr.parentElement ?? tr.parentNode)?.tagName?.toUpperCase() === 'THEAD'
       || (cells.length > 0 && cells.every((c) => c.tagName?.toUpperCase() === 'TH'));
     if (isHeaderRow) headerRowCount = Math.max(headerRowCount, rIdx + 1);
 
     let cIdx = 0;
     for (const cell of cells) {
       while (occupied.has(`${rIdx}:${cIdx}`)) cIdx += 1;
-      const colSpan = Number(cell.getAttribute?.('colspan') || cell.colSpan) || 1;
-      const rowSpan = Number(cell.getAttribute?.('rowspan') || cell.rowSpan) || 1;
+      const colSpan = Number(cell.colSpan || cell.getAttribute?.('colspan') || cell.getAttribute?.('colSpan')) || 1;
+      const rowSpan = Number(cell.rowSpan || cell.getAttribute?.('rowspan') || cell.getAttribute?.('rowSpan')) || 1;
       const text = extractTableCellText(cell);
-      setCell(rIdx, cIdx, text);
+      const isNum = Boolean(cell.classList?.contains?.('num') || /\bnum\b/.test(cell.className || '') || cell.getAttribute?.('class')?.includes('num'));
+      setCell(rIdx, cIdx, text, isNum, isHeaderRow);
 
       if (colSpan > 1 || rowSpan > 1) {
         const fromRef = `${colName(cIdx)}${rIdx + 1}`;
@@ -316,17 +384,24 @@ export function extractTableGrid(table) {
       for (let rs = 0; rs < rowSpan; rs += 1) {
         for (let cs = 0; cs < colSpan; cs += 1) {
           occupied.add(`${rIdx + rs}:${cIdx + cs}`);
-          if (rs > 0 || cs > 0) setCell(rIdx + rs, cIdx + cs, '');
+          if (rs > 0 || cs > 0) setCell(rIdx + rs, cIdx + cs, '', false, isHeaderRow);
         }
       }
       cIdx += colSpan;
     }
   }
   const normalized = rows.map((row) => Array.from({ length: maxCols }, (_, i) => row[i] ?? ''));
-  return { rows: normalized.length ? normalized : tableToRows(table), merges, headerRowCount: headerRowCount || 1 };
+  const normalizedCellTypes = cellTypes.map((row) => Array.from({ length: maxCols }, (_, i) => row[i] ?? null));
+  return {
+    rows: normalized.length ? normalized : tableToRows(table),
+    merges,
+    headerRowCount: headerRowCount || 1,
+    numericCols,
+    cellTypes: normalizedCellTypes,
+  };
 }
 
-function buildSheetXml(rows, { headerRowCount = 1, merges = [] } = {}) {
+function buildSheetXml(rows, { headerRowCount = 1, merges = [], columnTypes, cellTypes } = {}) {
   const rowXmls = rows.map((row, rIdx) => {
     const rNum = rIdx + 1;
     const isHeader = rIdx < headerRowCount;
@@ -338,7 +413,9 @@ function buildSheetXml(rows, { headerRowCount = 1, merges = [] } = {}) {
         cellXmls.push(isHeader ? `<c r="${ref}" s="1"/>` : `<c r="${ref}"/>`);
         continue;
       }
-      const num = isHeader ? null : parseCellNumber(val);
+      const isExplicitText = !isHeader && ((columnTypes && (columnTypes[cIdx] === 'text' || columnTypes[cIdx] === 'string')) || (cellTypes && cellTypes[rIdx]?.[cIdx] === false));
+      const isExplicitNumber = !isHeader && ((columnTypes && columnTypes[cIdx] === 'number') || (cellTypes && cellTypes[rIdx]?.[cIdx] === true));
+      const num = (isHeader || isExplicitText) ? null : parseCellNumber(val, { allowAnyCurrency: isExplicitNumber });
       if (num != null) {
         const styleId = isHeader ? 3 : 2;
         cellXmls.push(`<c r="${ref}" s="${styleId}"><v>${num}</v></c>`);
@@ -370,21 +447,28 @@ export function buildXlsx(data, options = {}) {
   let rows = [];
   let merges = options.merges ?? [];
   let headerRowCount = options.headerRowCount ?? 1;
+  let cellTypes = options.cellTypes;
+  let columnTypes = options.columnTypes;
 
-  if (typeof data === 'string') {
-    rows = fromCsv(data);
-  } else if (data && typeof data === 'object' && !Array.isArray(data) && (data.tagName || data.querySelector)) {
-    const grid = extractTableGrid(data);
+  const tableElem = (options.table && (options.table.tagName || options.table.querySelector))
+    ? options.table
+    : (data && typeof data === 'object' && !Array.isArray(data) && (data.tagName || data.querySelector) ? data : null);
+
+  if (tableElem) {
+    const grid = extractTableGrid(tableElem);
     rows = grid.rows;
-    merges = merges.length ? merges : grid.merges;
+    merges = options.merges ?? grid.merges;
     headerRowCount = options.headerRowCount ?? grid.headerRowCount;
+    if (grid.numericCols?.size) {
+      cellTypes = options.cellTypes ?? grid.cellTypes;
+      if (!columnTypes) {
+        columnTypes = Array.from({ length: rows[0]?.length || 0 }, (_, i) => (grid.numericCols.has(i) ? 'number' : 'text'));
+      }
+    }
+  } else if (typeof data === 'string') {
+    rows = fromCsv(data);
   } else if (Array.isArray(data)) {
     rows = data;
-    if (options.table && (options.table.tagName || options.table.querySelector)) {
-      const grid = extractTableGrid(options.table);
-      if (!merges.length) merges = grid.merges;
-      if (options.headerRowCount == null) headerRowCount = grid.headerRowCount;
-    }
   }
 
   const sheetName = sanitizeSheetName(options.sheetName || 'Sheet1');
@@ -394,7 +478,7 @@ export function buildXlsx(data, options = {}) {
     'xl/_rels/workbook.xml.rels': WORKBOOK_RELS_XML,
     'xl/workbook.xml': buildWorkbookXml(sheetName),
     'xl/styles.xml': STYLES_XML,
-    'xl/worksheets/sheet1.xml': buildSheetXml(rows, { headerRowCount, merges }),
+    'xl/worksheets/sheet1.xml': buildSheetXml(rows, { headerRowCount, merges, columnTypes, cellTypes }),
   };
 
   return createZip(files);
