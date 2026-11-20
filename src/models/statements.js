@@ -1,7 +1,9 @@
 // Bank statement files (OFX/QFX, CAMT.053, QIF) parsed into statement lines; re-importing the same transactions is a no-op.
-import { create, read, search } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { isLiquidityJournal, journalCompany } from './ledger.js';
 import { sanitizeAccountNumber } from './partnerbank.js';
+import { today } from './common.js';
+import { roundCurrency } from '../money.js';
 
 const isValidCalendarDate = (y, m, d) => {
   if (!Number.isSafeInteger(y) || y < 1000 || y > 9999) return false;
@@ -330,12 +332,14 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false, e
   // The journal's own account (online sync stamps it on every line) is not a counterparty.
   const ownBank = journal?.bank_account_id ? read(db, 'res.partner.bank', journal.bank_account_id) : null;
   const ownKey = ownBank ? ownBank.sanitized_account_number || sanitizeAccountNumber(ownBank.account_number) : null;
-  const next = fresh.reduce((acc, { currency: _currency, ...l }) => {
+  const line_ids = [];
+  let next = db;
+  for (const { currency: _currency, ...l } of fresh) {
     let partnerId = l.partner_id ?? defaults.partner_id ?? null;
     if (!partnerId && l.account_number && sanitizeAccountNumber(l.account_number) !== ownKey) {
       partnerId = partnerByAccount.get(sanitizeAccountNumber(l.account_number)) ?? null;
     }
-    return create(acc, 'account.bank.statement.line', {
+    const res = create(next, 'account.bank.statement.line', {
       ...defaults,
       ...l,
       currency_id: currencyId,
@@ -343,12 +347,52 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false, e
       payment_ref: l.payment_ref || '/',
       state: 'to_check',
       ...(partnerId ? { partner_id: partnerId } : {}),
-    }).db;
-  }, db);
-  return { db: next, count: fresh.length };
+    });
+    next = res.db;
+    line_ids.push(res.id);
+  }
+  return { db: next, count: fresh.length, line_ids };
 }
 
-/** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
+/** Extract opening (OPBD/PRCD) and closing (CLBD/CLAV) balances from a CAMT.053 XML string. */
+export function parseCamtBalances(text) {
+  let balance_start = null;
+  let balance_end_real = null;
+  for (const [, b] of String(text).matchAll(/<(?:\w+:)?Bal>([\s\S]*?)<\/(?:\w+:)?Bal>/g)) {
+    const code = xmlTag(b, ['Tp', 'CdOrPrtry', 'Cd']) || xmlTag(b, ['Tp', 'CdOrPrtry', 'Prtry']);
+    const amtStr = xmlTag(b, ['Amt']);
+    if (!amtStr) continue;
+    const isDebit = xmlTag(b, ['CdtDbtInd']) === 'DBIT';
+    const num = Number(amtStr);
+    if (!Number.isFinite(num)) continue;
+    const val = isDebit ? -num : num;
+    if (['OPBD', 'PRCD'].includes(code)) {
+      balance_start = val;
+    } else if (['CLBD', 'CLAV'].includes(code)) {
+      balance_end_real = val;
+    }
+  }
+  return { balance_start, balance_end_real };
+}
+
+/** Extract ledger balance from an OFX string. */
+export function parseOfxBalances(text) {
+  let balance_start = null;
+  let balance_end_real = null;
+  const ledgerMatch = String(text).match(/<LEDGERBAL>([\s\S]*?)(?:<\/LEDGERBAL>|<LEDGERBAL>|<\/STMTRS>|<\/CCSTMTRS>|$)/i);
+  if (ledgerMatch) {
+    const balAmt = ofxTag(ledgerMatch[1], 'BALAMT');
+    if (balAmt) {
+      const num = Number(balAmt.replace(',', '.'));
+      if (Number.isFinite(num)) {
+        balance_end_real = num;
+      }
+    }
+  }
+  return { balance_start, balance_end_real };
+}
+
+/** Parse a statement file by its name/content and create the new lines and statement record; returns { db, count }. */
 export function importStatement(db, fileName, text, defaults = {}) {
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
   const qif = /\.qif$/i.test(fileName) || /^\s*!Type:(?:Bank|Cash|CCard|Invst|Oth A|Oth L)/im.test(text);
@@ -356,5 +400,46 @@ export function importStatement(db, fileName, text, defaults = {}) {
     ? parseCamt(text, { details: true })
     : (qif ? parseQif(text, { details: true }) : parseOfx(text, { details: true }));
   if (!lines.length) throw new Error('No transactions found in this file');
-  return importStatementLines(db, lines, defaults, { camt });
+
+  const { db: linesDb, count, line_ids } = importStatementLines(db, lines, defaults, { camt });
+  if (!count || !line_ids.length) {
+    return { db, count: 0 };
+  }
+
+  const fileBalances = camt ? parseCamtBalances(text) : (qif ? { balance_start: null, balance_end_real: null } : parseOfxBalances(text));
+  const prevStatement = search(linesDb, 'account.bank.statement')
+    .filter((s) => s.journal_id === defaults.journal_id && s.active !== false)
+    .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id)
+    .at(-1);
+
+  const prevEnd = Number(prevStatement?.balance_end_real) || 0;
+  const balance_start = fileBalances.balance_start != null ? fileBalances.balance_start : prevEnd;
+
+  const importedLines = line_ids.map((id) => read(linesDb, 'account.bank.statement.line', id));
+  const importedLinesSum = importedLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
+
+  const journal = read(linesDb, 'account.journal', defaults.journal_id);
+  const company = journal?.company_id ?? defaults.company_id ?? 1;
+  const currencyId = journal?.currency_id ?? read(linesDb, 'res.company', company)?.currency_id ?? null;
+  const currency = read(linesDb, 'res.currency', currencyId);
+  const computedEnd = currency ? roundCurrency(balance_start + importedLinesSum, currency) : balance_start + importedLinesSum;
+  const balance_end_real = fileBalances.balance_end_real != null ? fileBalances.balance_end_real : computedEnd;
+
+  const statementDate = importedLines.map((l) => l.date).filter(Boolean).sort().at(-1) || today();
+
+  const stmtRes = create(linesDb, 'account.bank.statement', {
+    name: defaults.statement_name || fileName,
+    journal_id: defaults.journal_id,
+    company_id: company,
+    date: defaults.statement_date || statementDate,
+    balance_start,
+    balance_end_real,
+  });
+
+  let finalDb = stmtRes.db;
+  for (const lineId of line_ids) {
+    finalDb = write(finalDb, 'account.bank.statement.line', lineId, { statement_id: stmtRes.id });
+  }
+
+  return { db: finalDb, count, statement_id: stmtRes.id };
 }

@@ -845,6 +845,31 @@ function lineGuard(db, before, after) {
   const journal = read(db, 'account.journal', after.journal_id);
   if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
   if (!isLiquidityJournal(journal)) return 'Bank transactions need a bank or cash journal';
+  if (after.statement_id) {
+    const statement = read(db, 'account.bank.statement', after.statement_id);
+    if (!statement) return 'The bank statement does not exist';
+    if (statement.journal_id !== after.journal_id || (statement.company_id ?? 1) !== company) {
+      return 'Statement lines must belong to the statement journal and company';
+    }
+    if (statement.state === 'closed' && (!before || before.statement_id !== after.statement_id)) {
+      const isDiffLine = after.counterpart_account_id && (after.counterpart_account_id === journal?.profit_account_id || after.counterpart_account_id === journal?.loss_account_id);
+      if (!isDiffLine) {
+        return 'Cannot add lines to a closed statement';
+      }
+    }
+  }
+  if (before?.statement_id) {
+    const prevStmt = read(db, 'account.bank.statement', before.statement_id);
+    if (prevStmt?.state === 'closed') {
+      if (after.statement_id !== before.statement_id) {
+        return 'Cannot remove lines from a closed statement';
+      }
+      const changed = ['amount', 'date', 'journal_id', 'company_id'].find(
+        (k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)
+      );
+      if (changed) return 'Cannot change lines linked to a closed statement';
+    }
+  }
   if (after.unique_import_id && (db.records['account.bank.statement.line'] ?? []).some((l) => l.id !== after.id && l.active !== false && l.journal_id === after.journal_id && l.unique_import_id === after.unique_import_id)) {
     return 'A bank transaction with this Import ID already exists on this journal';
   }
@@ -979,6 +1004,7 @@ export const bankModels = {
       amount: { type: 'monetary', label: 'Amount', required: true },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },
+      statement_id: { type: 'many2one', relation: 'account.bank.statement', label: 'Statement' },
       running_balance: { type: 'monetary', label: 'Running Balance', readonly: true, sum: false, compute: computeRunningBalance },
       state: { type: 'selection', label: 'Status', tracking: true, optional: 'hide', badge: { to_check: 'info', reconciled: 'success' }, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true, domain: (j) => isLiquidityJournal(j) },

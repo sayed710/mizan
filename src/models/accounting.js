@@ -1936,6 +1936,29 @@ export const purchaseInvoiceView = {
   groupBys: INVOICE_GROUP_BYS,
 };
 
+/** Create a statement line for cash moved into or out of a cash journal. */
+export function cashMove(db, journalId, { amount, label, date, statementId } = {}, sign = 1) {
+  const journal = read(db, 'account.journal', journalId);
+  if (!journal || journal.type !== 'cash') throw new Error('Cash operations are only available for cash journals');
+  const num = typeof amount === 'number' ? amount : promptedAmount(amount);
+  if (!Number.isFinite(num) || !(num > 0)) throw new Error('Enter a valid amount greater than 0');
+  const moveLabel = (label ? String(label).trim() : '') || (sign >= 0 ? 'Put Money In' : 'Take Money Out');
+  const moveDate = date || today();
+
+  return create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
+    company_id: journal.company_id ?? 1,
+    date: moveDate,
+    payment_ref: moveLabel,
+    amount: sign * Math.abs(num),
+    state: 'to_check',
+    ...(statementId ? { statement_id: statementId } : {}),
+  });
+}
+
+export const putMoneyIn = (db, journalId, args) => cashMove(db, journalId, args, 1);
+export const takeMoneyOut = (db, journalId, args) => cashMove(db, journalId, args, -1);
+
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
@@ -2249,6 +2272,26 @@ export const accountingModels = {
     form: {
       title: 'name',
       chatter: true,
+      buttons: [
+        {
+          label: 'Put Money In',
+          when: (j) => j?.type === 'cash',
+          prompt: 'Amount',
+          run: (db, j, input) => {
+            const res = putMoneyIn(db, j.id, { amount: input });
+            return { db: res.db };
+          },
+        },
+        {
+          label: 'Take Money Out',
+          when: (j) => j?.type === 'cash',
+          prompt: 'Amount',
+          run: (db, j, input) => {
+            const res = takeMoneyOut(db, j.id, { amount: input });
+            return { db: res.db };
+          },
+        },
+      ],
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
       groups: [['type', 'code']],
       tabs: (j) => {
