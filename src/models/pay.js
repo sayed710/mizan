@@ -1098,11 +1098,15 @@ const paymentEntries = (db, payment) => [payment.move_id, payment.destination_mo
  */
 export function resetToDraftError(db, payment, ctx = null) {
   if (!payment) return 'Payment not found';
+  const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
+  const isUnvoidedCheck = (p) => p && p.check_number != null && !(p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
+  if (isUnvoidedCheck(payment) || (paired && isUnvoidedCheck(paired))) {
+    return 'Void the check before resetting the payment to draft';
+  }
   const entries = paymentEntries(db, payment);
   if (payment.state === 'cancel' && entries.every((m) => m.state !== 'posted')) return null;
   if (payment.state === 'reversed') return 'Reversed payments cannot be reset to draft';
   if (payment.state !== 'posted' && payment.state !== 'cancel') return 'Only posted or cancelled payments can be reset to draft';
-  const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
   if (isPaymentMatched(db, payment) || (paired && isPaymentMatched(db, paired)) || entries.some((m) => bookedByBank(db, m.id))) {
     return 'A payment linked to a reconciled bank transaction cannot be reset to draft';
   }
@@ -1288,8 +1292,11 @@ export function printCheck(db, payment) {
     return db;
   }
   const number = nextCheckNumber(db, p.journal_id);
-  let next = write(db, 'account.payment', p.id, { check_number: number });
-  next = write(next, 'account.journal', p.journal_id, { check_next_number: number + 1 });
+  let next = db;
+  if (!journal?.check_manual_sequencing) {
+    next = write(next, 'account.journal', p.journal_id, { check_next_number: number + 1 });
+  }
+  next = write(next, 'account.payment', p.id, { check_number: number });
   return postNote(next, 'account.payment', p.id, `Check ${number} printed`);
 }
 
@@ -1388,8 +1395,8 @@ export function printBatchChecks(db, batchOrId) {
     } else {
       if (payment.check_number == null || isVoided) {
         const number = nextCheckNumber(next, journal.id);
-        next = write(next, 'account.payment', payment.id, { check_number: number });
         next = write(next, 'account.journal', journal.id, { check_next_number: number + 1 });
+        next = write(next, 'account.payment', payment.id, { check_number: number });
         nextLines[i] = { ...line, check_number: number };
         changed = true;
       }
@@ -1415,11 +1422,17 @@ export function reprintCheck(db, payment, replacementNumber = null) {
     if (!Number.isSafeInteger(number) || number < 1) {
       throw new Error('Check number is required for manual numbering');
     }
+    if (number === p.check_number || (p.voided_check_numbers ?? []).some((v) => v.check_number === number)) {
+      throw new Error('The replacement check number must differ from the current and voided numbers');
+    }
   } else {
     number = nextCheckNumber(db, p.journal_id);
   }
   const isAlreadyVoided = (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
   let next = db;
+  if (!isManual) {
+    next = write(next, 'account.journal', p.journal_id, { check_next_number: number + 1 });
+  }
   if (!isAlreadyVoided) {
     const voided_check_numbers = [...(p.voided_check_numbers ?? []), { check_number: p.check_number, date: today() }];
     next = write(next, 'account.payment', p.id, { voided_check_numbers });
@@ -1427,9 +1440,6 @@ export function reprintCheck(db, payment, replacementNumber = null) {
   next = write(next, 'account.payment', p.id, { check_number: number });
   for (const batch of (next.records['account.batch.payment'] ?? []).filter((b) => b.lines?.some((l) => l.payment_id === p.id))) {
     next = write(next, 'account.batch.payment', batch.id, { lines: batch.lines.map((l) => l.payment_id === p.id ? { ...l, check_number: number } : l) });
-  }
-  if (!isManual) {
-    next = write(next, 'account.journal', p.journal_id, { check_next_number: number + 1 });
   }
   return postNote(next, 'account.payment', p.id, `Check ${p.check_number} voided, reprinted as ${number}`);
 }
@@ -1582,9 +1592,12 @@ const validCheckWrite = (db, before, after) => {
     return voidedUnchanged || (!beforeVoided && appendsVoidOf(priorVoided, nextVoided, before.check_number));
   }
   if (before.state !== 'posted' || after.state !== 'posted' || after.payment_type !== 'outbound') return false;
+  const validVoidTransition = (beforeVoided && voidedUnchanged) || (!beforeVoided && appendsVoidOf(priorVoided, nextVoided, before.check_number));
+  if (!validVoidTransition) return false;
   const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
-  if (!journal?.check_manual_sequencing && after.check_number !== nextCheckNumber(db, after.journal_id)) return false;
-  return beforeVoided && voidedUnchanged;
+  // An automatic replacement is the number the journal sequence just issued; uniqueness is checked by the journal guard.
+  if (!journal?.check_manual_sequencing && journal?.check_next_number !== after.check_number + 1) return false;
+  return true;
 };
 
 const paymentMethodGuard = (db, before, after) => {

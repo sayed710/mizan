@@ -297,8 +297,9 @@ export const paymentModels = {
             label: 'Check Number',
             readonly: (record, db) => {
               if (!db || !record) return true;
-              const batch = record.batch_id ? read(db, 'account.batch.payment', record.batch_id) : (db.records['account.batch.payment'] ?? []).find((b) => (b.lines ?? []).includes(record));
-              const journalId = batch?.journal_id ?? (record.payment_id ? read(db, 'account.payment', record.payment_id)?.journal_id : null);
+              const journalId = record.parent_journal_id
+                ?? (record.payment_id ? read(db, 'account.payment', record.payment_id)?.journal_id : null)
+                ?? (record.batch_id ? read(db, 'account.batch.payment', record.batch_id)?.journal_id : null);
               const journal = journalId ? read(db, 'account.journal', journalId) : null;
               return !journal?.check_manual_sequencing;
             },

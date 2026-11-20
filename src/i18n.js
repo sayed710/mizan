@@ -3543,6 +3543,10 @@ const ar = {
   'This credit note is linked to another invoice': 'إشعار الدائن هذا مرتبط بفاتورة أخرى',
   'A check batch only holds check payments': 'دفعة الشيكات تحتوي على مدفوعات الشيكات فقط',
   'The batch journal has no check payment method': 'دفتر الدفعة لا يحتوي على طريقة دفع بالشيكات',
+  'Void the check before resetting the payment to draft': 'أبطل الشيك قبل إعادة تعيين الدفعة إلى مسودة',
+  'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
+  'VOID': 'ملغى',
+  'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

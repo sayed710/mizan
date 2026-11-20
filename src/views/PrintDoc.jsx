@@ -47,6 +47,17 @@ const LAYOUTS = {
 
 export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment' || model === 'account.payment' || model === 'audit.report';
 
+export const STUB_LINES_PER_SHEET = 8;
+
+export function splitStubLines(lines, perSheet = STUB_LINES_PER_SHEET) {
+  if (!lines || !lines.length) return [[]];
+  const pages = [];
+  for (let i = 0; i < lines.length; i += perSheet) {
+    pages.push(lines.slice(i, i + perSheet));
+  }
+  return pages;
+}
+
 /** One cheque per batch line: payee, date, number, amount in figures and in words. */
 function Checks({ db, batch }) {
   const company = documentCompany(db, batch);
@@ -57,7 +68,7 @@ function Checks({ db, batch }) {
         <button type="button" className="btn primary" onClick={() => window.print()}>{t('Print')}</button>
         <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
       </div>
-      {(batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id && read(db, 'account.payment', l.payment_id)?.state === 'posted').map((l) => {
+      {(batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id && read(db, 'account.payment', l.payment_id)?.state === 'posted').flatMap((l) => {
         const move = read(db, 'account.move', l.move_id);
         const payment = read(db, 'account.payment', l.payment_id);
         const number = payment?.check_number ?? l.check_number;
@@ -87,18 +98,30 @@ function Checks({ db, batch }) {
         if (!totalsByCurrency.length) {
           totalsByCurrency.push({ currency: amounts.currency, total: payment?.amount ?? l.amount ?? 0 });
         }
+        const stubPages = splitStubLines(stubLines);
 
-        const checkBody = (
-          <section key="check-main" className="check-main-area">
-            <header className="paper-head"><b className="paper-company">{company.name}</b><span>{t('Check')} #{number}</span></header>
-            <p>{t('Date')}: {formatDate(batch.date)}</p>
-            <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', payment?.partner_id ?? move?.partner_id)?.name ?? '—'}</b> <span className="num">{amounts.numeric}</span></p>
-            <p className="check-words">{amounts.words}</p>
-            <footer className="paper-foot muted">{t('Memo')}: {move?.name || payment?.memo}</footer>
+        const checkBody = (isVoid = false) => (
+          <section key="check-main" className={`check-main-area${isVoid ? ' void' : ''}`}>
+            {isVoid ? (
+              <div className="check-void-overlay">
+                <header className="paper-head"><b className="paper-company">{company.name}</b><span>{t('Check')} #{number}</span></header>
+                <div className="check-void-watermark">{t('VOID')}</div>
+                <p>{t('Date')}: {formatDate(batch.date)}</p>
+                <footer className="paper-foot muted">{t('VOID - KEEP FOR YOUR RECORDS')}</footer>
+              </div>
+            ) : (
+              <>
+                <header className="paper-head"><b className="paper-company">{company.name}</b><span>{t('Check')} #{number}</span></header>
+                <p>{t('Date')}: {formatDate(batch.date)}</p>
+                <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', payment?.partner_id ?? move?.partner_id)?.name ?? '—'}</b> <span className="num">{amounts.numeric}</span></p>
+                <p className="check-words">{amounts.words}</p>
+                <footer className="paper-foot muted">{t('Memo')}: {move?.name || payment?.memo}</footer>
+              </>
+            )}
           </section>
         );
 
-        const stubSection = (key = 'remittance-stub') => (
+        const stubSection = (pageLines, key = 'remittance-stub') => (
           <section key={key} className="remittance-stub">
             <header className="stub-head"><b>{t('Remittance Advice')}</b></header>
             <table className="paper-lines stub-table">
@@ -111,7 +134,7 @@ function Checks({ db, batch }) {
                 </tr>
               </thead>
               <tbody>
-                {stubLines.length ? stubLines.map((item, idx) => {
+                {pageLines.length ? pageLines.map((item, idx) => {
                   const lineCurrency = item.currency ?? (item.move ? documentCurrency(db, item.move) : null) ?? amounts.currency;
                   return (
                     <tr key={item.move?.id ?? idx}>
@@ -149,13 +172,16 @@ function Checks({ db, batch }) {
           </section>
         );
 
-        return (
-          <article key={number ?? l.move_id} className={`paper check check-layout-${layout}`}>
-            {layout === 'bottom' && [stubSection('stub-top'), checkBody]}
-            {layout === 'middle' && [stubSection('stub-top'), checkBody, stubSection('stub-bottom')]}
-            {layout === 'top' && [checkBody, stubSection('stub-bottom')]}
-          </article>
-        );
+        return stubPages.map((pageLines, pageIdx) => {
+          const isVoid = pageIdx > 0;
+          return (
+            <article key={`${number ?? l.move_id}-page-${pageIdx}`} className={`paper check check-layout-${layout}`}>
+              {layout === 'bottom' && [stubSection(pageLines, 'stub-top'), checkBody(isVoid)]}
+              {layout === 'middle' && [stubSection(pageLines, 'stub-top'), checkBody(isVoid), stubSection(pageLines, 'stub-bottom')]}
+              {layout === 'top' && [checkBody(isVoid), stubSection(pageLines, 'stub-bottom')]}
+            </article>
+          );
+        });
       })}
     </main>
   );

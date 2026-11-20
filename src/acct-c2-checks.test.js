@@ -1162,3 +1162,308 @@ test('Qodo Bug 4: Voided check cannot be renumbered or cleared by ordinary write
     sync(db, write(db, 'account.payment', 99881, { memo: 'Draft memo update' }));
   });
 });
+
+test('Qodo Bug 1 (Round 3): Reprint through sync on unvoided check updates check_number and appends to void history', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_next_number: 500 });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Item 1', price_unit: 100, qty: 1 }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 100,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = printCheck(db, draftPay.id);
+  const printed = read(db, 'account.payment', draftPay.id);
+  assert.equal(printed.check_number, 500);
+
+  // Client performs reprintCheck without prior separate void
+  const clientDb = reprintCheck(db, printed);
+  const clientPay = read(clientDb, 'account.payment', printed.id);
+  assert.equal(clientPay.check_number, 501);
+  assert.deepEqual(clientPay.voided_check_numbers.map((v) => v.check_number), [500]);
+
+  // Sync round-trip (diffDb + applyDiff) must succeed
+  let serverDb = db;
+  assert.doesNotThrow(() => {
+    serverDb = sync(serverDb, clientDb);
+  });
+  const syncedPay = read(serverDb, 'account.payment', printed.id);
+  assert.equal(syncedPay.check_number, 501);
+  assert.deepEqual(syncedPay.voided_check_numbers.map((v) => v.check_number), [500]);
+  assert.equal(read(serverDb, 'account.journal', bank.id).check_next_number, 502);
+});
+
+test('Qodo Bug 2 (Round 3): Save void through sync, then reprint through sync', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_next_number: 500 });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Item 2', price_unit: 120, qty: 1 }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 120,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = printCheck(db, draftPay.id);
+  const printed = read(db, 'account.payment', draftPay.id);
+  assert.equal(printed.check_number, 500);
+
+  // 1. Save void through sync
+  const voidedClient = voidCheck(db, printed);
+  let serverDb = sync(db, voidedClient);
+  const voidedOnServer = read(serverDb, 'account.payment', printed.id);
+  assert.equal(voidedOnServer.check_number, 500);
+  assert.deepEqual(voidedOnServer.voided_check_numbers.map((v) => v.check_number), [500]);
+
+  // 2. Reprint through sync
+  const reprintClient = reprintCheck(serverDb, voidedOnServer);
+  assert.doesNotThrow(() => {
+    serverDb = sync(serverDb, reprintClient);
+  });
+  const reprintedOnServer = read(serverDb, 'account.payment', printed.id);
+  assert.equal(reprintedOnServer.check_number, 501);
+  assert.deepEqual(reprintedOnServer.voided_check_numbers.map((v) => v.check_number), [500]);
+  assert.equal(read(serverDb, 'account.journal', bank.id).check_next_number, 502);
+});
+
+test('Qodo Bug 3 (Round 3): Reset to Draft is hidden and action refuses for unvoided issued check', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_next_number: 500 });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 100,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = printCheck(db, draftPay.id);
+  const printed = read(db, 'account.payment', draftPay.id);
+
+  const resetBtn = models['account.payment'].form.buttons.find((b) => b.label === 'Reset to Draft');
+  assert.ok(resetBtn, 'Reset to Draft button exists');
+
+  // Button must be hidden for issued, unvoided check
+  assert.equal(resetBtn.when(printed, db), false, 'Reset to Draft button must be hidden for unvoided check');
+
+  // Action resetPaymentToDraft must refuse with explicit message
+  assert.throws(() => {
+    resetPaymentToDraft(db, printed);
+  }, /Void the check before resetting the payment to draft/);
+
+  // Once check is voided, button becomes visible and reset succeeds
+  db = voidCheck(db, printed);
+  const voided = read(db, 'account.payment', printed.id);
+  assert.equal(resetBtn.when(voided, db), true, 'Reset to Draft button visible after check is voided');
+  assert.doesNotThrow(() => {
+    db = resetPaymentToDraft(db, voided);
+  });
+  assert.equal(read(db, 'account.payment', printed.id).state, 'draft');
+});
+
+test('Qodo Bug 4 (Round 3): Manual reprint refuses current number and voided numbers and leaves payment unchanged', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, {
+    check_next_number: 100,
+    check_manual_sequencing: true,
+  });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 200,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = sync(db, write(db, 'account.payment', draftPay.id, { check_number: 700 }));
+  const printed = read(db, 'account.payment', draftPay.id);
+
+  // 1. Attempt manual reprint with equal number (700)
+  assert.throws(() => {
+    reprintCheck(db, printed, 700);
+  }, /The replacement check number must differ from the current and voided numbers/i);
+  assert.equal(read(db, 'account.payment', printed.id).check_number, 700);
+
+  // 2. Void 700 and reprint with 705
+  db = reprintCheck(db, printed, 705);
+  const reprinted = read(db, 'account.payment', printed.id);
+  assert.equal(reprinted.check_number, 705);
+  assert.deepEqual(reprinted.voided_check_numbers.map((v) => v.check_number), [700]);
+
+  // 3. Attempt manual reprint reusing previously voided number (700)
+  assert.throws(() => {
+    reprintCheck(db, reprinted, 700);
+  }, /The replacement check number must differ from the current and voided numbers/i);
+  assert.equal(read(db, 'account.payment', printed.id).check_number, 705);
+});
+
+test('Qodo Bug 5 (Round 3): New unsaved batch and saved batch with changed journal allow entering manual numbers via parent_journal_id', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+  assert.ok(bank && cash);
+
+  // Bank is manual sequencing, Cash is auto sequencing
+  db = write(db, 'account.journal', bank.id, { check_manual_sequencing: true });
+  db = write(db, 'account.journal', cash.id, { check_manual_sequencing: false });
+
+  const checkNumberField = models['account.batch.payment'].fields.lines.fields.check_number;
+
+  // 1. New unsaved batch (no id) on manual bank journal
+  const unsavedBatch = {
+    journal_id: bank.id,
+    batch_type: 'outbound',
+    lines: [{ move_id: 1, amount: 50 }],
+  };
+  const unsavedLineRec = { ...unsavedBatch.lines[0], parent_journal_id: unsavedBatch.journal_id };
+  const isRoUnsaved = fieldReadonly(checkNumberField, unsavedLineRec, db);
+  assert.equal(isRoUnsaved, false, 'New unsaved batch on manual journal must allow entering numbers');
+
+  // 2. Saved batch with in-memory changed journal (saved on cash, changed in form to bank)
+  const savedBatch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: cash.id,
+    date: today(),
+    lines: [{ move_id: 1, amount: 80 }],
+  });
+  const savedRecord = read(savedBatch.db, 'account.batch.payment', savedBatch.id);
+  // Form has unsaved journal change to bank.id
+  const formRecord = { ...savedRecord, journal_id: bank.id };
+  const changedJournalLineRec = { ...formRecord.lines[0], parent_journal_id: formRecord.journal_id };
+  const isRoChanged = fieldReadonly(checkNumberField, changedJournalLineRec, savedBatch.db);
+  assert.equal(isRoChanged, false, 'Saved batch with unsaved journal change to manual must allow entering numbers');
+});
+
+test('Qodo Bug 6 (Round 3): Long remittance stubs split across Letter sheets and show VOID on extra sheets', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb, commit } = await import('./store.js');
+  const { PrintDoc, STUB_LINES_PER_SHEET, splitStubLines } = await import('./views/PrintDoc.jsx');
+
+  // Test splitting function
+  assert.ok(typeof STUB_LINES_PER_SHEET === 'number' && STUB_LINES_PER_SHEET > 0);
+  const sampleLines = Array.from({ length: 15 }, (_, i) => ({ name: `Bill ${i + 1}`, paid_amount: 10 }));
+  const chunks = splitStubLines(sampleLines);
+  assert.equal(chunks.length, Math.ceil(15 / STUB_LINES_PER_SHEET));
+  assert.equal(chunks[0].length, STUB_LINES_PER_SHEET);
+  assert.equal(chunks[1].length, 15 - STUB_LINES_PER_SHEET);
+
+  // Test rendering of multi-sheet payment
+  await initStore();
+  let db = getDb();
+  const journal = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', journal.id, { check_next_number: 100 });
+  const checkLine = (journal.outbound_payment_method_line_ids ?? []).map((l) => typeof l === 'object' ? l : read(db, 'account.payment.method.line', l))
+    .find((l) => read(db, 'account.payment.method', l?.payment_method_id)?.code === 'check_printing');
+  const partner = search(db, 'res.partner')[0];
+
+  const bills = [];
+  for (let i = 0; i < 12; i++) {
+    const b = create(db, 'account.move', {
+      move_type: 'in_invoice',
+      partner_id: partner.id,
+      invoice_date: '2026-01-01',
+      invoice_line_ids: [{ qty: 1, price_unit: 10, tax: 0 }],
+    });
+    db = postMove(b.db, b.id);
+    bills.push(b.id);
+  }
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 120,
+    journal_id: journal.id,
+    ...(checkLine ? { payment_method_line_id: checkLine.id } : {}),
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = printCheck(db, draftPay.id);
+
+  // Settle all 12 bills with this payment move
+  const payment = read(db, 'account.payment', draftPay.id);
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => (
+        bills.includes(m.id)
+          ? { ...m, payments: [{ date: '2026-01-02', amount: 10, move_id: payment.move_id }], amount_paid: 10 }
+          : m
+      )),
+    },
+  };
+
+  await React.act(async () => commit(db));
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: payment.id })));
+    const articles = [];
+    const collectArticles = (node) => {
+      if (!node) return;
+      if (node.tagName === 'ARTICLE' && node.className?.includes('paper') && node.className?.includes('check')) {
+        articles.push(node);
+      }
+      for (const child of node.childNodes ?? []) collectArticles(child);
+    };
+    collectArticles(host);
+    assert.ok(articles.length >= 2, `Expected at least 2 sheets, got ${articles.length}`);
+    const hasVoidArea = (art) => Boolean(find(art, (n) => n.className?.includes('check-main-area') && n.className?.includes('void')));
+    // First sheet has normal check
+    assert.ok(!hasVoidArea(articles[0]), 'Sheet 1 has active check area');
+    // Continuation sheet(s) have check area marked VOID
+    assert.ok(hasVoidArea(articles[1]), 'Sheet 2 has check area marked VOID');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
