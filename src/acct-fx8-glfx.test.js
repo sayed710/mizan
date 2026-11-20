@@ -6,7 +6,7 @@ import { applyDiff, diffDb } from './sync.js';
 import { postMove } from './models/accounting.js';
 import { accountId, journalItems, postEntry, reconciledJournalItems } from './models/ledger.js';
 import { reconcileLedgerItems, unreconcileLedgerItems } from './models/glReconcile.js';
-import { applyPaymentCredit, postPayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment, unapplyPaymentCredit } from './models/pay.js';
 
 async function arabicTranslator() {
   const prevDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
@@ -1011,4 +1011,101 @@ test('Arabic translations for reconciliation errors are present and accurate', a
     t('The applied amount cannot be represented in the foreign currency after rounding'),
     'لا يمكن تمثيل المبلغ المطبق بالعملة الأجنبية بعد التقريب',
   );
+});
+
+// -----------------------------------------------------------------------------
+// Code Review Round 2: Multi-invoice batch with linked credit note
+// -----------------------------------------------------------------------------
+test('Code Review round 2: Multi-invoice batch with older invoice, newer linked invoice + note, and later payment reconciles cleanly', () => {
+  const setup = setupCurrencies(seed());
+  let db = setup.db;
+  const partner = create(db, 'res.partner', { name: 'Batch CN Partner' });
+  db = partner.db;
+  const ar = arAccount(db, 1);
+
+  // 1. Older invoice A: 100 USD (date: 2026-01-02)
+  const invA = create(db, 'account.move', {
+    partner_id: partner.id, company_id: 1, move_type: 'out_invoice',
+    invoice_date: '2026-01-02',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(invA.db, invA.id);
+
+  // 2. Newer invoice B: 50 USD (date: 2026-01-10)
+  const invB = create(db, 'account.move', {
+    partner_id: partner.id, company_id: 1, move_type: 'out_invoice',
+    invoice_date: '2026-01-10',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = postMove(invB.db, invB.id);
+
+  // Temporarily pay invB so posting noteB does not auto-reconcile it via offsetCreditNote
+  const bnk = search(db, 'account.journal').find((j) => j.type === 'bank' && (!j.company_id || j.company_id === 1));
+  const tempPmt = create(db, 'account.payment', {
+    partner_id: partner.id, company_id: 1, payment_type: 'inbound', partner_type: 'customer',
+    journal_id: bnk.id, amount: 50, date: '2026-01-11',
+  });
+  db = postPayment(tempPmt.db, read(tempPmt.db, 'account.payment', tempPmt.id), { autoAllocate: false });
+  db = applyPaymentCredit(db, tempPmt.id, invB.id, '2026-01-11');
+
+  // 3. Credit note B linked to invoice B: 50 USD (date: 2026-01-12)
+  const noteB = create(db, 'account.move', {
+    partner_id: partner.id, company_id: 1, move_type: 'out_refund',
+    reversed_entry_id: invB.id,
+    invoice_date: '2026-01-12',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = postMove(noteB.db, noteB.id);
+
+  // Unapply temp payment so both invB and noteB are open
+  const pmtMoveId = read(db, 'account.payment', tempPmt.id).move_id;
+  db = unapplyPaymentCredit(db, invB.id, pmtMoveId, '2026-01-11');
+
+  // 4. Later payment intended for invoice A: 100 USD (date: 2026-01-15)
+  const pmtA = create(db, 'account.payment', {
+    partner_id: partner.id, company_id: 1, payment_type: 'inbound', partner_type: 'customer',
+    journal_id: bnk.id, amount: 100, date: '2026-01-15',
+  });
+  db = postPayment(pmtA.db, read(pmtA.db, 'account.payment', pmtA.id), { autoAllocate: false });
+  const pmtMoveAId = read(db, 'account.payment', pmtA.id).move_id;
+
+  // Select all 4 journal items
+  const selections = [
+    itemSelection(db, invA.id, ar),
+    itemSelection(db, invB.id, ar),
+    itemSelection(db, noteB.id, ar),
+    itemSelection(db, pmtMoveAId, ar),
+  ];
+
+  const reconciled = reconcileLedgerItems(db, selections, { date: '2026-01-20' });
+
+  // Replay through diffDb + applyDiff
+  const synced = applyDiff(db, diffDb(db, reconciled), { isAdmin: true });
+
+  // Both invoices are fully reconciled
+  const recInvA = reconciledJournalItems(synced, read(synced, 'account.move', invA.id)).find((l) => l.account_id === ar);
+  const recInvB = reconciledJournalItems(synced, read(synced, 'account.move', invB.id)).find((l) => l.account_id === ar);
+  const recNoteB = reconciledJournalItems(synced, read(synced, 'account.move', noteB.id)).find((l) => l.account_id === ar);
+  const recPmtA = reconciledJournalItems(synced, read(synced, 'account.move', pmtMoveAId)).find((l) => l.account_id === ar);
+
+  assert.equal(recInvA.amount_residual, 0);
+  assert.equal(recInvA.reconciled, true);
+  assert.equal(recInvB.amount_residual, 0);
+  assert.equal(recInvB.reconciled, true);
+  assert.equal(recNoteB.amount_residual, 0);
+  assert.equal(recNoteB.reconciled, true);
+  assert.equal(recPmtA.amount_residual, 0);
+  assert.equal(recPmtA.reconciled, true);
+
+  // Partial links: Inv B is paired with Note B, Inv A is paired with Payment A
+  const partials = (synced.records['account.partial.reconcile'] ?? []).filter((p) => p && p.active !== false && !p.reversed);
+  const pNote = partials.find((p) => p.credit_move_id === noteB.id);
+  assert.ok(pNote, 'Credit note B has a partial reconcile link');
+  assert.equal(pNote.debit_move_id, invB.id, 'Credit note B matched invoice B, NOT invoice A');
+  assert.equal(pNote.amount, 50);
+
+  const pPmt = partials.find((p) => p.credit_move_id === pmtMoveAId);
+  assert.ok(pPmt, 'Payment A has a partial reconcile link');
+  assert.equal(pPmt.debit_move_id, invA.id, 'Payment A matched invoice A');
+  assert.equal(pPmt.amount, 100);
 });

@@ -766,13 +766,16 @@ function validateCreditNotePairing(db, items) {
   const docs = items.filter((it) => ['out_invoice', 'in_invoice'].includes(it.move?.move_type));
   const refunds = items.filter((it) => ['out_refund', 'in_refund'].includes(it.move?.move_type));
   for (const ref of refunds) {
-    if (docs.length === 1) {
+    if (ref.move?.reversed_entry_id) {
+      if (docs.length > 0) {
+        const target = docs.find((d) => d.move?.id === ref.move.reversed_entry_id);
+        if (!target) throw new Error('This credit note is linked to another invoice');
+        const pairErr = creditNotePairError(db, ref.move, target.move, { allowDifferentCurrencies: true });
+        if (pairErr) throw new Error(pairErr);
+      }
+    } else if (docs.length === 1) {
       const pairErr = creditNotePairError(db, ref.move, docs[0].move, { allowDifferentCurrencies: true });
       if (pairErr) throw new Error(pairErr);
-    } else if (docs.length > 1 && ref.move?.reversed_entry_id) {
-      if (!docs.some((d) => d.move?.id === ref.move.reversed_entry_id)) {
-        throw new Error('This credit note is linked to another invoice');
-      }
     }
   }
 }
@@ -1208,6 +1211,64 @@ function matchMixedPairStep(db, { d, c, budget, account, companyId, matchDate, o
   return { db: next, budget: nextBudget };
 }
 
+/** Check whether a debit item and credit item are allowed to pair under credit-note linking rules. */
+function canPairItems(d, c) {
+  const isRefundC = ['out_refund', 'in_refund'].includes(c.move?.move_type);
+  const isDocD = ['out_invoice', 'in_invoice'].includes(d.move?.move_type);
+  if (isRefundC && isDocD && c.move?.reversed_entry_id && c.move.reversed_entry_id !== d.move?.id) {
+    return false;
+  }
+  const isRefundD = ['out_refund', 'in_refund'].includes(d.move?.move_type);
+  const isDocC = ['out_invoice', 'in_invoice'].includes(c.move?.move_type);
+  if (isRefundD && isDocC && d.move?.reversed_entry_id && d.move.reversed_entry_id !== c.move?.id) {
+    return false;
+  }
+  return true;
+}
+
+/** Check whether an item still has unconsumed open balance in company currency and foreign currency. */
+function isItemOpen(db, it, ownCurrency) {
+  if (!it || it.remaining <= 0 || isCurrencyZero(it.remaining, ownCurrency)) return false;
+  const currId = itemCurrencyId(db, it, ownCurrency);
+  if (currId !== (ownCurrency?.id ?? null) && it.remainingCurrency != null) {
+    const foreignCurr = read(db, 'res.currency', currId);
+    if (isCurrencyZero(it.remainingCurrency, foreignCurr)) return false;
+  }
+  return true;
+}
+
+/** Select the next debit/credit pair to match, prioritizing linked credit notes with their target invoice. */
+function selectNextReconcilePair(db, debits, credits, ownCurrency) {
+  // 1. Linked refund on credit side (e.g. customer credit note linked to customer invoice)
+  for (const c of credits) {
+    if (!isItemOpen(db, c, ownCurrency)) continue;
+    if (['out_refund', 'in_refund'].includes(c.move?.move_type) && c.move?.reversed_entry_id) {
+      const d = debits.find((it) => isItemOpen(db, it, ownCurrency) && it.move?.id === c.move.reversed_entry_id);
+      if (d) return { d, c };
+    }
+  }
+
+  // 2. Linked refund on debit side (e.g. vendor refund linked to vendor bill)
+  for (const d of debits) {
+    if (!isItemOpen(db, d, ownCurrency)) continue;
+    if (['out_refund', 'in_refund'].includes(d.move?.move_type) && d.move?.reversed_entry_id) {
+      const c = credits.find((it) => isItemOpen(db, it, ownCurrency) && it.move?.id === d.move.reversed_entry_id);
+      if (c) return { d, c };
+    }
+  }
+
+  // 3. General FIFO matching: oldest open debit with oldest compatible open credit
+  for (const d of debits) {
+    if (!isItemOpen(db, d, ownCurrency)) continue;
+    for (const c of credits) {
+      if (!isItemOpen(db, c, ownCurrency)) continue;
+      if (canPairItems(d, c)) return { d, c };
+    }
+  }
+
+  return null;
+}
+
 function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate, requestedAmount, ownCurrency, roundOwn }) {
   const { debits, credits } = splitDebitCreditItems(workingItems, ownCurrency, roundOwn);
   debits.sort(compareOldestFirst);
@@ -1218,18 +1279,15 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
   }
 
   let next = db;
-  let di = 0;
-  let ci = 0;
   let budget = requestedAmount;
-  while (di < debits.length && ci < credits.length) {
+  while (true) {
     if (budget != null && (budget <= 0 || isCurrencyZero(budget, ownCurrency))) break;
-    const prevDi = di;
-    const prevCi = ci;
-    const prevBudget = budget;
-    const d = debits[di];
-    const c = credits[ci];
+    const pair = selectNextReconcilePair(next, debits, credits, ownCurrency);
+    if (!pair) break;
+    const { d, c } = pair;
     const prevDRem = d.remaining;
     const prevCRem = c.remaining;
+    const prevBudget = budget;
 
     const currD = itemCurrencyId(next, d, ownCurrency);
     const currC = itemCurrencyId(next, c, ownCurrency);
@@ -1240,16 +1298,13 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
       ({ db: next, budget } = matchForeignPairStep(next, {
         d, c, budget, account, companyId, matchDate, ownCurrency, roundOwn, foreignCurr,
       }));
-      if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency) || (d.remainingCurrency != null && isCurrencyZero(d.remainingCurrency, foreignCurr))) di += 1;
-      if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency) || (c.remainingCurrency != null && isCurrencyZero(c.remainingCurrency, foreignCurr))) ci += 1;
     } else {
       ({ db: next, budget } = matchMixedPairStep(next, {
         d, c, budget, account, companyId, matchDate, ownCurrency, roundOwn, currD, currC,
       }));
-      if (d.remaining <= 0 || isCurrencyZero(d.remaining, ownCurrency)) di += 1;
-      if (c.remaining <= 0 || isCurrencyZero(c.remaining, ownCurrency)) ci += 1;
     }
-    if (di === prevDi && ci === prevCi && budget === prevBudget && d.remaining === prevDRem && c.remaining === prevCRem) {
+
+    if (budget === prevBudget && d.remaining === prevDRem && c.remaining === prevCRem) {
       throw new Error('Reconciliation matching stalled without progress');
     }
   }
