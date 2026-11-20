@@ -216,6 +216,38 @@ function OutstandingCredits({ db, spec, current, onApply }) {
   );
 }
 
+/** Model-driven widget (def.form[tab.widget]): lists the payments applied to this record, each with an action that removes only that matching. */
+function AppliedPayments({ db, spec, current, onUnreconcile }) {
+  const rows = spec.list(db, current);
+  if (!rows?.length) return null;
+  return (
+    <section className="applied-payments" aria-label={t(spec.title)}>
+      <h3>{t(spec.title)}</h3>
+      <table className="list">
+        <thead><tr>
+          {spec.fields.map((f) => <th key={f.name}>{t(f.label)}</th>)}
+          <th><span className="sr-only">{t('Actions')}</span></th>
+        </tr></thead>
+        <tbody>
+          {rows.map((row) => {
+            const currency = read(db, 'res.currency', row.display_currency_id) ?? companyCurrencyRecord(db, row.company_id ?? 1);
+            return (
+              <tr key={row.id}>
+                {spec.fields.map((f) => (
+                  <td key={f.name} className={f.money ? 'num' : ''}>
+                    {f.money ? money(row[f.name] ?? 0, currency?.name ?? null, currency) : String(row[f.name] ?? '')}
+                  </td>
+                ))}
+                <td><button type="button" className="btn sm" onClick={() => onUnreconcile(row)}>{t(spec.unreconcileLabel)}</button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
 function Activities({ db, model, id, name }) {
   const [form, setForm] = useState(null);
   const acts = search(db, 'mail.activity').filter((a) => a.res_model === model && a.res_id === id && !a.done);
@@ -689,6 +721,22 @@ export function FormView({ leaf, id, base, params }) {
                         ) : (
                           <>
                             {(activeTab.fields ?? []).map((f) => renderTabField(f))}
+                            {activeTab.widget && def.form[activeTab.widget] && !isNew && (
+                              <AppliedPayments
+                                db={db}
+                                spec={def.form[activeTab.widget]}
+                                current={current}
+                                onUnreconcile={(row) => {
+                                  const savedId = current.id && !dirty ? current.id : save();
+                                  if (savedId == null) return;
+                                  try {
+                                    const res = def.form[activeTab.widget].unreconcile(getDb(), read(getDb(), model, savedId), row);
+                                    commit(res.db);
+                                    setError(null);
+                                  } catch (e) { fail(e); }
+                                }}
+                              />
+                            )}
                             {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly, isNew })}
                           </>
                         )}

@@ -2,7 +2,7 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
-import { appendDocumentSettlement, applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
+import { appendDocumentSettlement, applyCreditNote, isInvoice, isPurchase, isRefund, liquidityForeignFields, payMove, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -638,6 +638,12 @@ export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineI
   if (source?.state !== 'posted' || (!byPartial && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === targetMoveId))) {
     throw new Error(byPartial ? 'The reconciled counterpart entry must remain posted' : 'The payment entry must remain posted and unreversed');
   }
+  if (payment && (isPaymentMatched(db, payment) || bookedByBank(db, targetMoveId))) {
+    throw new Error('This payment is matched with a reconciled bank transaction; unreconcile the transaction first');
+  }
+  if (payment && inPostedBatch(db, payment)) {
+    throw new Error('A payment in a posted batch cannot be unreconciled; remove it from the batch first');
+  }
   const fxError = settlementFxError(db, invoice, row);
   if (fxError) throw new Error(fxError);
   for (const id of [row.payment_fx_move_id, row.cash_basis_move_id].filter(Boolean)) {
@@ -694,6 +700,106 @@ export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today(
   });
   if (payment && unapplied != null) next = write(next, 'account.payment', payment.id, { unapplied });
   return write(next, 'account.move', invoice.id, { ...invoiceValues, payments: paymentsFinal });
+}
+
+/**
+ * Unreconcile one applied payment from one invoice or bill (invoice form, payments tab). The payment stays posted and its
+ * credit is released through unapplyPaymentCredit; the guards match unreconciling from journal items: a payment matched
+ * with a reconciled bank transaction or sitting in a posted batch is kept, and so is anything dated inside a lock period.
+ */
+export function unreconcileInvoicePayment(db, invoiceId, paymentMoveId, { date = null, lineIndex = null, ctx = null } = {}) {
+  const invoice = read(db, 'account.move', invoiceId);
+  if (!isInvoice(invoice) || invoice.state !== 'posted') throw new Error('Only posted invoices and bills have payments to unreconcile');
+  const row = (invoice.payments ?? []).find((r) => !r.reversed && r.move_id === paymentMoveId && (!Number.isInteger(lineIndex) || r.line_index === lineIndex));
+  if (!row) throw new Error('Select one active application of a posted payment');
+  const on = date ?? [today(), row.date].filter(Boolean).sort().at(-1);
+  for (const move of [invoice, read(db, 'account.move', paymentMoveId)].filter(Boolean)) {
+    const lock = recordLockDate(db, move, ctx);
+    if (lock && on <= lock) throw new Error(`The period up to ${lock} is locked`);
+  }
+  return unapplyPaymentCredit(db, invoiceId, paymentMoveId, on, { lineIndex: Number.isInteger(lineIndex) ? lineIndex : null, ctx });
+}
+
+/** Open documents a grouped or single Register Payment can settle: customer invoices/refunds or vendor bills/refunds. */
+const REGISTERABLE_TYPES = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'];
+
+/** Resolve the selected invoices or bills for Register Payment, or refuse the selection with a clear message. */
+export function paymentDocuments(db, ids) {
+  const docs = [...new Set(ids ?? [])].map((id) => read(db, 'account.move', id));
+  if (!docs.length || docs.some((d) => !d)) throw new Error('Select posted invoices or bills to register a payment');
+  if (docs.some((d) => !REGISTERABLE_TYPES.includes(d.move_type))) throw new Error('Only customer invoices, credit notes and vendor bills can be paid together');
+  if (new Set(docs.map((d) => isPurchase(d))).size > 1) throw new Error('Customer invoices and vendor bills cannot be paid together');
+  if (docs.some((d) => d.state !== 'posted')) throw new Error('Only posted invoices and bills can be paid; remove drafts and cancelled documents from the selection');
+  if (new Set(docs.map((d) => d.company_id ?? 1)).size > 1) throw new Error('Documents of different companies cannot be paid together');
+  if (docs.some((d) => !(residual(d, db) > 0))) throw new Error('Remove fully paid documents from the selection');
+  return docs;
+}
+
+/**
+ * Register payments for several invoices or bills. Grouped: one payment per partner, receivable/payable account, currency
+ * and recipient bank, paying all of that group's documents in full; ungrouped: one payment per document. Every payment is
+ * created by the single-document registerPayment on the first document of its group; the others receive its credit
+ * through applyPaymentCredit. Returns the new database, or throws without changing the given one.
+ */
+export function registerPayments(db, ids, values = {}) {
+  const docs = paymentDocuments(db, ids);
+  const grouped = values.group_payment !== false;
+  if (!grouped && docs.some((d) => isRefund(d))) {
+    throw new Error('Credit notes can only be paid when Group Payments is enabled');
+  }
+  const groups = new Map();
+  for (const doc of docs) {
+    const key = grouped
+      ? JSON.stringify([doc.partner_id, invoiceCounterpartAccount(db, doc), doc.currency_id ?? companyCurrencyRecord(db, doc.company_id)?.id ?? null, doc.partner_bank_id ?? null])
+      : doc.id;
+    groups.set(key, [...(groups.get(key) ?? []), doc]);
+  }
+  let next = db;
+  for (const group of groups.values()) {
+    const invoices = group.filter((d) => !isRefund(d));
+    const creditNotes = group.filter((d) => isRefund(d));
+    const invTotal = invoices.reduce((sum, d) => sum + residual(d, next), 0);
+    const noteTotal = creditNotes.reduce((sum, d) => sum + residual(d, next), 0);
+    const net = invTotal - noteTotal;
+    if (!(net > 0)) throw new Error('The net payment amount must be greater than zero');
+
+    const paymentDate = values.date || today();
+    for (const note of creditNotes) {
+      const candidateInvoices = note.reversed_entry_id
+        ? [...invoices.filter((i) => i.id === note.reversed_entry_id), ...invoices.filter((i) => i.id !== note.reversed_entry_id)]
+        : invoices;
+      for (const inv of candidateInvoices) {
+        const noteOpen = residual(read(next, 'account.move', note.id), next);
+        if (!(noteOpen > 0)) break;
+        const invOpen = residual(read(next, 'account.move', inv.id), next);
+        if (!(invOpen > 0)) continue;
+        const take = Math.min(noteOpen, invOpen);
+        next = applyCreditNote(next, note.id, inv.id, paymentDate, take);
+      }
+    }
+
+    const openInvoices = invoices.filter((d) => residual(read(next, 'account.move', d.id), next) > 0);
+    const [lead, ...rest] = openInvoices;
+    const amount = roundCurrency(openInvoices.reduce((sum, d) => sum + residual(read(next, 'account.move', d.id), next), 0), documentCurrency(next, lead));
+    const memo = values.memo || (group.length > 1 ? group.map((d) => d.name).join(', ') : undefined);
+    next = registerPayment(next, read(next, 'account.move', lead.id), {
+      amount: String(amount),
+      date: values.date,
+      journal_id: values.journal_id,
+      currency_id: lead.currency_id ?? undefined,
+      partner_bank_id: values.partner_bank_id ?? null,
+      ...(memo !== undefined ? { memo } : {}),
+    }).db;
+    if (rest.length) {
+      const moveId = read(next, 'account.move', lead.id).payments.at(-1).move_id;
+      const payment = search(next, 'account.payment').find((p) => p.move_id === moveId && p.state === 'posted');
+      for (const doc of rest) next = applyPaymentCredit(next, payment.id, doc.id, values.date, residual(read(next, 'account.move', doc.id), next));
+    }
+    for (const doc of group) {
+      if (residual(read(next, 'account.move', doc.id), next) > 0) throw new Error('The payment could not settle every selected document; nothing was registered');
+    }
+  }
+  return { db: next };
 }
 
 /** Reconcile each open line of a source entry on a reconcilable account with its mirror line on the reversal. */
@@ -1317,6 +1423,14 @@ export const payModels = {
             : (before[f] ?? null) !== (after[f] ?? null)
         ))) {
           return 'Accounting-defining fields of a posted transfer cannot be modified';
+        }
+      }
+      if (before && before.state === 'posted' && after.state === 'posted' && Number(after.unapplied || 0) > Number(before.unapplied || 0)) {
+        if (isPaymentMatched(db, before) || bookedByBank(db, before.move_id)) {
+          return 'This payment is matched with a reconciled bank transaction; unreconcile the transaction first';
+        }
+        if (inPostedBatch(db, before)) {
+          return 'A payment in a posted batch cannot be unreconciled; remove it from the batch first';
         }
       }
       return datedLockGuard([

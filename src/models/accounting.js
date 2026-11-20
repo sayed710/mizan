@@ -3,7 +3,7 @@ import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, reconcileReversalLines, reverseEntry, SETTLES } from './pay.js';
+import { applyPaymentCredit, paymentDocuments, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
@@ -1738,6 +1738,21 @@ function outstandingCreditNotes(db, r) {
   return (db?.records['account.move'] ?? []).filter((m) => isOutstandingCreditNoteFor(db, r, m));
 }
 
+/** Active applied payments of a posted invoice or bill, for the form's Unreconcile list (early-payment discounts follow their payment). */
+function appliedPayments(db, r) {
+  if (r?.state !== 'posted' || !isInvoice(r)) return [];
+  return (r.payments ?? []).filter((row) => !row.reversed && !row.discount && row.move_id != null).map((row) => ({
+    id: `${row.move_id}:${row.line_index ?? ''}`,
+    move_id: row.move_id,
+    line_index: Number.isInteger(row.line_index) ? row.line_index : null,
+    name: search(db, 'account.payment').find((p) => p.move_id === row.move_id && p.state === 'posted')?.name ?? read(db, 'account.move', row.move_id)?.name ?? '',
+    date: row.date,
+    amount: row.amount,
+    company_id: r.company_id,
+    display_currency_id: documentCurrency(db, r)?.id ?? null,
+  }));
+}
+
 /** All outstanding credit rows (unapplied payments + open credit notes) formatted for the invoice form widget. */
 function outstandingCredits(db, r) {
   return [
@@ -2404,6 +2419,44 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
   monthFilters('invoice_date_due', 'Due Date'),
 ];
 
+/** List action: pay every selected invoice or bill at once, one payment per partner group or one per document. */
+const registerPaymentsListAction = {
+  label: 'Register Payment',
+  requiresSelection: true,
+  wizard: (db, ids) => {
+    const docs = paymentDocuments(db, ids);
+    const partnerGroups = new Map();
+    for (const doc of docs) {
+      const key = JSON.stringify([doc.partner_id, invoiceCounterpartAccount(db, doc), doc.currency_id ?? companyCurrencyRecord(db, doc.company_id)?.id ?? null, doc.partner_bank_id ?? null]);
+      partnerGroups.set(key, [...(partnerGroups.get(key) ?? []), doc]);
+    }
+    for (const group of partnerGroups.values()) {
+      const invTotal = group.filter((d) => !isRefund(d)).reduce((sum, d) => sum + residual(d, db), 0);
+      const noteTotal = group.filter((d) => isRefund(d)).reduce((sum, d) => sum + residual(d, db), 0);
+      if (!(invTotal - noteTotal > 0)) throw new Error('The net payment amount must be greater than zero');
+    }
+    const companyId = docs[0].company_id ?? 1;
+    return {
+      title: 'Register Payment',
+      fields: [
+        ...(docs.length > 1 ? [{ name: 'group_payment', type: 'boolean', label: 'Group Payments', default: true }] : []),
+        { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
+        {
+          name: 'journal_id',
+          type: 'many2one',
+          relation: 'account.journal',
+          label: 'Payment Journal',
+          required: true,
+          default: defaultPaymentJournalId(db, companyId),
+          domain: (j) => (!j.company_id || j.company_id === companyId) && isLiquidityJournal(j),
+        },
+        { name: 'memo', type: 'char', label: 'Memo', default: '' },
+      ],
+    };
+  },
+  run: (db, ids, values = {}) => registerPayments(db, ids, values),
+};
+
 const INVOICE_GROUP_BYS = ['invoice_user_id', 'partner_id', 'status_in_payment', 'journal_id', 'company_id', 'invoice_date', 'invoice_date_due', 'date'];
 const INVOICE_GROUP_BY_LABELS = { partner_id: 'Partner', invoice_date: 'Invoice Date', date: 'Accounting Date', status_in_payment: 'Status' };
 const INVOICE_SEARCH_FIELDS = ['name', 'display_name', 'invoice_origin', 'ref', 'payment_reference', 'partner_id', 'journal_id', 'invoice_user_id'];
@@ -2419,6 +2472,7 @@ export const salesInvoiceView = {
   listLabels: { display_name: 'Number', partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
+  listActions: [registerPaymentsListAction],
   searchFields: INVOICE_SEARCH_FIELDS,
   filters: invoiceSearchFilters({ purchases: false }),
   groupBys: INVOICE_GROUP_BYS,
@@ -2435,6 +2489,7 @@ export const purchaseInvoiceView = {
   listLabels: { display_name: 'Number', partner_id: 'Vendor', invoice_date: 'Bill Date', currency_id: 'Bill Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
+  listActions: [registerPaymentsListAction],
   searchFields: INVOICE_SEARCH_FIELDS,
   filters: invoiceSearchFilters({ purchases: true }),
   groupBys: INVOICE_GROUP_BYS,
@@ -3560,7 +3615,7 @@ export const accountingModels = {
         ? [
           { label: 'Invoice Lines', fields: ['invoice_line_ids'], aside: ['narration'] },
           { label: 'Journal Items', fields: ['line_ids'], readonly: true },
-          { label: 'Payments', fields: ['payments'], readonly: true },
+          { label: 'Payments', fields: ['payments'], readonly: true, widget: 'appliedPayments' },
           {
             label: 'Other Info',
             groups: [
@@ -3634,6 +3689,18 @@ export const accountingModels = {
           }
           return { db: applyPaymentCredit(db, creditId, r.id, today()) };
         },
+      },
+      // The payments tab lists each active applied payment with an Unreconcile action that removes only that matching.
+      appliedPayments: {
+        title: 'Applied Payments',
+        unreconcileLabel: 'Unreconcile',
+        fields: [
+          { name: 'name', label: 'Payment' },
+          { name: 'date', label: 'Paid on' },
+          { name: 'amount', label: 'Amount', money: true },
+        ],
+        list: (db, r) => appliedPayments(db, r),
+        unreconcile: (db, r, row) => ({ db: unreconcileInvoicePayment(db, r.id, row.move_id, { lineIndex: row.line_index }) }),
       },
       chatter: true,
     },

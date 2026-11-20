@@ -423,6 +423,14 @@ function unapplicationError(db, stored, after, before) {
       });
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
+    if (payment) {
+      if (isPaymentMatched(db, payment) || bookedByBank(db, moveId)) {
+        return 'This payment is matched with a reconciled bank transaction; unreconcile the transaction first';
+      }
+      if ((db.records['account.batch.payment'] ?? []).some((b) => b.state === 'posted' && (b.lines ?? []).some((l) => !l.cancelled && l.payment_id === payment.id))) {
+        return 'A payment in a posted batch cannot be unreconciled; remove it from the batch first';
+      }
+    }
     const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
     if (glOnly) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
@@ -698,8 +706,24 @@ function securedMoveRule(before, after) {
   return null;
 }
 
+function unapplicationSettlementRule(db, before, after) {
+  const unappliedRows = (before?.payments ?? []).filter((p, i) => !p.reversed && after?.payments?.[i]?.unapplied);
+  for (const row of unappliedRows) {
+    const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === row.move_id && x.state === 'posted');
+    if (payment) {
+      if (isPaymentMatched(db, payment) || bookedByBank(db, row.move_id)) {
+        return 'This payment is matched with a reconciled bank transaction; unreconcile the transaction first';
+      }
+      if ((db.records['account.batch.payment'] ?? []).some((b) => b.state === 'posted' && (b.lines ?? []).some((l) => !l.cancelled && l.payment_id === payment.id))) {
+        return 'A payment in a posted batch cannot be unreconciled; remove it from the batch first';
+      }
+    }
+  }
+  return null;
+}
+
 export function moveGuard(db, before, after, ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? unapplicationSettlementRule(db, before, after) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
