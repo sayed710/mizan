@@ -1,5 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import { setupDom, find } from './test-support/dom.js';
+
+register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
+
 import { create, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
@@ -10,6 +15,7 @@ import {
   printCheck,
   printBatchChecks,
   voidCheck,
+  reprintCheck,
   paymentRemittanceLines,
   postPayment,
   resetPaymentToDraft,
@@ -636,4 +642,319 @@ test('Bug 5: Deleting a voided check payment is blocked by protectDelete so chec
   assert.throws(() => {
     sync(db, unlink(db, 'account.payment', [draftVoidedPay.id]));
   }, /Issued checks cannot be deleted/i);
+});
+
+const textOf = (node) => (node.nodeType === 3 ? node.nodeValue : (node.childNodes ?? []).map(textOf).join(''));
+const props = (node) => Object.entries(node ?? {}).find(([k]) => k.startsWith('__reactProps$'))?.[1];
+
+test('Round 2 Bug 1: Register buttons handle errors with feedback and route manual To Print rows to payment form', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/checks' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb, commit } = await import('./store.js');
+  const { Checks } = await import('./views/Checks.jsx');
+
+  await initStore();
+  let db = getDb();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_manual_sequencing: true });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  // Create a posted payment that needs manual check number (state will be 'To Print' in register)
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 120,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+
+  // Create an already-voided batch check payment to test onVoid error feedback
+  const batchBill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Batch item', price_unit: 100, qty: 1 }],
+  });
+  db = postMove(batchBill.db, batchBill.id);
+  const batch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    date: today(),
+    lines: [{ move_id: batchBill.id, amount: 100 }],
+  });
+  db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+  const postedBatch = read(db, 'account.batch.payment', batch.id);
+  db = write(db, 'account.batch.payment', postedBatch.id, {
+    lines: [{ ...postedBatch.lines[0], check_number: 999 }],
+  });
+  db = printBatchChecks(db, postedBatch.id);
+  const bPayId = postedBatch.lines[0].payment_id;
+  db = voidCheck(db, read(db, 'account.payment', bPayId));
+
+  await React.act(async () => commit(db));
+
+  let alertedMessage = null;
+  globalThis.alert = (msg) => { alertedMessage = msg; };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Checks)));
+    const printBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Print');
+    assert.ok(printBtn, 'Print button exists for To Print row');
+
+    // Clicking Print on manual To Print row should route to payment form instead of throwing unhandled error
+    await React.act(async () => {
+      props(printBtn).onClick();
+    });
+    assert.equal(window.location.hash, `#/open/account.payment/${draftPay.id}`);
+
+    // Clicking Void on already-voided batch row should catch error and show alert feedback
+    const voidBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Void');
+    assert.ok(voidBtn, 'Void button exists for batch row');
+    await React.act(async () => {
+      props(voidBtn).onClick();
+    });
+    assert.match(alertedMessage, /already voided/i);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Round 2 Bug 2: Manual-numbering reprint reuses the voided number', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, {
+    check_next_number: 100,
+    check_manual_sequencing: true,
+  });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 250,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = sync(db, write(db, 'account.payment', draftPay.id, { check_number: 500 }));
+  const payment = read(db, 'account.payment', draftPay.id);
+  db = printCheck(db, payment);
+  assert.equal(read(db, 'account.payment', payment.id).check_number, 500);
+
+  // Void check #500
+  db = voidCheck(db, read(db, 'account.payment', payment.id));
+  const voidedPay = read(db, 'account.payment', payment.id);
+
+  // printCheck on voided check with manual sequencing must throw, not return db unchanged
+  assert.throws(() => {
+    printCheck(db, voidedPay);
+  }, /manual/i);
+
+  // Form button "Print Check" must be hidden while voided on manual journal
+  const printBtn = models['account.payment'].form.buttons.find((b) => b.label === 'Print Check');
+  assert.equal(printBtn.when(voidedPay, db), false, 'Print Check must be hidden while check number is voided on manual journal');
+
+  // After setting a new check number, Print Check becomes available again
+  db = sync(db, write(db, 'account.payment', voidedPay.id, { check_number: 501 }));
+  const renumberedPay = read(db, 'account.payment', voidedPay.id);
+  assert.equal(printBtn.when(renumberedPay, db), true);
+  assert.doesNotThrow(() => {
+    db = printCheck(db, renumberedPay);
+  });
+});
+
+test('Round 2 Bug 3: Mixed-currency stubs show separate totals by currency instead of summing across currencies', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb, commit } = await import('./store.js');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+
+  await initStore();
+  let db = getDb();
+  const journal = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(usd && eur);
+
+  db = write(db, 'res.currency', eur.id, { rate_ids: [{ date: '2026-01-01', rate: 2.0 }] });
+
+  // Bill in USD (50)
+  const usdBill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 3,
+    currency_id: usd.id,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = postMove(usdBill.db, usdBill.id);
+
+  // Bill in EUR (200)
+  const eurBill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 3,
+    currency_id: eur.id,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ qty: 1, price_unit: 200, tax: 0 }],
+  });
+  db = postMove(eurBill.db, eurBill.id);
+
+  const checkLine = (journal.outbound_payment_method_line_ids ?? []).map((l) => typeof l === 'object' ? l : read(db, 'account.payment.method.line', l))
+    .find((l) => read(db, 'account.payment.method', l?.payment_method_id)?.code === 'check_printing');
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 3,
+    amount: 150,
+    journal_id: journal.id,
+    ...(checkLine ? { payment_method_line_id: checkLine.id } : {}),
+  });
+  db = payMove(draftPay.db, usdBill.id, 150, '2026-01-02', { paymentId: draftPay.id, journalId: journal.id });
+  db = printCheck(db, draftPay.id);
+  const payment = read(db, 'account.payment', draftPay.id);
+
+  // Settle EUR bill with payment move
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => (
+        m.id === eurBill.id
+          ? { ...m, payments: [{ date: '2026-01-02', amount: 200, move_id: payment.move_id }], amount_paid: 200 }
+          : m
+      )),
+    },
+  };
+
+  const lines = paymentRemittanceLines(db, payment);
+  assert.equal(lines.length, 2);
+  assert.ok(lines.every((l) => l.currency && l.currency.id));
+
+  await React.act(async () => commit(db));
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: payment.id })));
+    const text = textOf(host);
+    assert.match(text, /Remittance Advice/i);
+    // Must NOT add 50 USD + 200 EUR into a false total like 250 € or $250
+    assert.doesNotMatch(text, /€\s*250|250\.00\s*€|\$\s*250/);
+    // Separate totals for EUR and USD must appear
+    assert.match(text, /Net Total\s*\(EUR\)/i);
+    assert.match(text, /Net Total\s*\(USD\)/i);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Round 2 Bug 4: Manual reprintCheck requires replacement check number and does not advance journal sequence', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, {
+    check_next_number: 100,
+    check_manual_sequencing: true,
+  });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 180,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = sync(db, write(db, 'account.payment', draftPay.id, { check_number: 500 }));
+  const payment = read(db, 'account.payment', draftPay.id);
+  db = printCheck(db, payment);
+  assert.equal(read(db, 'account.payment', payment.id).check_number, 500);
+
+  // Calling reprintCheck on manual journal without replacement number must throw
+  assert.throws(() => {
+    reprintCheck(db, payment);
+  }, /manual/i);
+
+  // Calling with replacement number assigns it, voids old number, and leaves check_next_number untouched
+  db = reprintCheck(db, payment, 505);
+  const reprinted = read(db, 'account.payment', payment.id);
+  assert.equal(reprinted.check_number, 505);
+  assert.deepEqual(reprinted.voided_check_numbers.map((v) => v.check_number), [500]);
+  assert.equal(read(db, 'account.journal', bank.id).check_next_number, 100);
+});
+
+test('Round 2 Bug 5: Bottom check layout anchors check body to bottom of sheet with print layout styles', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb, commit } = await import('./store.js');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+  const fs = await import('node:fs');
+
+  await initStore();
+  let db = getDb();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, {
+    check_printing_layout: 'bottom',
+    check_next_number: 600,
+  });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Bottom Check Item', price_unit: 100, qty: 1 }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 100,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = payMove(draftPay.db, bill.id, 100, today(), { paymentId: draftPay.id, journalId: bank.id });
+  db = printCheck(db, draftPay.id);
+
+  await React.act(async () => commit(db));
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: draftPay.id })));
+    const article = find(host, (n) => n.tagName === 'ARTICLE' && props(n)?.className?.includes('check-layout-bottom'));
+    assert.ok(article, 'Article has check-layout-bottom class');
+
+    // CSS file must contain print bottom-anchor styles for check-layout-bottom and check min-height
+    const css = fs.readFileSync('src/views.css', 'utf-8');
+    assert.match(css, /\.check-layout-bottom[\s\S]*?(margin-top:\s*auto|justify-content:\s*flex-end)/);
+    assert.match(css, /@media print[\s\S]*?\.paper\.check/);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
 });

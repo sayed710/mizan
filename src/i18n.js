@@ -3499,6 +3499,7 @@ const ar = {
   'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
   'Manual Numbering': 'ترقيم يدوي',
   'Check Layout': 'تخطيط الشيك',
+  'New Check Number': 'رقم الشيك الجديد',
   'Top': 'أعلى',
   'Middle': 'وسط',
   'Bottom': 'أسفل',

@@ -55,10 +55,18 @@
 .paper-qr { margin: 16px 0 0; display: inline-flex; flex-direction: column; align-items: center; gap: 4px; }
 .paper-qr svg { background: #fff; }
 .paper-foot { margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px; font-size: 12px; text-align: center; }
+.paper.check { min-height: 1000px; display: flex; flex-direction: column; box-sizing: border-box; }
+.paper.check.check-layout-bottom { display: flex; flex-direction: column; justify-content: flex-end; }
+.paper.check.check-layout-bottom .check-main-area { margin-top: auto; }
+.paper.check.check-layout-middle { display: flex; flex-direction: column; justify-content: space-between; }
+.paper.check.check-layout-top { display: flex; flex-direction: column; justify-content: flex-start; }
 @media print {
   .no-print { display: none !important; }
   .print-page { background: #fff; padding: 0; }
   .paper { box-shadow: none; padding: 0; max-width: none; min-height: 0; }
+  .paper.check { min-height: 10.5in; height: 100%; page-break-after: always; }
+  .paper.check.check-layout-bottom { min-height: 10.5in; display: flex; flex-direction: column; justify-content: flex-end; }
+  .paper.check.check-layout-bottom .check-main-area { margin-top: auto; }
 }
 
 .company-switch { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: var(--surface); }

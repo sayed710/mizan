@@ -71,11 +71,22 @@ function Checks({ db, batch }) {
         const layout = journal?.check_printing_layout || 'top';
         const stubLines = payment
           ? paymentRemittanceLines(db, payment)
-          : (move ? [{ move, name: move.name || move.ref || '—', date: move.invoice_date || move.date, original_amount: move.amount_total, paid_amount: l.amount }] : []);
-        const netTotal = stubLines.length
-          ? stubLines.reduce((sum, item) => sum + (Number(item.paid_amount) || 0), 0)
-          : (payment?.amount ?? l.amount);
-        const docCurrency = (stubLines[0]?.move ? documentCurrency(db, stubLines[0].move) : null) ?? amounts.currency;
+          : (move ? [{ move, name: move.name || move.ref || '—', date: move.invoice_date || move.date, original_amount: move.amount_total, paid_amount: l.amount, currency: documentCurrency(db, move) }] : []);
+        const totalsByCurrency = [];
+        const seenCurrencies = new Map();
+        for (const item of stubLines) {
+          const curr = item.currency ?? (item.move ? documentCurrency(db, item.move) : null) ?? amounts.currency;
+          const key = curr?.id ?? curr?.name ?? 'default';
+          if (!seenCurrencies.has(key)) {
+            const entry = { currency: curr, total: 0 };
+            seenCurrencies.set(key, entry);
+            totalsByCurrency.push(entry);
+          }
+          seenCurrencies.get(key).total += Number(item.paid_amount) || 0;
+        }
+        if (!totalsByCurrency.length) {
+          totalsByCurrency.push({ currency: amounts.currency, total: payment?.amount ?? l.amount ?? 0 });
+        }
 
         const checkBody = (
           <section key="check-main" className="check-main-area">
@@ -101,7 +112,7 @@ function Checks({ db, batch }) {
               </thead>
               <tbody>
                 {stubLines.length ? stubLines.map((item, idx) => {
-                  const lineCurrency = (item.move ? documentCurrency(db, item.move) : null) ?? docCurrency;
+                  const lineCurrency = item.currency ?? (item.move ? documentCurrency(db, item.move) : null) ?? amounts.currency;
                   return (
                     <tr key={item.move?.id ?? idx}>
                       <td>{item.name}</td>
@@ -120,10 +131,19 @@ function Checks({ db, batch }) {
                 )}
               </tbody>
               <tfoot>
-                <tr>
-                  <td colSpan="3"><b>{t('Net Total')}</b></td>
-                  <td className="num"><b>{docCurrency ? formatCurrency(netTotal, docCurrency) : netTotal}</b></td>
-                </tr>
+                {totalsByCurrency.length <= 1 ? (
+                  <tr>
+                    <td colSpan="3"><b>{t('Net Total')}</b></td>
+                    <td className="num"><b>{totalsByCurrency[0]?.currency ? formatCurrency(totalsByCurrency[0].total, totalsByCurrency[0].currency) : totalsByCurrency[0]?.total}</b></td>
+                  </tr>
+                ) : (
+                  totalsByCurrency.map((tb) => (
+                    <tr key={tb.currency?.id ?? tb.currency?.name}>
+                      <td colSpan="3"><b>{t('Net Total')} ({tb.currency?.name || tb.currency?.symbol || ''})</b></td>
+                      <td className="num"><b>{formatCurrency(tb.total, tb.currency)}</b></td>
+                    </tr>
+                  ))
+                )}
               </tfoot>
             </table>
           </section>

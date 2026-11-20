@@ -78,16 +78,29 @@ export function Checks() {
     const onPrintToPrint = () => {
       const p = read(db, 'account.payment', row.paymentId);
       if (p) {
-        const nextDb = printCheck(db, p);
-        commit(nextDb);
-        window.location.hash = `#/print/account.payment/${row.paymentId}`;
+        const journal = p.journal_id ? read(db, 'account.journal', p.journal_id) : null;
+        if (journal?.check_manual_sequencing) {
+          window.location.hash = `#/open/account.payment/${row.paymentId}`;
+          return;
+        }
+        try {
+          const nextDb = printCheck(db, p);
+          commit(nextDb);
+          window.location.hash = `#/print/account.payment/${row.paymentId}`;
+        } catch (e) {
+          alert(t(e.message));
+        }
       }
     };
 
     const onVoid = () => {
       const p = read(db, 'account.payment', row.paymentId);
       if (p) {
-        commit(voidCheck(db, p));
+        try {
+          commit(voidCheck(db, p));
+        } catch (e) {
+          alert(t(e.message));
+        }
       }
     };
 
