@@ -60,12 +60,15 @@
 .paper.check.check-layout-bottom .check-main-area { margin-top: auto; }
 .paper.check.check-layout-middle { display: flex; flex-direction: column; justify-content: space-between; }
 .paper.check.check-layout-top { display: flex; flex-direction: column; justify-content: flex-start; }
+@page check { size: letter; margin: 0.25in; }
 @media print {
   .no-print { display: none !important; }
   .print-page { background: #fff; padding: 0; }
   .paper { box-shadow: none; padding: 0; max-width: none; min-height: 0; }
-  .paper.check { min-height: 10.5in; height: 100%; page-break-after: always; }
-  .paper.check.check-layout-bottom { min-height: 10.5in; display: flex; flex-direction: column; justify-content: flex-end; }
+  /* One check per Letter sheet: 11in minus the 0.25in top and bottom margins of the check page. */
+  .paper.check { page: check; min-height: 10.5in; height: 10.5in; overflow: hidden; break-inside: avoid; }
+  .paper.check:not(:last-child) { break-after: page; }
+  .paper.check.check-layout-bottom { display: flex; flex-direction: column; justify-content: flex-end; }
   .paper.check.check-layout-bottom .check-main-area { margin-top: auto; }
 }
 
