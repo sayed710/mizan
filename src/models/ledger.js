@@ -124,6 +124,14 @@ export function resolveCompanyAccount(db, accountId, companyId) {
 
 /** Whether any line has a negative debit or credit. */
 export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);
+/** Whether any line's amount_currency sign contradicts its debit/credit balance. */
+export const badCurrencyAmountSign = (lines = []) => lines.some((l) => {
+  const amount = Number(l.amount_currency) || 0;
+  if (!amount) return false;
+  const debit = Number(l.debit) || 0;
+  const credit = Number(l.credit) || 0;
+  return (amount > 0 && credit > debit) || (amount < 0 && debit > credit);
+});
 export const isBalanced = (lines = [], currency = null) =>
   lines.length >= 2 && lines.every((l) => ['debit', 'credit'].every((key) => {
     const value = Number(l[key] ?? 0);

@@ -3521,6 +3521,7 @@ const ar = {
   'Federal States': 'الولايات الاتحادية',
   'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
   'Country group name is required': 'اسم مجموعة الدول مطلوب',
+  'The currency amount sign must match the debit/credit balance': 'يجب أن تتطابق إشارة المبلغ بالعملة مع رصيد المدين/الدائن',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
