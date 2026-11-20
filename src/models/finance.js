@@ -189,17 +189,6 @@ export function taxLockFor(db, move, ctx = null) {
 }
 
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
-/** A posted payment sits in a posted batch payment. */
-export const inPostedBatch = (db, payment) => (db.records['account.batch.payment'] ?? [])
-  .some((b) => b.state === 'posted' && (b.lines ?? []).some((l) => !l.cancelled && l.payment_id === payment.id));
-
-/** Why a posted payment's matching with its documents must stay (bank-reconciled or in a posted batch), or null. */
-export function settledPaymentLock(db, payment) {
-  if (isPaymentMatched(db, payment) || bookedByBank(db, payment.move_id)) return 'This payment is matched with a reconciled bank transaction; unreconcile the transaction first';
-  if (inPostedBatch(db, payment)) return 'A payment in a posted batch cannot be unreconciled; remove it from the batch first';
-  return null;
-}
-
 export const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === id || l.writeoff_move_id === id || (l.allocations ?? []).some((a) => a.payment_move_id === id || a.writeoff_move_id === id) || (l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id)));
 
 /**
@@ -434,8 +423,6 @@ function unapplicationError(db, stored, after, before) {
       });
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
-    const settled = payment && settledPaymentLock(db, payment);
-    if (settled) return settled;
     const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
     if (glOnly) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);

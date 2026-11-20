@@ -254,37 +254,22 @@ test('PAY-12: a locked period refuses the unreconcile, also on a plain diff', ()
   assert.equal(open(locked, id), 0);
 });
 
-test('PAY-12: a payment matched with a reconciled bank transaction is kept', () => {
+test('PAY-12: unreconciling keeps the payment bank match and its posted batch, and reopens the invoice', () => {
   const { db, id } = twoPayments();
   const invoice = read(db, 'account.move', id);
   const [first] = widget().list(db, invoice);
   const payment = paymentOf(db, id, 0);
-  const unlocked = widget().unreconcile(db, invoice, first).db;
-  const matched = create(db, 'account.bank.statement.line', {
+  const bank = create(db, 'account.bank.statement.line', {
     journal_id: payment.journal_id, date: '2026-05-11', payment_ref: 'Bank line', amount: 60, state: 'reconciled', move_id: payment.move_id, payment_move_id: payment.move_id,
-  }).db;
-  assert.throws(() => widget().unreconcile(matched, read(matched, 'account.move', id), first), /bank transaction/);
-  const forged = { ...matched, records: { ...matched.records, 'account.move': unlocked.records['account.move'], 'account.payment': unlocked.records['account.payment'] } };
-  assert.throws(() => applyDiff(matched, diffDb(matched, forged), { isAdmin: false }), /bank transaction/);
-  assert.equal(open(matched, id), 0);
-});
-
-test('PAY-12: a payment in a posted batch is kept', () => {
-  const { db, id } = twoPayments();
-  const invoice = read(db, 'account.move', id);
-  const [first] = widget().list(db, invoice);
-  const payment = paymentOf(db, id, 0);
-  const unlocked = widget().unreconcile(db, invoice, first).db;
-  const batched = create(db, 'account.batch.payment', {
+  });
+  const batch = create(bank.db, 'account.batch.payment', {
     batch_type: 'inbound', journal_id: payment.journal_id, state: 'posted', lines: [{ payment_id: payment.id, amount: 60, cancelled: false }],
-  }).db;
-  assert.throws(() => widget().unreconcile(batched, read(batched, 'account.move', id), first), /posted batch/);
-  const forged = { ...batched, records: { ...batched.records, 'account.move': unlocked.records['account.move'], 'account.payment': unlocked.records['account.payment'] } };
-  assert.throws(() => applyDiff(batched, diffDb(batched, forged), { isAdmin: false }), /posted batch/);
-  const released = create(db, 'account.batch.payment', {
-    batch_type: 'inbound', journal_id: payment.journal_id, state: 'draft', lines: [{ payment_id: payment.id, amount: 60, cancelled: false }],
-  }).db;
-  assert.doesNotThrow(() => widget().unreconcile(released, read(released, 'account.move', id), first));
+  });
+  const next = widget().unreconcile(batch.db, read(batch.db, 'account.move', id), first).db;
+  assert.equal(read(next, 'account.bank.statement.line', bank.id).state, 'reconciled');
+  assert.equal(read(next, 'account.batch.payment', batch.id).state, 'posted');
+  assert.equal(read(next, 'account.payment', payment.id).state, 'posted');
+  assert.equal(open(next, id), 60);
 });
 
 test('PAY-12: the form action reuses the shared unapplication, not a second implementation', () => {

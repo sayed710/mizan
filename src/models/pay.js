@@ -3,7 +3,7 @@ import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, isInvoice, isPurchase, isRefund, liquidityForeignFields, payMove, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
-import { bookedByBank, datedLockDelete, inPostedBatch, settledPaymentLock, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
+import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
@@ -638,8 +638,6 @@ export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineI
   if (source?.state !== 'posted' || (!byPartial && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === targetMoveId))) {
     throw new Error(byPartial ? 'The reconciled counterpart entry must remain posted' : 'The payment entry must remain posted and unreversed');
   }
-  const settled = payment && settledPaymentLock(db, payment);
-  if (settled) throw new Error(settled);
   const fxError = settlementFxError(db, invoice, row);
   if (fxError) throw new Error(fxError);
   for (const id of [row.payment_fx_move_id, row.cash_basis_move_id].filter(Boolean)) {
@@ -700,8 +698,8 @@ export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today(
 
 /**
  * Unreconcile one applied payment from one invoice or bill (invoice form, payments tab). The payment stays posted and its
- * credit is released through unapplyPaymentCredit; the guards match unreconciling from journal items: a payment matched
- * with a reconciled bank transaction or sitting in a posted batch is kept, and so is anything dated inside a lock period.
+ * credit is released through unapplyPaymentCredit, as unreconciling from journal items does: a bank match or a posted
+ * batch stays on the payment, which simply becomes outstanding again. Nothing dated inside a lock period changes.
  */
 export function unreconcileInvoicePayment(db, invoiceId, paymentMoveId, { date = null, lineIndex = null, ctx = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
@@ -1039,6 +1037,9 @@ export function reversePayment(db, p, date = today(), options = {}) {
   }
   return postNote(next, 'account.payment', p.id, `Reversed by ${reversal.name}`);
 }
+
+const inPostedBatch = (db, payment) => (db.records['account.batch.payment'] ?? [])
+  .some((b) => b.state === 'posted' && (b.lines ?? []).some((l) => !l.cancelled && l.payment_id === payment.id));
 
 /** Entries of a payment that a reset to draft would undo. */
 const paymentEntries = (db, payment) => [payment.move_id, payment.destination_move_id].filter(Boolean)
@@ -1417,10 +1418,6 @@ export const payModels = {
         ))) {
           return 'Accounting-defining fields of a posted transfer cannot be modified';
         }
-      }
-      if (before && before.state === 'posted' && after.state === 'posted' && Number(after.unapplied || 0) > Number(before.unapplied || 0)) {
-        const settled = settledPaymentLock(db, before);
-        if (settled) return settled;
       }
       return datedLockGuard([
         'name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id',
