@@ -174,18 +174,23 @@ test('Requirement 1: applyDiff enforces partner compatibility and company-curren
   );
   assert.deepEqual(db.records['account.partial.reconcile'] ?? [], diffPartnersSnapshot);
 
-  // 1b. Foreign currency (on invoice move OR directly on a journal line): rejected by both paths; db unchanged.
-  assert.throws(
-    () => reconcileLedgerItems(db, [itemSelection(db, foreignInvA.id, ar), itemSelection(db, creditA.id, ar)], { date: '2026-04-05' }),
-    /General-ledger reconciliation requires items in the company currency/,
-  );
+  // 1b. Mixed company and foreign currency matches on company currency with proportional foreign residual;
+  // forged links with missing or invalid foreign currency amounts remain rejected through applyDiff; db unchanged.
+  const mixedDb = reconcileLedgerItems(db, [itemSelection(db, foreignInvA.id, ar), itemSelection(db, creditA.id, ar)], { date: '2026-04-05' });
+  const mixedPartials = (mixedDb.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
+  assert.equal(mixedPartials.length, 1);
+  assert.equal(mixedPartials[0].amount, 150);
+  assert.equal(mixedPartials[0].debit_amount_currency, 75); // 100 EUR * (150 USD / 200 USD) = 75 EUR
+  assert.equal(mixedPartials[0].credit_amount_currency, null);
+  assert.equal(mixedPartials[0].exchange_move_id, null);
+
   assert.throws(
     () => applyDiff(db, { upserts: { 'account.partial.reconcile': [{ ...linkTemplate, debit_move_id: foreignInvA.id, debit_line_index: foreignInvArIdx }] } }, { isAdmin: true }),
-    /General-ledger reconciliation requires items in the company currency/,
+    /Currency amounts on foreign partial reconciliation must match and be positive/,
   );
   assert.throws(
     () => applyDiff(db, { upserts: { 'account.partial.reconcile': [{ ...linkTemplate, debit_move_id: foreignLineEntry.id, debit_line_index: 0 }] } }, { isAdmin: true }),
-    /General-ledger reconciliation requires items in the company currency/,
+    /Currency amounts on foreign partial reconciliation must match and be positive/,
   );
   assert.deepEqual(db.records['account.partial.reconcile'] ?? [], diffPartnersSnapshot);
 

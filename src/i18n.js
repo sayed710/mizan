@@ -3514,6 +3514,7 @@ const ar = {
   'Payment does not pay by check': 'الدفعة لا تسدد بشيك',
   'Check has already been printed': 'تمت طباعة الشيك بالفعل',
   'Check number is required for manual numbering': 'رقم الشيك مطلوب للترقيم اليدوي',
+  'Partial reconciliation currency amount does not match the expected foreign residual': 'مبلغ العملة للمطابقة الجزئية لا يطابق الرصيد الأجنبي المتبقي المتوقع',
   'Group Payments': 'تجميع الدفعات',
   'Applied Payments': 'الدفعات المطبقة',
   'Only posted invoices and bills have payments to unreconcile': 'الفواتير المرحلة فقط هي التي يمكن إلغاء تسوية دفعاتها',
@@ -3538,6 +3539,8 @@ const ar = {
   'Federal States': 'الولايات الاتحادية',
   'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
   'Country group name is required': 'اسم مجموعة الدول مطلوب',
+  'The applied amount cannot be represented in the foreign currency after rounding': 'لا يمكن تمثيل المبلغ المطبق بالعملة الأجنبية بعد التقريب',
+  'This credit note is linked to another invoice': 'إشعار الدائن هذا مرتبط بفاتورة أخرى',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
