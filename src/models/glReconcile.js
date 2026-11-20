@@ -533,50 +533,27 @@ function partialReconcileInvariant(db, after) {
         }
       } else if (currD !== ownId || currC !== ownId) {
         if (after.exchange_move_id != null) return 'An exchange entry is not required for this settlement';
-        const isForeignD = currD !== ownId;
-        const foreignCurrId = isForeignD ? currD : currC;
-        const foreignCurr = read(baseDb, 'res.currency', foreignCurrId);
+        // Mixed company/foreign match: only the foreign side carries a currency amount, its proportional share.
+        const foreignSide = currD !== ownId ? 'debit' : 'credit';
+        const companySide = foreignSide === 'debit' ? 'credit' : 'debit';
+        if (after[`${companySide}_amount_currency`] != null) {
+          return 'Exchange difference and currency amounts are not valid for company-currency reconciliation';
+        }
+        const amountCurrency = after[`${foreignSide}_amount_currency`];
+        if (amountCurrency == null || !(Number(amountCurrency) > 0)) {
+          return 'Currency amounts on foreign partial reconciliation must match and be positive';
+        }
+        const foreignCurr = read(baseDb, 'res.currency', foreignSide === 'debit' ? currD : currC);
         const roundCurr = (v) => (foreignCurr ? roundCurrency(v, foreignCurr) : round(v));
-        if (isForeignD) {
-          if (after.credit_amount_currency != null) {
-            return 'Exchange difference and currency amounts are not valid for company-currency reconciliation';
-          }
-          if (after.debit_amount_currency == null || !(Number(after.debit_amount_currency) > 0)) {
-            return 'Currency amounts on foreign partial reconciliation must match and be positive';
-          }
-          const resD = lineResidualBeforePartial(baseDb, db, after.debit_move_id, after.debit_line_index, after.id, ownCurrency, foreignCurr);
-          if (resD.remainingCompany <= 0 || resD.remainingCurrency <= 0) {
-            return 'The applied amount cannot exceed the open balance available to reconcile';
-          }
-          let expectedCurr;
-          if (roundOwn(after.amount) >= resD.remainingCompany) {
-            expectedCurr = resD.remainingCurrency;
-          } else {
-            expectedCurr = roundCurr(resD.remainingCurrency * after.amount / resD.remainingCompany);
-          }
-          if (Math.abs(roundCurr(Number(after.debit_amount_currency)) - expectedCurr) > 1e-4) {
-            return 'Partial reconciliation currency amount does not match the expected foreign residual';
-          }
-        } else {
-          if (after.debit_amount_currency != null) {
-            return 'Exchange difference and currency amounts are not valid for company-currency reconciliation';
-          }
-          if (after.credit_amount_currency == null || !(Number(after.credit_amount_currency) > 0)) {
-            return 'Currency amounts on foreign partial reconciliation must match and be positive';
-          }
-          const resC = lineResidualBeforePartial(baseDb, db, after.credit_move_id, after.credit_line_index, after.id, ownCurrency, foreignCurr);
-          if (resC.remainingCompany <= 0 || resC.remainingCurrency <= 0) {
-            return 'The applied amount cannot exceed the open balance available to reconcile';
-          }
-          let expectedCurr;
-          if (roundOwn(after.amount) >= resC.remainingCompany) {
-            expectedCurr = resC.remainingCurrency;
-          } else {
-            expectedCurr = roundCurr(resC.remainingCurrency * after.amount / resC.remainingCompany);
-          }
-          if (Math.abs(roundCurr(Number(after.credit_amount_currency)) - expectedCurr) > 1e-4) {
-            return 'Partial reconciliation currency amount does not match the expected foreign residual';
-          }
+        const res = lineResidualBeforePartial(baseDb, db, after[`${foreignSide}_move_id`], after[`${foreignSide}_line_index`], after.id, ownCurrency, foreignCurr);
+        if (res.remainingCompany <= 0 || res.remainingCurrency <= 0) {
+          return 'The applied amount cannot exceed the open balance available to reconcile';
+        }
+        const expectedCurr = roundOwn(after.amount) >= res.remainingCompany
+          ? res.remainingCurrency
+          : roundCurr(res.remainingCurrency * after.amount / res.remainingCompany);
+        if (Math.abs(roundCurr(Number(amountCurrency)) - expectedCurr) > 1e-4) {
+          return 'Partial reconciliation currency amount does not match the expected foreign residual';
         }
       }
     }
@@ -899,6 +876,22 @@ export function deriveCommonCurrencyForBudget(budget, dRemaining, dCurrRemaining
 }
 
 /** Match debits against credits oldest first, creating `account.partial.reconcile` links and document settlements. */
+/**
+ * Foreign amount a company-currency match of `matchAmt` consumes from a foreign-currency item (its proportional share,
+ * or the whole remainder when the match clears the item), updating the item's running foreign remainder; null for
+ * company-currency items.
+ */
+function consumeForeign(db, item, currencyId, matchAmt, ownCurrency) {
+  if (currencyId === (ownCurrency?.id ?? null)) return null;
+  const currency = read(db, 'res.currency', currencyId);
+  const remaining = item.remainingCurrency ?? Math.abs(Number(item.reconciledLine.amount_residual_currency) || 0);
+  const consumed = matchAmt >= item.remaining || Math.abs(matchAmt - item.remaining) < 1e-9
+    ? remaining
+    : roundCurrency(remaining * matchAmt / item.remaining, currency);
+  item.remainingCurrency = roundCurrency(remaining - consumed, currency);
+  return consumed;
+}
+
 function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate, requestedAmount, ownCurrency, roundOwn }) {
   const { debits, credits } = splitDebitCreditItems(workingItems, ownCurrency, roundOwn);
   debits.sort(compareOldestFirst);
@@ -1052,37 +1045,8 @@ function matchDebitCreditPairs(db, workingItems, { account, companyId, matchDate
     } else {
       const matchAmt = roundOwn(Math.min(d.remaining, c.remaining, ...(budget != null ? [budget] : [])));
       if (matchAmt > 0 && !isCurrencyZero(matchAmt, ownCurrency)) {
-        let consumedD = null;
-        let consumedC = null;
-
-        if (currD !== (ownCurrency?.id ?? null)) {
-          const foreignCurrD = read(next, 'res.currency', currD);
-          const roundCurrD = (v) => roundCurrency(v, foreignCurrD);
-          const remCurrD = d.remainingCurrency != null
-            ? d.remainingCurrency
-            : Math.abs(Number(d.reconciledLine.amount_residual_currency) || 0);
-          if (matchAmt >= d.remaining || Math.abs(matchAmt - d.remaining) < 1e-9) {
-            consumedD = remCurrD;
-          } else {
-            consumedD = roundCurrD(remCurrD * matchAmt / d.remaining);
-          }
-          d.remainingCurrency = roundCurrD(remCurrD - consumedD);
-        }
-
-        if (currC !== (ownCurrency?.id ?? null)) {
-          const foreignCurrC = read(next, 'res.currency', currC);
-          const roundCurrC = (v) => roundCurrency(v, foreignCurrC);
-          const remCurrC = c.remainingCurrency != null
-            ? c.remainingCurrency
-            : Math.abs(Number(c.reconciledLine.amount_residual_currency) || 0);
-          if (matchAmt >= c.remaining || Math.abs(matchAmt - c.remaining) < 1e-9) {
-            consumedC = remCurrC;
-          } else {
-            consumedC = roundCurrC(remCurrC * matchAmt / c.remaining);
-          }
-          c.remainingCurrency = roundCurrC(remCurrC - consumedC);
-        }
-
+        const consumedD = consumeForeign(next, d, currD, matchAmt, ownCurrency);
+        const consumedC = consumeForeign(next, c, currC, matchAmt, ownCurrency);
         const pairDate = [matchDate, d.moveDate, c.moveDate].sort().at(-1);
         const created = create(next, 'account.partial.reconcile', {
           debit_move_id: d.move.id,
