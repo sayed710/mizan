@@ -702,7 +702,9 @@ test('PR #189 review fixes: multi-company header, totals in merged ranges, HTML 
       });
       const bodyEl = find(host, (n) => n.className?.includes('annual-report-body'));
       assert.ok(bodyEl, 'annual-report-body is rendered');
-      const html = props(bodyEl)?.dangerouslySetInnerHTML?.__html ?? bodyEl.textContent ?? '';
+      const safeEl = find(bodyEl, (n) => n.className?.includes('readonly-html'));
+      assert.ok(safeEl, 'the report body renders through SafeHtml');
+      const html = props(safeEl)?.dangerouslySetInnerHTML?.__html ?? safeEl.textContent ?? '';
       assert.ok(!html.includes('<script>'), 'script tags must be stripped by sanitizer');
       assert.ok(!html.includes('onclick'), 'onclick attribute must be stripped by sanitizer');
       assert.ok(html.includes('Safe Content'), 'safe report text is preserved');
