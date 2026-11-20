@@ -1187,7 +1187,7 @@ test('Cross-company partner bank: batch payment rejects a posted bill that alrea
   const posted = postMove(bill.db, bill.id);
   // A record saved before the company check existed.
   const legacy = { ...posted, records: { ...posted.records, 'account.move': posted.records['account.move'].map((m) => (m.id === bill.id ? { ...m, partner_bank_id: bank.id } : m)) } };
-  const batch = create(legacy, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 1, lines: [{ move_id: bill.id, amount: 500 }] });
+  const batch = create(legacy, 'account.batch.payment', { batch_type: 'outbound', lines: [{ move_id: bill.id, amount: 500 }] });
   assert.throws(() => postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id)), /select a record shared with or belonging to this company/i);
   assert.equal(read(batch.db, 'account.move', bill.id).amount_paid ?? 0, 0);
 });

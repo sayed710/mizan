@@ -1033,7 +1033,6 @@ test('out-payment rule: vendor bill payments and batch payments require allow_ou
   // Batch payment with outbound bill to vendor without allow_out_payment must be rejected
   const batch = create(postedBill, 'account.batch.payment', {
     batch_type: 'outbound',
-    check_number_start: 101,
     date: today(),
     lines: [{ move_id: bill.id, amount: 100 }],
   });
@@ -1060,7 +1059,6 @@ test('out-payment rule: vendor bill payments and batch payments require allow_ou
   const posted2 = postMove(bill2.db, bill2.id);
   const batch2 = create(posted2, 'account.batch.payment', {
     batch_type: 'outbound',
-    check_number_start: 102,
     date: today(),
     lines: [{ move_id: bill2.id, amount: 100 }],
   });
@@ -1088,7 +1086,7 @@ test('outbound payment actions allow no recipient bank and persist a chosen bill
   assert.equal(read(confirmPayment.run(standaloneMissing.db, read(standaloneMissing.db, 'account.payment', standaloneMissing.id)).db, 'account.payment', standaloneMissing.id).state, 'posted');
   const missingSelection = write(draft.db, 'account.payment', draft.id, { partner_bank_id: 999999 });
   assert.throws(() => confirmPayment.run(missingSelection, read(missingSelection, 'account.payment', draft.id)), /invalid or inactive/i);
-  const batch = create(noBankBill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 1, lines: [{ move_id: noBankBill.id, amount: 100 }] });
+  const batch = create(noBankBill.db, 'account.batch.payment', { batch_type: 'outbound', lines: [{ move_id: noBankBill.id, amount: 100 }] });
   const validate = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Validate');
   assert.equal(read(validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db, 'account.batch.payment', batch.id).state, 'posted');
 
@@ -1158,13 +1156,18 @@ test('batch payment form action posts each bill settlement to the selected bank'
     db = confirm.run(bill.db, read(bill.db, 'account.move', bill.id)).db;
     ids.push(bill.id);
   }
-  const batch = create(db, 'account.batch.payment', { batch_type: 'outbound', date: today(), check_number_start: 100,
+  const journal = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', journal.id, { check_next_number: 100 });
+  const batch = create(db, 'account.batch.payment', { batch_type: 'outbound', journal_id: journal.id, date: today(),
     lines: ids.map((move_id) => ({ move_id, amount: read(db, 'account.move', move_id).amount_residual })) });
   const validate = models['account.batch.payment'].form.buttons.find((button) => button.label === 'Validate');
   db = validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db;
   const postedBatch = read(db, 'account.batch.payment', batch.id);
   assert.equal(postedBatch.state, 'posted');
-  assert.deepEqual(postedBatch.lines.map((line) => line.check_number), [100, 101]);
+  const printChecks = models['account.batch.payment'].form.buttons.find((button) => button.label === 'Print Checks');
+  db = printChecks.run(db, read(db, 'account.batch.payment', batch.id)).db;
+  const printedBatch = read(db, 'account.batch.payment', batch.id);
+  assert.deepEqual(printedBatch.lines.map((line) => line.check_number), [100, 101]);
   for (const [i, id] of ids.entries()) {
     const bill = read(db, 'account.move', id);
     const amount = [100, 200][i];

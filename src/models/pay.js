@@ -1223,7 +1223,9 @@ export function paymentRemittanceLines(db, payment) {
 export function printBatchChecks(db, batchOrId) {
   const batch = typeof batchOrId === 'object' && batchOrId !== null ? batchOrId : read(db, 'account.batch.payment', batchOrId);
   if (!batch || batch.state !== 'posted' || batch.batch_type !== 'outbound') return db;
-  const journal = batch.journal_id ? read(db, 'account.journal', batch.journal_id) : null;
+  // Batches posted before the batch kept its journal use their payments' journal.
+  const journalId = batch.journal_id ?? (batch.lines?.[0]?.payment_id ? read(db, 'account.payment', batch.lines[0].payment_id)?.journal_id : null);
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
   if (!journal) return db;
 
   let next = db;

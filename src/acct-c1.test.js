@@ -69,7 +69,6 @@ test('PAY-11 (Point 1): batch states have draft/posted only, no cancel/sent/reco
   const batchRes = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: journal.id,
-    check_number_start: 500,
     date: '2026-01-02',
     lines: [{ move_id: bill.id, amount: 100 }],
   });
@@ -183,7 +182,7 @@ test('PAY-17 (Point 4): remittance stub uses paymentSettledMoves, shows credit n
   const { initStore, getDb, commit } = await import('./store.js');
   const { create, read, search, write } = await import('./orm.js');
   const { postMove, payMove } = await import('./models/accounting.js');
-  const { applyPaymentCredit } = await import('./models/pay.js');
+  const { applyPaymentCredit, printCheck } = await import('./models/pay.js');
   const { PrintDoc } = await import('./views/PrintDoc.jsx');
 
   await initStore();
@@ -229,10 +228,24 @@ test('PAY-17 (Point 4): remittance stub uses paymentSettledMoves, shows credit n
   });
   db = postMove(creditNote.db, creditNote.id);
 
+  // Set journal check_next_number = 8500
+  db = write(db, 'account.journal', journal.id, { check_next_number: 8500 });
+  const checkLine = (journal.outbound_payment_method_line_ids ?? []).map((l) => typeof l === 'object' ? l : read(db, 'account.payment.method.line', l))
+    .find((l) => read(db, 'account.payment.method', l?.payment_method_id)?.code === 'check_printing');
+
   // Pay USD 150 against USD 50 bill with check #8500 (leaves USD 100 unapplied credit)
-  db = payMove(db, usdBill.id, 150, '2026-01-02', { journalId: journal.id, checkNumber: 8500 });
-  const payment = search(db, 'account.payment').find((p) => p.check_number === 8500);
-  assert.ok(payment, 'Check #8500 payment created');
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 3,
+    amount: 150,
+    journal_id: journal.id,
+    ...(checkLine ? { payment_method_line_id: checkLine.id } : {}),
+  });
+  db = payMove(draftPay.db, usdBill.id, 150, '2026-01-02', { paymentId: draftPay.id, journalId: journal.id });
+  db = printCheck(db, draftPay.id);
+  const payment = read(db, 'account.payment', draftPay.id);
+  assert.equal(payment.check_number, 8500, 'Check #8500 payment created');
 
   // Apply $100 USD unapplied credit of this payment to EUR 200 bill (settles EUR 200.00)
   db = applyPaymentCredit(db, payment.id, eurBill.id, '2026-01-02', 200);
@@ -288,10 +301,10 @@ test('PAY-18 (Points 2 & 3): Checks register drops Void, filters directly on che
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
   const { initStore, getDb, commit } = await import('./store.js');
-  const { create, read, search } = await import('./orm.js');
+  const { create, read, search, write } = await import('./orm.js');
   const { postMove, payMove } = await import('./models/accounting.js');
   const { postBatch, CHECK_REGISTER_STATES } = await import('./models/payments.js');
-  const { reprintCheck } = await import('./models/pay.js');
+  const { printCheck, printBatchChecks, reprintCheck } = await import('./models/pay.js');
   const { Checks } = await import('./views/Checks.jsx');
 
   // Verify every state in CHECK_REGISTER_STATES has an Arabic translation and option values stay canonical
@@ -309,14 +322,15 @@ test('PAY-18 (Points 2 & 3): Checks register drops Void, filters directly on che
     invoice_line_ids: [{ qty: 1, price_unit: 150, tax: 0 }],
   });
   db = postMove(bill1.db, bill1.id);
+  db = write(db, 'account.journal', journal.id, { check_next_number: 9100 });
   const batchRes = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: journal.id,
-    check_number_start: 9100,
     date: '2026-01-02',
     lines: [{ move_id: bill1.id, amount: 150 }],
   });
   db = postBatch(batchRes.db, read(batchRes.db, 'account.batch.payment', batchRes.id));
+  db = printBatchChecks(db, batchRes.id);
 
   // 2. Individual check -> state: 'Issued' + reprint -> state: 'Voided' + replacement check
   const bill2 = create(db, 'account.move', {
@@ -326,8 +340,21 @@ test('PAY-18 (Points 2 & 3): Checks register drops Void, filters directly on che
     invoice_line_ids: [{ qty: 1, price_unit: 75, tax: 0 }],
   });
   db = postMove(bill2.db, bill2.id);
-  db = payMove(db, bill2.id, 75, '2026-01-03', { journalId: journal.id, checkNumber: 9200 });
-  const indivPayment = search(db, 'account.payment').find((p) => p.check_number === 9200);
+  db = write(db, 'account.journal', journal.id, { check_next_number: 9200 });
+  const checkLine = (journal.outbound_payment_method_line_ids ?? []).map((l) => typeof l === 'object' ? l : read(db, 'account.payment.method.line', l))
+    .find((l) => read(db, 'account.payment.method', l?.payment_method_id)?.code === 'check_printing');
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 3,
+    amount: 75,
+    journal_id: journal.id,
+    ...(checkLine ? { payment_method_line_id: checkLine.id } : {}),
+  });
+  db = payMove(draftPay.db, bill2.id, 75, '2026-01-03', { paymentId: draftPay.id, journalId: journal.id });
+  db = printCheck(db, draftPay.id);
+  const indivPayment = read(db, 'account.payment', draftPay.id);
+  assert.equal(indivPayment.check_number, 9200);
   // Reprint voids 9200 ('Voided') and issues 9201 ('Issued')
   db = reprintCheck(db, indivPayment);
 
@@ -338,47 +365,39 @@ test('PAY-18 (Points 2 & 3): Checks register drops Void, filters directly on che
   try {
     await React.act(async () => root.render(React.createElement(Checks)));
 
-    // Verify Void button does NOT exist; Print link DOES exist
+    // Verify Void button and Print link exist
     const voidBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n).includes('Void'));
-    assert.equal(Boolean(voidBtn), false, 'Void button must NOT exist in Checks register');
+    assert.ok(voidBtn, 'Void button exists in Checks register');
 
     const printLinks = findAll(host, (n) => n.tagName === 'A' && props(n)?.href?.includes('/print/'));
     assert.ok(printLinks.length >= 2, 'Print action links exist on issued/posted check rows');
 
-    // Verify status filter <select> options match exact row state values, without 'printed' or 'unprinted' or 'Draft'
+    // Verify status filter <select> options match c2 register options, without unprinted or Draft
     const statusSelect = find(host, (n) => n.tagName === 'SELECT');
     assert.ok(statusSelect, 'Status filter select exists');
     const optionValues = findAll(statusSelect, (n) => n.tagName === 'OPTION').map((o) => props(o)?.value);
-    assert.equal(optionValues.includes('printed'), false, 'must not use printed alias');
+    assert.ok(optionValues.includes('printed'), 'offers printed status');
+    assert.ok(optionValues.includes('to_print'), 'offers to_print status');
+    assert.ok(optionValues.includes('voided'), 'offers voided status');
     assert.equal(optionValues.includes('unprinted'), false, 'must not handle/offer unprinted');
     assert.equal(optionValues.includes('Draft'), false, 'must not offer Draft which cannot occur');
     assert.ok(optionValues.includes('all'));
-    assert.ok(optionValues.includes('Posted'));
-    assert.ok(optionValues.includes('Issued'));
-    assert.ok(optionValues.includes('Voided'));
     assert.ok(optionValues.includes('Reversed'));
     assert.ok(optionValues.includes('Cancelled'));
 
-    // Filter by 'Posted'
-    await React.act(async () => props(statusSelect).onChange({ target: { value: 'Posted' } }));
-    const postedRowsText = textOf(find(host, (n) => n.tagName === 'TBODY'));
-    assert.match(postedRowsText, /9100/);
-    assert.doesNotMatch(postedRowsText, /9200/);
-    assert.doesNotMatch(postedRowsText, /9201/);
+    // Filter by 'printed' (shows both Posted batch check 9100 and Issued check 9201)
+    await React.act(async () => props(statusSelect).onChange({ target: { value: 'printed' } }));
+    const printedRowsText = textOf(find(host, (n) => n.tagName === 'TBODY'));
+    assert.match(printedRowsText, /9100/);
+    assert.match(printedRowsText, /9201/);
+    assert.doesNotMatch(printedRowsText, /9200/);
 
-    // Filter by 'Voided'
-    await React.act(async () => props(statusSelect).onChange({ target: { value: 'Voided' } }));
+    // Filter by 'voided' (shows Voided check 9200)
+    await React.act(async () => props(statusSelect).onChange({ target: { value: 'voided' } }));
     const voidedRowsText = textOf(find(host, (n) => n.tagName === 'TBODY'));
     assert.match(voidedRowsText, /9200/);
     assert.doesNotMatch(voidedRowsText, /9100/);
     assert.doesNotMatch(voidedRowsText, /9201/);
-
-    // Filter by 'Issued'
-    await React.act(async () => props(statusSelect).onChange({ target: { value: 'Issued' } }));
-    const issuedRowsText = textOf(find(host, (n) => n.tagName === 'TBODY'));
-    assert.match(issuedRowsText, /9201/);
-    assert.doesNotMatch(issuedRowsText, /9100/);
-    assert.doesNotMatch(issuedRowsText, /9200/);
 
     // Reset filter to 'all' and test search input + group by date
     await React.act(async () => props(statusSelect).onChange({ target: { value: 'all' } }));
@@ -405,9 +424,10 @@ test('Finding 1: check register row print link targets that row payment and prin
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
   const { initStore, getDb, commit } = await import('./store.js');
-  const { create, read, search } = await import('./orm.js');
+  const { create, read, search, write } = await import('./orm.js');
   const { postMove } = await import('./models/accounting.js');
   const { postBatch } = await import('./models/payments.js');
+  const { printBatchChecks } = await import('./models/pay.js');
   const { Checks } = await import('./views/Checks.jsx');
   const { PrintDoc } = await import('./views/PrintDoc.jsx');
 
@@ -435,10 +455,10 @@ test('Finding 1: check register row print link targets that row payment and prin
   db = postMove(bill2.db, bill2.id);
 
   // Create outbound batch with both bills
+  db = write(db, 'account.journal', journal.id, { check_next_number: 9300 });
   const batchRes = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: journal.id,
-    check_number_start: 9300,
     date: '2026-01-02',
     lines: [
       { move_id: bill1.id, amount: 100 },
@@ -446,10 +466,13 @@ test('Finding 1: check register row print link targets that row payment and prin
     ],
   });
   db = postBatch(batchRes.db, read(batchRes.db, 'account.batch.payment', batchRes.id));
+  db = printBatchChecks(db, batchRes.id);
   const postedBatch = read(db, 'account.batch.payment', batchRes.id);
   const payment1Id = postedBatch.lines[0].payment_id;
   const payment2Id = postedBatch.lines[1].payment_id;
   assert.ok(payment1Id && payment2Id);
+  assert.equal(postedBatch.lines[0].check_number, 9300);
+  assert.equal(postedBatch.lines[1].check_number, 9301);
 
   await React.act(async () => commit(db));
   const host = makeEl('div');

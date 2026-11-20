@@ -13,7 +13,6 @@ import { postMove, payMove } from './models/accounting.js';
 import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { journalAudit } from './models/journal_audit.js';
 import { checkRegisterRows } from './models/payments.js';
-import { printCheck, printBatchChecks } from './models/pay.js';
 
 test('payment terms reject an incomplete percentage split', () => {
   assert.throws(() => installments({ line_ids: [{ value_type: 'percent', value: 10 }, { value_type: 'percent', value: 10 }] }, 1000, '2026-01-01'), /100%/);
