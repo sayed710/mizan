@@ -22,6 +22,7 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
+import { migratePaymentMethods } from './models/paymentmethod.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 
 export function migrateStages(db) {
@@ -1771,6 +1772,7 @@ MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (
     },
   };
 } });
+MIGRATIONS.push({ version: 61, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
