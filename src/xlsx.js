@@ -163,9 +163,12 @@ export function parseZip(buf) {
   return { files, centralDirectory, eocd };
 }
 
-/** Escape special characters for XML content. */
+// Code points XML 1.0 forbids (control characters other than tab/newline/carriage return, unpaired surrogates, U+FFFE/U+FFFF).
+const XML_INVALID = /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** Escape special characters for XML content, dropping characters XML cannot hold so the workbook stays valid. */
 export function escapeXml(str) {
-  return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+  return String(str ?? '').replace(XML_INVALID, '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;',
     '<': '&lt;',
     '>': '&gt;',

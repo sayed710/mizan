@@ -930,3 +930,11 @@ test('Qodo PR #189: annual report export without a DOM keeps literal brackets an
     if (saved) globalThis.document = saved;
   }
 });
+
+test('Qodo PR #189: XLSX cell text drops XML-forbidden characters so the workbook stays valid', async () => {
+  const { escapeXml } = await import('./xlsx.js');
+  const { decodeEntities } = await import('./csv.js');
+  const text = decodeEntities('A&#11;B&#x1;C\tD');
+  assert.equal(escapeXml(text), 'ABC\tD');
+  assert.equal(escapeXml('x < y & "z"'), 'x &lt; y &amp; &quot;z&quot;');
+});
