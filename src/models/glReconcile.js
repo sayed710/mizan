@@ -1314,7 +1314,7 @@ function itemHasLegacySettlement(db, item, activePartialIds) {
   return hasApp || hasBank;
 }
 
-/** Collect and fully validate all partial links, document settlements, and legacy selections before writing. */
+/** Collect all partial link ids and legacy selections from the selected journal items before writing. */
 function collectAndValidateUnreconcile(db, items, date) {
   const activePartials = (db.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
   const activePartialIds = new Set(activePartials.map((g) => g.id));
@@ -1336,6 +1336,15 @@ function collectAndValidateUnreconcile(db, items, date) {
     }
   }
 
+  return { partialIds, legacySelections };
+}
+
+/**
+ * Remove matching for given partial links: validate locks and matching dates, reverse exchange moves,
+ * unapply invoice settlement rows, and deactivate partial reconcile records.
+ */
+function applyUnreconcilePartials(db, partialIds, date, { rowId = null } = {}) {
+  const activePartials = (db.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
   const fxMovesToReverse = [];
   const visitedFx = new Set();
   let expanded = true;
@@ -1382,31 +1391,17 @@ function collectAndValidateUnreconcile(db, items, date) {
   const docRows = [];
   if (partialIds.size) {
     for (const move of db.records['account.move'] ?? []) {
-      const rows = (move.payments ?? []).filter((p) => !p.reversed && partialIds.has(p.partial_reconcile_id));
+      const rows = (move.payments ?? []).filter((p) => !p.reversed && partialIds.has(p.partial_reconcile_id) && (rowId != null ? p.id === rowId : true));
       if (!rows.length) continue;
       const lock = recordLockDate(db, move);
       if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
       for (const row of rows) {
         const lineIndex = Number.isInteger(row.line_index) ? row.line_index : null;
-        paymentUnapplication(db, move.id, row.move_id, date, { lineIndex, partialReconcileId: row.partial_reconcile_id });
+        paymentUnapplication(db, move.id, row.move_id, date, { lineIndex, partialReconcileId: row.partial_reconcile_id, rowId: row.id });
         docRows.push({ moveId: move.id, row, lineIndex });
       }
     }
   }
-
-  return { touchedLinks, docRows, legacySelections, fxMovesToReverse };
-}
-
-/**
- * Remove reconciliations on selected journal items. Active `account.partial.reconcile` links are marked
- * reversed/inactive without reversing their underlying journal entries (including write-offs created by
- * Reconcile with write-off), while document residuals, cash-basis releases, and unapplied payment credits are restored.
- */
-export function unreconcileLedgerItems(db, selections, { date = today() } = {}) {
-  const items = selectedItems(db, selections, { allowMultipleEntryLines: true });
-  if (!validDate(date)) throw new Error('Enter a valid reversal date');
-
-  const { touchedLinks, docRows, legacySelections, fxMovesToReverse } = collectAndValidateUnreconcile(db, items, date);
 
   let next = db;
   for (const g of touchedLinks) {
@@ -1420,13 +1415,13 @@ export function unreconcileLedgerItems(db, selections, { date = today() } = {}) 
     next = unapplyPaymentCredit(next, moveId, row.move_id, date, {
       lineIndex,
       partialReconcileId: row.partial_reconcile_id,
+      rowId: row.id,
     });
   }
   for (const fxMove of fxMovesToReverse) {
     const reversed = reverseEntry(next, fxMove, date, { reconciliation_reversal: true });
     next = reversed.db;
     const revMove = read(next, 'account.move', reversed.id);
-    // The exchange line sits on the account the settlement matched; pair it with the same line of the reversal.
     const matchedAccountId = touchedLinks.find((g) => g.exchange_move_id === fxMove.id)?.account_id;
     const fxAccountLineIdx = (fxMove.line_ids ?? []).findIndex((l) => l.account_id === matchedAccountId);
     if (fxAccountLineIdx >= 0) {
@@ -1454,6 +1449,37 @@ export function unreconcileLedgerItems(db, selections, { date = today() } = {}) 
         next = pair.db;
       }
     }
+  }
+  return next;
+}
+
+/**
+ * Remove an existing partial reconciliation link through the GL unreconciliation workflow:
+ * deactivates the partial link, unapplies the matched invoice settlement, and reverses exchange entries.
+ */
+export function unreconcilePartialReconcile(db, partialId, { date = today(), rowId = null } = {}) {
+  if (!validDate(date)) throw new Error('Enter a valid reversal date');
+  const activePartials = (db.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
+  if (!activePartials.some((g) => g.id === partialId)) {
+    throw new Error('The selected settlement has no active reconciliation to remove');
+  }
+  return applyUnreconcilePartials(db, new Set([partialId]), date, { rowId });
+}
+
+/**
+ * Remove reconciliations on selected journal items. Active `account.partial.reconcile` links are marked
+ * reversed/inactive without reversing their underlying journal entries (including write-offs created by
+ * Reconcile with write-off), while document residuals, cash-basis releases, and unapplied payment credits are restored.
+ */
+export function unreconcileLedgerItems(db, selections, { date = today() } = {}) {
+  const items = selectedItems(db, selections, { allowMultipleEntryLines: true });
+  if (!validDate(date)) throw new Error('Enter a valid reversal date');
+
+  const { partialIds, legacySelections } = collectAndValidateUnreconcile(db, items, date);
+
+  let next = db;
+  if (partialIds.size) {
+    next = applyUnreconcilePartials(next, partialIds, date);
   }
   if (legacySelections.length) {
     next = unreconcileJournalItems(next, legacySelections, { date });
