@@ -1221,9 +1221,10 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   return { db: settled.db, id: booked.id };
 }
 
+// useInTaxClosing is true, false, or null for releases posted before the closing flag existed.
 const releasedTaxKey = (account, taxId, name, tags = [], useInTaxClosing = true) => taxId != null
   ? JSON.stringify([account, taxId, [...tags].sort((a, b) => a - b), useInTaxClosing])
-  : `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}:${useInTaxClosing ? 1 : 0}`;
+  : `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}${useInTaxClosing == null ? '' : `:${useInTaxClosing ? 1 : 0}`}`;
 
 /** Tax and base already released for an invoice. */
 const releasedTaxes = (db, r) => {
@@ -1246,7 +1247,7 @@ const releasedTaxes = (db, r) => {
           bases.set(key, (bases.get(key) ?? 0) + base);
         }
       } else {
-        const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids, l.use_in_tax_closing !== false);
+        const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids, l.use_in_tax_closing ?? null);
         const previous = taxes.get(key) ?? { amount: 0, base: 0 };
         const amount = ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0));
         taxes.set(key, { amount: previous.amount + amount, base: previous.base + base });
@@ -1285,10 +1286,16 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
     const tagged = final ? released.taxes.get(releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids, g.use_in_tax_closing === true)) : null;
+    // Releases posted before the closing flag existed carry no flag; share them across the groups that differ only by the flag.
+    const unflaggedKey = releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids, null);
+    const unflagged = final && unflaggedKey !== `${g.account}:` ? released.taxes.get(unflaggedKey) : null;
+    const sameTax = (x) => releasedTaxKey(x.account, x.tax_id, x.tax_name, x.tax_tag_ids, null) === releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids, null);
+    const flagTotal = groups.filter(sameTax).reduce((s, x) => s + x.amount, 0);
+    const unflaggedShare = flagTotal ? g.amount / flagTotal : 0;
     const legacy = final ? released.taxes.get(`${g.account}:`) : null;
     const legacyShare = accountTotal ? g.amount / accountTotal : 0;
-    const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
-    const priorBase = (tagged?.base ?? 0) + (legacy?.base ?? 0) * legacyShare;
+    const prior = (tagged?.amount ?? 0) + (unflagged?.amount ?? 0) * unflaggedShare + (legacy?.amount ?? 0) * legacyShare;
+    const priorBase = (tagged?.base ?? 0) + (unflagged?.base ?? 0) * unflaggedShare + (legacy?.base ?? 0) * legacyShare;
     return { ...g, amount: companyRound(final ? g.amount - prior : g.amount * Math.abs(share)), base: companyRound(final ? g.base - priorBase : g.base * share) };
   })
     .filter((g) => g.amount || g.base);

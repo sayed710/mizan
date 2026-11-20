@@ -1428,3 +1428,50 @@ test('TAX-8 / Qodo 3: period with unpaid and paid cash-basis invoices closes suc
   // Transition account still has the 20.00 credit balance from the unpaid invoice
   assert.equal(accountBalanceUpTo(submitted, cbTrans.id, '2099-12-31'), -20);
 });
+
+test('TAX-13 / Qodo 4: a partial cash-basis release posted before migration is not released again by the final payment after it', () => {
+  const env = setupBaseTaxClosingEnv(seed());
+  let { db } = env;
+  const expAcc = create(db, 'account.account', { code: '651922', name: 'Non-Deductible Tax Expense', account_type: 'expense', company_id: 1 });
+  db = expAcc.db;
+  const transAcc = create(db, 'account.account', { code: '251198', name: 'Cash Basis Transition', account_type: 'liability_current', company_id: 1 });
+  db = transAcc.db;
+  const rows = [
+    { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+    { repartition_type: 'tax', factor_percent: 100, account_id: expAcc.id, tag_ids: [] },
+  ];
+  const taxRes = create(db, 'account.tax', {
+    name: 'CB Expense Tax 10% B', company_id: 1, type_tax_use: 'sale', amount: 10, amount_type: 'percent',
+    tax_exigibility: 'on_payment', cash_basis_transition_account_id: transAcc.id,
+    invoice_repartition_line_ids: rows, refund_repartition_line_ids: rows,
+  });
+  db = taxRes.db;
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-08-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, ...taxSnapshot(read(db, 'account.tax', taxRes.id)) }],
+  });
+  db = payMove(postMove(inv.db, inv.id), inv.id, 55, '2026-08-12');
+
+  // Make the invoice snapshot and its first release look like they were written before the closing flag existed.
+  const drop = ({ use_in_tax_closing: _drop, ...rest }) => rest;
+  const legacyDb = {
+    ...db,
+    schema_version: 59,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => {
+        if (m.id === inv.id) {
+          return { ...m, invoice_line_ids: m.invoice_line_ids.map((l) => ({ ...l, invoice_repartition_line_ids: l.invoice_repartition_line_ids.map(drop), refund_repartition_line_ids: l.refund_repartition_line_ids.map(drop) })) };
+        }
+        return m.cash_basis_origin_move_id === inv.id ? { ...m, line_ids: m.line_ids.map(drop) } : m;
+      }),
+    },
+  };
+  const paid = payMove(migrate(legacyDb, 60), inv.id, 55, '2026-08-20');
+
+  const released = paid.records['account.move']
+    .filter((m) => m.cash_basis_origin_move_id === inv.id && m.state === 'posted')
+    .flatMap((m) => m.line_ids.filter((l) => l.account_id === expAcc.id))
+    .reduce((s, l) => s + (Number(l.credit) || 0) - (Number(l.debit) || 0), 0);
+  assert.equal(round(released), 10, 'the whole tax is released exactly once across both payments');
+});
