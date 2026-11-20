@@ -1046,7 +1046,7 @@ export function invoiceCurrencyAmount(db, r, amount, date = today(), currencyId 
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber, memo, currencyId, paymentAmount, partnerBankId } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber, memo, currencyId, paymentAmount, partnerBankId, paymentMethodLineId } = {}) {
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
@@ -1098,7 +1098,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const counterpartCode = invoiceCounterpartAccount(db, r);
   const via = paymentJournal(db, payJournal, r.company_id ?? 1);
   const journal = read(db, 'account.journal', via.id);
-  const methodLineId = payRec?.payment_method_line_id ?? defaultPaymentMethodLineId(db, via.id, sale ? 'inbound' : 'outbound');
+  const chosenMethodLineId = paymentMethodLineId ?? null;
+  const methodLineId = payRec?.payment_method_line_id ?? chosenMethodLineId ?? defaultPaymentMethodLineId(db, via.id, sale ? 'inbound' : 'outbound');
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale, methodLineId);
   const liquidity = liquidityAccountId ?? outstanding ?? via.accountId;
   const allocatedPay = isForeignPayment ? paymentCurrencyAmount(db, r, value, date, payCurrId) : value;
@@ -1634,6 +1635,7 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
     ...(opts.currencyId ? { currencyId: opts.currencyId } : {}),
     ...(paymentAmount != null ? { paymentAmount } : {}),
     ...(opts.partnerBankId ? { partnerBankId: opts.partnerBankId } : {}),
+    ...(opts.paymentMethodLineId ? { paymentMethodLineId: opts.paymentMethodLineId } : {}),
   });
   if (!(discount > 0)) return paid;
   const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);

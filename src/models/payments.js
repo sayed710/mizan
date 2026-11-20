@@ -184,16 +184,17 @@ export function postBatch(db, batch) {
     const currency = documentCurrency(next, invoice);
     const discount = discountAvailable(next, invoice, batch.date);
     const eligible = discount > 0 && roundCurrency(invoice.amount_residual - Number(line.amount) - discount, currency) === 0;
-    const options = { journalId: journal.id, ...(checkLine ? { payment_method_line_id: checkLine.id } : {}) };
+    const options = {
+      journalId: journal.id,
+      ...(checkLine ? { paymentMethodLineId: checkLine.id } : {}),
+      ...(line.check_number != null ? { checkNumber: line.check_number } : {}),
+    };
     next = eligible
       ? payWithDiscount(next, line.move_id, Number(line.amount), batch.date, options)
       : payMove(next, line.move_id, Number(line.amount), batch.date, options);
     const entryId = read(next, 'account.move', line.move_id).payments.findLast((payment) => !payment.discount).move_id;
     const createdPayment = search(next, 'account.payment').find((p) => p.move_id === entryId);
-    if (checkLine && createdPayment) {
-      next = write(next, 'account.payment', createdPayment.id, { payment_method_line_id: checkLine.id });
-    }
-    return { ...line, check_number: null, payment_id: createdPayment?.id, cancelled: false };
+    return { ...line, check_number: line.check_number ?? createdPayment?.check_number ?? null, payment_id: createdPayment?.id, cancelled: false };
   });
   const prefix = batch.batch_type === 'inbound' ? 'BATCH-IN/' : 'BATCH-OUT/';
   const name = batch.name && batch.name !== 'New' ? batch.name : nextName(next, 'account.batch.payment', prefix);
@@ -288,7 +289,16 @@ export const paymentModels = {
         fields: {
           move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
           amount: { type: 'monetary', label: 'Amount' },
-          check_number: { type: 'integer', label: 'Check Number', readonly: true },
+          check_number: {
+            type: 'integer',
+            label: 'Check Number',
+            readonly: (line, r, db) => {
+              if (!db || !r) return true;
+              const journalId = r.journal_id ?? (r.lines?.[0]?.payment_id ? read(db, 'account.payment', r.lines[0].payment_id)?.journal_id : null);
+              const journal = journalId ? read(db, 'account.journal', journalId) : null;
+              return !journal?.check_manual_sequencing;
+            },
+          },
           payment_id: { type: 'many2one', relation: 'account.payment', label: 'Payment' },
           cancelled: { type: 'boolean', label: 'Cancelled', readonly: true },
         },

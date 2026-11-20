@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write } from './orm.js';
+import { create, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove, payMove } from './models/accounting.js';
@@ -8,6 +8,7 @@ import { postBatch, checkRegisterRows } from './models/payments.js';
 import {
   paymentPaysByCheck,
   printCheck,
+  printBatchChecks,
   voidCheck,
   paymentRemittanceLines,
   postPayment,
@@ -381,4 +382,258 @@ test('PAY-17: stub lines amounts computes original and paid amounts for bills an
   assert.ok(stubLines.length >= 1);
   const totalPaid = stubLines.reduce((sum, l) => sum + Number(l.paid_amount), 0);
   assert.equal(totalPaid, 1000);
+});
+
+test('Bug 1: Voiding a check saves through diffDb + applyDiff without failing server payment invariant', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_next_number: 400 });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Void Server Sync Test', price_unit: 100, qty: 1 }],
+  });
+  db = postMove(bill.db, bill.id);
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 100,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = payMove(draftPay.db, bill.id, 100, today(), {
+    paymentId: draftPay.id,
+    journalId: bank.id,
+  });
+  const pay = read(db, 'account.payment', draftPay.id);
+  db = printCheck(db, pay);
+  assert.equal(read(db, 'account.payment', pay.id).check_number, 400);
+
+  // Void check locally
+  const voidedDb = voidCheck(db, read(db, 'account.payment', pay.id));
+
+  // Syncing to server via diffDb + applyDiff must not be rejected by paymentInvariant
+  assert.doesNotThrow(() => {
+    db = sync(db, voidedDb);
+  });
+  const syncedPay = read(db, 'account.payment', pay.id);
+  assert.equal(syncedPay.check_number, 400);
+  assert.deepEqual(syncedPay.voided_check_numbers.map((v) => v.check_number), [400]);
+});
+
+test('Bug 2: Batch checks book to the payment method line\'s outstanding account, not the default method\'s account', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const partner = search(db, 'res.partner')[0];
+
+  // Create a separate dedicated outstanding account for check printing
+  const customCheckAccount = create(db, 'account.account', {
+    code: '101402',
+    name: 'Outstanding Checks Account',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: bank.company_id ?? 1,
+  });
+  db = customCheckAccount.db;
+
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  assert.ok(checkMethodLine);
+
+  // Update check method line with custom payment_account_id
+  db = write(db, 'account.payment.method.line', checkMethodLine.id, {
+    payment_account_id: customCheckAccount.id,
+  });
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Batch Check Account Item', price_unit: 300, qty: 1 }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  const batch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    date: today(),
+    lines: [{ move_id: bill.id, amount: 300 }],
+  });
+
+  db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+  const postedBatch = read(db, 'account.batch.payment', batch.id);
+  const paymentId = postedBatch.lines[0].payment_id;
+  const payment = read(db, 'account.payment', paymentId);
+
+  // Payment method line must be the check method line
+  assert.equal(payment.payment_method_line_id, checkMethodLine.id);
+  // Payment's outstanding_account_id must be customCheckAccount
+  assert.equal(payment.outstanding_account_id, customCheckAccount.id);
+
+  // The journal entry's liquidity line must be booked to customCheckAccount, not the default account
+  const entry = read(db, 'account.move', payment.move_id);
+  assert.ok(entry);
+  const checkLineInEntry = entry.line_ids.find((l) => l.account_id === customCheckAccount.id);
+  assert.ok(checkLineInEntry, 'Entry lines must contain customCheckAccount');
+});
+
+test('Bug 3: Batch printing on manual numbering journal requires check numbers and does not auto-sequence', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, {
+    check_next_number: 100,
+    check_manual_sequencing: true,
+  });
+  const partner = search(db, 'res.partner')[0];
+
+  const bill1 = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Item 1', price_unit: 50, qty: 1 }],
+  });
+  db = postMove(bill1.db, bill1.id);
+
+  const bill2 = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Item 2', price_unit: 75, qty: 1 }],
+  });
+  db = postMove(bill2.db, bill2.id);
+
+  const batch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    date: today(),
+    lines: [
+      { move_id: bill1.id, amount: 50 },
+      { move_id: bill2.id, amount: 75 },
+    ],
+  });
+  db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+  const postedBatch = read(db, 'account.batch.payment', batch.id);
+
+  // 1. Printing without providing check numbers on a manual-sequencing journal must be rejected
+  assert.throws(() => {
+    printBatchChecks(db, postedBatch.id);
+  }, /manual/i);
+
+  // Journal check_next_number must remain unchanged at 100
+  assert.equal(read(db, 'account.journal', bank.id).check_next_number, 100);
+
+  // 2. Printing with supplied check numbers assigns them and succeeds without advancing sequence
+  const pay1Id = postedBatch.lines[0].payment_id;
+  const pay2Id = postedBatch.lines[1].payment_id;
+  db = write(db, 'account.batch.payment', postedBatch.id, { lines: postedBatch.lines.map((l, i) => ({ ...l, check_number: [801, 802][i] })) });
+  db = printBatchChecks(db, postedBatch.id);
+
+  const printedBatch = read(db, 'account.batch.payment', batch.id);
+  assert.equal(read(db, 'account.payment', pay1Id).check_number, 801);
+  assert.equal(read(db, 'account.payment', pay2Id).check_number, 802);
+  assert.equal(printedBatch.lines[0].check_number, 801);
+  assert.equal(printedBatch.lines[1].check_number, 802);
+  // Sequence must still NOT be advanced for manual sequencing
+  assert.equal(read(db, 'account.journal', bank.id).check_next_number, 100);
+});
+
+test('Bug 4: Existing payment with check_number on non-check method line can be edited, voided, and reversed', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const manualMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'manual'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Legacy Batch Check Item', price_unit: 100, qty: 1 }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  // Create legacy payment with check_number on manual method line
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 100,
+    journal_id: bank.id,
+    payment_method_line_id: manualMethodLine.id,
+  });
+  db = payMove(draftPay.db, bill.id, 100, today(), {
+    paymentId: draftPay.id,
+    journalId: bank.id,
+  });
+  // Simulate an existing stored payment created before this PR (numbered on manual method line)
+  const legacyPayRecord = {
+    ...read(db, 'account.payment', draftPay.id),
+    check_number: 333,
+  };
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (p.id === draftPay.id ? legacyPayRecord : p)),
+    },
+  };
+  const legacyPay = read(db, 'account.payment', draftPay.id);
+  assert.equal(legacyPay.check_number, 333);
+  assert.equal(paymentPaysByCheck(db, legacyPay), false);
+
+  // Modifying memo on existing payment should succeed through sync (guard should not reject unchanged check_number)
+  assert.doesNotThrow(() => {
+    db = sync(db, write(db, 'account.payment', legacyPay.id, { memo: 'Updated Memo' }));
+  });
+  assert.equal(read(db, 'account.payment', legacyPay.id).memo, 'Updated Memo');
+
+  // Voiding should succeed
+  const voidedDb = voidCheck(db, read(db, 'account.payment', legacyPay.id));
+  assert.doesNotThrow(() => {
+    db = sync(db, voidedDb);
+  });
+  assert.equal(read(db, 'account.payment', legacyPay.id).check_number, 333);
+});
+
+test('Bug 5: Deleting a voided check payment is blocked by protectDelete so check number cannot be reused', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_next_number: 950 });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 200,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  const postedPay = read(db, 'account.payment', draftPay.id);
+  db = printCheck(db, postedPay);
+  assert.equal(read(db, 'account.payment', postedPay.id).check_number, 950);
+
+  // Void the check and reset to draft
+  db = voidCheck(db, read(db, 'account.payment', postedPay.id));
+  db = resetPaymentToDraft(db, read(db, 'account.payment', postedPay.id));
+  const draftVoidedPay = read(db, 'account.payment', postedPay.id);
+  assert.equal(draftVoidedPay.state, 'draft');
+
+  // Attempting to delete the voided check must be blocked by protectDelete
+  assert.throws(() => {
+    sync(db, unlink(db, 'account.payment', [draftVoidedPay.id]));
+  }, /Issued checks cannot be deleted/i);
 });

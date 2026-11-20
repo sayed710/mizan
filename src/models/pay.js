@@ -1101,7 +1101,9 @@ export function resetPaymentToDraft(db, paymentOrId, ctx = null) {
 const consumedCheckNumbers = (db, journalId) => {
   const payments = (db.records['account.payment'] ?? []).filter((p) => p.journal_id === journalId);
   const ids = new Set(payments.map((p) => p.id));
-  const fromBatches = (db.records['account.batch.payment'] ?? []).flatMap((b) => (b.lines ?? []).filter((l) => ids.has(l.payment_id)).map((l) => l.check_number));
+  const fromBatches = (db.records['account.batch.payment'] ?? [])
+    .filter((b) => b.journal_id === journalId || (b.lines ?? []).some((l) => ids.has(l.payment_id)))
+    .flatMap((b) => (b.lines ?? []).map((l) => l.check_number));
   return [...payments.map((p) => p.check_number), ...payments.flatMap((p) => (p.voided_check_numbers ?? []).map((v) => v.check_number)), ...fromBatches]
     .filter((n) => Number.isSafeInteger(n) && n > 0);
 };
@@ -1232,6 +1234,8 @@ export function printBatchChecks(db, batchOrId) {
   let nextLines = [...(batch.lines ?? [])];
   let changed = false;
 
+  const isManual = Boolean(journal.check_manual_sequencing);
+
   for (let i = 0; i < nextLines.length; i++) {
     const line = nextLines[i];
     if (line.cancelled || !line.payment_id) continue;
@@ -1240,12 +1244,27 @@ export function printBatchChecks(db, batchOrId) {
     if (!paymentPaysByCheck(next, payment)) continue;
 
     const isVoided = (payment.voided_check_numbers ?? []).some((v) => v.check_number === payment.check_number);
-    if (payment.check_number == null || isVoided) {
-      const number = nextCheckNumber(next, journal.id);
-      next = write(next, 'account.payment', payment.id, { check_number: number });
-      next = write(next, 'account.journal', journal.id, { check_next_number: number + 1 });
-      nextLines[i] = { ...line, check_number: number };
-      changed = true;
+    if (isManual) {
+      const num = line.check_number ?? (payment.check_number != null && !isVoided ? payment.check_number : null);
+      if (num == null) {
+        throw new Error('Check number is required for manual numbering');
+      }
+      if (payment.check_number !== num) {
+        next = write(next, 'account.payment', payment.id, { check_number: num });
+        changed = true;
+      }
+      if (line.check_number !== num) {
+        nextLines[i] = { ...line, check_number: num };
+        changed = true;
+      }
+    } else {
+      if (payment.check_number == null || isVoided) {
+        const number = nextCheckNumber(next, journal.id);
+        next = write(next, 'account.payment', payment.id, { check_number: number });
+        next = write(next, 'account.journal', journal.id, { check_next_number: number + 1 });
+        nextLines[i] = { ...line, check_number: number };
+        changed = true;
+      }
     }
   }
 
@@ -1470,7 +1489,7 @@ export const payModels = {
     label: 'Payments',
     auditDelete: true,
     guard: (db, before, after, ctx) => {
-      if (after.check_number != null && !paymentPaysByCheck(db, after)) {
+      if (after.check_number != null && (!before || before.check_number !== after.check_number) && !paymentPaysByCheck(db, after)) {
         return 'Payments not paying by check cannot have a check number';
       }
       if (after.check_number != null && (!before || before.check_number !== after.check_number) && isCheckNumberUsedOnJournal(db, after.journal_id, after.check_number, after.id)) {
@@ -1510,8 +1529,8 @@ export const payModels = {
       return paymentMethodGuard(db, before, after);
     },
     protectDelete: (db, payment, staged, ctx) => {
-      const isVoided = (payment.voided_check_numbers ?? []).some((v) => v.check_number === payment.check_number);
-      return payment.check_number != null && !isVoided
+      const hasCheck = payment.check_number != null || (payment.voided_check_numbers ?? []).length > 0;
+      return hasCheck
         ? 'Issued checks cannot be deleted'
         : datedLockDelete((p) => p.state === 'posted')(db, payment, staged, ctx);
     },
