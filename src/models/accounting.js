@@ -1957,7 +1957,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
   const companyId = move.company_id ?? db?.settings?.current_company_id ?? 1;
   const companyCurrencyRec = companyCurrencyRecord(db, companyId);
   const roundingMethod = companyRoundingMethod(db, companyId);
-  const moveDate = move.date ?? move.invoice_date ?? today();
+  const entryDate = moveDate(move);
 
   if (move.fiscal_position_id) {
     const fp = read(db, 'account.fiscal.position', move.fiscal_position_id);
@@ -2130,7 +2130,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
 
     const roundedUntaxedDoc = roundCurrency(totalUntaxedDoc, docCurrency);
     const untaxedCompany = hasPriceInclude
-      ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, moveDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
+      ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
       : baseAmount;
 
     const updatedBase = {
@@ -2168,11 +2168,11 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
 
     for (const g of splitGroups.values()) {
       const taxAmount = isForeign
-        ? toCompany(db, baseLine.currency_id, g.docAmount, moveDate, companyId)
+        ? toCompany(db, baseLine.currency_id, g.docAmount, entryDate, companyId)
         : roundCurrency(g.docAmount, companyCurrencyRec);
 
       const taxBase = isForeign
-        ? (g.docBase === 0 ? 0 : toCompany(db, baseLine.currency_id, g.docBase, moveDate, companyId))
+        ? (g.docBase === 0 ? 0 : toCompany(db, baseLine.currency_id, g.docBase, entryDate, companyId))
         : (g.docBase === 0 ? 0 : roundCurrency(g.docBase, companyCurrencyRec));
 
       // Finding 6: debit/credit choice uses base direction and split sign; amounts non-negative
@@ -2230,6 +2230,58 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
   return resultLines;
 }
 
+/** A journal item tied to one tax (tax_id or repartition line): its tags come from that tax, so base-line tag updates must skip it. */
+export const isEntryTaxLine = (l) => Boolean(l && (l.tax_repartition_line_id != null || l.tax_id != null));
+
+export function revalueForeignLine(db, line, entryDate, companyId) {
+  if (!db || !line) return line;
+  const companyCurr = companyCurrencyRecord(db, companyId);
+  const account = line.account_id ? read(db, 'account.account', line.account_id) : null;
+  const lineCurrencyId = line.currency_id ?? (account?.currency_id && account.currency_id !== companyCurr?.id ? account.currency_id : null);
+  const isForeign = Boolean(lineCurrencyId && companyCurr && lineCurrencyId !== companyCurr.id);
+  if (!isForeign) {
+    if (!line.currency_id || line.currency_id === companyCurr?.id) {
+      return { ...line, amount_currency: 0 };
+    }
+    return line;
+  }
+  const amt = Number(line.amount_currency) || 0;
+  if (amt !== 0) {
+    if (amt > 0) {
+      return {
+        ...line,
+        currency_id: line.currency_id ?? lineCurrencyId,
+        debit: toCompany(db, lineCurrencyId, amt, entryDate, companyId),
+        credit: 0,
+      };
+    }
+    return {
+      ...line,
+      currency_id: line.currency_id ?? lineCurrencyId,
+      debit: 0,
+      credit: toCompany(db, lineCurrencyId, -amt, entryDate, companyId),
+    };
+  }
+  const debit = Number(line.debit) || 0;
+  const credit = Number(line.credit) || 0;
+  if (debit > 0 || credit > 0) {
+    const rate = rateAt(db, lineCurrencyId, entryDate, companyId);
+    const foreignCurrency = read(db, 'res.currency', lineCurrencyId);
+    return {
+      ...line,
+      currency_id: line.currency_id ?? lineCurrencyId,
+      amount_currency: debit > 0 ? roundCurrency(debit * rate, foreignCurrency) : -roundCurrency(credit * rate, foreignCurrency),
+    };
+  }
+  return {
+    ...line,
+    currency_id: line.currency_id ?? lineCurrencyId,
+    debit: 0,
+    credit: 0,
+    amount_currency: 0,
+  };
+}
+
 const lineItem = {
   type: 'one2many',
   label: 'Journal Items',
@@ -2276,51 +2328,47 @@ const lineItem = {
     const account = updated.account_id && db ? read(db, 'account.account', updated.account_id) : null;
     const lineCurrencyId = updated.currency_id ?? (account?.currency_id && account.currency_id !== companyCurr?.id ? account.currency_id : null);
     const isForeign = Boolean(lineCurrencyId && companyCurr && lineCurrencyId !== companyCurr.id);
-    const entryDate = move?.invoice_date ?? move?.date ?? today();
+    const entryDate = moveDate(move);
 
     if (key === 'account_id') {
       updated = { ...updated, tax_ids: accountDefaultTaxIds(db, account, companyId) };
       if (account?.currency_id && account.currency_id !== companyCurr?.id && !updated.currency_id) {
         updated.currency_id = account.currency_id;
       }
-      if (db) {
+      if (db && !isEntryTaxLine(updated)) {
         updated = updateBaseLineTags(updated, move, db);
       }
     } else if (key === 'tax_ids' || key === 'debit' || key === 'credit') {
-      if (db) {
+      if (db && !isEntryTaxLine(updated)) {
         updated = updateBaseLineTags(updated, move, db);
       }
     }
 
     if (isForeign && db && (!move || move.move_type === 'entry')) {
-      if (key === 'amount_currency') {
-        const amt = Number(updated.amount_currency) || 0;
-        if (amt > 0) {
-          updated.debit = toCompany(db, lineCurrencyId, amt, entryDate, companyId);
-          updated.credit = 0;
-        } else if (amt < 0) {
-          updated.debit = 0;
-          updated.credit = toCompany(db, lineCurrencyId, -amt, entryDate, companyId);
-        } else {
-          updated.debit = 0;
-          updated.credit = 0;
+      if (key === 'currency_id') {
+        updated = revalueForeignLine(db, updated, entryDate, companyId);
+        if (!isEntryTaxLine(updated)) {
+          updated = updateBaseLineTags(updated, move, db);
         }
-        updated = updateBaseLineTags(updated, move, db);
+      } else if (key === 'amount_currency') {
+        const amt = Number(updated.amount_currency) || 0;
+        if (amt === 0) {
+          updated.debit = 0;
+          updated.credit = 0;
+        } else {
+          updated = revalueForeignLine(db, updated, entryDate, companyId);
+        }
+        if (!isEntryTaxLine(updated)) {
+          updated = updateBaseLineTags(updated, move, db);
+        }
       } else if (key === 'debit' || key === 'credit') {
         if (Number(updated.amount_currency || 0) === 0) {
-          const rate = rateAt(db, lineCurrencyId, entryDate, companyId);
-          const foreignCurrency = read(db, 'res.currency', lineCurrencyId);
-          const debit = Number(updated.debit) || 0;
-          const credit = Number(updated.credit) || 0;
-          if (debit > 0) {
-            updated.amount_currency = roundCurrency(debit * rate, foreignCurrency);
-          } else if (credit > 0) {
-            updated.amount_currency = -roundCurrency(credit * rate, foreignCurrency);
-          } else {
-            updated.amount_currency = 0;
-          }
+          updated = revalueForeignLine(db, updated, entryDate, companyId);
         }
       }
+    } else if (key === 'currency_id' && (!lineCurrencyId || lineCurrencyId === companyCurr?.id)) {
+      updated.amount_currency = 0;
+      if (updated.currency_id === companyCurr?.id) updated.currency_id = null;
     }
     return updated;
   },
@@ -3275,7 +3323,15 @@ export const accountingModels = {
         };
       }
       if (r.move_type === 'entry') {
-        if (key === 'date') return { invoice_date: r.date, line_ids: computeEntryTaxLines(r.line_ids, r, db) };
+        if (key === 'date') {
+          const entryDate = moveDate(r);
+          const companyId = r.company_id ?? db?.settings?.current_company_id ?? 1;
+          const lines = (!r.state || r.state === 'draft')
+            ? (r.line_ids ?? []).map((l) => revalueForeignLine(db, l, entryDate, companyId))
+            : (r.line_ids ?? []);
+          const updatedMove = { ...r, date: r.date, invoice_date: r.date, line_ids: lines };
+          return { invoice_date: r.date, line_ids: computeEntryTaxLines(lines, updatedMove, db) };
+        }
         if (key === 'line_ids' || key === 'currency_id') return { line_ids: computeEntryTaxLines(r.line_ids, r, db) };
       }
       if (key === 'invoice_date') {
@@ -3745,7 +3801,7 @@ export const accountingModels = {
           when: (r, db) => canResetMove(r, db),
           run: (db, r) => {
             const draftReversals = (db.records['account.move'] ?? []).filter(
-              (m) => m.state === 'draft' && (m.reversed_entry_id === r.id || m.id === r.reversal_move_id)
+              (m) => m.state === 'draft' && m.auto_post && m.auto_post !== 'no' && (m.reversed_entry_id === r.id || m.id === r.reversal_move_id)
             );
             const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
             const nextDb = write(cancelledDb, 'account.move', r.id, {
