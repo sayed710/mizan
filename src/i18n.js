@@ -3497,6 +3497,7 @@ const ar = {
   'Select at least one record first': 'اختر سجلًا واحدًا على الأقل أولًا',
   'None of the selected records match the current filter': 'لا يطابق أي من السجلات المحددة عامل التصفية الحالي',
   'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
+  'Partial reconciliation currency amount does not match the expected foreign residual': 'مبلغ العملة للمطابقة الجزئية لا يطابق الرصيد الأجنبي المتبقي المتوقع',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
