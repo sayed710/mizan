@@ -6,6 +6,7 @@ import { applyDiff, diffDb } from './sync.js';
 import { postMove } from './models/accounting.js';
 import { accountId, journalItems, postEntry, reconciledJournalItems } from './models/ledger.js';
 import { reconcileLedgerItems, unreconcileLedgerItems } from './models/glReconcile.js';
+import { applyPaymentCredit, postPayment } from './models/pay.js';
 
 async function arabicTranslator() {
   const prevDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
@@ -725,6 +726,277 @@ test('Item 5: Server-side guard via diffDb + applyDiff on mixed partial', () => 
   );
 });
 
+// -----------------------------------------------------------------------------
+// Code Review Bug 1: Credit note pairing check on different-currency matching
+// -----------------------------------------------------------------------------
+test('Review Bug 1: EUR credit note linked to invoice A selected with same-partner USD invoice B is refused with pairing error', () => {
+  const setup = setupCurrencies(seed());
+  let db = setup.db;
+  const eur = setup.eur;
+  const partner = create(db, 'res.partner', { name: 'CN Pair Partner' });
+  db = partner.db;
+  const ar = arAccount(db, 1);
+
+  // EUR invoice A, paid in full before noteA is posted so noteA remains open with reversed_entry_id: invA.id
+  const invA = create(db, 'account.move', {
+    partner_id: partner.id, company_id: 1, move_type: 'out_invoice', currency_id: eur.id,
+    invoice_date: '2026-01-15',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(invA.db, invA.id);
+
+  const bnk = search(db, 'account.journal').find((j) => j.type === 'bank' && (!j.company_id || j.company_id === 1));
+  const pmt = create(db, 'account.payment', {
+    partner_id: partner.id, company_id: 1, payment_type: 'inbound', partner_type: 'customer',
+    journal_id: bnk.id, currency_id: eur.id, amount: 100, date: '2026-01-20',
+  });
+  db = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id), { autoAllocate: false });
+  db = applyPaymentCredit(db, pmt.id, invA.id, '2026-01-20');
+
+  // EUR credit note linked to invoice A (open because invA is already paid)
+  const noteA = create(db, 'account.move', {
+    partner_id: partner.id, company_id: 1, move_type: 'out_refund', currency_id: eur.id,
+    reversed_entry_id: invA.id,
+    invoice_date: '2026-02-15',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = postMove(noteA.db, noteA.id);
+
+  // USD invoice B (different invoice, same partner)
+  const invB = create(db, 'account.move', {
+    partner_id: partner.id, company_id: 1, move_type: 'out_invoice', currency_id: null,
+    invoice_date: '2026-02-15',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(invB.db, invB.id);
+
+  const snapshotLinks = db.records['account.partial.reconcile'] ?? [];
+  const snapshotMoves = db.records['account.move'] ?? [];
+
+  // Attempt reconcile via reconcileLedgerItems -> must be refused with creditNotePairError message
+  assert.throws(
+    () => reconcileLedgerItems(db, [itemSelection(db, noteA.id, ar), itemSelection(db, invB.id, ar)], { date: '2026-02-20' }),
+    /This credit note is linked to another invoice/,
+  );
+
+  // Assert database is completely unchanged
+  assert.equal((db.records['account.partial.reconcile'] ?? []).length, snapshotLinks.length);
+  assert.equal((db.records['account.move'] ?? []).length, snapshotMoves.length);
+
+  // Assert forged link between noteA and invB is also rejected through diffDb + applyDiff
+  const postedNoteA = read(db, 'account.move', noteA.id);
+  const postedInvB = read(db, 'account.move', invB.id);
+  const noteArIdx = (postedNoteA.line_ids ?? []).findIndex((l) => l.account_id === ar);
+  const invBArIdx = (postedInvB.line_ids ?? []).findIndex((l) => l.account_id === ar);
+  const forged = {
+    id: 9910,
+    debit_move_id: invB.id,
+    debit_line_index: invBArIdx,
+    credit_move_id: noteA.id,
+    credit_line_index: noteArIdx,
+    account_id: ar,
+    company_id: 1,
+    amount: 100,
+    debit_amount_currency: null,
+    credit_amount_currency: 50,
+    exchange_move_id: null,
+    date: '2026-02-20',
+    active: true,
+    reversed: false,
+  };
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.partial.reconcile': [forged] } }),
+    /This credit note is linked to another invoice/,
+  );
+  assert.equal((db.records['account.partial.reconcile'] ?? []).length, snapshotLinks.length);
+});
+
+// -----------------------------------------------------------------------------
+// Code Review Bug 2: Foreign residual fully consumed with positive company remainder
+// -----------------------------------------------------------------------------
+test('Review Bug 2: 100 USD / 3 EUR debit vs 99.99 USD credit books 0.01 exchange difference and clears both residuals', () => {
+  const setup = setupCurrencies(seed());
+  let db = setup.db;
+  const eur = setup.eur;
+  const partner = create(db, 'res.partner', { name: 'FX Remainder Partner' });
+  db = partner.db;
+  const ar = arAccount(db, 1);
+  const rev = revAccount(db, 1);
+  const misc = miscJournal(db, 1);
+
+  // Debit item: 100 USD company, 3 EUR foreign
+  const dMove = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-01-10', ref: 'USD100-EUR3',
+    lines: [
+      { account_id: ar, partner_id: partner.id, debit: 100, currency_id: eur.id, amount_currency: 3 },
+      { account_id: rev, credit: 100, currency_id: eur.id, amount_currency: -3 },
+    ],
+  });
+  db = dMove.db;
+
+  // Credit item: 99.99 USD company currency
+  const cMove = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-01-15', ref: 'USD99.99',
+    lines: [
+      { account_id: ar, partner_id: partner.id, credit: 99.99 },
+      { account_id: rev, debit: 99.99 },
+    ],
+  });
+  db = cMove.db;
+
+  const preMoves = (db.records['account.move'] ?? []).length;
+  const settled = reconcileLedgerItems(db, [itemSelection(db, dMove.id, ar), itemSelection(db, cMove.id, ar)], { date: '2026-01-20' });
+
+  // Saved through diffDb + applyDiff
+  const diff = diffDb(db, settled);
+  const synced = applyDiff(db, diff);
+
+  // Exactly one exchange entry posted of 0.01 USD
+  assert.equal((synced.records['account.move'] ?? []).length, preMoves + 1);
+  const partials = (synced.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
+  assert.equal(partials.length, 2, 'Main partial + gap partial created');
+
+  const mainP = partials.find((g) => g.debit_move_id === dMove.id && g.credit_move_id === cMove.id);
+  assert.ok(mainP, 'Main partial between dMove and cMove exists');
+  assert.equal(mainP.amount, 99.99);
+  assert.equal(mainP.debit_amount_currency, 3);
+  assert.equal(mainP.credit_amount_currency, null);
+  assert.ok(mainP.exchange_move_id, 'Main partial links exchange_move_id');
+
+  const gapP = partials.find((g) => g.id !== mainP.id);
+  assert.ok(gapP, 'Gap partial exists');
+  assert.equal(gapP.amount, 0.01);
+  assert.equal(gapP.debit_amount_currency, 0);
+  assert.equal(gapP.credit_amount_currency, null);
+  assert.equal(gapP.exchange_move_id, mainP.exchange_move_id);
+
+  const fxMove = read(synced, 'account.move', mainP.exchange_move_id);
+  assert.equal(fxMove.state, 'posted');
+  const fxArLine = (fxMove.line_ids ?? []).find((l) => l.account_id === ar);
+  assert.ok(fxArLine, 'Exchange entry has line on AR account');
+  assert.equal(Number(fxArLine.credit), 0.01);
+  assert.equal(Number(fxArLine.debit), 0);
+
+  // Both items end fully reconciled in both currencies
+  const dItem = reconciledJournalItems(synced, read(synced, 'account.move', dMove.id)).find((l) => l.account_id === ar);
+  const cItem = reconciledJournalItems(synced, read(synced, 'account.move', cMove.id)).find((l) => l.account_id === ar);
+  assert.equal(dItem.amount_residual, 0, 'Debit residual in company currency is 0');
+  assert.equal(dItem.amount_residual_currency, 0, 'Debit residual in foreign currency is 0');
+  assert.equal(dItem.reconciled, true);
+  assert.equal(cItem.amount_residual, 0, 'Credit residual in company currency is 0');
+  assert.equal(cItem.amount_residual_currency, 0, 'Credit residual in foreign currency is 0');
+  assert.equal(cItem.reconciled, true);
+
+  // Unreconcile restores original open balances and reverses exchange difference entry
+  const unreconciled = unreconcileLedgerItems(synced, [itemSelection(synced, dMove.id, ar), itemSelection(synced, cMove.id, ar)], { date: '2026-01-25' });
+  const unrecDiff = diffDb(synced, unreconciled);
+  const unrecSynced = applyDiff(synced, unrecDiff);
+
+  const dItemRestored = reconciledJournalItems(unrecSynced, read(unrecSynced, 'account.move', dMove.id)).find((l) => l.account_id === ar);
+  const cItemRestored = reconciledJournalItems(unrecSynced, read(unrecSynced, 'account.move', cMove.id)).find((l) => l.account_id === ar);
+  assert.equal(dItemRestored.amount_residual, 100);
+  assert.equal(dItemRestored.amount_residual_currency, 3);
+  assert.equal(dItemRestored.reconciled, false);
+  assert.equal(cItemRestored.amount_residual, -99.99);
+  assert.equal(cItemRestored.reconciled, false);
+});
+
+// -----------------------------------------------------------------------------
+// Code Review Bug 3: Proportional foreign share rounds to zero refused beforehand
+// -----------------------------------------------------------------------------
+test('Review Bug 3: Small match whose proportional foreign share rounds to zero is refused before partial/writeoff', () => {
+  const setup = setupCurrencies(seed());
+  let db = setup.db;
+  const eur = setup.eur;
+  const partner = create(db, 'res.partner', { name: 'Small Share Partner' });
+  db = partner.db;
+  const ar = arAccount(db, 1);
+  const rev = revAccount(db, 1);
+  const misc = miscJournal(db, 1);
+
+  // Debit item: 1000 USD company, 100 EUR foreign
+  const dMove = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-01-10', ref: 'USD1000-EUR100',
+    lines: [
+      { account_id: ar, partner_id: partner.id, debit: 1000, currency_id: eur.id, amount_currency: 100 },
+      { account_id: rev, credit: 1000, currency_id: eur.id, amount_currency: -100 },
+    ],
+  });
+  db = dMove.db;
+
+  // Credit item: 0.01 USD company currency. 100 EUR * 0.01 / 1000 = 0.001 EUR -> rounds to 0.00 EUR!
+  const cMove = postEntry(db, {
+    journal: misc.code, journal_id: misc.id, company: 1, date: '2026-01-15', ref: 'USD0.01',
+    lines: [
+      { account_id: ar, partner_id: partner.id, credit: 0.01 },
+      { account_id: rev, debit: 0.01 },
+    ],
+  });
+  db = cMove.db;
+
+  const preMoves = (db.records['account.move'] ?? []).length;
+  const prePartials = (db.records['account.partial.reconcile'] ?? []).length;
+
+  // Refused by reconcileLedgerItems with clear message, leaving db unchanged
+  assert.throws(
+    () => reconcileLedgerItems(db, [itemSelection(db, dMove.id, ar), itemSelection(db, cMove.id, ar)], { date: '2026-01-20' }),
+    /The applied amount cannot be represented in the foreign currency after rounding/,
+  );
+  assert.equal((db.records['account.move'] ?? []).length, preMoves);
+  assert.equal((db.records['account.partial.reconcile'] ?? []).length, prePartials);
+
+  // If write-off is requested on this match, refusal happens BEFORE any write-off move is created
+  const woAccount = accountId(db, '680000', 1) || rev;
+  assert.throws(
+    () => reconcileLedgerItems(db, [itemSelection(db, dMove.id, ar), itemSelection(db, cMove.id, ar)], {
+      date: '2026-01-20',
+      writeoff: {
+        journalId: misc.id,
+        accountId: woAccount,
+        label: 'Write-off small round test',
+      },
+    }),
+    /The applied amount cannot be represented in the foreign currency after rounding/,
+  );
+  assert.equal((db.records['account.move'] ?? []).length, preMoves, 'No write-off move created');
+  assert.equal((db.records['account.partial.reconcile'] ?? []).length, prePartials);
+
+  // Forged partial with 0 currency amount is rejected through applyDiff and diffDb + applyDiff
+  const forgedZeroCurr = {
+    id: 9920,
+    debit_move_id: dMove.id,
+    debit_line_index: 0,
+    credit_move_id: cMove.id,
+    credit_line_index: 0,
+    account_id: ar,
+    company_id: 1,
+    amount: 0.01,
+    debit_amount_currency: 0, // 0 is rejected!
+    credit_amount_currency: null,
+    exchange_move_id: null,
+    date: '2026-01-20',
+    active: true,
+    reversed: false,
+  };
+  assert.throws(
+    () => applyDiff(db, { upserts: { 'account.partial.reconcile': [forgedZeroCurr] } }),
+    /Currency amounts on foreign partial reconciliation must match and be positive/,
+  );
+  const forgedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.partial.reconcile': [...(db.records['account.partial.reconcile'] ?? []), forgedZeroCurr],
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, forgedDb), { isAdmin: true }),
+    /Currency amounts on foreign partial reconciliation must match and be positive/,
+  );
+  assert.equal((db.records['account.move'] ?? []).length, preMoves);
+  assert.equal((db.records['account.partial.reconcile'] ?? []).length, prePartials);
+});
+
 test('Arabic translations for reconciliation errors are present and accurate', async () => {
   const t = await arabicTranslator();
   assert.equal(
@@ -734,5 +1006,9 @@ test('Arabic translations for reconciliation errors are present and accurate', a
   assert.equal(
     t('Partial reconciliation currency amount does not match the expected foreign residual'),
     'مبلغ العملة للمطابقة الجزئية لا يطابق الرصيد الأجنبي المتبقي المتوقع',
+  );
+  assert.equal(
+    t('The applied amount cannot be represented in the foreign currency after rounding'),
+    'لا يمكن تمثيل المبلغ المطبق بالعملة الأجنبية بعد التقريب',
   );
 });
