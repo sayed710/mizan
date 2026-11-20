@@ -1,4 +1,4 @@
-import { create, read, unlink, write } from '../orm.js';
+import { create, read, search, unlink, write } from '../orm.js';
 import { isReconcilableAccount } from './ledger.js';
 import { currentCompany } from './company.js';
 
@@ -20,7 +20,8 @@ export const isMethodLineJournal = (journalOrType) =>
 
 /** Find a payment method record by its `code` and `payment_type` (never by name or label). */
 export const findPaymentMethod = (db, code, paymentType) =>
-  (db?.records?.['account.payment.method'] ?? []).find((m) => m.code === code && m.payment_type === paymentType) ?? null;
+  search(db, 'account.payment.method', { includeArchived: true })
+    .find((m) => m.code === code && m.payment_type === paymentType) ?? null;
 
 /** Default method specifications for a newly created or migrated bank/cash journal. */
 export function defaultMethodSpecsForJournal(journalType) {
@@ -42,7 +43,13 @@ export function defaultMethodSpecsForJournal(journalType) {
 
 /** Seed any missing reference payment methods (`Manual` inbound/outbound, `Checks` outbound). */
 export function ensurePaymentMethods(db) {
-  let next = db;
+  if (!db) return db;
+  let next = {
+    ...db,
+    records: db.records ?? {},
+    seq: db.seq ?? {},
+    messages: db.messages ?? [],
+  };
   for (const spec of SEEDED_PAYMENT_METHODS) {
     if (!findPaymentMethod(next, spec.code, spec.payment_type)) {
       next = create(next, 'account.payment.method', spec).db;
@@ -54,8 +61,8 @@ export function ensurePaymentMethods(db) {
 /** Active payment method lines for `journalId` (optionally filtered by direction), ordered by sequence then ID. */
 export function journalMethodLines(db, journalId, paymentType = null) {
   if (!db || !journalId) return [];
-  return (db.records?.['account.payment.method.line'] ?? [])
-    .filter((l) => l.journal_id === journalId && l.active !== false && (!paymentType || l.payment_type === paymentType))
+  return search(db, 'account.payment.method.line')
+    .filter((l) => l.journal_id === journalId && (!paymentType || l.payment_type === paymentType))
     .slice()
     .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0));
 }
@@ -84,8 +91,8 @@ export function methodLineAccountDomain(account, line, db) {
 
 /** Block deletion of any payment method line referenced by a posted payment (stored or staged). */
 export function protectMethodLineDelete(db, line, staged = db) {
-  const postedInDb = (db.records?.['account.payment'] ?? []).some((p) => p.payment_method_line_id === line.id && p.state === 'posted');
-  const postedInStaged = (staged?.records?.['account.payment'] ?? []).some((p) => p.payment_method_line_id === line.id && p.state === 'posted');
+  const postedInDb = search(db, 'account.payment', { includeArchived: true }).some((p) => p.payment_method_line_id === line.id && p.state === 'posted');
+  const postedInStaged = search(staged, 'account.payment', { includeArchived: true }).some((p) => p.payment_method_line_id === line.id && p.state === 'posted');
   return postedInDb || postedInStaged ? 'A payment method line used by a posted payment cannot be deleted' : null;
 }
 
@@ -100,7 +107,7 @@ export function paymentMethodLineGuard(db, before, after) {
     return 'Payment method line must belong to the journal company';
   }
   if (before && (after.journal_id !== before.journal_id || after.payment_type !== before.payment_type)) {
-    const payments = (db.records?.['account.payment'] ?? []).filter((p) => p.payment_method_line_id === after.id);
+    const payments = search(db, 'account.payment', { includeArchived: true }).filter((p) => p.payment_method_line_id === after.id);
     if (payments.some((p) => p.state === 'posted')) {
       return 'Cannot change journal or direction of a payment method line used by a posted payment';
     }
@@ -126,7 +133,7 @@ export function ensureJournalDefaultMethodLines(db, journal, direction = null) {
   let next = db;
   const directions = direction ? [direction] : ['inbound', 'outbound'];
   for (const dir of directions) {
-    const hasAny = (next.records?.['account.payment.method.line'] ?? []).some(
+    const hasAny = search(next, 'account.payment.method.line', { includeArchived: true }).some(
       (l) => l.journal_id === journal.id && l.payment_type === dir,
     );
     if (hasAny) continue;
@@ -149,7 +156,7 @@ export function ensureJournalDefaultMethodLines(db, journal, direction = null) {
 /** Migration helper: seed reference payment methods and add default lines to existing bank/cash journals. */
 export function migratePaymentMethods(db) {
   let next = ensurePaymentMethods(db);
-  for (const journal of next.records?.['account.journal'] ?? []) {
+  for (const journal of search(next, 'account.journal', { includeArchived: true })) {
     if (isMethodLineJournal(journal)) {
       next = ensureJournalDefaultMethodLines(next, journal);
     }
@@ -173,7 +180,7 @@ export function computeJournalMethodLines(journal, db, direction) {
 /** Default unsaved row when clicking "Add a line" on a journal's payment method tab. */
 export function defaultNewJournalMethodLine(db, direction) {
   const method = findPaymentMethod(db, 'manual', direction)
-    ?? (db?.records?.['account.payment.method'] ?? []).find((m) => m.payment_type === direction)
+    ?? search(db, 'account.payment.method').find((m) => m.payment_type === direction)
     ?? null;
   return {
     sequence: 10,
@@ -204,7 +211,7 @@ export function methodLineOnchange(line, key, db) {
 function validateJournalLinesForDirection(db, journal, lines, direction) {
   if (!Array.isArray(lines)) return 'Invalid payment method lines';
   if (lines.length > 0 && !isMethodLineJournal(journal)) return 'Payment method lines are only valid for bank and cash journals';
-  const existing = (db.records?.['account.payment.method.line'] ?? []).filter(
+  const existing = search(db, 'account.payment.method.line', { includeArchived: true }).filter(
     (l) => l.journal_id === journal.id && l.payment_type === direction,
   );
   const existingIds = new Set(existing.map((l) => l.id));
@@ -244,7 +251,7 @@ export function journalMethodLineGuard(db, before, after, vals) {
     }
   }
   if (before?.id) {
-    const ownLines = (db.records?.['account.payment.method.line'] ?? []).filter((l) => l.journal_id === before.id);
+    const ownLines = search(db, 'account.payment.method.line', { includeArchived: true }).filter((l) => l.journal_id === before.id);
     if (ownLines.length && !isMethodLineJournal(after)) {
       const blocked = ownLines.map((l) => protectMethodLineDelete(db, l)).find(Boolean);
       if (blocked) return blocked;
@@ -264,7 +271,7 @@ const stripJournalMethodLineFields = (db, journalId) => ({
   ...db,
   records: {
     ...db.records,
-    'account.journal': (db.records['account.journal'] ?? []).map((j) => {
+    'account.journal': (db.records?.['account.journal'] ?? []).map((j) => {
       if (j.id !== journalId || (!Object.hasOwn(j, 'inbound_payment_method_line_ids') && !Object.hasOwn(j, 'outbound_payment_method_line_ids'))) return j;
       const { inbound_payment_method_line_ids: _in, outbound_payment_method_line_ids: _out, ...rest } = j;
       return rest;
@@ -274,7 +281,7 @@ const stripJournalMethodLineFields = (db, journalId) => ({
 
 function syncDirectionLines(db, journal, lines, direction) {
   let next = db;
-  const existing = (next.records?.['account.payment.method.line'] ?? []).filter(
+  const existing = search(next, 'account.payment.method.line', { includeArchived: true }).filter(
     (l) => l.journal_id === journal.id && l.payment_type === direction,
   );
   const keepIds = new Set(lines.map((l) => l.id).filter(Boolean));
@@ -313,7 +320,7 @@ export function syncJournalMethodLines(db, journal, vals, before = null) {
   }
   if (before && before.company_id !== journal.company_id) {
     const companyId = journal.company_id ?? 1;
-    for (const line of (next.records?.['account.payment.method.line'] ?? []).filter((l) => l.journal_id === journal.id)) {
+    for (const line of search(next, 'account.payment.method.line', { includeArchived: true }).filter((l) => l.journal_id === journal.id)) {
       if (line.company_id !== companyId) next = write(next, 'account.payment.method.line', line.id, { company_id: companyId });
     }
   }
@@ -322,7 +329,9 @@ export function syncJournalMethodLines(db, journal, vals, before = null) {
 
 /** Unlink all payment method lines owned by a journal being deleted. */
 export function unlinkJournalMethodLines(db, journal) {
-  const lineIds = (db.records?.['account.payment.method.line'] ?? []).filter((l) => l.journal_id === journal.id).map((l) => l.id);
+  const lineIds = search(db, 'account.payment.method.line', { includeArchived: true })
+    .filter((l) => l.journal_id === journal.id)
+    .map((l) => l.id);
   return lineIds.length ? unlink(db, 'account.payment.method.line', lineIds) : db;
 }
 

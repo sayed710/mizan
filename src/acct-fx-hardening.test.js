@@ -45,20 +45,22 @@ test('a one-cent exchange difference cannot be satisfied by an entry without the
 });
 
 test('standalone foreign asset bill payment and reversal classify actual cash as investing', async () => {
- const { postPayment, reversePayment } = await import('./models/pay.js');
+ const { applyPaymentCredit, postPayment, reversePayment } = await import('./models/pay.js');
  let db=seed(); const fx=create(db,'res.currency',{name:'CASHSTANDALONE',rate_ids:[{date:'2026-01-01',rate:2},{date:'2026-01-02',rate:1}]}); db=fx.db;
  const bill=create(db,'account.move',{move_type:'in_invoice',partner_id:1,currency_id:fx.id,invoice_date:'2026-01-01',invoice_line_ids:[{product_id:5,qty:1,price_unit:100,tax:0,account_id:accountId(db,'151000')}]}); db=postMove(bill.db,bill.id);
  const payment=create(db,'account.payment',{partner_id:1,partner_type:'supplier',payment_type:'outbound',amount:100,date:'2026-01-02'}); db=postPayment(payment.db,read(payment.db,'account.payment',payment.id));
+ db=applyPaymentCredit(db,payment.id,bill.id,'2026-01-02');
  let flow=cashFlow(db,{from:'2026-01-02',to:'2026-01-02'}); assert.deepEqual([flow.investing,flow.operating,flow.net],[-100,0,-100]);
  db=reversePayment(db,read(db,'account.payment',payment.id),'2026-01-03');
  flow=cashFlow(db,{from:'2026-01-03',to:'2026-01-03'}); assert.deepEqual([flow.investing,flow.operating,flow.net],[100,0,100]);
 });
 
 test('a generated one-cent exchange entry clears the receivable and settles the invoice', async () => {
- const { postPayment } = await import('./models/pay.js');
+ const { applyPaymentCredit, postPayment } = await import('./models/pay.js');
  let db=seed(); const fx=create(db,'res.currency',{name:'VALIDCENTFX',rate_ids:[{date:'2026-01-01',rate:2},{date:'2026-01-02',rate:1}]}); db=fx.db;
  const inv=create(db,'account.move',{move_type:'out_invoice',partner_id:1,currency_id:fx.id,invoice_date:'2026-01-01',invoice_line_ids:[{product_id:5,qty:1,price_unit:0.02,tax:0}]}); db=postMove(inv.db,inv.id);
  const p=create(db,'account.payment',{partner_id:1,partner_type:'customer',payment_type:'inbound',amount:0.02,date:'2026-01-02'}); db=postPayment(p.db,read(p.db,'account.payment',p.id));
+ db=applyPaymentCredit(db,p.id,inv.id,'2026-01-02');
  const invoice=read(db,'account.move',inv.id); const payment=read(db,'account.payment',p.id); const entry=read(db,'account.move',invoice.payments[0].payment_fx_move_id);
  const receivable=accountId(db,'121000');
  const net=[invoice,read(db,'account.move',payment.move_id),entry].flatMap((m)=>m.line_ids).filter((l)=>l.account_id===receivable && l.partner_id===1).reduce((sum,l)=>sum+(l.debit||0)-(l.credit||0),0);
@@ -66,11 +68,11 @@ test('a generated one-cent exchange entry clears the receivable and settles the 
 });
 
 test('legitimate generated exchange entry synchronizes with its settlement', async () => {
- const { postPayment } = await import('./models/pay.js');
+ const { applyPaymentCredit, postPayment } = await import('./models/pay.js');
  let db=seed(); const fx=create(db,'res.currency',{name:'SYNCFX',rate_ids:[{date:'2026-01-01',rate:2},{date:'2026-01-02',rate:1}]}); db=fx.db;
  const inv=create(db,'account.move',{move_type:'out_invoice',partner_id:1,currency_id:fx.id,invoice_date:'2026-01-01',invoice_line_ids:[{product_id:5,qty:1,price_unit:100,tax:0}]}); db=postMove(inv.db,inv.id);
  const p=create(db,'account.payment',{partner_id:1,partner_type:'customer',payment_type:'inbound',amount:25,date:'2026-01-02'}); db=p.db;
- const booked=postPayment(db,read(db,'account.payment',p.id));
+ const booked=applyPaymentCredit(postPayment(db,read(db,'account.payment',p.id)),p.id,inv.id,'2026-01-02');
  const synced=applyDiff(db,diffDb(db,booked)); assert.equal(read(synced,'account.move',inv.id).amount_residual,75);
 });
 

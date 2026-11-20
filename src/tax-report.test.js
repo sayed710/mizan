@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, search, read, write } from './orm.js';
 import { postMove, payMove } from './models/accounting.js';
+import { applyPaymentCredit } from './models/pay.js';
 import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { taxReport, taxesByTax } from './models/finance.js';
 import { payOrder, refundOrder, startSession } from './models/pos.js';
@@ -117,6 +118,7 @@ test('reversing a final cash-basis payment removes its exact rounded release', (
       for (let i = 0; i < 3; i++) {
         const payment = create(db, 'account.payment', { partner_id: 1, ...(direct ? { invoice_id: inv.id } : {}), amount: 38, date: today(), partner_type: side === 'sale' ? 'customer' : 'supplier', payment_type: (side === 'sale') === (sign === 1) ? 'inbound' : 'outbound' });
         db = confirm(payment.db, 'account.payment', payment.id);
+        if (!direct) db = applyPaymentCredit(db, payment.id, inv.id, today());
         last = payment.id;
       }
       assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, tax_id: tax.id, name, base: sign * 100, tax: sign * 14 });
