@@ -101,10 +101,24 @@ function settlesAfterLock(db, before, after, lock) {
  * The latest lock date configured on the move's company: general and hard locks always apply, then
  * the sales or purchase lock by journal type. Empty when nothing is locked.
  */
-/** Whether an entry has tax lines or taxable invoice lines. */
+/** Whether a move carries any tax line, tax identifier/rate, or tax-grid indicator. */
 export function hasTaxLines(move = {}) {
-  return (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || line.tax_repartition_line_id)
-    || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || (Array.isArray(line.tax_ids) && line.tax_ids.length > 0) || Number(line.tax) > 0);
+  return (move.line_ids ?? []).some((line) => Boolean(
+    line.tax_name
+    || line.tax_id
+    || (Array.isArray(line.tax_ids) && line.tax_ids.length > 0)
+    || line.tax_grid_base
+    || line.tax_grid_release
+    || (Array.isArray(line.tax_tag_ids) && line.tax_tag_ids.length > 0)
+    || Number(line.tax),
+  ))
+  || (move.invoice_line_ids ?? []).some((line) => Boolean(
+    line.tax_id
+    || line.tax_name
+    || (Array.isArray(line.tax_ids) && line.tax_ids.length > 0)
+    || (Array.isArray(line.tax_breakdown) && line.tax_breakdown.length > 0)
+    || Number(line.tax),
+  ));
 }
 
 /**
@@ -741,8 +755,8 @@ function lockRule(db, before, after, ctx = null) {
  * Checked once the whole change set is applied: payments that settle a locked entry must point at posted journal
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
-export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && recordLockDate(db, before);
+export function lockedSettlementInvariant(db, after, before, ctx = null) {
+  const lock = before && recordLockDate(db, before, ctx);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));

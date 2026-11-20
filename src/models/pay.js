@@ -599,7 +599,7 @@ export function applyPaymentCredit(db, paymentIdOrRec, invoiceIdOrRec, date = to
 }
 
 /** Validate an exact application inverse before any journal entry or balance is changed. */
-export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineIndex = null, partialReconcileId = null } = {}) {
+export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineIndex = null, partialReconcileId = null, ctx = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
   const byPartial = partialReconcileId != null;
   const matches = (invoice?.payments ?? []).filter((row) => !row.reversed
@@ -662,9 +662,9 @@ export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineI
   const unapplied = payment && bookedPayment > 0
     ? roundCurrency(Number(payment.unapplied) + bookedPayment, companyCurrencyRecord(db, invoice.company_id))
     : null;
-  const lockError = (unapplied != null ? datedLockGuard(['unapplied'], (p) => p.state === 'posted')(db, payment, { ...payment, unapplied }) : null)
-    ?? lockedSettlementInvariant(db, { ...invoice, ...invoiceValues }, invoice)
-    ?? (byPartial ? datedLockGuard(['reversal_date'], () => true)(db, { ...invoice, date: row.date }, { ...invoice, date, reversal_date: date }) : null);
+  const lockError = (unapplied != null ? datedLockGuard(['unapplied'], (p) => p.state === 'posted')(db, payment, { ...payment, unapplied }, ctx) : null)
+    ?? lockedSettlementInvariant(db, { ...invoice, ...invoiceValues }, invoice, ctx)
+    ?? (byPartial ? datedLockGuard(['reversal_date'], () => true)(db, { ...invoice, date: row.date }, { ...invoice, date, reversal_date: date }, ctx) : null);
   if (lockError) throw new Error(lockError);
   return { invoice, row, payment, discounts, invoiceValues, unapplied };
 }
@@ -942,7 +942,7 @@ const paymentEntries = (db, payment) => [payment.move_id, payment.destination_mo
  * Why a payment cannot go back to draft, or null. Cancelled payments always can; posted ones only while
  * nothing is matched, batched, bank-matched, hashed or locked. Reconciled payments keep only Reverse.
  */
-export function resetToDraftError(db, payment) {
+export function resetToDraftError(db, payment, ctx = null) {
   if (!payment) return 'Payment not found';
   const entries = paymentEntries(db, payment);
   if (payment.state === 'cancel' && entries.every((m) => m.state !== 'posted')) return null;
@@ -955,11 +955,11 @@ export function resetToDraftError(db, payment) {
   if (inPostedBatch(db, payment) || (paired && inPostedBatch(db, paired))) {
     return 'A payment in a posted batch cannot be reset to draft';
   }
-  const lock = recordLockDate(db, payment);
+  const lock = recordLockDate(db, payment, ctx);
   if (lock && String(payment.date ?? today()) <= lock) return `The period up to ${lock} is locked`;
   for (const move of entries) {
     if (move.inalterable_hash) return 'Secured entries cannot be reset to draft or cancelled';
-    const moveLock = recordLockDate(db, move);
+    const moveLock = recordLockDate(db, move, ctx);
     if (moveLock && moveDate(move) <= moveLock) return `The period up to ${moveLock} is locked`;
   }
   const settling = settlingEntries(db);
@@ -999,15 +999,15 @@ export function resetToDraftError(db, payment) {
 }
 
 /** Reset a payment back to draft: its entries are deleted, or cancelled where the move rules keep them. */
-export function resetPaymentToDraft(db, paymentOrId) {
+export function resetPaymentToDraft(db, paymentOrId, ctx = null) {
   const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
   if (payment?.state === 'draft') return db;
-  const error = resetToDraftError(db, payment);
+  const error = resetToDraftError(db, payment, ctx);
   if (error) throw new Error(error);
 
   const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
   if (paired && paired.state !== 'draft') {
-    const pairedError = resetToDraftError(db, paired);
+    const pairedError = resetToDraftError(db, paired, ctx);
     if (pairedError) throw new Error(pairedError);
   }
 
@@ -1054,7 +1054,7 @@ export function resetPaymentToDraft(db, paymentOrId) {
   for (const moveId of movesToUndo) {
     const move = read(next, 'account.move', moveId);
     if (!move) continue;
-    const delErr = moveDeleteGuard(next, move);
+    const delErr = moveDeleteGuard(next, move, next, ctx);
     if (!delErr) {
       next = unlink(next, 'account.move', [move.id]);
     } else {
@@ -1291,7 +1291,7 @@ export const payModels = {
     guard: (db, before, after, ctx) => {
       if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
       if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && after.state === 'cancel'))) {
-        const resetError = resetToDraftError(db, before);
+        const resetError = resetToDraftError(db, before, ctx);
         if (resetError) return resetError;
       }
       if (after.state === 'draft' && after.move_id) {
@@ -1319,7 +1319,7 @@ export const payModels = {
         'paired_internal_transfer_payment_id',
       ], (p) => p.state === 'posted')(db, before, after, ctx);
     },
-    protectDelete: (db, payment, staged) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged),
+    protectDelete: (db, payment, staged, ctx) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged, ctx),
     invariant: (db, after, before, stored) => (
       after.is_internal_transfer
         ? internalTransferInvariant(db, after)

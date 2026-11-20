@@ -28,17 +28,31 @@ export const lockActorLogin = (ctx) => ctx?.login ?? currentActor()?.login ?? nu
  */
 export const isAccountingManager = (ctx) => !ctx || ctx.isAdmin !== false;
 
+const DATETIME_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?$/;
+
+function parseExpiry(value) {
+  if (typeof value !== 'string') return NaN;
+  const trimmed = value.trim();
+  const match = DATETIME_RE.exec(trimmed);
+  if (!match) return NaN;
+  const [, datePart, hh, mm, ss = '00'] = match;
+  if (!validDate(datePart)) return NaN;
+  if (Number(hh) > 23 || Number(mm) > 59 || Number(ss) > 59) return NaN;
+  const isoLike = trimmed.includes(' ') ? trimmed.replace(' ', 'T') : trimmed;
+  const ms = Date.parse(isoLike);
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
 /**
  * State computed from end_datetime and revoked status: active, revoked, or expired.
+ * Fails closed on missing or unparseable expiry values and expires at the end instant.
  */
 export function exceptionState(r, now = new Date()) {
   if (!r) return 'expired';
   if (r.revoked) return 'revoked';
-  if (r.end_datetime) {
-    const end = new Date(r.end_datetime).getTime();
-    const current = now instanceof Date ? now.getTime() : new Date(now).getTime();
-    if (!Number.isNaN(end) && !Number.isNaN(current) && end < current) return 'expired';
-  }
+  const end = parseExpiry(r.end_datetime);
+  const current = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (!Number.isFinite(end) || !Number.isFinite(current) || current >= end) return 'expired';
   return 'active';
 }
 
@@ -67,7 +81,7 @@ export function activeLockExceptions(db, companyId, ctx = null, now = new Date()
 
 /**
  * Return a copy of company with its lock dates replaced by active exceptions for the acting user.
- * Hard lock date is never relaxed.
+ * Only existing (non-empty) locks can be relaxed; hard lock date is never relaxed.
  */
 export function effectiveCompanyLockDates(company, db, ctx = null, now = new Date()) {
   if (!company || !db) return company;
@@ -78,7 +92,7 @@ export function effectiveCompanyLockDates(company, db, ctx = null, now = new Dat
   for (const ex of active) {
     const field = LOCK_EXCEPTION_TARGET[ex.lock_field];
     if (!field || !ex.lock_date) continue;
-    if (result[field] == null || ex.lock_date < result[field]) {
+    if (result[field] && ex.lock_date < result[field]) {
       result[field] = ex.lock_date;
     }
   }
@@ -93,7 +107,9 @@ export function lockExceptionGuard(db, before, after, ctx) {
     return 'Only accounting managers create or revoke exceptions';
   }
 
-  if (after.company_id && !read(db, 'res.company', after.company_id)) {
+  const companyId = after.company_id ?? 1;
+  const company = read(db, 'res.company', companyId);
+  if (!company) {
     return 'Select an existing company';
   }
 
@@ -106,14 +122,20 @@ export function lockExceptionGuard(db, before, after, ctx) {
     return 'Enter a valid exception lock date';
   }
 
-  if (!after.end_datetime || !validDate(String(after.end_datetime).slice(0, 10))) {
+  if (!after.end_datetime || !Number.isFinite(parseExpiry(after.end_datetime))) {
     return 'Enter a valid expiry date';
   }
 
-  const company = read(db, 'res.company', after.company_id ?? 1);
-  if (company && !before) {
-    const currentLock = company[targetField] ?? null;
-    if (currentLock && after.lock_date >= currentLock) {
+  const changingTarget = !before
+    || before.lock_field !== after.lock_field
+    || before.lock_date !== after.lock_date
+    || (before.company_id ?? 1) !== companyId;
+  if (changingTarget) {
+    const currentLock = company[targetField] || null;
+    if (!currentLock) {
+      return 'Cannot create an exception when the target lock date is not set';
+    }
+    if (after.lock_date >= currentLock) {
       return 'The exception date must be earlier than the current lock date';
     }
   }
@@ -182,6 +204,9 @@ export const lockExceptionModels = {
       revoked: false,
     }),
     guard: lockExceptionGuard,
+    protectDelete: (_db, _r, _staged, ctx) => (
+      isAccountingManager(ctx) ? null : 'Only accounting managers can delete lock exceptions'
+    ),
     list: ['company_id', 'user_id', 'lock_field', 'lock_date', 'end_datetime', 'reason', 'state'],
     searchFields: ['reason', 'lock_field'],
   },

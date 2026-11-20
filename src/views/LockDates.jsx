@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
 import { commit, currentCompany, getDb, getUser, isServer, useDb } from '../store.js';
 import { validateCompanySettingWrite } from './Settings.jsx';
+import { handleDialogKeyDown } from './Wizard.jsx';
 import { t } from '../i18n.js';
-import { createLockException, revokeLockException, exceptionState, isAccountingManager } from '../models/lockexception.js';
+import { createLockException, revokeLockException, exceptionState, isAccountingManager, LOCK_EXCEPTION_FIELDS } from '../models/lockexception.js';
+
+const EXCEPTION_FIELD_LABELS = Object.fromEntries(LOCK_EXCEPTION_FIELDS);
 
 export const LOCK_DATE_FIELDS = [
   { name: 'sale_lock_date', label: 'Sales Lock Date' },
@@ -154,10 +157,13 @@ function LockDatesDialog({ db, company, readOnly, onClose, onSave }) {
     handleConfirm(values);
   };
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Escape') {
+  const onKeyDown = (e) => handleDialogKeyDown(e, box.current, close);
+
+  const onExceptionKeyDown = (e) => {
+    if (e.key === 'Enter' && e.target?.tagName !== 'BUTTON') {
+      e.preventDefault();
       e.stopPropagation();
-      close();
+      handleAddException();
     }
   };
 
@@ -174,13 +180,7 @@ function LockDatesDialog({ db, company, readOnly, onClose, onSave }) {
     return match?.name ?? `User #${uid}`;
   };
 
-  const fieldName = (f) => {
-    if (f === 'global' || f === 'lock_date') return 'Global Lock Date';
-    if (f === 'tax' || f === 'tax_lock_date') return 'Tax Return Lock Date';
-    if (f === 'sale' || f === 'sale_lock_date') return 'Sales Lock Date';
-    if (f === 'purchase' || f === 'purchase_lock_date') return 'Purchase Lock Date';
-    return f;
-  };
+  const fieldName = (f) => EXCEPTION_FIELD_LABELS[f] ?? f;
 
   const handleRevoke = async (id) => {
     const currentDb = getDb();
@@ -239,30 +239,32 @@ function LockDatesDialog({ db, company, readOnly, onClose, onSave }) {
 
   return (
     <div className="wizard-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
-      <form ref={box} className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title" onSubmit={handleSubmit} onKeyDown={onKeyDown}>
+      <div ref={box} className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title" onKeyDown={onKeyDown}>
         <h2 id="wizard-title">{t('Lock Dates')}</h2>
-        {LOCK_DATE_FIELDS.map((f) => (
-          <div className="field" key={f.name}>
-            <label htmlFor={`w-${f.name}`}>{t(f.label)}</label>
-            <div className="field-value">
-              <input
-                type="date"
-                id={`w-${f.name}`}
-                disabled={readOnly}
-                value={values[f.name] ?? ''}
-                onChange={(e) => setValues((s) => ({ ...s, [f.name]: e.target.value || null }))}
-              />
-              {f.warning && <p className="muted setting-desc">{t(f.warning)}</p>}
+        <form onSubmit={handleSubmit}>
+          {LOCK_DATE_FIELDS.map((f) => (
+            <div className="field" key={f.name}>
+              <label htmlFor={`w-${f.name}`}>{t(f.label)}</label>
+              <div className="field-value">
+                <input
+                  type="date"
+                  id={`w-${f.name}`}
+                  disabled={readOnly}
+                  value={values[f.name] ?? ''}
+                  onChange={(e) => setValues((s) => ({ ...s, [f.name]: e.target.value || null }))}
+                />
+                {f.warning && <p className="muted setting-desc">{t(f.warning)}</p>}
+              </div>
             </div>
+          ))}
+          {error && (
+            <div className="alert" role="alert">{error}</div>
+          )}
+          <div className="row">
+            <button type="submit" className="btn primary" disabled={readOnly}>{t('Save')}</button>
+            <button type="button" className="btn" onClick={close}>{t('Cancel')}</button>
           </div>
-        ))}
-        {error && (
-          <div className="alert" role="alert">{error}</div>
-        )}
-        <div className="row">
-          <button type="submit" className="btn primary" disabled={readOnly}>{t('Save')}</button>
-          <button type="button" className="btn" onClick={close}>{t('Cancel')}</button>
-        </div>
+        </form>
 
         <div className="lock-exceptions-section" style={{ marginTop: '20px', borderTop: '1px solid #ddd', paddingTop: '16px' }}>
           <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '8px' }}>{t('Active Exceptions')}</h3>
@@ -306,7 +308,7 @@ function LockDatesDialog({ db, company, readOnly, onClose, onSave }) {
           )}
 
           {canManageExceptions && (
-            <div className="add-exception-box" style={{ marginTop: '12px', background: '#f9fafb', padding: '12px', borderRadius: '4px' }}>
+            <div className="add-exception-box" onKeyDown={onExceptionKeyDown} style={{ marginTop: '12px', background: '#f9fafb', padding: '12px', borderRadius: '4px' }}>
               <h4 style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '8px' }}>{t('Add Exception')}</h4>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '8px', marginBottom: '8px' }}>
                 <div>
@@ -316,10 +318,9 @@ function LockDatesDialog({ db, company, readOnly, onClose, onSave }) {
                     value={newEx.lock_field}
                     onChange={(e) => setNewEx((s) => ({ ...s, lock_field: e.target.value }))}
                   >
-                    <option value="global">{t('Global Lock Date')}</option>
-                    <option value="tax">{t('Tax Return Lock Date')}</option>
-                    <option value="sale">{t('Sales Lock Date')}</option>
-                    <option value="purchase">{t('Purchase Lock Date')}</option>
+                    {LOCK_EXCEPTION_FIELDS.map(([key, label]) => (
+                      <option key={key} value={key}>{t(label)}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -375,7 +376,7 @@ function LockDatesDialog({ db, company, readOnly, onClose, onSave }) {
             </div>
           )}
         </div>
-      </form>
+      </div>
     </div>
   );
 }

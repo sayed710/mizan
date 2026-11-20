@@ -662,7 +662,7 @@ test('JE-15: LockDates.jsx lists active exceptions and lets a manager add and re
   const { initStore, commit, getDb } = await import('./store.js');
 
   let db = seed();
-  db = write(db, 'res.company', 1, { lock_date: '2026-03-31' });
+  db = write(db, 'res.company', 1, { lock_date: '2026-03-31', tax_lock_date: '2026-03-31' });
   const future = new Date(Date.now() + 86400000).toISOString();
   db = createLockException(db, {
     company_id: 1,
@@ -681,7 +681,7 @@ test('JE-15: LockDates.jsx lists active exceptions and lets a manager add and re
       root.render(React.createElement(LockDates, { db: getDb(), companyId: 1 }));
     });
 
-    const dialog = find(container, (n) => n.tagName === 'FORM' && n.role === 'dialog');
+    const dialog = find(container, (n) => n.role === 'dialog');
     assert.ok(dialog, 'Dialog rendered');
 
     // Verify active exception is listed
@@ -728,4 +728,511 @@ test('JE-15: LockDates.jsx lists active exceptions and lets a manager add and re
   } finally {
     await React.act(async () => root.unmount());
   }
+});
+
+// ============================================================================
+// Qodo PR #187 Review Bug Fixes (1-10)
+// ============================================================================
+
+test('Qodo #1: end_datetime rejects invalid time suffixes on create and update, fails closed, and expires AT end instant', async () => {
+  const { createLockException, exceptionState } = await import('./models/lockexception.js');
+  let db = seed();
+  db = write(db, 'res.company', 1, { lock_date: '2026-03-31' });
+  const future = new Date(Date.now() + 86400000).toISOString();
+
+  // Fail closed on missing/unparseable end_datetime and expire AT exact instant
+  assert.equal(exceptionState({ end_datetime: null }), 'expired');
+  assert.equal(exceptionState({ end_datetime: '2026-12-31T99:99:99Z' }), 'expired');
+  assert.equal(exceptionState({ end_datetime: '2026-12-31garbage' }), 'expired');
+  assert.equal(exceptionState({ end_datetime: '2026-06-01T12:00:00Z' }, new Date('2026-06-01T12:00:00Z')), 'expired');
+  assert.equal(exceptionState({ end_datetime: '2026-06-01T12:00:00Z' }, new Date('2026-06-01T11:59:59.999Z')), 'active');
+
+  // Create rejects valid date prefix with invalid time/suffix via ORM and sync diff
+  for (const bad of ['2026-12-31T99:99:99Z', '2026-12-31-bad', '2026-02-30T12:00:00Z', '2026-12-31']) {
+    assert.throws(() => createLockException(db, {
+      company_id: 1,
+      lock_field: 'global',
+      lock_date: '2026-01-31',
+      end_datetime: bad,
+      reason: 'Bad expiry',
+    }), /expiry date/i);
+    const forged = {
+      ...db,
+      records: {
+        ...db.records,
+        'account.lock_exception': [...(db.records['account.lock_exception'] ?? []), {
+          id: 9901,
+          company_id: 1,
+          user_id: null,
+          lock_field: 'global',
+          lock_date: '2026-01-31',
+          end_datetime: bad,
+          reason: 'Forged expiry',
+          revoked: false,
+        }],
+      },
+    };
+    assert.throws(() => applyDiff(db, diffDb(db, forged), managerCtx), /expiry date|end_datetime/i);
+  }
+
+  // Update rejects unparseable end_datetime via ORM and sync diff
+  const validDb = applyDiff(db, diffDb(db, createLockException(db, {
+    company_id: 1,
+    lock_field: 'global',
+    lock_date: '2026-01-31',
+    end_datetime: future,
+    reason: 'Valid',
+  })), managerCtx);
+  const ex = search(validDb, 'account.lock_exception')[0];
+  assert.throws(() => write(validDb, 'account.lock_exception', ex.id, { end_datetime: '2026-12-31T25:00:00Z' }), /expiry date|end_datetime/i);
+  const forgedUpdate = {
+    ...validDb,
+    records: {
+      ...validDb.records,
+      'account.lock_exception': validDb.records['account.lock_exception'].map((r) => (
+        r.id === ex.id ? { ...r, end_datetime: '2026-12-31T25:00:00Z' } : r
+      )),
+    },
+  };
+  assert.throws(() => applyDiff(validDb, diffDb(validDb, forgedUpdate), managerCtx), /expiry date|end_datetime/i);
+});
+
+test('Qodo #2: exceptions require a configured target lock and effectiveCompanyLockDates never creates a lock on an unset field', async () => {
+  const { createLockException, effectiveCompanyLockDates } = await import('./models/lockexception.js');
+  let db = seed();
+  const future = new Date(Date.now() + 86400000).toISOString();
+
+  // Creating global exception with unset lock_date fails
+  assert.throws(() => applyDiff(db, diffDb(db, createLockException(db, {
+    company_id: 1,
+    lock_field: 'global',
+    lock_date: '2026-01-31',
+    end_datetime: future,
+  })), managerCtx), /not set/i);
+
+  // Creating per-type exceptions with unset target locks fails
+  for (const field of ['sale', 'purchase', 'tax']) {
+    assert.throws(() => applyDiff(db, diffDb(db, createLockException(db, {
+      company_id: 1,
+      lock_field: field,
+      lock_date: '2026-01-31',
+      end_datetime: future,
+    })), managerCtx), /not set/i);
+  }
+
+  // Even if an exception exists after a company lock is later cleared, effectiveCompanyLockDates leaves it unset
+  db = write(db, 'res.company', 1, { lock_date: '2026-03-31', sale_lock_date: '2026-03-31' });
+  db = createLockException(db, { company_id: 1, lock_field: 'global', lock_date: '2026-01-31', end_datetime: future });
+  db = createLockException(db, { company_id: 1, lock_field: 'sale', lock_date: '2026-01-31', end_datetime: future });
+  db = write(db, 'res.company', 1, { lock_date: null, sale_lock_date: null });
+
+  const effective = effectiveCompanyLockDates(read(db, 'res.company', 1), db, managerCtx);
+  assert.equal(effective.lock_date, null);
+  assert.equal(effective.sale_lock_date, null);
+});
+
+test('Qodo #3 & #10: LockDates.jsx keeps exceptions outside lock <form>, handles Enter cleanly, and traps Tab/Shift+Tab focus', async () => {
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { LockDates } = await import('./views/LockDates.jsx');
+  const { initStore, commit, getDb } = await import('./store.js');
+
+  let db = seed();
+  db = write(db, 'res.company', 1, { lock_date: '2026-03-31', tax_lock_date: '2026-03-31' });
+  await initStore();
+  await commit(db);
+
+  let closed = false;
+  let saved = false;
+  const root = createRoot(container);
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(LockDates, {
+        db: getDb(),
+        companyId: 1,
+        onClose: () => { closed = true; },
+        onSave: () => { saved = true; },
+      }));
+    });
+
+    const dialog = find(container, (n) => n.role === 'dialog');
+    const lockForm = find(dialog, (n) => n.tagName === 'FORM');
+    const hasCls = (n, cls) => String(n.class ?? n.className ?? '').split(/\s+/).includes(cls);
+    const exSection = find(dialog, (n) => hasCls(n, 'lock-exceptions-section'));
+    assert.ok(lockForm && exSection, 'Both lock form and exceptions section render');
+    assert.equal(lockForm.contains(exSection), false, 'Exceptions section is kept outside the lock-date <form>');
+
+    // Qodo #3: Pressing Enter in exception inputs adds the exception instead of closing the dialog
+    const fieldSelect = find(dialog, (n) => n.id === 'ex-field');
+    const dateInput = find(dialog, (n) => n.id === 'ex-date');
+    const expiryInput = find(dialog, (n) => n.id === 'ex-expiry');
+    const reasonInput = find(dialog, (n) => n.id === 'ex-reason');
+    const addBox = find(dialog, (n) => hasCls(n, 'add-exception-box'));
+
+    await React.act(async () => {
+      props(fieldSelect).onChange({ target: { value: 'global' } });
+      props(dateInput).onChange({ target: { value: '2026-01-31' } });
+      props(expiryInput).onChange({ target: { value: '2026-12-31' } });
+      props(reasonInput).onChange({ target: { value: 'Enter key addition' } });
+    });
+
+    let prevented = false;
+    await React.act(async () => {
+      props(addBox).onKeyDown({
+        key: 'Enter',
+        target: reasonInput,
+        preventDefault: () => { prevented = true; },
+        stopPropagation: () => {},
+      });
+    });
+
+    assert.equal(prevented, true, 'Enter in exception input prevents default');
+    assert.equal(closed, false, 'Enter in exception input does not close dialog');
+    assert.equal(saved, false, 'Enter in exception input does not submit lock-date form');
+    assert.equal(search(getDb(), 'account.lock_exception').length, 1, 'Enter added the exception');
+
+    // Qodo #10: Tab / Shift+Tab stays trapped inside the dialog
+    const focusable = [...dialog.querySelectorAll('input, select, textarea, button')].filter((el) => !el.disabled);
+    assert.ok(focusable.length >= 2);
+    const first = focusable[0];
+    const last = focusable.at(-1);
+
+    first.focus();
+    await React.act(async () => {
+      props(dialog).onKeyDown({ key: 'Tab', shiftKey: true, preventDefault: () => {}, stopPropagation: () => {} });
+    });
+    assert.equal(document.activeElement, last, 'Shift+Tab on first focusable wraps to last');
+
+    last.focus();
+    await React.act(async () => {
+      props(dialog).onKeyDown({ key: 'Tab', shiftKey: false, preventDefault: () => {}, stopPropagation: () => {} });
+    });
+    assert.equal(document.activeElement, first, 'Tab on last focusable wraps to first');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Qodo #4: taxable draft date move into tax-only lock is refused for negative plain tax, positive plain tax, manual tax_ids, and tax_grid_base', () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { tax_lock_date: '2026-01-31' });
+  const accId = search(db, 'account.account')[0].id;
+
+  const cases = [
+    { name: 'negative plain tax', vals: { move_type: 'out_invoice', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: -5 }] } },
+    { name: 'positive plain tax', vals: { move_type: 'out_invoice', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 14 }] } },
+    { name: 'manual line tax_ids', vals: { move_type: 'entry', line_ids: [{ account_id: accId, debit: 100, credit: 0, tax_ids: [1] }, { account_id: accId, debit: 0, credit: 100 }] } },
+    { name: 'manual line tax_grid_base', vals: { move_type: 'entry', line_ids: [{ account_id: accId, debit: 100, credit: 0, tax_grid_base: true }, { account_id: accId, debit: 0, credit: 100 }] } },
+  ];
+
+  for (const { name, vals } of cases) {
+    const draft = create(db, 'account.move', {
+      company_id: 1,
+      partner_id: 1,
+      invoice_date: '2026-02-15',
+      date: '2026-02-15',
+      ...vals,
+    });
+    const moved = {
+      ...draft.db,
+      records: {
+        ...draft.db.records,
+        'account.move': draft.db.records['account.move'].map((m) => (m.id === draft.id ? { ...m, invoice_date: '2026-01-15', date: '2026-01-15' } : m)),
+      },
+    };
+    assert.throws(() => applyDiff(draft.db, diffDb(draft.db, moved), clerkCtx), /locked/i, `${name} must hit tax lock`);
+  }
+});
+
+test('Qodo #5: bank statement guard honors user-specific lock exception for matched employee through applyDiff', async () => {
+  const { createLockException } = await import('./models/lockexception.js');
+  let db = seed();
+  db = write(db, 'hr.employee', 2, { user_login: 'clerk' });
+  db = write(db, 'hr.employee', 3, { user_login: 'other' });
+  const bankJ = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const bankAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_cash')?.id ?? 1;
+  const receivable = search(db, 'account.account').find((a) => a.code === '121000')?.id ?? 1;
+  assert.ok(bankJ);
+
+  const bankMove = create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: 1,
+    journal_id: bankJ.id,
+    invoice_date: '2026-02-15',
+    state: 'posted',
+    name: 'BNK/2026/0099',
+    line_ids: [
+      { account_id: bankAcc, debit: 100, credit: 0 },
+      { account_id: receivable, debit: 0, credit: 100 },
+    ],
+  });
+  const line = create(bankMove.db, 'account.bank.statement.line', {
+    company_id: 1,
+    journal_id: bankJ.id,
+    date: '2026-02-15',
+    payment_ref: 'Bank Wire',
+    amount: 100,
+    state: 'reconciled',
+    move_id: bankMove.id,
+    bank_move_id: bankMove.id,
+  });
+  db = write(line.db, 'res.company', 1, { lock_date: '2026-03-31' });
+  db = createLockException(db, {
+    company_id: 1,
+    user_id: 2,
+    lock_field: 'global',
+    lock_date: '2026-01-31',
+    end_datetime: new Date(Date.now() + 86400000).toISOString(),
+  });
+
+  // Update a non-reconciled-freeze guard field that triggers datedLockGuard (active: false)
+  const archived = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => (
+        l.id === line.id ? { ...l, active: false } : l
+      )),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, archived), user3Ctx), /locked/i);
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, archived), clerkCtx));
+});
+
+test('Qodo #6: lockedSettlementInvariant honors user-specific lock exception when settling a locked invoice', async () => {
+  const { createLockException } = await import('./models/lockexception.js');
+  let db = seed();
+  db = write(db, 'hr.employee', 2, { user_login: 'clerk' });
+  db = write(db, 'hr.employee', 3, { user_login: 'other' });
+
+  const accounts = search(db, 'account.account');
+  const receivable = accounts.find((a) => a.code === '121000')?.id ?? accounts[0].id;
+  const revenue = accounts.find((a) => a.code === '400000')?.id ?? accounts[1].id;
+  const bankAcc = accounts.find((a) => a.account_type === 'asset_cash')?.id ?? accounts[0].id;
+
+  // Create and post invoice dated 2026-02-10 before locking
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    invoice_date: '2026-02-10',
+    partner_id: 1,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+    line_ids: [
+      { account_id: receivable, debit: 100, credit: 0, partner_id: 1 },
+      { account_id: revenue, debit: 0, credit: 100, partner_id: 1 },
+    ],
+    state: 'posted',
+    name: 'INV/2026/0010',
+    amount_total: 100,
+    amount_residual: 100,
+    amount_paid: 0,
+  });
+  db = write(inv.db, 'res.company', 1, { lock_date: '2026-03-31' });
+  db = createLockException(db, {
+    company_id: 1,
+    user_id: 2,
+    lock_field: 'global',
+    lock_date: '2026-01-31',
+    end_datetime: new Date(Date.now() + 86400000).toISOString(),
+  });
+
+  // Build diff that books a payment entry dated 2026-02-20 and settles the invoice on 2026-02-20
+  const payMoveId = Math.max(0, ...(db.records['account.move'] ?? []).map((m) => m.id)) + 1;
+  const miscJ = search(db, 'account.journal').find((j) => j.type === 'general') ?? search(db, 'account.journal')[0];
+  const payMove = {
+    id: payMoveId,
+    move_type: 'entry',
+    company_id: 1,
+    journal_id: miscJ.id,
+    invoice_date: '2026-02-20',
+    date: '2026-02-20',
+    partner_id: 1,
+    state: 'posted',
+    name: 'BNK/2026/0010',
+    line_ids: [
+      { account_id: bankAcc, debit: 100, credit: 0 },
+      { account_id: receivable, debit: 0, credit: 100, partner_id: 1 },
+    ],
+  };
+  const settledDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [
+        ...db.records['account.move'].map((m) => (
+          m.id === inv.id
+            ? {
+                ...m,
+                amount_paid: 100,
+                amount_residual: 0,
+                payment_date: '2026-02-20',
+                payments: [{ move_id: payMoveId, amount: 100, date: '2026-02-20', company_amount: 100 }],
+              }
+            : m
+        )),
+        payMove,
+      ],
+    },
+  };
+
+  const diff = diffDb(db, settledDb);
+  assert.throws(() => applyDiff(db, diff, user3Ctx), /locked/i);
+  const res = applyDiff(db, diff, clerkCtx);
+  assert.equal(read(res, 'account.move', inv.id).amount_paid, 100);
+});
+
+test('Qodo #7: payment reset to draft and payment edits honor user-specific lock exception through applyDiff', async () => {
+  const { createLockException } = await import('./models/lockexception.js');
+  const { resetToDraftError } = await import('./models/pay.js');
+  let db = seed();
+  db = write(db, 'hr.employee', 2, { user_login: 'clerk' });
+  db = write(db, 'hr.employee', 3, { user_login: 'other' });
+  const bankJ = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const bankAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_cash')?.id ?? 1;
+  const receivable = search(db, 'account.account').find((a) => a.code === '121000')?.id ?? 1;
+
+  const payMove = create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: 1,
+    journal_id: bankJ.id,
+    invoice_date: '2026-02-15',
+    partner_id: 1,
+    state: 'posted',
+    name: 'PAY/2026/0015',
+    line_ids: [
+      { account_id: bankAcc, debit: 50, credit: 0, partner_id: 1 },
+      { account_id: receivable, debit: 0, credit: 50, partner_id: 1 },
+    ],
+  });
+  const payment = create(payMove.db, 'account.payment', {
+    company_id: 1,
+    journal_id: bankJ.id,
+    date: '2026-02-15',
+    partner_id: 1,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 50,
+    state: 'posted',
+    name: 'PAY/2026/0015',
+    move_id: payMove.id,
+  });
+  db = write(payment.db, 'res.company', 1, { lock_date: '2026-03-31' });
+  db = createLockException(db, {
+    company_id: 1,
+    user_id: 2,
+    lock_field: 'global',
+    lock_date: '2026-01-31',
+    end_datetime: new Date(Date.now() + 86400000).toISOString(),
+  });
+
+  // resetToDraftError respects ctx
+  assert.match(resetToDraftError(db, read(db, 'account.payment', payment.id), user3Ctx) ?? '', /locked/i);
+  assert.equal(resetToDraftError(db, read(db, 'account.payment', payment.id), clerkCtx), null);
+
+  // Payment memo edit & reset to draft via applyDiff
+  const editedMemo = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (p.id === payment.id ? { ...p, memo: 'Adjusted memo' } : p)),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, editedMemo), user3Ctx), /locked/i);
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, editedMemo), clerkCtx));
+
+  const resetDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (p.id === payment.id ? { ...p, state: 'draft', move_id: null } : p)),
+      'account.move': db.records['account.move'].map((m) => (m.id === payMove.id ? { ...m, state: 'draft' } : m)),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, resetDb), user3Ctx), /locked/i);
+  const afterReset = applyDiff(db, diffDb(db, resetDb), clerkCtx);
+  assert.equal(read(afterReset, 'account.payment', payment.id).state, 'draft');
+});
+
+test('Qodo #8: server-side deletes via applyDiff pass ctx so personal exceptions apply consistently', async () => {
+  const { createLockException } = await import('./models/lockexception.js');
+  let db = seed();
+  db = write(db, 'hr.employee', 2, { user_login: 'clerk' });
+  db = write(db, 'hr.employee', 3, { user_login: 'other' });
+  const bankJ = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const accounts = search(db, 'account.account');
+  const receivable = accounts.find((a) => a.code === '121000')?.id ?? accounts[0].id;
+  const revenue = accounts.find((a) => a.code === '400000')?.id ?? accounts[1].id;
+
+  const payment = create(db, 'account.payment', {
+    company_id: 1,
+    journal_id: bankJ.id,
+    date: '2026-02-15',
+    partner_id: 1,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 75,
+    state: 'posted',
+    name: 'PAY/2026/0075',
+  });
+  const postedMove = create(payment.db, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    invoice_date: '2026-02-15',
+    partner_id: 1,
+    state: 'posted',
+    name: 'INV/2026/0075',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 75, tax: 0 }],
+    line_ids: [
+      { account_id: receivable, debit: 75, credit: 0, partner_id: 1 },
+      { account_id: revenue, debit: 0, credit: 75, partner_id: 1 },
+    ],
+  });
+  db = write(postedMove.db, 'res.company', 1, { lock_date: '2026-03-31' });
+  db = createLockException(db, {
+    company_id: 1,
+    user_id: 2,
+    lock_field: 'global',
+    lock_date: '2026-01-31',
+    end_datetime: new Date(Date.now() + 86400000).toISOString(),
+  });
+
+  // Payment delete via applyDiff: user3 blocked by lock, clerk succeeds
+  const payDel = { upserts: {}, deletes: { 'account.payment': [payment.id] } };
+  assert.throws(() => applyDiff(db, payDel, user3Ctx), /locked/i);
+  const afterDel = applyDiff(db, payDel, clerkCtx);
+  assert.equal(read(afterDel, 'account.payment', payment.id), undefined);
+
+  // Move delete guard receives ctx via applyDiff: user3 gets locked error, clerk bypasses lock check
+  const moveDel = { upserts: {}, deletes: { 'account.move': [postedMove.id] } };
+  assert.throws(() => applyDiff(db, moveDel, user3Ctx), /period up to 2026-03-31 is locked/i);
+  assert.throws(() => applyDiff(db, moveDel, clerkCtx), /Posted entries cannot be deleted/i);
+});
+
+test('Qodo #9: non-accounting managers cannot create, edit, revoke, or delete lock exceptions through applyDiff', async () => {
+  const { createLockException } = await import('./models/lockexception.js');
+  let db = seed();
+  db = write(db, 'res.company', 1, { lock_date: '2026-03-31' });
+  const future = new Date(Date.now() + 86400000).toISOString();
+
+  const saved = applyDiff(db, diffDb(db, createLockException(db, {
+    company_id: 1,
+    user_id: 2,
+    lock_field: 'global',
+    lock_date: '2026-01-31',
+    end_datetime: future,
+    reason: 'Initial',
+  })), managerCtx);
+  const ex = search(saved, 'account.lock_exception')[0];
+
+  // Non-admin edit rejected
+  const edited = write(saved, 'account.lock_exception', ex.id, { reason: 'Tampered' });
+  assert.throws(() => applyDiff(saved, diffDb(saved, edited), clerkCtx), /Only accounting managers/i);
+
+  // Non-admin delete rejected
+  assert.throws(() => applyDiff(saved, { upserts: {}, deletes: { 'account.lock_exception': [ex.id] } }, clerkCtx), /Only accounting managers/i);
+
+  // Manager delete allowed
+  const afterDel = applyDiff(saved, { upserts: {}, deletes: { 'account.lock_exception': [ex.id] } }, managerCtx);
+  assert.equal(read(afterDel, 'account.lock_exception', ex.id), undefined);
 });

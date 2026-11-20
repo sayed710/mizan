@@ -3407,6 +3407,8 @@ const ar = {
   'Enter a valid expiry date': 'أدخل تاريخ انتهاء صالحاً',
   'Select a lock date field': 'اختر حقل تاريخ الإقفال',
   'Invalid lock date field': 'حقل تاريخ الإقفال غير صالح',
+  'Cannot create an exception when the target lock date is not set': 'لا يمكن إنشاء استثناء عندما لا يكون تاريخ الإقفال المستهدف محدداً',
+  'Only accounting managers can delete lock exceptions': 'مديرو المحاسبة فقط يمكنهم حذف استثناءات الإقفال',
   'No active exceptions.': 'لا توجد استثناءات نشطة.',
   'Select a source journal': 'اختر دفتر يومية المصدر',
   'Select a destination journal': 'اختر دفتر يومية الوجهة',
