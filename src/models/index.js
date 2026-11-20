@@ -288,7 +288,6 @@ const allApps = [
           { key: 'inventory-valuation', label: 'Inventory Valuation', type: 'report', report: 'valuation' },
         ] },
                 { label: 'Regularization Entries', children: [
-          { key: 'unrealized-currencies', label: 'Unrealized Currencies', type: 'report', report: 'unrealizedCurrencies' },
           { key: 'deferred-revenues', label: 'Deferred Revenues', model: 'account.deferral', domain: (r) => r.kind === 'revenue', defaults: { kind: 'revenue' } },
           { key: 'deferred-expenses', label: 'Deferred Expenses', model: 'account.deferral', domain: (r) => r.kind === 'expense', defaults: { kind: 'expense' } },
           { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
@@ -323,6 +322,7 @@ const allApps = [
         ] },
                 { label: 'Management', children: [
           { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.invoice.report', view: 'pivot' },
+          { key: 'unrealized-currencies', label: 'Unrealized Currencies', type: 'report', report: 'unrealizedCurrencies' },
           { key: 'loans-analysis', label: 'Loans Analysis', type: 'report', report: 'loansAnalysis' },
           { key: 'cashflow-analysis', label: 'Cashflow Analysis', type: 'report', report: 'cashflowAnalysis' },
           { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
