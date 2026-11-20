@@ -1350,17 +1350,7 @@ export const payModels = {
       ], (p) => p.state === 'posted')(db, before, after, ctx);
       if (lockErr) return lockErr;
 
-      if ((!before && after.state === 'posted') || (after.state === 'posted' && after.move_id)) {
-        const entry = after.move_id ? (db.records['account.move'] ?? []).find((m) => m.id === after.move_id) : null;
-        if (!entry || entry.state !== 'posted' || entry.move_type !== 'entry') {
-          return 'A posted payment needs its posted journal entry';
-        }
-      }
-
-      const methodErr = paymentMethodGuard(db, before, after);
-      if (methodErr) return methodErr;
-
-      return null;
+      return paymentMethodGuard(db, before, after);
     },
     protectDelete: (db, payment, staged, ctx) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged, ctx),
     invariant: (db, after, before, stored) => (
