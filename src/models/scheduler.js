@@ -8,6 +8,7 @@ import { runFollowUps } from './finance.js';
 import { postDepreciation } from './assets.js';
 import { postAutoPostMoves } from './accounting.js';
 import { autoReconcile } from './reconcile.js';
+import { syncDueOnlineLinks } from './onlineSync.js';
 import { processDue } from './automation.js';
 import { publishDue } from './social.js';
 import { assignAllTeams, refreshProbabilities } from './crmteams.js';
@@ -61,6 +62,7 @@ export function runScheduledJobs(db, at = today(), { onError = () => {}, deliver
       return sent && typeof sent.then === 'function' ? sent.then(save) : save(sent);
     }],
     ['accounting', (db) => autoReconcile(db)],
+    ['accounting', tolerant(syncDueOnlineLinks)],
     ['automation', tolerant(processDue)],
     ['social', publishDue],
     ['crm', (db) => assignAllTeams(db)],
