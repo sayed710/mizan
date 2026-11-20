@@ -11,6 +11,7 @@ import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
+import { ensurePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
@@ -124,6 +125,7 @@ export function seed() {
     installedByCode[code] = id;
     if (key) installedAccountIds[key] = id;
   });
+  db = ensurePaymentMethods(db);
   const companyJournals = {};
   let demoBankJournal = null;
   JOURNALS.forEach((journal, idx) => {

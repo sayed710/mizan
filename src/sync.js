@@ -14,6 +14,7 @@ import { checkMandatoryPlans } from './models/analyticplus.js';
 import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
 import { isProtectedAuditMessage } from './models/auditRules.js';
+import { syncJournalMethodLines, unlinkJournalMethodLines } from './models/paymentmethod.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
@@ -695,7 +696,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     for (let i = 0; i < changed.length; i++) if (changed[i][0] === 'account.move' && provenance.has(changed[i][1].id)) changed[i] = ['account.move', records['account.move'].find((m) => m.id === changed[i][1].id)];
   }
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
-  const stagedSeq = { ...db.seq };
+  let stagedSeq = { ...db.seq };
   for (const model of Object.keys(d.upserts ?? {})) stagedSeq[model] = Math.max(stagedSeq[model] ?? 0, maxId(records[model]));
   const staged = { ...db, records, seq: stagedSeq };
   const revaluationMoves = generatedRevaluationMoves(staged, db, changed);
@@ -805,6 +806,13 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const err = validate(model, rec, seen, !before, before) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
       ?? models[model].guard?.(seen, before, rec, { ...baseCtx, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets }, submittedByRecord.get(`${model}:${rec.id}`));
     if (err) throw new Error(err);
+    if (model === 'account.journal') {
+      const submitted = submittedByRecord.get(`${model}:${rec.id}`);
+      const nextDb = syncJournalMethodLines({ ...db, records, seq: stagedSeq }, rec, submitted, before);
+      records = nextDb.records;
+      stagedSeq = nextDb.seq;
+      seen.records = records;
+    }
     if (model === 'account.move') {
       const generated = generatedMoves.has(rec.id);
       if (rec.state === 'posted' && before?.state !== 'posted') {
@@ -836,6 +844,16 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
     if (unauthorized) throw new Error(unauthorized);
     growth -= (records[model] ?? []).filter((r) => drop.has(r.id)).reduce((n, r) => n + json(r) + 1, 0);
+    if (model === 'account.journal') {
+      for (const id of ids) {
+        const journal = (db.records['account.journal'] ?? []).find((j) => j.id === id);
+        if (journal) {
+          const nextDb = unlinkJournalMethodLines({ ...db, records, seq: stagedSeq }, journal);
+          records = nextDb.records;
+          stagedSeq = nextDb.seq;
+        }
+      }
+    }
     if (model in records) records = { ...records, [model]: records[model].filter((r) => !drop.has(r.id)) };
   }
   // Whole-record rules that look across models run once every change is in place.
@@ -858,8 +876,8 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const missing = danglingLink(records, d.upserts ?? {}, db.records);
   if (missing) throw new Error(missing);
   // Id counters follow the records actually stored; the client's own counters (d.seq) are ignored so they cannot be poisoned.
-  const seq = { ...db.seq };
-  for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
+  const seq = { ...db.seq, ...stagedSeq };
+  for (const model of new Set([...Object.keys(d.upserts ?? {}), 'account.payment.method.line'])) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
   const auditRecords = new Map();
   const kept = new Set(db.messages.filter((m) => {
