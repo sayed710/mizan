@@ -5,7 +5,7 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { accountId, postEntry } from './models/ledger.js';
-import { postPayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment } from './models/pay.js';
 import { bookBankMovement, reconcileWith } from './models/bank.js';
 import { postMove } from './models/accounting.js';
 import { rateAt } from './models/currency.js';
@@ -278,6 +278,7 @@ test('an exchange difference generated on settlement of a USD invoice does not v
     journal_id: bankJournal.id,
   });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, invoice.id, addDays(today(), -1));
   const settled = read(db, 'account.move', invoice.id);
   const fxMoveId = settled.payments?.[0]?.payment_fx_move_id;
   assert.ok(fxMoveId, 'exchange difference move must be generated');
@@ -307,6 +308,7 @@ test('exchange difference entries carry the exchange account currency', () => {
     amount: 25, date: '2026-01-02', currency_id: fx.id,
   });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, invoice.id, '2026-01-02');
 
   const settled = read(db, 'account.move', invoice.id);
   const fxEntry = read(db, 'account.move', settled.payments[0].payment_fx_move_id);
@@ -522,6 +524,7 @@ test('an exchange difference entry touching a USD-forced account leaves that acc
     journal_id: bankJournal.id,
   });
   db = postPayment(pay.db, read(pay.db, 'account.payment', pay.id));
+  db = applyPaymentCredit(db, pay.id, inv.id, '2026-01-15');
 
   const settled = read(db, 'account.move', inv.id);
   const fxMoveId = settled.payments?.[0]?.payment_fx_move_id;

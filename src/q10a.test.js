@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { creditNote, postMove } from './models/accounting.js';
-import { postPayment, reverseEntry } from './models/pay.js';
+import { applyPaymentCredit, postPayment, reverseEntry } from './models/pay.js';
 import { postDueEntries, generateGroupedEntries } from './models/deferred.js';
 
 const move = (db, id) => read(db, 'account.move', id);
@@ -167,6 +167,7 @@ test('Qodo 10: resetting a linked credit note to draft reverts adjustments and s
     date: '2026-01-05',
   });
   let db = postPayment(p.db, read(p.db, 'account.payment', p.id));
+  db = applyPaymentCredit(db, p.id, source.invoiceId, '2026-01-05');
   db = write(db, 'account.move', source.invoiceId, { amount_paid: 120 });
 
   // Post Jan recognition (40).
@@ -296,7 +297,9 @@ test('an earlier credit note cannot be reset while a later credit note still adj
   const source = deferredInvoice(90);
   // A paid invoice keeps its credit notes unreconciled, so they can be reset to draft.
   const payment = create(source.db, 'account.payment', { partner_id: 2, partner_type: 'customer', payment_type: 'inbound', amount: 90, date: '2026-01-05' });
-  let db = write(postPayment(payment.db, read(payment.db, 'account.payment', payment.id)), 'account.move', source.invoiceId, { amount_paid: 90 });
+  let db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, source.invoiceId, '2026-01-05');
+  db = write(db, 'account.move', source.invoiceId, { amount_paid: 90 });
   db = postDueEntries(db, source.schedule, '2026-01-31');
   const postPartialCredit = (state, date) => {
     const drafted = creditNote(state, move(state, source.invoiceId), { date });

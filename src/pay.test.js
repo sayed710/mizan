@@ -49,20 +49,20 @@ test('registering a payment on an invoice also records a posted payment', () => 
   assert.match(payment.name, /^PBNK1\/2026\//);
 });
 
-test('a manual customer payment settles open invoices oldest due first and keeps the rest as credit', () => {
+test('a manual customer payment books credit without auto-settling open invoices', () => {
   const fresh = create(seed(), 'res.partner', { name: 'New Client' });
   const a = post(fresh.db, { move_type: 'out_invoice', partner_id: fresh.id, invoice_date_due: '2026-05-30' });
   const b = post(a.db, { move_type: 'out_invoice', partner_id: fresh.id, invoice_date_due: '2026-05-01' });
   const { db, id } = create(b.db, 'account.payment', { partner_id: fresh.id, amount: 150, date: '2026-05-10', payment_type: 'inbound', partner_type: 'customer' });
   const done = postPayment(db, read(db, 'account.payment', id));
-  assert.equal(read(done, 'account.move', b.id).payment_state, 'paid');
-  assert.equal(read(done, 'account.move', a.id).amount_residual, 50);
+  assert.equal(read(done, 'account.move', b.id).payment_state, 'not_paid');
+  assert.equal(read(done, 'account.move', a.id).amount_residual, 100);
   const payment = read(done, 'account.payment', id);
   assert.equal(payment.state, 'posted');
-  assert.equal(payment.unapplied, 0);
+  assert.equal(payment.unapplied, 150);
   assert.ok(isBalanced(read(done, 'account.move', payment.move_id).line_ids));
   const extra = create(done, 'account.payment', { partner_id: fresh.id, amount: 80, payment_type: 'inbound', partner_type: 'customer' });
-  assert.equal(read(postPayment(extra.db, read(extra.db, 'account.payment', extra.id)), 'account.payment', extra.id).unapplied, 30);
+  assert.equal(read(postPayment(extra.db, read(extra.db, 'account.payment', extra.id)), 'account.payment', extra.id).unapplied, 80);
   assert.throws(() => postPayment(done, payment), /draft/);
 });
 

@@ -12,7 +12,7 @@ import { installments } from './models/terms.js';
 import { deferralBoard } from './models/deferred.js';
 import { unrealizedExchange, revalueForeignBalances } from './models/closing.js';
 import { migrate } from './migrations.js';
-import { postPayment, reversePayment } from './models/pay.js';
+import { applyPaymentCredit, postPayment, reversePayment } from './models/pay.js';
 
 test('currency increments round half away from zero and expose display precision', () => {
   assert.equal(roundCurrency(175.7, { rounding: 1 }), 176);
@@ -150,6 +150,7 @@ test('a company-currency payment allocates and records a three-decimal foreign e
   let { db, id } = setupPrecision(0.001, true);
   const payment = create(db, 'account.payment', { partner_id: 2, partner_type: 'customer', payment_type: 'inbound', amount: 1, date: '2025-02-02' });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  db = applyPaymentCredit(db, payment.id, id, '2025-02-02');
   const invoice = read(db, 'account.move', id);
   assert.equal(invoice.payments[0].amount, 4);
   assert.equal(invoice.amount_residual, 7.543);
