@@ -604,9 +604,9 @@ export function bookToAccount(db, line, opts = {}) {
 }
 
 /** Reject unreconciling when the statement line date, or any bank or counterpart entry, is on or before a lock date. */
-function unreconcileLockError(db, line) {
+function unreconcileLockError(db, line, ctx = null) {
   if (!line) return null;
-  const lineLock = recordLockDate(db, line);
+  const lineLock = recordLockDate(db, line, ctx);
   const violatedLocks = [];
   if (lineLock && String(line.date ?? today()) <= lineLock) {
     violatedLocks.push(lineLock);
@@ -624,7 +624,7 @@ function unreconcileLockError(db, line) {
   for (const moveId of moveIds) {
     const move = read(db, 'account.move', moveId);
     if (!move) continue;
-    const moveLock = recordLockDate(db, move);
+    const moveLock = recordLockDate(db, move, ctx);
     if (moveLock && moveDate(move) <= moveLock) {
       violatedLocks.push(moveLock);
     }
@@ -635,8 +635,8 @@ function unreconcileLockError(db, line) {
 }
 
 /** Validate a release against linked, posted mirror entries rather than trusting a client flag. */
-function unreconcileError(db, before, after) {
-  const lockError = unreconcileLockError(db, before);
+function unreconcileError(db, before, after, ctx = null) {
+  const lockError = unreconcileLockError(db, before, ctx);
   if (lockError) return lockError;
   if (before.statement_id) {
     const stmt = read(db, 'account.bank.statement', before.statement_id);
@@ -676,9 +676,9 @@ function unreconcileError(db, before, after) {
 }
 
 /** Release a match by posting linked reversals; existing payments are not reversed. */
-export function unreconcile(db, line, reversalDate = null) {
+export function unreconcile(db, line, reversalDate = null, ctx = null) {
   const target = read(db, 'account.bank.statement.line', line.id) ?? line;
-  const lockErr = unreconcileLockError(db, target);
+  const lockErr = unreconcileLockError(db, target, ctx);
   if (lockErr) throw new Error(lockErr);
   if (target.statement_id) {
     const stmt = read(db, 'account.bank.statement', target.statement_id);
@@ -837,9 +837,9 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
 }
 
 /** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
-function lineGuard(db, before, after) {
+function lineGuard(db, before, after, ctx = null) {
   const clearingBooking = before?.bank_move_id && (!after.bank_move_id || after.open_amount == null || (after.allocations ?? []).length < (before.allocations ?? []).length);
-  if (before && after.state === 'to_check' && !after.move_id && (before.state === 'reconciled' || clearingBooking)) return unreconcileError(db, before, after);
+  if (before && after.state === 'to_check' && !after.move_id && (before.state === 'reconciled' || clearingBooking)) return unreconcileError(db, before, after, ctx);
 
   if (before?.statement_id) {
     const prevStmt = read(db, 'account.bank.statement', before.statement_id);
@@ -1023,13 +1023,13 @@ function statementJournalType(db, r) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
-    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
-    protectDelete: (db, l) => {
+    guard: (db, before, after, ctx) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after, ctx) ?? lineGuard(db, before, after, ctx),
+    protectDelete: (db, l, staged, ctx) => {
       if (l.statement_id) {
         const stmt = read(db, 'account.bank.statement', l.statement_id);
         if (stmt?.state === 'closed') return 'Cannot remove lines from a closed statement';
       }
-      return datedLockDelete((rec) => rec.state === 'reconciled' || Boolean(rec.bank_move_id) || Boolean(rec.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null);
+      return datedLockDelete((r) => r.state === 'reconciled' || Boolean(r.bank_move_id) || Boolean(r.move_id))(db, l, staged, ctx) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null);
     },
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).

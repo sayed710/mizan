@@ -232,16 +232,16 @@ function partialReconcileStructureError(db, rec) {
 }
 
 /** Server-side guard enforcing creation integrity, immutability, reversal transitions, and lock dates on partial links. */
-function partialReconcileGuard(db, before, after) {
+function partialReconcileGuard(db, before, after, ctx = null) {
   const err = partialReconcileStructureError(db, after);
   if (err) return err;
   const debitMove = read(db, 'account.move', after.debit_move_id);
   const creditMove = read(db, 'account.move', after.credit_move_id);
   const fxMove = after.exchange_move_id ? read(db, 'account.move', after.exchange_move_id) : null;
   const lockOn = (date) => [
-    recordLockDate(db, { ...debitMove, date, invoice_date: date }),
-    recordLockDate(db, { ...creditMove, date, invoice_date: date }),
-    fxMove ? recordLockDate(db, { ...fxMove, date, invoice_date: date }) : null,
+    recordLockDate(db, { ...debitMove, date, invoice_date: date }, ctx),
+    recordLockDate(db, { ...creditMove, date, invoice_date: date }, ctx),
+    fxMove ? recordLockDate(db, { ...fxMove, date, invoice_date: date }, ctx) : null,
   ].filter(Boolean).sort().at(-1);
 
   if (!before) {
