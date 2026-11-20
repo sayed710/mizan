@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
-import { create, postNote, read, search, unlink, write } from '../orm.js';
+import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
+import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, isInvoice, isPurchase, isRefund, liquidityForeignFields, payMove, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -13,7 +13,8 @@ import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
 import { reconcileLedgerItems } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
-import { companyFilter, recipientBankCompanyError } from './company.js';
+import { companyFilter, currentCompany, recipientBankCompanyError } from './company.js';
+import { defaultPaymentMethodLineId, isMethodLineJournal, paymentMethodLineError } from './paymentmethod.js';
 import { openActivitiesText } from './mail.js';
 import { hasMultiCurrency } from './money.js';
 
@@ -369,16 +370,27 @@ export function postPayment(db, p) {
     const name = explicitName ?? paymentName(recDb, sourceJournal, date, read(recDb, 'account.move', sourceMoveId).name);
     const destName = paymentName(recDb, destJournal, date, read(recDb, 'account.move', destMoveId).name);
 
+    const existingPaired = p.paired_internal_transfer_payment_id ? read(recDb, 'account.payment', p.paired_internal_transfer_payment_id) : null;
+    const existingDestLine = existingPaired?.payment_method_line_id ? read(recDb, 'account.payment.method.line', existingPaired.payment_method_line_id) : null;
+    const destMethodLineId = (existingDestLine && existingDestLine.journal_id === destJournal.id && existingDestLine.payment_type === 'inbound')
+      ? existingDestLine.id
+      : defaultPaymentMethodLineId(recDb, destJournal.id, 'inbound');
+
     const destVals = {
       name: destName, payment_type: 'inbound', partner_type: null, partner_id: null, is_internal_transfer: true,
       journal_id: destJournal.id, destination_journal_id: sourceJournal.id, amount: p.amount, currency_id: p.currency_id ?? null,
       date, memo: p.memo || null, state: 'posted', move_id: destMoveId, destination_move_id: sourceMoveId,
       outstanding_account_id: destOutstanding, unapplied: 0, company_id: companyId, paired_internal_transfer_payment_id: p.id,
+      payment_method_line_id: destMethodLineId,
     };
-    const existingPaired = p.paired_internal_transfer_payment_id ? read(recDb, 'account.payment', p.paired_internal_transfer_payment_id) : null;
     const created = existingPaired?.state === 'draft' ? null : create(recDb, 'account.payment', destVals);
     const destPaymentId = created ? created.id : existingPaired.id;
     const withDestPayment = created ? created.db : write(recDb, 'account.payment', destPaymentId, destVals);
+
+    const currentMethodLine = p.payment_method_line_id ? read(withDestPayment, 'account.payment.method.line', p.payment_method_line_id) : null;
+    const sourceMethodLineId = (currentMethodLine && currentMethodLine.journal_id === sourceJournal.id && currentMethodLine.payment_type === 'outbound')
+      ? currentMethodLine.id
+      : defaultPaymentMethodLineId(withDestPayment, sourceJournal.id, 'outbound');
 
     return write(withDestPayment, 'account.payment', p.id, {
       name,
@@ -392,6 +404,7 @@ export function postPayment(db, p) {
       outstanding_account_id: sourceOutstanding,
       unapplied: 0,
       paired_internal_transfer_payment_id: destPaymentId,
+      payment_method_line_id: sourceMethodLineId,
     });
   }
 
@@ -415,15 +428,22 @@ export function postPayment(db, p) {
     }
     if (invoice && invoiceAfterPayment(invoice, date)) throw new Error(`The payment date cannot be before the invoice date of ${invoice.name}`);
   }
+  const resolvedJournal = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
+  const resolvedJournalRec = read(db, 'account.journal', resolvedJournal.id);
+  if (isMethodLineJournal(resolvedJournalRec)) {
+    if (!currentPayment.payment_method_line_id) throw new Error('Payment Method is required');
+    const lineErr = paymentMethodLineError(db, { ...currentPayment, journal_id: resolvedJournal.id });
+    if (lineErr) throw new Error(lineErr);
+  }
   if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
-  const via = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
-  const journalRecord = read(db, 'account.journal', via.id);
+  const via = resolvedJournal;
+  const journalRecord = resolvedJournalRec;
   const explicitName = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : null;
   const preName = explicitName ?? paymentName(db, journalRecord, date);
   const isTaxOrDirect = currentPayment.is_tax_payment || currentPayment.return_id || currentPayment.destination_account_id || currentPayment.destination_account_code;
   const inbound = currentPayment.payment_type === 'inbound';
   const journal = read(db, 'account.journal', via.id);
-  const outstanding = outstandingAccount(db, journal, currentPayment.company_id ?? 1, inbound);
+  const outstanding = outstandingAccount(db, journal, currentPayment.company_id ?? 1, inbound, currentPayment.payment_method_line_id);
   const liquidity = outstanding ?? via.accountId;
   let taxClosing = null;
   if (currentPayment.return_id || currentPayment.is_tax_payment) {
@@ -1363,6 +1383,21 @@ const validCheckWrite = (db, before, after) => {
     && after.check_number === nextCheckNumber(restored, before.journal_id);
 };
 
+const paymentMethodGuard = (db, before, after) => {
+  const err = paymentMethodLineError(db, after);
+  if (err) return err;
+  if (after.state === 'posted') {
+    const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
+    const needsMethodLine = Boolean(journal && isMethodLineJournal(journal));
+    const transitioningToPosted = !before || before.state !== 'posted';
+    const clearedMethodLine = before?.payment_method_line_id != null && !after.payment_method_line_id;
+    if (needsMethodLine && !after.payment_method_line_id && (transitioningToPosted || clearedMethodLine)) {
+      return 'Payment Method is required';
+    }
+  }
+  return null;
+};
+
 function internalTransferInvariant(db, after) {
   if (after.state !== 'posted') return null;
   if (!Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) {
@@ -1419,12 +1454,15 @@ export const payModels = {
           return 'Accounting-defining fields of a posted transfer cannot be modified';
         }
       }
-      return datedLockGuard([
+      const lockErr = datedLockGuard([
         'name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id',
-        'partner_type', 'journal_id', 'move_id', 'destination_move_id', 'destination_journal_id',
+        'partner_type', 'journal_id', 'payment_method_line_id', 'move_id', 'destination_move_id', 'destination_journal_id',
         'is_internal_transfer', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active',
         'paired_internal_transfer_payment_id',
       ], (p) => p.state === 'posted')(db, before, after, ctx);
+      if (lockErr) return lockErr;
+
+      return paymentMethodGuard(db, before, after);
     },
     protectDelete: (db, payment, staged, ctx) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged, ctx),
     invariant: (db, after, before, stored) => (
@@ -1455,6 +1493,13 @@ export const payModels = {
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', tracking: true, readonly: (r) => Boolean(r?.invoice_id) },
       activities: { type: 'char', label: 'Activities', compute: (r, db) => openActivitiesText(db, 'account.payment', r.id) },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal', tracking: true },
+      payment_method_line_id: {
+        type: 'many2one',
+        relation: 'account.payment.method.line',
+        label: 'Payment Method',
+        domain: (line, r) => Boolean(r?.journal_id) && line.journal_id === r.journal_id && line.payment_type === r.payment_type,
+        hideWhen: (r, db) => Boolean(r?.journal_id) && db && !isMethodLineJournal(read(db, 'account.journal', r.journal_id)),
+      },
       check_number: { type: 'integer', label: 'Check Number', readonly: true },
       voided_check_numbers: { type: 'one2many', label: 'Voided Checks', readonly: true, fields: { check_number: { type: 'integer', label: 'Check Number' }, date: { type: 'date', label: 'Date' } } },
       date: { type: 'date', label: 'Date', tracking: true },
@@ -1487,7 +1532,27 @@ export const payModels = {
       },
     },
     defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0, is_internal_transfer: false }),
-    onchange: (r, key, db) => (key === 'invoice_id' && r.invoice_id && db ? { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null } : {}),
+    createDefaults: (db, vals = {}) => {
+      const companyId = vals.company_id ?? getActiveCompany() ?? currentCompany(db);
+      const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
+      const paymentType = vals.payment_type ?? 'inbound';
+      const lineId = vals.payment_method_line_id === undefined && journalId
+        ? defaultPaymentMethodLineId(db, journalId, paymentType)
+        : undefined;
+      return {
+        ...(vals.journal_id === undefined && journalId ? { journal_id: journalId } : {}),
+        ...(lineId !== undefined ? { payment_method_line_id: lineId } : {}),
+      };
+    },
+    onchange: (r, key, db) => {
+      if (key === 'invoice_id' && r.invoice_id && db) {
+        return { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null };
+      }
+      if ((key === 'journal_id' || key === 'payment_type') && db) {
+        return { payment_method_line_id: defaultPaymentMethodLineId(db, r.journal_id, r.payment_type) };
+      }
+      return {};
+    },
     groupBys: PAYMENT_GROUP_BYS,
     groupByLabels: PAYMENT_GROUP_BY_LABELS,
     searchFields: PAYMENT_SEARCH_FIELDS,
@@ -1586,7 +1651,7 @@ export const payModels = {
           'memo',
         ],
         [
-          'journal_id',
+          { label: 'Journal', fields: ['journal_id', 'payment_method_line_id'] },
           ...(r?.is_internal_transfer ? ['destination_journal_id'] : [{ field: 'partner_bank_id', label: paymentBankLabel(r) }]),
         ],
         ...(r?.invoice_id || r?.state === 'draft' || Number(r?.unapplied) > 0
