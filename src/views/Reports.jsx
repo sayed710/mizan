@@ -200,7 +200,7 @@ function TaxBoxDetailRow({ db, returnOrPeriod, code, colSpan }) {
     return acc ? `${acc.code} ${acc.name}` : '—';
   };
   return (
-    <tr className="tax-drill">
+    <tr className="tax-drill no-export">
       <td colSpan={colSpan}>
         <table className="list report">
           <thead>

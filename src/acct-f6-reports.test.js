@@ -881,3 +881,25 @@ test('PR #189 review fixes: multi-company header, totals in merged ranges, HTML 
     }
   }
 });
+
+test('Qodo PR #189: an expanded tax box detail table does not leak rows or text into the CSV/XLSX grid', async () => {
+  const { extractTableGrid } = await import('./xlsx.js');
+  const el = (tag, cls, ...kids) => {
+    const node = { nodeType: 1, tagName: tag.toUpperCase(), className: cls ?? '', childNodes: [] };
+    for (const k of kids) node.childNodes.push(typeof k === 'string' ? { nodeType: 3, nodeValue: k } : k);
+    return node;
+  };
+  const detail = el('table', 'list report',
+    el('tbody', null, el('tr', null, el('td', null, '2026-01-05'), el('td', null, 'INV/1'), el('td', 'num', '15.00'))));
+  const table = el('table', 'list report',
+    el('thead', null, el('tr', null, el('th', null, 'Box'), el('th', null, 'Amount'))),
+    el('tbody', null,
+      el('tr', null, el('td', null, '01'), el('td', 'num', '100.00')),
+      el('tr', 'tax-drill no-export', el('td', null, detail)),
+      el('tr', 'detail-without-marker', el('td', null, 'Note ', detail)),
+      el('tr', null, el('td', null, '02'), el('td', 'num', '40.00'))));
+  const expected = [['Box', 'Amount'], ['01', '100.00'], ['Note'], ['02', '40.00']];
+  assert.deepEqual(tableToRows(table), expected);
+  const grid = extractTableGrid(table);
+  assert.deepEqual(grid.rows, expected.map((r) => [...r, '', ''].slice(0, 2)));
+});

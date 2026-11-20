@@ -92,7 +92,8 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
 export function extractTableCellText(cellNode) {
   let txt = '';
   const isIgnored = (node) => node?.nodeType === 1 && (
-    node.className === 'caret'
+    node.tagName?.toUpperCase() === 'TABLE'
+    || node.className === 'caret'
     || (typeof node.className === 'string' && node.className.split(' ').includes('no-export'))
     || (node.tagName?.toUpperCase() === 'BUTTON' && (node.textContent === '▾' || node.textContent === '▸')));
   const walk = (c) => {
@@ -105,32 +106,31 @@ export function extractTableCellText(cellNode) {
   return txt.trim();
 }
 
+const isNoExport = (node) => typeof node?.className === 'string' && node.className.split(' ').includes('no-export');
+
+/** The rows that belong to `table` itself: nested tables (e.g. expanded detail panels) and no-export rows are left out. */
+export function tableRows(table) {
+  const rows = [];
+  const walk = (node) => {
+    for (const child of node?.childNodes ?? node?.children ?? []) {
+      const tag = child.tagName?.toUpperCase();
+      if (tag === 'TR') { if (!isNoExport(child)) rows.push(child); }
+      else if (tag !== 'TABLE') walk(child);
+    }
+  };
+  walk(table);
+  return rows;
+}
+
+/** The TH/TD cells of a row, in order. */
+export function rowCells(tr) {
+  return Array.from(tr?.childNodes ?? tr?.children ?? []).filter((c) => ['TH', 'TD'].includes(c.tagName?.toUpperCase()));
+}
+
 /** Extracts 2D array of string cells from a table element or tree. */
 export function tableToRows(table) {
   if (!table) return [];
-  const rows = [];
-  const collect = (node) => {
-    if (!node) return;
-    const tag = node.tagName?.toUpperCase();
-    if (tag === 'TR') {
-      const cells = [];
-      const findCells = (trChild) => {
-        if (!trChild) return;
-        const ctag = trChild.tagName?.toUpperCase();
-        if (ctag === 'TH' || ctag === 'TD') {
-          cells.push(extractTableCellText(trChild));
-          return;
-        }
-        for (const child of trChild.childNodes ?? []) findCells(child);
-      };
-      for (const child of node.childNodes ?? []) findCells(child);
-      if (cells.length > 0) rows.push(cells);
-      return;
-    }
-    for (const child of node.childNodes ?? []) collect(child);
-  };
-  collect(table);
-  return rows;
+  return tableRows(table).map((tr) => rowCells(tr).map(extractTableCellText)).filter((cells) => cells.length > 0);
 }
 
 /** Downloads text content as a file via a dynamic link in browser, returns the text. */

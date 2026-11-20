@@ -1,5 +1,5 @@
 // Zero-dependency OpenXML Spreadsheet (XLSX) writer and store-only ZIP generator.
-import { downloadBlob, extractTableCellText, fromCsv, tableToRows } from './csv.js';
+import { downloadBlob, extractTableCellText, fromCsv, rowCells, tableRows, tableToRows } from './csv.js';
 import { parseAmount } from './models/common.js';
 
 const CRC_TABLE = (() => {
@@ -344,25 +344,10 @@ export function extractTableGrid(table) {
     if (c + 1 > maxCols) maxCols = c + 1;
   };
 
-  const findTrs = (root) => {
-    const list = Array.from(root.querySelectorAll?.('tr') ?? []);
-    if (list.length) return list;
-    const res = [];
-    const walk = (n) => {
-      for (const child of n.childNodes ?? n.children ?? []) {
-        if (child.tagName?.toUpperCase() === 'TR') res.push(child);
-        else walk(child);
-      }
-    };
-    walk(root);
-    return res;
-  };
-
-  const trs = findTrs(table);
+  const trs = tableRows(table);
   for (let rIdx = 0; rIdx < trs.length; rIdx += 1) {
     const tr = trs[rIdx];
-    const cellList = (tr.children && tr.children.length > 0 ? Array.from(tr.children) : (tr.childNodes ?? []));
-    const cells = cellList.filter((c) => ['TH', 'TD'].includes(c.tagName?.toUpperCase()));
+    const cells = rowCells(tr);
     const isHeaderRow = (tr.parentElement ?? tr.parentNode)?.tagName?.toUpperCase() === 'THEAD'
       || (cells.length > 0 && cells.every((c) => c.tagName?.toUpperCase() === 'TH'));
     if (isHeaderRow) headerRowCount = Math.max(headerRowCount, rIdx + 1);
