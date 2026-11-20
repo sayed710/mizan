@@ -22,6 +22,7 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
+import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1672,6 +1673,34 @@ MIGRATIONS.push({ version: 59, name: 'horizontal-group-rules-to-relational-ids',
     return normalized;
   });
   return changed ? { ...db, records: { ...db.records, 'account.report.horizontal.group': next } } : db;
+} });
+
+// Tax repartition rows now store explicit boolean `use_in_tax_closing`: true for tax rows unless the linked account
+// is an income or expense account, and false for base rows.
+MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (db) => {
+  const taxes = db?.records?.['account.tax'];
+  if (!Array.isArray(taxes)) return db;
+  let changed = false;
+  const fixLines = (lines) => {
+    if (!Array.isArray(lines)) return lines;
+    let sideChanged = false;
+    const next = lines.map((l) => {
+      const updated = withRepartitionUseInTaxClosing(db, l);
+      if (updated !== l) sideChanged = true;
+      return updated;
+    });
+    if (sideChanged) changed = true;
+    return sideChanged ? next : lines;
+  };
+  const next = taxes.map((tax) => {
+    if (!tax) return tax;
+    const inv = fixLines(tax.invoice_repartition_line_ids);
+    const ref = fixLines(tax.refund_repartition_line_ids);
+    return (inv !== tax.invoice_repartition_line_ids || ref !== tax.refund_repartition_line_ids)
+      ? { ...tax, invoice_repartition_line_ids: inv, refund_repartition_line_ids: ref }
+      : tax;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.tax': next } } : db;
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

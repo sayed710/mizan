@@ -4,7 +4,7 @@ import { round } from '../money.js';
 import { addDays, today } from './common.js';
 import { postPayment } from './pay.js';
 import { postEntry, resolveDocumentJournal } from './ledger.js';
-import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, taxUnitPaymentEntryError, taxUnitSettlementSpec, validateTaxReturnPeriod } from './finance.js';
+import { closableTaxPayable, moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, taxUnitPaymentEntryError, taxUnitSettlementSpec, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 
@@ -294,10 +294,10 @@ export function reviewReturn(db, returnId) {
     throw new Error(`Cannot review a tax return in state ${ret.state}`);
   }
 
-  const rep = validateTaxReturnPeriod(db, ret);
+  validateTaxReturnPeriod(db, ret);
   return write(db, 'account.return', ret.id, {
     state: 'reviewed',
-    total_amount_to_pay: rep.payable,
+    total_amount_to_pay: closableTaxPayable(db, ret),
   });
 }
 
@@ -412,25 +412,27 @@ export function payReturn(db, returnId) {
     const specs = returnCompanies(db, ret).map((companyId) => ({ companyId, spec: taxClosingSpec(db, ret, companyId) }));
 
     for (const { companyId, spec } of specs) {
-      if (!spec.payable) continue;
-      const inbound = spec.payable < 0;
-      const targetAccount = inbound ? spec.receivableAccount : spec.payableAccount;
-      const created = create(nextDb, 'account.payment', {
-        partner_id: spec.partner,
-        partner_type: 'supplier',
-        payment_type: inbound ? 'inbound' : 'outbound',
-        amount: Math.abs(spec.payable),
-        date: today(),
-        memo: inbound ? `Tax Return Refund: ${ret.name}` : `Tax Return Payment: ${ret.name}`,
-        company_id: companyId,
-        state: 'draft',
-        destination_account_id: targetAccount.id,
-        destination_account_code: targetAccount.code,
-        is_tax_payment: true,
-        return_id: ret.id,
-      });
-      paymentIds.push(created.id);
-      nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
+      for (const obligation of spec.obligations ?? []) {
+        if (!obligation.amount) continue;
+        const inbound = obligation.amount < 0;
+        const targetAccount = obligation.account;
+        const created = create(nextDb, 'account.payment', {
+          partner_id: obligation.partner_id,
+          partner_type: 'supplier',
+          payment_type: inbound ? 'inbound' : 'outbound',
+          amount: Math.abs(obligation.amount),
+          date: today(),
+          memo: inbound ? `Tax Return Refund: ${ret.name}` : `Tax Return Payment: ${ret.name}`,
+          company_id: companyId,
+          state: 'draft',
+          destination_account_id: targetAccount.id,
+          destination_account_code: targetAccount.code,
+          is_tax_payment: true,
+          return_id: ret.id,
+        });
+        paymentIds.push(created.id);
+        nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
+      }
     }
   }
 
@@ -529,14 +531,24 @@ function taxPaymentsMatchReturn(db, after) {
   let required = 0;
   for (const companyId of returnCompanies(staged, after)) {
     const spec = taxClosingSpec(staged, after, companyId);
-    if (!spec.payable) continue;
-    required += 1;
-    const payment = payments.find((p) => (p.company_id ?? 1) === companyId);
     const closing = (after.closing_move_ids ?? []).map((id) => read(db, 'account.move', id)).find((m) => (m?.company_id ?? 1) === companyId);
-    if (!payment || !closing || payment.payment_type !== (spec.payable < 0 ? 'inbound' : 'outbound')
-      || round(Number(payment.amount) || 0) !== Math.abs(spec.payable)
-      || !(closing.payments ?? []).some((p) => !p.reversed && p.move_id === payment.move_id && round(Number(p.amount) || 0) === Math.abs(spec.payable))) {
-      return false;
+    for (const obligation of spec.obligations ?? []) {
+      if (!obligation.amount) continue;
+      required += 1;
+      const payment = payments.find((p) => (p.company_id ?? 1) === companyId
+        && p.destination_account_id === obligation.account_id
+        && p.partner_id === obligation.partner_id);
+      if (!payment || !closing || payment.payment_type !== (obligation.amount < 0 ? 'inbound' : 'outbound')
+        || round(Number(payment.amount) || 0) !== Math.abs(obligation.amount)
+        || !(closing.payments ?? []).some((p) => (
+          !p.reversed
+          && p.move_id === payment.move_id
+          && round(Number(p.amount) || 0) === Math.abs(obligation.amount)
+          && Number.isInteger(p.line_index)
+          && closing.line_ids?.[p.line_index]?.account_id === obligation.account_id
+        ))) {
+        return false;
+      }
     }
   }
   return ids.length === required;

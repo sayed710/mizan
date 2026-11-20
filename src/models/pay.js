@@ -432,16 +432,23 @@ export function postPayment(db, p) {
     let companies = [];
     try { if (ret) companies = returnCompanies(db, ret); } catch { companies = []; }
     if (!ret || ret.state !== 'submitted' || !companies.includes(payCompanyId)) throw new Error('A submitted tax return is required for settlement');
-    const expected = taxClosingSpec(db, ret, payCompanyId).payable;
-    if (!expected || inbound !== (expected < 0) || amountMismatch(currentPayment.amount, Math.abs(expected))) throw new Error('Payment must match the tax return obligation');
+    const obligations = taxClosingSpec(db, ret, payCompanyId).obligations ?? [];
+    const expectedObligation = obligations.find((o) => (
+      o.account_id === currentPayment.destination_account_id && o.partner_id === currentPayment.partner_id
+    ));
+    if (!expectedObligation || inbound !== (expectedObligation.amount < 0) || amountMismatch(currentPayment.amount, Math.abs(expectedObligation.amount))) {
+      throw new Error('Payment must match the tax return obligation');
+    }
     const matches = (ret.closing_move_ids ?? []).flatMap((id) => {
       const move = read(db, 'account.move', id);
       if (!move || move.state !== 'posted' || (move.company_id ?? 1) !== payCompanyId) return [];
       return (move.line_ids ?? []).map((line, index) => ({ move, line, index })).filter(({ line }) =>
         line.account_id === currentPayment.destination_account_id && line.partner_id === currentPayment.partner_id
-        && round((Number(line.credit) || 0) - (Number(line.debit) || 0)) === expected);
+        && round((Number(line.credit) || 0) - (Number(line.debit) || 0)) === expectedObligation.amount);
     });
-    if (matches.length !== 1 || (matches[0].move.payments ?? []).some((p) => !p.reversed)) throw new Error('An unsettled tax closing obligation is required');
+    if (matches.length !== 1 || (matches[0].move.payments ?? []).some((row) => !row.reversed && (row.line_index == null || row.line_index === matches[0].index))) {
+      throw new Error('An unsettled tax closing obligation is required');
+    }
     taxClosing = matches[0];
   }
   let counterpart;
@@ -488,7 +495,7 @@ export function postPayment(db, p) {
     unapplied: isTaxOrDirect ? 0 : amount,
   });
   const settled = taxClosing ? write(registered, 'account.move', taxClosing.move.id, {
-    amount_paid: amount, payment_date: date,
+    amount_paid: companyRound((Number(taxClosing.move.amount_paid) || 0) + amount), payment_date: date,
     payments: [...(taxClosing.move.payments ?? []), { date, amount, move_id: moveId, company_amount: amount, line_index: taxClosing.index }],
   }) : registered;
   return settled;

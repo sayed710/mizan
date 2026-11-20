@@ -5,13 +5,16 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { round } from './money.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { createCompany } from './models/company.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { journalItems, postEntry } from './models/ledger.js';
+import { postPayment } from './models/pay.js';
 import { taxSnapshot } from './models/taxes.js';
-import { taxClosingMatchesReturn, taxClosingSpec, taxReport } from './models/finance.js';
-import { reviewReturn, submitReturn } from './models/taxreturn.js';
+import { isClosableRepartitionLine, taxClosingMatchesReturn, taxClosingSpec, taxReport } from './models/finance.js';
+import { ensureReturnTypes, payReturn, reviewReturn, submitReturn } from './models/taxreturn.js';
 
 function accountBalanceUpTo(db, accountId, toDate, companyId = 1) {
   const items = journalItems(db, { to: toDate, company_id: companyId }).filter((l) => l.account_id === accountId);
@@ -794,4 +797,435 @@ test('TAX-8: closing entry balances and payable equals report.payable with round
   // Tax accounts completely cleared
   assert.equal(accountBalanceUpTo(synced, tax1OutAcc.id, '2027-01-31'), 0);
   assert.equal(accountBalanceUpTo(synced, tax2OutAcc.id, '2027-01-31'), 0);
+});
+
+test('TAX-8: paying a return with group-configured payable accounts settles every closing obligation', () => {
+  const env = setupBaseTaxClosingEnv(seed());
+  let { db } = env;
+
+  const p1 = create(db, 'account.account', { code: '251901', name: 'Group 1 Own Payable', account_type: 'liability_current', company_id: 1 });
+  db = p1.db;
+  const p2 = create(db, 'account.account', { code: '251902', name: 'Group 2 Own Payable', account_type: 'liability_current', company_id: 1 });
+  db = p2.db;
+  const tax1Acc = create(db, 'account.account', { code: '251903', name: 'Tax 1 Out Pay', account_type: 'liability_current', company_id: 1 });
+  db = tax1Acc.db;
+  const tax2Acc = create(db, 'account.account', { code: '251904', name: 'Tax 2 Out Pay', account_type: 'liability_current', company_id: 1 });
+  db = tax2Acc.db;
+
+  const g1 = create(db, 'account.tax.group', { name: 'Pay Group 1', company_id: 1, tax_payable_account_id: p1.id });
+  db = g1.db;
+  const g2 = create(db, 'account.tax.group', { name: 'Pay Group 2', company_id: 1, tax_payable_account_id: p2.id });
+  db = g2.db;
+
+  const t1Res = create(db, 'account.tax', {
+    name: 'Sale Tax P1', company_id: 1, type_tax_use: 'sale', amount: 10, amount_type: 'percent', tax_group_id: g1.id,
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: tax1Acc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: tax1Acc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+  });
+  db = t1Res.db;
+  const t1 = read(db, 'account.tax', t1Res.id);
+
+  // Case A: Single group with custom payable p1
+  const inv1 = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-05-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Sale A', qty: 1, price_unit: 100, ...taxSnapshot(t1) }],
+  });
+  db = postMove(inv1.db, inv1.id);
+
+  const retA = create(db, 'account.return', {
+    name: 'VAT May 2026 Pay', type_id: env.vatType.id, date_from: '2026-05-01', date_to: '2026-05-31', company_id: 1,
+  });
+  const revA = reviewReturn(retA.db, retA.id);
+  const subA = submitReturn(revA, retA.id);
+
+  // Guard: posting payment to the default return-type account instead of the group's p1 must throw
+  const wrongPay = create(subA, 'account.payment', {
+    partner_id: env.vatType.payment_partner_id,
+    partner_type: 'supplier',
+    payment_type: 'outbound',
+    amount: 10,
+    date: '2026-06-05',
+    company_id: 1,
+    state: 'draft',
+    destination_account_id: env.defPayableAccId,
+    is_tax_payment: true,
+    return_id: retA.id,
+  });
+  assert.throws(() => postPayment(wrongPay.db, read(wrongPay.db, 'account.payment', wrongPay.id)), /Payment must match the tax return obligation/i);
+
+  // Paying via payReturn succeeds, creates payment to p1, clears p1, and passes applyDiff
+  const paidA = payReturn(subA, retA.id);
+  const syncedPaidA = applyDiff(subA, diffDb(subA, paidA), { isAdmin: true });
+  const paidRecA = read(syncedPaidA, 'account.return', retA.id);
+  assert.equal(paidRecA.state, 'paid');
+  assert.equal(paidRecA.is_completed, true);
+  assert.equal(paidRecA.payment_ids.length, 1);
+  assert.equal(read(syncedPaidA, 'account.payment', paidRecA.payment_ids[0]).destination_account_id, p1.id);
+  assert.equal(accountBalanceUpTo(syncedPaidA, p1.id, '2099-12-31'), 0);
+  assert.equal(accountBalanceUpTo(syncedPaidA, env.defPayableAccId, '2099-12-31'), 0);
+
+  // Case B: Multiple groups (p1 and p2) in one return -> both obligations paid and settled
+  const t2Res = create(db, 'account.tax', {
+    name: 'Sale Tax P2', company_id: 1, type_tax_use: 'sale', amount: 20, amount_type: 'percent', tax_group_id: g2.id,
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: tax2Acc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: tax2Acc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+  });
+  let dbB = t2Res.db;
+  const t2 = read(dbB, 'account.tax', t2Res.id);
+
+  const invB1 = create(dbB, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-06-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Sale B1', qty: 1, price_unit: 100, ...taxSnapshot(t1) }],
+  });
+  dbB = postMove(invB1.db, invB1.id);
+  const invB2 = create(dbB, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-06-12', company_id: 1,
+    invoice_line_ids: [{ name: 'Sale B2', qty: 1, price_unit: 100, ...taxSnapshot(t2) }],
+  });
+  dbB = postMove(invB2.db, invB2.id);
+
+  const retB = create(dbB, 'account.return', {
+    name: 'VAT Jun 2026 Pay', type_id: env.vatType.id, date_from: '2026-06-01', date_to: '2026-06-30', company_id: 1,
+  });
+  const revB = reviewReturn(retB.db, retB.id);
+  const subB = submitReturn(revB, retB.id);
+  const paidB = payReturn(subB, retB.id);
+  const syncedPaidB = applyDiff(subB, diffDb(subB, paidB), { isAdmin: true });
+  const paidRecB = read(syncedPaidB, 'account.return', retB.id);
+  assert.equal(paidRecB.state, 'paid');
+  assert.equal(paidRecB.payment_ids.length, 2);
+  const destAccounts = paidRecB.payment_ids.map((pid) => read(syncedPaidB, 'account.payment', pid).destination_account_id).sort((a, b) => a - b);
+  assert.deepEqual(destAccounts, [p1.id, p2.id].sort((a, b) => a - b));
+  assert.equal(accountBalanceUpTo(syncedPaidB, p1.id, '2099-12-31'), 0);
+  assert.equal(accountBalanceUpTo(syncedPaidB, p2.id, '2099-12-31'), 0);
+});
+
+test('TAX-8: tax unit settlement clears member group-account obligations across two groups and balances intercompany entries', () => {
+  const env = setupBaseTaxClosingEnv(seed());
+  let db = write(env.db, 'res.company', 1, { country: 'Egypt' });
+  const branch = createCompanyWithDefaultInvoiceJournals(db, { name: 'Unit Member Co', country: 'Egypt' });
+  db = ensureReturnTypes(branch.db);
+  const memberId = branch.id;
+
+  const mainPartner = create(db, 'res.partner', { name: 'Main Co Contact' });
+  db = mainPartner.db;
+  const memberPartner = create(db, 'res.partner', { name: 'Member Co Contact' });
+  db = memberPartner.db;
+  db = write(db, 'res.company', 1, { partner_id: mainPartner.id });
+  db = write(db, 'res.company', memberId, { partner_id: memberPartner.id });
+
+  const memberType = search(db, 'account.return.type').find((t) => t.company_id === memberId && t.name === 'VAT Return');
+  const mDefPay = create(db, 'account.account', { code: '251910', name: 'Member Def Payable', account_type: 'liability_current', company_id: memberId });
+  db = mDefPay.db;
+  const mDefRec = create(db, 'account.account', { code: '131910', name: 'Member Def Receivable', account_type: 'asset_current', company_id: memberId });
+  db = mDefRec.db;
+  db = write(db, 'account.return.type', memberType.id, {
+    tax_payable_account_id: mDefPay.id,
+    tax_receivable_account_id: mDefRec.id,
+    payment_partner_id: env.vatType.payment_partner_id,
+  });
+
+  // Member IC accounts for Main Co partner and Main IC accounts for Member Co partner
+  const mainIcRec = create(db, 'account.account', { code: '121911', name: 'Main IC Receivable', account_type: 'asset_receivable', company_id: 1, reconcile: true });
+  db = mainIcRec.db;
+  const mainIcPay = create(db, 'account.account', { code: '211911', name: 'Main IC Payable', account_type: 'liability_payable', company_id: 1, reconcile: true });
+  db = mainIcPay.db;
+  db = write(db, 'res.partner', memberPartner.id, {
+    property_account_receivable_id: mainIcRec.id,
+    property_account_payable_id: mainIcPay.id,
+  });
+  const memIcRec = create(db, 'account.account', { code: '121912', name: 'Member IC Receivable', account_type: 'asset_receivable', company_id: memberId, reconcile: true });
+  db = memIcRec.db;
+  const memIcPay = create(db, 'account.account', { code: '211912', name: 'Member IC Payable', account_type: 'liability_payable', company_id: memberId, reconcile: true });
+  db = memIcPay.db;
+  db = write(db, 'res.partner', mainPartner.id, {
+    property_account_receivable_id: memIcRec.id,
+    property_account_payable_id: memIcPay.id,
+  });
+
+  const unit = create(db, 'account.tax.unit', {
+    name: 'Group Tax Unit',
+    country: 'Egypt',
+    company_ids: [1, memberId],
+    main_company_id: 1,
+    member_return_type_ids: [{ company_id: memberId, type_id: memberType.id }],
+  });
+  db = unit.db;
+
+  // Main company sale tax (50 due)
+  const mainTaxOut = create(db, 'account.account', { code: '251915', name: 'Main Tax Out', account_type: 'liability_current', company_id: 1 });
+  db = mainTaxOut.db;
+  const mainTaxRes = create(db, 'account.tax', {
+    name: 'Main Sale 10%', company_id: 1, type_tax_use: 'sale', amount: 10, amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: mainTaxOut.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: mainTaxOut.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+  });
+  db = mainTaxRes.db;
+  const mainInv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-07-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Main Sale', qty: 1, price_unit: 500, ...taxSnapshot(read(db, 'account.tax', mainTaxRes.id)) }],
+  });
+  db = postMove(mainInv.db, mainInv.id);
+
+  // Member company TWO groups on DIFFERENT custom accounts: mp1 (+15 payable), mr2 (-40 receivable) -> member net -25
+  const mp1 = create(db, 'account.account', { code: '251916', name: 'Member G1 Payable', account_type: 'liability_current', company_id: memberId });
+  db = mp1.db;
+  const mr2 = create(db, 'account.account', { code: '131917', name: 'Member G2 Receivable', account_type: 'asset_current', company_id: memberId });
+  db = mr2.db;
+  const mTaxOutAcc = create(db, 'account.account', { code: '251918', name: 'Member G1 Out', account_type: 'liability_current', company_id: memberId });
+  db = mTaxOutAcc.db;
+  const mTaxInAcc = create(db, 'account.account', { code: '131919', name: 'Member G2 In', account_type: 'asset_current', company_id: memberId });
+  db = mTaxInAcc.db;
+
+  const mg1 = create(db, 'account.tax.group', { name: 'Member Group 1', company_id: memberId, tax_payable_account_id: mp1.id });
+  db = mg1.db;
+  const mg2 = create(db, 'account.tax.group', { name: 'Member Group 2', company_id: memberId, tax_receivable_account_id: mr2.id });
+  db = mg2.db;
+
+  const mTax1Res = create(db, 'account.tax', {
+    name: 'Member Sale 15%', company_id: memberId, type_tax_use: 'sale', amount: 15, amount_type: 'percent', tax_group_id: mg1.id,
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: mTaxOutAcc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: mTaxOutAcc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+  });
+  db = mTax1Res.db;
+  const mTax2Res = create(db, 'account.tax', {
+    name: 'Member Purch 20%', company_id: memberId, type_tax_use: 'purchase', amount: 20, amount_type: 'percent', tax_group_id: mg2.id,
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: mTaxInAcc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: mTaxInAcc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+  });
+  db = mTax2Res.db;
+
+  const mInv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2026-07-12', company_id: memberId,
+    invoice_line_ids: [{ name: 'Member Sale', qty: 1, price_unit: 100, ...taxSnapshot(read(db, 'account.tax', mTax1Res.id)) }],
+  });
+  db = postMove(mInv.db, mInv.id);
+  const mBill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: env.partnerId, invoice_date: '2026-07-14', company_id: memberId,
+    invoice_line_ids: [{ name: 'Member Purch', qty: 1, price_unit: 200, ...taxSnapshot(read(db, 'account.tax', mTax2Res.id)) }],
+  });
+  db = postMove(mBill.db, mBill.id);
+
+  const ret = create(db, 'account.return', {
+    name: 'Unit VAT Jul 2026', type_id: env.vatType.id, tax_unit_id: unit.id,
+    date_from: '2026-07-01', date_to: '2026-07-31', company_id: 1,
+  });
+  const rev = reviewReturn(ret.db, ret.id);
+  assert.equal(read(rev, 'account.return', ret.id).total_amount_to_pay, 25);
+
+  const sub = submitReturn(rev, ret.id);
+  const paid = payReturn(sub, ret.id);
+  const synced = applyDiff(sub, diffDb(sub, paid), { isAdmin: true });
+  assert.equal(read(synced, 'account.return', ret.id).state, 'paid');
+
+  // Every tax and group account across both companies is cleared to 0
+  assert.equal(accountBalanceUpTo(synced, mp1.id, '2099-12-31', memberId), 0);
+  assert.equal(accountBalanceUpTo(synced, mr2.id, '2099-12-31', memberId), 0);
+  assert.equal(accountBalanceUpTo(synced, mDefPay.id, '2099-12-31', memberId), 0);
+  assert.equal(accountBalanceUpTo(synced, mDefRec.id, '2099-12-31', memberId), 0);
+  assert.equal(accountBalanceUpTo(synced, env.defPayableAccId, '2099-12-31', 1), 0);
+
+  // Intercompany entry in member cleared both mp1 (debit 15) and mr2 (credit 40) cleanly and balanced
+  const memberSettlementMove = (synced.records['account.move'] ?? []).find((m) => (
+    m.company_id === memberId && m.is_tax_payment && m.tax_return_id === ret.id && !(read(synced, 'account.return', ret.id).closing_move_ids ?? []).includes(m.id)
+  ));
+  assert.ok(memberSettlementMove, 'Member settlement move exists');
+  assert.equal(memberSettlementMove.line_ids.find((l) => l.account_id === mp1.id)?.debit, 15);
+  assert.equal(memberSettlementMove.line_ids.find((l) => l.account_id === mr2.id)?.credit, 40);
+  assert.equal(memberSettlementMove.line_ids.find((l) => l.account_id === memIcRec.id)?.debit, 25);
+});
+
+test('TAX-13: per-line exclusion works when included/excluded rows share an account and when invoice/refund flags differ', () => {
+  const env = setupBaseTaxClosingEnv(seed());
+  let { db } = env;
+
+  // Case A: Included and excluded row sharing the SAME account on a purchase tax
+  const sharedPurchAcc = create(db, 'account.account', { code: '131921', name: 'Shared Input VAT Acc', account_type: 'asset_current', company_id: 1 });
+  db = sharedPurchAcc.db;
+
+  const splitSharedTaxRes = create(db, 'account.tax', {
+    name: 'Shared Acc Split 20%', company_id: 1, type_tax_use: 'purchase', amount: 20, amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 50, account_id: sharedPurchAcc.id, tag_ids: [], use_in_tax_closing: true },
+      { repartition_type: 'tax', factor_percent: 50, account_id: sharedPurchAcc.id, tag_ids: [], use_in_tax_closing: false },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 50, account_id: sharedPurchAcc.id, tag_ids: [], use_in_tax_closing: true },
+      { repartition_type: 'tax', factor_percent: 50, account_id: sharedPurchAcc.id, tag_ids: [], use_in_tax_closing: false },
+    ],
+  });
+  db = splitSharedTaxRes.db;
+  const splitSharedTax = read(db, 'account.tax', splitSharedTaxRes.id);
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: env.partnerId, invoice_date: '2027-05-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Shared Split Purchase', qty: 1, price_unit: 100, ...taxSnapshot(splitSharedTax) }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  // Full tax report shows 20 input tax; reviewReturn stores -10 (closable portion only) before posting
+  const repA = taxReport(db, { from: '2027-05-01', to: '2027-05-31', company_id: 1 });
+  assert.equal(repA.input, 20);
+  const retA = create(db, 'account.return', {
+    name: 'VAT May 2027', type_id: env.vatType.id, date_from: '2027-05-01', date_to: '2027-05-31', company_id: 1,
+  });
+  const revA = reviewReturn(retA.db, retA.id);
+  const revRecA = read(revA, 'account.return', retA.id);
+  assert.equal(revRecA.total_amount_to_pay, -10, 'reviewReturn uses closable-payable calculation without posting');
+  assert.equal(revRecA.closing_move_ids.length, 0);
+
+  const subA = submitReturn(revA, retA.id);
+  const syncedA = applyDiff(revA, diffDb(revA, subA), { isAdmin: true });
+  const subRecA = read(syncedA, 'account.return', retA.id);
+  assert.equal(subRecA.total_amount_to_pay, -10);
+  assert.equal(taxClosingMatchesReturn(syncedA, subRecA), true);
+
+  // Only the eligible 10 is closed; the excluded 10 stays on sharedPurchAcc
+  const closeA = read(syncedA, 'account.move', subRecA.closing_move_ids[0]);
+  assert.equal(closeA.line_ids.find((l) => l.account_id === sharedPurchAcc.id)?.credit, 10);
+  assert.equal(accountBalanceUpTo(syncedA, sharedPurchAcc.id, '2027-05-31'), 10);
+
+  // Case B: Invoice (use_in_tax_closing: true) vs Refund (use_in_tax_closing: false) on the SAME account
+  const sharedSaleAcc = create(db, 'account.account', { code: '251922', name: 'Inv vs Ref Shared Sale Acc', account_type: 'liability_current', company_id: 1 });
+  db = sharedSaleAcc.db;
+
+  const invRefTaxRes = create(db, 'account.tax', {
+    name: 'Inv Closable / Ref Excluded 10%', company_id: 1, type_tax_use: 'sale', amount: 10, amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: sharedSaleAcc.id, tag_ids: [], use_in_tax_closing: true },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: sharedSaleAcc.id, tag_ids: [], use_in_tax_closing: false },
+    ],
+  });
+  db = invRefTaxRes.db;
+  const invRefTax = read(db, 'account.tax', invRefTaxRes.id);
+
+  const saleInv = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: env.partnerId, invoice_date: '2027-06-10', company_id: 1,
+    invoice_line_ids: [{ name: 'Sale Inv', qty: 1, price_unit: 100, ...taxSnapshot(invRefTax) }], // +10 credit (closable)
+  });
+  db = postMove(saleInv.db, saleInv.id);
+  const saleRef = create(db, 'account.move', {
+    move_type: 'out_refund', partner_id: env.partnerId, invoice_date: '2027-06-12', company_id: 1,
+    invoice_line_ids: [{ name: 'Sale Ref', qty: 1, price_unit: 40, ...taxSnapshot(invRefTax) }], // 4 debit (excluded)
+  });
+  db = postMove(saleRef.db, saleRef.id);
+
+  // Full report shows net 6 output, whereas closing only closes the 10 eligible invoice tax
+  assert.equal(taxReport(db, { from: '2027-06-01', to: '2027-06-30', company_id: 1 }).payable, 6);
+  const retB = create(db, 'account.return', {
+    name: 'VAT Jun 2027', type_id: env.vatType.id, date_from: '2027-06-01', date_to: '2027-06-30', company_id: 1,
+  });
+  const revB = reviewReturn(retB.db, retB.id);
+  assert.equal(read(revB, 'account.return', retB.id).total_amount_to_pay, 10);
+
+  const subB = submitReturn(revB, retB.id);
+  const syncedB = applyDiff(revB, diffDb(revB, subB), { isAdmin: true });
+  const subRecB = read(syncedB, 'account.return', retB.id);
+  assert.equal(subRecB.total_amount_to_pay, 10);
+  const closeB = read(syncedB, 'account.move', subRecB.closing_move_ids[0]);
+  assert.equal(closeB.line_ids.find((l) => l.account_id === sharedSaleAcc.id)?.debit, 10);
+  // Refund debit of +4 remains unclosed on sharedSaleAcc
+  assert.equal(accountBalanceUpTo(syncedB, sharedSaleAcc.id, '2027-06-30'), 4);
+});
+
+test('TAX-13: use_in_tax_closing stored defaults on create, migration v60, and strict stored-value read', () => {
+  let db = seed();
+
+  const expAcc = create(db, 'account.account', { code: '600931', name: 'Expense For Repartition', account_type: 'expense', company_id: 1 });
+  db = expAcc.db;
+  const incAcc = create(db, 'account.account', { code: '400931', name: 'Income For Repartition', account_type: 'income', company_id: 1 });
+  db = incAcc.db;
+  const taxLiabAcc = create(db, 'account.account', { code: '251931', name: 'Liability For Repartition', account_type: 'liability_current', company_id: 1 });
+  db = taxLiabAcc.db;
+
+  // Creating a tax sets stored `use_in_tax_closing` explicitly: true for liability/asset/null tax rows, false for income/expense tax rows and base rows
+  const createdTax = create(db, 'account.tax', {
+    name: 'Explicit Defaults Check',
+    company_id: 1,
+    type_tax_use: 'purchase',
+    amount: 20,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 50, account_id: taxLiabAcc.id, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 25, account_id: expAcc.id, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 25, account_id: incAcc.id, tag_ids: [] },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] },
+    ],
+  });
+  const savedTax = read(createdTax.db, 'account.tax', createdTax.id);
+  assert.strictEqual(savedTax.invoice_repartition_line_ids[0].use_in_tax_closing, false, 'base row stored false');
+  assert.strictEqual(savedTax.invoice_repartition_line_ids[1].use_in_tax_closing, true, 'liability tax row defaults true');
+  assert.strictEqual(savedTax.invoice_repartition_line_ids[2].use_in_tax_closing, false, 'expense tax row defaults false');
+  assert.strictEqual(savedTax.invoice_repartition_line_ids[3].use_in_tax_closing, false, 'income tax row defaults false');
+  assert.strictEqual(savedTax.refund_repartition_line_ids[0].use_in_tax_closing, false, 'refund base row stored false');
+  assert.strictEqual(savedTax.refund_repartition_line_ids[1].use_in_tax_closing, true, 'accountless tax row defaults true');
+
+  // isClosableRepartitionLine reads ONLY the stored boolean (never guesses from type_tax_use)
+  assert.strictEqual(isClosableRepartitionLine({ repartition_type: 'tax', use_in_tax_closing: true }), true);
+  assert.strictEqual(isClosableRepartitionLine({ repartition_type: 'tax', use_in_tax_closing: false }), false);
+  assert.strictEqual(isClosableRepartitionLine({ repartition_type: 'tax' }), false);
+
+  // Migration v60 backfills legacy repartition rows lacking `use_in_tax_closing`
+  const stripClosing = (lines) => (lines ?? []).map(({ use_in_tax_closing: _drop, ...rest }) => rest);
+  const legacyDb = {
+    ...createdTax.db,
+    schema_version: 59,
+    records: {
+      ...createdTax.db.records,
+      'account.tax': (createdTax.db.records['account.tax'] ?? []).map((t) => ({
+        ...t,
+        invoice_repartition_line_ids: stripClosing(t.invoice_repartition_line_ids),
+        refund_repartition_line_ids: stripClosing(t.refund_repartition_line_ids),
+      })),
+    },
+  };
+  assert.equal(SCHEMA_VERSION, 60);
+  const migrated = migrate(legacyDb);
+  assert.equal(migrated.schema_version, 60);
+  const migratedTax = read(migrated, 'account.tax', createdTax.id);
+  assert.strictEqual(migratedTax.invoice_repartition_line_ids[0].use_in_tax_closing, false);
+  assert.strictEqual(migratedTax.invoice_repartition_line_ids[1].use_in_tax_closing, true);
+  assert.strictEqual(migratedTax.invoice_repartition_line_ids[2].use_in_tax_closing, false);
+  assert.strictEqual(migratedTax.invoice_repartition_line_ids[3].use_in_tax_closing, false);
+  assert.strictEqual(migrate(migrated), migrated, 'migration v60 is idempotent');
 });
