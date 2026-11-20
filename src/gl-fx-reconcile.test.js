@@ -633,9 +633,9 @@ test('Case 9: Two different foreign currencies - both reconcileLedgerItems and a
 });
 
 // -----------------------------------------------------------------------------
-// Scope cut check: Company-currency item + foreign item keeps REFUSING
+// Mixed currency: Company-currency item + foreign item matches on company currency
 // -----------------------------------------------------------------------------
-test('Scope cut: Company currency item + foreign item keeps refusing with exact message', () => {
+test('Mixed currency: Company currency item + foreign item matches on company currency with proportional foreign residual', () => {
   const setup = setupCurrencies(seed());
   let db = setup.db;
   const eur = setup.eur;
@@ -663,10 +663,32 @@ test('Scope cut: Company currency item + foreign item keeps refusing with exact 
   });
   db = eurEntry.db;
 
-  assert.throws(
-    () => reconcileLedgerItems(db, [itemSelection(db, compEntry.id, ar), itemSelection(db, eurEntry.id, ar)], { date: '2026-03-05' }),
-    (err) => err.message === 'General-ledger reconciliation requires items in the company currency; reconcile foreign-currency documents from their payment or credit-note workflow',
-  );
+  const preMoves = (db.records['account.move'] ?? []).length;
+  const settled = reconcileLedgerItems(db, [itemSelection(db, compEntry.id, ar), itemSelection(db, eurEntry.id, ar)], { date: '2026-03-05' });
+
+  // No exchange difference move posted for mixed reconciliation
+  assert.equal((settled.records['account.move'] ?? []).length, preMoves);
+
+  const partials = (settled.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
+  assert.equal(partials.length, 1);
+  const [p] = partials;
+  assert.equal(p.amount, 100);
+  assert.equal(p.debit_amount_currency, null);
+  assert.equal(p.credit_amount_currency, 80);
+  assert.equal(p.exchange_move_id, null);
+
+  const dItem = reconciledJournalItems(settled, read(settled, 'account.move', compEntry.id)).find((l) => l.account_id === ar);
+  const cItem = reconciledJournalItems(settled, read(settled, 'account.move', eurEntry.id)).find((l) => l.account_id === ar);
+  assert.equal(dItem.amount_residual, 0);
+  assert.equal(dItem.amount_residual_currency, 0);
+  assert.equal(dItem.reconciled, true);
+  assert.equal(cItem.amount_residual, 0);
+  assert.equal(cItem.amount_residual_currency, 0);
+  assert.equal(cItem.reconciled, true);
+  assert.ok(dItem.matching_number);
+  assert.equal(dItem.matching_number, cItem.matching_number);
+
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, settled), { isAdmin: false }));
 });
 
 // -----------------------------------------------------------------------------
