@@ -1,10 +1,11 @@
 import { Fragment, useMemo, useState } from 'react';
 import { viewRecords } from '../companyView.js';
 import { read } from '../orm.js';
-import { useDb } from '../store.js';
+import { commit, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { checkRegisterRows, CHECK_REGISTER_STATES } from '../models/payments.js';
+import { paymentPaysByCheck, printCheck, voidCheck } from '../models/pay.js';
 
 export function Checks() {
   const db = useDb();
@@ -12,11 +13,33 @@ export function Checks() {
   const [status, setStatus] = useState('all');
   const [groupByDate, setGroupByDate] = useState(false);
 
-  const rows = checkRegisterRows(db, viewRecords(db, 'account.batch.payment'), viewRecords(db, 'account.payment'));
+  const payments = viewRecords(db, 'account.payment');
+  const batches = viewRecords(db, 'account.batch.payment');
+
+  const rows = useMemo(() => {
+    const existingRows = checkRegisterRows(db, batches, payments);
+    const toPrintRows = payments
+      .filter((p) => p.state === 'posted' && p.payment_type === 'outbound' && paymentPaysByCheck(db, p)
+        && (p.check_number == null || (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number)))
+      .map((p) => ({
+        key: `payment-${p.id}-to-print`,
+        checkNumber: '—',
+        date: p.date,
+        paymentId: p.id,
+        amount: p.amount,
+        state: 'To Print',
+      }));
+    return [...existingRows, ...toPrintRows];
+  }, [db, batches, payments]);
 
   const filtered = useMemo(() => {
     return rows.filter((row) => {
-      if (status !== 'all' && row.state !== status) return false;
+      if (status !== 'all') {
+        if (status === 'to_print' && row.state !== 'To Print') return false;
+        if (status === 'printed' && !['Posted', 'Issued'].includes(row.state)) return false;
+        if (status === 'voided' && row.state !== 'Voided') return false;
+        if (!['to_print', 'printed', 'voided'].includes(status) && row.state !== status) return false;
+      }
 
       if (search.trim()) {
         const q = search.trim().toLowerCase();
@@ -47,8 +70,40 @@ export function Checks() {
   const renderRow = (row) => {
     const payment = read(db, 'account.payment', row.paymentId);
     const invoice = read(db, 'account.move', row.invoiceId);
-    const canPrint = ['Posted', 'Issued'].includes(row.state);
+    const isToPrint = row.state === 'To Print';
+    const canPrint = ['Posted', 'Issued'].includes(row.state) || isToPrint;
+    const canVoid = ['Posted', 'Issued'].includes(row.state) && Boolean(row.paymentId);
     const printUrl = row.paymentId ? `#/print/account.payment/${row.paymentId}` : `#/print/account.batch.payment/${row.batchId}`;
+
+    const onPrintToPrint = () => {
+      const p = read(db, 'account.payment', row.paymentId);
+      if (p) {
+        const journal = p.journal_id ? read(db, 'account.journal', p.journal_id) : null;
+        if (journal?.check_manual_sequencing) {
+          window.location.hash = `#/open/account.payment/${row.paymentId}`;
+          return;
+        }
+        try {
+          const nextDb = printCheck(db, p);
+          commit(nextDb);
+          window.location.hash = `#/print/account.payment/${row.paymentId}`;
+        } catch (e) {
+          alert(t(e.message));
+        }
+      }
+    };
+
+    const onVoid = () => {
+      const p = read(db, 'account.payment', row.paymentId);
+      if (p) {
+        try {
+          commit(voidCheck(db, p));
+        } catch (e) {
+          alert(t(e.message));
+        }
+      }
+    };
+
     return (
       <tr key={row.key}>
         <td>{row.checkNumber}</td>
@@ -64,9 +119,17 @@ export function Checks() {
         <td>{money(row.amount)}</td>
         <td>{t(row.state)}</td>
         <td>
-          {canPrint && (
-            <a href={printUrl} className="btn sm" title={t('Print Check')}>{t('Print')}</a>
-          )}
+          <div className="btn-group sm" style={{ display: 'inline-flex', gap: '4px' }}>
+            {isToPrint && (
+              <button type="button" className="btn sm" onClick={onPrintToPrint} title={t('Print Check')}>{t('Print')}</button>
+            )}
+            {!isToPrint && canPrint && (
+              <a href={printUrl} className="btn sm" title={t('Print Check')}>{t('Print')}</a>
+            )}
+            {canVoid && (
+              <button type="button" className="btn sm danger" onClick={onVoid} title={t('Void Check')}>{t('Void')}</button>
+            )}
+          </div>
         </td>
       </tr>
     );
@@ -92,7 +155,10 @@ export function Checks() {
             aria-label={t('Status Filter')}
           >
             <option value="all">{t('All Statuses')}</option>
-            {CHECK_REGISTER_STATES.map((s) => (
+            <option value="to_print">{t('To Print')}</option>
+            <option value="printed">{t('Printed')}</option>
+            <option value="voided">{t('Voided')}</option>
+            {CHECK_REGISTER_STATES.filter((s) => !['Voided', 'Issued', 'Posted'].includes(s)).map((s) => (
               <option key={s} value={s}>{t(s)}</option>
             ))}
           </select>

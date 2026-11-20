@@ -5,7 +5,7 @@ import { seed } from './seed.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
 import { create, read, search, write } from './orm.js';
 import { models } from './registry.js';
-import { reprintCheck } from './models/pay.js';
+import { reprintCheck, printBatchChecks } from './models/pay.js';
 import { postBatch } from './models/payments.js';
 import { postMove, payMove } from './models/accounting.js';
 import { secureEntries } from './models/hash_chain.js';
@@ -31,6 +31,7 @@ test('1. Posted check numbers cannot be forged by supplying voided_check_numbers
     lines: [{ move_id: bill.id, amount: 150 }],
   });
   db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+  db = printBatchChecks(db, batch.id);
   const payId = read(db, 'account.batch.payment', batch.id).lines[0].payment_id;
   const pay = read(db, 'account.payment', payId);
   assert.equal(pay.check_number, 500);

@@ -5,7 +5,7 @@ import { discountAvailable, payMove, payWithDiscount } from './accounting.js';
 import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { isLiquidityJournal, paymentJournal } from './ledger.js';
-import { nextCheckNumber } from './pay.js';
+import { paymentPaysByCheck, printBatchChecks } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
 
@@ -125,6 +125,7 @@ export function postBatch(db, batch) {
       if (!payment || payment.state !== 'posted' || !payment.move_id || read(db, 'account.move', payment.move_id)?.state !== 'posted') throw new Error('Select an existing posted payment');
       if (payment.payment_type !== batch.batch_type || payment.partner_type !== (batch.batch_type === 'inbound' ? 'customer' : 'supplier')) throw new Error('Payment direction and partner type must match the batch');
       if (payment.journal_id !== batch.journal_id) throw new Error('Payment journal must match the batch journal');
+      if (batch.batch_type === 'outbound' && !paymentPaysByCheck(db, payment)) throw new Error('A check batch only holds check payments');
       if (isPaymentMatched(db, payment)) throw new Error('Payment is already matched');
       if ((db.records['account.batch.payment'] ?? []).some((other) => other.id !== batch.id && (other.lines ?? []).some((item) => !item.cancelled && item.payment_id === payment.id))) throw new Error('Payment is already in a batch');
       if (!(Number(line.amount) > 0) || roundCurrency(Number(line.amount) - Number(payment.amount), documentCurrency(db, payment)) !== 0) throw new Error('Batch amount must match the payment amount');
@@ -150,17 +151,18 @@ export function postBatch(db, batch) {
   const journal = read(db, 'account.journal', journalConfig.id);
   // A journal without its own currency accepts any currency; a fixed one only its own.
   if (journal.currency_id && currency.id !== journal.currency_id) throw new Error('Batch currency must match the journal currency');
-  const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
-  const unnumberedPaymentLines = batch.batch_type === 'outbound'
-    ? lines.filter((l) => l.payment_id && read(db, 'account.payment', l.payment_id)?.check_number == null)
-    : [];
-  const needsCheckCount = batch.batch_type === 'outbound' ? invoiceIds.length + unnumberedPaymentLines.length : 0;
-  if (batch.batch_type === 'outbound' && needsCheckCount > 0 && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
   if (!isLiquidityJournal(journal) || (batch.batch_type === 'outbound' && journal.type !== 'bank')) {
     throw new Error(batch.batch_type === 'outbound' ? 'Checks require a bank journal' : 'Inbound batches require a bank or cash journal');
   }
   if (journal.company_id != null && journal.company_id !== company) throw new Error('Batch journal and invoices must belong to the same company');
   paymentJournal(db, journal.id, company);
+  const checkMethod = search(db, 'account.payment.method').find((m) => m.code === 'check_printing' && m.payment_type === 'outbound');
+  const checkLine = (batch.batch_type === 'outbound' && checkMethod)
+    ? search(db, 'account.payment.method.line').find((l) => l.journal_id === journal.id && l.payment_method_id === checkMethod.id)
+    : null;
+  if (batch.batch_type === 'outbound' && !checkLine) {
+    throw new Error('The batch journal has no check payment method');
+  }
   for (const line of lines) {
     if (line.payment_id) {
       const payment = read(db, 'account.payment', line.payment_id);
@@ -174,34 +176,29 @@ export function postBatch(db, batch) {
       resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id, { companyId: company });
     }
   }
-  const start = batch.batch_type === 'outbound' && needsCheckCount > 0 ? nextCheckNumber(db, journal.id, requested) : requested;
-  if (batch.batch_type === 'outbound' && needsCheckCount > 0 && !Number.isSafeInteger(start + needsCheckCount)) throw new Error('Check number is too large');
 
   let next = db;
-  let issued = 0;
   const linked = lines.map((line) => {
     if (line.payment_id) {
       const payment = read(next, 'account.payment', line.payment_id);
-      let checkNumber = payment.check_number ?? null;
-      if (batch.batch_type === 'outbound' && checkNumber == null) {
-        checkNumber = start + issued++;
-        next = write(next, 'account.payment', payment.id, { check_number: checkNumber });
-      }
+      const checkNumber = payment?.check_number ?? null;
       return { ...line, check_number: checkNumber, cancelled: false };
     }
-    const checkNumber = batch.batch_type === 'outbound' ? start + issued++ : null;
     const invoice = read(next, 'account.move', line.move_id);
     const currency = documentCurrency(next, invoice);
     const discount = discountAvailable(next, invoice, batch.date);
     const eligible = discount > 0 && roundCurrency(invoice.amount_residual - Number(line.amount) - discount, currency) === 0;
-    const options = { journalId: journal.id, ...(checkNumber != null ? { checkNumber } : {}) };
+    const options = {
+      journalId: journal.id,
+      ...(checkLine ? { paymentMethodLineId: checkLine.id } : {}),
+    };
     next = eligible
       ? payWithDiscount(next, line.move_id, Number(line.amount), batch.date, options)
       : payMove(next, line.move_id, Number(line.amount), batch.date, options);
     const entryId = read(next, 'account.move', line.move_id).payments.findLast((payment) => !payment.discount).move_id;
-    return { ...line, check_number: checkNumber, payment_id: search(next, 'account.payment').find((p) => p.move_id === entryId).id, cancelled: false };
+    const createdPayment = search(next, 'account.payment').find((p) => p.move_id === entryId);
+    return { ...line, check_number: line.check_number ?? createdPayment?.check_number ?? null, payment_id: createdPayment?.id, cancelled: false };
   });
-  if (batch.batch_type === 'outbound' && issued) next = write(next, 'account.journal', journal.id, { check_next_number: start + issued });
   const prefix = batch.batch_type === 'inbound' ? 'BATCH-IN/' : 'BATCH-OUT/';
   const name = batch.name && batch.name !== 'New' ? batch.name : nextName(next, 'account.batch.payment', prefix);
   return write(next, 'account.batch.payment', batch.id, {
@@ -260,7 +257,6 @@ export const paymentModels = {
       name: { type: 'char', label: 'Reference', required: true },
       batch_type: { type: 'selection', label: 'Batch Type', required: true, options: [['inbound', 'Inbound'], ['outbound', 'Outbound']] },
       date: { type: 'date', label: 'Date' },
-      check_number_start: { type: 'integer', label: 'First Check Number' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', compute: (r, db) => batchCurrency(db, r).id },
       currency_warning: { type: 'char', label: 'Currency Status', readonly: true, compute: (r, db) => batchCurrency(db, r).error ?? '' },
@@ -296,7 +292,18 @@ export const paymentModels = {
         fields: {
           move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
           amount: { type: 'monetary', label: 'Amount' },
-          check_number: { type: 'integer', label: 'Check Number', readonly: true },
+          check_number: {
+            type: 'integer',
+            label: 'Check Number',
+            readonly: (record, db) => {
+              if (!db || !record) return true;
+              const journalId = record.parent_journal_id
+                ?? (record.payment_id ? read(db, 'account.payment', record.payment_id)?.journal_id : null)
+                ?? (record.batch_id ? read(db, 'account.batch.payment', record.batch_id)?.journal_id : null);
+              const journal = journalId ? read(db, 'account.journal', journalId) : null;
+              return !journal?.check_manual_sequencing;
+            },
+          },
           payment_id: { type: 'many2one', relation: 'account.payment', label: 'Payment' },
           cancelled: { type: 'boolean', label: 'Cancelled', readonly: true },
         },
@@ -326,11 +333,11 @@ export const paymentModels = {
       buttons: [
         { label: 'Add Open Invoices', when: (r) => r.state === 'draft', run: (db, r) => ({ db: fillOpenInvoices(db, r) }) },
         { label: 'Validate', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postBatch(db, r) }) },
-        { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
+        { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound', run: (db, r) => ({ db: printBatchChecks(db, r), go: '#/print/account.batch.payment/' + r.id }) },
         { label: 'Print Deposit Slip', when: (r) => r.state === 'posted' && r.batch_type === 'inbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],
       title: 'name',
-      groups: [['batch_type'], ['date', 'journal_id', 'check_number_start'], ['currency_id', 'amount_total', 'currency_warning']],
+      groups: [['batch_type'], ['date', 'journal_id'], ['currency_id', 'amount_total', 'currency_warning']],
       tabs: [{ label: 'Payment Lines', fields: ['lines'] }],
       chatter: true,
     },

@@ -37,7 +37,6 @@ test('Item 1: One bank statement line matches a batch payment (several outstandi
   const batch = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: journal.id,
-    check_number_start: 900,
     date: '2025-01-02',
     lines,
   });
@@ -125,7 +124,6 @@ test('Item 1b: Matching explicit payment_ids list clears outstanding items and u
   const batch = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: journal.id,
-    check_number_start: 950,
     date: '2025-01-02',
     lines,
   });
@@ -174,7 +172,6 @@ test('Item 1c: A single selected payment belonging to a batch matches only that 
   const batch = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: journal.id,
-    check_number_start: 910,
     date: '2025-01-02',
     lines,
   });
@@ -249,7 +246,6 @@ test('Item 1d: Statement line open amount mismatch with selected payments throws
   const batch = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: journal.id,
-    check_number_start: 920,
     date: '2025-01-02',
     lines: [{ move_id: m.id, amount: 100 }],
   });
@@ -293,7 +289,6 @@ test('Item 1e: Statement line rejects batch_payment_id from another company', ()
     company_id: c2.id,
     batch_type: 'outbound',
     journal_id: journal2.id,
-    check_number_start: 500,
     date: '2025-01-02',
     lines: [{ move_id: bill2.id, amount: 100 }],
   });

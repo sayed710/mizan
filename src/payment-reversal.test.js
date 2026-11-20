@@ -154,7 +154,7 @@ test('reversing an order prepayment clears the stored payment state without undo
 
 test('reversed outbound batch payments cancel their check lines while preserving posted history', () => {
   const bill = invoice(seed(), 100, { move_type: 'in_invoice', force_post: true });
-  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 100, lines: [{ move_id: bill.id, amount: 100 }] });
+  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', lines: [{ move_id: bill.id, amount: 100 }] });
   const paid = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
   const payment = search(paid, 'account.payment').find((p) => p.invoice_id === bill.id);
   const reversed = reverse(paid, payment.id);
@@ -168,7 +168,7 @@ test('reversed outbound batch payments cancel their check lines while preserving
 
 test('batch reversal uses payment_id, not matching amounts or invoice references', () => {
   const bill = invoice(seed(), 200, { move_type: 'in_invoice', force_post: true });
-  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 100, lines: [{ move_id: bill.id, amount: 100 }] });
+  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', lines: [{ move_id: bill.id, amount: 100 }] });
   const validate = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Validate');
   const posted = validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db;
   const batchPaymentId = read(posted, 'account.batch.payment', batch.id).lines[0].payment_id;
@@ -189,7 +189,7 @@ test('batch reversal uses payment_id, not matching amounts or invoice references
 
 test('a posted batch line missing payment_id fails closed before payment reversal', () => {
   const bill = invoice(seed(), 200, { move_type: 'in_invoice', force_post: true });
-  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 100, lines: [{ move_id: bill.id, amount: 100 }] });
+  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', lines: [{ move_id: bill.id, amount: 100 }] });
   const validate = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Validate');
   const posted = validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db;
   const paymentId = read(posted, 'account.batch.payment', batch.id).lines[0].payment_id;

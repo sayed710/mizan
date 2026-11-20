@@ -316,7 +316,7 @@ test('credit journal behaves as liquidity journal across payments, statements, b
   });
   db = postMove(bill.db, bill.id);
   const outBatch = create(db, 'account.batch.payment', {
-    batch_type: 'outbound', journal_id: creditJ.id, date: '2026-05-03', check_number_start: 1001,
+    batch_type: 'outbound', journal_id: creditJ.id, date: '2026-05-03',
     lines: [{ move_id: bill.id, amount: 50 }],
   });
   assert.throws(() => postBatch(outBatch.db, read(outBatch.db, 'account.batch.payment', outBatch.id)), /Checks require a bank journal/);
