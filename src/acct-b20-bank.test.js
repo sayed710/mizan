@@ -254,7 +254,7 @@ test('BANK-21: scheduled online bank sync job syncs due links, skips recent link
       }],
     },
   };
-  assert.throws(() => applyDiff(db, diffDb(db, badIntervalLink), { isAdmin: true }), /Sync interval must be a positive number/);
+  assert.throws(() => applyDiff(db, diffDb(db, badIntervalLink), { isAdmin: true }), /Sync interval must be a whole number of hours/);
 });
 
 function makeBankJournal(db, { name, code }) {
@@ -273,3 +273,39 @@ function makeBankJournal(db, { name, code }) {
     bank_statements_source: 'undefined',
   });
 }
+
+test('BANK-21: only connected links with Auto Sync switched on are scheduled, and an incomplete link does not stop the others', () => {
+  let db = seed();
+  const feed = (ref) => ({ [ref]: { '': { transactions: [{ unique_import_id: `TX-${ref}`, date: '2026-06-04', amount: 10, payment_ref: ref }], nextCursor: 'c', balance: 10 } } });
+  const journalFor = (code) => {
+    const j = makeBankJournal(db, { name: `Bank ${code}`, code });
+    db = j.db;
+    return j.id;
+  };
+  const link = (name, vals) => {
+    const res = create(db, LINK, { name, provider: 'demo', last_refresh: '2026-06-01T10:00:00Z', sync_interval: 24, ...vals });
+    db = res.db;
+    return res.id;
+  };
+  const before = link('Healthy Before', { state: 'connected', demo_transactions: feed('A1'), account_ids: [{ name: 'A1', account_number: 'A1', journal_id: journalFor('HB1') }] });
+  const incomplete = link('No Journal', { state: 'connected', account_ids: [{ name: 'A2', account_number: 'A2', journal_id: null }] });
+  const after = link('Healthy After', { state: 'connected', demo_transactions: feed('A3'), account_ids: [{ name: 'A3', account_number: 'A3', journal_id: journalFor('HB3') }] });
+  const neverSynced = link('Not Synchronized', { state: 'not_synchronized', last_refresh: null, demo_transactions: feed('A4'), account_ids: [{ name: 'A4', account_number: 'A4', journal_id: journalFor('HB4') }] });
+  const failed = link('In Error', { state: 'error', demo_transactions: feed('A5'), account_ids: [{ name: 'A5', account_number: 'A5', journal_id: journalFor('HB5') }] });
+  const legacy = link('Legacy Manual', { state: 'connected', demo_transactions: feed('A6'), account_ids: [{ name: 'A6', account_number: 'A6', journal_id: journalFor('HB6') }] });
+  db = { ...db, records: { ...db.records, [LINK]: db.records[LINK].map((l) => (l.id === legacy ? (({ auto_sync, ...rest }) => rest)(l) : l)) } };
+
+  const out = syncDueOnlineLinks(db, '2026-06-04T12:00:00Z');
+  const imported = (ref) => search(out, LINE).some((l) => l.unique_import_id === `TX-${ref}`);
+  assert.ok(imported('A1') && imported('A3'), 'links on both sides of the incomplete one still sync');
+  assert.equal(read(out, LINK, incomplete).state, 'error');
+  assert.equal(read(out, LINK, incomplete).error_message, 'Link an online account to a bank journal first');
+  assert.ok(!imported('A4') && !imported('A5') && !imported('A6'), 'unsynchronized, failed and legacy links without Auto Sync are not fetched');
+  assert.equal(read(out, LINK, before).state, 'connected');
+  assert.equal(read(out, LINK, after).state, 'connected');
+  assert.equal(read(out, LINK, failed).state, 'error');
+  assert.equal(read(out, LINK, neverSynced).state, 'not_synchronized');
+
+  const huge = { ...db, records: { ...db.records, [LINK]: db.records[LINK].map((l) => (l.id === before ? { ...l, sync_interval: 10_000_000_000 } : l)) } };
+  assert.throws(() => applyDiff(db, diffDb(db, huge), { isAdmin: true }), /whole number of hours from 1 to 8760/);
+});

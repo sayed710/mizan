@@ -5,6 +5,7 @@ import { importStatementLines } from './statements.js';
 import { isOnlineFeedJournal, journalCompany } from './ledger.js';
 
 const HOUR_MS = 3600 * 1000;
+const MAX_SYNC_INTERVAL_HOURS = 8760;
 
 const LINK_MODEL = 'account.online.link';
 const ACCOUNT_MODEL = 'account.online.account';
@@ -251,8 +252,8 @@ function linkGuard(db, before, after, _ctx, vals) {
     const linked = (db.records?.[ACCOUNT_MODEL] ?? []).some((a) => a.link_id === after.id && a.active !== false);
     if (linked) return 'Cannot change company while online accounts exist on this connection';
   }
-  if (after.sync_interval != null && after.sync_interval !== '' && (!Number.isFinite(Number(after.sync_interval)) || Number(after.sync_interval) <= 0)) {
-    return 'Sync interval must be a positive number';
+  if (after.sync_interval != null && after.sync_interval !== '' && !(Number.isInteger(Number(after.sync_interval)) && Number(after.sync_interval) >= 1 && Number(after.sync_interval) <= MAX_SYNC_INTERVAL_HOURS)) {
+    return 'Sync interval must be a whole number of hours from 1 to 8760';
   }
   return null;
 }
@@ -363,12 +364,10 @@ function runSyncForAccounts(db, link, accounts, { now = new Date().toISOString()
       });
     }
 
-    const nextRefresh = new Date(Date.parse(now) + (Number(link.sync_interval) || 24) * HOUR_MS).toISOString();
     stagedDb = write(stagedDb, LINK_MODEL, link.id, {
       state: 'connected',
       error_message: '',
       last_refresh: now,
-      next_refresh: nextRefresh,
     });
     return { db: stagedDb, count: totalCreated, error: null };
   } catch (error) {
@@ -442,7 +441,6 @@ export const onlineSyncModels = {
         ],
       },
       last_refresh: { type: 'datetime', label: 'Last Refresh', readonly: true },
-      next_refresh: { type: 'datetime', label: 'Next Refresh', readonly: true },
       auto_sync: { type: 'boolean', label: 'Auto Sync' },
       sync_interval: { type: 'integer', label: 'Sync Interval (hours)' },
       error_message: { type: 'text', label: 'Error Message', readonly: true },
@@ -474,7 +472,6 @@ export const onlineSyncModels = {
       provider: 'demo',
       state: 'not_synchronized',
       last_refresh: null,
-      next_refresh: null,
       auto_sync: true,
       sync_interval: 24,
       error_message: '',
@@ -503,7 +500,7 @@ export const onlineSyncModels = {
         { label: 'Disconnect', when: (r) => Boolean(r?.id) && r.state !== 'disconnected', vals: { state: 'disconnected' } },
         { label: 'Reconnect', when: (r) => Boolean(r?.id) && r.state === 'disconnected', run: (db, r) => ({ db: reconnectOnlineConnection(db, r.id) }) },
       ],
-      groups: [['name', 'provider'], ['auto_sync', 'sync_interval'], ['last_refresh', 'next_refresh', 'error_message']],
+      groups: [['name', 'provider'], ['auto_sync', 'sync_interval'], ['last_refresh', 'error_message']],
       tabs: [{ label: 'Online Accounts', fields: ['account_ids'] }],
       chatter: true,
     },
@@ -544,9 +541,9 @@ export const onlineSyncModels = {
   },
 };
 
-/** A connected, active link with Auto Sync is due once Sync Interval (hours) has passed since its last refresh. */
+/** A connected, active link with Auto Sync switched on is due once Sync Interval (hours) has passed since its last refresh. */
 export function isOnlineLinkDue(link, now) {
-  if (!link || link.active === false || link.state === 'disconnected' || link.auto_sync === false) return false;
+  if (!link || link.active === false || link.state !== 'connected' || link.auto_sync !== true) return false;
   if (!link.last_refresh) return true;
   return Date.parse(now) - Date.parse(link.last_refresh) >= (Number(link.sync_interval) || 24) * HOUR_MS;
 }
@@ -560,5 +557,12 @@ export function syncDueOnlineLinks(db, at) {
   const now = typeof at === 'string' && at.includes('T') ? at : new Date().toISOString();
   return (db.records?.[LINK_MODEL] ?? [])
     .filter((link) => isOnlineLinkDue(link, now))
-    .reduce((current, link) => syncOnlineConnection(current, link.id, { now }).db, db);
+    .reduce((current, link) => {
+      // A link the manual Fetch would refuse (no journal-linked account) records that as its error; the others still sync.
+      try {
+        return syncOnlineConnection(current, link.id, { now }).db;
+      } catch (error) {
+        return failConnection(current, link.id, error instanceof Error ? error.message : String(error)).db;
+      }
+    }, db);
 }
