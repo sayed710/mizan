@@ -3420,6 +3420,7 @@ const ar = {
   'Posted internal transfers cannot be modified': 'لا يمكن تعديل التحويلات الداخلية المرحلة',
   'A draft payment cannot be linked to a posted journal entry': 'لا يمكن ربط دفعة في حالة مسودة بقيد يومية مرحل',
   'Paired Internal Transfer Payment': 'الدفعة المقترنة للتحويل الداخلي',
+  'Reverse Entries': 'عكس القيود',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
