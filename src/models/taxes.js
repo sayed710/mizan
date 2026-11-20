@@ -896,32 +896,14 @@ export const taxModels = {
       if (after.country_group_id && !read(db, 'res.country.group', after.country_group_id)) {
         return 'Selected country group does not exist';
       }
-      if (after.company_id) {
-        const fpCompany = after.company_id;
-        for (const row of after.account_ids ?? []) {
-          if (row.account_src_id) {
-            const account = read(db, 'account.account', row.account_src_id);
-            if (!account || (account.company_id && account.company_id !== fpCompany)) {
-              return 'Fiscal position source account must belong to the fiscal position company';
-            }
-          }
-          if (row.account_dest_id) {
-            const account = read(db, 'account.account', row.account_dest_id);
-            if (!account || (account.company_id && account.company_id !== fpCompany)) {
-              return 'Fiscal position destination account must belong to the fiscal position company';
-            }
-          }
-        }
-      } else {
-        for (const row of after.account_ids ?? []) {
-          if (row.account_src_id && row.account_dest_id) {
-            const src = read(db, 'account.account', row.account_src_id);
-            const dest = read(db, 'account.account', row.account_dest_id);
-            if (src && dest && src.company_id && dest.company_id && src.company_id !== dest.company_id) {
-              return 'Both accounts of a fiscal position mapping line must belong to the same company';
-            }
-          }
-        }
+      // A mapping's source may be any account a line was entered with; the posted destination must be usable by this company.
+      // A position without a company is shared, so its destinations are checked when it is applied to a company.
+      if (!after.company_id) return null;
+      const fpCompany = after.company_id;
+      for (const row of after.account_ids ?? []) {
+        if (!row.account_dest_id) continue;
+        const account = read(db, 'account.account', row.account_dest_id);
+        if (!account || (account.company_id && account.company_id !== fpCompany)) return 'Fiscal position destination account must belong to the fiscal position company';
       }
       return null;
     },

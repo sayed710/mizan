@@ -3509,7 +3509,7 @@ export const accountingModels = {
       },
       auto_post_until: { type: 'date', label: 'Repeat Until', copy: false },
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
-      narration: { type: 'text', label: 'Terms and Conditions', tracking: true },
+      narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {

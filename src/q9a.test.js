@@ -129,9 +129,9 @@ test('Qodo 23: transfers track untracked edits for either audited company and at
     const synced = applyDiff(entry.db, diffDb(entry.db, local), { isAdmin: true });
     assert.equal(synced.messages.find((m) => m.id === note.id)?.company_id, to);
   }
-  const ordinary = create(branch.db, 'account.move', { move_type: 'entry', company_id: branch.id, ref: 'before' });
-  const changed = write(ordinary.db, 'account.move', ordinary.id, { ref: 'after' });
-  assert.ok(!changed.messages.slice(ordinary.db.messages.length).some((m) => m.res_id === ordinary.id && m.body.includes('Reference:')));
+  const ordinary = create(branch.db, 'account.move', { move_type: 'entry', company_id: branch.id, narration: 'before' });
+  const changed = write(ordinary.db, 'account.move', ordinary.id, { narration: 'after' });
+  assert.ok(!changed.messages.slice(ordinary.db.messages.length).some((m) => m.res_id === ordinary.id && m.body.includes('Terms and Conditions:')));
 });
 
 test('Qodo 22: syncing chatter checks audit protection without computing invoice fields', () => {
