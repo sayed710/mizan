@@ -222,6 +222,7 @@ const rawProductLines = (label, priceField, extraFields = {}) => ({
     refund_repartition_line_ids: { type: 'json', label: 'Distribution for Refunds', hidden: true, refs: REPARTITION_REFS },
     tax_name: { type: 'char', label: 'Tax Name', hidden: true },
     tax_invoice_label: { type: 'char', label: 'Tax Invoice Label', hidden: true },
+    tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group', hidden: true },
     analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
     ...extraFields,

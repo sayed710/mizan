@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, Fragment } from 'react';
 import { models } from '../models/index.js';
 import { read } from '../orm.js';
 import { useDb } from '../store.js';
@@ -7,11 +7,14 @@ import { display, formatDate } from '../ui.jsx';
 import { batchCurrency, checkAmountDisplay } from '../models/payments.js';
 import { paymentRemittanceLines } from '../models/pay.js';
 import { subtotal } from '../models/common.js';
+import { invoiceTaxTotals } from '../models/ledger.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
 import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
 import { taxInvoiceLabel } from '../models/taxes.js';
 import { documentCurrency, formatCurrency } from '../money.js';
 import { invoiceTermNote } from '../models/terms.js';
+import { SafeHtml } from '../HtmlEditor.jsx';
+import { ReportPrintView } from './ReportPrintView.jsx';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
 function PaymentQr({ db, company, settings, move }) {
@@ -42,7 +45,7 @@ const LAYOUTS = {
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
 };
 
-export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment' || model === 'account.payment';
+export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment' || model === 'account.payment' || model === 'audit.report';
 
 /** One cheque per batch line: payee, date, number, amount in figures and in words. */
 function Checks({ db, batch }) {
@@ -254,6 +257,20 @@ export function PrintDoc({ model, id }) {
     const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
     return <Checks db={db} batch={batch} />;
   }
+  if (rec && model === 'audit.report') {
+    const company = documentCompany(db, rec);
+    if (!company) return <main className="action"><p className="empty" role="alert">{t('Configure the document company before printing.')}</p></main>;
+    return (
+      <ReportPrintView
+        company={company}
+        title={rec.title}
+        subtitle={`${rec.start_date} → ${rec.end_date}`}
+        autoPrint={false}
+      >
+        <div className="annual-report-body"><SafeHtml html={rec.body} /></div>
+      </ReportPrintView>
+    );
+  }
   if (!rec || !layout) return <main className="action"><p className="empty">{t('Record not found.')}</p></main>;
 
   const company = documentCompany(db, rec);
@@ -318,9 +335,32 @@ export function PrintDoc({ model, id }) {
           </table>
         )}
         <dl className="totals paper-totals">
-          {layout.totals.map((f) => (
-            <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
-          ))}
+          {(() => {
+            const taxTotals = model === 'account.move' ? invoiceTaxTotals(db, rec) : null;
+            if (!taxTotals) {
+              return layout.totals.map((f) => (
+                <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
+              ));
+            }
+            const hasTaxGroups = taxTotals.subtotals.some((s) => s.groups.length > 0);
+            return (
+              <>
+                {taxTotals.subtotals.map((sub, si) => (
+                  <Fragment key={`sub-${si}`}>
+                    <div><dt>{t(sub.name)}</dt><dd>{display(db, { type: 'monetary' }, sub.amount, rec)}</dd></div>
+                    {sub.groups.map((g) => (
+                      <div key={`grp-${g.tax_group_id ?? 'none'}`}><dt>{g.tax_group_id ? g.name : t(g.name)}</dt><dd>{display(db, { type: 'monetary' }, g.amount, rec)}</dd></div>
+                    ))}
+                  </Fragment>
+                ))}
+                {!hasTaxGroups && <div><dt>{t(def.fields.amount_tax.label)}</dt><dd>{display(db, def.fields.amount_tax, rec.amount_tax, rec)}</dd></div>}
+                {taxTotals.rounding_amount !== 0 && <div><dt>{t('Cash Rounding')}</dt><dd>{display(db, { type: 'monetary' }, taxTotals.rounding_amount, rec)}</dd></div>}
+                {layout.totals.filter((f) => !['amount_untaxed', 'amount_tax'].includes(f)).map((f) => (
+                  <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
+                ))}
+              </>
+            );
+          })()}
         </dl>
         {model === 'account.move' && <PaymentQr db={db} company={company} settings={qrSettings} move={rec} />}
         {model === 'account.move' && invoiceTermNote(db, rec) && <p className="paper-note">{invoiceTermNote(db, rec)}</p>}

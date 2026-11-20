@@ -6,7 +6,7 @@ import { filterByAnalytic, journalItems } from '../models/ledger.js';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
-import { currentCompany } from '../models/company.js';
+import { currentCompany, documentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
 import { commit, companiesOf, getDb, isServer, listAuditAll, useDb } from '../store.js';
@@ -17,6 +17,8 @@ import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLed
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
+import { downloadXlsx } from '../xlsx.js';
+import { ReportPrintView } from './ReportPrintView.jsx';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
@@ -163,6 +165,7 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
       {returnRecord && (
         <div className="row" style={{ marginBottom: 8 }}>
           <button type="button" className="btn sm" onClick={() => downloadCsv(`${safeBase}.csv`, taxReturnToCsv(db, returnRecord))}>{t('Export CSV')}</button>
+          <button type="button" className="btn sm" onClick={() => downloadXlsx(`${safeBase}.xlsx`, taxReturnToCsv(db, returnRecord), { sheetName: safeBase, columnTypes: ['text', 'text', 'number', 'number'] })}>{t('Export XLSX')}</button>
           <button type="button" className="btn sm" onClick={() => downloadXml(`${safeBase}.xml`, taxReturnToXml(db, returnRecord))}>{t('Export XML')}</button>
         </div>
       )}
@@ -197,7 +200,7 @@ function TaxBoxDetailRow({ db, returnOrPeriod, code, colSpan }) {
     return acc ? `${acc.code} ${acc.name}` : '—';
   };
   return (
-    <tr className="tax-drill">
+    <tr className="tax-drill no-export">
       <td colSpan={colSpan}>
         <table className="list report">
           <thead>
@@ -758,6 +761,7 @@ function ReportPage({ leaf }) {
   const isAudit = leaf.report === 'audit';
   const [serverAuditLog, setServerAuditLog] = useState(undefined);
   const [auditPage, setAuditPage] = useState({ key: '', offset: 0 });
+  const [isPrinting, setIsPrinting] = useState(false);
   const auditScopeKey = JSON.stringify(sourceDb.settings?.allowed_company_ids ?? [sourceDb.settings?.current_company_id ?? 1]);
   useEffect(() => {
     let active = true;
@@ -781,109 +785,139 @@ function ReportPage({ leaf }) {
     }
     downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
   };
+  const exportXlsx = () => {
+    if (isAudit) {
+      downloadXlsx('audit.xlsx', auditTrailToCsv(auditAllRows), { sheetName: 'Audit Trail', columnTypes: Array(8).fill('text') });
+      return;
+    }
+    const name = leaf.report || 'report';
+    const sheetName = title || name;
+    downloadXlsx(`${name}.xlsx`, tableRef.current, { sheetName });
+  };
+  const activeCompanyId = selectedCompany === 'all' ? currentCompany(companyDb) : Number(selectedCompany);
+  const printCompany = isPrinting ? documentCompany(companyDb, { company_id: activeCompanyId }) : null;
+  const printCompanies = isPrinting
+    ? (selectedCompany === 'all'
+        ? companies.map((c) => documentCompany(companyDb, { company_id: c.id }) || c)
+        : (printCompany ? [printCompany] : []))
+    : null;
+  const subtitle = leaf.report === 'inalterability'
+    ? t('Chain verification always covers all secured entries.')
+    : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
+  const controls = (
+    <div className="control-panel">
+      <h1 className="cp-title">{t(title)}</h1>
+      {leaf.report !== 'inalterability' && <label className="inline-select">
+        {t('Period')}
+        <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
+          <option value="month">{t('This Month')}</option>
+          <option value="quarter">{t('This Quarter')}</option>
+          <option value="year">{t('This Year')}</option>
+          <option value="all">{t('All Dates')}</option>
+          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+        </select>
+      </label>}
+      {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+      {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
+        <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
+          <option value="">{t('All Ledgers')}</option>
+          {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </label>}
+      {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Journals')}
+        <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
+          {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
+        </select>
+      </label>}
+      {leaf.report === 'journalAudit' && <label className="inline-select">{t('Sort by')}
+        <select aria-label={t('Sort by')} value={auditSort} onChange={(e) => setAuditSort(e.target.value)}>
+          <option value="date">{t('Date')}</option>
+          <option value="number">{t('Journal Entry Number')}</option>
+        </select>
+      </label>}
+      {(['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
+      )}
+      {leaf.report === 'tax' && countryTemplate && (
+        <label className="inline-select">
+          {t('Variant')}
+          <select aria-label={t('Variant')} value={activeTaxVariant} onChange={(e) => setTaxVariant(e.target.value)}>
+            <option value={countryTemplateKey}>{t(countryTemplate.label)}</option>
+            <option value="generic">{t('Generic')}</option>
+          </select>
+        </label>
+      )}
+      {showAnalyticFilter && analyticAccounts.length > 0 && (
+        <label className="inline-select">
+          {t('Analytic Accounts')}
+          <select aria-label={t('Analytic Accounts')} multiple value={analyticAccountIds} onChange={(e) => {
+            const selected = Array.from(e.target.selectedOptions).map((o) => Number(o.value));
+            setAnalyticAccountIds(selected);
+          }}>
+            {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </label>
+      )}
+      {isPartnerLedger && <>
+        <label className="inline-select">
+          <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
+        </label>
+        <label className="inline-select">
+          {t('Partners')}
+          <select aria-label={t('Partners')} multiple value={partnerFilterIds} onChange={(e) => setPartnerFilterIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}>
+            {partnerChoices.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </label>
+      </>}
+      {comparable && <label className="inline-select">
+        {t('Comparison')}
+        <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setHorizontalGroupId(''); }}>
+          <option value="none">{t('No comparison')}</option>
+          <option value="previous">{t('Previous Period')}</option>
+          <option value="lastYear">{t('Same Period Last Year')}</option>
+          <option value="last3">{t('Last 3 Periods')}</option>
+        </select>
+      </label>}
+      {horizontalGroups.length > 0 && <label className="inline-select">
+        {t('Horizontal Group')}
+        <select aria-label={t('Horizontal Group')} value={horizontalGroupId} onChange={(e) => { setHorizontalGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
+          <option value="">{t('None')}</option>
+          {horizontalGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+        </select>
+      </label>}
+      {showUnpostedOption && <label className="inline-select">
+        <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
+      </label>}
+      <span className="muted">{subtitle}</span>
+      <span className="spacer" />
+      {isAudit && (
+        <span className="pager" role="group" aria-label={t('Pager')}>
+          <span aria-live="polite">{auditWin.label} / {auditWin.total}</span>
+          <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={auditWin.prev == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.prev })}>‹</button>
+          <button type="button" className="btn sm" aria-label={t('Next page')} disabled={auditWin.next == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.next })}>›</button>
+        </span>
+      )}
+      <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+      <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
+      <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
+    </div>
+  );
   return (
-    <main className="action report-page">
-      <div className="control-panel">
-        <h1 className="cp-title">{t(title)}</h1>
-        {leaf.report !== 'inalterability' && <label className="inline-select">
-          {t('Period')}
-          <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
-            <option value="month">{t('This Month')}</option>
-            <option value="quarter">{t('This Quarter')}</option>
-            <option value="year">{t('This Year')}</option>
-            <option value="all">{t('All Dates')}</option>
-            {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
-          </select>
-        </label>}
-        {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
-        {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
-          <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
-            <option value="">{t('All Ledgers')}</option>
-            {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </label>}
-        {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Journals')}
-          <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
-            {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
-          </select>
-        </label>}
-        {leaf.report === 'journalAudit' && <label className="inline-select">{t('Sort by')}
-          <select aria-label={t('Sort by')} value={auditSort} onChange={(e) => setAuditSort(e.target.value)}>
-            <option value="date">{t('Date')}</option>
-            <option value="number">{t('Journal Entry Number')}</option>
-          </select>
-        </label>}
-        {(['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
-          <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
-        )}
-        {leaf.report === 'tax' && countryTemplate && (
-          <label className="inline-select">
-            {t('Variant')}
-            <select aria-label={t('Variant')} value={activeTaxVariant} onChange={(e) => setTaxVariant(e.target.value)}>
-              <option value={countryTemplateKey}>{t(countryTemplate.label)}</option>
-              <option value="generic">{t('Generic')}</option>
-            </select>
-          </label>
-        )}
-        {showAnalyticFilter && analyticAccounts.length > 0 && (
-          <label className="inline-select">
-            {t('Analytic Accounts')}
-            <select aria-label={t('Analytic Accounts')} multiple value={analyticAccountIds} onChange={(e) => {
-              const selected = Array.from(e.target.selectedOptions).map((o) => Number(o.value));
-              setAnalyticAccountIds(selected);
-            }}>
-              {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
-          </label>
-        )}
-        {isPartnerLedger && <>
-          <label className="inline-select">
-            <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
-          </label>
-          <label className="inline-select">
-            {t('Partners')}
-            <select aria-label={t('Partners')} multiple value={partnerFilterIds} onChange={(e) => setPartnerFilterIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}>
-              {partnerChoices.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </label>
-        </>}
-        {comparable && <label className="inline-select">
-          {t('Comparison')}
-          <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setHorizontalGroupId(''); }}>
-            <option value="none">{t('No comparison')}</option>
-            <option value="previous">{t('Previous Period')}</option>
-            <option value="lastYear">{t('Same Period Last Year')}</option>
-            <option value="last3">{t('Last 3 Periods')}</option>
-          </select>
-        </label>}
-        {horizontalGroups.length > 0 && <label className="inline-select">
-          {t('Horizontal Group')}
-          <select aria-label={t('Horizontal Group')} value={horizontalGroupId} onChange={(e) => { setHorizontalGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
-            <option value="">{t('None')}</option>
-            {horizontalGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
-        </label>}
-        {showUnpostedOption && <label className="inline-select">
-          <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
-        </label>}
-        <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>
-        <span className="spacer" />
-        {isAudit && (
-          <span className="pager" role="group" aria-label={t('Pager')}>
-            <span aria-live="polite">{auditWin.label} / {auditWin.total}</span>
-            <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={auditWin.prev == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.prev })}>‹</button>
-            <button type="button" className="btn sm" aria-label={t('Next page')} disabled={auditWin.next == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.next })}>›</button>
-          </span>
-        )}
-        <button type="button" className="btn sm" onClick={() => window.print()}>{t('Print')}</button>
-        <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
-      </div>
+    <ReportPrintView
+      active={isPrinting}
+      company={printCompany}
+      companies={printCompanies}
+      title={t(title)}
+      subtitle={subtitle}
+      controls={controls}
+      onBack={() => setIsPrinting(false)}
+    >
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
           {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} />}
         </table>
       </div>
-    </main>
+    </ReportPrintView>
   );
 }

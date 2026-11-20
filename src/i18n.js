@@ -3092,6 +3092,8 @@ const ar = {
   'Reconciled entry and invoice must belong to the same company': 'يجب أن ينتمي القيد المسوّى والفاتورة إلى نفس الشركة',
   'The reconciled counterpart entry must remain posted': 'يجب أن يظل القيد المقابل المسوّى مرحّلاً',
   'Export CSV': 'تصدير CSV',
+  'Export XLSX': 'تصدير XLSX',
+  'Download XLSX': 'تنزيل XLSX',
   'Export XML': 'تصدير XML',
   'Tax Return Template': 'قالب الإقرار الضريبي',
   'Generic VAT Return': 'إقرار ضريبي عام',
@@ -3511,6 +3513,15 @@ const ar = {
   'Payment does not pay by check': 'الدفعة لا تسدد بشيك',
   'Check has already been printed': 'تمت طباعة الشيك بالفعل',
   'Check number is required for manual numbering': 'رقم الشيك مطلوب للترقيم اليدوي',
+  'Auto Sync': 'مزامنة تلقائية',
+  'Sync Interval (hours)': 'فترة المزامنة (بالساعات)',
+  'Sync interval must be a whole number of hours from 1 to 8760': 'يجب أن تكون فترة المزامنة عدداً صحيحاً من الساعات بين 1 و8760',
+  'Country Group': 'مجموعة الدول',
+  'Country Groups': 'مجموعات الدول',
+  Countries: 'الدول',
+  'Federal States': 'الولايات الاتحادية',
+  'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
+  'Country group name is required': 'اسم مجموعة الدول مطلوب',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
