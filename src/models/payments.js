@@ -5,7 +5,7 @@ import { discountAvailable, payMove, payWithDiscount } from './accounting.js';
 import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { isLiquidityJournal, paymentJournal } from './ledger.js';
-import { printBatchChecks } from './pay.js';
+import { paymentPaysByCheck, printBatchChecks } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
 
@@ -125,6 +125,7 @@ export function postBatch(db, batch) {
       if (!payment || payment.state !== 'posted' || !payment.move_id || read(db, 'account.move', payment.move_id)?.state !== 'posted') throw new Error('Select an existing posted payment');
       if (payment.payment_type !== batch.batch_type || payment.partner_type !== (batch.batch_type === 'inbound' ? 'customer' : 'supplier')) throw new Error('Payment direction and partner type must match the batch');
       if (payment.journal_id !== batch.journal_id) throw new Error('Payment journal must match the batch journal');
+      if (batch.batch_type === 'outbound' && !paymentPaysByCheck(db, payment)) throw new Error('A check batch only holds check payments');
       if (isPaymentMatched(db, payment)) throw new Error('Payment is already matched');
       if ((db.records['account.batch.payment'] ?? []).some((other) => other.id !== batch.id && (other.lines ?? []).some((item) => !item.cancelled && item.payment_id === payment.id))) throw new Error('Payment is already in a batch');
       if (!(Number(line.amount) > 0) || roundCurrency(Number(line.amount) - Number(payment.amount), documentCurrency(db, payment)) !== 0) throw new Error('Batch amount must match the payment amount');
@@ -155,6 +156,13 @@ export function postBatch(db, batch) {
   }
   if (journal.company_id != null && journal.company_id !== company) throw new Error('Batch journal and invoices must belong to the same company');
   paymentJournal(db, journal.id, company);
+  const checkMethod = search(db, 'account.payment.method').find((m) => m.code === 'check_printing' && m.payment_type === 'outbound');
+  const checkLine = (batch.batch_type === 'outbound' && checkMethod)
+    ? search(db, 'account.payment.method.line').find((l) => l.journal_id === journal.id && l.payment_method_id === checkMethod.id)
+    : null;
+  if (batch.batch_type === 'outbound' && !checkLine) {
+    throw new Error('The batch journal has no check payment method');
+  }
   for (const line of lines) {
     if (line.payment_id) {
       const payment = read(db, 'account.payment', line.payment_id);
@@ -170,10 +178,6 @@ export function postBatch(db, batch) {
   }
 
   let next = db;
-  const checkMethod = search(next, 'account.payment.method').find((m) => m.code === 'check_printing' && m.payment_type === 'outbound');
-  const checkLine = (batch.batch_type === 'outbound' && checkMethod)
-    ? search(next, 'account.payment.method.line').find((l) => l.journal_id === journal.id && l.payment_method_id === checkMethod.id)
-    : null;
   const linked = lines.map((line) => {
     if (line.payment_id) {
       const payment = read(next, 'account.payment', line.payment_id);
@@ -187,7 +191,6 @@ export function postBatch(db, batch) {
     const options = {
       journalId: journal.id,
       ...(checkLine ? { paymentMethodLineId: checkLine.id } : {}),
-      ...(line.check_number != null ? { checkNumber: line.check_number } : {}),
     };
     next = eligible
       ? payWithDiscount(next, line.move_id, Number(line.amount), batch.date, options)
@@ -292,9 +295,10 @@ export const paymentModels = {
           check_number: {
             type: 'integer',
             label: 'Check Number',
-            readonly: (line, r, db) => {
-              if (!db || !r) return true;
-              const journalId = r.journal_id ?? (r.lines?.[0]?.payment_id ? read(db, 'account.payment', r.lines[0].payment_id)?.journal_id : null);
+            readonly: (record, db) => {
+              if (!db || !record) return true;
+              const batch = record.batch_id ? read(db, 'account.batch.payment', record.batch_id) : (db.records['account.batch.payment'] ?? []).find((b) => (b.lines ?? []).includes(record));
+              const journalId = batch?.journal_id ?? (record.payment_id ? read(db, 'account.payment', record.payment_id)?.journal_id : null);
               const journal = journalId ? read(db, 'account.journal', journalId) : null;
               return !journal?.check_manual_sequencing;
             },

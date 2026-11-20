@@ -22,6 +22,7 @@ import {
 } from './models/pay.js';
 import { applyDiff, diffDb } from './sync.js';
 import { today } from './models/common.js';
+import { fieldReadonly } from './field-metadata.js';
 
 const sync = (db, next, opts = { isAdmin: true }) => applyDiff(db, diffDb(db, next), opts);
 
@@ -957,4 +958,207 @@ test('Round 2 Bug 5: Bottom check layout anchors check body to bottom of sheet w
   } finally {
     await React.act(async () => root.unmount());
   }
+});
+
+test('Qodo Bug 1: Manual batch check_number readonly uses (record, db) signature and allows entering numbers', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, {
+    check_manual_sequencing: true,
+  });
+
+  const batch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    date: today(),
+    lines: [{ move_id: 1, amount: 100 }],
+  });
+
+  const checkNumberField = models['account.batch.payment'].fields.lines.fields.check_number;
+
+  const batchRecord = read(batch.db, 'account.batch.payment', batch.id);
+  const lineRecord = { ...batchRecord.lines[0], batch_id: batch.id };
+  const isRo = fieldReadonly(checkNumberField, lineRecord, batch.db);
+  assert.equal(isRo, false, 'check_number on draft batch line with manual numbering must be editable');
+
+  // When journal is auto-sequencing, it must remain readonly
+  const nextDb = write(batch.db, 'account.journal', bank.id, { check_manual_sequencing: false });
+  const isRoAuto = fieldReadonly(checkNumberField, lineRecord, nextDb);
+  assert.equal(isRoAuto, true, 'check_number on auto-sequencing journal must be readonly');
+});
+
+test('Qodo Bug 2: Pre-numbered draft batches pass validation and assign check numbers at print time', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, {
+    check_next_number: 100,
+    check_manual_sequencing: true,
+  });
+  const partner = search(db, 'res.partner')[0];
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Pre-numbered Item', price_unit: 100, qty: 1 }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  const batch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    date: today(),
+    lines: [{ move_id: bill.id, amount: 100, check_number: 101 }],
+  });
+
+  // Validation must succeed without uniqueness violation from the draft batch line itself
+  assert.doesNotThrow(() => {
+    db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+  });
+
+  const postedBatch = read(db, 'account.batch.payment', batch.id);
+  assert.equal(postedBatch.state, 'posted');
+  assert.equal(postedBatch.lines[0].check_number, 101);
+
+  // Payment record initially has check_number null before print
+  const payId = postedBatch.lines[0].payment_id;
+  assert.ok(payId, 'Payment was created and linked');
+  assert.ok(read(db, 'account.payment', payId).check_number == null, 'Payment has no check number before print');
+
+  // PrintBatchChecks assigns check number 101 to payment and succeeds
+  db = printBatchChecks(db, postedBatch.id);
+  assert.equal(read(db, 'account.payment', payId).check_number, 101);
+  assert.equal(read(db, 'account.batch.payment', batch.id).lines[0].check_number, 101);
+  // Manual sequencing must not increment check_next_number
+  assert.equal(read(db, 'account.journal', bank.id).check_next_number, 100);
+});
+
+test('Qodo Bug 3: Outbound check batch rejects journals without check_printing or payment lines not paying by check', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const partner = search(db, 'res.partner')[0];
+
+  const manualMethod = search(db, 'account.payment.method').find((m) => m.code === 'manual' && m.payment_type === 'outbound');
+  const manualMethodLine = bank.outbound_payment_method_line_ids.find((l) => l.payment_method_id === manualMethod.id);
+
+  // 1. Existing payment that does NOT pay by check (paid via manual)
+  const bill1 = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Bill 1', price_unit: 50, qty: 1 }],
+  });
+  db = postMove(bill1.db, bill1.id);
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 50,
+    journal_id: bank.id,
+    payment_method_line_id: manualMethodLine.id,
+  });
+  db = payMove(draftPay.db, bill1.id, 50, today(), { paymentId: draftPay.id, journalId: bank.id });
+  const paymentRecord = read(db, 'account.payment', draftPay.id);
+  assert.equal(paymentPaysByCheck(db, paymentRecord), false);
+
+  const batchWithNonCheckPay = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    date: today(),
+    lines: [{ payment_id: paymentRecord.id, amount: 50 }],
+  });
+
+  assert.throws(() => {
+    postBatch(batchWithNonCheckPay.db, read(batchWithNonCheckPay.db, 'account.batch.payment', batchWithNonCheckPay.id));
+  }, /check batch only holds check payments/i);
+
+  // 2. Journal with NO check_printing payment method line
+  let noCheckDb = write(db, 'account.journal', bank.id, {
+    outbound_payment_method_line_ids: [manualMethodLine],
+  });
+  const bill2 = create(noCheckDb, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Bill 2', price_unit: 60, qty: 1 }],
+  });
+  noCheckDb = postMove(bill2.db, bill2.id);
+
+  const batchNoCheckMethod = create(noCheckDb, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    date: today(),
+    lines: [{ move_id: bill2.id, amount: 60 }],
+  });
+
+  assert.throws(() => {
+    postBatch(batchNoCheckMethod.db, read(batchNoCheckMethod.db, 'account.batch.payment', batchNoCheckMethod.id));
+  }, /batch journal has no check payment method/i);
+
+});
+
+test('Qodo Bug 4: Voided check cannot be renumbered or cleared by ordinary write; allows reprint and unprinted voided list', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_next_number: 500 });
+  const checkMethodLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 100,
+    journal_id: bank.id,
+    payment_method_line_id: checkMethodLine.id,
+  });
+  db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
+  db = printCheck(db, draftPay.id);
+  const printed = read(db, 'account.payment', draftPay.id);
+  assert.equal(printed.check_number, 500);
+
+  // Void check #500
+  db = voidCheck(db, printed);
+  const voided = read(db, 'account.payment', draftPay.id);
+  assert.equal(voided.check_number, 500);
+  assert.deepEqual(voided.voided_check_numbers.map((v) => v.check_number), [500]);
+
+  // 1. Ordinary write clearing check_number to null must be rejected
+  assert.throws(() => {
+    sync(db, write(db, 'account.payment', voided.id, { check_number: null }));
+  }, /Issued check numbers cannot be changed/i);
+
+  // 2. Ordinary write renumbering check_number to arbitrary number (e.g. 9999) must be rejected
+  assert.throws(() => {
+    sync(db, write(db, 'account.payment', voided.id, { check_number: 9999 }));
+  }, /Issued check numbers cannot be changed/i);
+
+  // 3. Changing check number via legitimate reprintCheck succeeds
+  db = reprintCheck(db, voided);
+  const reprinted = read(db, 'account.payment', voided.id);
+  assert.equal(reprinted.check_number, 501);
+  assert.deepEqual(reprinted.voided_check_numbers.map((v) => v.check_number), [500]);
+
+  // 4. Payment with check_number == null and existing voided list allows edits with unchanged voided list
+  const unprintedWithVoided = {
+    ...reprinted,
+    id: 99881,
+    move_id: null,
+    destination_move_id: null,
+    check_number: null,
+    voided_check_numbers: [{ check_number: 9991, date: today() }],
+    state: 'draft',
+  };
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': [...(db.records['account.payment'] ?? []), unprintedWithVoided],
+    },
+  };
+  assert.doesNotThrow(() => {
+    sync(db, write(db, 'account.payment', 99881, { memo: 'Draft memo update' }));
+  });
 });

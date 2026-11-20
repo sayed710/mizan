@@ -1569,16 +1569,22 @@ const appendsVoidOf = (prior, next, number) => next.length === prior.length + 1
 const validCheckWrite = (db, before, after) => {
   const priorVoided = before?.voided_check_numbers ?? [];
   const nextVoided = after.voided_check_numbers ?? [];
+  const voidedUnchanged = JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
   if (!before) return !nextVoided.length && (after.check_number == null || after.state === 'posted');
-  if (before.check_number == null) return !nextVoided.length && (after.check_number == null || (after.state === 'posted' && after.payment_type === 'outbound'));
+  if (before.check_number == null) {
+    return voidedUnchanged && (after.check_number == null || (after.state === 'posted' && after.payment_type === 'outbound'));
+  }
+  if (after.check_number == null) return false;
   if (before.journal_id !== after.journal_id) return false;
   const beforeVoided = priorVoided.some((v) => v.check_number === before.check_number);
-  if (after.state === 'draft') return beforeVoided && after.check_number === before.check_number && JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
+  if (after.state === 'draft') return beforeVoided && after.check_number === before.check_number && voidedUnchanged;
   if (before.check_number === after.check_number) {
-    return JSON.stringify(priorVoided) === JSON.stringify(nextVoided) || (!beforeVoided && appendsVoidOf(priorVoided, nextVoided, before.check_number));
+    return voidedUnchanged || (!beforeVoided && appendsVoidOf(priorVoided, nextVoided, before.check_number));
   }
   if (before.state !== 'posted' || after.state !== 'posted' || after.payment_type !== 'outbound') return false;
-  return beforeVoided && JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
+  const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
+  if (!journal?.check_manual_sequencing && after.check_number !== nextCheckNumber(db, after.journal_id)) return false;
+  return beforeVoided && voidedUnchanged;
 };
 
 const paymentMethodGuard = (db, before, after) => {

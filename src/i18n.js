@@ -3541,6 +3541,8 @@ const ar = {
   'Country group name is required': 'اسم مجموعة الدول مطلوب',
   'The applied amount cannot be represented in the foreign currency after rounding': 'لا يمكن تمثيل المبلغ المطبق بالعملة الأجنبية بعد التقريب',
   'This credit note is linked to another invoice': 'إشعار الدائن هذا مرتبط بفاتورة أخرى',
+  'A check batch only holds check payments': 'دفعة الشيكات تحتوي على مدفوعات الشيكات فقط',
+  'The batch journal has no check payment method': 'دفتر الدفعة لا يحتوي على طريقة دفع بالشيكات',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

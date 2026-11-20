@@ -456,7 +456,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
                 </tr>
               );
             }
-            const cellRec = { ...l, move_type: l.move_type ?? record?.move_type, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id };
+            const cellRec = { ...l, batch_id: l.batch_id ?? record?.id, move_type: l.move_type ?? record?.move_type, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id };
             return (
               <tr key={i}>
                 {cols.map(([k, f]) => {
