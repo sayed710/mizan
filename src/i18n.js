@@ -3499,7 +3499,6 @@ const ar = {
   'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
   'Auto Sync': 'مزامنة تلقائية',
   'Sync Interval (hours)': 'فترة المزامنة (بالساعات)',
-  'Sync Interval': 'فترة المزامنة',
   'Next Refresh': 'التحديث القادم',
   'Sync interval must be a positive number': 'يجب أن تكون فترة المزامنة رقماً موجباً',
 };

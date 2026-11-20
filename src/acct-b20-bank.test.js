@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read, search } from './orm.js';
 import { models } from './models/index.js';
 import { accountId } from './models/ledger.js';
-import { applyRule, writeOff } from './models/reconcile.js';
+import { applyRule } from './models/reconcile.js';
 import { syncDueOnlineLinks } from './models/onlineSync.js';
 import { runScheduledJobs } from './models/scheduler.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -104,40 +104,6 @@ test('BANK-20: reconciliation model counterpart lines have analytic_distribution
     },
   };
   assert.throws(() => applyDiff(db, diffDb(db, badCompanyRule), { isAdmin: true }), /Analytic accounts in the distribution must belong to the model company/);
-});
-
-test('BANK-20: manual write-off in bank reconciliation widget carries distribution to journal item and creates analytic items', () => {
-  const base = seed();
-  const feeAcc = accountId(base, '600000');
-  const plan = create(base, 'account.analytic.plan', { name: 'Projects' });
-  const analyticAcc = create(plan.db, 'account.analytic.account', { name: 'Project Gamma', plan_id: plan.id });
-  let db = analyticAcc.db;
-
-  // St line carrying manual write-off fields with writeoff_analytic_distribution
-  const stLine = addLine(db, {
-    payment_ref: 'Manual Adjustment Ref',
-    amount: -45,
-    writeoff_account_id: feeAcc,
-    writeoff_label: 'Manual Writeoff Fee',
-    writeoff_analytic_distribution: { [analyticAcc.id]: 100 },
-  });
-  db = stLine.db;
-
-  // Calling writeOff(db, line) directly as the widget manual operation execution does
-  const after = writeOff(db, read(db, LINE, stLine.id));
-  const reconciled = read(after, LINE, stLine.id);
-  assert.equal(reconciled.state, 'reconciled');
-
-  const move = read(after, 'account.move', reconciled.move_id);
-  assert.ok(move, 'Manual write-off move created');
-  const item = move.line_ids.find((l) => l.account_id === feeAcc);
-  assert.ok(item, 'Write-off journal item exists');
-  assert.deepEqual(item.analytic_distribution, { [analyticAcc.id]: 100 });
-
-  const analyticLines = search(after, 'account.analytic.line').filter((l) => l.move_id === move.id);
-  assert.equal(analyticLines.length, 1, 'Analytic item created for manual write-off');
-  assert.equal(analyticLines[0].account_id, analyticAcc.id);
-  assert.equal(analyticLines[0].amount, -45);
 });
 
 test('BANK-21: scheduled online bank sync job syncs due links, skips recent links, and keeps going past failing links', () => {

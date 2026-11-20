@@ -1,8 +1,10 @@
 import { create, read, unlink, write } from '../orm.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
-import { today, validDate } from './common.js';
+import { validDate } from './common.js';
 import { importStatementLines } from './statements.js';
 import { isOnlineFeedJournal, journalCompany } from './ledger.js';
+
+const HOUR_MS = 3600 * 1000;
 
 const LINK_MODEL = 'account.online.link';
 const ACCOUNT_MODEL = 'account.online.account';
@@ -361,8 +363,7 @@ function runSyncForAccounts(db, link, accounts, { now = new Date().toISOString()
       });
     }
 
-    const intervalMs = linkSyncIntervalMs(link);
-    const nextRefresh = new Date(new Date(now).getTime() + intervalMs).toISOString();
+    const nextRefresh = new Date(Date.parse(now) + (Number(link.sync_interval) || 24) * HOUR_MS).toISOString();
     stagedDb = write(stagedDb, LINK_MODEL, link.id, {
       state: 'connected',
       error_message: '',
@@ -543,76 +544,21 @@ export const onlineSyncModels = {
   },
 };
 
-export function linkSyncIntervalMs(link) {
-  if (!link || typeof link !== 'object') return 24 * 3600 * 1000;
-  if (link.interval_type || link.interval_unit) {
-    const unit = link.interval_type || link.interval_unit;
-    const count = Number(link.interval_number ?? link.sync_interval ?? link.interval ?? 1) || 1;
-    if (['minute', 'minutes'].includes(unit)) return count * 60 * 1000;
-    if (['hour', 'hours'].includes(unit)) return count * 3600 * 1000;
-    if (['day', 'days'].includes(unit)) return count * 24 * 3600 * 1000;
-    if (['week', 'weeks'].includes(unit)) return count * 7 * 24 * 3600 * 1000;
-    if (['month', 'months'].includes(unit)) return count * 30 * 24 * 3600 * 1000;
-  }
-  const raw = link.sync_interval ?? link.auto_sync_interval ?? link.interval ?? link.sync_frequency;
-  if (typeof raw === 'string') {
-    if (raw === 'hourly') return 3600 * 1000;
-    if (raw === 'daily') return 24 * 3600 * 1000;
-    if (raw === 'weekly') return 7 * 24 * 3600 * 1000;
-    if (raw === 'monthly') return 30 * 24 * 3600 * 1000;
-  }
-  const n = Number(raw);
-  if (Number.isFinite(n) && n > 0) {
-    if (n >= 100000) return n;
-    if (['day', 'days'].includes(link.sync_unit)) return n * 24 * 3600 * 1000;
-    return n * 3600 * 1000;
-  }
-  return 24 * 3600 * 1000;
-}
-
-export function isOnlineLinkDue(link, at = today()) {
-  if (!link || link.active === false || link.state === 'disconnected' || link.auto_sync === false) {
-    return false;
-  }
+/** A connected, active link with Auto Sync is due once Sync Interval (hours) has passed since its last refresh. */
+export function isOnlineLinkDue(link, now) {
+  if (!link || link.active === false || link.state === 'disconnected' || link.auto_sync === false) return false;
   if (!link.last_refresh) return true;
-  const intervalMs = linkSyncIntervalMs(link);
-  const atTime = typeof at === 'string'
-    ? (at.includes('T') ? new Date(at).getTime() : (at === today() ? Date.now() : new Date(`${at}T00:00:00Z`).getTime()))
-    : (at instanceof Date ? at.getTime() : Number(at) || Date.now());
-  const lastTime = new Date(link.last_refresh).getTime();
-  if (!Number.isFinite(lastTime)) return true;
-  return (atTime - lastTime) >= intervalMs;
+  return Date.parse(now) - Date.parse(link.last_refresh) >= (Number(link.sync_interval) || 24) * HOUR_MS;
 }
 
 /**
- * Scheduled job to fetch transactions for every connected online synchronization link due for sync.
- * Skips disconnected or archived links and links synced recently. Records errors on failing links
- * without stopping other links.
+ * Scheduled job (Odoo's online synchronization cron): fetch transactions for every due link. A failing link records its
+ * error through the usual connection failure handling and the other links still sync. `at` is the scheduler time;
+ * a date without a time means "now".
  */
-export function syncDueOnlineLinks(db, at = today()) {
-  const links = (db?.records?.[LINK_MODEL] ?? [])
-    .filter((link) => link.active !== false && link.state !== 'disconnected' && link.auto_sync !== false);
-
-  let currentDb = db;
-  for (const link of links) {
-    const freshLink = read(currentDb, LINK_MODEL, link.id) ?? link;
-    if (!isOnlineLinkDue(freshLink, at)) continue;
-
-    const now = typeof at === 'string' && at.includes('T') ? at : new Date().toISOString();
-    try {
-      const res = syncOnlineConnection(currentDb, freshLink.id, { now });
-      currentDb = res.db;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      currentDb = write(currentDb, LINK_MODEL, freshLink.id, {
-        state: 'error',
-        error_message: message,
-      });
-    }
-  }
-  return currentDb;
+export function syncDueOnlineLinks(db, at) {
+  const now = typeof at === 'string' && at.includes('T') ? at : new Date().toISOString();
+  return (db.records?.[LINK_MODEL] ?? [])
+    .filter((link) => isOnlineLinkDue(link, now))
+    .reduce((current, link) => syncOnlineConnection(current, link.id, { now }).db, db);
 }
-
-export const scheduledOnlineSync = syncDueOnlineLinks;
-export const cronFetchOnlineTransactions = syncDueOnlineLinks;
-

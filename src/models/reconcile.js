@@ -5,7 +5,6 @@ import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bo
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
-import { storedLineDistribution } from '../analytic_distribution.js';
 
 export { sameCommercialPartner } from './common.js';
 
@@ -361,40 +360,19 @@ export function counterpartTaxLines(db, {
   return allLines;
 }
 
-export function writeOff(db, rule, line) {
-  let targetRule = rule;
-  let stLine = line;
-  if (!stLine && targetRule && (targetRule.payment_ref !== undefined || targetRule.amount !== undefined)) {
-    stLine = targetRule;
-    targetRule = null;
-  }
-  if (!stLine) throw new Error('Statement line is required for write-off');
-  stLine = typeof stLine === 'object' && stLine.id ? (read(db, 'account.bank.statement.line', stLine.id) || stLine) : (read(db, 'account.bank.statement.line', stLine) || stLine);
-
-  const incoming = stLine.amount > 0;
-  const company = stLine.company_id ?? 1;
-  const journalCurrency = read(db, 'account.journal', stLine.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+function writeOff(db, rule, line) {
+  const incoming = line.amount > 0;
+  const company = line.company_id ?? 1;
+  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   const foreign = journalCurrency && journalCurrency !== companyCurrencyRecord(db, company)?.id;
   const currency = read(db, 'res.currency', journalCurrency);
-  const balance = stLine.open_amount != null
-    ? roundCurrency(stLine.open_amount * (foreign ? Math.abs(stLine.amount) / bookedStatementAmount(db, stLine) : 1), currency)
-    : roundCurrency(Math.abs(stLine.amount), currency);
+  const balance = line.open_amount != null
+    ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency)
+    : roundCurrency(Math.abs(line.amount), currency);
   if (!(balance > 0)) throw new Error('This bank transaction has no open amount');
-
-  const defaultLines = (stLine.writeoff_account_id || stLine.counterpart_account_id) ? [{
-    sequence: 10,
-    account_id: stLine.writeoff_account_id || stLine.counterpart_account_id,
-    label: stLine.writeoff_label || stLine.payment_ref || '',
-    amount_type: stLine.writeoff_amount != null ? 'fixed' : 'percentage',
-    amount_string: stLine.writeoff_amount != null ? String(stLine.writeoff_amount) : '100',
-    amount: stLine.writeoff_amount != null ? Number(stLine.writeoff_amount) : 100,
-    tax_ids: stLine.tax_ids ?? [],
-    analytic_distribution: stLine.writeoff_analytic_distribution ?? stLine.analytic_distribution ?? null,
-  }] : [];
-  const ruleLines = targetRule?.line_ids?.length ? targetRule.line_ids : defaultLines;
-
-  const stLineTotal = roundCurrency(Math.abs(stLine.amount), currency);
-  const split = splitCounterparts(ruleLines, balance, currency, stLine.payment_ref, incoming, stLineTotal);
+  const ruleLines = rule.line_ids ?? [];
+  const stLineTotal = roundCurrency(Math.abs(line.amount), currency);
+  const split = splitCounterparts(ruleLines, balance, currency, line.payment_ref, incoming, stLineTotal);
   const counterparts = split.filter((l) => l.value);
   if (!counterparts.length) {
     // Regex lines that do not match the transaction label are skipped without failing the line.
@@ -403,14 +381,14 @@ export function writeOff(db, rule, line) {
   }
   for (const counterpart of counterparts) {
     const account = read(db, 'account.account', counterpart.account_id);
-    if (!counterpart.account_id) throw new Error(`Configure the counterpart account on reconciliation model ${targetRule?.name ?? ''}`.trim());
-    if (!account || account.active === false) throw new Error(`Unknown account in reconciliation model ${targetRule?.name ?? ''}`.trim());
+    if (!counterpart.account_id) throw new Error(`Configure the counterpart account on reconciliation model ${rule.name}`);
+    if (!account || account.active === false) throw new Error(`Unknown account in reconciliation model ${rule.name}`);
     if (account.company_id && account.company_id !== company) throw new Error('Reconciliation account belongs to another company');
   }
-  const partner_id = stLine.partner_id ?? null;
-  const companyValue = stLine.open_amount ?? statementCompanyAmount(db, stLine);
+  const partner_id = line.partner_id ?? null;
+  const companyValue = line.open_amount ?? statementCompanyAmount(db, line);
   const companyCurrency = companyCurrencyRecord(db, company);
-  const via = paymentJournal(db, stLine.journal_id, company);
+  const via = paymentJournal(db, line.journal_id, company);
   const side = (value, debit, extra = {}) => ({
     ...extra,
     [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency),
@@ -418,7 +396,6 @@ export function writeOff(db, rule, line) {
   });
   const items = counterparts.flatMap((l) => {
     const sameAsCounterpart = l.value > 0;
-    const lineDist = storedLineDistribution(l) ?? (stLine.writeoff_analytic_distribution || stLine.analytic_distribution || null);
     return counterpartTaxLines(db, {
       company,
       tax_ids: l.tax_ids ?? [],
@@ -429,10 +406,10 @@ export function writeOff(db, rule, line) {
       foreignCurrency: foreign ? journalCurrency : null,
       companyValue,
       balance,
-      date: stLine.date,
+      date: line.date,
       partner_id: l.partner_id ?? partner_id,
-      name: l.label || stLine.payment_ref,
-      analytic_distribution: lineDist,
+      name: l.label || line.payment_ref,
+      analytic_distribution: l.analytic_distribution,
       validateTaxUse: false,
     });
   });
@@ -454,13 +431,13 @@ export function writeOff(db, rule, line) {
     }
   }
   let current = db;
-  let bankMoveId = stLine.bank_move_id ?? null;
+  let bankMoveId = line.bank_move_id ?? null;
   let openAmount = 0;
   let allocated = companyValue;
   let entryLines = [side(balance, incoming, { account: bankMoveId ? ensureBankSuspense(db, company, via.id).id : via.accountId, partner_id }), ...items];
   if (!fullCoverage) {
     // The bank movement is booked once into the bank suspense account; this entry clears only its share.
-    const bookedBank = bookBankMovement(db, stLine, company, { date: stLine.date, openAmount: companyValue });
+    const bookedBank = bookBankMovement(db, line, company, { date: line.date, openAmount: companyValue });
     current = bookedBank.db;
     bankMoveId = bookedBank.bankMoveId;
     openAmount = companyRemainder;
@@ -473,15 +450,15 @@ export function writeOff(db, rule, line) {
     }, ...items];
   }
   const { db: booked, id } = postEntry(current, {
-    journal: via.code, journal_id: via.id, date: stLine.date, ref: stLine.payment_ref, company: stLine.company_id ?? 1,
+    journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: entryLines,
   });
-  return write(booked, 'account.bank.statement.line', stLine.id, {
+  return write(booked, 'account.bank.statement.line', line.id, {
     state: fullCoverage ? 'reconciled' : 'to_check',
     move_id: id,
     bank_move_id: bankMoveId ?? id,
     open_amount: openAmount,
-    allocations: [...(stLine.allocations ?? []), { payment_move_id: id, amount: allocated, ...(targetRule?.id ? { reconcile_model_id: targetRule.id } : {}) }],
+    allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: allocated, reconcile_model_id: rule.id }],
   });
 }
 
@@ -539,12 +516,11 @@ export function applyRule(db, rule, line) {
           const wo = (rule.line_ids ?? []).find((l) => l.account_id);
           if (wo) {
             const diff = roundCurrency(res - target, companyCurrency);
-            const dist = storedLineDistribution(wo);
             const withWo = write(db, 'account.bank.statement.line', line.id, {
               writeoff_account_id: wo.account_id,
               writeoff_label: wo.label || rule.name || 'Payment Tolerance',
               writeoff_amount: diff,
-              ...(dist ? { writeoff_analytic_distribution: dist } : {}),
+              ...(wo.analytic_distribution ? { writeoff_analytic_distribution: wo.analytic_distribution } : {}),
             });
             return reconcileWith(withWo, read(withWo, 'account.bank.statement.line', line.id), match.id);
           }
