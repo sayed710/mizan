@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove, computeEntryTaxLines } from './models/accounting.js';
 import { accountId } from './models/ledger.js';
+import { taxesByGrid } from './models/finance.js';
 
 test('1. JE-16: analytic_distribution is a visible column on manual entry lines with distribution widget when analytic plans exist', () => {
   let db = seed();
@@ -390,7 +391,7 @@ test('8. JE-1: split repartition rows across two tax accounts (50% / 50%)', () =
   assert.equal(taxLineA.tax_base, 1000);
   assert.equal(taxLineB.account_id, taxAcc2);
   assert.equal(taxLineB.debit, 50);
-  assert.equal(taxLineB.tax_base, 1000);
+  assert.equal(taxLineB.tax_base, 0, 'non-contributing repartition row carries 0 base (Finding 1)');
 });
 
 test('9. JE-1: manual entry tax lines handle foreign currency', () => {
@@ -490,4 +491,617 @@ test('10. JE-1: taxes with type_tax_use neither sale nor purchase follow natural
   assert.equal(creditTaxLine.debit, 0);
   assert.deepEqual(creditBase.tax_tag_ids, [baseTag.id], 'credit base gets invoice base tags');
   assert.deepEqual(creditTaxLine.tax_tag_ids, [taxTag.id], 'credit tax line gets invoice tax tags');
+});
+
+test('11. Finding 1: Split tax rows use each split\'s returned base including zero in both domestic and foreign currencies', () => {
+  let db = seed();
+  const taxAcc1 = accountId(db, '251000');
+  const taxAcc2Rec = create(db, 'account.account', { name: 'Split Tax Acc 2', code: '251097', account_type: 'liability_current' });
+  db = taxAcc2Rec.db;
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const eurCurr = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(eurCurr);
+
+  const splitTax = create(db, 'account.tax', {
+    name: 'Multi-row Repartition Tax',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 801, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 802, repartition_type: 'tax', factor_percent: 50, account_id: taxAcc1, tag_ids: [] },
+      { id: 803, repartition_type: 'tax', factor_percent: 50, account_id: taxAcc2Rec.id, tag_ids: [] },
+    ],
+  });
+  db = splitTax.db;
+
+  // Domestic: 1000 debit. Only contributing row carries base 1000, other carries 0.
+  const domLines = computeEntryTaxLines(
+    [{ account_id: expAcc.id, debit: 1000, credit: 0, tax_ids: [splitTax.id] }],
+    { move_type: 'entry', company_id: 1 },
+    db,
+  );
+  const domSplit1 = domLines.find((l) => l.tax_repartition_line_id === 802);
+  const domSplit2 = domLines.find((l) => l.tax_repartition_line_id === 803);
+  assert.equal(domSplit1.tax_base, 1000, 'contributing split carries full taxable base');
+  assert.equal(domSplit2.tax_base, 0, 'non-contributing split carries 0 base (no duplicate fallback)');
+
+  // Foreign: 100 EUR at rate 0.5 (200 USD base).
+  db = write(db, 'res.currency', eurCurr.id, { rate_ids: [{ date: '2026-06-01', rate: 0.5 }] });
+  const fxLines = computeEntryTaxLines(
+    [{ account_id: expAcc.id, debit: 200, credit: 0, currency_id: eurCurr.id, amount_currency: 100, tax_ids: [splitTax.id] }],
+    { move_type: 'entry', company_id: 1, date: '2026-06-01' },
+    db,
+  );
+  const fxSplit1 = fxLines.find((l) => l.tax_repartition_line_id === 802);
+  const fxSplit2 = fxLines.find((l) => l.tax_repartition_line_id === 803);
+  assert.equal(fxSplit1.tax_base, 200, 'foreign contributing split carries converted company base');
+  assert.equal(fxSplit2.tax_base, 0, 'foreign non-contributing split carries 0 base');
+});
+
+test('12. Finding 2: Explicit and fiscal-position-mapped taxes on manual entries are validated against entry company', () => {
+  let db = seed();
+  const c2 = create(db, 'res.company', { name: 'Company B' });
+  db = c2.db;
+  const taxCo2 = create(db, 'account.tax', {
+    name: 'Co2 Tax',
+    company_id: c2.id,
+    amount: 15,
+    type_tax_use: 'purchase',
+  });
+  db = taxCo2.db;
+  const fpCo2 = create(db, 'account.fiscal.position', {
+    name: 'Co2 FP',
+    company_id: c2.id,
+  });
+  db = fpCo2.db;
+
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const cashAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_cash' || a.account_type === 'asset_current');
+
+  // Explicit foreign tax in computeEntryTaxLines throws
+  assert.throws(
+    () => computeEntryTaxLines([{ account_id: expAcc.id, debit: 100, tax_ids: [taxCo2.id] }], { move_type: 'entry', company_id: 1 }, db),
+    /Tax belongs to another company/,
+  );
+
+  // Foreign fiscal position in computeEntryTaxLines throws
+  assert.throws(
+    () => computeEntryTaxLines([{ account_id: expAcc.id, debit: 100, tax_ids: [] }], { move_type: 'entry', company_id: 1, fiscal_position_id: fpCo2.id }, db),
+    /Fiscal position belongs to another company/,
+  );
+
+  // Foreign fiscal position at create throws
+  assert.throws(() => create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: 1,
+    fiscal_position_id: fpCo2.id,
+    line_ids: [
+      { account_id: expAcc.id, debit: 100, credit: 0 },
+      { account_id: cashAcc.id, debit: 0, credit: 100 },
+    ],
+  }), /Fiscal position belongs to another company/);
+
+  // Foreign fiscal position at postMove throws even on pre-existing unvalidated draft
+  const draftWithForeignFp = {
+    id: 99999,
+    move_type: 'entry',
+    state: 'draft',
+    company_id: 1,
+    fiscal_position_id: fpCo2.id,
+    line_ids: [
+      { account_id: expAcc.id, debit: 100, credit: 0 },
+      { account_id: cashAcc.id, debit: 0, credit: 100 },
+    ],
+  };
+  const dbWithDraft = { ...db, records: { ...db.records, 'account.move': [...(db.records['account.move'] ?? []), draftWithForeignFp] } };
+  assert.throws(() => postMove(dbWithDraft, 99999), /Fiscal position belongs to another company/);
+
+  // Manual tax item belonging to another company at postMove throws
+  const resTax = create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: 1,
+    line_ids: [
+      { account_id: expAcc.id, debit: 100, credit: 0 },
+      { account_id: cashAcc.id, debit: 0, credit: 100, tax_id: taxCo2.id },
+    ],
+  });
+  assert.throws(() => postMove(resTax.db, resTax.id), /Tax belongs to another company/);
+});
+
+test('13. Finding 3: Tax synchronization runs on ORM create, explicit line writes, and postMove', () => {
+  let db = seed();
+  const taxAcc = accountId(db, '251000');
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const cashAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_cash' || a.account_type === 'asset_current');
+
+  const tax = create(db, 'account.tax', {
+    name: 'Sync Tax 15%',
+    type_tax_use: 'purchase',
+    amount: 15,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 901, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 902, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = tax.db;
+
+  // 1. ORM create automatically creates synchronized tax lines without onchange
+  const created = create(db, 'account.move', {
+    move_type: 'entry',
+    date: '2026-06-01',
+    line_ids: [
+      { account_id: expAcc.id, debit: 1000, credit: 0, tax_ids: [tax.id] },
+      { account_id: cashAcc.id, debit: 0, credit: 1150 },
+    ],
+  });
+  db = created.db;
+  const createdRec = read(db, 'account.move', created.id);
+  assert.equal(createdRec.line_ids.length, 3, 'ORM create generates tax line');
+  const taxLine1 = createdRec.line_ids.find((l) => l.tax_id === tax.id && l.tax_repartition_line_id === 902);
+  assert.ok(taxLine1);
+  assert.equal(taxLine1.debit, 150);
+
+  // 2. ORM explicit write of line_ids resynchronizes tax lines
+  db = write(db, 'account.move', created.id, {
+    line_ids: [
+      { account_id: expAcc.id, debit: 2000, credit: 0, tax_ids: [tax.id] },
+      { account_id: cashAcc.id, debit: 0, credit: 2300 },
+    ],
+  });
+  const updatedRec = read(db, 'account.move', created.id);
+  assert.equal(updatedRec.line_ids.length, 3, 'ORM write resynchronizes tax line');
+  const taxLine2 = updatedRec.line_ids.find((l) => l.tax_id === tax.id && l.tax_repartition_line_id === 902);
+  assert.equal(taxLine2.debit, 300);
+  assert.equal(taxLine2.tax_base, 2000);
+
+  // 3. postMove runs and validates synchronized lines before posting
+  db = postMove(db, created.id);
+  const postedRec = read(db, 'account.move', created.id);
+  assert.equal(postedRec.state, 'posted');
+});
+
+test('14. Finding 4: Pre-existing manual tax items are preserved during line synchronization', () => {
+  let db = seed();
+  const taxAcc = accountId(db, '251000');
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+
+  const taxA = create(db, 'account.tax', {
+    name: 'Auto Tax 10%',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 1001, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1002, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = taxA.db;
+
+  const taxB = create(db, 'account.tax', {
+    name: 'Manual Tax 5%',
+    type_tax_use: 'purchase',
+    amount: 5,
+    amount_type: 'percent',
+  });
+  db = taxB.db;
+
+  // Entry has a base line and an independent manual tax item without tax_base_line_key
+  const lines = [
+    { account_id: expAcc.id, debit: 1000, credit: 0, tax_ids: [taxA.id] },
+    { account_id: taxAcc, debit: 77, credit: 0, tax_id: taxB.id, name: 'Independent Manual Tax' },
+  ];
+
+  const syncd = computeEntryTaxLines(lines, { move_type: 'entry', company_id: 1 }, db);
+  // Should have: updated base line (1000), manual tax line (77), generated taxA line (100)
+  assert.equal(syncd.length, 3);
+  const manual = syncd.find((l) => l.name === 'Independent Manual Tax');
+  assert.ok(manual, 'manual tax item preserved');
+  assert.equal(manual.debit, 77);
+  assert.equal(manual.tax_id, taxB.id);
+
+  const auto = syncd.find((l) => l.tax_id === taxA.id && l.tax_repartition_line_id === 1002);
+  assert.ok(auto, 'auto tax line generated');
+  assert.equal(auto.debit, 100);
+
+  // Edit base line amount: 1000 -> 2500
+  const baseLine = syncd.find((l) => !l.tax_id && !l.tax_repartition_line_id);
+  baseLine.debit = 2500;
+  const reSyncd = computeEntryTaxLines(syncd, { move_type: 'entry', company_id: 1 }, db);
+  assert.equal(reSyncd.length, 3);
+  const preservedManual = reSyncd.find((l) => l.name === 'Independent Manual Tax');
+  assert.ok(preservedManual, 'manual tax item remains after base line edit');
+  assert.equal(preservedManual.debit, 77);
+  const updatedAuto = reSyncd.find((l) => l.tax_id === taxA.id && l.tax_repartition_line_id === 1002);
+  assert.equal(updatedAuto.debit, 250);
+});
+
+test('15. Finding 5: Price-included tax updates base line untaxed amount and entry balances', () => {
+  let db = seed();
+  const taxAcc = accountId(db, '251000');
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const cashAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_cash' || a.account_type === 'asset_current');
+  const eurCurr = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(eurCurr);
+
+  const inclTax = create(db, 'account.tax', {
+    name: 'VAT 10% Incl',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    price_include: true,
+    invoice_repartition_line_ids: [
+      { id: 1101, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1102, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = inclTax.db;
+
+  // Domestic: gross debit 110 -> base 100, tax 10. Cash credit 110 balances entry!
+  const domRes = create(db, 'account.move', {
+    move_type: 'entry',
+    date: '2026-06-01',
+    line_ids: [
+      { account_id: expAcc.id, debit: 110, credit: 0, tax_ids: [inclTax.id] },
+      { account_id: cashAcc.id, debit: 0, credit: 110 },
+    ],
+  });
+  db = domRes.db;
+  const domMove = read(db, 'account.move', domRes.id);
+  const domBase = domMove.line_ids.find((l) => !l.tax_id && !l.tax_repartition_line_id);
+  const domTax = domMove.line_ids.find((l) => l.tax_id === inclTax.id);
+  assert.equal(domBase.debit, 100, 'base line debits computed untaxed amount');
+  assert.equal(domTax.debit, 10, 'tax line debits computed tax amount');
+  assert.equal(domBase.debit + domTax.debit, 110, 'sum matches counterpart credit 110');
+
+  // Verify it posts cleanly
+  db = postMove(db, domRes.id);
+  assert.equal(read(db, 'account.move', domRes.id).state, 'posted');
+
+  // Foreign: 110 EUR at rate 0.5 (220 USD gross) -> base 100 EUR (200 USD), tax 10 EUR (20 USD)
+  db = write(db, 'res.currency', eurCurr.id, { rate_ids: [{ date: '2026-06-01', rate: 0.5 }] });
+  const fxLines = computeEntryTaxLines(
+    [{ account_id: expAcc.id, debit: 220, credit: 0, currency_id: eurCurr.id, amount_currency: 110, tax_ids: [inclTax.id] }],
+    { move_type: 'entry', company_id: 1, date: '2026-06-01' },
+    db,
+  );
+  const fxBase = fxLines.find((l) => !l.tax_id && !l.tax_repartition_line_id);
+  const fxTax = fxLines.find((l) => l.tax_id === inclTax.id);
+  assert.equal(fxBase.amount_currency, 100, 'base amount_currency updated to untaxed 100 EUR');
+  assert.equal(fxBase.debit, 200, 'base debit updated to converted 200 USD');
+  assert.equal(fxTax.amount_currency, 10, 'tax amount_currency is 10 EUR');
+  assert.equal(fxTax.debit, 20, 'tax debit is converted 20 USD');
+});
+
+test('16. Finding 6: Negative factor repartition split books positive amount on opposite side and posts without badLineSign error', () => {
+  let db = seed();
+  const taxAcc1 = accountId(db, '251000');
+  const taxAcc2Rec = create(db, 'account.account', { name: 'Withholding Tax Acc', code: '251096', account_type: 'liability_current' });
+  db = taxAcc2Rec.db;
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const cashAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_cash' || a.account_type === 'asset_current');
+  const eurCurr = search(db, 'res.currency').find((c) => c.name === 'EUR');
+
+  const withhTax = create(db, 'account.tax', {
+    name: 'Tax with Withholding',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 1201, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1202, repartition_type: 'tax', factor_percent: 120, account_id: taxAcc1, tag_ids: [] }, // +120
+      { id: 1203, repartition_type: 'tax', factor_percent: -20, account_id: taxAcc2Rec.id, tag_ids: [] }, // -20
+    ],
+  });
+  db = withhTax.db;
+
+  // Debit base line 1000:
+  // Tax 1 (+120% of 100 tax = +120) -> debit 120
+  // Tax 2 (-20% of 100 tax = -20) -> opposite side: credit 20, debit 0 (non-negative!)
+  // Base 1000 + Tax 1 (debit 120) = 1120 debit; Tax 2 (credit 20) + Cash (credit 1100) = 1120 credit.
+  const lines = computeEntryTaxLines(
+    [
+      { account_id: expAcc.id, debit: 1000, credit: 0, tax_ids: [withhTax.id] },
+      { account_id: cashAcc.id, debit: 0, credit: 1100 },
+    ],
+    { move_type: 'entry', company_id: 1 },
+    db,
+  );
+
+  const posLine = lines.find((l) => l.tax_repartition_line_id === 1202);
+  const negLine = lines.find((l) => l.tax_repartition_line_id === 1203);
+  assert.ok(posLine && negLine);
+
+  assert.equal(posLine.debit, 120);
+  assert.equal(posLine.credit, 0);
+
+  // Negative split booked on credit side with nonnegative magnitude
+  assert.equal(negLine.debit, 0);
+  assert.equal(negLine.credit, 20, 'negative factor split books on credit side for debit base');
+
+  // Verify posting succeeds without badLineSign error
+  const res = create(db, 'account.move', {
+    move_type: 'entry',
+    date: '2026-06-01',
+    line_ids: lines,
+  });
+  db = postMove(res.db, res.id);
+  assert.equal(read(db, 'account.move', res.id).state, 'posted');
+
+  // Also check foreign currency amount_currency sign follows side
+  db = write(db, 'res.currency', eurCurr.id, { rate_ids: [{ date: '2026-06-01', rate: 1 }] });
+  const fxLines = computeEntryTaxLines(
+    [{ account_id: expAcc.id, debit: 1000, credit: 0, currency_id: eurCurr.id, amount_currency: 1000, tax_ids: [withhTax.id] }],
+    { move_type: 'entry', company_id: 1, date: '2026-06-01' },
+    db,
+  );
+  const fxNegLine = fxLines.find((l) => l.tax_repartition_line_id === 1203);
+  assert.equal(fxNegLine.amount_currency, -20, 'credit tax line amount_currency is negative');
+});
+
+test('17. Finding 7: Changing entry date recalculates company-currency tax amounts with new exchange rate', () => {
+  let db = seed();
+  const taxAcc = accountId(db, '251000');
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const eurCurr = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(eurCurr);
+
+  // Rate on 2026-06-01 is 0.5 (1 EUR = 2 USD), rate on 2026-07-01 is 0.25 (1 EUR = 4 USD)
+  db = write(db, 'res.currency', eurCurr.id, {
+    rate_ids: [
+      { date: '2026-06-01', rate: 0.5 },
+      { date: '2026-07-01', rate: 0.25 },
+    ],
+  });
+
+  const tax = create(db, 'account.tax', {
+    name: 'FX Rate Tax 10%',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 1301, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1302, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = tax.db;
+
+  const res = create(db, 'account.move', {
+    move_type: 'entry',
+    date: '2026-06-01',
+    line_ids: [
+      { account_id: expAcc.id, debit: 200, credit: 0, currency_id: eurCurr.id, amount_currency: 100, tax_ids: [tax.id] },
+    ],
+  });
+  db = res.db;
+
+  let move = read(db, 'account.move', res.id);
+  let taxLine = move.line_ids.find((l) => l.tax_id === tax.id);
+  assert.equal(taxLine.debit, 20, 'converted at 2026-06-01 rate (10 EUR / 0.5 = 20 USD)');
+
+  // Change date to 2026-07-01 via ORM write
+  db = write(db, 'account.move', res.id, { date: '2026-07-01' });
+  move = read(db, 'account.move', res.id);
+  taxLine = move.line_ids.find((l) => l.tax_id === tax.id);
+  assert.equal(taxLine.debit, 40, 'recalculated at 2026-07-01 rate (10 EUR / 0.25 = 40 USD)');
+
+  // Change date via form onchange
+  const changed = models['account.move'].onchange({ ...move, date: '2026-06-01' }, 'date', db);
+  assert.equal(changed.invoice_date, '2026-06-01');
+  const onchangeTaxLine = changed.line_ids.find((l) => l.tax_id === tax.id);
+  assert.equal(onchangeTaxLine.debit, 20, 'form onchange recomputes foreign tax with new date rate');
+});
+
+test('18. Finding 8: Changing foreign base line to domestic clears currency fields; multiple base lines keep distinct provenance', () => {
+  let db = seed();
+  const taxAcc = accountId(db, '251000');
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const eurCurr = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(eurCurr);
+
+  db = write(db, 'res.currency', eurCurr.id, { rate_ids: [{ date: '2026-06-01', rate: 1 }] });
+
+  const tax = create(db, 'account.tax', {
+    name: 'Provenance Tax 10%',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 1401, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1402, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = tax.db;
+
+  // 1. Foreign base line generates tax line with currency_id and amount_currency
+  let lines = [
+    { account_id: expAcc.id, debit: 100, credit: 0, currency_id: eurCurr.id, amount_currency: 100, tax_ids: [tax.id] },
+  ];
+  let syncd = computeEntryTaxLines(lines, { move_type: 'entry', company_id: 1, date: '2026-06-01' }, db);
+  let taxLine = syncd.find((l) => l.tax_id === tax.id);
+  assert.equal(taxLine.currency_id, eurCurr.id);
+  assert.equal(taxLine.amount_currency, 10);
+
+  // Edit base line to domestic: remove currency_id and amount_currency
+  const baseLine = syncd.find((l) => !l.tax_id);
+  delete baseLine.currency_id;
+  delete baseLine.amount_currency;
+  baseLine.debit = 500;
+  syncd = computeEntryTaxLines(syncd, { move_type: 'entry', company_id: 1, date: '2026-06-01' }, db);
+  taxLine = syncd.find((l) => l.tax_id === tax.id);
+  assert.equal(taxLine.currency_id, undefined, 'stale currency_id removed');
+  assert.equal(taxLine.amount_currency, undefined, 'stale amount_currency removed');
+  assert.equal(taxLine.debit, 50);
+
+  // 2. Multiple base lines with same tax keep distinct provenance
+  const multiLines = [
+    { account_id: expAcc.id, debit: 1000, credit: 0, tax_ids: [tax.id], line_id: 'base_first' },
+    { account_id: expAcc.id, debit: 500, credit: 0, tax_ids: [tax.id], line_id: 'base_second' },
+  ];
+  const multiSyncd = computeEntryTaxLines(multiLines, { move_type: 'entry', company_id: 1 }, db);
+  assert.equal(multiSyncd.length, 4, '2 base lines + 2 tax lines');
+
+  const taxLineFirst = multiSyncd.find((l) => l.tax_base_line_key === 'base_first' && l.tax_repartition_line_id);
+  const taxLineSecond = multiSyncd.find((l) => l.tax_base_line_key === 'base_second' && l.tax_repartition_line_id);
+  assert.ok(taxLineFirst && taxLineSecond);
+  assert.equal(taxLineFirst.debit, 100);
+  assert.equal(taxLineSecond.debit, 50);
+
+  // Update only base_second
+  const baseSecond = multiSyncd.find((l) => l.line_id === 'base_second');
+  baseSecond.debit = 800;
+  const reMulti = computeEntryTaxLines(multiSyncd, { move_type: 'entry', company_id: 1 }, db);
+  const reTaxFirst = reMulti.find((l) => l.tax_base_line_key === 'base_first' && l.tax_repartition_line_id);
+  const reTaxSecond = reMulti.find((l) => l.tax_base_line_key === 'base_second' && l.tax_repartition_line_id);
+  assert.equal(reTaxFirst.debit, 100, 'base_first tax line is unaffected');
+  assert.equal(reTaxSecond.debit, 80, 'base_second tax line updated');
+});
+
+test('19. Finding 9: Mixed sale and purchase price-included taxes compute and split using their respective repartition sides', () => {
+  let db = seed();
+  const taxAcc = accountId(db, '251000');
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+
+  // Purchase tax: on debit base uses invoice side (factor 100%). Refund has 60%/40% splits.
+  const purchTax = create(db, 'account.tax', {
+    name: 'Purch Tax 10%',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    price_include: true,
+    invoice_repartition_line_ids: [
+      { id: 1501, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1502, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [] },
+    ],
+    refund_repartition_line_ids: [
+      { id: 1503, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1504, repartition_type: 'tax', factor_percent: 60, account_id: taxAcc, tag_ids: [] },
+      { id: 15041, repartition_type: 'tax', factor_percent: 40, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = purchTax.db;
+
+  // Sale tax: on debit base uses refund side (factor 100%). Invoice has 70%/30% splits.
+  const saleTax = create(db, 'account.tax', {
+    name: 'Sale Tax 10%',
+    type_tax_use: 'sale',
+    amount: 10,
+    amount_type: 'percent',
+    price_include: true,
+    invoice_repartition_line_ids: [
+      { id: 1505, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1506, repartition_type: 'tax', factor_percent: 70, account_id: taxAcc, tag_ids: [] },
+      { id: 15061, repartition_type: 'tax', factor_percent: 30, account_id: taxAcc, tag_ids: [] },
+    ],
+    refund_repartition_line_ids: [
+      { id: 1507, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1508, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = saleTax.db;
+
+  // Debit base line with 110 gross and purchTax: untaxed = 100, purchTax = 10 (invoice factor 100%)
+  // Debit base line with 110 gross and saleTax: untaxed = 100, saleTax = 10 (refund factor 100%)
+  const lines = computeEntryTaxLines(
+    [{ account_id: expAcc.id, debit: 110, credit: 0, tax_ids: [purchTax.id, saleTax.id] }],
+    { move_type: 'entry', company_id: 1 },
+    db,
+  );
+  // Purch tax split uses invoice side (factor 100%)
+  const purchLine = lines.find((l) => l.tax_id === purchTax.id && l.tax_repartition_line_id === 1502);
+  assert.ok(purchLine);
+  // Sale tax split uses refund side (factor 100%)
+  const saleLine = lines.find((l) => l.tax_id === saleTax.id && l.tax_repartition_line_id === 1508);
+  assert.ok(saleLine);
+});
+
+test('20. Finding 10: Foreign tax splits sharing account and tags aggregate before company-currency conversion', () => {
+  let db = seed();
+  const taxAcc = accountId(db, '251000');
+  const expAcc = search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const eurCurr = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(eurCurr);
+
+  // Rate where 1.40 EUR / 0.75 = 1.8666 -> 1.87 USD each (sum = 3.74 USD)
+  // but aggregate 2.80 EUR / 0.75 = 3.7333 -> 3.73 USD
+  db = write(db, 'res.currency', eurCurr.id, { rate_ids: [{ date: '2026-06-01', rate: 0.75 }] });
+
+  // Tax with two 50% splits sharing the same account and tags
+  const aggTax = create(db, 'account.tax', {
+    name: 'Agg Tax',
+    type_tax_use: 'purchase',
+    amount: 10,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 1601, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+      { id: 1602, repartition_type: 'tax', factor_percent: 50, account_id: taxAcc, tag_ids: [] },
+      { id: 1603, repartition_type: 'tax', factor_percent: 50, account_id: taxAcc, tag_ids: [] },
+    ],
+  });
+  db = aggTax.db;
+
+  // Base foreign line: 28 EUR -> 10% tax is 2.80 EUR (two splits of 1.40 EUR each)
+  const lines = computeEntryTaxLines(
+    [{ account_id: expAcc.id, debit: 37.33, credit: 0, currency_id: eurCurr.id, amount_currency: 28, tax_ids: [aggTax.id] }],
+    { move_type: 'entry', company_id: 1, date: '2026-06-01' },
+    db,
+  );
+
+  const taxLines = lines.filter((l) => l.tax_id === aggTax.id);
+  // Aggregated split converts 2.80 EUR -> 3.73 USD (not 3.74 USD)
+  const totalTaxCompany = taxLines.reduce((sum, l) => sum + (Number(l.debit) || 0), 0);
+  assert.equal(totalTaxCompany, 3.73, 'aggregated conversion produces 3.73 USD without 1-cent discrepancy');
+});
+
+test('21. Finding 11: Neutral tax on credit base sets tax_side to sale so taxesByGrid reports positive sign', () => {
+  let db = seed();
+  const baseTag = create(db, 'account.account.tag', { name: 'Neutral Base Grid Tag', applicability: 'taxes' });
+  db = baseTag.db;
+  const taxTag = create(db, 'account.account.tag', { name: 'Neutral Tax Grid Tag', applicability: 'taxes' });
+  db = taxTag.db;
+
+  const taxAcc = accountId(db, '251000');
+  const revAcc = search(db, 'account.account').find((a) => a.account_type === 'income');
+  const cashAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_cash' || a.account_type === 'asset_current');
+
+  const neutralTax = create(db, 'account.tax', {
+    name: 'Neutral Tax 10%',
+    type_tax_use: 'none',
+    amount: 10,
+    amount_type: 'percent',
+    invoice_repartition_line_ids: [
+      { id: 1701, repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [baseTag.id] },
+      { id: 1702, repartition_type: 'tax', factor_percent: 100, account_id: taxAcc, tag_ids: [taxTag.id] },
+    ],
+  });
+  db = neutralTax.db;
+
+  // Credit base entry: credit 1000 on revenue, tax credit 100 on taxAcc, cash debit 1100
+  const res = create(db, 'account.move', {
+    move_type: 'entry',
+    date: '2026-06-01',
+    line_ids: [
+      { account_id: revAcc.id, debit: 0, credit: 1000, tax_ids: [neutralTax.id] },
+      { account_id: cashAcc.id, debit: 1100, credit: 0 },
+    ],
+  });
+  db = postMove(res.db, res.id);
+
+  const posted = read(db, 'account.move', res.id);
+  assert.equal(posted.state, 'posted');
+
+  const creditBaseLine = posted.line_ids.find((l) => l.account_id === revAcc.id);
+  const creditTaxLine = posted.line_ids.find((l) => l.tax_id === neutralTax.id);
+  assert.equal(creditBaseLine.tax_side, 'sale', 'credit base line gets tax_side: sale');
+  assert.equal(creditTaxLine.tax_side, 'sale', 'credit tax line gets tax_side: sale');
+
+  // Check taxesByGrid: both base and tax amounts should be strictly positive (sale grid convention)
+  const grid = taxesByGrid(db);
+  const baseRow = grid.find((r) => r.id === baseTag.id);
+  const taxRow = grid.find((r) => r.id === taxTag.id);
+  assert.ok(baseRow, 'base grid row found');
+  assert.ok(taxRow, 'tax grid row found');
+  assert.equal(baseRow.base, 1000, 'credit base appears positive in tax grid');
+  assert.equal(taxRow.tax, 100, 'credit tax appears positive in tax grid');
 });

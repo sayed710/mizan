@@ -3347,6 +3347,7 @@ const ar = {
   Metric: 'المؤشر',
   'Include in Analytic Cost': 'تضمين في التكلفة التحليلية',
   'Tax Repartition Line': 'بند توزيع الضريبة',
+  'Base Line Key': 'مفتاح البند الأساسي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

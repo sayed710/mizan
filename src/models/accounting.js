@@ -656,7 +656,23 @@ export function postMove(db, id, { autoPost = false } = {}) {
   const journalRecord = resolveDocumentJournal(db, r, { required: true });
   const journal = journalRecord.id;
   if (!isInvoice(r)) {
-  if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
+    if (r.move_type === 'entry') {
+      r = { ...r, line_ids: computeEntryTaxLines(r.line_ids, r, db) };
+    }
+    if (r.fiscal_position_id) {
+      const fp = read(db, 'account.fiscal.position', r.fiscal_position_id);
+      if (fp?.company_id && fp.company_id !== (r.company_id ?? 1)) {
+        throw new Error('Fiscal position belongs to another company');
+      }
+    }
+    for (const line of r.line_ids ?? []) {
+      const taxIds = (line.tax_ids ?? []).filter(Boolean);
+      if (line.tax_id) taxIds.push(line.tax_id);
+      if (taxIds.length) {
+        validateTaxCompany(db, taxIds, r.company_id ?? 1, r.fiscal_position_id);
+      }
+    }
+    if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
   if (!journalRecord.code?.trim()) throw new Error('Set a short code on the journal');
     const year = (r.invoice_date ?? r.date ?? today()).slice(0, 4);
     const name = enteredName ?? nextName(db, 'account.move', `${journalRecord.code}/${year}/`);
@@ -1698,13 +1714,18 @@ function updateBaseLineTags(line, move, db) {
   const credit = Number(line.credit) || 0;
   const baseSide = debit >= credit ? 'debit' : 'credit';
   const allBaseTags = new Set();
+  let firstTax = null;
   for (const id of taxIds) {
     const tax = read(db, 'account.tax', id);
     if (!tax) continue;
+    if (!firstTax) firstTax = tax;
     const side = entryTaxRepartitionSide(tax, baseSide);
     for (const tagId of taxBaseTags(tax, side)) allBaseTags.add(tagId);
   }
-  return { ...line, tax_tag_ids: [...allBaseTags].sort((a, b) => a - b) };
+  const reportingTaxSide = (firstTax?.type_tax_use === 'sale' || firstTax?.type_tax_use === 'purchase')
+    ? firstTax.type_tax_use
+    : (baseSide === 'credit' ? 'sale' : 'purchase');
+  return { ...line, tax_tag_ids: [...allBaseTags].sort((a, b) => a - b), tax_side: reportingTaxSide };
 }
 
 /** Compute and sync tax lines on manual journal entry lines (move_type 'entry'). */
@@ -1716,28 +1737,56 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
   const roundingMethod = companyRoundingMethod(db, companyId);
   const moveDate = move.date ?? move.invoice_date ?? today();
 
-  const baseLines = [];
-  const existingTaxLines = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    if (l.tax_repartition_line_id != null || l.tax_id != null) {
-      existingTaxLines.push(l);
-    } else {
-      let baseLine = { ...l };
-      if (baseLine.account_id && baseLine.tax_ids === undefined) {
-        baseLine.tax_ids = accountDefaultTaxIds(db, read(db, 'account.account', baseLine.account_id), companyId);
-      }
-      baseLines.push(baseLine);
+  if (move.fiscal_position_id) {
+    const fp = read(db, 'account.fiscal.position', move.fiscal_position_id);
+    if (fp?.company_id && fp.company_id !== companyId) {
+      throw new Error('Fiscal position belongs to another company');
     }
   }
 
-  const matchedTaxLineIndexes = new Set();
-  const resultLines = [];
+  const existingTaxLinesByBaseKey = new Map();
+  for (const l of lines) {
+    if (l.tax_base_line_key && (l.tax_repartition_line_id != null || l.tax_id != null)) {
+      const k = String(l.tax_base_line_key);
+      if (!existingTaxLinesByBaseKey.has(k)) existingTaxLinesByBaseKey.set(k, []);
+      existingTaxLinesByBaseKey.get(k).push(l);
+    }
+  }
 
-  for (let bIdx = 0; bIdx < baseLines.length; bIdx++) {
-    const baseLine = baseLines[bIdx];
+  const resultLines = [];
+  let baseCount = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+
+    // Case 1: Generated tax line - skip; will be regenerated with its base line
+    if (l.tax_base_line_key && (l.tax_repartition_line_id != null || l.tax_id != null)) {
+      continue;
+    }
+
+    // Case 2: Manual tax item (Finding 4) - preserve as-is
+    if (!l.tax_base_line_key && (l.tax_repartition_line_id != null || (l.tax_id != null && !Array.isArray(l.tax_ids)))) {
+      resultLines.push(l);
+      continue;
+    }
+
+    // Case 3: Base line
+    baseCount += 1;
+    let baseLine = { ...l };
+
+    const baseKey = baseLine.line_id
+      || (baseLine.id != null ? String(baseLine.id) : null)
+      || (baseLine.tax_base_line_key ? String(baseLine.tax_base_line_key) : null)
+      || `b_${baseCount}`;
+
+    baseLine.tax_base_line_key = baseKey;
+
+    const existingForBase = existingTaxLinesByBaseKey.get(baseKey) ?? [];
     const taxIds = (baseLine.tax_ids ?? []).filter(Boolean);
+    if (taxIds.length) {
+      validateTaxCompany(db, taxIds, companyId, move.fiscal_position_id);
+    }
+
     const debit = Number(baseLine.debit) || 0;
     const credit = Number(baseLine.credit) || 0;
     const baseSide = debit >= credit ? 'debit' : 'credit';
@@ -1746,104 +1795,213 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
     const isForeign = Boolean(baseLine.currency_id && companyCurrencyRec && baseLine.currency_id !== companyCurrencyRec.id);
     const docCurrency = (isForeign && baseLine.currency_id) ? read(db, 'res.currency', baseLine.currency_id) : companyCurrencyRec;
     const foreignAmount = isForeign && baseLine.amount_currency != null ? Math.abs(Number(baseLine.amount_currency) || 0) : null;
+    const docAmount = (isForeign && foreignAmount != null) ? foreignAmount : baseAmount;
 
-    if (!taxIds.length || (baseAmount === 0 && (foreignAmount === null || foreignAmount === 0))) {
-      const updatedBase = { ...baseLine, tax_tag_ids: taxIds.length ? (baseLine.tax_tag_ids ?? []) : [] };
+    if (!taxIds.length || docAmount === 0) {
+      const hadTaxGeneratedTags = existingForBase.length > 0 || Boolean(baseLine.tax_grid_base);
+      const updatedBase = {
+        ...baseLine,
+        tax_tag_ids: hadTaxGeneratedTags ? [] : (baseLine.tax_tag_ids ?? []),
+        tax_grid_base: hadTaxGeneratedTags ? false : (baseLine.tax_grid_base ?? false),
+      };
       resultLines.push(updatedBase);
       continue;
     }
 
+    const hasPriceIncludeTax = taxIds.some((id) => read(db, 'account.tax', id)?.price_include);
+    let grossDocAmount = docAmount;
+    if (hasPriceIncludeTax && existingForBase.length) {
+      const existingPriceInclDoc = existingForBase.reduce((sum, el) => {
+        const tRec = read(db, 'account.tax', el.tax_id);
+        if (!tRec?.price_include) return sum;
+        const amt = isForeign
+          ? Math.abs(Number(el.amount_currency) || 0)
+          : (Number(el.debit) || Number(el.credit) || 0);
+        return sum + amt;
+      }, 0);
+      grossDocAmount += existingPriceInclDoc;
+    }
+
+    // Finding 9: group taxes by resolved side
+    const taxesBySide = new Map();
+    for (const id of taxIds) {
+      const tax = read(db, 'account.tax', id);
+      if (!tax) continue;
+      const s = entryTaxRepartitionSide(tax, baseSide);
+      if (!taxesBySide.has(s)) taxesBySide.set(s, []);
+      taxesBySide.get(s).push(id);
+    }
+
+    const allBaseTags = new Set();
+    const rawSplits = [];
+    let totalUntaxedDoc = grossDocAmount;
+    let hasPriceInclude = false;
+
+    for (const [side, groupTaxIds] of taxesBySide) {
+      const expanded = expandTaxIds(db, groupTaxIds, move.fiscal_position_id);
+      const lineObj = {
+        qty: 1,
+        price_unit: grossDocAmount,
+        discount: 0,
+        tax_ids: groupTaxIds,
+        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id)),
+      };
+
+      const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
+
+      if (computed.untaxed < grossDocAmount) {
+        hasPriceInclude = true;
+        totalUntaxedDoc -= (grossDocAmount - computed.untaxed);
+      }
+
+      for (const t of computed.taxes) {
+        const taxRec = read(db, 'account.tax', t.tax_id);
+        for (const tagId of taxBaseTags(t, side, lineObj)) {
+          allBaseTags.add(tagId);
+        }
+
+        const { splits } = taxRepartitionSplits(t, lineObj, side, docCurrency);
+        for (const split of splits) {
+          const { row, amount: splitDocAmount, base: splitDocBase } = split;
+
+          let taxAccountId;
+          if (t.tax_cash_basis) {
+            taxAccountId = cashBasisTransitionAccount(db, t.tax_id, companyId);
+          } else if (row.account_id) {
+            const mapped = mapAccount(db, move.fiscal_position_id, row.account_id);
+            taxAccountId = resolveCompanyAccount(db, mapped, companyId) ?? mapped;
+          } else {
+            taxAccountId = baseLine.account_id;
+          }
+
+          const taxTagIds = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
+          const analytic = (taxRec?.analytic && baseLine.analytic_distribution)
+            ? baseLine.analytic_distribution
+            : null;
+
+          // Finding 11: neutral tax reporting tax_side follows base direction
+          const reportingTaxSide = (t.type_tax_use === 'sale' || t.type_tax_use === 'purchase')
+            ? t.type_tax_use
+            : (baseSide === 'credit' ? 'sale' : 'purchase');
+
+          rawSplits.push({
+            t,
+            taxRec,
+            row,
+            taxAccountId,
+            taxTagIds,
+            analytic,
+            splitDocAmount,
+            splitDocBase, // Finding 1: direct base, including zero
+            reportingTaxSide,
+          });
+        }
+      }
+    }
+
+    // Finding 5 & 11: update base line
+    const baseTags = [...allBaseTags].sort((a, b) => a - b);
     const firstTax = read(db, 'account.tax', taxIds[0]);
-    const side = entryTaxRepartitionSide(firstTax, baseSide);
+    const baseReportingSide = (firstTax?.type_tax_use === 'sale' || firstTax?.type_tax_use === 'purchase')
+      ? firstTax.type_tax_use
+      : (baseSide === 'credit' ? 'sale' : 'purchase');
 
-    const expanded = expandTaxIds(db, taxIds, move.fiscal_position_id);
-    const lineObj = {
-      qty: 1,
-      price_unit: (isForeign && foreignAmount != null) ? foreignAmount : baseAmount,
-      discount: 0,
-      tax_ids: taxIds,
-      tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id)),
-    };
-
-    const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
-
-    const baseTags = [...new Set(computed.taxes.flatMap((t) => {
-      const taxRec = read(db, 'account.tax', t.tax_id);
-      const tSide = entryTaxRepartitionSide(taxRec, baseSide);
-      return taxBaseTags(t, tSide, lineObj);
-    }))].sort((a, b) => a - b);
+    const roundedUntaxedDoc = roundCurrency(totalUntaxedDoc, docCurrency);
+    const untaxedCompany = hasPriceInclude
+      ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, moveDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
+      : baseAmount;
 
     const updatedBase = {
       ...baseLine,
+      debit: baseSide === 'debit' ? (hasPriceInclude ? untaxedCompany : baseLine.debit) : 0,
+      credit: baseSide === 'credit' ? (hasPriceInclude ? untaxedCompany : baseLine.credit) : 0,
       tax_tag_ids: baseTags,
       tax_grid_base: baseTags.length > 0,
-      ...(firstTax?.type_tax_use ? { tax_side: firstTax.type_tax_use } : {}),
+      tax_side: baseReportingSide,
+      ...(isForeign && hasPriceInclude ? {
+        amount_currency: baseSide === 'debit' ? roundedUntaxedDoc : -roundedUntaxedDoc,
+      } : {}),
     };
     resultLines.push(updatedBase);
 
-    for (let tIdx = 0; tIdx < computed.taxes.length; tIdx++) {
-      const t = computed.taxes[tIdx];
-      const taxRec = read(db, 'account.tax', t.tax_id);
-      const tSide = entryTaxRepartitionSide(taxRec, baseSide);
-
-      const { splits } = taxRepartitionSplits(t, lineObj, tSide, docCurrency);
-
-      for (let sIdx = 0; sIdx < splits.length; sIdx++) {
-        const { row, amount: splitDocAmount, base: splitDocBase } = splits[sIdx];
-        const taxAmount = isForeign
-          ? toCompany(db, baseLine.currency_id, splitDocAmount, moveDate, companyId)
-          : splitDocAmount;
-        const taxBase = isForeign
-          ? toCompany(db, baseLine.currency_id, splitDocBase, moveDate, companyId)
-          : (splitDocBase || baseAmount);
-
-        let taxAccountId;
-        if (t.tax_cash_basis) {
-          taxAccountId = cashBasisTransitionAccount(db, t.tax_id, companyId);
-        } else if (row.account_id) {
-          const mapped = mapAccount(db, move.fiscal_position_id, row.account_id);
-          taxAccountId = resolveCompanyAccount(db, mapped, companyId) ?? mapped;
-        } else {
-          taxAccountId = baseLine.account_id;
-        }
-
-        const analytic = (taxRec?.analytic && baseLine.analytic_distribution)
-          ? baseLine.analytic_distribution
-          : null;
-        const taxTagIds = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
-
-        const existingIdx = existingTaxLines.findIndex((cand, idx) => {
-          if (matchedTaxLineIndexes.has(idx)) return false;
-          return cand.tax_id === t.tax_id && (cand.tax_repartition_line_id == null || row.id == null || cand.tax_repartition_line_id === row.id);
+    // Finding 10: aggregate splits sharing taxAccountId, tax_id, taxTagIds, reportingTaxSide
+    const splitGroups = new Map();
+    for (const split of rawSplits) {
+      const key = `${split.taxAccountId}|${split.t.tax_id ?? ''}|${split.taxTagIds.join(',')}|${split.reportingTaxSide}`;
+      if (!splitGroups.has(key)) {
+        splitGroups.set(key, {
+          ...split,
+          docAmount: 0,
+          docBase: 0,
+          rows: [],
         });
-
-        const existing = existingIdx >= 0 ? existingTaxLines[existingIdx] : null;
-        if (existingIdx >= 0) matchedTaxLineIndexes.add(existingIdx);
-
-        const taxLine = {
-          ...(existing ?? {}),
-          account_id: taxAccountId,
-          partner_id: baseLine.partner_id ?? move.partner_id ?? null,
-          name: t.name || t.tax_name || taxLabel(t),
-          debit: baseSide === 'debit' ? taxAmount : 0,
-          credit: baseSide === 'credit' ? taxAmount : 0,
-          tax_id: t.tax_id,
-          tax_name: t.name || t.tax_name || taxLabel(t),
-          tax_repartition_line_id: row.id ?? null,
-          tax_base: taxBase,
-          tax_tag_ids: taxTagIds,
-          ...(t.type_tax_use ? { tax_side: t.type_tax_use } : (firstTax?.type_tax_use ? { tax_side: firstTax.type_tax_use } : {})),
-          ...(analytic && Object.keys(analytic).length ? { analytic_distribution: analytic } : {}),
-          ...(isForeign ? {
-            currency_id: baseLine.currency_id,
-            amount_currency: baseSide === 'debit' ? splitDocAmount : -splitDocAmount,
-          } : {}),
-        };
-        if (!analytic || !Object.keys(analytic).length) {
-          delete taxLine.analytic_distribution;
-        }
-        resultLines.push(taxLine);
       }
+      const g = splitGroups.get(key);
+      g.docAmount += split.splitDocAmount;
+      g.docBase += split.splitDocBase;
+      g.rows.push(split.row);
+    }
+
+    const matchedIndexesForBase = new Set();
+
+    for (const g of splitGroups.values()) {
+      const taxAmount = isForeign
+        ? toCompany(db, baseLine.currency_id, g.docAmount, moveDate, companyId)
+        : roundCurrency(g.docAmount, companyCurrencyRec);
+
+      const taxBase = isForeign
+        ? (g.docBase === 0 ? 0 : toCompany(db, baseLine.currency_id, g.docBase, moveDate, companyId))
+        : (g.docBase === 0 ? 0 : roundCurrency(g.docBase, companyCurrencyRec));
+
+      // Finding 6: debit/credit choice uses base direction and split sign; amounts non-negative
+      const splitSign = Math.sign(g.docAmount) < 0 ? -1 : 1;
+      const effectiveSide = splitSign === 1
+        ? baseSide
+        : (baseSide === 'debit' ? 'credit' : 'debit');
+
+      const absTaxAmount = Math.abs(taxAmount);
+      const absDocAmount = roundCurrency(Math.abs(g.docAmount), docCurrency);
+
+      const existingIdx = existingForBase.findIndex((cand, idx) => {
+        if (matchedIndexesForBase.has(idx)) return false;
+        return cand.tax_id === g.t.tax_id && (cand.tax_repartition_line_id == null || g.row.id == null || cand.tax_repartition_line_id === g.row.id);
+      });
+      const existing = existingIdx >= 0 ? existingForBase[existingIdx] : null;
+      if (existingIdx >= 0) matchedIndexesForBase.add(existingIdx);
+
+      const cleanExisting = { ...(existing ?? {}) };
+      // Finding 8: clear stale currency fields
+      delete cleanExisting.currency_id;
+      delete cleanExisting.amount_currency;
+
+      const taxLine = {
+        ...cleanExisting,
+        account_id: g.taxAccountId,
+        partner_id: baseLine.partner_id ?? move.partner_id ?? null,
+        name: g.t.name || g.t.tax_name || taxLabel(g.t),
+        debit: effectiveSide === 'debit' ? absTaxAmount : 0,
+        credit: effectiveSide === 'credit' ? absTaxAmount : 0,
+        tax_id: g.t.tax_id,
+        tax_name: g.t.name || g.t.tax_name || taxLabel(g.t),
+        tax_repartition_line_id: g.row.id ?? null,
+        tax_base: taxBase,
+        tax_tag_ids: g.taxTagIds,
+        tax_side: g.reportingTaxSide,
+        tax_base_line_key: baseKey, // Finding 4: explicit provenance
+        ...(g.analytic && Object.keys(g.analytic).length ? { analytic_distribution: g.analytic } : {}),
+        ...(isForeign ? {
+          currency_id: baseLine.currency_id,
+          amount_currency: effectiveSide === 'debit' ? absDocAmount : -absDocAmount,
+        } : {}),
+      };
+      if (!g.analytic || !Object.keys(g.analytic).length) {
+        delete taxLine.analytic_distribution;
+      }
+      if (!isForeign) {
+        delete taxLine.currency_id;
+        delete taxLine.amount_currency;
+      }
+      resultLines.push(taxLine);
     }
   }
 
@@ -1885,6 +2043,7 @@ const lineItem = {
     tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', hidden: true },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
     tax_repartition_line_id: { type: 'integer', label: 'Tax Repartition Line', hidden: true },
+    tax_base_line_key: { type: 'char', label: 'Base Line Key', hidden: true },
   },
   onchange: (line, key, db, move, _context = {}) => {
     let updated = { ...line };
@@ -2484,6 +2643,27 @@ export const accountingModels = {
     label: 'Invoices',
     auditDelete: true,
     actions: { postAutoPostMoves },
+    prepareCreate: (db, vals) => {
+      let nextVals = { ...vals };
+      if (nextVals.move_type === 'entry' && (!nextVals.state || nextVals.state === 'draft') && Array.isArray(nextVals.line_ids)) {
+        nextVals.line_ids = computeEntryTaxLines(nextVals.line_ids, nextVals, db);
+      }
+      return { db, vals: nextVals };
+    },
+    prepareWrite: (db, vals, before) => {
+      let nextVals = { ...vals };
+      const moveType = nextVals.move_type ?? before.move_type;
+      const state = nextVals.state ?? before.state;
+      if (moveType === 'entry' && state === 'draft') {
+        const touches = ['line_ids', 'date', 'invoice_date', 'currency_id'].some((k) => k in nextVals);
+        if (touches) {
+          const effectiveMove = { ...before, ...nextVals };
+          const lines = nextVals.line_ids ?? before.line_ids ?? [];
+          nextVals.line_ids = computeEntryTaxLines(lines, effectiveMove, db);
+        }
+      }
+      return { db, vals: nextVals };
+    },
     guard: (db, before, after, ctx) => {
       const roundingTarget = (m) => ({ id: m.invoice_cash_rounding_id, companyId: m.company_id ?? 1, currencyId: m.currency_id ?? findCompanyCurrencyRecord(db, m.company_id ?? 1)?.id });
       const roundingErr = cashRoundingError(db, roundingTarget(after), before && roundingTarget(before));
@@ -2614,8 +2794,10 @@ export const accountingModels = {
           } : {}),
         };
       }
-      if (r.move_type === 'entry' && key === 'date') return { invoice_date: r.date };
-      if (r.move_type === 'entry' && key === 'line_ids') return { line_ids: computeEntryTaxLines(r.line_ids, r, db) };
+      if (r.move_type === 'entry') {
+        if (key === 'date') return { invoice_date: r.date, line_ids: computeEntryTaxLines(r.line_ids, r, db) };
+        if (key === 'line_ids' || key === 'currency_id') return { line_ids: computeEntryTaxLines(r.line_ids, r, db) };
+      }
       if (key === 'invoice_date') {
         if (r.invoice_payment_term_id) return termDue(db, r);
         const prev = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null);
