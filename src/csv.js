@@ -107,7 +107,7 @@ export function extractTableCellText(cellNode) {
 }
 
 // Named entities an HTML serializer (innerHTML) or XML writer emits; anything else is spelled as a numeric reference.
-const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '00A0' };
 /** Decode HTML/XML entities in one pass (named and numeric), so "&amp;lt;" stays the literal text "&lt;". */
 export function decodeEntities(text) {
   return String(text ?? '').replace(/&(?:(amp|lt|gt|quot|apos|nbsp)|#(\d+)|#x([0-9a-f]+));/gi, (match, name, dec, hex) => {
