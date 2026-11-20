@@ -117,10 +117,13 @@ export function decodeEntities(text) {
   });
 }
 
-/** Plain text of an HTML fragment: tags removed until none are left, then entities decoded once. */
+/**
+ * Plain text of an HTML fragment: tags removed until none are left, then entities decoded once. Like an HTML parser, a
+ * "<" only opens a tag when a letter, "/", "!" or "?" follows it, so literal text such as "2 < 3 > 1" is kept.
+ */
 export function htmlToText(html) {
   let text = String(html ?? '');
-  for (let prev = null; prev !== text;) { prev = text; text = text.replace(/<[^>]*>/g, ''); }
+  for (let prev = null; prev !== text;) { prev = text; text = text.replace(/<[a-zA-Z/!?][^>]*>/g, ''); }
   return decodeEntities(text);
 }
 
