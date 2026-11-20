@@ -368,3 +368,191 @@ test('migration adds seeded payment methods and default lines to existing bank a
   // Idempotent on re-run
   assert.equal(migrate(migrated), migrated);
 });
+
+test('Bug 1: default internal transfers can be confirmed and preserve chosen method line', () => {
+  let db = seed();
+  const transferAcc = create(db, 'account.account', {
+    code: '101450',
+    name: 'Internal Transfers',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+
+  // 1. Create internal transfer with default payment_type ('inbound')
+  const transfer = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    journal_id: bank.id,
+    destination_journal_id: cash.id,
+    amount: 100,
+    date: '2026-01-20',
+  });
+  db = transfer.db;
+  const initial = read(db, 'account.payment', transfer.id);
+  assert.equal(initial.payment_type, 'inbound');
+
+  // Confirm / post payment
+  assert.doesNotThrow(() => {
+    db = postPayment(db, initial);
+  });
+  const sourcePosted = read(db, 'account.payment', transfer.id);
+  assert.equal(sourcePosted.state, 'posted');
+  assert.equal(sourcePosted.payment_type, 'outbound');
+  assert.ok(sourcePosted.payment_method_line_id);
+  const sourceLine = read(db, 'account.payment.method.line', sourcePosted.payment_method_line_id);
+  assert.equal(sourceLine.journal_id, bank.id);
+  assert.equal(sourceLine.payment_type, 'outbound');
+
+  // 2. Transfer with an explicit chosen outbound line (e.g. Checks) preserves that line when posted
+  const checkLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing',
+  );
+  assert.ok(checkLine);
+  const transfer2 = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    payment_type: 'outbound',
+    journal_id: bank.id,
+    destination_journal_id: cash.id,
+    payment_method_line_id: checkLine.id,
+    amount: 50,
+    date: '2026-01-21',
+  });
+  db = transfer2.db;
+  db = postPayment(db, read(db, 'account.payment', transfer2.id));
+  const posted2 = read(db, 'account.payment', transfer2.id);
+  assert.equal(posted2.payment_method_line_id, checkLine.id, 'preserves chosen outbound line');
+});
+
+test('Bug 2: existing draft bank payments can be posted after migration upgrade', () => {
+  const base = seed();
+  const bank = search(base, 'account.journal').find((j) => j.code === 'BNK1');
+  const draftPayId = 9876;
+  const legacyDb = {
+    ...base,
+    schema_version: 60,
+    records: {
+      ...base.records,
+      'account.payment.method': [],
+      'account.payment.method.line': [],
+      'account.payment': [
+        ...(base.records['account.payment'] ?? []),
+        {
+          id: draftPayId,
+          name: '/',
+          payment_type: 'inbound',
+          partner_type: 'customer',
+          partner_id: 1,
+          journal_id: bank.id,
+          amount: 150,
+          date: '2026-01-15',
+          state: 'draft',
+          company_id: 1,
+        },
+      ],
+    },
+    seq: {
+      ...base.seq,
+      'account.payment.method': 0,
+      'account.payment.method.line': 0,
+      'account.payment': Math.max(base.seq['account.payment'] ?? 0, draftPayId),
+    },
+  };
+
+  const migrated = migrate(legacyDb);
+  const migratedPay = read(migrated, 'account.payment', draftPayId);
+  assert.ok(migratedPay.payment_method_line_id, 'migrated draft payment has payment_method_line_id');
+  assert.doesNotThrow(() => {
+    postPayment(migrated, migratedPay);
+  });
+});
+
+test('Bug 3: editing a journal does not delete its archived method lines', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const outLines = bank.outbound_payment_method_line_ids;
+  assert.ok(outLines.length >= 2);
+  const lineToArchive = outLines[1];
+
+  // Archive the line
+  db = write(db, 'account.payment.method.line', lineToArchive.id, { active: false });
+  const archivedBefore = search(db, 'account.payment.method.line', { includeArchived: true }).find((l) => l.id === lineToArchive.id);
+  assert.equal(archivedBefore.active, false);
+
+  // Read journal's visible method lines
+  const visibleOutLines = read(db, 'account.journal', bank.id).outbound_payment_method_line_ids;
+  assert.ok(!visibleOutLines.some((l) => l.id === lineToArchive.id));
+
+  // Edit the journal with visible lines
+  db = write(db, 'account.journal', bank.id, {
+    outbound_payment_method_line_ids: [
+      { ...visibleOutLines[0], name: 'Manual Outbound Renamed' },
+    ],
+  });
+
+  // Archived line must not have been deleted
+  const archivedAfter = search(db, 'account.payment.method.line', { includeArchived: true }).find((l) => l.id === lineToArchive.id);
+  assert.ok(archivedAfter, 'archived method line must still exist');
+  assert.equal(archivedAfter.active, false);
+});
+
+test('Bug 4: journal method line edits and new journals are saved through applyDiff', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const inLine = bank.inbound_payment_method_line_ids[0];
+  const outLines = bank.outbound_payment_method_line_ids;
+
+  const extraAccount = create(db, 'account.account', {
+    code: '101477',
+    name: 'Diff Method Line Account',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: 1,
+  });
+  db = extraAccount.db;
+
+  // 1. Edit method lines via applyDiff
+  const diff = {
+    upserts: {
+      'account.journal': [{
+        ...read(db, 'account.journal', bank.id),
+        inbound_payment_method_line_ids: [
+          { ...inLine, name: 'Custom Inbound Name' },
+        ],
+        outbound_payment_method_line_ids: [
+          { ...outLines[0], name: 'Custom Outbound Manual', payment_account_id: extraAccount.id },
+          outLines[1],
+        ],
+      }],
+    },
+  };
+  const synced = applyDiff(db, diff);
+  const syncedBank = read(synced, 'account.journal', bank.id);
+  assert.equal(syncedBank.inbound_payment_method_line_ids[0].name, 'Custom Inbound Name');
+  assert.equal(syncedBank.outbound_payment_method_line_ids[0].name, 'Custom Outbound Manual');
+  assert.equal(syncedBank.outbound_payment_method_line_ids[0].payment_account_id, extraAccount.id);
+
+  // 2. New bank journal via applyDiff gets default method lines
+  const newJournalDiff = {
+    upserts: {
+      'account.journal': [{
+        id: 9988,
+        name: 'Diff Bank',
+        code: 'DBK',
+        type: 'bank',
+        company_id: 1,
+        default_account_id: bank.default_account_id,
+        suspense_account_id: bank.suspense_account_id,
+        bank_statements_source: 'undefined',
+      }],
+    },
+  };
+  const syncedWithNew = applyDiff(synced, newJournalDiff);
+  const newBank = read(syncedWithNew, 'account.journal', 9988);
+  assert.equal(newBank.inbound_payment_method_line_ids.length, 1);
+  assert.equal(newBank.outbound_payment_method_line_ids.length, 2);
+});
+

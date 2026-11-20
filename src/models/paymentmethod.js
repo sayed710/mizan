@@ -1,5 +1,5 @@
 import { create, read, search, unlink, write } from '../orm.js';
-import { isReconcilableAccount } from './ledger.js';
+import { defaultPaymentJournalId, isReconcilableAccount } from './ledger.js';
 import { currentCompany } from './company.js';
 
 export const SEEDED_PAYMENT_METHODS = [
@@ -161,6 +161,16 @@ export function migratePaymentMethods(db) {
       next = ensureJournalDefaultMethodLines(next, journal);
     }
   }
+  // Payments created before method lines existed get their journal's default line, so they can still be posted.
+  const payments = (next.records?.['account.payment'] ?? []).map((p) => {
+    if (p.payment_method_line_id) return p;
+    const jId = p.journal_id ?? defaultPaymentJournalId(next, p.company_id ?? 1);
+    const journal = jId ? read(next, 'account.journal', jId) : null;
+    if (!journal || !isMethodLineJournal(journal)) return p;
+    const lineId = defaultPaymentMethodLineId(next, journal.id, p.payment_type ?? 'inbound');
+    return lineId ? { ...p, payment_method_line_id: lineId } : p;
+  });
+  if (payments.length) next = { ...next, records: { ...next.records, 'account.payment': payments } };
   return next;
 }
 
@@ -211,10 +221,10 @@ export function methodLineOnchange(line, key, db) {
 function validateJournalLinesForDirection(db, journal, lines, direction) {
   if (!Array.isArray(lines)) return 'Invalid payment method lines';
   if (lines.length > 0 && !isMethodLineJournal(journal)) return 'Payment method lines are only valid for bank and cash journals';
-  const existing = search(db, 'account.payment.method.line', { includeArchived: true }).filter(
+  const existingAll = search(db, 'account.payment.method.line', { includeArchived: true }).filter(
     (l) => l.journal_id === journal.id && l.payment_type === direction,
   );
-  const existingIds = new Set(existing.map((l) => l.id));
+  const existingIds = new Set(existingAll.map((l) => l.id));
   const seenIds = new Set();
   for (const line of lines) {
     if (!line || typeof line !== 'object' || Array.isArray(line)) return 'Invalid payment method line';
@@ -232,7 +242,8 @@ function validateJournalLinesForDirection(db, journal, lines, direction) {
     const accErr = paymentAccountError(db, line.payment_account_id, journal.company_id ?? 1);
     if (accErr) return accErr;
   }
-  for (const oldLine of existing) {
+  const existingActive = existingAll.filter((l) => l.active !== false);
+  for (const oldLine of existingActive) {
     if (!seenIds.has(oldLine.id)) {
       const blocked = protectMethodLineDelete(db, oldLine);
       if (blocked) return blocked;
@@ -281,11 +292,11 @@ const stripJournalMethodLineFields = (db, journalId) => ({
 
 function syncDirectionLines(db, journal, lines, direction) {
   let next = db;
-  const existing = search(next, 'account.payment.method.line', { includeArchived: true }).filter(
+  const existingActive = search(next, 'account.payment.method.line').filter(
     (l) => l.journal_id === journal.id && l.payment_type === direction,
   );
   const keepIds = new Set(lines.map((l) => l.id).filter(Boolean));
-  const removeIds = existing.filter((l) => !keepIds.has(l.id)).map((l) => l.id);
+  const removeIds = existingActive.filter((l) => !keepIds.has(l.id)).map((l) => l.id);
   if (removeIds.length) next = unlink(next, 'account.payment.method.line', removeIds);
   for (const line of lines) {
     const payload = {

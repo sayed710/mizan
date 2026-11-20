@@ -370,16 +370,27 @@ export function postPayment(db, p) {
     const name = explicitName ?? paymentName(recDb, sourceJournal, date, read(recDb, 'account.move', sourceMoveId).name);
     const destName = paymentName(recDb, destJournal, date, read(recDb, 'account.move', destMoveId).name);
 
+    const existingPaired = p.paired_internal_transfer_payment_id ? read(recDb, 'account.payment', p.paired_internal_transfer_payment_id) : null;
+    const existingDestLine = existingPaired?.payment_method_line_id ? read(recDb, 'account.payment.method.line', existingPaired.payment_method_line_id) : null;
+    const destMethodLineId = (existingDestLine && existingDestLine.journal_id === destJournal.id && existingDestLine.payment_type === 'inbound')
+      ? existingDestLine.id
+      : defaultPaymentMethodLineId(recDb, destJournal.id, 'inbound');
+
     const destVals = {
       name: destName, payment_type: 'inbound', partner_type: null, partner_id: null, is_internal_transfer: true,
       journal_id: destJournal.id, destination_journal_id: sourceJournal.id, amount: p.amount, currency_id: p.currency_id ?? null,
       date, memo: p.memo || null, state: 'posted', move_id: destMoveId, destination_move_id: sourceMoveId,
       outstanding_account_id: destOutstanding, unapplied: 0, company_id: companyId, paired_internal_transfer_payment_id: p.id,
+      payment_method_line_id: destMethodLineId,
     };
-    const existingPaired = p.paired_internal_transfer_payment_id ? read(recDb, 'account.payment', p.paired_internal_transfer_payment_id) : null;
     const created = existingPaired?.state === 'draft' ? null : create(recDb, 'account.payment', destVals);
     const destPaymentId = created ? created.id : existingPaired.id;
     const withDestPayment = created ? created.db : write(recDb, 'account.payment', destPaymentId, destVals);
+
+    const currentMethodLine = p.payment_method_line_id ? read(withDestPayment, 'account.payment.method.line', p.payment_method_line_id) : null;
+    const sourceMethodLineId = (currentMethodLine && currentMethodLine.journal_id === sourceJournal.id && currentMethodLine.payment_type === 'outbound')
+      ? currentMethodLine.id
+      : defaultPaymentMethodLineId(withDestPayment, sourceJournal.id, 'outbound');
 
     return write(withDestPayment, 'account.payment', p.id, {
       name,
@@ -393,6 +404,7 @@ export function postPayment(db, p) {
       outstanding_account_id: sourceOutstanding,
       unapplied: 0,
       paired_internal_transfer_payment_id: destPaymentId,
+      payment_method_line_id: sourceMethodLineId,
     });
   }
 
