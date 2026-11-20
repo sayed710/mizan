@@ -1047,7 +1047,7 @@ export function invoiceCurrencyAmount(db, r, amount, date = today(), currencyId 
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber, memo, currencyId, paymentAmount, partnerBankId, settleAmount = null, excessAmount = null } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null, checkNumber, memo, currencyId, paymentAmount, partnerBankId, paymentMethodLineId, settleAmount = null, excessAmount = null } = {}) {
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
@@ -1099,7 +1099,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const counterpartCode = invoiceCounterpartAccount(db, r);
   const via = paymentJournal(db, payJournal, r.company_id ?? 1);
   const journal = read(db, 'account.journal', via.id);
-  const methodLineId = payRec?.payment_method_line_id ?? defaultPaymentMethodLineId(db, via.id, sale ? 'inbound' : 'outbound');
+  const chosenMethodLineId = paymentMethodLineId ?? null;
+  const methodLineId = payRec?.payment_method_line_id ?? chosenMethodLineId ?? defaultPaymentMethodLineId(db, via.id, sale ? 'inbound' : 'outbound');
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale, methodLineId);
   const liquidity = liquidityAccountId ?? outstanding ?? via.accountId;
   const allocatedPay = isForeignPayment ? paymentCurrencyAmount(db, r, value, date, payCurrId) : value;
@@ -1685,6 +1686,7 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
     ...(opts.currencyId ? { currencyId: opts.currencyId } : {}),
     ...(paymentAmount != null ? { paymentAmount } : {}),
     ...(opts.partnerBankId ? { partnerBankId: opts.partnerBankId } : {}),
+    ...(opts.paymentMethodLineId ? { paymentMethodLineId: opts.paymentMethodLineId } : {}),
     ...(opts.settleAmount != null ? { settleAmount: opts.settleAmount } : {}),
     ...(opts.excessAmount != null ? { excessAmount: opts.excessAmount } : {}),
   });
@@ -2991,6 +2993,16 @@ export const accountingModels = {
         onchange: methodLineOnchange,
       },
       check_next_number: { type: 'integer', label: 'Next Check Number' },
+      check_manual_sequencing: { type: 'boolean', label: 'Manual Numbering' },
+      check_printing_layout: {
+        type: 'selection',
+        label: 'Check Layout',
+        options: [
+          ['top', 'Top'],
+          ['middle', 'Middle'],
+          ['bottom', 'Bottom'],
+        ],
+      },
       bank_account_id: {
         type: 'many2one', relation: 'res.partner.bank', label: 'Bank Account Number',
         domain: (b, j, db) => {
@@ -3040,6 +3052,7 @@ export const accountingModels = {
     defaults: () => ({
       type: 'general', active: true, sequence: 10,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
+      check_manual_sequencing: false, check_printing_layout: 'top',
     }),
     prepareCreate: (db, vals) => {
       let nextVals = { ...vals };
@@ -3159,7 +3172,7 @@ export const accountingModels = {
           { label: 'Journal Entries', groups: entryGroups },
           ...(liquidity ? [
             { label: 'Incoming Payments', ...(cashOrBank ? { fields: ['inbound_payment_method_line_ids'] } : {}), groups: [['outstanding_receipts_account_id']] },
-            { label: 'Outgoing Payments', ...(cashOrBank ? { fields: ['outbound_payment_method_line_ids'] } : {}), groups: [['outstanding_payments_account_id', 'check_next_number']] },
+            { label: 'Outgoing Payments', ...(cashOrBank ? { fields: ['outbound_payment_method_line_ids'] } : {}), groups: [['outstanding_payments_account_id', 'check_next_number', 'check_manual_sequencing', 'check_printing_layout']] },
           ] : []),
           ...(advancedGroups.length ? [{ label: 'Advanced Settings', groups: advancedGroups }] : []),
         ];

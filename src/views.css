@@ -55,10 +55,23 @@
 .paper-qr { margin: 16px 0 0; display: inline-flex; flex-direction: column; align-items: center; gap: 4px; }
 .paper-qr svg { background: #fff; }
 .paper-foot { margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px; font-size: 12px; text-align: center; }
+.paper.check { min-height: 1000px; display: flex; flex-direction: column; box-sizing: border-box; }
+.paper.check.check-layout-bottom { display: flex; flex-direction: column; justify-content: flex-end; }
+.paper.check.check-layout-bottom .check-main-area { margin-top: auto; }
+.paper.check.check-layout-middle { display: flex; flex-direction: column; justify-content: space-between; }
+.paper.check.check-layout-top { display: flex; flex-direction: column; justify-content: flex-start; }
+.check-main-area.void { display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+.check-void-watermark { font-size: 48px; font-weight: 800; letter-spacing: 12px; color: #888; margin: 24px 0; }
+@page check { size: letter; margin: 0.25in; }
 @media print {
   .no-print { display: none !important; }
   .print-page { background: #fff; padding: 0; }
   .paper { box-shadow: none; padding: 0; max-width: none; min-height: 0; }
+  /* One check per Letter sheet: 11in minus the 0.25in top and bottom margins of the check page. */
+  .paper.check { page: check; min-height: 10.5in; height: 10.5in; break-inside: avoid; }
+  .paper.check:not(:last-child) { break-after: page; }
+  .paper.check.check-layout-bottom { display: flex; flex-direction: column; justify-content: flex-end; }
+  .paper.check.check-layout-bottom .check-main-area { margin-top: auto; }
 }
 
 .company-switch { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: var(--surface); }

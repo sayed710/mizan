@@ -620,7 +620,17 @@ export function fxProvenanceError(db, entry) {
 
 /** A posted payment must have its own posted journal entry, booked for its partner. */
 export function paymentInvariant(db, after) {
-  if (after.check_number != null && (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound' || (after.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number) || (db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && (p.check_number === after.check_number || (p.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number))))) return 'Check number must be unique within its journal';
+  if (after.check_number != null) {
+    if (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound') {
+      return 'Check number must be unique within its journal';
+    }
+    if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && (p.check_number === after.check_number || (p.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number)))) {
+      return 'Check number must be unique within its journal';
+    }
+  }
+  if ((after.voided_check_numbers ?? []).some((v) => (db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && (p.check_number === v.check_number || (p.voided_check_numbers ?? []).some((pv) => pv.check_number === v.check_number))))) {
+    return 'Check number must be unique within its journal';
+  }
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
