@@ -1259,8 +1259,13 @@ export function reprintCheck(db, payment) {
   if (p.check_number == null || p.payment_type !== 'outbound') throw new Error('Only issued checks can be reprinted');
   if (p.state !== 'posted') throw new Error('Only posted checks can be reprinted');
   const number = nextCheckNumber(db, p.journal_id);
-  const voided_check_numbers = [...(p.voided_check_numbers ?? []), { check_number: p.check_number, date: today() }];
-  let next = write(db, 'account.payment', p.id, { check_number: number, voided_check_numbers });
+  const isAlreadyVoided = (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
+  let next = db;
+  if (!isAlreadyVoided) {
+    const voided_check_numbers = [...(p.voided_check_numbers ?? []), { check_number: p.check_number, date: today() }];
+    next = write(next, 'account.payment', p.id, { voided_check_numbers });
+  }
+  next = write(next, 'account.payment', p.id, { check_number: number });
   for (const batch of (next.records['account.batch.payment'] ?? []).filter((b) => b.lines?.some((l) => l.payment_id === p.id))) {
     next = write(next, 'account.batch.payment', batch.id, { lines: batch.lines.map((l) => l.payment_id === p.id ? { ...l, check_number: number } : l) });
   }
@@ -1412,7 +1417,7 @@ const validCheckWrite = (db, before, after) => {
     return JSON.stringify(priorVoided) === JSON.stringify(nextVoided) || (!beforeVoided && appendsVoidOf(priorVoided, nextVoided, before.check_number));
   }
   if (before.state !== 'posted' || after.state !== 'posted' || after.payment_type !== 'outbound') return false;
-  return beforeVoided ? JSON.stringify(priorVoided) === JSON.stringify(nextVoided) : appendsVoidOf(priorVoided, nextVoided, before.check_number);
+  return beforeVoided && JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
 };
 
 const paymentMethodGuard = (db, before, after) => {

@@ -12,7 +12,7 @@ import { postCompanyDeferrals } from './models/deferred.js';
 import { disposeAsset, postDepreciation } from './models/assets.js';
 import { agedBalance, followUps, followUpCompanies } from './models/finance.js';
 import { postBatch, checkRegisterRows } from './models/payments.js';
-import { reversePayment } from './models/pay.js';
+import { reversePayment, printBatchChecks } from './models/pay.js';
 
 const button = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -670,6 +670,7 @@ test('Area C: Terms, partial payment, aging by due date, early discount, follow-
     ],
   });
   db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+  db = printBatchChecks(db, batch.id);
 
   const postedBatch = read(db, 'account.batch.payment', batch.id);
   assert.equal(postedBatch.lines[0].check_number, 501);
@@ -711,6 +712,7 @@ test('Area C: Terms, partial payment, aging by due date, early discount, follow-
     lines: [{ move_id: bill3.id, amount: 200 }],
   });
   db = postBatch(batch2.db, read(batch2.db, 'account.batch.payment', batch2.id));
+  db = printBatchChecks(db, batch2.id);
   const postedBatch2 = read(db, 'account.batch.payment', batch2.id);
   assert.equal(postedBatch2.lines[0].check_number, 503, 'Next check number must skip already used/cancelled numbers (501, 502) and be 503');
 });

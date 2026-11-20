@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { isBalanced } from './models/ledger.js';
 import { seed } from './seed.js';
@@ -40,25 +40,30 @@ test('an inbound batch fills the open invoices and pays them all in full', () =>
   assert.ok(search(db, 'account.move').filter((m) => m.state === 'posted' && (m.ref ?? '').startsWith('Payment ')).every((m) => isBalanced(m.line_ids)));
 });
 
-test('an outbound batch numbers checks from the first check number and prints', () => {
+test('an outbound batch numbers checks from journal check_next_number at print', () => {
   let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  db = write(db, 'account.journal', bank.id, { check_next_number: 5000 });
   const first = invoice(db, 'in_invoice');
   const second = invoice(first.db, 'in_invoice');
   db = second.db;
   const due = (id) => read(db, 'account.move', id).amount_residual;
   const { db: withBatch, id } = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
-    check_number_start: 5000,
+    journal_id: bank.id,
     lines: [{ move_id: first.id, amount: due(first.id) }, { move_id: second.id, amount: due(second.id) }],
   });
   db = run(withBatch, 'account.batch.payment', id, 'Validate');
-  const batch = read(db, 'account.batch.payment', id);
+  let batch = read(db, 'account.batch.payment', id);
   assert.equal(batch.state, 'posted');
   assert.equal(batch.name, 'BATCH-OUT/00001');
-  assert.deepEqual(batch.lines.map((l) => l.check_number), [5000, 5001]);
+  assert.deepEqual(batch.lines.map((l) => l.check_number), [null, null]);
   assert.ok(batch.lines.every((l) => read(db, 'account.move', l.move_id).amount_residual === 0));
   const printed = button('account.batch.payment', 'Print Checks').run(db, batch);
-  assert.equal(printed.db, db);
+  db = printed.db;
+  batch = read(db, 'account.batch.payment', id);
+  assert.deepEqual(batch.lines.map((l) => l.check_number), [5000, 5001]);
+  assert.equal(read(db, 'account.journal', bank.id).check_next_number, 5002);
   assert.equal(printed.go, '#/print/account.batch.payment/' + id);
 });
 
@@ -82,11 +87,14 @@ test('an empty batch cannot be validated', () => {
   assert.throws(() => postBatch(withBatch, read(withBatch, 'account.batch.payment', id)), /at least one/);
 });
 
-test('an outbound batch without a first check number is refused', () => {
+test('an outbound batch does not require a check number at validation', () => {
   const { db, id } = invoice(seed(), 'in_invoice');
   const due = read(db, 'account.move', id).amount_residual;
   const { db: withBatch, id: batchId } = create(db, 'account.batch.payment', { batch_type: 'outbound', lines: [{ move_id: id, amount: due }] });
-  assert.throws(() => postBatch(withBatch, read(withBatch, 'account.batch.payment', batchId)), /first check number/);
+  const validated = postBatch(withBatch, read(withBatch, 'account.batch.payment', batchId));
+  const batch = read(validated, 'account.batch.payment', batchId);
+  assert.equal(batch.state, 'posted');
+  assert.equal(batch.lines[0].check_number, null);
 });
 
 test('amountInWords writes cheque-style amounts up to 999,999,999.99', () => {

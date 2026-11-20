@@ -8,6 +8,7 @@ import { accountId, isBalanced } from './models/ledger.js';
 import { confirmAsset, depreciationBoard, disposeAsset, modifyAsset, postDepreciation } from './models/assets.js';
 import { discountAvailable, payWithDiscount, postMove } from './models/accounting.js';
 import { postBatch } from './models/payments.js';
+import { printBatchChecks } from './models/pay.js';
 import { taxSnapshot } from './models/taxes.js';
 import { followUps, partnerFollowUp, updatePartnerFollowUp } from './models/finance.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
@@ -393,6 +394,7 @@ test('reprinting a check voids the old number, takes the next free one and never
     db = postMove(bill.db, bill.id);
     const batch = create(db, 'account.batch.payment', { batch_type: 'outbound', journal_id: journal.id, date: '2026-01-02', lines: [{ move_id: bill.id, amount: 100 }] });
     db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+    db = printBatchChecks(db, batch.id);
     return { batchId: batch.id, ...read(db, 'account.batch.payment', batch.id).lines[0] };
   };
   const first = issue();

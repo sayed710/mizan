@@ -13,6 +13,7 @@ import { postMove, payMove } from './models/accounting.js';
 import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { journalAudit } from './models/journal_audit.js';
 import { checkRegisterRows } from './models/payments.js';
+import { printCheck, printBatchChecks } from './models/pay.js';
 
 test('payment terms reject an incomplete percentage split', () => {
   assert.throws(() => installments({ line_ids: [{ value_type: 'percent', value: 10 }, { value_type: 'percent', value: 10 }] }, 1000, '2026-01-01'), /100%/);
@@ -141,17 +142,32 @@ test('check register includes issued checks and voided reprints alongside batch 
     return read(db, 'account.move', bill.id);
   };
   const bankJournal = search(db, 'account.journal').find((journal) => journal.code === 'BNK1');
+  db = write(db, 'account.journal', bankJournal.id, { check_next_number: 9100 });
   const batchBill = makeBill();
   const batch = create(db, 'account.batch.payment', {
-    batch_type: 'outbound', date: today(), journal_id: bankJournal.id, check_number_start: 9100,
+    batch_type: 'outbound', date: today(), journal_id: bankJournal.id,
     lines: [{ move_id: batchBill.id, amount: batchBill.amount_residual }],
   });
   const validate = models['account.batch.payment'].form.buttons.find((button) => button.label === 'Validate');
   db = validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db;
+  const printChecks = models['account.batch.payment'].form.buttons.find((button) => button.label === 'Print Checks');
+  db = printChecks.run(db, read(db, 'account.batch.payment', batch.id)).db;
 
   const individualBill = makeBill();
-  db = payMove(db, individualBill.id, read(db, 'account.move', individualBill.id).amount_residual, today(), { journalId: bankJournal.id, checkNumber: 9200 });
-  const individualPayment = search(db, 'account.payment').find((payment) => payment.move_id === read(db, 'account.move', individualBill.id).payments.at(-1).move_id);
+  const checkLine = bankJournal.outbound_payment_method_line_ids?.find((l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing');
+  db = write(db, 'account.journal', bankJournal.id, { check_next_number: 9200 });
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: vendor.id,
+    amount: individualBill.amount_residual,
+    journal_id: bankJournal.id,
+    payment_method_line_id: checkLine.id,
+  });
+  db = payMove(draftPay.db, individualBill.id, individualBill.amount_residual, today(), { paymentId: draftPay.id, journalId: bankJournal.id });
+  const printCheckBtn = models['account.payment'].form.buttons.find((button) => button.label === 'Print Check');
+  db = printCheckBtn.run(db, read(db, 'account.payment', draftPay.id)).db;
+  const individualPayment = read(db, 'account.payment', draftPay.id);
   const reprint = models['account.payment'].form.buttons.find((button) => button.label === 'Reprint Check');
   db = reprint.run(db, individualPayment).db;
 
