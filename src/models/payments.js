@@ -201,7 +201,6 @@ export function postBatch(db, batch) {
     name,
     state: 'posted',
     company_id: company,
-    journal_id: batch.journal_id ?? journal.id,
     lines: linked,
   });
 }
