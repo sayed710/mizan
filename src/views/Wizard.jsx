@@ -64,6 +64,26 @@ function WizardField({ db, field, value, values, onChange, id, disabled = false 
   return <FieldInput db={db} field={field} value={value} onChange={onChange} id={id} label={t(field.label)} disabled={disabled} />;
 }
 
+/** Escape closes a modal dialog; Tab/Shift+Tab keeps keyboard focus inside `container`. */
+export function handleDialogKeyDown(e, container, onClose) {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    onClose?.();
+    return;
+  }
+  if (e.key !== 'Tab' || !container) return;
+  const focusable = [...container.querySelectorAll('input, select, textarea, button')].filter((el) => !el.disabled);
+  if (!focusable.length) return;
+  const [first, last] = [focusable[0], focusable.at(-1)];
+  if (e.shiftKey && (document.activeElement === first || !container.contains?.(document.activeElement))) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (document.activeElement === last || !container.contains?.(document.activeElement))) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
 export function Wizard({ db, spec, onConfirm, onCancel, error }) {
   const [state, setState] = useState(() => {
     const init = wizardDefaults(spec);
@@ -115,14 +135,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
     if (!empty.length) onConfirm(values);
   };
   // Escape closes; Tab stays inside the dialog.
-  const onKeyDown = (e) => {
-    if (e.key === 'Escape') { e.stopPropagation(); onCancel(); }
-    if (e.key !== 'Tab') return;
-    const focusable = [...box.current.querySelectorAll('input, select, textarea, button')].filter((el) => !el.disabled);
-    const [first, last] = [focusable[0], focusable.at(-1)];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  };
+  const onKeyDown = (e) => handleDialogKeyDown(e, box.current, onCancel);
   return (
     <div className="wizard-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <form ref={box} className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title" onSubmit={submit} onKeyDown={onKeyDown}>

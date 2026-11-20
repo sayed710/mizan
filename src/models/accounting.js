@@ -1891,12 +1891,12 @@ function unbalancedEntryWarning(db, r) {
 }
 
 /** Whether a move can be reset back to draft under Mizan's settlement, hash, bank, and lock rules. */
-function canResetMove(r, db) {
+function canResetMove(r, db, ctx = null) {
   if (!r || r.state === 'draft' || r.inalterable_hash || Number(r.amount_paid) > 0) return false;
   if (db && settlingEntries(db).has(r.id)) return false;
   if (r.move_type === 'entry' && db) {
     if (bookedByBank(db, r.id)) return false;
-    const lock = recordLockDate(db, r);
+    const lock = recordLockDate(db, r, ctx);
     if (lock && moveDate(r) <= lock) return false;
   }
   return true;
@@ -2502,8 +2502,8 @@ export const accountingModels = {
       }
       return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
     },
-    invariant: (db, after, before, stored) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before, stored),
-    protectDelete: (db, m, staged) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
+    invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
+    protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
