@@ -5,6 +5,8 @@ import { configurableReport, findStatementReport } from './configurableReports.j
 import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
 import { round } from '../money.js';
+import { downloadCsv } from '../csv.js';
+import { downloadXlsx } from '../xlsx.js';
 
 function formatMoney(n) {
   return Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -105,6 +107,63 @@ function renderReportTable(title, reportData, tableClass, valueHeader) {
 ${bodyRows}
     </tbody>
   </table>`;
+}
+
+export function annualReportToRows(body) {
+  if (typeof document !== 'undefined') {
+    const div = document.createElement('div');
+    div.innerHTML = body || '';
+    const rows = [];
+    for (const tr of div.querySelectorAll('tr')) {
+      const cells = Array.from(tr.querySelectorAll('th, td')).map((c) => c.textContent.trim());
+      if (cells.length) rows.push(cells);
+    }
+    if (rows.length) return rows;
+  }
+  const rows = [];
+  const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const cellRegex = /<(?:td|th)[^>]*>([\s\S]*?)<\/(?:td|th)>/gi;
+  let trMatch;
+  while ((trMatch = trRegex.exec(body || '')) !== null) {
+    const cells = [];
+    let cellMatch;
+    while ((cellMatch = cellRegex.exec(trMatch[1])) !== null) {
+      cells.push(
+        cellMatch[1]
+          .replace(/<[^>]+>/g, '')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .trim(),
+      );
+    }
+    if (cells.length) rows.push(cells);
+  }
+  return rows;
+}
+
+function annualReportExportData(db, r) {
+  const current = read(db, 'audit.report', r.id) ?? r;
+  const body = current.body || renderAnnualReportHtml(db, {
+    start_date: current.start_date,
+    end_date: current.end_date,
+    company_id: current.company_id ?? 1,
+  });
+  const rows = annualReportToRows(body);
+  const baseName = String(current.title || 'annual_report').toLowerCase().replace(/\s+/g, '_');
+  return { rows, baseName };
+}
+
+export function exportAnnualReportXlsx(db, r) {
+  const { rows, baseName } = annualReportExportData(db, r);
+  return downloadXlsx(`${baseName}.xlsx`, rows, { sheetName: 'Annual Report' });
+}
+
+export function exportAnnualReportCsv(db, r) {
+  const { rows, baseName } = annualReportExportData(db, r);
+  return downloadCsv(`${baseName}.csv`, rows);
 }
 
 export function renderAnnualReportHtml(db, { start_date, end_date, company_id }) {
@@ -229,6 +288,24 @@ export const auditReportModels = {
           label: 'Reset to Draft',
           when: (r) => r.status === 'done',
           run: (db, r) => ({ db: write(db, 'audit.report', r.id, { status: 'draft' }) }),
+        },
+        {
+          label: 'Print',
+          run: (db, r) => ({ db, go: `#/print/audit.report/${r.id}` }),
+        },
+        {
+          label: 'Export CSV',
+          run: (db, r) => {
+            exportAnnualReportCsv(db, r);
+            return { db };
+          },
+        },
+        {
+          label: 'Export XLSX',
+          run: (db, r) => {
+            exportAnnualReportXlsx(db, r);
+            return { db };
+          },
         },
       ],
       chatter: true,

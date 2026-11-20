@@ -1,5 +1,5 @@
 // RFC 4180-style CSV: quoted fields, doubled quotes, CRLF/LF line breaks.
-import { models } from './models/index.js';
+import { models } from './registry.js';
 import { create, search } from './orm.js';
 import { fieldReadonly } from './field-metadata.js';
 import { t } from './i18n.js';
@@ -88,6 +88,23 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
   return { db: next, count };
 }
 
+/** Extract trimmed cell text from a TH/TD node, omitting UI-only carets and `.no-export` elements. */
+export function extractTableCellText(cellNode) {
+  let txt = '';
+  const isIgnored = (node) => node?.nodeType === 1 && (
+    node.className === 'caret'
+    || (typeof node.className === 'string' && node.className.split(' ').includes('no-export'))
+    || (node.tagName?.toUpperCase() === 'BUTTON' && (node.textContent === '▾' || node.textContent === '▸')));
+  const walk = (c) => {
+    if (!c || isIgnored(c)) return;
+    if (c.nodeType === 3) txt += c.nodeValue;
+    else if (c.childNodes && c.childNodes.length) c.childNodes.forEach(walk);
+    else if (c.textContent) txt += c.textContent;
+  };
+  walk(cellNode);
+  return txt.trim();
+}
+
 /** Extracts 2D array of string cells from a table element or tree. */
 export function tableToRows(table) {
   if (!table) return [];
@@ -97,26 +114,11 @@ export function tableToRows(table) {
     const tag = node.tagName?.toUpperCase();
     if (tag === 'TR') {
       const cells = [];
-      const extractText = (cellNode) => {
-        let txt = '';
-        const isIgnored = (node) => node?.nodeType === 1 && (
-          node.className === 'caret'
-          || (typeof node.className === 'string' && node.className.split(' ').includes('no-export'))
-          || (node.tagName?.toUpperCase() === 'BUTTON' && (node.textContent === '▾' || node.textContent === '▸')));
-        const walk = (c) => {
-          if (!c || isIgnored(c)) return;
-          if (c.nodeType === 3) txt += c.nodeValue;
-          else if (c.childNodes && c.childNodes.length) c.childNodes.forEach(walk);
-          else if (c.textContent) txt += c.textContent;
-        };
-        walk(cellNode);
-        return txt.trim();
-      };
       const findCells = (trChild) => {
         if (!trChild) return;
         const ctag = trChild.tagName?.toUpperCase();
         if (ctag === 'TH' || ctag === 'TD') {
-          cells.push(extractText(trChild));
+          cells.push(extractTableCellText(trChild));
           return;
         }
         for (const child of trChild.childNodes ?? []) findCells(child);

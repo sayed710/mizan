@@ -12,6 +12,7 @@ import { documentCompany, addressLines, documentTaxBreakdown } from '../models/c
 import { taxInvoiceLabel } from '../models/taxes.js';
 import { documentCurrency, formatCurrency } from '../money.js';
 import { invoiceTermNote } from '../models/terms.js';
+import { ReportPrintView } from './ReportPrintView.jsx';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
 function PaymentQr({ db, company, settings, move }) {
@@ -42,7 +43,7 @@ const LAYOUTS = {
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
 };
 
-export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment' || model === 'account.payment';
+export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment' || model === 'account.payment' || model === 'audit.report';
 
 /** One cheque per batch line: payee, date, number, amount in figures and in words. */
 function Checks({ db, batch }) {
@@ -235,6 +236,20 @@ export function PrintDoc({ model, id }) {
   if (rec && model === 'account.payment' && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
     const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
     return <Checks db={db} batch={batch} />;
+  }
+  if (rec && model === 'audit.report') {
+    const company = documentCompany(db, rec);
+    if (!company) return <main className="action"><p className="empty" role="alert">{t('Configure the document company before printing.')}</p></main>;
+    return (
+      <ReportPrintView
+        company={company}
+        title={rec.title}
+        subtitle={`${rec.start_date} → ${rec.end_date}`}
+        autoPrint={false}
+      >
+        <div className="annual-report-body" dangerouslySetInnerHTML={{ __html: rec.body }} />
+      </ReportPrintView>
+    );
   }
   if (!rec || !layout) return <main className="action"><p className="empty">{t('Record not found.')}</p></main>;
 

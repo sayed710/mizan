@@ -3092,6 +3092,8 @@ const ar = {
   'Reconciled entry and invoice must belong to the same company': 'يجب أن ينتمي القيد المسوّى والفاتورة إلى نفس الشركة',
   'The reconciled counterpart entry must remain posted': 'يجب أن يظل القيد المقابل المسوّى مرحّلاً',
   'Export CSV': 'تصدير CSV',
+  'Export XLSX': 'تصدير XLSX',
+  'Download XLSX': 'تنزيل XLSX',
   'Export XML': 'تصدير XML',
   'Tax Return Template': 'قالب الإقرار الضريبي',
   'Generic VAT Return': 'إقرار ضريبي عام',
