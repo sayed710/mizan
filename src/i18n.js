@@ -3471,6 +3471,9 @@ const ar = {
   'A draft payment cannot be linked to a posted journal entry': 'لا يمكن ربط دفعة في حالة مسودة بقيد يومية مرحل',
   'Paired Internal Transfer Payment': 'الدفعة المقترنة للتحويل الداخلي',
   'Reverse Entries': 'عكس القيود',
+  'Select at least one record first': 'اختر سجلًا واحدًا على الأقل أولًا',
+  'None of the selected records match the current filter': 'لا يطابق أي من السجلات المحددة عامل التصفية الحالي',
+  'A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode': 'يُعكس قيد الإهلاك فورًا: استخدم تاريخ اليوم أو تاريخًا سابقًا ووضع العكس',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

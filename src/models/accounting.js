@@ -804,6 +804,10 @@ function reverseOneEntry(db, r, values = {}) {
   if (r && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === r.id)) throw new Error('This entry has already been reversed');
   if (settlingEntries(db).has(r.id)) throw new Error('A settlement entry cannot be reversed directly');
   if (search(db, 'account.asset').some((a) => (a.depreciation_ids ?? []).some((l) => l.posted && l.move_id === r.id))) {
+    // Depreciation reversals reopen the board line at once, so they cannot be scheduled or turned into a new draft.
+    if (String(values.date ?? '') > today() || (values.mode ?? 'reverse') !== 'reverse') {
+      throw new Error('A depreciation entry is reversed immediately: use today or an earlier date and the Reverse mode');
+    }
     return { db: reverseDepreciation(db, r, values) };
   }
   const scheduled = values.scheduled ?? (String(values.date ?? '') > today());
@@ -2329,6 +2333,7 @@ export const journalEntriesView = {
   listActions: [
     {
       label: 'Reverse Entries',
+      requiresSelection: true,
       wizard: (db) => ({ title: 'Reverse Entries', fields: reversalWizardFields(null, db?.settings?.current_company_id ?? 1) }),
       run: (db, ids, values = {}) => reverseEntries(db, ids, values),
     },

@@ -153,7 +153,10 @@ export function ActionView({ leaf, base, params }) {
     <>
       {listActions.map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
         try {
-          const ids = selected.size ? records.filter((r) => selected.has(r.id)).map((r) => r.id) : records.map((r) => r.id);
+          const visibleSelection = records.filter((r) => selected.has(r.id)).map((r) => r.id);
+          // Actions that change each record never fall back to "every filtered record".
+          if (action.requiresSelection && !visibleSelection.length) throw new Error(selected.size ? 'None of the selected records match the current filter' : 'Select at least one record first');
+          const ids = selected.size ? visibleSelection : records.map((r) => r.id);
           if (!ids.length && !action.noSelection) return;
           if (action.wizard) {
             const spec = typeof action.wizard === 'function' ? action.wizard(getDb(), ids) : action.wizard;

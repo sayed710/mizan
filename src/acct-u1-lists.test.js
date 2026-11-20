@@ -365,3 +365,23 @@ test('JE-21: Journal Items header select-all checkbox selects every visible row 
     await React.act(async () => root.unmount());
   }
 });
+
+test('JE-20 (Qodo 1): Reverse Entries never falls back to every filtered entry', () => {
+  const action = journalEntriesView.listActions.find((a) => a.label === 'Reverse Entries');
+  assert.equal(action.requiresSelection, true);
+});
+
+test('JE-20 (Qodo 2): a depreciation entry cannot be scheduled or reversed into a new draft', async () => {
+  const { models } = await import('./registry.js');
+  const { assetAccounts } = await import('./test-support/asset-accounts.js');
+  const button = (model, label, db, id) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
+  let db = seed();
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', method: 'linear', method_number: 24, method_period: '1' });
+  db = button('account.asset', 'Confirm', asset.db, asset.id);
+  db = button('account.asset', 'Post Depreciation', db, asset.id);
+  const moveId = read(db, 'account.asset', asset.id).depreciation_ids[0].move_id;
+  assert.throws(() => reverseEntries(db, [moveId], { date: '2999-01-01' }), /reversed immediately/);
+  assert.throws(() => reverseEntries(db, [moveId], { mode: 'modify' }), /reversed immediately/);
+  const reversed = reverseEntries(db, [moveId], {});
+  assert.equal(read(reversed.db, 'account.asset', asset.id).depreciation_ids[0].posted, false);
+});
