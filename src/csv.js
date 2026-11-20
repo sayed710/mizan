@@ -106,6 +106,19 @@ export function extractTableCellText(cellNode) {
   return txt.trim();
 }
 
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" };
+/** Decode the basic HTML/XML entities in one pass, so "&amp;lt;" stays the literal text "&lt;". */
+export function decodeEntities(text) {
+  return String(text ?? '').replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name) => ENTITIES[name]);
+}
+
+/** Plain text of an HTML fragment: tags removed until none are left, then entities decoded once. */
+export function htmlToText(html) {
+  let text = String(html ?? '');
+  for (let prev = null; prev !== text;) { prev = text; text = text.replace(/<[^>]*>/g, ''); }
+  return decodeEntities(text);
+}
+
 const isNoExport = (node) => typeof node?.className === 'string' && node.className.split(' ').includes('no-export');
 
 /** The rows that belong to `table` itself: nested tables (e.g. expanded detail panels) and no-export rows are left out. */

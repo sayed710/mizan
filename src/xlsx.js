@@ -1,5 +1,5 @@
 // Zero-dependency OpenXML Spreadsheet (XLSX) writer and store-only ZIP generator.
-import { downloadBlob, extractTableCellText, fromCsv, rowCells, tableRows, tableToRows } from './csv.js';
+import { decodeEntities, downloadBlob, extractTableCellText, fromCsv, rowCells, tableRows, tableToRows } from './csv.js';
 import { parseAmount } from './models/common.js';
 
 const CRC_TABLE = (() => {
@@ -504,7 +504,7 @@ export function readXlsx(bytes) {
       let val = '';
       if (body.includes('<is><t>')) {
         const tMatch = body.match(/<is><t>([\s\S]*?)<\/t><\/is>/);
-        val = tMatch ? tMatch[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'") : '';
+        val = tMatch ? decodeEntities(tMatch[1]) : '';
       } else if (body.includes('<v>')) {
         const vMatch = body.match(/<v>([\s\S]*?)<\/v>/);
         const raw = vMatch ? vMatch[1] : '';

@@ -5,7 +5,7 @@ import { configurableReport, findStatementReport } from './configurableReports.j
 import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
 import { round } from '../money.js';
-import { downloadCsv } from '../csv.js';
+import { downloadCsv, htmlToText } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 
 function formatMoney(n) {
@@ -129,14 +129,7 @@ export function annualReportToRows(body) {
     let cellMatch;
     while ((cellMatch = cellRegex.exec(trMatch[1])) !== null) {
       cells.push(
-        cellMatch[1]
-          .replace(/<[^>]+>/g, '')
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'")
-          .trim(),
+        htmlToText(cellMatch[1]).trim(),
       );
     }
     if (cells.length) rows.push(cells);

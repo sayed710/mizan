@@ -903,3 +903,16 @@ test('Qodo PR #189: an expanded tax box detail table does not leak rows or text 
   const grid = extractTableGrid(table);
   assert.deepEqual(grid.rows, expected.map((r) => [...r, '', ''].slice(0, 2)));
 });
+
+test('CodeQL PR #189: exported text decodes entities once and strips nested tags', async () => {
+  const { annualReportToRows } = await import('./models/auditreport.js');
+  const { decodeEntities } = await import('./csv.js');
+  assert.equal(decodeEntities('A &amp;lt; B &amp;amp; C'), 'A &lt; B &amp; C');
+  const saved = globalThis.document;
+  delete globalThis.document;
+  try {
+    assert.deepEqual(annualReportToRows('<table><tr><td>R&amp;D &amp;lt;x&amp;gt;</td><td><<b>b</b>script>1</td></tr></table>'), [['R&D &lt;x&gt;', 'bscript>1']]);
+  } finally {
+    if (saved) globalThis.document = saved;
+  }
+});
