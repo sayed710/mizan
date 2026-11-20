@@ -172,8 +172,7 @@ test('account.tax form shows one Tax Group, conditional Child Taxes, Definition 
       'Base Affected by Previous Taxes',
       'Active',
       'Tax Exigibility',
-      'Cash Basis Transition Account',
-    ]);
+    ]); // TAX-15: the transition account shows only for taxes due on payment, group taxes included.
     assert.equal(allFind(ctx.host, (n) => hasClass(n, 'field') && n.childNodes[0]?.textContent?.trim() === 'Tax Group').length, 1);
   } finally {
     await ctx.done();
