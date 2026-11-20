@@ -33,6 +33,7 @@ import {
   defaultPaymentMethodLineId,
   isMethodLineJournal,
   journalMethodLineGuard,
+  METHOD_LINE_FIELDS,
   methodLineAccountDomain,
   methodLineOnchange,
   protectMethodLineDelete,
@@ -2810,6 +2811,15 @@ export const accountingModels = {
       type: 'general', active: true, sequence: 10,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
     }),
+    prepareCreate: (db, vals) => {
+      let nextVals = { ...vals };
+      for (const [field] of METHOD_LINE_FIELDS) {
+        if (Array.isArray(nextVals[field]) && nextVals[field].some((l) => l?.id != null && l.id !== '')) {
+          delete nextVals[field];
+        }
+      }
+      return { db, vals: nextVals };
+    },
     createDefaults: (db, vals = {}) => ({
       ...(isLiquidityJournal(vals) && vals.company_id === undefined ? { company_id: currentCompany(db) } : {}),
       ...(vals.payment_sequence === undefined ? { payment_sequence: isLiquidityJournal(vals) } : {}),

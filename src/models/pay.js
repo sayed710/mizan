@@ -1269,7 +1269,7 @@ const paymentMethodGuard = (db, before, after) => {
   if (err) return err;
   if (after.state === 'posted') {
     const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
-    const needsMethodLine = !journal || isMethodLineJournal(journal);
+    const needsMethodLine = Boolean(journal && isMethodLineJournal(journal));
     const transitioningToPosted = !before || before.state !== 'posted';
     const clearedMethodLine = before?.payment_method_line_id != null && !after.payment_method_line_id;
     if (needsMethodLine && !after.payment_method_line_id && (transitioningToPosted || clearedMethodLine)) {
@@ -1313,8 +1313,6 @@ export const payModels = {
     auditDelete: true,
     guard: (db, before, after, ctx) => {
       if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
-      const methodErr = paymentMethodGuard(db, before, after);
-      if (methodErr) return methodErr;
       if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && after.state === 'cancel'))) {
         const resetError = resetToDraftError(db, before, ctx);
         if (resetError) return resetError;
@@ -1337,12 +1335,25 @@ export const payModels = {
           return 'Accounting-defining fields of a posted transfer cannot be modified';
         }
       }
-      return datedLockGuard([
+      const lockErr = datedLockGuard([
         'name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id',
         'partner_type', 'journal_id', 'payment_method_line_id', 'move_id', 'destination_move_id', 'destination_journal_id',
         'is_internal_transfer', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active',
         'paired_internal_transfer_payment_id',
       ], (p) => p.state === 'posted')(db, before, after, ctx);
+      if (lockErr) return lockErr;
+
+      if ((!before && after.state === 'posted') || (after.state === 'posted' && after.move_id)) {
+        const entry = after.move_id ? (db.records['account.move'] ?? []).find((m) => m.id === after.move_id) : null;
+        if (!entry || entry.state !== 'posted' || entry.move_type !== 'entry') {
+          return 'A posted payment needs its posted journal entry';
+        }
+      }
+
+      const methodErr = paymentMethodGuard(db, before, after);
+      if (methodErr) return methodErr;
+
+      return null;
     },
     protectDelete: (db, payment, staged, ctx) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged, ctx),
     invariant: (db, after, before, stored) => (
@@ -1378,7 +1389,6 @@ export const payModels = {
         relation: 'account.payment.method.line',
         label: 'Payment Method',
         domain: (line, r) => Boolean(r?.journal_id) && line.journal_id === r.journal_id && line.payment_type === r.payment_type,
-        required: (r, db) => r?.state === 'posted' && (!r?.journal_id || !db || isMethodLineJournal(read(db, 'account.journal', r.journal_id))),
         hideWhen: (r, db) => Boolean(r?.journal_id) && db && !isMethodLineJournal(read(db, 'account.journal', r.journal_id)),
       },
       check_number: { type: 'integer', label: 'Check Number', readonly: true },

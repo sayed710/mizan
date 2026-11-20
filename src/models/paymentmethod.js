@@ -9,7 +9,7 @@ export const SEEDED_PAYMENT_METHODS = [
 ];
 
 const METHOD_LINE_JOURNAL_TYPES = ['bank', 'cash'];
-const METHOD_LINE_FIELDS = [
+export const METHOD_LINE_FIELDS = [
   ['inbound_payment_method_line_ids', 'inbound'],
   ['outbound_payment_method_line_ids', 'outbound'],
 ];
