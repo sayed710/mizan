@@ -1470,8 +1470,11 @@ export function journalItemIdentity({ reconciled: _reconciled, matching_number: 
   return JSON.stringify(line);
 }
 
-/** Journal items with their move date, optionally limited by review status, date and company. */
-export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
+/** Whether a move or journal item belongs in a report given `includeClosing` (shared by P&L, Trial Balance, and General Ledger). */
+export const includeClosingItem = (item, includeClosing = false) => includeClosing || !item?.is_closing;
+
+/** Journal items with their move date, optionally limited by review status, date, company, and closing flag. */
+export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted', includeClosing = true } = {}) {
   const targetCompany = company_id ?? company;
   const wantedState = reviewMode === 'draft' ? 'draft' : 'posted';
   const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
@@ -1481,6 +1484,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       const date = m.date ?? m.invoice_date;
       const stateOk = reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
       return stateOk
+      && includeClosingItem(m, includeClosing)
       && (!from || date >= from)
       && (!to || date <= to)
       && (!targetCompany || (m.company_id ?? 1) === targetCompany);
@@ -1612,7 +1616,7 @@ const sumTypes = (rows, types, sign = 1) => round(rows.filter((r) => types.inclu
 
 /** Profit & loss figures (income shown positive); year-end closing entries are left out unless asked for. */
 export function profitAndLoss(db, period, { includeClosing = false, weight, analyticAccountIds } = {}) {
-  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds).filter((l) => includeClosing || !l.is_closing);
+  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds).filter((l) => includeClosingItem(l, includeClosing));
   const rows = balances(db, weighted(items, weight));
   const revenue = sumTypes(rows, ['income'], -1);
   const cost = sumTypes(rows, ['expense_direct_cost']);
