@@ -958,6 +958,10 @@ function draftAssetsFromBill(db, bill) {
         method_number: model.method_number ?? 5,
         method_period: model.method_period ?? '12',
         method_progress_factor: model.method_progress_factor ?? 0.3,
+        method_mode: model.method_mode,
+        method_rate: model.method_rate,
+        prorata_computation_type: model.prorata_computation_type ?? (model.prorata ? 'daily_computation' : 'none'),
+        prorata_date: model.prorata_date,
         prorata: Boolean(model.prorata),
         account_depreciation_id: model.account_depreciation_id ?? null,
         account_depreciation_expense_id: model.account_depreciation_expense_id ?? null,
@@ -4128,9 +4132,10 @@ Object.assign(accountingModels, {
           ['linear', 'Linear'],
           ['degressive', 'Degressive'],
           ['degressive_then_linear', 'Degressive Then Linear'],
+          ['no_depreciation', 'No Depreciation'],
         ],
       },
-      method_number: { type: 'integer', label: 'Number of Depreciations', required: true },
+      method_number: { type: 'float', label: 'Number of Depreciations', required: true },
       method_period: {
         type: 'selection',
         label: 'Period Length',
@@ -4141,6 +4146,10 @@ Object.assign(accountingModels, {
         ],
       },
       method_progress_factor: { type: 'float', label: 'Degressive Factor' },
+      method_mode: { type: 'selection', label: 'Based On', options: [['duration', 'Duration'], ['rate', 'Rate']] },
+      method_rate: { type: 'float', label: 'Rate' },
+      prorata_computation_type: { type: 'selection', label: 'Computation', options: [['none', 'No Prorata'], ['constant_periods', 'Constant Periods'], ['daily_computation', 'Based on days per period']] },
+      prorata_date: { type: 'date', label: 'Prorata Date' },
       prorata: { type: 'boolean', label: 'Prorata Temporis' },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Asset Account' },
       account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
@@ -4149,13 +4158,18 @@ Object.assign(accountingModels, {
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
     },
-    defaults: () => ({ method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false }),
+    defaults: () => ({ method: 'linear', method_mode: 'duration', method_number: 5, method_rate: 0.2, method_period: '12', method_progress_factor: 0.3, prorata: false }),
+    onchange: (r, key) => {
+      if ((key === 'method_number' || key === 'method_mode') && r.method_mode !== 'rate' && Number(r.method_number) > 0) return { method_rate: 1 / Number(r.method_number) };
+      if ((key === 'method_rate' || key === 'method_mode') && r.method_mode === 'rate' && Number(r.method_rate) > 0) return { method_number: 1 / Number(r.method_rate) };
+      return {};
+    },
     list: ['name', 'method', 'method_number', 'method_period', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
     form: {
       title: 'name',
       groups: [
         ['name', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
-        ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution'],
+        ['method', 'method_mode', 'method_rate', 'method_number', 'method_period', 'method_progress_factor', 'prorata_computation_type', 'prorata_date', 'analytic_distribution'],
       ],
     },
   },

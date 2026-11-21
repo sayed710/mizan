@@ -3548,6 +3548,14 @@ const ar = {
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Computation': 'طريقة الحساب',
+  'No Prorata': 'دون احتساب نسبي',
+  'Constant Periods': 'فترات ثابتة',
+  'Based on days per period': 'حسب عدد أيام الفترة',
+  'Prorata Date': 'تاريخ الاحتساب النسبي',
+  'No Depreciation': 'دون إهلاك',
+  'Rate must be greater than zero and at most one': 'يجب أن يكون المعدل أكبر من الصفر وعلى الأكثر واحداً',
+  'The duration must be positive': 'يجب أن تكون المدة موجبة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

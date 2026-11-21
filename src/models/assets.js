@@ -17,6 +17,10 @@ export const IMMUTABLE_ASSET_FIELDS = [
   'method_period',
   'method_progress_factor',
   'prorata',
+  'prorata_computation_type',
+  'prorata_date',
+  'method_mode',
+  'method_rate',
   'already_depreciated',
   'company_id',
   'account_asset_id',
@@ -358,44 +362,63 @@ function periodEnd(y, m, yearly, i) {
 
 /** Share of the first period still ahead on the acquisition date (1 when prorata is off). */
 function firstFraction(asset, y, m, yearly) {
-  if (!asset.prorata) return 1;
+  const computation = asset.prorata_computation_type ?? (asset.prorata ? 'daily_computation' : 'none');
+  if (computation === 'none') return 1;
+  const date = asset.prorata_date || asset.acquisition_date;
+  if (computation === 'constant_periods') {
+    const [, month, day] = date.split('-').map(Number);
+    const endDay = Number(periodEnd(y, m, false, 0).slice(-2));
+    const monthFraction = (endDay - day + 1) / endDay;
+    return yearly ? (12 - month + monthFraction) / 12 : monthFraction;
+  }
   const start = yearly ? `${y}-01-01` : `${y}-${pad2(m)}-01`;
   const end = periodEnd(y, m, yearly, 0);
   const length = dayNumber(end) - dayNumber(start) + 1;
-  return (dayNumber(end) - dayNumber(asset.acquisition_date) + 1) / length;
+  return (dayNumber(end) - dayNumber(date) + 1) / length;
 }
 
 /** Depreciation lines dated at period ends; the last line absorbs rounding so the total equals the base. */
 export function depreciationBoard(asset, { periods: overridePeriods = null, dates = null, startDate = null, remainingBase = null, initialCumulated = null } = {}) {
-  const n = overridePeriods != null ? Number(overridePeriods) : Number(asset.method_number);
+  if (asset.method === 'no_depreciation') return [];
+  const n = overridePeriods != null ? Number(overridePeriods) : asset.method === 'linear' && asset.method_mode === 'rate' ? (String(asset.method_period) === '12' ? 1 : 12) / Number(asset.method_rate) : Number(asset.method_number);
   const yearly = String(asset.method_period) === '12';
   const anchor = dates?.length ? dates.at(-1) : startDate;
-  const [y, m] = (anchor || asset.acquisition_date || today()).split('-').map(Number);
+  const [y, m] = (anchor || asset.prorata_date || asset.acquisition_date || today()).split('-').map(Number);
   const base = remainingBase != null ? remainingBase : cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
   const frac = overridePeriods != null ? 1 : firstFraction(asset, y, m, yearly);
-  const periods = n + (frac < 1 ? 1 : 0);
+  const periods = Math.ceil(n + (frac < 1 ? 1 - frac : 0));
   const rate = (Number(asset.method_progress_factor) || 0) / (yearly ? 1 : 12);
   const method = asset.method || 'linear';
   let remaining = base;
   let cumulated = initialCumulated != null ? initialCumulated : cents(asset.already_depreciated);
+  const dailyStart = asset.prorata_date || asset.acquisition_date;
+  let dailyLength = 0;
+  if (overridePeriods == null && asset.prorata_computation_type === 'daily_computation' && method === 'linear') {
+    const end = new Date(`${dailyStart}T00:00:00Z`);
+    end.setUTCMonth(end.getUTCMonth() + Math.round(n * (yearly ? 12 : 1)));
+    dailyLength = dayNumber(end.toISOString().slice(0, 10)) - dayNumber(dailyStart);
+  }
   return Array.from({ length: periods }, (_, i) => {
     const elapsed = i === 0 ? 0 : frac + i - 1;
     const len = Math.min(i === 0 ? frac : 1, n - elapsed);
-    const linear = method === 'linear' ? Math.round((base / n) * len) : Math.round((remaining * len) / (n - elapsed));
+    const linear = Math.round((base / n) * len);
+    const remainingLinear = Math.round((remaining * len) / (n - elapsed));
     const declining = Math.round(remaining * rate * len);
-    const due = { linear, degressive: declining, degressive_then_linear: Math.max(declining, linear) }[method] ?? linear;
+    const offset = dates?.length ? i - dates.length + 1 : anchor ? i + 1 : i;
+    const date = dates?.[i] ?? periodEnd(y, m, yearly, offset);
+    const dailyDue = dailyLength ? Math.round(base * Math.min(dailyLength, dayNumber(date) - dayNumber(dailyStart) + 1) / dailyLength) - (base - remaining) : linear;
+    const due = { linear: dailyDue, degressive: Math.max(declining, remainingLinear), degressive_then_linear: Math.max(declining, linear) }[method] ?? linear;
     const amount = i === periods - 1 ? remaining : Math.min(remaining, due);
     remaining -= amount;
     cumulated += amount;
-    const offset = dates?.length ? i - dates.length + 1 : anchor ? i + 1 : i;
-    const date = dates?.[i] ?? periodEnd(y, m, yearly, offset);
     return { date, amount: amount / 100, cumulated: cumulated / 100, remaining: (cents(asset.original_value) - cumulated) / 100 };
-  });
+  }).filter((line) => line.amount !== 0);
 }
 
 function validate(db, asset) {
   if (!(Number(asset.original_value) > 0)) throw new Error('The original value must be positive');
-  if (!Number.isInteger(Number(asset.method_number)) || Number(asset.method_number) < 1) throw new Error('The duration must be at least 1 period');
+  if (asset.method === 'linear' && asset.method_mode === 'rate' && !(Number(asset.method_rate) > 0 && Number(asset.method_rate) <= 1)) throw new Error('Rate must be greater than zero and at most one');
+  if (!Number.isFinite(Number(asset.method_number)) || Number(asset.method_number) <= 0) throw new Error('The duration must be positive');
   if (!(Number(asset.salvage_value || 0) < Number(asset.original_value))) throw new Error('The not depreciable value must be lower than the original value');
   if (!Number.isFinite(Number(asset.already_depreciated ?? 0)) || Number(asset.already_depreciated ?? 0) < 0 || cents(asset.already_depreciated) > cents(asset.original_value) - cents(asset.salvage_value)) throw new Error('Depreciated at import must be between zero and the depreciable value');
   if (!asset.acquisition_date) throw new Error('Set an acquisition date');
@@ -673,11 +696,15 @@ export const assetModels = {
       original_value: { type: 'monetary', label: 'Original Value', readonly: readonlyWhenNotDraft },
       salvage_value: { type: 'monetary', label: 'Not Depreciable Value', readonly: readonlyWhenNotDraft },
       already_depreciated: { type: 'monetary', label: 'Depreciated at Import', readonly: readonlyWhenNotDraft },
-      method: { type: 'selection', label: 'Method', options: [['linear', 'Straight Line'], ['degressive', 'Declining'], ['degressive_then_linear', 'Declining then Straight Line']], readonly: readonlyWhenNotDraft },
-      method_number: { type: 'integer', label: 'Duration', readonly: readonlyWhenNotDraft },
+      method: { type: 'selection', label: 'Method', options: [['linear', 'Straight Line'], ['degressive', 'Declining'], ['degressive_then_linear', 'Declining then Straight Line'], ['no_depreciation', 'No Depreciation']], readonly: (r) => Boolean(r?.model_id) || readonlyWhenNotDraft(r) },
+      method_mode: { type: 'selection', label: 'Based On', options: [['duration', 'Duration'], ['rate', 'Rate']], readonly: readonlyWhenNotDraft },
+      method_rate: { type: 'float', label: 'Rate', readonly: readonlyWhenNotDraft },
+      method_number: { type: 'float', label: 'Duration', readonly: readonlyWhenNotDraft },
       method_period: { type: 'selection', label: 'Period', options: [['1', 'Months'], ['12', 'Years']], readonly: readonlyWhenNotDraft },
       method_progress_factor: { type: 'float', label: 'Declining Factor', readonly: readonlyWhenNotDraft },
       prorata: { type: 'boolean', label: 'Prorata Temporis', readonly: readonlyWhenNotDraft },
+      prorata_computation_type: { type: 'selection', label: 'Computation', options: [['none', 'No Prorata'], ['constant_periods', 'Constant Periods'], ['daily_computation', 'Based on days per period']], readonly: readonlyWhenNotDraft },
+      prorata_date: { type: 'date', label: 'Prorata Date', readonly: readonlyWhenNotDraft },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
       model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model', readonly: readonlyWhenNotDraft },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account', readonly: readonlyWhenNotDraft },
@@ -742,16 +769,27 @@ export const assetModels = {
       const company = vals?.company_id ?? (db ? currentCompany(db) : 1);
       const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
       const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
-      const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
+      const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'method_mode', 'method_rate', 'prorata', 'prorata_computation_type', 'prorata_date', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
       if (modelJournal) modelDefaults.journal_id = modelJournal;
       const defaultJournal = !vals?.journal_id && !modelDefaults.journal_id ? (journalId(db, 'MISC', company) ?? null) : null;
+      const computation = vals?.prorata_computation_type ?? (vals?.prorata !== undefined ? (vals.prorata ? 'daily_computation' : 'none') : modelDefaults.prorata_computation_type ?? (modelDefaults.prorata ? 'daily_computation' : 'none'));
+      const acquisition = vals?.acquisition_date || today();
+      const period = vals?.method_period ?? modelDefaults.method_period ?? '12';
+      const defaultDate = computation === 'none' ? `${acquisition.slice(0, period === '12' ? 4 : 7)}${period === '12' ? '-01-01' : '-01'}` : acquisition;
       return {
         company_id: company,
         ...(defaultJournal ? { journal_id: defaultJournal } : {}),
         ...modelDefaults,
+        prorata_computation_type: computation,
+        prorata_date: vals?.prorata_date ?? modelDefaults.prorata_date ?? defaultDate,
       };
     },
     onchange: (r, key, db) => {
+      if (['acquisition_date', 'prorata_computation_type', 'method_period'].includes(key) && r.acquisition_date) {
+        const computation = r.prorata_computation_type ?? (r.prorata ? 'daily_computation' : 'none');
+        const yearly = String(r.method_period) === '12';
+        return { prorata_date: computation === 'none' ? `${r.acquisition_date.slice(0, yearly ? 4 : 7)}${yearly ? '-01-01' : '-01'}` : r.acquisition_date };
+      }
       if (key === 'company_id') {
         const company = r.company_id ?? 1;
         const currentJournal = r.journal_id ? read(db, 'account.journal', r.journal_id) : null;
@@ -768,6 +806,10 @@ export const assetModels = {
             method_number: model.method_number ?? r.method_number,
             method_period: model.method_period ?? r.method_period,
             method_progress_factor: model.method_progress_factor ?? r.method_progress_factor,
+            method_mode: model.method_mode ?? r.method_mode,
+            method_rate: model.method_rate ?? r.method_rate,
+            prorata_computation_type: model.prorata_computation_type ?? (model.prorata ? 'daily_computation' : 'none'),
+            prorata_date: model.prorata_date ?? r.prorata_date,
             prorata: model.prorata !== undefined ? model.prorata : r.prorata,
             account_asset_id: model.account_asset_id ?? r.account_asset_id,
             account_depreciation_id: model.account_depreciation_id ?? r.account_depreciation_id,
@@ -838,7 +880,7 @@ export const assetModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution', 'disposal_date', 'sale_value']],
+      groups: [['model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'], ['method', 'method_mode', 'method_rate', 'method_number', 'method_period', 'method_progress_factor', 'prorata_computation_type', 'prorata_date', 'analytic_distribution', 'disposal_date', 'sale_value']],
       tabs: [{ label: 'Depreciation Board', fields: ['depreciation_ids', 'cancelled_depreciation_ids'] }],
       chatter: true,
     },
