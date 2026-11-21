@@ -3548,6 +3548,12 @@ const ar = {
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Not Started': 'لم يبدأ',
+  'Before': 'قبل',
+  'Current': 'الحالي',
+  'Recognized': 'المعترف به',
+  '<= 12 Months': 'خلال 12 شهراً أو أقل',
+  '> 12 Months': 'بعد أكثر من 12 شهراً',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

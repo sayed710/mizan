@@ -217,7 +217,7 @@ function datedBoard(amount, start, end, method = 'day', currency = null, periodi
 }
 
 /** Cumulative recognition for one board period through an inclusive cut-off date. */
-function recognitionTargetThroughDate(schedule, index, date, method, currency) {
+export function recognitionTargetThroughDate(schedule, index, date, method, currency) {
   const normMethod = normalizeDeferredComputationMethod(method);
   const line = schedule.board[index];
   const start = index === 0 ? (schedule.start_date ?? line.date) : addDays(schedule.board[index - 1].date, 1);
