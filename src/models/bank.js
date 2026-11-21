@@ -996,9 +996,18 @@ function journalRunningBalances(db, journalId) {
   const lines = (db.records['account.bank.statement.line'] ?? [])
     .filter((l) => l.active !== false && l.journal_id === journalId)
     .sort(statementLineOrder);
+  const statements = new Map((db.records['account.bank.statement'] ?? []).map((s) => [s.id, s]));
   map = new Map();
+  const anchored = new Set();
   let balance = 0;
   for (const line of lines) {
+    if (line.statement_id && !anchored.has(line.statement_id)) {
+      anchored.add(line.statement_id);
+      const stmt = statements.get(line.statement_id);
+      if (stmt && stmt.journal_id === journalId && stmt.balance_start != null) {
+        balance = Number(stmt.balance_start) || 0;
+      }
+    }
     balance += Number(line.amount) || 0;
     if (currency) balance = roundCurrency(balance, currency);
     map.set(line.id, balance);

@@ -128,7 +128,7 @@ function Comparison({ data, report }) {
 }
 
 function Ledger({ db, period, analyticAccountIds }) {
-  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds);
+  const items = filterByAnalytic(journalItems(db, { ...period, includeClosing: false }), analyticAccountIds);
   const opening = period.from ? filterByAnalytic(journalItems(db, { to: period.from, ...(period.reviewMode ? { reviewMode: period.reviewMode } : {}) }), analyticAccountIds).filter((l) => l.date < period.from) : [];
   const accounts = [...new Set([...items, ...opening].map((l) => l.account_id))]
     .map((id) => read(db, 'account.account', id)).filter(Boolean).sort((a, b) => a.code.localeCompare(b.code));

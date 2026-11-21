@@ -3548,7 +3548,10 @@ const ar = {
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
   'Report Footer': 'تذييل التقرير',
+  'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Tax Closing Lines': 'بنود الإقفال الضريبي',
+  'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

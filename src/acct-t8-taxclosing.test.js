@@ -1118,6 +1118,8 @@ test('TAX-13: per-line exclusion works when included/excluded rows share an acco
   assert.equal(accountBalanceUpTo(syncedA, sharedPurchAcc.id, '2027-05-31'), 10);
 
   // Case B: Invoice (use_in_tax_closing: true) vs Refund (use_in_tax_closing: false) on the SAME account
+  // Continue from the closed May period so the June closing does not pick up May's unclosed input tax.
+  db = syncedA;
   const sharedSaleAcc = create(db, 'account.account', { code: '251922', name: 'Inv vs Ref Shared Sale Acc', account_type: 'liability_current', company_id: 1 });
   db = sharedSaleAcc.db;
 
