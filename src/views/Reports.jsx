@@ -18,7 +18,7 @@ import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
-import { ReportPrintView } from './ReportPrintView.jsx';
+import { ReportPrintView } from './FinancialReportPrint.jsx';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
@@ -60,7 +60,7 @@ function ComparisonCells({ values, variance, showVariance = true, format = null 
   return <>{cells}<td className="num">{formatDiff(amount)}</td><td className="num">{pct == null ? t('n/a') : `${pct}${t('%')}`}</td></>;
 }
 
-function Section({ title, total, rows, sign = 1, totals, variance, showVariance = true }) {
+function Section({ title, total, rows, sign = 1, totals, variance, showVariance = true, preserveRows = false }) {
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -68,8 +68,8 @@ function Section({ title, total, rows, sign = 1, totals, variance, showVariance 
         <td><span className="caret">{rows?.length ? (open ? '▾' : '▸') : ''}</span> {t(title)}</td>
         {totals ? <ComparisonCells values={totals} variance={variance} showVariance={showVariance} /> : <td className="num">{money(sign * total)}</td>}
       </tr>
-      {open && rows?.map((r) => (
-        <tr key={r.account.id} className="rep-detail">
+      {(open || preserveRows) && rows?.map((r) => (
+        <tr key={r.account.id} className={!open && preserveRows ? "rep-detail report-folded-row" : "rep-detail"}>
           <td><a href={`#/open/account.account/${r.account.id}`}>{r.account.code} {r.account.name}</a></td>
           {totals ? <ComparisonCells values={r.values} showVariance={showVariance} /> : <td className="num">{money(r.balance)}</td>}
         </tr>
@@ -85,9 +85,9 @@ const Total = ({ label, value, strong, values, variance, showVariance = true, fo
   </tr>
 );
 
-function Comparison({ data }) {
+function Comparison({ data, report }) {
   const showVariance = Boolean(data.variance);
-  const section = (i) => <Section key={data.sections[i].title} {...data.sections[i]} variance={data.variance?.[i]} showVariance={showVariance} />;
+  const section = (i) => <Section key={data.sections[i].title} {...data.sections[i]} variance={data.variance?.[i]} showVariance={showVariance} preserveRows={report === 'cashflow'} />;
   const total = (i) => <Total key={data.totals[i].label} {...data.totals[i]} variance={data.variance?.[data.sections.length + i]} showVariance={showVariance} />;
   return <tbody>{[...data.sections.map((_, i) => section(i)), ...data.totals.map((_, i) => total(i))]}</tbody>;
 }
