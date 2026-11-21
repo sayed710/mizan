@@ -228,6 +228,18 @@ function rateRowsError(beforeRows = [], afterRows = []) {
   return null;
 }
 
+/** Latest base-relative rate of the rate line's effective company currency (1 when base or unconfigured). */
+function companyCurrencyRate(line, db) {
+  if (!db) return 1;
+  const companyId = line?.company_id || (db.settings?.current_company_id ?? 1);
+  const own = findCompanyCurrencyRecord(db, companyId);
+  const base = findBaseCurrency(db);
+  if (!own || (base && own.id === base.id)) return 1;
+  return baseRateInfo(own, today(), base?.id, companyId).rate
+    ?? baseRateInfo(own, '9999-12-31', base?.id, companyId).rate
+    ?? 1;
+}
+
 export const currencyModels = {
   'res.currency': {
     label: 'Currencies',
@@ -285,28 +297,41 @@ export const currencyModels = {
             label: 'Unit/Base',
             digits: [6, 6],
             editable: true,
-            compute: (line) => Number(line.rate || 0),
+            compute: (line, db) => {
+              const rate = Number(line.rate || 0);
+              if (!(rate > 0)) return rate;
+              const ownRate = companyCurrencyRate(line, db);
+              return ownRate === 1 ? rate : Number((rate / ownRate).toPrecision(12));
+            },
           },
           inverse_company_rate: {
             type: 'float',
             label: 'Base/Unit',
             digits: [6, 6],
             editable: true,
-            compute: (line) => (Number(line.rate) > 0 ? Number((1 / Number(line.rate)).toPrecision(12)) : 0),
+            compute: (line, db) => {
+              const rate = Number(line.rate);
+              if (!(rate > 0)) return 0;
+              return Number((companyCurrencyRate(line, db) / rate).toPrecision(12));
+            },
           },
           rate: { type: 'float', label: 'Technical Rate', digits: [6, 6], optional: 'hide' },
         },
         newLine: (record, db) => ({ date: today(), rate: 1, company_id: db?.settings?.current_company_id ?? null }),
-        onchange: (line, changed) => {
+        onchange: (line, changed, db) => {
           if (changed === 'company_rate') {
             const { company_rate: v, ...rest } = line;
             const num = Number(v);
-            return { ...rest, rate: Number.isFinite(num) ? num : line.rate };
+            if (!Number.isFinite(num)) return { ...rest, rate: line.rate };
+            const ownRate = companyCurrencyRate(line, db);
+            return { ...rest, rate: ownRate === 1 ? num : Number((num * ownRate).toPrecision(12)) };
           }
           if (changed === 'inverse_company_rate') {
             const { inverse_company_rate: v, ...rest } = line;
             const num = Number(v);
-            return { ...rest, rate: Number.isFinite(num) && num > 0 ? 1 / num : 0 };
+            if (!Number.isFinite(num) || num <= 0) return { ...rest, rate: 0 };
+            const ownRate = companyCurrencyRate(line, db);
+            return { ...rest, rate: ownRate === 1 ? 1 / num : Number((ownRate / num).toPrecision(12)) };
           }
           return line;
         },
@@ -332,8 +357,8 @@ export const currencyModels = {
         ['symbol', 'currency_unit_label', 'currency_subunit_label', 'position'],
         { title: 'Price Accuracy', fields: ['rounding', 'decimal_places'] },
       ],
-      // The base currency's rate is implicitly 1 and any stored rows on it are ignored, so hide its Rates tab even when the company uses another currency.
-      tabs: (r, db) => (r?.id && (findBaseCurrency(db)?.id === r.id || (!findBaseCurrency(db) && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id))
+      // Hide the Rates tab only on the active company's own currency, matching Odoo's is_current_company_currency.
+      tabs: (r, db) => (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id
         ? []
         : [{ label: 'Rates', fields: ['rate_ids'] }]),
       chatter: true,
