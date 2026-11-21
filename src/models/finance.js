@@ -1041,8 +1041,9 @@ function closingPeriodCalculation(db, ret, companyId) {
 
   // References use the move and the ledger's stable embedded-line identity. A linked
   // posted closing is the authority; cancelled closings no longer cover anything.
+  const closingIds = ret.closing_move_ids ?? (ret.id ? read(db, 'account.return', ret.id)?.closing_move_ids : null) ?? [];
   const ownClosing = ['submitted', 'paid'].includes(ret.state)
-    ? (ret.closing_move_ids ?? []).map((id) => read(db, 'account.move', id))
+    ? closingIds.map((id) => read(db, 'account.move', id))
       .find((move) => move?.state === 'posted' && (move.company_id ?? 1) === companyId)
     : null;
   const ref = (line) => {
@@ -1062,9 +1063,17 @@ function closingPeriodCalculation(db, ret, companyId) {
       else legacyPeriods.push(other);
     }
   }
-  const available = (line) => ownRefs ? ownRefs.has(ref(line)) : !covered.has(ref(line))
-    && !legacyPeriods.some((period) => line.date >= period.date_from && line.date <= period.date_to);
-  const sourceLines = journalItems(db, { to: ret.date_to, company_id: companyId })
+  const isLegacyOwnClosing = Boolean(ownClosing && !Array.isArray(ownClosing.tax_closing_lines));
+  const available = (line) => {
+    if (ownRefs) return ownRefs.has(ref(line));
+    if (isLegacyOwnClosing) return true;
+    return !covered.has(ref(line))
+      && !legacyPeriods.some((period) => line.date >= period.date_from && line.date <= period.date_to);
+  };
+  const itemScope = isLegacyOwnClosing
+    ? { from: ret.date_from, to: ret.date_to, company_id: companyId }
+    : { to: ret.date_to, company_id: companyId };
+  const sourceLines = journalItems(db, itemScope)
     .filter((line) => !line.is_closing && !line.is_tax_closing && !line.is_tax_payment && isItemClosable(line) && available(line));
   const sourceRefs = [...new Set(sourceLines.map(ref))].sort();
   const balances = new Map();
@@ -1080,7 +1089,7 @@ function closingPeriodCalculation(db, ret, companyId) {
     }
   }
 
-  const periodItems = taxItems(db, { to: ret.date_to, company_id: companyId });
+  const periodItems = taxItems(db, itemScope);
   const closableItems = periodItems.filter((line) => isItemClosable(line) && available(line));
   const closableOutput = moneyRound(closableItems.filter((l) => l.side === 'sale').reduce((s, l) => s + l.tax, 0));
   const closableInput = moneyRound(closableItems.filter((l) => l.side === 'purchase').reduce((s, l) => s + l.tax, 0));

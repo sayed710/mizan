@@ -83,3 +83,44 @@ test('historical posted closing without provenance covers its own period', () =>
   db = taxEntry(db, '2025-02-05', 14).db;
   assert.equal(closableTaxPayable(db, { company_id: 1, date_from: '2025-02-01', date_to: '2025-02-28' }), 14);
 });
+
+test('settlement of legacy submitted return without provenance matches its closing and succeeds despite unclosed earlier line', () => {
+  let db = seed();
+  db = taxEntry(db, '2025-01-10', 10).db;
+  db = taxEntry(db, '2025-02-05', 14).db;
+  const feb = makeReturn(db, 'February', '2025-02-01', '2025-02-28');
+  db = feb.db;
+  const payableAcc = search(db, 'account.account').find((a) => (a.company_id ?? 1) === 1 && a.code === '251000');
+  const vatType = search(db, 'account.return.type')[0];
+  const entry = postEntry(db, {
+    journal: 'MISC',
+    date: '2025-02-28',
+    ref: 'Tax Closing: February',
+    lines: [
+      { account_id: payableAcc.id, debit: 14 },
+      { account_id: vatType.tax_payable_account_id ?? payableAcc.id, credit: 14, partner_id: vatType.payment_partner_id },
+    ],
+    company: 1,
+    tax_return_id: feb.id,
+  });
+  db = entry.db;
+  db = { ...db, records: { ...db.records, 'account.return': db.records['account.return'].map((r) => (r.id === feb.id ? {
+    ...r,
+    state: 'submitted',
+    total_amount_to_pay: 14,
+    date_submission: '2025-02-28',
+    date_lock: '2025-02-28',
+    closing_move_ids: [entry.id],
+    is_completed: false,
+  } : r)) } };
+
+  // Settlement / Payment of the legacy February return must succeed against its posted closing
+  db = runAction(db, feb.id, 'Pay');
+  assert.equal(read(db, 'account.return', feb.id).state, 'paid');
+
+  // Later return picks up the unclosed January line
+  const mar = makeReturn(db, 'March', '2025-03-01', '2025-03-31');
+  db = runAction(mar.db, mar.id, 'Review');
+  assert.equal(read(db, 'account.return', mar.id).total_amount_to_pay, 10);
+});
+
