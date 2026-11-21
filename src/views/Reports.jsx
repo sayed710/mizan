@@ -18,7 +18,8 @@ import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
-import { ReportPrintView } from './FinancialReportPrint.jsx';
+import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
+import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
@@ -60,11 +61,16 @@ function ComparisonCells({ values, variance, showVariance = true, format = null 
   return <>{cells}<td className="num">{formatDiff(amount)}</td><td className="num">{pct == null ? t('n/a') : `${pct}${t('%')}`}</td></>;
 }
 
-function Section({ title, total, rows, sign = 1, totals, variance, showVariance = true, preserveRows = false }) {
-  const [open, setOpen] = useState(false);
+function Section({ title, total, rows, sign = 1, totals, variance, showVariance = true, preserveRows = false, isOpen, onToggle }) {
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = isOpen !== undefined ? isOpen : localOpen;
+  const toggle = () => {
+    if (onToggle) onToggle();
+    else setLocalOpen(!localOpen);
+  };
   return (
     <>
-      <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
+      <tr className="rep-section" onClick={toggle} aria-expanded={open}>
         <td><span className="caret">{rows?.length ? (open ? '▾' : '▸') : ''}</span> {t(title)}</td>
         {totals ? <ComparisonCells values={totals} variance={variance} showVariance={showVariance} /> : <td className="num">{money(sign * total)}</td>}
       </tr>
@@ -86,10 +92,39 @@ const Total = ({ label, value, strong, values, variance, showVariance = true, fo
 );
 
 function Comparison({ data, report }) {
+  const isCashFlow = report === 'cashflow';
   const showVariance = Boolean(data.variance);
-  const section = (i) => <Section key={data.sections[i].title} {...data.sections[i]} variance={data.variance?.[i]} showVariance={showVariance} preserveRows={report === 'cashflow'} />;
+  const [open, setOpen] = useState(() => new Set());
+  const keys = isCashFlow ? data.sections.map((s) => s.title) : [];
+  const colSpan = 1 + (data.headers?.length ?? 0) + (showVariance ? 2 : 0);
+  const section = (i) => {
+    const s = data.sections[i];
+    return (
+      <Section
+        key={s.title}
+        {...s}
+        variance={data.variance?.[i]}
+        showVariance={showVariance}
+        preserveRows={isCashFlow}
+        isOpen={isCashFlow ? open.has(s.title) : undefined}
+        onToggle={isCashFlow ? () => setOpen((prev) => toggleReportFold(prev, s.title)) : undefined}
+      />
+    );
+  };
   const total = (i) => <Total key={data.totals[i].label} {...data.totals[i]} variance={data.variance?.[data.sections.length + i]} showVariance={showVariance} />;
-  return <tbody>{[...data.sections.map((_, i) => section(i)), ...data.totals.map((_, i) => total(i))]}</tbody>;
+  return (
+    <tbody>
+      {isCashFlow && keys.length > 0 && (
+        <tr className="no-export">
+          <td colSpan={colSpan}>
+            <ReportFoldAll keys={keys} open={open} onToggle={() => setOpen((prev) => toggleAllReportFolds(prev, keys))} />
+          </td>
+        </tr>
+      )}
+      {data.sections.map((_, i) => section(i))}
+      {data.totals.map((_, i) => total(i))}
+    </tbody>
+  );
 }
 
 function Ledger({ db, period, analyticAccountIds }) {
