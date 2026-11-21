@@ -1,11 +1,11 @@
 // Batch payments: pay several invoices in one operation; outbound batches also number and print checks.
-import { read, search, write } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { nextName, today, validDate } from './common.js';
 import { discountAvailable, payMove, payWithDiscount } from './accounting.js';
 import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { isLiquidityJournal, paymentJournal } from './ledger.js';
-import { paymentPaysByCheck, printBatchChecks } from './pay.js';
+import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
 
@@ -343,3 +343,92 @@ export const paymentModels = {
     },
   },
 };
+
+export const paymentMethodIdOf = (db, payment) => {
+  const line = payment?.payment_method_line_id ? read(db, 'account.payment.method.line', payment.payment_method_line_id) : null;
+  return line?.payment_method_id ?? payment?.payment_method_id ?? null;
+};
+
+/** Create a draft batch payment from a selection of existing posted payments. */
+export function createBatchPayment(db, ids) {
+  if (!ids || !ids.length) throw new Error('Select at least one payment');
+  const uniqueIds = [...new Set(ids)];
+  const payments = uniqueIds.map((id) => read(db, 'account.payment', id));
+  if (payments.some((p) => !p)) throw new Error('Payment not found');
+  if (payments.some((p) => p.state !== 'posted')) {
+    throw new Error('Only posted payments can be added to a batch');
+  }
+  if (payments.some((p) => p.is_internal_transfer)) {
+    throw new Error('Internal transfers cannot be added to a batch');
+  }
+  if (payments.some((p) => isPaymentMatched(db, p))) {
+    throw new Error('Selected payments cannot include already matched payments');
+  }
+  const batches = db.records?.['account.batch.payment'] ?? [];
+  const inBatch = payments.find((p) =>
+    batches.some((b) => (b.lines ?? []).some((l) => !l.cancelled && l.payment_id === p.id)),
+  );
+  if (inBatch) {
+    throw new Error('Selected payments cannot include payments already in a batch');
+  }
+  const journalIds = new Set(payments.map((p) => p.journal_id ?? null));
+  if (journalIds.size > 1) {
+    throw new Error('Selected payments must belong to the same journal');
+  }
+  const directions = new Set(payments.map((p) => p.payment_type ?? null));
+  if (directions.size > 1) {
+    throw new Error('Selected payments must have the same direction');
+  }
+  const methodLineIds = new Set(payments.map((p) => p.payment_method_line_id ?? null));
+  const methodIds = new Set(payments.map((p) => paymentMethodIdOf(db, p) ?? p.payment_method_line_id ?? null));
+  if (methodLineIds.size > 1 || methodIds.size > 1) {
+    throw new Error('Selected payments must use the same payment method');
+  }
+  const companyIds = new Set(payments.map((p) => p.company_id ?? 1));
+  if (companyIds.size > 1) {
+    throw new Error('Selected payments must belong to the same company');
+  }
+
+  const first = payments[0];
+  const companyId = first.company_id ?? read(db, 'account.journal', first.journal_id)?.company_id ?? 1;
+  const methodId = paymentMethodIdOf(db, first);
+
+  const batchPayload = {
+    name: 'New',
+    batch_type: first.payment_type,
+    journal_id: first.journal_id,
+    company_id: companyId,
+    date: today(),
+    state: 'draft',
+    ...(methodId ? { payment_method_id: methodId } : {}),
+    lines: payments.map((p) => ({
+      payment_id: p.id,
+      amount: p.amount,
+      ...(p.check_number != null ? { check_number: p.check_number } : {}),
+    })),
+  };
+  const res = create(db, 'account.batch.payment', batchPayload);
+  return {
+    db: res.db,
+    go: `#/accounting/batch-payments/${res.id}`,
+    id: res.id,
+  };
+}
+
+export const createBatchPaymentListAction = {
+  label: 'Create Batch Payment',
+  requiresSelection: true,
+  run: (db, ids) => createBatchPayment(db, ids),
+};
+
+const attachListAction = (target, action) => {
+  if (!target) return;
+  const current = target.listActions ?? [];
+  if (!current.some((a) => a.label === action.label)) {
+    target.listActions = [...current, action];
+  }
+};
+attachListAction(customerPaymentView, createBatchPaymentListAction);
+attachListAction(vendorPaymentView, createBatchPaymentListAction);
+attachListAction(payModels?.['account.payment'], createBatchPaymentListAction);
+

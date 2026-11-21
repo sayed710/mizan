@@ -3548,6 +3548,18 @@ const ar = {
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Create Batch Payment': 'إنشاء دفعة مجمعة',
+  'Select at least one payment': 'اختر دفعة واحدة على الأقل',
+  'Selected payments must belong to the same journal': 'يجب أن تنتمي المدفوعات المحددة إلى نفس دفتر اليومية',
+  'Selected payments must have the same direction': 'يجب أن يكون للمدفوعات المحددة نفس الاتجاه',
+  'Selected payments must use the same payment method': 'يجب أن تستخدم المدفوعات المحددة نفس طريقة الدفع',
+  'Only posted payments can be added to a batch': 'يمكن فقط إضافة المدفوعات المرحلة إلى الدفعة المجمعة',
+  'Selected payments cannot include already matched payments': 'لا يمكن أن تتضمن المدفوعات المحددة مدفوعات تمت مطابقتها بالفعل',
+  'Selected payments cannot include payments already in a batch': 'لا يمكن أن تتضمن المدفوعات المحددة مدفوعات موجودة بالفعل في دفعة مجمعة',
+  'New batch lines are payment lines only': 'بنود الدفعة المجمعة الجديدة هي بنود مدفوعات فقط',
+  'Internal transfers cannot be added to a batch': 'لا يمكن إضافة التحويلات الداخلية إلى الدفعة المجمعة',
+  'Selected payments must belong to the same company': 'يجب أن تنتمي المدفوعات المحددة إلى نفس الشركة',
+  'The payment currency must be active': 'يجب أن تكون عملة الدفعة نشطة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
