@@ -3358,6 +3358,7 @@ export const accountingModels = {
       return {};
     },
     fields: {
+      tax_closing_lines: { type: 'json', label: 'Tax Closing Lines', readonly: true, hidden: true },
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.name && r.name !== '/' ? r.name : t('Draft (* {id})', { id: r.id })) },
       move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
