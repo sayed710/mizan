@@ -1774,6 +1774,29 @@ MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (
 } });
 MIGRATIONS.push({ version: 61, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
 
+export function migrateFollowUpNextActionDate(db) {
+  if (!db?.records?.['res.partner']) return db;
+  const currentCompanyId = db.settings?.current_company_id ?? 1;
+  let changed = false;
+  const partners = db.records['res.partner'].map((p) => {
+    if (!('followup_next_action_date' in p)) return p;
+    changed = true;
+    const { followup_next_action_date, ...rest } = p;
+    if (followup_next_action_date == null) return rest;
+    const lines = [...(p.followup_lines ?? [])];
+    const idx = lines.findIndex((l) => l.company_id === currentCompanyId);
+    if (idx >= 0) {
+      lines[idx] = { ...lines[idx], followup_next_action_date };
+    } else {
+      lines.push({ company_id: currentCompanyId, followup_next_action_date });
+    }
+    return { ...rest, followup_lines: lines };
+  });
+  if (!changed) return db;
+  return { ...db, records: { ...db.records, 'res.partner': partners } };
+}
+MIGRATIONS.push({ version: 62, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
