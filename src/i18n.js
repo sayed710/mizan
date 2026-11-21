@@ -3577,6 +3577,8 @@ const ar = {
   'Payment reference cannot exceed 35 characters': 'لا يمكن أن يتجاوز مرجع الدفعة 35 حرفًا',
   'Creditor name cannot exceed 70 characters': 'لا يمكن أن يتجاوز اسم الدائن 70 حرفًا',
   'Remittance information cannot exceed 140 characters': 'لا يمكن أن تتجاوز معلومات التحويل 140 حرفًا',
+  'Tax Closing Lines': 'بنود الإقفال الضريبي',
+  'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
