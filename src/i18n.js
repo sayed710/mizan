@@ -3569,6 +3569,14 @@ const ar = {
   'A validated SEPA batch requires a SEPA file': 'تتطلب دفعة التحويل الأوروبي المجمعة المعتمدة ملف التحويل',
   'The SEPA file does not match the batch': 'ملف التحويل الأوروبي لا يطابق الدفعة المجمعة',
   'A SEPA batch requires posted payments matching the journal, company and amounts': 'تتطلب الدفعة المجمعة دفعات مرحلة تطابق دفتر اليومية والشركة والمبالغ',
+  'The journal account IBAN is not in the SEPA zone': 'رقم الآيبان للحساب البنكي لدفتر اليومية ليس ضمن منطقة التحويل الأوروبي (SEPA)',
+  'A payment recipient IBAN is not in the SEPA zone': 'رقم آيبان المستفيد في إحدى الدفعات ليس ضمن منطقة التحويل الأوروبي (SEPA)',
+  'The batch reference is required': 'مرجع الدفعة المجمعة مطلوب',
+  'Batch reference cannot exceed 35 characters': 'لا يمكن أن يتجاوز مرجع الدفعة المجمعة 35 حرفًا',
+  'Debtor name cannot exceed 70 characters': 'لا يمكن أن يتجاوز اسم المدين 70 حرفًا',
+  'Payment reference cannot exceed 35 characters': 'لا يمكن أن يتجاوز مرجع الدفعة 35 حرفًا',
+  'Creditor name cannot exceed 70 characters': 'لا يمكن أن يتجاوز اسم الدائن 70 حرفًا',
+  'Remittance information cannot exceed 140 characters': 'لا يمكن أن تتجاوز معلومات التحويل 140 حرفًا',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

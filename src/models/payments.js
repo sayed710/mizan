@@ -171,6 +171,10 @@ export function postBatch(db, batch) {
       const payment = read(db, 'account.payment', line.payment_id);
       const payError = recipientBankCompanyError(db, payment, payment?.company_id ?? company);
       if (payError) throw new Error(payError);
+      if (batch.batch_type === 'outbound' && payment?.partner_id) {
+        if (sepa && !payment.partner_bank_id) throw new Error('The selected bank account is invalid or inactive');
+        resolveAndValidateRecipientBank(db, payment.partner_id, payment.partner_bank_id, { companyId: company });
+      }
     }
     const move = read(db, 'account.move', line.move_id);
     const moveError = recipientBankCompanyError(db, move, move?.company_id ?? company);
@@ -232,15 +236,32 @@ export function generateSepaFile(db, batch, createdAt = new Date().toISOString()
     const method = read(db, 'account.payment.method', methodLine?.payment_method_id);
     if (method?.code !== 'sepa_ct' || method.payment_type !== 'outbound') throw new Error('Every payment must use SEPA Credit Transfer');
     if (documentCurrency(db, payment)?.name !== 'EUR') throw new Error('SEPA payments must use EUR');
+    if (!payment.partner_bank_id) throw new Error('The selected bank account is invalid or inactive');
+    resolveAndValidateRecipientBank(db, payment.partner_id, payment.partner_bank_id, { companyId: company?.id ?? payment.company_id ?? 1 });
     const recipient = read(db, 'res.partner.bank', payment.partner_bank_id);
     return { id: String(payment.id), amount: payment.amount, name: read(db, 'res.partner', payment.partner_id)?.name, iban: recipient?.account_number, memo: payment.memo };
   });
   return { name: `sepa-${batch.id}.xml`, content: buildSepaXml({ id: batch.name, createdAt, date: batch.date, debtor: { name: company?.name, iban: bank?.account_number, bic: bank?.bank_bic }, payments }) };
 }
+
+function validBatchLinesTransition(beforeLines = [], afterLines = []) {
+  if (beforeLines.length !== afterLines.length) return false;
+  return beforeLines.every((bLine, i) => {
+    const aLine = afterLines[i];
+    if (!aLine) return false;
+    const { cancelled: bCancelled, ...bRest } = bLine;
+    const { cancelled: aCancelled, ...aRest } = aLine;
+    if (JSON.stringify(bRest) !== JSON.stringify(aRest)) return false;
+    if (Boolean(bCancelled) === Boolean(aCancelled)) return true;
+    return !bCancelled && aCancelled === true;
+  });
+}
+
 function sepaBatchGuard(db, before, after) {
   if (before?.state === 'posted' && before.sepa_file) {
     if (before.sepa_file !== after.sepa_file) return 'The SEPA file cannot be changed after validation';
-    if (['state', 'name', 'batch_type', 'journal_id', 'company_id', 'date', 'lines'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return 'A validated SEPA batch cannot be changed';
+    if (['state', 'name', 'batch_type', 'journal_id', 'company_id', 'date'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return 'A validated SEPA batch cannot be changed';
+    if (!validBatchLinesTransition(before.lines, after.lines)) return 'A validated SEPA batch cannot be changed';
   }
   if (after.state !== 'posted' || before?.state === 'posted') return null;
   const sepa = (after.lines ?? []).some((line) => paymentMethodCode(db, read(db, 'account.payment', line.payment_id)) === 'sepa_ct');
