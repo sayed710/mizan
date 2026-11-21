@@ -727,8 +727,23 @@ export function postMove(db, id, { autoPost = false } = {}) {
         posted = reconcileReversalLines(posted, source.id, id, r.date ?? entryDate);
       }
     }
-    if (journalRecord.restrict_mode_hash_table) posted = secureEntries(posted, { throughMoveId: id });
-    const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id, scheduled: r.reverse_date > today() }).db : posted;
+    let reversed = posted;
+    let revMove = null;
+    if (r.auto_reverse) {
+      const revResult = reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, {
+        journal_id: r.reverse_journal_id ?? r.journal_id,
+        scheduled: r.reverse_date > today(),
+      });
+      reversed = revResult.db;
+      revMove = read(reversed, 'account.move', revResult.id);
+    }
+    if (journalRecord.restrict_mode_hash_table) reversed = secureEntries(reversed, { throughMoveId: id });
+    if (revMove && revMove.state === 'posted') {
+      const revJournal = read(reversed, 'account.journal', revMove.journal_id);
+      if (revJournal?.restrict_mode_hash_table) {
+        reversed = secureEntries(reversed, { throughMoveId: revMove.id });
+      }
+    }
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
   if (!r.partner_id) throw new Error('Partner is required');

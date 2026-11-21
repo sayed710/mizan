@@ -64,3 +64,176 @@ test('mixed legacy v1 and v2 chains extend with v3 on posting', () => {
   assert.equal(read(result, 'account.move', third.id).inalterable_hash_version, 3);
   assert.equal(checkInalterability(result, { journalId: journal })[0].status, 'ok');
 });
+
+test('automatic immediate reversal secures both source and reversal in restricted journal and preserves bidirectional links', () => {
+  let db = seed();
+  const journal = create(db, 'account.journal', { name: 'Secure JE10 Auto', code: 'JE10A', restrict_mode_hash_table: true });
+  db = journal.db;
+  const draft = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'draft',
+    name: '/',
+    date: '2026-11-01',
+    journal_id: journal.id,
+    company_id: 1,
+    ref: 'original',
+    auto_reverse: true,
+    reverse_date: '2026-11-02',
+    line_ids: [
+      { account_id: accountId(db, '600000'), debit: 100, credit: 0 },
+      { account_id: accountId(db, '211000'), debit: 0, credit: 100 },
+    ],
+  });
+  db = server(draft.db, postMove(draft.db, draft.id));
+
+  const source = read(db, 'account.move', draft.id);
+  assert.equal(source.state, 'posted');
+  assert.ok(source.inalterable_hash, 'source must have an inalterability hash');
+  assert.equal(source.secure_sequence_number, 1);
+  assert.ok(source.reversal_move_id, 'source must record reversal_move_id');
+
+  const reversal = read(db, 'account.move', source.reversal_move_id);
+  assert.ok(reversal, 'reversal entry must exist');
+  assert.equal(reversal.state, 'posted');
+  assert.equal(reversal.reversed_entry_id, source.id, 'reversal must link to reversed_entry_id');
+  assert.ok(reversal.inalterable_hash, 'reversal must be secured when in restricted journal');
+  assert.equal(reversal.secure_sequence_number, 2, 'reversal sequence number must follow source');
+  assert.equal(reversal.journal_id, journal.id);
+
+  // Check inalterability across the whole journal
+  const report = checkInalterability(db, { journalId: journal.id });
+  assert.equal(report[0].status, 'ok');
+  assert.equal(report[0].last_move, reversal.name);
+});
+
+test('automatic reversal into a different restricted journal secures both in their respective journals', () => {
+  let db = seed();
+  const j1 = create(db, 'account.journal', { name: 'Secure J1', code: 'SJ1', restrict_mode_hash_table: true }); db = j1.db;
+  const j2 = create(db, 'account.journal', { name: 'Secure J2', code: 'SJ2', restrict_mode_hash_table: true }); db = j2.db;
+  const draft = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'draft',
+    name: '/',
+    date: '2026-11-01',
+    journal_id: j1.id,
+    reverse_journal_id: j2.id,
+    company_id: 1,
+    ref: 'cross-journal',
+    auto_reverse: true,
+    reverse_date: '2026-11-02',
+    line_ids: [
+      { account_id: accountId(db, '600000'), debit: 50, credit: 0 },
+      { account_id: accountId(db, '211000'), debit: 0, credit: 50 },
+    ],
+  });
+  db = server(draft.db, postMove(draft.db, draft.id));
+
+  const source = read(db, 'account.move', draft.id);
+  assert.ok(source.inalterable_hash);
+  assert.equal(source.secure_sequence_number, 1);
+  assert.equal(source.journal_id, j1.id);
+  assert.ok(source.reversal_move_id);
+
+  const reversal = read(db, 'account.move', source.reversal_move_id);
+  assert.equal(reversal.state, 'posted');
+  assert.equal(reversal.journal_id, j2.id);
+  assert.ok(reversal.inalterable_hash);
+  assert.equal(reversal.secure_sequence_number, 1);
+  assert.equal(reversal.reversed_entry_id, source.id);
+
+  assert.equal(checkInalterability(db, { journalId: j1.id })[0].status, 'ok');
+  assert.equal(checkInalterability(db, { journalId: j2.id })[0].status, 'ok');
+});
+
+test('scheduled auto-reversal records reversal link on source and leaves draft reversal unhashed', () => {
+  let db = seed();
+  const journal = create(db, 'account.journal', { name: 'Secure JE10 Sched', code: 'SCHED', restrict_mode_hash_table: true }); db = journal.db;
+  const draft = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'draft',
+    name: '/',
+    date: '2026-11-01',
+    journal_id: journal.id,
+    company_id: 1,
+    ref: 'scheduled-orig',
+    auto_reverse: true,
+    reverse_date: '2099-12-31',
+    line_ids: [
+      { account_id: accountId(db, '600000'), debit: 120, credit: 0 },
+      { account_id: accountId(db, '211000'), debit: 0, credit: 120 },
+    ],
+  });
+  db = server(draft.db, postMove(draft.db, draft.id));
+
+  const source = read(db, 'account.move', draft.id);
+  assert.ok(source.inalterable_hash);
+  assert.equal(source.secure_sequence_number, 1);
+  assert.ok(source.reversal_move_id, 'source must retain reversal_move_id for scheduled reversal');
+
+  const reversal = read(db, 'account.move', source.reversal_move_id);
+  assert.equal(reversal.state, 'draft');
+  assert.equal(reversal.inalterable_hash, undefined, 'scheduled reversal draft must not be hashed');
+  assert.equal(reversal.reversed_entry_id, source.id);
+
+  assert.equal(checkInalterability(db, { journalId: journal.id })[0].status, 'ok');
+});
+
+test('large-journal posting extends chain using chain head and detects trust boundary corruption', () => {
+  let db = seed();
+  const journal = create(db, 'account.journal', { name: 'Secure HighVol', code: 'HVOL', restrict_mode_hash_table: true }); db = journal.db;
+
+  const count = 30;
+  for (let i = 0; i < count; i++) {
+    const draft = create(db, 'account.move', {
+      move_type: 'entry',
+      state: 'draft',
+      name: '/',
+      date: '2026-11-01',
+      journal_id: journal.id,
+      company_id: 1,
+      ref: `bulk-${i}`,
+      line_ids: [
+        { account_id: accountId(db, '600000'), debit: 10 + i, credit: 0 },
+        { account_id: accountId(db, '211000'), debit: 0, credit: 10 + i },
+      ],
+    });
+    db = postMove(draft.db, draft.id);
+  }
+
+  const jRec = read(db, 'account.journal', journal.id);
+  const head = (jRec.secure_chain_heads ?? []).find((h) => h.company_id === 1);
+  assert.ok(head);
+  assert.equal(head.count, count);
+  assert.equal(head.last_sequence, count);
+
+  // Full-chain audit passes
+  const audit = checkInalterability(db, { journalId: journal.id });
+  assert.equal(audit[0].status, 'ok');
+
+  // Verify corruption detection at trust boundary:
+  // Tampering with the last secured entry prevents extending the chain
+  const nextDraft = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'draft',
+    name: '/',
+    date: '2026-11-02',
+    journal_id: journal.id,
+    company_id: 1,
+    ref: 'corrupt-test',
+    line_ids: [
+      { account_id: accountId(db, '600000'), debit: 99, credit: 0 },
+      { account_id: accountId(db, '211000'), debit: 0, credit: 99 },
+    ],
+  });
+
+  const corruptedDb = {
+    ...nextDraft.db,
+    records: {
+      ...nextDraft.db.records,
+      'account.move': nextDraft.db.records['account.move'].map((m) =>
+        m.id === head.last_move_id ? { ...m, inalterable_hash: 'forged_hash' } : m
+      ),
+    },
+  };
+  assert.throws(() => postMove(corruptedDb, nextDraft.id), /Cannot extend a corrupted secure entry chain/);
+});

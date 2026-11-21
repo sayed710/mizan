@@ -160,6 +160,24 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   };
 }
 
+/** Validates the trust boundary at the head of a secured journal chain without traversing full history. */
+export function checkChainHeadCorruption(journal, company, securedMoves) {
+  const head = (journal?.secure_chain_heads ?? []).find((h) => h.company_id === company);
+  const lastSecured = securedMoves.at(-1);
+  const preceding = securedMoves.length > 1 ? securedMoves.at(-2) : null;
+  if (head) {
+    if (head.count !== securedMoves.length || head.last_sequence !== securedMoves.length || !lastSecured) return true;
+    if (head.last_hash !== lastSecured.inalterable_hash || head.last_move_id !== lastSecured.id || head.last_move_name !== lastSecured.name) return true;
+  }
+  if (lastSecured) {
+    if (lastSecured.state !== 'posted' || lastSecured.secure_sequence_number !== securedMoves.length) return true;
+    if (preceding && (preceding.state !== 'posted' || preceding.secure_sequence_number !== securedMoves.length - 1)) return true;
+    const prevHash = preceding ? preceding.inalterable_hash : '';
+    if (!validMoveHash(lastSecured, prevHash)) return true;
+  }
+  return false;
+}
+
 /**
  * Secures posted entries in journals with restrict_mode_hash_table up to hashDate.
  * Computes hashes and sequence numbers in sequence order, and sets the company's hard lock date.
@@ -188,7 +206,7 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
     const moves = journalMoves.filter(inScope);
     const securedMoves = journalMoves.filter((m) => m.inalterable_hash);
-    if ((securedMoves.length || (journal.secure_chain_heads ?? []).some((h) => h.company_id === company)) && checkInalterability(next, { journalId: journal.id, companyId: company }).some((r) => r.status === 'corrupted')) throw new Error('Cannot extend a corrupted secure entry chain');
+    if (checkChainHeadCorruption(journal, company, securedMoves)) throw new Error('Cannot extend a corrupted secure entry chain');
     const lastSecured = securedMoves.at(-1);
     let previousHash = lastSecured ? lastSecured.inalterable_hash : '';
     let lastSeqNum = lastSecured ? (lastSecured.secure_sequence_number || 0) : 0;
