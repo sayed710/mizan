@@ -1,0 +1,26 @@
+open sessions at seed []
+[sync open session] lost: 0 
+second session while one open: A session is already open
+[sync pay] lost: 1 pos.order#2.stock_costs: client=[{"index":0,"unit_cost":0.6},{"index":1,"unit_cost":120}] server=null
+order POS/00002 paid total 245.1 company 1 | espresso 500 -> 498 chair 135 -> 134
+sale GL delta {"101501":245.1,"110100":-121.2,"251000":-30.1,"400000":-215,"500000":121.2}
+Refund visible true
+[sync refund] lost: 3 stock.valuation.layer#8.counterpart: client="500000" server=null ; stock.valuation.layer#9.counterpart: client="500000" server=null ; pos.order#3.stock_costs: client=[] server=null
+after refund: espresso 500 chair 135 refund GL delta {"101501":-245.1,"110100":121.2,"251000":30.1,"400000":215,"500000":-121.2}
+refund twice: Only paid orders can be refunded
+net GL of sale+refund {}
+stock_costs client [{"index":0,"unit_cost":120}] server undefined
+refund stock value booked: from server copy {"101401":-239.4,"110100":999,"251000":29.4,"400000":210,"500000":-999} | from client copy {"101401":-239.4,"110100":120,"251000":29.4,"400000":210,"500000":-120}
+POS sale of an item with 0 on hand: REFUSED Not enough stock to deliver
+session totals {"orders":2,"cash":0,"card":0,"expected":100}
+[sync close] lost: 0 
+closed closed difference -5 GL {"101501":-5,"690000":5}
+close again (hidden): The session is not open
+refund after session closed, none open: Cannot read properties of undefined (reading 'state')
+[sync posplus pay] lost: 2 pos.order#5.stock_costs: client=[{"index":0,"unit_cost":0.99864}] server=null ; pos.order#6.stock_costs: client=[{"index":0,"unit_cost":1.0012927756653993}] server=null
+split pay: order paid session_id null | settlements [["POS/00005","cash",5,[1.4619883040935673]],["POS/00006","card",5.26,[1.5380116959064327]]] | croissant 60 -> 57 | GL {"101401":5.26,"101501":5,"110100":-3,"251000":-1.26,"400000":-9,"500000":3}
+Pay twice: Select a draft order
+refund split bill: state refunded croissant -> 60 GL net {}
+server: rewrite lines of a paid POS order (non-admin): ACCEPTED
+server: delete the refund order (non-admin): ACCEPTED
+   then set original back to paid and refund again: ACCEPTED (second cash refund)

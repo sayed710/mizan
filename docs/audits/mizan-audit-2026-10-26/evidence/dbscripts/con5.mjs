@@ -1,0 +1,10 @@
+const W = process.argv[2];
+const { seed } = await import(W + '/src/seed.js');
+const { applyDiff } = await import(W + '/src/sync.js');
+const { modelsForApps } = await import(W + '/src/models/index.js');
+const crm = modelsForApps(['crm']);
+const s = seed();
+const foreign = s.messages.filter((m) => !crm.has(m.model));
+console.log('messages on models outside the CRM app:', foreign.length, foreign.slice(0, 3).map((m) => m.model + '#' + m.res_id + ' by ' + m.author).join('; '));
+const t = applyDiff(s, { upserts: {}, deletes: {}, messages: [], removedMessages: foreign.map((m) => m.id) }, { isAdmin: false, allowed: crm });
+console.log('after CRM-only user posts removedMessages for them, remaining:', t.messages.filter((m) => !crm.has(m.model)).length);

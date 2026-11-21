@@ -1,0 +1,26 @@
+posted invoice INV/2026/00003 478.8 state posted
+ACCEPTED | posted invoice -> state cancel
+   receivable(partner 3) before/after 1688.8 1210
+ACCEPTED | mark posted invoice paid: amount_paid = total, no payment entry
+   payment_state now paid ; 121000 for partner still 1688.8
+ACCEPTED | change price on posted invoice lines (line_ids untouched)
+   amount_total now 2.28 but journal 121000 debit 478.8
+ACCEPTED | rewrite posted journal items (debit/credit) of the invoice, unbalanced
+   balanced? -477.8
+ACCEPTED | create a POSTED unbalanced manual entry (Dr Bank 1,000,000)
+   bank 101401 before/after 158366 1158366
+ACCEPTED | re-number a posted invoice (audit trail off)
+ACCEPTED | SO: reset qty_invoiced to 0 so it can be invoiced again
+   Create Invoice now visible+works: true new invoices [ 12 ]
+ACCEPTED | SO: draft -> sale state directly (no picking, no procurement)
+ACCEPTED | done delivery picking back to ready (stock already moved)
+   re-validate: ACCEPTED chair on hand 133 -> 131
+ACCEPTED | product qty_available 135 -> 1e6 (readonly field)
+ACCEPTED | product cost 120 -> 0.01
+ACCEPTED | account.payment: set amount on posted payment
+ACCEPTED | delete posted invoice (audit trail off, no lock)
+   SO invoice_status after server delete invoiced (onUnlink hook not run by applyDiff); qty_invoiced 2
+ACCEPTED | delete done delivery picking
+ACCEPTED | delete stock valuation layer
+ACCEPTED | delete confirmed sale order
+with lock_date+audit_trail: cancel posted invoice -> REFUSED The period up to 2026-12-31 is locked

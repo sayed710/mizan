@@ -1,0 +1,20 @@
+import { seed, models, orm, btn, tryIt, serverSync, log } from './lib.mjs';
+const { create, read, search, write } = orm;
+const m = Object.keys(models).filter((k) => k.includes('rental'));
+log('rental models', m.join(','), '| sale.rental buttons', (models['sale.rental']?.form?.buttons ?? []).map((b) => b.label).join(','));
+let db = seed(); const db0 = db;
+const fieldsReq = Object.entries(models['sale.rental'].fields).filter(([, f]) => f.required).map(([k]) => k);
+log('required', fieldsReq.join(','));
+let r = create(db, 'sale.rental', { partner_id: 3, product_id: 1, qty: 2, start_date: '2026-10-26', return_date: '2026-10-30', price_per_day: 10 });
+db = r.db;
+for (const label of ['Confirm', 'Pickup']) { const x = tryIt(() => btn(db, 'sale.rental', r.id, label)); if (!x.ok) { log(label, 'error', x.error); break; } log(label, 'visible', x.value.visible); db = x.value.db; }
+log('client product qty_available', read(db, 'product', 1).qty_available, 'qty_rented', read(db, 'product', 1).qty_rented);
+const before = db;
+const srv = serverSync(db0, db).db;
+log('server product qty_rented', read(srv, 'product', 1).qty_rented);
+const so = create(srv, 'sale.order', { partner_id: 5, order_line: [{ product_id: 1, qty: 1, price_unit: 210, tax: 0 }] });
+const c = btn(so.db, 'sale.order', so.id, 'Confirm').db; const pk = search(c, 'stock.picking').find((p) => p.sale_id === so.id);
+log('after server round trip, deliver 1 chair:', tryIt(() => btn(c, 'stock.picking', pk.id, 'Validate')).error ?? 'ok');
+const so2 = create(before, 'sale.order', { partner_id: 5, order_line: [{ product_id: 1, qty: 1, price_unit: 210, tax: 0 }] });
+const c2 = btn(so2.db, 'sale.order', so2.id, 'Confirm').db; const pk2 = search(c2, 'stock.picking').find((p) => p.sale_id === so2.id);
+log('same on the client copy:', tryIt(() => btn(c2, 'stock.picking', pk2.id, 'Validate')).error ?? 'ok');

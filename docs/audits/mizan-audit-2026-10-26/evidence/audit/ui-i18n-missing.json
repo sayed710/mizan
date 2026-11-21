@@ -1,0 +1,1647 @@
+{
+ "missStatic": [
+  [
+   "Unknown",
+   [
+    "src/views/FinanceReports.jsx:28"
+   ]
+  ],
+  [
+   "%",
+   [
+    "src/views/Reports.jsx:32"
+   ]
+  ],
+  [
+   "Results",
+   [
+    "src/views/Survey.jsx:95"
+   ]
+  ]
+ ],
+ "missDyn": [
+  [
+   "Consolidations",
+   [
+    "menu"
+   ]
+  ],
+  [
+   "Consolidation Periods",
+   [
+    "menu"
+   ]
+  ],
+  [
+   "Workspaces",
+   [
+    "menu"
+   ]
+  ],
+  [
+   "Workflow Actions",
+   [
+    "menu"
+   ]
+  ],
+  [
+   "Results",
+   [
+    "menu"
+   ]
+  ],
+  [
+   "kg",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "m",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "L",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Standard Price",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Average Cost",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "FIFO",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Manual Periodic",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Automated",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Cash Basis",
+   [
+    "field"
+   ]
+  ],
+  [
+   "40 hours/week",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "35 hours/week",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Part-time 20 hours/week",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Flexible",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Assign",
+   [
+    "button"
+   ]
+  ],
+  [
+   "OEE Target (%)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Working Hours per Day",
+   [
+    "field"
+   ]
+  ],
+  [
+   "At Cost",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "At Sales Price",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Doctorate",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Does Not Fit",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Other Offer",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "No Answer",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Timesheet",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Billable Time",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Non-billable",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Unpaid Invoices",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Weeks",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Years",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Normal",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Bank / Card",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Prorata",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Other Input",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Overtime",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Public",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Signed-in Users",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Restricted Group",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Parent Page",
+   [
+    "field"
+   ]
+  ],
+  [
+   "signature",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "initial",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "text",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "date",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "checkbox",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "name",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "email",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Tag",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Folder",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Locked By",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Share",
+   [
+    "button"
+   ]
+  ],
+  [
+   "Lead/Opportunity",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Tools",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Tyres",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Inspection",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Kiosk",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Systray",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Submit Employee Feedback",
+   [
+    "button"
+   ]
+  ],
+  [
+   "Submit Manager Feedback",
+   [
+    "button"
+   ]
+  ],
+  [
+   "Multiple choice (legacy)",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Rating 1-5 (legacy)",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Score",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Raw Answers",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Customer Receipt",
+   [
+    "field"
+   ]
+  ],
+  [
+   "On Invitation",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "On Payment",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Everyone",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Members Only",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "450000 Other Income",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "600000 Expenses",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "610000 Travel & Meals",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "630000 Rent",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "690000 Bank Fees",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Rule",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Connector",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Amazon",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Noon",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Shopee",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Lazada",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "TikTok Shop",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Jumia",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Custom feed",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Carrier API (DHL, FedEx, Aramex…)",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Tracking URL ({ref})",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Scale",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Sensor",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Printer",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Scanner",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Meter",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Token (hash)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Plan",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Regions",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Budget Name",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Budget Lines",
+   [
+    "field",
+    "tab"
+   ]
+  ],
+  [
+   "Planned Amount",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Team",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Round Robin",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Balanced Workload",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Team Members",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Automatic Closing",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Close After (Days)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Customer Ratings",
+   [
+    "field"
+   ]
+  ],
+  [
+   "High",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Duration",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Bill",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Bill Line",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Paid/Received",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Any",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Is Lower Than",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Is Greater Than",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Is Between",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Contains",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Not Contains",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Match Regex",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Percentage of balance",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Purchases",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Joined",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Facebook",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Instagram",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "X",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "YouTube",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Published on",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Fixed Payments (annuity)",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Fixed Principal",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Periodic",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Proposal",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Gold",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Silver",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Bronze",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Small",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Large",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Sold",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Hour",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Deposit Entry",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Settlement Entry",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Coupons",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Promotion",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Discount Code",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Buy X Get Y",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Current order",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Future orders",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Automatic",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "With a Code",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Per Order",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Per Currency Unit",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Per Product Unit",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Free Product",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Cheapest Product",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Used",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Generic",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Borrow",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Leave",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Optional",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Square",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Round",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Parent Folder",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Tag Categories",
+   [
+    "field",
+    "tab"
+   ]
+  ],
+  [
+   "Tags (comma-separated)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Action Name",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Required Tags",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Excluded Tags",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Add Tags",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Remove Tags",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Move to Workspace",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Set Owner",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Create Record",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Signature Request",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Activity Summary",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Activity Deadline (days)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Unavailable",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Employee Questions",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Manager Questions",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Expected Duration (min)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Actual Duration (min)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Waiting for another WO",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Quantity Produced",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Minutes",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Productive",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Reduced Speed",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Unplanned Stop",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Blanket Order",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Call for Tenders",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Remaining Quantity",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Remaining Value",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Price Difference",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Inventory Adjustment",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Revaluation",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Landed Cost",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Theoretical Quantity",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Reward",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Parent Menu",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Permanent (301)",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Temporary (302)",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Features",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Dynamic",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Inner Content",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Hidden",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Chat",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Email and Chat",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Lines",
+   [
+    "field",
+    "tab"
+   ]
+  ],
+  [
+   "Company Contact",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Logo",
+   [
+    "field",
+    "tab"
+   ]
+  ],
+  [
+   "Inter-Company Rule",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Create Purchase from Sale",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Group Currency",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Ownership (%)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Full",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Proportional",
+   [
+    "selection"
+   ]
+  ],
+  [
+   "Group Accounts",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Source Codes (comma-separated)",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Consolidation",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Translation Rates",
+   [
+    "field",
+    "tab"
+   ]
+  ],
+  [
+   "Average Rate",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Closing Rate",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Stored Balances",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Group Code",
+   [
+    "field"
+   ]
+  ],
+  [
+   "By Company",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Eliminations",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Consolidated Balances",
+   [
+    "field",
+    "tab"
+   ]
+  ],
+  [
+   "Unmapped Accounts",
+   [
+    "field"
+   ]
+  ],
+  [
+   "Consolidate",
+   [
+    "button"
+   ]
+  ],
+  [
+   "Close Period",
+   [
+    "button"
+   ]
+  ]
+ ],
+ "unused": [
+  "Invoicing",
+  "kanban",
+  "list",
+  "graph",
+  "pivot",
+  "calendar",
+  "Bar",
+  "Line",
+  "Pie",
+  "Show data table",
+  "Hide data table",
+  "is required",
+  "Receive Products",
+  "Partial",
+  "Individuals",
+  "Unassigned",
+  "Sales Orders",
+  "Below Minimum",
+  "RFQs",
+  "To Receive",
+  "Remote",
+  "Open Tasks",
+  "Late",
+  "My Tickets",
+  "Invoice Date",
+  "Other Info",
+  "Sales Order ",
+  "Wrong login or password",
+  "In Progress ",
+  "Interview",
+  "Archive",
+  "Unarchive",
+  "Revenue",
+  "Gross Profit",
+  "Net Operating Income",
+  "Net Income",
+  "Total Assets",
+  "Liabilities",
+  "Current Year Earnings",
+  "Liabilities + Equity",
+  "Online Orders",
+  "Sales this month",
+  "Open pipeline",
+  "Net income (year)",
+  "Open tickets",
+  "Products below minimum",
+  "Pickups",
+  "Returns",
+  "Human Resources",
+  "Supply Chain",
+  "Productivity",
+  "Multiline Text",
+  "Decimal",
+  "Monetary",
+  "Checkbox",
+  "Selection",
+  "Customizations",
+  "Tap to advance",
+  "Tap when served",
+  "Request for Quotation",
+  "Accounts",
+  "Introduction Message",
+  "Lunch Orders",
+  "Lunch Products",
+  "Multiple choice",
+  "Open Shifts",
+  "Rating 1-5",
+  "Shifts",
+  "Subscribed",
+  "Survey Answers",
+  "To Pay",
+  "To Review",
+  "To do",
+  "Name is required",
+  "To reconcile",
+  "gantt",
+  "Administration",
+  "Expiring Soon",
+  "Fixed Price ",
+  "In Stock",
+  "AI Draft",
+  "Thinking…",
+  "Marketplace Connectors",
+  "Output Tax",
+  "Input Tax",
+  "Tax Payable",
+  "Not due",
+  "Older",
+  "Actual",
+  "Achievement",
+  "Oldest Due",
+  "Foreign Exchange Gain",
+  "Foreign Exchange Loss",
+  "Cash Discount Gain",
+  "Cash Discount Loss",
+  "Prepaid Expenses",
+  "Visa Expiring Soon",
+  "Departed",
+  "Stock Valuation",
+  "Total Value",
+  "SLA Failed",
+  "SLA On Track",
+  "Waiting Components",
+  "Employee Expenses Payable",
+  "To Post",
+  "To Reimburse",
+  "Book",
+  "Days between each preventive maintenance",
+  "Odometer Logs",
+  "Expiring in 30 days",
+  "Conflicts",
+  "Requested",
+  "Overdue Requests",
+  "Not Linked",
+  "Replenishment",
+  "Customer Payments",
+  "Vendor Payments",
+  "Base",
+  "Scan to verify this invoice",
+  "Scan to pay",
+  "Set a valid IBAN for payment QR codes",
+  "No transactions found in this file",
+  "Sales Lock Date",
+  "Purchase Lock Date",
+  "Posted Entries",
+  "Drafts",
+  "New Invoice",
+  "New Bill",
+  "End Balance",
+  "Operating Activities",
+  "Investing Activities",
+  "Financing Activities",
+  "Net Profit",
+  "Receivables",
+  "Payables",
+  "Current Ratio",
+  "Gross Margin",
+  "Net Margin",
+  "Days Sales Outstanding",
+  "Blacklisted Email Addresses",
+  "Received Ratio",
+  "Opened Ratio",
+  "Clicked Ratio",
+  "Replied Ratio",
+  "Bounced Ratio",
+  "This question requires an answer",
+  "This is not a number",
+  "This is not a date",
+  "Choose one of the answers",
+  "Choose among the answers",
+  "This survey is not open",
+  "Enter your name",
+  "You have used all your attempts for this survey",
+  "Expand",
+  "Collapse",
+  "This article is in the trash",
+  "Select or create an article",
+  "Parent article not found",
+  "Article not found",
+  "An article cannot be its own parent",
+  "An article cannot be moved under its own sub-article",
+  "An article cannot be moved under itself or its sub-articles",
+  "Only articles in the trash can be deleted",
+  "Version not found",
+  "Top-ups",
+  "The quantity must be greater than zero",
+  "The order deadline must be HH:MM",
+  "Received orders cannot be cancelled",
+  "Your lunch account does not have enough money for this order",
+  "This product is not available",
+  "Choose a product",
+  "Blacklisted Phone Numbers",
+  "No recipient has a valid phone number",
+  "This SMS campaign was already sent",
+  "Write the SMS content first",
+  "Rated",
+  "Live chat is not available",
+  "Conversation not found",
+  "Unknown author",
+  "Write a message first",
+  "This conversation is closed",
+  "No chatbot is running in this conversation",
+  "Rate from 1 to 5 stars",
+  "This conversation cannot be rated yet",
+  "This conversation was already rated",
+  "Unknown conversation",
+  "Enter your name and a valid email address",
+  "Have a Question? Chat with us.",
+  "Hello, how may I help you?",
+  "Add at least one workflow step",
+  "Write a message",
+  "Choose at least one account",
+  "Pick a date from today onwards",
+  "This post is already published",
+  "Featured",
+  "Newest",
+  "Price: low to high",
+  "Price: high to low",
+  "Confirmation",
+  "Too many lines in your cart",
+  "Enter a quantity between 1 and 1000",
+  "A product in your cart is not available online",
+  "Choose a delivery method",
+  "Choose a payment method",
+  "Course Attendees",
+  "Open Enrollment",
+  "Blog Posts",
+  "Not Published",
+  "Forum Posts",
+  "Most voted",
+  "Unanswered",
+  "Your post awaits moderation",
+  "Post not found",
+  "Write your message",
+  "Your message is too long (5000 characters at most)",
+  "Enter a title",
+  "The title is too long (200 characters at most)",
+  "Unknown forum",
+  "This question is not open for answers",
+  "This post cannot be voted on",
+  "A vote is +1 or -1",
+  "You already voted on this post",
+  "Only answers can be accepted",
+  "Validate the answer first",
+  "Discussions have no accepted answer",
+  "Unknown appointment type",
+  "Enter a valid phone number",
+  "Pick a time",
+  "This slot is no longer available",
+  "Booking not found",
+  "Only booked appointments can be cancelled",
+  "An appointment can only be cancelled before it starts",
+  "Enter the start as YYYY-MM-DDTHH:MM",
+  "This slot is already booked",
+  "Unknown appointment",
+  "Backorders",
+  "Create a backorder for the remaining quantities?",
+  "Set the quantities done before validating (or cancel the transfer)",
+  "Only done transfers can be returned",
+  "Add at least one product to the transfer",
+  "The quantity to scrap must be positive",
+  "The quantity to unbuild must be positive",
+  "WhatsApp Templates",
+  "WhatsApp Messages",
+  "Templates and conversations on WhatsApp",
+  "Document not found",
+  "The contact has no international phone number (e.g. +20 100 123 4567)",
+  "The WhatsApp template is not approved",
+  "This template is not for this kind of document",
+  "More than 24 hours since the customer's last message: use an approved template",
+  "Only administrators can approve or reject WhatsApp templates",
+  "Submitted templates cannot be edited",
+  "WhatsApp message sent",
+  "Message not found",
+  "Balanced",
+  "Auto Close",
+  "Auto Close After (days)",
+  "Document Tags",
+  "Folders",
+  "Expense Reports",
+  "Employee already has an open attendance",
+  "Employee has no open attendance",
+  "Retained Earnings",
+  "Variance",
+  "On Site",
+  "Invoiced this month",
+  "Overdue invoices",
+  "Payment amount",
+  "New on-hand quantity",
+  "record created",
+  "Payment of {amount} registered"
+ ]
+}

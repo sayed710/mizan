@@ -1,0 +1,24 @@
+// Build demo databases to inject into localStorage: (1) seed + a posted SAR invoice; (2) seed + 5000 partners + 2000 posted-looking invoices.
+import fs from 'node:fs';
+const [W, OUTDIR] = process.argv.slice(2);
+const { seed } = await import(`${W}/src/seed.js`);
+const { create, search } = await import(`${W}/src/orm.js`);
+const { postMove } = await import(`${W}/src/models/accounting.js`);
+let db = seed();
+const sar = search(db, 'res.currency').find((c) => c.name === 'SAR');
+const date = new Date().toISOString().slice(0, 10);
+const res = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, currency_id: sar.id, invoice_date: date, invoice_line_ids: [{ name: 'Consulting (SAR)', qty: 1, price_unit: 37500, tax: 0 }] });
+db = postMove(res.db, res.id);
+fs.writeFileSync(`${OUTDIR}/db-fx.json`, JSON.stringify(db));
+console.log('fx invoice id', res.id);
+let big = seed();
+const t0 = Date.now();
+const partners = [];
+for (let i = 0; i < 5000; i++) partners.push({ id: 10000 + i, name: `Bulk Partner ${i}`, email: `p${i}@example.test`, city: 'Cairo', company_id: 1, active: true });
+big = { ...big, records: { ...big.records, 'res.partner': [...big.records['res.partner'], ...partners] }, seq: { ...big.seq, 'res.partner': 15000 } };
+const moves = [];
+const tmpl = search(big, 'account.move').find((m) => m.move_type === 'out_invoice' && m.state === 'posted');
+for (let i = 0; i < 2000; i++) moves.push({ ...tmpl, id: 20000 + i, name: `INV/BULK/${i}`, partner_id: 10000 + (i % 5000) });
+big = { ...big, records: { ...big.records, 'account.move': [...big.records['account.move'], ...moves] }, seq: { ...big.seq, 'account.move': 22000 } };
+fs.writeFileSync(`${OUTDIR}/db-big.json`, JSON.stringify(big));
+console.log('big db bytes', fs.statSync(`${OUTDIR}/db-big.json`).size, 'built in', Date.now() - t0, 'ms');

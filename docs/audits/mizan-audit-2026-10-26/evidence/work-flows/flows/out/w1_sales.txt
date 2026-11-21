@@ -1,0 +1,32 @@
+[sync customer] lost fields: 0 
+[sync quotation] lost fields: 0 
+SO S00004 total 1299.6 company 1
+[sync confirm] lost fields: 0 
+after Confirm: state sale pickings WH/OUT/00002:ready:outgoing:route=true
+Confirm again: visible= false pickings now 2
+free qty / availability before validate 135
+[sync validate delivery] lost fields: 0 
+after Validate: picking done chair on hand 135 -> 130 qty_delivered [ 5, undefined ]
+ledger delta of delivery {"110100":-600,"500000":600}
+[sync create invoice] lost fields: 0 
+invoice 11 draft total 1299.6 company 1 SO invoice_status invoiced
+Create Invoice again -> Nothing left to invoice: everything ordered or delivered is already invoiced
+[sync post invoice] lost fields: 0 
+posted INV/2026/00003 ledger delta {"121000":1299.6,"251000":-159.6,"400000":-1140}
+[sync register payment] lost fields: 0 
+after payment: payment_state paid residual 0 ledger delta {"101401":1299.6,"121000":-1299.6}
+customer receivable (121000) balance for partner 0 payments PBNK1/2026/00003:1299.6:posted
+total ledger delta whole flow {"101401":1299.6,"110100":-600,"251000":-159.6,"400000":-1140,"500000":600}
+
+-- transitions --
+Cancel paid+posted invoice via run(): visible= false state cancel receivable for partner after -1299.6 SO invoice_status to_invoice
+Reset paid invoice to draft via run(): visible= false state draft partner 121000 -1299.6
+Create Invoice after cancelling the paid invoice: new invoice 13
+Credit notes created for one invoice (2 clicks): 2
+Register Payment on DRAFT invoice via run(): visible= false invoice state draft amount_paid 51.3 bank delta {"101401":51.3,"121000":-51.3}
+Cancel confirmed+invoiced SO via run(): visible= false state cancel done pickings untouched [ 'done' ]
+
+-- over-delivery --
+routed delivery qty 2, done 10: Done quantities must be finite and cannot exceed demand
+manual delivery qty 2 done 10: ACCEPTED lamp on hand 128 -> 118, SO qty_delivered 2
+then validate the routed delivery too: ACCEPTED lamp on hand -> 116, SO qty_delivered 2

@@ -1,0 +1,14 @@
+const B = 'http://127.0.0.1:38517';
+const H = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
+const login = await fetch(B + '/api/login', { method: 'POST', headers: H, body: JSON.stringify({ login: 'admin', password: 'audit-pass-123' }) });
+const cookie = login.headers.get('set-cookie').split(';')[0];
+console.log('login', login.status);
+const db = await (await fetch(B + '/api/db', { headers: { ...H, cookie } })).json();
+const { models } = await import(process.cwd() + '/src/models/index.js');
+const { search } = await import(process.cwd() + '/src/orm.js');
+const { diffDb } = await import(process.cwd() + '/src/sync.js');
+const exp = search(db, 'hr.expense').find((r) => r.state === 'draft' && !r.sheet_id);
+const res = models['hr.expense'].form.buttons.find((b) => b.label === 'Create Report').run(db, exp);
+const r = await fetch(B + '/api/diff', { method: 'POST', headers: { ...H, cookie }, body: JSON.stringify(diffDb(db, res.db)) });
+const body = await r.json();
+console.log('POST /api/diff (admin, Create Report on draft expense', exp.id + '):', r.status, body.error ?? 'ok');

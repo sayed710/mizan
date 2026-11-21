@@ -1,0 +1,14 @@
+import { seed, orm, btn, tryIt, log } from './lib.mjs';
+const { create, read, search, write } = orm;
+const { invoiceDue } = await import('../src/models/subscriptionplus.js');
+let db = seed();
+const plan = create(db, 'sale.subscription.plan', { name: 'Monthly', interval: 1, unit: 'month', auto_close_days: 15 }); db = plan.db;
+const r = create(db, 'sale.subscription', { partner_id: 5, plan_id: plan.id, start_date: '2026-10-26', next_invoice_date: '2026-10-26', order_line: [{ product_id: 12, qty: 1, price_unit: 99, tax: 14 }], stage: 'progress' }); db = r.db;
+db = btn(db, 'sale.subscription', r.id, 'Generate Invoice').db;
+const inv = search(db, 'account.move').find((m) => m.subscription_id === r.id);
+log('inv', inv.invoice_date, inv.state, 'sub next', read(db, 'sale.subscription', r.id).next_invoice_date);
+let c = btn(write(db, 'account.move', inv.id, { state: 'draft' }), 'account.move', inv.id, 'Cancel').db;
+c = write(c, 'sale.subscription', r.id, { next_invoice_date: '2026-10-26' });
+log('sub before', JSON.stringify((({ stage, next_invoice_date, end_date }) => ({ stage, next_invoice_date, end_date }))(read(c, 'sale.subscription', r.id))));
+const out = invoiceDue(c, '2026-12-26');
+log('invoices after', search(out, 'account.move').filter((m) => m.subscription_id === r.id).map((m) => m.invoice_date + ':' + m.state).join(' | '), 'stage', read(out, 'sale.subscription', r.id).stage);
