@@ -34,10 +34,12 @@ function isClosingEntry(db, year, move) {
   return sameLines(closingLines(without, year, year.closing_earnings_account_id).map((l) => ({ ...l, debit: l.credit, credit: l.debit })), move.line_ids ?? []);
 }
 
-/** The genuine reopening entry: posted, named for the year, and the exact mirror of its closing entry. */
+/** The genuine reopening entry: posted, named for the year, linked to its closing entry, and its exact mirror. */
 function isReopeningEntry(db, year, move) {
   const closing = read(db, 'account.move', year.closing_move_id);
   return !!move && !!closing && (move.company_id ?? 1) === (year.company_id ?? 1) && move.state === 'posted' && move.move_type === 'entry' && move.ref === `Reopen fiscal year: ${year.name}`
+    && move.reversed_entry_id === closing.id
+    && (closing.reversal_move_id === move.id || Boolean(closing.inalterable_hash))
     && sameLines(closing.line_ids ?? [], move.line_ids ?? []);
 }
 
@@ -52,6 +54,7 @@ function yearGuard(db, before, after) {
   if ((before?.closing_earnings_account_id ?? null) !== (after.closing_earnings_account_id ?? null) && !closes) return 'The closing earnings account is set by closing the fiscal year';
   if ((before?.closing_move_id ?? null) !== (after.closing_move_id ?? null) && !(closes && after.closing_move_id)) return 'The closing entry is set by closing the fiscal year';
   if (closes && !after.closing_move_id) return 'Close the fiscal year with its closing entry';
+  if (before?.opening_move_id && !after.opening_move_id && !closes) return 'The reopening entry is set by reopening the fiscal year';
   if (after.opening_move_id && after.opening_move_id !== before?.opening_move_id && (before?.opening_move_id || after.state !== 'open')) return 'The reopening entry is set by reopening the fiscal year';
   if (entryOff(after.closing_move_id) || entryOff(after.opening_move_id)) return 'Closing entries are dated on the fiscal year end';
   // Only the real entries made by closing or reopening may be named: an ordinary entry would vanish from the P&L.
@@ -81,7 +84,18 @@ export function closeFiscalYear(db, yearId, { date } = {}) {
   }
   const earningsAccountId = currentYearEarningsAccount(db, year.company_id).id;
   const lines = closingLines(db, year, earningsAccountId);
-  const next = db;
+  let next = db;
+  // Keep any prior closing and its reopening reversal explicitly paired before replacing the year's current closing link.
+  if (year.closing_move_id && year.opening_move_id) {
+    const prevClosing = read(next, 'account.move', year.closing_move_id);
+    const prevOpening = read(next, 'account.move', year.opening_move_id);
+    if (prevOpening && !prevOpening.reversed_entry_id && !prevOpening.inalterable_hash) {
+      next = write(next, 'account.move', prevOpening.id, { reversed_entry_id: year.closing_move_id });
+    }
+    if (prevClosing && !prevClosing.reversal_move_id && !prevClosing.inalterable_hash) {
+      next = write(next, 'account.move', prevClosing.id, { reversal_move_id: year.opening_move_id });
+    }
+  }
   const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, company: year.company_id, lines, system_generated: true });
   const marked = { ...entry.db, records: { ...entry.db.records, 'account.move': entry.db.records['account.move'].map((m) => m.id === entry.id ? { ...m, closing_fiscal_year_id: yearId } : m) } };
   // The year references its closing entry first: only such an entry may carry the closing flag.
@@ -103,7 +117,12 @@ export function reopenFiscalYear(db, yearId) {
     system_generated: true,
     archivedOriginIds: [closing.id],
   });
-  return write(write(entry.db, 'account.fiscal.year', yearId, { opening_move_id: entry.id }), 'account.move', entry.id, { is_closing: true });
+  let linked = write(entry.db, 'account.move', entry.id, { reversed_entry_id: closing.id });
+  if (!closing.inalterable_hash) {
+    linked = write(linked, 'account.move', closing.id, { reversal_move_id: entry.id });
+  }
+  const opened = write(linked, 'account.fiscal.year', yearId, { opening_move_id: entry.id });
+  return write(opened, 'account.move', entry.id, { is_closing: true });
 }
 
 const pnlRows = [['revenue', 'Revenue'], ['cost', 'Cost of Revenue'], ['gross', 'Gross Profit'], ['expense', 'Expenses'],
