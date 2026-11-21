@@ -86,7 +86,7 @@ export function installments(term, total, invoiceDate, currency = null) {
   const error = termScheduleError(term, total, currency);
   if (error) throw new Error(error);
 
-  const lines = term.line_ids ?? [];
+  const lines = [...(term.line_ids ?? [])].sort((a, b) => lineDate(a, invoiceDate).localeCompare(lineDate(b, invoiceDate)));
   const step = Number(currency?.rounding ?? 0.01);
   const signedTotal = currencyUnits(total, currency);
   const sign = Math.sign(signedTotal);
@@ -94,6 +94,8 @@ export function installments(term, total, invoiceDate, currency = null) {
   const fixed = lines.map((line) => (line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0));
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
 
+  const isBalanceLine = (line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance');
+  const hasBalance = lines.some(isBalanceLine);
   let remaining = totalCents;
   const amounts = lines.map((line, index) => {
     fixedRemaining -= fixed[index];
@@ -101,7 +103,12 @@ export function installments(term, total, invoiceDate, currency = null) {
       ? fixed[index]
       : Math.max(0, Math.round(totalCents * (Number(line.value) || 0) / 100));
     // Reserve later fixed terms and never let rounded percentages overspend the total.
-    const amount = index === lines.length - 1 ? remaining : Math.min(requested, remaining - fixedRemaining);
+    const isBalance = isBalanceLine(line);
+    const laterRequested = isBalance ? lines.slice(index + 1).reduce((sum, later) => sum + (later.value_type === 'fixed'
+      ? Math.max(0, currencyUnits(later.value, currency))
+      : Math.max(0, Math.round(totalCents * (Number(later.value) || 0) / 100))), 0) : 0;
+    const amount = isBalance ? Math.max(0, remaining - laterRequested)
+      : index === lines.length - 1 && !hasBalance ? remaining : Math.min(requested, remaining - fixedRemaining);
     remaining -= amount;
     return sign * amount;
   });
@@ -186,7 +193,7 @@ export const termModels = {
           ['mixed', 'Always (upon invoice)'],
         ],
       },
-      display_on_invoice: { type: 'boolean', label: 'Display terms on invoice' },
+      display_on_invoice: { type: 'boolean', label: 'Show installment dates' },
       example_amount: { type: 'float', label: 'Example Amount', editable: true, compute: (r) => (r && Object.hasOwn(r, 'example_amount') ? r.example_amount : 1000) },
       example_date: { type: 'date', label: 'Example Date', editable: true, compute: (r) => (r && Object.hasOwn(r, 'example_date') ? r.example_date : today()) },
       line_ids: {
