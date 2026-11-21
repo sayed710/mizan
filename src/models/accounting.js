@@ -727,6 +727,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
         posted = reconcileReversalLines(posted, source.id, id, r.date ?? entryDate);
       }
     }
+    if (journalRecord.restrict_mode_hash_table) posted = secureEntries(posted, { throughMoveId: id });
     const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id, scheduled: r.reverse_date > today() }).db : posted;
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
@@ -785,6 +786,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
   }
   if (matchWarnings.length) posted = postNote(posted, 'account.move', id, `Purchase price mismatch: ${matchWarnings.map((line) => `${read(db, 'product', line.product_id)?.name ?? 'Unknown product'}, difference ${line.priceDifference}`).join('; ')}`);
   posted = write(posted, 'account.journal', journal, { [sequence.numberField]: sequence.nextNumber + 1 });
+  if (journalRecord.restrict_mode_hash_table) posted = secureEntries(posted, { throughMoveId: id });
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   if (isRefund(r) && r.reversed_entry_id) {
     const adjusted = adjustInvoiceDeferralsForCreditNote(deferred, read(deferred, 'account.move', id), reverseEntry);

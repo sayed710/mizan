@@ -53,10 +53,10 @@ export function computeMoveHash(move, previousHash = '', version = move.inaltera
     const lines = (move.line_ids ?? []).map((l) => [l.account_id ?? null, Number(l.debit || 0), Number(l.credit || 0)]);
     return sha256(JSON.stringify([date, journal, name, company, partner, lines, previousHash]));
   }
-  if (version !== 2) return null;
+  if (version !== 2 && version !== 3) return null;
   const lineFields = ['name', 'account_id', 'partner_id', 'debit', 'credit', 'amount_currency', 'currency_id', 'tax_name', 'tax_base', 'tax_side', 'tax_zero', 'tax_id', 'tax_ids', 'tax_tag_ids', 'tag_ids', 'analytic_distribution'];
   const lines = (move.line_ids ?? []).map((line) => lineFields.map((field) => canonical(line[field])));
-  return sha256(JSON.stringify([2, move.invoice_date ?? null, move.date ?? null, journal, name, company, partner, move.move_type ?? null, move.reversed_entry_id ?? null, move.reversal_move_id ?? null, move.correction_of_id ?? null, move.is_closing ?? null, move.currency_id ?? null, move.fiscal_position_id ?? null, canonical(move.invoice_line_ids ?? []), lines, previousHash]));
+  return sha256(JSON.stringify([version, ...(version === 3 ? [move.ref ?? null] : []), move.invoice_date ?? null, move.date ?? null, journal, name, company, partner, move.move_type ?? null, move.reversed_entry_id ?? null, move.reversal_move_id ?? null, move.correction_of_id ?? null, move.is_closing ?? null, move.currency_id ?? null, move.fiscal_position_id ?? null, canonical(move.invoice_line_ids ?? []), lines, previousHash]));
 }
 
 // Early unversioned snapshots used a delimiter-based payload before version 1 was frozen.
@@ -198,11 +198,11 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
     if (lastSecured && unhashed.some((m) => (m.name ?? '').localeCompare(lastSecured.name ?? '') <= 0)) throw new Error('Cannot secure an entry before the last secured sequence');
     for (const move of unhashed) {
       lastSeqNum += 1;
-      const hash = computeMoveHash(move, previousHash, 2);
+      const hash = computeMoveHash(move, previousHash, 3);
       next = write(next, 'account.move', move.id, {
         inalterable_hash: hash,
         secure_sequence_number: lastSeqNum,
-        inalterable_hash_version: 2,
+        inalterable_hash_version: 3,
       });
     
       previousHash = hash;
