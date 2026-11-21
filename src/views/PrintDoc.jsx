@@ -6,13 +6,13 @@ import { t } from '../i18n.js';
 import { display, formatDate } from '../ui.jsx';
 import { batchCurrency, checkAmountDisplay } from '../models/payments.js';
 import { paymentRemittanceLines } from '../models/pay.js';
-import { subtotal } from '../models/common.js';
+import { subtotal, today, validDate } from '../models/common.js';
 import { invoiceTaxTotals } from '../models/ledger.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
 import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
 import { taxInvoiceLabel } from '../models/taxes.js';
 import { documentCurrency, formatCurrency } from '../money.js';
-import { installments, invoiceTermNote } from '../models/terms.js';
+import { dueTermLinesError, installments, invoiceInstallments, invoiceTermNote, termScheduleError } from '../models/terms.js';
 import { SafeHtml } from '../HtmlEditor.jsx';
 import { ReportPrintView } from './ReportPrintView.jsx';
 
@@ -414,7 +414,12 @@ export function PrintDoc({ model, id }) {
           const note = invoiceTermNote(db, rec) && <p className="paper-note">{invoiceTermNote(db, rec)}</p>;
           if (!term?.display_on_invoice) return note;
           const currency = documentCurrency(db, rec);
-          const rows = installments(term, rec.amount_total, rec.invoice_date || rec.date, currency);
+          const rows = rec.state === 'posted'
+            ? invoiceInstallments(db, rec, term)
+            : !termScheduleError(term, rec.amount_total, currency) && !dueTermLinesError(term)
+              ? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency)
+              : null;
+          if (!rows?.length) return note;
           return <>{note}<table><thead><tr><th>{t('Due Date')}</th><th>{t('Amount')}</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><td>{formatDate(row.date)}</td><td className="num">{formatCurrency(row.amount, currency)}</td></tr>)}</tbody></table></>;
         })()}
         {rec.narration && <p className="paper-note">{rec.narration}</p>}
