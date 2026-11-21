@@ -3,7 +3,7 @@ import { read, search, write } from '../orm.js';
 import { today, validDate } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport } from '../models/reports.js';
-import { generateGroupedEntries } from '../models/deferred.js';
+import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { filterByAnalytic, journalItems } from '../models/ledger.js';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
@@ -18,6 +18,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { companyCurrencyRecord, findCompanyCurrencyRecord } from '../money.js';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView } from './ReportPrintView.jsx';
@@ -636,17 +637,18 @@ function InalterabilityCheck({ db, companyId }) {
   );
 }
 
-function DeferredBody({ db, period, companyId, kind }) {
+export function DeferredBody({ db, period, companyId, kind }) {
   const rows = deferredReport(db, { ...period, company_id: Number(companyId) }, kind);
+  const currency = findCompanyCurrencyRecord(db, Number(companyId)) ?? companyCurrencyRecord(db, Number(companyId));
   return <tbody>{rows.map((row) => {
     const account = read(db, 'account.account', row.account_id);
-    return <tr key={row.account_id}><td><a href={`#/accounting/journal-items?account=${row.account_id}`}>{account ? `${account.code} ${account.name}` : row.account_id} - {t('Journal Items')}</a></td>{['total', 'not_started', 'before', 'current', 'recognized', 'within_year', 'after_year'].map((key) => <td className="num" key={key}>{money(row[key])}</td>)}</tr>;
+    return <tr key={row.account_id}><td><a href={`#/accounting/journal-items?account=${row.account_id}${companyId ? `&company=${companyId}` : ''}`}>{account ? `${account.code} ${account.name}` : row.account_id} - {t('Journal Items')}</a></td>{['total', 'not_started', 'before', 'current', 'recognized', 'within_year', 'after_year'].map((key) => <td className="num" key={key}>{money(row[key], currency?.name, currency)}</td>)}</tr>;
   })}</tbody>;
 }
 
-const REPORTS = {
+export const REPORTS = {
   deferredRevenue: { title: 'Deferred Revenue', Body: DeferredBody, firstCol: 'Account', cols: ['Total', 'Not Started', 'Before', 'Current', 'Recognized', '<= 12 Months', '> 12 Months'] },
-  deferredExpense: { title: 'Deferred Expense', Body: DeferredBody, firstCol: 'Account', cols: ['Total', 'Not Started', 'Before', 'Current', 'Later'] },
+  deferredExpense: { title: 'Deferred Expense', Body: DeferredBody, firstCol: 'Account', cols: ['Total', 'Not Started', 'Before', 'Current', 'Recognized', '<= 12 Months', '> 12 Months'] },
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   fiscal: { title: 'Fiscal Report', Body: FiscalReport, cols: ['Debit', 'Credit', 'Balance'] },
   partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
@@ -908,7 +910,8 @@ function ReportPage({ leaf }) {
       </label>}
       <span className="muted">{subtitle}</span>
       <span className="spacer" />
-      {isDeferred && <button type="button" className="btn sm" onClick={() => {
+      {isDeferred && <button type="button" className="btn sm" disabled={!deferredSettings(db, Number(selectedCompany) || 1, deferredKind).isGrouped} title={!deferredSettings(db, Number(selectedCompany) || 1, deferredKind).isGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={() => {
+        if (!deferredSettings(getDb(), Number(selectedCompany) || 1, deferredKind).isGrouped) return;
         setGenerationError('');
         try { commit(generateGroupedEntries(getDb(), { date: period.to, company_id: Number(selectedCompany), kind: deferredKind })); }
         catch (error) { setGenerationError(error.message); }

@@ -175,7 +175,7 @@ function groupedBoardLines(schedule, date, method, currency) {
 
 function adjustedRecognitionOutstanding(line, currency) {
   const amount = roundCurrency(Math.abs(Number(line.amount) || 0), currency);
-  const adjusted = roundCurrency(Math.abs(Number(line.credit_adjusted_amount) || 0), currency);
+  const adjusted = roundCurrency(lineCreditAdjustmentAmount(null, null, line), currency);
   if (adjusted > amount) throw new Error('Deferred recognition credit adjustments exceed the posted amount');
   return roundCurrency(amount - adjusted, currency);
 }
@@ -229,6 +229,31 @@ export function recognitionTargetThroughDate(schedule, index, date, method, curr
   const periodDays = Math.floor((Date.parse(end) - Date.parse(start)) / DAY) + 1;
   if (periodDays <= 0) throw new Error(`Invalid deferred service period on ${schedule.name}`);
   return roundCurrency((Number(line.amount) || 0) * elapsedDays / periodDays, currency);
+}
+
+/** Reconstruct a deferral schedule as of a cutoff date using saved credit adjustment snapshots. */
+export function scheduleAsOf(db, schedule, cutoffDate) {
+  if (!cutoffDate || !Array.isArray(schedule?.board)) return schedule;
+  const lineAdjs = schedule.board.flatMap((l) => l.credit_adjustments ?? []);
+  if (!lineAdjs.length) return schedule;
+  const futureAdjs = lineAdjs.filter((adj) => adj.date > cutoffDate);
+  if (!futureAdjs.length) return schedule;
+  let state = schedule.state;
+  if (state === 'cancel') {
+    state = 'running';
+  }
+  return { ...schedule, state };
+}
+
+/** Cumulative credit adjustments posted on a board line on or before cutoffDate. */
+export function lineCreditAdjustmentAmount(db, schedule, line, cutoffDate) {
+  if (!line || !Array.isArray(line.credit_adjustments)) return 0;
+  return line.credit_adjustments.reduce((sum, adj) => {
+    if (!cutoffDate || adj.date <= cutoffDate) {
+      return sum + (Number(adj.amount) || 0);
+    }
+    return sum;
+  }, 0);
 }
 
 const isRefund = (move) => ['out_refund', 'in_refund'].includes(move.move_type);
@@ -667,7 +692,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
           : postRecognitionCorrection(next, schedule, recognitionMove, outstanding, date, note, true);
         next = stepDb;
         if (reversalId) {
-          reversalByDate.set(line.date, reversalId);
+          reversalByDate.set(line.date, { id: reversalId, amount: outstanding, date });
           adjustmentMoveIds.push(reversalId);
         }
       }
@@ -688,8 +713,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
           const correction = postRecognitionCorrection(next, schedule, recognitionMove, adjustmentAmount, date, note, true);
           next = correction.db;
           if (correction.id) adjustmentMoveIds.push(correction.id);
-          line.credit_adjusted_amount = roundCurrency((Number(line.credit_adjusted_amount) || 0) + adjustmentAmount, currency);
-          line.credit_adjustment_move_ids = [...(line.credit_adjustment_move_ids ?? []), correction.id];
+          line.credit_adjustments = [...(line.credit_adjustments ?? []), { move_id: correction.id, amount: adjustmentAmount, date }];
         }
       }
     }
@@ -711,8 +735,13 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
     }
 
     const updatedBoard = board.map((line) => {
-      let updatedLine = reversalByDate.has(line.date)
-        ? { ...line, reversal_move_id: reversalByDate.get(line.date), credit_adjusted_amount: roundCurrency(Math.abs(Number(line.amount) || 0), currency) }
+      const rev = reversalByDate.get(line.date);
+      let updatedLine = rev
+        ? {
+            ...line,
+            reversal_move_id: rev.id,
+            credit_adjustments: [...(line.credit_adjustments ?? []), { move_id: rev.id, amount: rev.amount, date: rev.date }],
+          }
         : line;
       if (updatedLine.reversal_move_id && reversed.has(updatedLine.reversal_move_id)) {
         updatedLine = { ...updatedLine, reversal_move_id: null };
@@ -1605,6 +1634,7 @@ export const deferredModels = {
           reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
           credit_adjusted_amount: { type: 'monetary', readonly: true, hidden: true },
           credit_adjustment_move_ids: { type: 'json', readonly: true, hidden: true },
+          credit_adjustments: { type: 'json', readonly: true, hidden: true },
         },
         newLine: () => ({ date: today(), amount: 0, posted: false, move_id: null }),
       },

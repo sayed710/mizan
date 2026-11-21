@@ -1,9 +1,8 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
-import { companyCurrencyRecord } from '../money.js';
-import { deferredSettings, recognitionTargetThroughDate } from './deferred.js';
+import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { deferredSettings, lineCreditAdjustmentAmount, recognitionTargetThroughDate, scheduleAsOf } from './deferred.js';
 import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, journalItems, profitAndLoss, weighted } from './ledger.js';
-import { round } from '../money.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
@@ -359,8 +358,10 @@ export function customerStatement(db, partnerId, { from, to, company_id, include
 /** Deferred recognition by original account for the selected company and period. */
 export function deferredReport(db, { from, to, company_id } = {}, kind) {
   const rows = new Map();
-  for (const schedule of search(db, 'account.deferral')) {
-    if (schedule.kind !== kind || schedule.state === 'cancel' || schedule.state === 'draft' || (company_id && (schedule.company_id ?? 1) !== Number(company_id))) continue;
+  for (const rawSchedule of search(db, 'account.deferral')) {
+    if (rawSchedule.kind !== kind || (company_id && (rawSchedule.company_id ?? 1) !== Number(company_id))) continue;
+    const schedule = scheduleAsOf(db, rawSchedule, to);
+    if (schedule.state === 'cancel' || schedule.state === 'draft') continue;
     const source = schedule.source_move_id ? read(db, 'account.move', schedule.source_move_id) : null;
     const sourceDate = source?.date ?? source?.invoice_date;
     if (schedule.source_move_id && (!source || source.state !== 'posted' || !sourceDate || (to && sourceDate > to))) continue;
@@ -370,8 +371,17 @@ export function deferredReport(db, { from, to, company_id } = {}, kind) {
     const method = deferredSettings(db, company, kind).computationMethod;
     const start = schedule.start_date ?? schedule.board[0]?.date;
     const previous = from ? new Date(Date.parse(from + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10) : null;
-    const total = schedule.board.reduce((sum, line) => sum + (line.cancelled ? 0 : Number(line.amount) || 0), 0);
-    const through = (date) => date ? schedule.board.reduce((sum, line, index) => sum + (line.cancelled ? 0 : recognitionTargetThroughDate(schedule, index, date, method, currency)), 0) : 0;
+    const total = schedule.board.reduce((sum, line) => {
+      if (line.cancelled) return sum;
+      const credited = lineCreditAdjustmentAmount(db, schedule, line, to);
+      return sum + Math.max(0, (Number(line.amount) || 0) - credited);
+    }, 0);
+    const through = (date) => date ? schedule.board.reduce((sum, line, index) => {
+      if (line.cancelled) return sum;
+      const target = recognitionTargetThroughDate(schedule, index, date, method, currency);
+      const credited = lineCreditAdjustmentAmount(db, schedule, line, date);
+      return sum + Math.max(0, target - credited);
+    }, 0) : 0;
     const before = through(previous);
     const untilEnd = to ? through(to) : total;
     const notStarted = start && to && start > to ? total : 0;
@@ -388,7 +398,9 @@ export function deferredReport(db, { from, to, company_id } = {}, kind) {
     const within_year = withinEnd - recognized;
     const after_year = total - withinEnd;
     const row = rows.get(schedule.recognition_account_id) ?? { account_id: schedule.recognition_account_id, total: 0, not_started: 0, before: 0, current: 0, recognized: 0, within_year: 0, after_year: 0 };
-    for (const [key, value] of Object.entries({ total, not_started: notStarted, before, current, recognized, within_year, after_year })) row[key] = round(row[key] + value);
+    for (const [key, value] of Object.entries({ total, not_started: notStarted, before, current, recognized, within_year, after_year })) {
+      row[key] = roundCurrency(row[key] + value, currency);
+    }
     rows.set(row.account_id, row);
   }
   return [...rows.values()];
