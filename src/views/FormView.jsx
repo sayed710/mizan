@@ -759,6 +759,7 @@ export function FormView({ leaf, id, base, params }) {
                           )
                         ) : (
                           <>
+                            {activeTab.help && <p className="field-help">{t(activeTab.help)}</p>}
                             {(activeTab.fields ?? []).map((f) => renderTabField(f))}
                             {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly, isNew })}
                           </>

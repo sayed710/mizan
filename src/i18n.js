@@ -3548,6 +3548,11 @@ const ar = {
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Base Currency Rate': 'سعر العملة الأساسية',
+  'Base Rate Date': 'تاريخ سعر الأساس',
+  'Units of this currency per 1 unit of the base currency.': 'وحدات هذه العملة لكل وحدة واحدة من العملة الأساسية.',
+  'The base currency rate is fixed at 1.': 'سعر العملة الأساسية ثابت عند 1.',
+  'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

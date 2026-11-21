@@ -6,6 +6,8 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
 import { addDays, today } from './models/common.js';
+import { rateAt, toCompany } from './models/currency.js';
+import { applyDiff, diffDb } from './sync.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -195,4 +197,193 @@ test('FX-2: company_rate and inverse_company_rate convert by the company currenc
   } finally {
     await gbpForm.done();
   }
+});
+
+test('Finding 1: historical rate lines use the company currency rate on line.date with no future fallback', async () => {
+  let db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const dHist = addDays(today(), -60);
+  const dLine = addDays(today(), -30);
+  const dFuture = addDays(today(), 30);
+  db = write(db, 'res.currency', eur.id, {
+    rate_ids: [
+      { date: dHist, rate: 0.8, company_id: null },
+      { date: today(), rate: 0.9, company_id: null },
+      { date: dFuture, rate: 1.2, company_id: null },
+    ],
+  });
+  const euroCo = create(db, 'res.company', { name: 'Euro Co', currency_id: eur.id });
+  db = {
+    ...euroCo.db,
+    settings: { ...euroCo.db.settings, current_company_id: euroCo.id, allowed_company_ids: [1, euroCo.id] },
+  };
+  const gbp = create(db, 'res.currency', {
+    name: 'GBP',
+    symbol: '£',
+    rate_ids: [
+      { date: dLine, rate: 0.64, company_id: euroCo.id },
+      { date: today(), rate: 0.72, company_id: euroCo.id },
+    ],
+  });
+  db = gbp.db;
+
+  const rateSpec = models['res.currency'].fields.rate_ids;
+  const gbpRec = read(db, 'res.currency', gbp.id);
+  const histLine = gbpRec.rate_ids.find((l) => l.date === dLine);
+  const currLine = gbpRec.rate_ids.find((l) => l.date === today());
+
+  // Historical line uses dHist (0.8), today line uses today() (0.9).
+  assert.equal(rateSpec.fields.company_rate.compute(histLine, db, gbpRec), 0.8);
+  assert.equal(rateSpec.fields.inverse_company_rate.compute(histLine, db, gbpRec), 1.25);
+  assert.equal(rateSpec.fields.company_rate.compute(currLine, db, gbpRec), 0.8);
+
+  // Editing the historical line in FormView saves 1.5 * 0.8 = 1.2 (not 1.5 * 0.9 = 1.35).
+  const gbpForm = await mountForm('res.currency', gbp.id, db);
+  try {
+    // Sorted newest-first: row 1 (index 2 in aria-label) is dLine.
+    const histUnitInput = find(gbpForm.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Unit/Base 2');
+    assert.equal(props(histUnitInput).value, 0.8);
+    await gbpForm.React.act(async () => {
+      props(histUnitInput).onChange({ target: { value: '1.5' } });
+    });
+    const saveBtn = find(gbpForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    await gbpForm.React.act(async () => {
+      props(saveBtn).onClick();
+    });
+    const nextDb = gbpForm.getDb();
+    const savedHist = read(nextDb, 'res.currency', gbp.id).rate_ids.find((l) => l.date === dLine);
+    assert.equal(savedHist.rate, 1.2);
+    assert.equal(Number(rateAt(nextDb, gbp.id, dLine, euroCo.id).toPrecision(12)), 1.5);
+  } finally {
+    await gbpForm.done();
+  }
+
+  // A line dated before EUR's earliest rate must not borrow future rates (no '9999-12-31' fallback).
+  const onlyFutureEur = write(db, 'res.currency', eur.id, {
+    rate_ids: [{ date: dFuture, rate: 1.2, company_id: null }],
+  });
+  assert.equal(rateSpec.fields.company_rate.compute(histLine, onlyFutureEur, gbpRec), null);
+});
+
+test('Finding 2: missing company currency rate is not treated as 1, and non-base company currency can edit its base rate', async () => {
+  let db = seed();
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  db = write(db, 'res.currency', eur.id, { rate_ids: [] });
+  const euroCo = create(db, 'res.company', { name: 'Euro Co', currency_id: eur.id });
+  db = {
+    ...euroCo.db,
+    settings: { ...euroCo.db.settings, current_company_id: euroCo.id, allowed_company_ids: [1, euroCo.id] },
+  };
+  const gbp = create(db, 'res.currency', {
+    name: 'GBP',
+    symbol: '£',
+    rate_ids: [{ date: today(), rate: 0.64, company_id: euroCo.id }],
+  });
+  db = gbp.db;
+
+  // Missing required rate on EUR must not fall back to 1 in the rate-line editor.
+  const rateSpec = models['res.currency'].fields.rate_ids;
+  const gbpRec = read(db, 'res.currency', gbp.id);
+  const gbpLine = gbpRec.rate_ids[0];
+  assert.equal(rateSpec.fields.company_rate.compute(gbpLine, db, gbpRec), null);
+  assert.equal(rateSpec.fields.inverse_company_rate.compute(gbpLine, db, gbpRec), null);
+  assert.equal(rateSpec.fields.company_rate.readonly(gbpLine, db), true);
+  assert.equal(rateSpec.fields.inverse_company_rate.readonly(gbpLine, db), true);
+  assert.equal(rateSpec.onchange({ ...gbpLine, company_rate: 1.5 }, 'company_rate', db).rate, 0.64);
+  assert.equal(rateSpec.onchange({ ...gbpLine, inverse_company_rate: 2 }, 'inverse_company_rate', db).rate, 0.64);
+
+  // EUR keeps hidden Rates tab, yet exposes Base Currency Rate so Euro Co can configure its missing rate.
+  const eurForm = await mountForm('res.currency', eur.id, db);
+  try {
+    assert.equal(allFind(eurForm.host, (n) => props(n)?.role === 'tab').length, 0);
+    const rateInput = find(eurForm.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Base Currency Rate');
+    const dateInput = find(eurForm.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Base Rate Date');
+    assert.ok(rateInput && dateInput, 'Base Currency Rate controls rendered for non-base company currency');
+    assert.equal(props(rateInput).value, '');
+
+    // Invalid rate (0) is rejected by guard on save.
+    await eurForm.React.act(async () => {
+      props(rateInput).onChange({ target: { value: '0' } });
+    });
+    let saveBtn = find(eurForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    await eurForm.React.act(async () => {
+      props(saveBtn).onClick();
+    });
+    assert.ok(find(eurForm.host, (n) => props(n)?.role === 'alert')?.textContent.includes('strictly positive'));
+
+    // Valid rate (0.8) saves into EUR.rate_ids and enables conversions + GBP company-relative rate editing.
+    const rateInput2 = find(eurForm.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Base Currency Rate');
+    await eurForm.React.act(async () => {
+      props(rateInput2).onChange({ target: { value: '0.8' } });
+    });
+    saveBtn = find(eurForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    await eurForm.React.act(async () => {
+      props(saveBtn).onClick();
+    });
+    const nextDb = eurForm.getDb();
+    const savedEur = read(nextDb, 'res.currency', eur.id);
+    assert.equal(savedEur.rate_ids.length, 1);
+    assert.equal(savedEur.rate_ids[0].rate, 0.8);
+    assert.equal(rateAt(nextDb, usd.id, today(), euroCo.id), 1.25);
+    assert.equal(toCompany(nextDb, usd.id, 100, today(), euroCo.id), 80);
+    assert.equal(rateSpec.fields.company_rate.compute(gbpLine, nextDb, read(nextDb, 'res.currency', gbp.id)), 0.8);
+
+    // Also supports editing a historical date via Base Rate Date.
+    const dPast = addDays(today(), -20);
+    const dateInput2 = find(eurForm.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Base Rate Date');
+    await eurForm.React.act(async () => {
+      props(dateInput2).onChange({ target: { value: dPast } });
+    });
+    const rateInput3 = find(eurForm.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Base Currency Rate');
+    assert.equal(props(rateInput3).value, '');
+    await eurForm.React.act(async () => {
+      props(rateInput3).onChange({ target: { value: '0.75' } });
+    });
+    saveBtn = find(eurForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    await eurForm.React.act(async () => {
+      props(saveBtn).onClick();
+    });
+    assert.equal(rateAt(eurForm.getDb(), usd.id, dPast, euroCo.id), 1 / 0.75);
+  } finally {
+    await eurForm.done();
+  }
+});
+
+test('Finding 3: base currency Rates tab is visible but read-only and base rate_ids writes are guarded', async () => {
+  let db = seed();
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const euroCo = create(db, 'res.company', { name: 'Euro Co', currency_id: eur.id });
+  db = {
+    ...euroCo.db,
+    settings: { ...euroCo.db.settings, current_company_id: euroCo.id, allowed_company_ids: [1, euroCo.id] },
+  };
+
+  // UI: USD Rates tab is shown, read-only (no Add a line / Delete / row inputs), and explains base rate is fixed at 1.
+  const usdForm = await mountForm('res.currency', usd.id, db);
+  try {
+    const rateTab = find(usdForm.host, (n) => props(n)?.role === 'tab' && n.textContent.trim() === 'Rates');
+    assert.ok(rateTab);
+    const panel = find(usdForm.host, (n) => props(n)?.role === 'tabpanel');
+    assert.ok(panel.textContent.includes('The base currency rate is fixed at 1.'));
+    assert.equal(find(panel, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Add a line'), null);
+    assert.equal(find(panel, (n) => n.tagName === 'BUTTON' && props(n)?.['aria-label'] === 'Delete'), null);
+    assert.equal(allFind(panel, (n) => n.tagName === 'INPUT').length, 0);
+  } finally {
+    await usdForm.done();
+  }
+
+  // Guard + diffDb/applyDiff: modifying rate_ids on base currency is rejected, while non-rate edits stay allowed.
+  const forgedRates = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.currency': db.records['res.currency'].map((c) => (
+        c.id === usd.id ? { ...c, rate_ids: [...(c.rate_ids ?? []), { date: today(), rate: 2, company_id: euroCo.id }] } : c
+      )),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedRates), { isAdmin: true }), /fixed at 1/i);
+  assert.doesNotThrow(() => write(db, 'res.currency', usd.id, { symbol: 'US$' }));
 });
