@@ -51,9 +51,9 @@ test('bank invoice matching links the payment entry and protects reversal', asyn
   const paymentEntry = read(paid, 'account.move', inv.id).payments.at(-1).move_id;
   assert.equal(read(paid, 'account.bank.statement.line', line.id).payment_move_id, paymentEntry);
   assert.equal(read(paid, 'account.bank.statement.line', line.id).move_id, inv.id);
-  const { reversePayment } = await import('./models/pay.js');
-  const payment = paid.records['account.payment'].find((p) => p.move_id === paymentEntry);
-  assert.throws(() => reversePayment(paid, payment), /reconciled bank transaction/);
+  const payment = paid.records['account.payment']?.find((p) => p.move_id === paymentEntry);
+  assert.equal(payment, undefined);
+  assert.throws(() => write(paid, 'account.move', paymentEntry, { state: 'draft' }), /reconciled bank transaction|cannot be changed/);
 });
 
 test('posted bank-linked entries already reject accounting-line and date changes', () => {

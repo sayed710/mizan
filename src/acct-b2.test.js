@@ -73,13 +73,13 @@ test('matchPayment matches an outstanding payment to the remaining open balance 
   assert.equal(finalLine.allocations[0].amount, 40);
   assert.equal(finalLine.allocations[1].amount, 60);
 
-  // 5. Unreconciliation cleanly reverses all allocations and bank movement
+  // 5. Unreconciliation releases allocations and restores the bank suspense entry
   const unrec = unreconcile(synced, finalLine);
   const unrecSynced = applyDiff(synced, diffDb(synced, unrec.db), { isAdmin: true });
   const unrecLine = read(unrecSynced, LINE, line.id);
   assert.equal(unrecLine.state, 'to_check');
-  assert.equal(unrecLine.open_amount, null);
-  assert.equal(unrecLine.bank_move_id, null);
+  assert.equal(unrecLine.open_amount, 100);
+  assert.equal(unrecLine.bank_move_id, partialLine.bank_move_id);
   assert.equal((unrecLine.allocations ?? []).length, 0);
 });
 
@@ -144,13 +144,13 @@ test('partial match leaves the rest open with the right open_amount, second paym
   assert.equal(step2Line.allocations[0].amount, 60);
   assert.equal(step2Line.allocations[1].amount, 40);
 
-  // 6. Unreconciliation cleanly reverses both allocations and the bank entry
+  // 6. Unreconciliation releases both allocations and restores suspense
   const unrec = unreconcile(db, step2Line);
   const unrecSynced = applyDiff(db, diffDb(db, unrec.db), { isAdmin: true });
   const unrecLine = read(unrecSynced, LINE, line.id);
   assert.equal(unrecLine.state, 'to_check');
-  assert.equal(unrecLine.open_amount, null);
-  assert.equal(unrecLine.bank_move_id, null);
+  assert.equal(unrecLine.open_amount, 100);
+  assert.equal(unrecLine.bank_move_id, step1Line.bank_move_id);
   assert.equal((unrecLine.allocations ?? []).length, 0);
 });
 

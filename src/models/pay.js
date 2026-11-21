@@ -635,7 +635,8 @@ export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineI
     && (!Number.isInteger(lineIndex) || row.line_index === lineIndex));
   const targetMoveId = byPartial ? (paymentMoveId ?? matches[0]?.move_id) : paymentMoveId;
   const payments = targetMoveId != null ? search(db, 'account.payment').filter((p) => p.move_id === targetMoveId && p.state === 'posted') : [];
-  if (!isInvoice(invoice) || invoice?.state !== 'posted' || matches.length !== 1 || (byPartial ? payments.length > 1 : payments.length !== 1)) {
+  const isBankMove = (db.records['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === targetMoveId);
+  if (!isInvoice(invoice) || invoice?.state !== 'posted' || matches.length !== 1 || (byPartial ? payments.length > 1 : (!isBankMove && payments.length !== 1))) {
     throw new Error(byPartial ? 'Select one active partial reconciliation settlement' : 'Select one active application of a posted payment');
   }
   const [row] = matches;
@@ -656,7 +657,7 @@ export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineI
   if (payment && (!byPartial || row.payment_company_amount != null) && !(bookedPayment > 0)) {
     throw new Error('The application payment company amount cannot be determined from its booked entry; repair the settlement link first');
   }
-  if (source?.state !== 'posted' || (!byPartial && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === targetMoveId))) {
+  if (source?.state !== 'posted' || (!byPartial && !isBankMove && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === targetMoveId))) {
     throw new Error(byPartial ? 'The reconciled counterpart entry must remain posted' : 'The payment entry must remain posted and unreversed');
   }
   const fxError = settlementFxError(db, invoice, row);
@@ -976,7 +977,7 @@ export function reverseWriteoff(db, invoiceId, moveId, date, { lineIndex = null 
  * again, cash-basis taxes included. Payments made by a bank reconciliation stay, since the bank line still matches them.
  */
 export function reversePayment(db, p, date = today(), options = {}) {
-  if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
+  if (!p || p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   if (p.return_id || p.is_tax_payment) throw new Error('Tax return payments cannot be reversed independently');
 
   if (p.is_internal_transfer) {

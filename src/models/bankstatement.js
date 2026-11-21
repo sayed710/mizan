@@ -167,7 +167,7 @@ export const bankStatementModels = {
         throw new Error('A closed statement cannot be deleted');
       }
       const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === statement.id);
-      if (lines.some((l) => l.state === 'reconciled' || Boolean(l.bank_move_id))) {
+      if (lines.some((l) => l.state === 'reconciled' || (l.allocations ?? []).length > 0)) {
         throw new Error('Cannot delete a statement with reconciled lines');
       }
       let currentDb = db;

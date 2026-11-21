@@ -41,7 +41,7 @@ for (const type of ['out_invoice', 'in_invoice']) test(`matching ${type} with an
   const item = added.flatMap((m) => m.line_ids).find((l) => l.account_id === x.account);
   assert.equal(item.name, 'Agreed adjustment');
   assert.equal(type === 'out_invoice' ? item.debit : item.credit, 10);
-  assert.equal(journalItems(done).filter((l) => !read(x.db, 'account.move', l.move_id) && l.account_id === x.bank).length, 1);
+  assert.equal(journalItems(done).filter((l) => l.move_id === read(x.db, LINE, x.id).bank_move_id && l.account_id === x.bank).length, 1);
   const synced = applyDiff(x.db, diffDb(x.db, done), { isAdmin: true });
   assert.equal(read(synced, 'account.move', x.invoice).amount_residual, 0);
 });

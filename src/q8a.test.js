@@ -181,10 +181,12 @@ test('Qodo 33: bank reversals in unreconcileJournalItems respect the selected re
   const selections = [{ move_id: postedInv.id, line_identity: journalItemIdentity(invoiceItem) }];
   const unreconciled = unreconcileJournalItems(db, selections, { date: selectedDate });
 
-  const reversalMoves = search(unreconciled, 'account.move').filter((m) => m.reversed_entry_id === bankMove.id);
-  assert.equal(reversalMoves.length, 1);
-  assert.equal(reversalMoves[0].invoice_date, selectedDate);
-  assert.equal(reversalMoves[0].date, selectedDate);
+  const restoredLine = read(unreconciled, 'account.bank.statement.line', line.id);
+  assert.equal(restoredLine.state, 'to_check');
+  assert.equal(restoredLine.open_amount, 100);
+  const restoredBank = read(unreconciled, 'account.move', bankMove.id);
+  const via = read(unreconciled, 'account.journal', journal.id);
+  assert.ok(restoredBank.line_ids.some((l) => l.account_id === via.default_account_id && l.debit === 100));
 });
 
 test('Qodo 34: selecting payment outstanding-account item in unreconcileJournalItems unapplies payment credit', () => {

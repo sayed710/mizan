@@ -1,7 +1,7 @@
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
-import { create, postNote, search, write } from './orm.js';
+import { create, postNote, read, search, write } from './orm.js';
 import { migrateAppointments } from './models/appointments.js';
 import { analyticLinesForMove } from './models/analyticplus.js';
 import { migrateDocumentTags } from './models/signplus.js';
@@ -13,7 +13,7 @@ import { migrateOrderpoints } from './models/orderpoint.js';
 import { normalizeHorizontalGroupVals } from './models/configurableReports.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today, validDate } from './models/common.js';
-import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
+import { CHART, isLiquidityJournal, journalId, statementPaymentIds, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
@@ -24,6 +24,7 @@ import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeD
 import { formatTaxReturnName } from './models/taxreturn.js';
 import { migratePaymentMethods } from './models/paymentmethod.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
+import { bookBankMovement, paymentOutstandingAccountId, statementCompanyAmount } from './models/bank.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1773,6 +1774,29 @@ MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (
   };
 } });
 MIGRATIONS.push({ version: 61, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
+function migrateStatementLinesBankSuspense(db) {
+  const lines = db.records['account.bank.statement.line'] ?? [];
+  let currentDb = db;
+  for (const line of lines) {
+    if (line.state === 'to_check' && !line.bank_move_id && line.journal_id && Number(line.amount) !== 0) {
+      const journal = read(currentDb, 'account.journal', line.journal_id);
+      if (!journal?.default_account_id) continue;
+      const linkedPayments = statementPaymentIds(currentDb, line).map((id) => read(currentDb, 'account.payment', id));
+      const hasDirectPayments = linkedPayments.length > 0 && linkedPayments.every((p) => p && !paymentOutstandingAccountId(currentDb, p));
+      if (hasDirectPayments) continue;
+      const company = line.company_id ?? journal.company_id ?? 1;
+      try {
+        const openAmount = statementCompanyAmount(currentDb, line);
+        const booked = bookBankMovement(currentDb, line, company, { date: line.date ?? today(), openAmount });
+        currentDb = booked.db;
+      } catch {
+        // Skip lines that cannot be booked due to missing rates or accounts in legacy data
+      }
+    }
+  }
+  return currentDb;
+}
+MIGRATIONS.push({ version: 62, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

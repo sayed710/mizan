@@ -65,7 +65,7 @@ test('outgoing payment uses company and journal outstanding defaults and unmatch
   db = run(db, 'account.bank.statement.line', line.id, 'Unreconcile');
   assert.deepEqual(read(db, 'account.payment', payment.id), before);
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
-  assert.ok(search(db, 'account.move').some((m) => m.reversed_entry_id === bankEntry.id));
+  assert.ok(read(db, 'account.move', bankEntry.id).line_ids.some((l) => l.account_id === bank.id && l.credit === 100));
 });
 
 test('a bank transaction on a general journal is refused, so a match cannot post bank lines there (PR 108 review)', () => {

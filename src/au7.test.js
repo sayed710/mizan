@@ -175,7 +175,7 @@ DATA:OFXSGML
   db = button(db, 'account.bank.statement.line', line2.id, 'Unreconcile');
   db = button(db, 'account.bank.statement.line', line3.id, 'Unreconcile');
 
-  assert.equal(balance(db, bankAcc) - initBank, 0, 'Bank balance restored to initial');
+  assert.equal(balance(db, bankAcc) - initBank, 125, 'Bank balance remains booked on statement lines');
   assert.equal(balance(db, outstandingReceipts) - initOut, 100, 'Outstanding receipts restored to payment balance (100)');
   assert.equal(balance(db, receivableAcc) - initRec, 100, 'Receivable restored to invoice 2 remaining balance (100)');
   assert.equal(read(db, 'account.move', inv1.id).amount_residual, 0, 'Invoice 1 remains settled by payment p1');

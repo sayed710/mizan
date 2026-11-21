@@ -3521,6 +3521,9 @@ const ar = {
   'Federal States': 'الولايات الاتحادية',
   'Selected country group does not exist': 'مجموعة الدول المحددة غير موجودة',
   'Country group name is required': 'اسم مجموعة الدول مطلوب',
+  'Bank Suspense Account': 'الحساب المعلق للبنك',
+  'Configure a bank suspense account on the journal or the company': 'قم بتهيئة حساب معلق للبنك في دفتر اليومية أو الشركة',
+  'Statement lines cannot use direct bank settlement': 'لا يمكن لبنود كشف الحساب البنكي استخدام التسوية البنكية المباشرة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

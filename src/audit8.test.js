@@ -90,7 +90,7 @@ test('Item 1: One bank statement line matches a batch payment (several outstandi
   const restoredLine = read(db, 'account.bank.statement.line', stmt.id);
   assert.equal(restoredLine.state, 'to_check');
   assert.equal(restoredLine.move_id, null);
-  assert.equal(restoredLine.bank_move_id, null);
+  assert.ok(restoredLine.bank_move_id);
 
   // Payments remain posted
   assert.equal(read(db, 'account.payment', p1.id).state, 'posted');

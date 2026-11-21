@@ -245,10 +245,72 @@ export function accountDeleteGuard(db, account, pending = db) {
 /** What a posted entry keeps until it is reset to draft. */
 const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
 
+function isBankStatementMove(db, moveId) {
+  return (db.records?.['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === moveId);
+}
+
+function bankStatementMoveRewriteError(db, before, after, ctx) {
+  if (before.date !== after.date
+    || (before.invoice_date ?? '') !== (after.invoice_date ?? '')
+    || before.journal_id !== after.journal_id
+    || (before.company_id ?? 1) !== (after.company_id ?? 1)
+    || before.name !== after.name
+    || before.state !== after.state
+    || (before.currency_id ?? null) !== (after.currency_id ?? null)
+    || (before.move_type ?? '') !== (after.move_type ?? '')
+    || (before.active !== false) !== (after.active !== false)) {
+    return 'Posted entries cannot be edited; reset them to draft first';
+  }
+  const lock = recordLockDate(db, after, ctx);
+  if (lock && (moveDate(after) <= lock || moveDate(before) <= lock)) {
+    return `The period up to ${lock} is locked`;
+  }
+  const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
+  if (before.inalterable_hash) {
+    return 'Secured entries cannot be modified';
+  }
+  const defaultAccountId = journal?.default_account_id;
+  if (!defaultAccountId) {
+    return 'The bank liquidity line cannot be changed';
+  }
+  const beforeLiq = (before.line_ids ?? []).filter((l) => l.account_id === defaultAccountId);
+  const afterLiq = (after.line_ids ?? []).filter((l) => l.account_id === defaultAccountId);
+  if (beforeLiq.length === 0) {
+    return 'The bank liquidity line cannot be changed';
+  }
+  for (const b of beforeLiq) {
+    const match = afterLiq.find((a) =>
+      Number(b.debit || 0) === Number(a.debit || 0)
+      && Number(b.credit || 0) === Number(a.credit || 0)
+      && (b.currency_id ?? null) === (a.currency_id ?? null)
+      && Number(b.amount_currency || 0) === Number(a.amount_currency || 0)
+    );
+    if (!match) {
+      return 'The bank liquidity line cannot be changed';
+    }
+  }
+  const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
+  if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) {
+    return 'Debits and credits cannot be negative';
+  }
+  if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) {
+    return 'A posted entry needs balanced journal items';
+  }
+  return null;
+}
+
+/** A posted statement entry whose only change is an allowed suspense rewrite (BANK-3/BANK-4). */
+export function bankStatementRewriteAllowed(db, before, after, ctx = null) {
+  return isBankStatementMove(db, after.id) && !bankStatementMoveRewriteError(db, before, after, ctx);
+}
+
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
-function postedMoveRule(db, before, after) {
+function postedMoveRule(db, before, after, ctx = null) {
   if (before?.state === 'posted' && after.state === 'posted') {
-    if (changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    if (isBankStatementMove(db, after.id)) {
+      const bankErr = bankStatementMoveRewriteError(db, before, after, ctx);
+      if (bankErr) return bankErr;
+    } else if (changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
   }
   if (before?.state === 'posted' && after.state !== 'posted') {
     // A sync may collapse the two reset steps; the return retains its link to the cancelled closing.
@@ -424,7 +486,7 @@ function unapplicationError(db, stored, after, before) {
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
     const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
-    if (glOnly) continue;
+    if (glOnly || isBankStatementMove(db, moveId)) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
     if (!payment || !prior || !Number.isFinite(change) || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
@@ -487,7 +549,8 @@ export function moveInvariant(db, after, before, stored = null) {
       const { reversed: flag, unapplied, reversal_date: unappliedOn, ...kept } = current;
       const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
       const glEntry = hasMatchingPartialLink(db, after, current, { reversed: true });
-      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry)
+      const bankEntry = isBankStatementMove(db, p.move_id);
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry && !bankEntry)
         || !unappliedOn || (p.date && unappliedOn < p.date);
     }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
@@ -699,7 +762,7 @@ function securedMoveRule(before, after) {
 }
 
 export function moveGuard(db, before, after, ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after, ctx) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */

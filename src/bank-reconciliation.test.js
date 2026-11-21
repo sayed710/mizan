@@ -88,7 +88,7 @@ test('an oversized line pays the invoice and keeps the remainder open with one b
   assert.equal(line.state, 'to_check');
   assert.equal(line.open_amount, 500);
   const bank = search(done, 'account.account').find((a) => a.code === '101401').id;
-  const newItems = journalItems(done).filter((l) => !read(db, 'account.move', l.move_id) && l.account_id === bank);
+  const newItems = journalItems(done).filter((l) => l.move_id === line.bank_move_id && l.account_id === bank);
   assert.equal(newItems.length, 1);
   assert.equal(newItems[0].debit, amount);
 });

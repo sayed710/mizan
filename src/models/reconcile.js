@@ -5,6 +5,7 @@ import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bo
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
+import { postAnalytic, removeAnalytic } from './analyticplus.js';
 
 export { sameCommercialPartner } from './common.js';
 
@@ -389,11 +390,6 @@ function writeOff(db, rule, line) {
   const companyValue = line.open_amount ?? statementCompanyAmount(db, line);
   const companyCurrency = companyCurrencyRecord(db, company);
   const via = paymentJournal(db, line.journal_id, company);
-  const side = (value, debit, extra = {}) => ({
-    ...extra,
-    [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency),
-    ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}),
-  });
   const items = counterparts.flatMap((l) => {
     const sameAsCounterpart = l.value > 0;
     return counterpartTaxLines(db, {
@@ -412,7 +408,7 @@ function writeOff(db, rule, line) {
       analytic_distribution: l.analytic_distribution,
       validateTaxUse: false,
     });
-  });
+  }).map((l) => ({ ...l, account_id: l.account_id ?? l.account, debit: Number(l.debit) || 0, credit: Number(l.credit) || 0 }));
   const counterpartSide = incoming ? 'credit' : 'debit';
   const opposingSide = incoming ? 'debit' : 'credit';
   const counterpartTotal = roundCurrency(items.reduce((sum, item) => sum + (Number(item[counterpartSide]) || 0) - (Number(item[opposingSide]) || 0), 0), companyCurrency);
@@ -432,33 +428,51 @@ function writeOff(db, rule, line) {
   }
   let current = db;
   let bankMoveId = line.bank_move_id ?? null;
-  let openAmount = 0;
-  let allocated = companyValue;
-  let entryLines = [side(balance, incoming, { account: bankMoveId ? ensureBankSuspense(db, company, via.id).id : via.accountId, partner_id }), ...items];
-  if (!fullCoverage) {
-    // The bank movement is booked once into the bank suspense account; this entry clears only its share.
-    const bookedBank = bookBankMovement(db, line, company, { date: line.date, openAmount: companyValue });
-    current = bookedBank.db;
-    bankMoveId = bookedBank.bankMoveId;
-    openAmount = companyRemainder;
-    allocated = counterpartTotal;
-    entryLines = [{
-      account: bookedBank.suspense,
-      partner_id,
-      [incoming ? 'debit' : 'credit']: counterpartTotal,
-      ...(foreign ? { currency_id: journalCurrency, amount_currency: -itemCurrency } : {}),
-    }, ...items];
+  if (fullCoverage) {
+    if (!bankMoveId) {
+      const bookedBank = bookBankMovement(db, line, company, { date: line.date, openAmount: companyValue });
+      current = bookedBank.db;
+      bankMoveId = bookedBank.bankMoveId;
+    }
+    const bankMove = read(current, 'account.move', bankMoveId);
+    const { id: suspenseId } = ensureBankSuspense(current, company, line.journal_id);
+    const bankLines = (bankMove?.line_ids ?? []).filter((l) => l.account_id !== suspenseId);
+    const externalAllocated = (line.allocations ?? []).filter((a) => a.payment_move_id && a.payment_move_id !== bankMoveId).reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
+    const suspLine = externalAllocated > 0 ? (incoming
+      ? { account_id: suspenseId, debit: 0, credit: externalAllocated, ...(foreign ? { currency_id: journalCurrency, amount_currency: -roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }
+      : { account_id: suspenseId, debit: externalAllocated, credit: 0, ...(foreign ? { currency_id: journalCurrency, amount_currency: roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }) : null;
+    const newLines = [...bankLines, ...items, ...(suspLine ? [suspLine] : [])];
+    current = write(current, 'account.move', bankMoveId, { line_ids: newLines });
+    if (items.some((l) => l.analytic_distribution)) {
+      current = postAnalytic(removeAnalytic(current, bankMoveId), bankMoveId);
+    }
+    return write(current, 'account.bank.statement.line', line.id, {
+      state: 'reconciled',
+      move_id: bankMoveId,
+      bank_move_id: bankMoveId,
+      open_amount: 0,
+      allocations: [...(line.allocations ?? []), { payment_move_id: bankMoveId, amount: companyValue, reconcile_model_id: rule.id }],
+    });
   }
+  const bookedBank = bookBankMovement(db, line, company, { date: line.date, openAmount: companyValue });
+  current = bookedBank.db;
+  bankMoveId = bookedBank.bankMoveId;
+  const entryLines = [{
+    account: bookedBank.suspense,
+    partner_id,
+    [incoming ? 'debit' : 'credit']: counterpartTotal,
+    ...(foreign ? { currency_id: journalCurrency, amount_currency: -itemCurrency } : {}),
+  }, ...items];
   const { db: booked, id } = postEntry(current, {
     journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: entryLines,
   });
   return write(booked, 'account.bank.statement.line', line.id, {
-    state: fullCoverage ? 'reconciled' : 'to_check',
+    state: 'to_check',
     move_id: id,
-    bank_move_id: bankMoveId ?? id,
-    open_amount: openAmount,
-    allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: allocated, reconcile_model_id: rule.id }],
+    bank_move_id: bankMoveId,
+    open_amount: companyRemainder,
+    allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: counterpartTotal, reconcile_model_id: rule.id }],
   });
 }
 

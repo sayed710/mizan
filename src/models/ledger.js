@@ -1,6 +1,6 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
-import { create, read, search } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
@@ -860,14 +860,52 @@ export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
   return { id: journal.id, code: journal.code, accountId: id, account_id: id, account: account.code };
 }
 
-/** Resolve the suspense account configured on the statement's journal. */
+/** Resolve or create the bank suspense account for the company. */
 export function ensureBankSuspense(db, company, journalId) {
-  const journal = read(db, 'account.journal', journalId ?? paymentJournal(db, null, company).id);
-  const account = read(db, 'account.account', journal?.suspense_account_id);
-  if (!account) throw new Error(`Configure the suspense account on journal ${journal?.name ?? journalId ?? '(not selected)'}`);
-  if (journal?.company_id && journal.company_id !== company) throw new Error('Statement journal belongs to another company');
-  if (account.active === false || (account.company_id && account.company_id !== company)) throw new Error('The suspense account must be active and belong to the statement company');
-  return { db, id: account.id };
+  const compId = company ?? 1;
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  if (journal?.company_id && journal.company_id !== compId) throw new Error('The bank journal belongs to another company or does not exist');
+
+  if (journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id) {
+    const account = read(db, 'account.account', journal.suspense_account_id);
+    if (!account || account.active === false || (account.company_id && account.company_id !== compId)) {
+      throw new Error('The suspense account must be active and belong to the statement company');
+    }
+    return { db, id: account.id };
+  }
+
+  const comp = read(db, 'res.company', compId);
+  const compSuspenseId = comp?.account_journal_suspense_account_id;
+  const compAccount = compSuspenseId ? read(db, 'account.account', compSuspenseId) : null;
+  const hasValidCompAccount = compAccount && compAccount.active !== false && (!compAccount.company_id || compAccount.company_id === compId) && compAccount.id !== journal?.default_account_id;
+
+  if (journal) {
+    if (journal.suspense_account_id === journal.default_account_id && hasValidCompAccount) {
+      return { db, id: compAccount.id };
+    }
+    if (journal.suspense_account_id === journal.default_account_id) {
+      // Both journal suspense and default account point to same account, and company has no separate suspense
+      // Fall through to auto-create a dedicated suspense account
+    } else if (hasValidCompAccount) {
+      throw new Error(`Configure the suspense account on journal ${journal.name || journal.code}`);
+    }
+  } else if (hasValidCompAccount) {
+    return { db, id: compAccount.id };
+  }
+
+  // Odoo always has a suspense account; create one with the first free code when none is configured.
+  const taken = new Set((db.records['account.account'] ?? []).filter((a) => !a.company_id || a.company_id === compId).map((a) => a.code));
+  let code = 101404;
+  while (taken.has(String(code))) code += 1;
+  const created = create(db, 'account.account', {
+    name: 'Bank Suspense Account',
+    code: String(code),
+    account_type: 'asset_current',
+    company_id: compId,
+    reconcile: true,
+  });
+  const nextDb = write(created.db, 'res.company', compId, { account_journal_suspense_account_id: created.id });
+  return { db: nextDb, id: created.id };
 }
 
 /** Resolve a payment method line's override account, else the optional journal/company outstanding account. */

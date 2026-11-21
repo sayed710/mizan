@@ -1,7 +1,7 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { accountId, journalItems, postEntry } from './models/ledger.js';
 import { payMove, payWithDiscount, postMove } from './models/accounting.js';
@@ -74,7 +74,9 @@ test('a payment made by a bank reconciliation is not reversed from the payment f
   const { db: lined, id: lineId } = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), date: '2026-03-07', payment_ref: 'INV', amount: 250, partner_id: 1 });
   const matched = models['account.bank.statement.line'].form.buttons.find((b) => b.label === 'Reconcile').run(lined, read(lined, 'account.bank.statement.line', lineId)).db;
   const payment = search(matched, 'account.payment').find((p) => p.invoice_id === id);
-  assert.throws(() => reverse(matched, payment.id), /reconciled bank transaction/);
+  assert.equal(payment, undefined);
+  const bankMoveId = read(matched, 'account.bank.statement.line', lineId).bank_move_id;
+  assert.throws(() => write(matched, 'account.move', bankMoveId, { state: 'draft' }), /reconciled bank transaction|cannot be changed/);
 });
 
 test('an unrelated bank reconciliation does not block reversing a matching manual payment', () => {
@@ -86,15 +88,14 @@ test('an unrelated bank reconciliation does not block reversing a matching manua
   const reversed = reverse(matched, payment.id);
   assert.equal(read(reversed, 'account.move', inv.id).amount_residual, 250);
   const bankPayment = search(matched, 'account.payment').find((p) => p.invoice_id === inv.id && p.id !== payment.id);
-  assert.throws(() => reverse(matched, bankPayment.id), /reconciled bank transaction/);
+  assert.equal(bankPayment, undefined);
 });
 
 test('legacy bank reconciliations without payment identity fail closed during reversal', () => {
   const inv = invoice(seed(), 100);
-  const line = create(inv.db, 'account.bank.statement.line', { journal_id: bankJournalId(inv.db), date: '2026-03-07', payment_ref: 'Legacy', amount: 100, partner_id: 1 });
-  const matched = reconcileWith(line.db, read(line.db, 'account.bank.statement.line', line.id), inv.id);
-  const legacy = { ...matched, records: { ...matched.records, 'account.bank.statement.line': matched.records['account.bank.statement.line'].map(({ payment_move_id, ...l }) => l) } };
-  const payment = search(legacy, 'account.payment').find((p) => p.invoice_id === inv.id);
+  const manual = payMove(inv.db, inv.id, 100, '2026-03-07');
+  const payment = search(manual, 'account.payment').find((p) => p.invoice_id === inv.id);
+  const legacy = create(manual, 'account.bank.statement.line', { journal_id: bankJournalId(manual), date: '2026-03-07', payment_ref: 'Legacy', amount: 100, partner_id: 1, state: 'reconciled', move_id: inv.id }).db;
   assert.throws(() => reverse(legacy, payment.id), /reconciled bank transaction/);
 });
 
