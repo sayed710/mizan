@@ -8,6 +8,7 @@ import { isLiquidityJournal, paymentJournal } from './ledger.js';
 import { paymentPaysByCheck, printBatchChecks } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
+import { buildSepaXml } from './sepa.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
@@ -111,6 +112,8 @@ export function postBatch(db, batch) {
   if (batch.state !== 'draft') throw new Error('Only draft batches can be validated');
   const lines = batch.lines ?? [];
   if (!lines.length) throw new Error('Add at least one invoice to the batch');
+  const sepa = batch.batch_type === 'outbound' && lines.some((line) => paymentMethodCode(db, read(db, 'account.payment', line.payment_id)) === 'sepa_ct');
+  if (sepa && lines.some((line) => !line.payment_id || paymentMethodCode(db, read(db, 'account.payment', line.payment_id)) !== 'sepa_ct')) throw new Error('Every payment must use SEPA Credit Transfer');
   const expected = MOVE_TYPE[batch.batch_type];
   const invoiceIds = lines.filter((l) => !l.payment_id).map((l) => l.move_id);
   const paymentIds = lines.filter((l) => l.payment_id).map((l) => l.payment_id);
@@ -125,7 +128,7 @@ export function postBatch(db, batch) {
       if (!payment || payment.state !== 'posted' || !payment.move_id || read(db, 'account.move', payment.move_id)?.state !== 'posted') throw new Error('Select an existing posted payment');
       if (payment.payment_type !== batch.batch_type || payment.partner_type !== (batch.batch_type === 'inbound' ? 'customer' : 'supplier')) throw new Error('Payment direction and partner type must match the batch');
       if (payment.journal_id !== batch.journal_id) throw new Error('Payment journal must match the batch journal');
-      if (batch.batch_type === 'outbound' && !paymentPaysByCheck(db, payment)) throw new Error('A check batch only holds check payments');
+      if (batch.batch_type === 'outbound' && !sepa && !paymentPaysByCheck(db, payment)) throw new Error('A check batch only holds check payments');
       if (isPaymentMatched(db, payment)) throw new Error('Payment is already matched');
       if ((db.records['account.batch.payment'] ?? []).some((other) => other.id !== batch.id && (other.lines ?? []).some((item) => !item.cancelled && item.payment_id === payment.id))) throw new Error('Payment is already in a batch');
       if (!(Number(line.amount) > 0) || roundCurrency(Number(line.amount) - Number(payment.amount), documentCurrency(db, payment)) !== 0) throw new Error('Batch amount must match the payment amount');
@@ -157,10 +160,10 @@ export function postBatch(db, batch) {
   if (journal.company_id != null && journal.company_id !== company) throw new Error('Batch journal and invoices must belong to the same company');
   paymentJournal(db, journal.id, company);
   const checkMethod = search(db, 'account.payment.method').find((m) => m.code === 'check_printing' && m.payment_type === 'outbound');
-  const checkLine = (batch.batch_type === 'outbound' && checkMethod)
+  const checkLine = (batch.batch_type === 'outbound' && !sepa && checkMethod)
     ? search(db, 'account.payment.method.line').find((l) => l.journal_id === journal.id && l.payment_method_id === checkMethod.id)
     : null;
-  if (batch.batch_type === 'outbound' && !checkLine) {
+  if (batch.batch_type === 'outbound' && !sepa && !checkLine) {
     throw new Error('The batch journal has no check payment method');
   }
   for (const line of lines) {
@@ -201,12 +204,60 @@ export function postBatch(db, batch) {
   });
   const prefix = batch.batch_type === 'inbound' ? 'BATCH-IN/' : 'BATCH-OUT/';
   const name = batch.name && batch.name !== 'New' ? batch.name : nextName(next, 'account.batch.payment', prefix);
+  const sepaFile = sepa ? generateSepaFile(next, { ...batch, name, company_id: company, lines: linked }).content : null;
   return write(next, 'account.batch.payment', batch.id, {
+    ...(sepa ? { sepa_file: sepaFile } : {}),
     name,
     state: 'posted',
     company_id: company,
     lines: linked,
   });
+}
+
+const paymentMethodCode = (db, payment) => {
+  const line = read(db, 'account.payment.method.line', payment?.payment_method_line_id);
+  const method = read(db, 'account.payment.method', line?.payment_method_id);
+  return method?.payment_type === payment?.payment_type ? method?.code : null;
+};
+
+/** Prepare an XML download from explicitly linked SEPA payments. */
+export function generateSepaFile(db, batch, createdAt = new Date().toISOString()) {
+  const journal = read(db, 'account.journal', batch.journal_id);
+  const bank = read(db, 'res.partner.bank', journal?.bank_account_id);
+  const company = read(db, 'res.company', batch.company_id ?? journal?.company_id);
+  const payments = (batch.lines ?? []).filter((line) => !line.cancelled).map((line) => {
+    const payment = read(db, 'account.payment', line.payment_id);
+    if (!payment) throw new Error('Each batch line must have a payment');
+    const methodLine = read(db, 'account.payment.method.line', payment.payment_method_line_id);
+    const method = read(db, 'account.payment.method', methodLine?.payment_method_id);
+    if (method?.code !== 'sepa_ct' || method.payment_type !== 'outbound') throw new Error('Every payment must use SEPA Credit Transfer');
+    if (documentCurrency(db, payment)?.name !== 'EUR') throw new Error('SEPA payments must use EUR');
+    const recipient = read(db, 'res.partner.bank', payment.partner_bank_id);
+    return { id: String(payment.id), amount: payment.amount, name: read(db, 'res.partner', payment.partner_id)?.name, iban: recipient?.account_number, memo: payment.memo };
+  });
+  return { name: `sepa-${batch.id}.xml`, content: buildSepaXml({ id: batch.name, createdAt, date: batch.date, debtor: { name: company?.name, iban: bank?.account_number, bic: bank?.bank_bic }, payments }) };
+}
+function sepaBatchGuard(db, before, after) {
+  if (before?.state === 'posted' && before.sepa_file) {
+    if (before.sepa_file !== after.sepa_file) return 'The SEPA file cannot be changed after validation';
+    if (['state', 'name', 'batch_type', 'journal_id', 'company_id', 'date', 'lines'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return 'A validated SEPA batch cannot be changed';
+  }
+  if (after.state !== 'posted' || before?.state === 'posted') return null;
+  const sepa = (after.lines ?? []).some((line) => paymentMethodCode(db, read(db, 'account.payment', line.payment_id)) === 'sepa_ct');
+  if (!sepa) return after.sepa_file ? 'Only SEPA batches can have a SEPA file' : null;
+  if (!after.sepa_file) return 'A validated SEPA batch requires a SEPA file';
+  if (after.batch_type !== 'outbound' || (after.lines ?? []).some((line) => {
+    const payment = read(db, 'account.payment', line.payment_id);
+    return !payment || payment.state !== 'posted' || payment.journal_id !== after.journal_id || (payment.company_id ?? 1) !== after.company_id || Number(line.amount) !== Number(payment.amount) || read(db, 'account.move', payment.move_id)?.state !== 'posted';
+  })) return 'A SEPA batch requires posted payments matching the journal, company and amounts';
+  const timestamp = after.sepa_file.match(/<CreDtTm>([^<]+)<\/CreDtTm>/)?.[1];
+  if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return 'The SEPA file does not match the batch';
+  try {
+    if (generateSepaFile(db, after, timestamp).content !== after.sepa_file) return 'The SEPA file does not match the batch';
+  } catch (error) {
+    return error.message;
+  }
+  return null;
 }
 
 const ONES = ['Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
@@ -253,8 +304,10 @@ export function isBatchReconciled(db, batch) {
 export const paymentModels = {
   'account.batch.payment': {
     label: 'Batch Payments',
+    guard: sepaBatchGuard,
     fields: {
       name: { type: 'char', label: 'Reference', required: true },
+      sepa_file: { type: 'text', label: 'SEPA file', readonly: true },
       batch_type: { type: 'selection', label: 'Batch Type', required: true, options: [['inbound', 'Inbound'], ['outbound', 'Outbound']] },
       date: { type: 'date', label: 'Date' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
@@ -333,7 +386,8 @@ export const paymentModels = {
       buttons: [
         { label: 'Add Open Invoices', when: (r) => r.state === 'draft', run: (db, r) => ({ db: fillOpenInvoices(db, r) }) },
         { label: 'Validate', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postBatch(db, r) }) },
-        { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound', run: (db, r) => ({ db: printBatchChecks(db, r), go: '#/print/account.batch.payment/' + r.id }) },
+        { label: 'Generate SEPA file', when: (r) => r.state === 'posted' && Boolean(r.sepa_file), run: (db, r) => ({ db, download: { name: `sepa-${r.id}.xml`, content: r.sepa_file } }) },
+        { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound' && !r.sepa_file, run: (db, r) => ({ db: printBatchChecks(db, r), go: '#/print/account.batch.payment/' + r.id }) },
         { label: 'Print Deposit Slip', when: (r) => r.state === 'posted' && r.batch_type === 'inbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],
       title: 'name',
