@@ -163,8 +163,8 @@ export function syncInvoicedQty(db, move) {
   if (!order) return db;
   const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
   const lines = order.order_line.map((l) => ({ ...l, qty_invoiced: 0 }));
-  const lineKey = model === 'sale.order' ? 'sale_line_key' : 'purchase_line_key';
-  const byKey = new Map(lines.map((l, i) => [l[lineKey], i]).filter(([key]) => key));
+  const lineKey = model === 'sale.order' ? 'sale_line_key' : 'purchase_line_id';
+  const byKey = new Map(lines.map((l, i) => [model === 'sale.order' ? l.sale_line_key : l.id, i]).filter(([key]) => key));
   const unlinked = [];
   for (const m of moves) for (const l of m.invoice_line_ids ?? []) {
     if (l.down_payment_key) continue;

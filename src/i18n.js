@@ -260,6 +260,7 @@ const ar = {
   'Enter a valid budget date': 'أدخل تاريخاً صالحاً للموازنة',
   'Configure a unique purchase order line link for each line': 'حدّد رابطاً فريداً ببند أمر الشراء لكل بند',
   'Purchase order and posted bill must belong to the same company': 'يجب أن يتبع أمر الشراء وفاتورة المورد المرحّلة الشركة نفسها',
+  'Unable to resolve purchase order line for vendor bill': '???? ????? ??? ??? ?????? ??????? ??????',
   'Link each posted bill line to its purchase order line before reporting budget commitments': 'اربط كل بند في فاتورة المورد المرحّلة ببند أمر الشراء قبل عرض التزامات الموازنة',
   'Configure units of measure on the purchase order and bill lines': 'حدّد وحدات القياس في بنود أمر الشراء وفاتورة المورد',
   'Budget not found': 'الموازنة غير موجودة',
@@ -3548,6 +3549,12 @@ const ar = {
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Purchase Order Line': 'بند أمر الشراء',
+  yes: 'نعم', no: 'لا', exception: 'استثناء',
+  'Credit Method': 'طريقة الإشعار الدائن',
+  'Partial Refund': 'استرداد جزئي',
+  'Full Refund': 'استرداد كامل',
+  'Full Refund and New Draft Invoice': 'استرداد كامل ومسودة فاتورة جديدة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

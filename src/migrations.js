@@ -1773,6 +1773,25 @@ MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (
   };
 } });
 MIGRATIONS.push({ version: 61, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
+MIGRATIONS.push({ version: 62, name: 'vendor-bill-line-purchase-line-id', up: (db) => {
+  const orders = db.records?.['purchase.order'] ?? [];
+  let nextId = Math.max(0, ...orders.flatMap((po) => (po.order_line ?? []).map((line) => Number(line.id) || 0)));
+  const nextOrders = orders.map((po) => ({ ...po, order_line: (po.order_line ?? []).map((line) => line.id == null ? { ...line, id: ++nextId } : line) }));
+  const nextMoves = (db.records?.['account.move'] ?? []).map((move) => {
+    if (!['in_invoice', 'in_refund'].includes(move.move_type) || !Array.isArray(move.invoice_line_ids)) return move;
+    return { ...move, invoice_line_ids: move.invoice_line_ids.map((line) => {
+      if (!line.purchase_line_key) return line;
+      const candidates = nextOrders.filter((po) => !move.purchase_id || po.id === move.purchase_id)
+        .flatMap((po) => po.order_line.filter((pol) => pol.purchase_line_key === line.purchase_line_key));
+      if (candidates.length !== 1) {
+        throw new Error('Unable to resolve purchase order line for vendor bill');
+      }
+      const { purchase_line_key, ...rest } = line;
+      return { ...rest, purchase_line_id: candidates[0].id };
+    }) };
+  });
+  return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

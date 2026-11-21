@@ -594,7 +594,7 @@ export function applyPaymentCredit(db, paymentIdOrRec, invoiceIdOrRec, date = to
   const invoice = typeof invoiceIdOrRec === 'object' && invoiceIdOrRec !== null ? invoiceIdOrRec : read(db, 'account.move', invoiceIdOrRec);
   if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice)) throw new Error('A posted invoice or bill is required');
   if (!(residual(invoice, db) > 0)) throw new Error('The invoice is already paid');
-  if (shouldBePaid(db, invoice) === 'exception') {
+  if (['exception', 'no'].includes(shouldBePaid(db, invoice))) {
     throw new Error('Resolve or approve the three-way matching exception before registering payment');
   }
 
@@ -1752,7 +1752,7 @@ export const payModels = {
           && (!r?.partner_id || m.partner_id === r.partner_id)
           && Boolean(SETTLES[r?.partner_type]?.[r?.payment_type]?.includes(m.move_type))
           && !invoiceAfterPayment(m, r?.date ?? today())
-          && shouldBePaid(db, m) !== 'exception',
+          && !['exception', 'no'].includes(shouldBePaid(db, m)),
       },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },
@@ -1861,7 +1861,7 @@ export const payModels = {
                   && sameCommercialPartner(db, m.partner_id, r.partner_id)
                   && SETTLES[r.partner_type]?.[r.payment_type]?.includes(m.move_type)
                   && residual(m, db) > 0
-                  && shouldBePaid(db, m) !== 'exception'
+                  && !['exception', 'no'].includes(shouldBePaid(db, m))
                   && (!r.partner_bank_id || !m.partner_bank_id || r.partner_bank_id === m.partner_bank_id),
               },
               { name: 'date', type: 'date', label: 'Application Date', default: today(), required: true },

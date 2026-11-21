@@ -1,11 +1,12 @@
 // Fixed assets: depreciation boards and their posting.
 import { read, search, write } from '../orm.js';
-import { addDays, today } from './common.js';
+import { addDays, subtotal, today } from './common.js';
 import { journalId, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
 import { configuredAccount } from './configured-account.js';
 import { currentCompany } from './company.js';
+import { toCompany } from './currency.js';
 import { t } from '../i18n.js';
 
 /** Depreciation settings of an asset without a model. */
@@ -662,11 +663,93 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   });
 }
 
+function cancelRefundedAsset(db, asset) {
+  const unposted = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
+  return write(db, 'account.asset', asset.id, {
+    state: 'cancel', depreciation_ids: [],
+    cancelled_depreciation_ids: [...(asset.cancelled_depreciation_ids ?? []), ...unposted.map((l) => ({ ...l, cancelled: true }))],
+  });
+}
+
+function disposeRefundedAsset(db, asset, refundMove) {
+  const disposalDate = refundMove.invoice_date ?? refundMove.date ?? today();
+  const maxPostedDate = (asset.depreciation_ids ?? []).filter((l) => l.posted).map((l) => l.date).sort().at(-1);
+  return disposeAsset(db, asset, { date: maxPostedDate && maxPostedDate > disposalDate ? maxPostedDate : disposalDate });
+}
+
+function reduceRefundedAsset(db, asset, refundMove, refundAmount) {
+  const newOriginal = (cents(asset.original_value) - cents(refundAmount)) / 100;
+  if (asset.state === 'draft') {
+    db = write(db, 'account.asset', asset.id, {
+      original_value: newOriginal,
+      depreciation_ids: asset.depreciation_ids?.length
+        ? depreciationBoard({ ...asset, original_value: newOriginal }).map((l) => ({ ...l, posted: false, move_id: null }))
+        : [],
+    });
+  } else {
+    const postedLines = (asset.depreciation_ids ?? []).filter((l) => l.posted);
+    const postedAmount = postedCents(asset) + cents(asset.already_depreciated);
+    const unpostedLines = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
+    const currentSalvage = cents(asset.salvage_value || 0);
+
+    if (cents(newOriginal) <= postedAmount + currentSalvage) {
+      db = write(db, 'account.asset', asset.id, {
+        state: 'cancel',
+        depreciation_ids: postedLines,
+        cancelled_depreciation_ids: [
+          ...(asset.cancelled_depreciation_ids ?? []),
+          ...unpostedLines.map((l) => ({ ...l, cancelled: true })),
+        ],
+      });
+    } else {
+      const remainingPeriods = unpostedLines.length;
+      const lastDate = postedLines.length ? postedLines.at(-1).date : null;
+      const newUnpostedLines = remainingPeriods > 0
+        ? depreciationBoard(
+            { ...asset, original_value: newOriginal, salvage_value: currentSalvage / 100 },
+            {
+              periods: remainingPeriods,
+              dates: unpostedLines.map((l) => l.date),
+              startDate: lastDate,
+              remainingBase: cents(newOriginal) - currentSalvage - postedAmount,
+              initialCumulated: postedAmount,
+            },
+          ).map((l) => ({ ...l, posted: false, move_id: null }))
+        : [];
+      db = write(db, 'account.asset', asset.id, {
+        original_value: newOriginal,
+        revaluation_ids: [...(asset.revaluation_ids ?? []), { date: refundMove.date || refundMove.invoice_date || today(), amount: -refundAmount, move_id: refundMove.id }],
+        depreciation_ids: [...postedLines, ...newUnpostedLines],
+      });
+    }
+  }
+  return db;
+}
+
+/** Adjust assets only when the refund identifies their original bill line. */
+export function adjustAssetsForCreditNote(db, refundMove, originalBillMove = (refundMove?.reversed_entry_id ? read(db, 'account.move', refundMove.reversed_entry_id) : null)) {
+  if (!refundMove || refundMove.move_type !== 'in_refund' || !refundMove.reversed_entry_id || !originalBillMove) return db;
+  const billLines = originalBillMove.invoice_line_ids ?? [];
+  const assets = search(db, 'account.asset').filter((a) => a.bill_id === originalBillMove.id && a.state !== 'cancel' && !(a.state === 'close' && a.disposal_date));
+  let nextDb = db;
+  for (const asset of assets) {
+    const billLine = billLines[asset.bill_line];
+    if (billLine?.line_id == null) continue;
+    const lines = (refundMove.invoice_line_ids ?? []).filter((l) => l.source_line_id != null && String(l.source_line_id) === String(billLine.line_id));
+    const amount = lines.reduce((sum, l) => sum + toCompany(nextDb, refundMove.currency_id, Math.abs(subtotal(l, nextDb)), refundMove.invoice_date ?? refundMove.date, refundMove.company_id ?? 1), 0);
+    if (!(amount > 0)) continue;
+    if (amount < Number(asset.original_value)) nextDb = reduceRefundedAsset(nextDb, asset, refundMove, amount);
+    else if (asset.state === 'draft' || !(asset.depreciation_ids ?? []).some((l) => l.posted)) nextDb = cancelRefundedAsset(nextDb, asset);
+    else nextDb = disposeRefundedAsset(nextDb, asset, refundMove);
+  }
+  return nextDb;
+}
+
 export const assetModels = {
   'account.asset': {
     label: 'Assets',
     guardLast: true,
-    actions: { dispose: disposeAsset, modify: modifyAsset },
+    actions: { dispose: disposeAsset, modify: modifyAsset, adjustForCreditNote: adjustAssetsForCreditNote },
     fields: {
       name: { type: 'char', label: 'Asset Name', required: true },
       acquisition_date: { type: 'date', label: 'Acquisition Date', readonly: readonlyWhenNotDraft },

@@ -649,7 +649,7 @@ test('invoices/bills keep their form untouched and Arabic i18n covers every new 
   try {
     assert.deepEqual(headerButtonLabels(billCtx.host), ['Confirm', 'Digitize Document', 'Cancel']);
     const groups = allFind(billCtx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
-    assert.deepEqual(fieldLabelsOf(groups[0]), ['Vendor', 'Bill Reference']);
+    assert.deepEqual(fieldLabelsOf(groups[0]), ['Vendor', 'Purchase Order', 'Bill Reference']);
   } finally {
     await billCtx.done();
   }
