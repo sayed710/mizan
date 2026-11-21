@@ -503,12 +503,13 @@ test('a tolerance match between two same-day invoices asks for manual selection'
   assert.throws(() => applyRule(line.db, read(line.db, MODEL, rule.id), read(line.db, LINE, line.id)), /Multiple invoices match/);
 });
 
-test('autoReconcile leaves rules with a regex counterpart line to manual use', () => {
+// BANK-23: Odoo 20 auto-reconciles rules with regex amount lines; compileRegex still rejects runaway patterns.
+test('autoReconcile applies rules with a regex counterpart line when the label matches', () => {
   const db = seed();
   const fee = accountId(db, '600000');
   const rule = addRule(db, { trigger: 'auto_reconcile', line_ids: [{ account_id: fee, amount_type: 'regex', amount_string: String.raw`FEE (\d+)`, label: 'Fee' }, { account_id: fee, amount_type: 'percentage', amount_string: '100', label: 'Rest' }] });
   const line = addLine(rule.db, { payment_ref: 'FEE 10', amount: -50 });
-  assert.equal(read(autoReconcile(line.db), LINE, line.id).state, 'to_check');
+  assert.equal(read(autoReconcile(line.db), LINE, line.id).state, 'reconciled');
 });
 
 test('a migrated two-way fixed rule books its amount on the counterpart side in both directions', () => {
