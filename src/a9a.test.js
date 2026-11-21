@@ -13,7 +13,7 @@ import { taxSnapshot } from './models/taxes.js';
 import { followUps, partnerFollowUp, updatePartnerFollowUp } from './models/finance.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
 
-test('asset modification: value increase posts adjusting entry, updates original value and recomputes remaining board', () => {
+test('asset modification: value increase posts adjusting entry and creates a child board', () => {
   let db = seed();
   const assetAccId = accountId(db, '151000');
   const revalAccId = accountId(db, '450300');
@@ -43,13 +43,16 @@ test('asset modification: value increase posts adjusting entry, updates original
   assert.ok(button, 'Modify Depreciation button exists on account.asset form');
 
   // Value increase requires an explicit counterpart account
-  assert.throws(() => button.run(db, a, { date: '2027-01-15', value_change: 2000 }), /counterpart account/i);
+  assert.throws(() => button.run(db, a, { modify_action: 'modify', date: '2027-01-15', value_residual: 10000, account_asset_id: assetAccId }), /counterpart account/i);
 
-  db = button.run(db, a, { date: '2027-01-15', value_change: 2000, account_id: revalAccId }).db;
+  db = button.run(db, a, { modify_action: 'modify', date: '2027-01-15', value_residual: 10000, account_asset_id: assetAccId, account_asset_counterpart_id: revalAccId }).db;
   a = read(db, 'account.asset', asset.id);
 
-  assert.equal(a.original_value, 12000);
-  assert.equal(a.book_value, 10000); // 12000 - 2000 posted
+  assert.equal(a.original_value, 10000);
+  assert.equal(a.book_value, 8000);
+  const child = search(db, 'account.asset').find((item) => item.parent_id === a.id);
+  assert.equal(child.original_value, 2000);
+  assert.equal(child.book_value, 2000);
 
   // Check the adjusting journal entry
   const moves = search(db, 'account.move').filter((m) => m.ref === 'Machinery value adjustment');
@@ -60,12 +63,13 @@ test('asset modification: value increase posts adjusting entry, updates original
   const revalLine = moves[0].line_ids.find((l) => l.account_id === revalAccId);
   assert.equal(revalLine.credit, 2000);
 
-  // Check remaining board: period 1 stays posted (2000). Remaining 10000 spread over 4 remaining periods = 2500 each
+  // Parent retains its posted and remaining board; the child depreciates the increase.
   assert.equal(a.depreciation_ids.length, 5);
   assert.equal(a.depreciation_ids[0].posted, true);
   assert.equal(a.depreciation_ids[0].amount, 2000);
-  assert.deepEqual(a.depreciation_ids.slice(1).map((l) => l.amount), [2500, 2500, 2500, 2500]);
+  assert.deepEqual(a.depreciation_ids.slice(1).map((l) => l.amount), [2000, 2000, 2000, 2000]);
   assert.equal(a.depreciation_ids.at(-1).remaining, 0);
+  assert.deepEqual(child.depreciation_ids.map((line) => line.amount), [500, 500, 500, 500]);
 });
 
 test('asset modification: value decrease (impairment) posts loss entry and recomputes declining board', () => {
