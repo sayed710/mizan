@@ -26,7 +26,8 @@ export function UnrealizedCurrencies() {
   };
   const exportXlsx = () => {
     if (!tableRef.current) return;
-    downloadXlsx('unrealized_currencies.xlsx', tableRef.current, { sheetName: t('Unrealized Currencies') });
+    const columnTypes = ['text', 'text', 'text', 'text', 'text', 'number', 'rate', 'number', 'number', 'number'];
+    downloadXlsx('unrealized_currencies.xlsx', tableRef.current, { sheetName: t('Unrealized Currencies'), columnTypes });
   };
   const controls = (
     <div className="control-panel">
@@ -68,7 +69,7 @@ export function UnrealizedCurrencies() {
               <td>{read(db, 'account.account', row.account_id)?.name ?? row.account}</td>
               <td>{currency?.name}</td>
               <td className="num">{money(row.residual ?? row.foreign, currency?.name ?? null, currency ?? null)}</td>
-              <td className="num">{display(db, RATE_FIELD, rate)}</td>
+              <td className="num rate">{display(db, RATE_FIELD, rate)}</td>
               <td className="num">{money(row.booked)}</td>
               <td className="num">{money(row.value ?? row.booked + row.difference)}</td>
               <td className="num">{money(row.difference)}</td>

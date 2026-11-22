@@ -28,7 +28,8 @@ export function SalesReview({ leaf }) {
   });
   const exportXlsx = () => {
     if (!tableRef.current) return;
-    downloadXlsx(`${leaf.report || 'sales_review'}.xlsx`, tableRef.current, { sheetName: t(leaf.label) });
+    const columnTypes = ['text', 'text', 'text', 'text', 'quantity', 'quantity', 'quantity', 'number', 'number'];
+    downloadXlsx(`${leaf.report || 'sales_review'}.xlsx`, tableRef.current, { sheetName: t(leaf.label), columnTypes });
   };
   return <main className="action report-page">
     <div className="control-panel">
@@ -42,7 +43,7 @@ export function SalesReview({ leaf }) {
         <td><a href={`#/sales/orders/${order.id}`}>{order.name}</a></td>
         <td>{read(db, 'res.partner', order.partner_id)?.name ?? ''}</td>
         <td>{read(db, 'product', line.product_id)?.name ?? ''}</td>
-        <td>{line.name}</td><td className="num">{delivered}</td><td className="num">{invoiced}</td><td className="num">{Number(difference.toPrecision(12))}</td>
+        <td>{line.name}</td><td className="num qty">{delivered}</td><td className="num qty">{invoiced}</td><td className="num qty">{Number(difference.toPrecision(12))}</td>
         <td className="num">{money(unitPrice)}</td><td className="num">{money(amount)}</td>
       </tr>)}</tbody>
     </table></div>

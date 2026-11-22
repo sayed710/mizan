@@ -20,6 +20,7 @@ const ITEM_COLUMNS = [
   { key: 'invoice_date', label: 'Invoice Date', optional: 'hide' },
   { key: 'date', label: 'Date', optional: false },
   { key: 'company_id', label: 'Company', optional: 'hide', multiCompanyOnly: true },
+  { key: 'company_currency_id', label: 'Company Currency', optional: 'hide', multiCompanyOnly: true },
   { key: 'journal_id', label: 'Journal', optional: 'hide' },
   { key: 'move_id', label: 'Journal Entry', optional: false },
   { key: 'status', label: 'Status', optional: 'hide' },
@@ -322,6 +323,7 @@ export function JournalItems({ leaf = {} } = {}) {
       case 'invoice_date': return line.invoice_date ?? '';
       case 'date': return line.date ?? '';
       case 'company_id': return line.company;
+      case 'company_currency_id': return line._companyCurrency?.name ?? '';
       case 'journal_id': return line.journal;
       case 'move_id': return line.move_name ?? '';
       case 'status': return line.status ? t(line.status) : '';
@@ -367,15 +369,46 @@ export function JournalItems({ leaf = {} } = {}) {
   const exportXlsx = () => {
     const displayedRows = [...groups.values()].flat();
     const baseName = mode === 'unreconciled' ? 'unreconciled' : mode === 'draft' ? 'draft_entries' : 'journal_items';
+    let exportCols = [...visibleCols];
+    const needCompanyCurrency = multiCompany || new Set(displayedRows.map((l) => l._companyCurrency?.name).filter(Boolean)).size > 1;
+    if (needCompanyCurrency && !exportCols.some((c) => c.key === 'company_currency_id')) {
+      const currIdx = exportCols.findIndex((c) => c.key === 'currency_id');
+      const debitIdx = exportCols.findIndex((c) => c.key === 'debit');
+      const insertIdx = currIdx >= 0 ? currIdx + 1 : debitIdx >= 0 ? debitIdx : exportCols.length;
+      exportCols.splice(insertIdx, 0, {
+        key: 'company_currency_id',
+        label: 'Company Currency',
+        numeric: false,
+      });
+    }
+
+    const exportRows = [
+      exportCols.map((col) => t(col.label)),
+      ...displayedRows.map((line) => exportCols.map((col) => cellValue(line, col))),
+    ];
+
+    if (displayedRows.length > 0) {
+      const debitColIdx = exportCols.findIndex((c) => c.key === 'debit');
+      const totalsRow = exportCols.map((col, idx) => {
+        if (col.key === 'debit') return totalDebit;
+        if (col.key === 'credit') return totalCredit;
+        if (col.key === 'balance') return totalBalance;
+        if (col.key === 'amount_residual') return totalResidual;
+        if (idx === 0) return t('Total');
+        if (unratedLines > 0 && debitColIdx > 0 && idx === debitColIdx - 1) {
+          return t('Excludes {n} documents in a currency with no exchange rate', { n: unratedLines });
+        }
+        return '';
+      });
+      exportRows.push(totalsRow);
+    }
+
     downloadXlsx(
       `${baseName}.xlsx`,
-      [
-        visibleCols.map((col) => t(col.label)),
-        ...displayedRows.map((line) => visibleCols.map((col) => cellValue(line, col))),
-      ],
+      exportRows,
       {
         sheetName: t(title),
-        columnTypes: visibleCols.map((col) => (col.numeric ? 'number' : 'text')),
+        columnTypes: exportCols.map((col) => (col.numeric ? 'number' : 'text')),
       },
     );
   };

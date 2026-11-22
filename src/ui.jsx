@@ -48,14 +48,15 @@ const docFmts = new Map();
 // number and the run does not reorder the surrounding right-to-left text.
 const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
 /** An amount whose currency is not configured: the number, marked as such, never a borrowed currency symbol. */
-function unconfiguredMoney(n) {
+export function unconfiguredMoney(n) {
   const val = Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n);
   return `${ltr(val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))} (${t('currency not configured')})`;
 }
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
 export const money = (n, code = null, currency = null) => {
   const activeCurrencyCode = activeCode || (moneyFmt ? moneyFmt.resolvedOptions().currency : null);
-  if (currency) return ltr(formatCurrency(n, currency, code || activeCurrencyCode || undefined));
+  const formatCode = code === '' ? '' : (code || currency?.name || activeCurrencyCode || undefined);
+  if (currency) return ltr(formatCurrency(n, currency, formatCode));
   if (code) {
     const fmt = docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code);
     return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
@@ -981,6 +982,14 @@ ICONS.recycle = <path d="M24 6l8 12h-5v6h-6v-6h-5zM10 30l6-10 4 6-3 5h12v6H10zm2
 
 export const Icon = ({ name, size = 18 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS[ALIAS[name]] ?? ICONS.grid}</svg>
+);
+
+/** Previous/next pager buttons as one joined group; the chevrons follow the text direction. */
+export const PagerButtons = ({ prevLabel, nextLabel, onPrev, onNext, prevDisabled = false, nextDisabled = false }) => (
+  <span className="pager-buttons">
+    <button type="button" className="pager-btn pager-prev" aria-label={prevLabel} disabled={prevDisabled} onClick={onPrev}><span className="pager-chevron" /></button>
+    <button type="button" className="pager-btn pager-next" aria-label={nextLabel} disabled={nextDisabled} onClick={onNext}><span className="pager-chevron" /></button>
+  </span>
 );
 
 /** One button per other interface language, each labelled in its own language. */

@@ -123,7 +123,19 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .switcher { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .switcher a { padding: 6px 9px; color: var(--muted); display: grid; place-items: center; }
 .switcher a.active { background: var(--brand-soft); color: var(--brand); }
-.pager { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.pager { display: flex; align-items: center; gap: 8px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pager-buttons { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.pager-btn { display: grid; place-items: center; width: 32px; height: 30px; padding: 0; border: 0; background: none; color: var(--text); cursor: pointer; }
+.pager-btn + .pager-btn { border-inline-start: 1px solid var(--border); }
+.pager-btn:hover:not(:disabled) { background: var(--bg); color: var(--brand); }
+.pager-btn:disabled { color: var(--muted); opacity: .45; cursor: default; }
+.pager-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+/* A CSS chevron (two borders of a turned square), pointing back (previous) and forward (next) in the reading direction. */
+.pager-chevron { width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; border-radius: 1px; }
+.pager-prev .pager-chevron { transform: translateX(1px) rotate(135deg); }
+.pager-next .pager-chevron { transform: translateX(-1px) rotate(-45deg); }
+[dir='rtl'] .pager-prev .pager-chevron { transform: translateX(-1px) rotate(-45deg); }
+[dir='rtl'] .pager-next .pager-chevron { transform: translateX(1px) rotate(135deg); }
 
 /* Kanban */
 .kanban { display: flex; gap: 14px; padding: 0 16px 24px; overflow-x: auto; align-items: flex-start; }

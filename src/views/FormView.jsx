@@ -8,7 +8,7 @@ import { invoiceTaxTotals } from '../models/ledger.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { myEmployeeId } from '../access.js';
 import { dateLocale, t } from '../i18n.js';
-import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
+import { Avatar, display, FieldInput, isLabelable, money, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
 import { companyCurrencyRecord } from '../money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
@@ -609,8 +609,7 @@ export function FormView({ leaf, id, base, params }) {
           {idx >= 0 && (
             <div className="pager">
               <span>{idx + 1} / {ids.length}</span>
-              <button type="button" className="btn sm" aria-label={t('Previous record')} onClick={() => pageTo(-1)}>‹</button>
-              <button type="button" className="btn sm" aria-label={t('Next record')} onClick={() => pageTo(1)}>›</button>
+              <PagerButtons prevLabel={t('Previous record')} nextLabel={t('Next record')} onPrev={() => pageTo(-1)} onNext={() => pageTo(1)} />
             </div>
           )}
         </div>
