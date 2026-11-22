@@ -44,6 +44,9 @@ import {
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
 
+export const includeInitialBalance = (account) => !['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'off_balance'].includes(account?.account_type);
+const canBeNonTrade = (account) => ['asset_receivable', 'liability_payable'].includes(account?.account_type);
+
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
     && (db.records['account.move'] ?? []).some((move) => move.state === 'posted'
@@ -2807,6 +2810,9 @@ export const accountingModels = {
       name: { type: 'char', label: 'Account Name', required: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES, tracking: true },
+      include_initial_balance: { type: 'boolean', label: 'Bring Accounts Balance Forward', readonly: true, compute: includeInitialBalance },
+      non_trade: { type: 'boolean', label: 'Non Trade', hideWhen: (r) => !canBeNonTrade(r) },
+      note: { type: 'text', label: 'Internal Notes' },
       currency_id: {
         type: 'many2one',
         relation: 'res.currency',
@@ -2857,6 +2863,7 @@ export const accountingModels = {
     },
     defaults: () => ({ account_type: 'expense', active: true, tax_ids: [] }),
     guard: (db, before, after) => {
+      if (after.non_trade && !canBeNonTrade(after)) return 'Non Trade requires a receivable or payable account';
       const useError = accountTypeGuard(db, before, after);
       if (useError) return useError;
       const codeError = accountCodeGuard(db, before, after);
@@ -2912,6 +2919,7 @@ export const accountingModels = {
     list: ['code', 'name', 'account_type', 'opening_debit', 'opening_credit', 'reconcile', 'currency_id'],
     listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') }, opening_debit: { optional: 'hide' }, opening_credit: { optional: 'hide' } },
     editableList: ['reconcile', 'opening_debit', 'opening_credit'],
+    onchange: (r, key) => key === 'account_type' && !canBeNonTrade(r) ? { non_trade: false } : {},
     prepareWrite: (db, vals, before) => {
       const hasOpeningDebit = vals && 'opening_debit' in vals;
       const hasOpeningCredit = vals && 'opening_credit' in vals;
@@ -2933,9 +2941,9 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
+            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'non_trade', 'active'],
             ['is_deferred', 'deferred_account_id', 'create_asset', 'asset_model_id'],
-            ['description'],
+            ['description', 'note'],
           ],
         },
       ],
