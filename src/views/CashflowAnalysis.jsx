@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { t } from '../i18n.js';
 import { isoDate, today } from '../models/common.js';
 import { cashflowAnalysis } from '../models/reports.js';
 import { useDb } from '../store.js';
 import { money } from '../ui.jsx';
+import { downloadXlsx } from '../xlsx.js';
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 
 const measures = ['Inflow', 'Outflow', 'Net'];
@@ -11,6 +12,7 @@ const measures = ['Inflow', 'Outflow', 'Net'];
 /** Cashflow Analysis report view with date range, company filter, and journal pivot toggle. */
 export function CashflowAnalysis() {
   const sourceDb = useDb();
+  const tableRef = useRef(null);
   const [companyId, setCompanyId] = useState('all');
   const { companyDb: db, availableCompanies, companies, selectedCompany } = reportCompanyScope(sourceDb, companyId);
   const [to, setTo] = useState(today);
@@ -24,14 +26,20 @@ export function CashflowAnalysis() {
     to,
     ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
   });
+  const exportXlsx = () => {
+    if (!tableRef.current) return;
+    downloadXlsx('cashflow_analysis.xlsx', tableRef.current, { sheetName: t('Cashflow Analysis') });
+  };
   return <main className="action report-page">
     <div className="control-panel"><h1 className="cp-title">{t('Cashflow Analysis')}</h1>
       <label>{t('From')} <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
       <label>{t('To')} <input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
       {availableCompanies.length > 1 && <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} />}
       <button type="button" className="btn sm" onClick={() => setPivot(!pivot)}>{t(pivot ? 'Monthly Summary' : 'Pivot by Journal')}</button>
+      <span className="spacer" />
+      <button type="button" className="btn sm" onClick={exportXlsx}>{t('Download XLSX')}</button>
     </div>
-    <div className="list-wrap"><table className="list report">
+    <div className="list-wrap"><table className="list report" ref={tableRef}>
       <thead>{pivot ? <>
         <tr><th>{t('Month')}</th>{journals.map((journal) => <th key={journal.id} colSpan={3}>{journal.name}</th>)}</tr>
         <tr><th />{journals.flatMap((journal) => measures.map((label) => <th key={`${journal.id}-${label}`} className="num">{t(label)}</th>))}</tr>
