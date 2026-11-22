@@ -7,7 +7,7 @@ import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { seed } from './seed.js';
 import { menusFor, models, viewsOf } from './models/index.js';
 import { postMove } from './models/accounting.js';
-import { partnerBankBic, partnerBankName } from './models/partnerbank.js';
+import { partnerBankBic, partnerBankName, validatePartnerBankLines } from './models/partnerbank.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany } from './models/qr.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -396,6 +396,7 @@ test('Arabic translations exist for all new res.bank and BIC strings', async () 
       'BIC/SWIFT must be stored in upper-case',
       'Select an existing bank',
       'Select an active bank',
+      'Bank name and BIC must match the selected bank',
     ];
     for (const s of strings) {
       assert.notEqual(t(s), s, `missing Arabic translation for: ${s}`);
@@ -403,4 +404,260 @@ test('Arabic translations exist for all new res.bank and BIC strings', async () 
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('Qodo review: Finding 1 - archived banks do not block saving existing partner bank lines with unchanged link, but new links to archived banks are rejected', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const bankRes = create(db, 'res.bank', { name: 'Active Bank', bic: 'ACTVUS33' });
+  db = bankRes.db;
+  const accRes = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'US12345678901234',
+    bank_id: bankRes.id,
+  });
+  db = accRes.db;
+  // Archive the bank
+  db = write(db, 'res.bank', bankRes.id, { active: false });
+
+  // Saving the partner with existing unchanged bank line should SUCCEED
+  const existingLine = { id: accRes.id, bank_id: bankRes.id, account_number: 'US12345678901234' };
+  const valErr = validatePartnerBankLines(db, partner.id, [existingLine]);
+  assert.equal(valErr, null, 'Unchanged link to archived bank should pass validation');
+
+  // But a genuinely new line linking to the archived bank should be rejected
+  const newLineErr = validatePartnerBankLines(db, partner.id, [
+    existingLine,
+    { account_number: 'US98765432109876', bank_id: bankRes.id },
+  ]);
+  assert.match(newLineErr ?? '', /active bank/i, 'New line with archived bank must be rejected');
+
+  // And changing an existing line to a newly selected archived bank should also be rejected
+  const otherBank = create(db, 'res.bank', { name: 'Other Bank', bic: 'OTHRUS33' });
+  db = otherBank.db;
+  const acc2 = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'US22222222222222',
+    bank_id: otherBank.id,
+  });
+  db = acc2.db;
+  const changedToArchivedErr = validatePartnerBankLines(db, partner.id, [
+    { id: acc2.id, bank_id: bankRes.id, account_number: 'US22222222222222' },
+  ]);
+  assert.match(changedToArchivedErr ?? '', /active bank/i, 'Changed link to archived bank must be rejected');
+});
+
+test('Qodo review: Finding 2 - synced bank-only diff reconciles linked partner bank account stored fields (bank_name and bank_bic)', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const bank = create(db, 'res.bank', { name: 'Old Bank Name', bic: 'OLDBUS33' });
+  db = bank.db;
+  const acc = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'ACC-FINDING-2',
+    bank_id: bank.id,
+  });
+  db = acc.db;
+  assert.equal(read(db, 'res.partner.bank', acc.id).bank_name, 'Old Bank Name');
+  assert.equal(read(db, 'res.partner.bank', acc.id).bank_bic, 'OLDBUS33');
+
+  // Apply a bank-only diff that renames and updates BIC of res.bank
+  const bankOnlyDiff = {
+    upserts: { 'res.bank': [{ ...read(db, 'res.bank', bank.id), name: 'New Bank Name', bic: 'NEWBUS33' }] },
+    deletes: {},
+    created: {},
+    bases: { 'res.bank': { [bank.id]: { name: 'Old Bank Name', bic: 'OLDBUS33' } } },
+  };
+  const syncedDb = applyDiff(db, bankOnlyDiff, { isAdmin: true });
+  const storedAcc = read(syncedDb, 'res.partner.bank', acc.id);
+  assert.equal(storedAcc.bank_name, 'New Bank Name', 'Persisted linked account bank_name must be updated after bank-only diff');
+  assert.equal(storedAcc.bank_bic, 'NEWBUS33', 'Persisted linked account bank_bic must be updated after bank-only diff');
+});
+
+test('Qodo review: Finding 3 - BIC bank-code portion requires four letters, rejecting 1234GB22 on create and sync', () => {
+  let db = seed();
+  // 1234GB22 has digits in the first 4 characters (bank code) -> must be rejected
+  assert.throws(() => create(db, 'res.bank', { name: 'Digit Bank', bic: '1234GB22' }), /8 or 11 alphanumeric/i);
+  const nextId = (db.seq['res.bank'] ?? 0) + 1;
+  assert.throws(
+    () => applyDiff(db, {
+      upserts: { 'res.bank': [{ id: nextId, name: 'Digit Bank', bic: '1234GB22', active: true }] },
+      deletes: {},
+      created: { 'res.bank': [nextId] },
+      bases: {},
+    }, { isAdmin: true }),
+    /8 or 11 alphanumeric/i,
+  );
+});
+
+test('Qodo review: Finding 4 - partner embedded bank lines schema includes bank_id, makes linked fields readonly, and onchange populates bank_name/bank_bic', () => {
+  const bankIdsDef = models['res.partner'].fields.bank_ids;
+  assert.ok(bankIdsDef.fields.bank_id, 'res.partner bank_ids exposes bank_id');
+  assert.equal(bankIdsDef.fields.bank_id.type, 'many2one');
+  assert.equal(bankIdsDef.fields.bank_id.relation, 'res.bank');
+
+  // Readonly logic on embedded line
+  assert.equal(typeof bankIdsDef.fields.bank_name.readonly, 'function');
+  assert.equal(bankIdsDef.fields.bank_name.readonly({ bank_id: 1 }), true);
+  assert.equal(bankIdsDef.fields.bank_name.readonly({ bank_id: null }), false);
+  assert.equal(typeof bankIdsDef.fields.bank_bic.readonly, 'function');
+  assert.equal(bankIdsDef.fields.bank_bic.readonly({ bank_id: 1 }), true);
+  assert.equal(bankIdsDef.fields.bank_bic.readonly({ bank_id: null }), false);
+
+  // newLine includes bank_id: null
+  const newLine = bankIdsDef.newLine();
+  assert.equal(newLine.bank_id, null);
+
+  // onchange populates bank_name and bank_bic from bank
+  let db = seed();
+  const bank = create(db, 'res.bank', { name: 'Metro Bank', bic: 'MYTRUS33' });
+  db = bank.db;
+  const populated = bankIdsDef.onchange({ bank_id: bank.id }, 'bank_id', db);
+  assert.equal(populated.bank_name, 'Metro Bank');
+  assert.equal(populated.bank_bic, 'MYTRUS33');
+
+  // onchange clears bank_name and bank_bic when bank_id is cleared
+  const cleared = bankIdsDef.onchange({ bank_id: null }, 'bank_id', db);
+  assert.equal(cleared.bank_name, '');
+  assert.equal(cleared.bank_bic, '');
+});
+
+test('Qodo review: Finding 5 - invoice EPC QR pairs BIC with matching IBAN, leaving BIC empty or from matching account when invoice bank and company IBAN differ', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const bankA = create(db, 'res.bank', { name: 'Bank A', bic: 'AAAAFR22' });
+  db = bankA.db;
+  const bankB = create(db, 'res.bank', { name: 'Bank B', bic: 'BBBBDE33' });
+  db = bankB.db;
+
+  // Account A (matches company IBAN)
+  const accA = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'FR7630006000011234567890189',
+    bank_id: bankA.id,
+  });
+  db = accA.db;
+
+  // Account B (different IBAN and BIC)
+  const accB = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'DE89370400440532013000',
+    bank_id: bankB.id,
+  });
+  db = accB.db;
+
+  const company = { ...read(db, 'res.company', 1), invoice_qr: 'epc', company_iban: 'FR7630006000011234567890189', currency: 'EUR' };
+  const qrSettings = invoiceQrSettingsForCompany(db, company);
+
+  // Invoice selects accB (DE IBAN), but company setting is FR IBAN
+  const move = {
+    move_type: 'out_invoice',
+    state: 'posted',
+    name: 'INV/2026/DIFF',
+    amount_residual: 100,
+    partner_bank_id: accB.id,
+  };
+  const payload = invoiceQrPayload(qrSettings, company, move, 'EUR', db);
+  const lines = payload.split('\n');
+  assert.equal(lines[6], 'DE89370400440532013000', 'IBAN is invoice bank IBAN');
+  assert.equal(lines[4], 'BBBBDE33', 'BIC is paired with the invoice bank account');
+  assert.notEqual(lines[6], 'FR7630006000011234567890189', 'Does not combine company IBAN with invoice bank BIC');
+
+  // When invoice bank account is not a valid IBAN, retain company IBAN and pair only with an account matching company IBAN
+  const accNonIban = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: '123456789',
+    bank_bic: 'NONIBIC1',
+  });
+  db = accNonIban.db;
+  const moveNonIban = { ...move, partner_bank_id: accNonIban.id };
+  const payloadNonIban = invoiceQrPayload(qrSettings, company, moveNonIban, 'EUR', db);
+  const linesNonIban = payloadNonIban.split('\n');
+  assert.equal(linesNonIban[6], 'FR7630006000011234567890189', 'Retains company IBAN when invoice bank is not an IBAN');
+  assert.equal(linesNonIban[4], 'AAAAFR22', 'BIC is paired with account matching company IBAN');
+  assert.notEqual(linesNonIban[4], 'NONIBIC1', 'Does not use invoice bank BIC solely because partner_bank_id is set');
+
+  // If no account matches company IBAN, BIC should be empty
+  const companyNoMatch = { ...company, company_iban: 'GB29NWBK60161331926819' };
+  const payloadNoMatch = invoiceQrPayload(invoiceQrSettingsForCompany(db, companyNoMatch), companyNoMatch, moveNonIban, 'EUR', db);
+  assert.equal(payloadNoMatch.split('\n')[4], '', 'BIC is empty when no bank account matches company IBAN');
+});
+
+test('Qodo review: Finding 6 - res.bank is in SHARED_MODELS and accessible across multiple companies', async () => {
+  const { SHARED_MODELS: ormShared, setActiveCompany, getActiveCompany } = await import('./orm.js');
+  const { visibleTo } = await import('./models/company.js');
+  assert.ok(ormShared.has('res.bank'), 'orm.js SHARED_MODELS includes res.bank');
+
+  const origActive = getActiveCompany();
+  try {
+    let db = seed();
+    setActiveCompany(2);
+    const created = create(db, 'res.bank', { name: 'Shared Bank Co 2', bic: 'SHARUS33' });
+    db = created.db;
+    const bank = read(db, 'res.bank', created.id);
+    assert.equal(bank.company_id, undefined, 'Shared models are not stamped with company_id');
+
+    // Switch to company 1 -> bank must still be searchable
+    setActiveCompany(1);
+    const found = search(db, 'res.bank').find((b) => b.id === created.id);
+    assert.ok(found, 'Bank created under company 2 must be found while company 1 is active');
+
+    // visibleTo must allow res.bank for users restricted to company 1
+    assert.equal(visibleTo(new Set([1]), 'res.bank', bank, db), true, 'visibleTo allows shared res.bank for company 1 user');
+  } finally {
+    setActiveCompany(origActive);
+  }
+});
+
+test('Qodo review: Finding 7 - server diff rejects res.partner.bank with bank_name or bank_bic mismatched with linked res.bank, while writeMany passes', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const bank = create(db, 'res.bank', { name: 'Real Bank Name', bic: 'REALUS33' });
+  db = bank.db;
+  const acc = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'ACC-FINDING-7',
+    bank_id: bank.id,
+  });
+  db = acc.db;
+
+  // Staged diff with mismatched bank_name rejected
+  assert.throws(
+    () => applyDiff(db, {
+      upserts: { 'res.partner.bank': [{ ...read(db, 'res.partner.bank', acc.id), bank_name: 'Fake Bank Name' }] },
+      deletes: {},
+      created: {},
+      bases: { 'res.partner.bank': { [acc.id]: { bank_name: 'Real Bank Name' } } },
+    }, { isAdmin: true }),
+    /match the selected bank/i,
+  );
+
+  // Staged diff with mismatched bank_bic rejected
+  assert.throws(
+    () => applyDiff(db, {
+      upserts: { 'res.partner.bank': [{ ...read(db, 'res.partner.bank', acc.id), bank_bic: 'FAKEUS33' }] },
+      deletes: {},
+      created: {},
+      bases: { 'res.partner.bank': { [acc.id]: { bank_bic: 'REALUS33' } } },
+    }, { isAdmin: true }),
+    /match the selected bank/i,
+  );
+
+  // New link in diff with mismatched name or BIC rejected
+  const nextAccId = (db.seq['res.partner.bank'] ?? 0) + 1;
+  assert.throws(
+    () => applyDiff(db, {
+      upserts: { 'res.partner.bank': [{ id: nextAccId, partner_id: partner.id, account_number: 'NEW-ACC-DIFF', bank_id: bank.id, bank_name: 'Wrong', bank_bic: 'REALUS33', active: true }] },
+      deletes: {},
+      created: { 'res.partner.bank': [nextAccId] },
+      bases: {},
+    }, { isAdmin: true }),
+    /match the selected bank/i,
+  );
+
+  // Renaming bank via write (which uses syncLinkedPartnerBanks / writeMany) passes
+  const renamedDb = write(db, 'res.bank', bank.id, { name: 'Renamed Bank', bic: 'RENMUS33' });
+  const renamedAcc = read(renamedDb, 'res.partner.bank', acc.id);
+  assert.equal(renamedAcc.bank_name, 'Renamed Bank');
+  assert.equal(renamedAcc.bank_bic, 'RENMUS33');
 });

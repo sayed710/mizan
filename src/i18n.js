@@ -3571,6 +3571,7 @@ const ar = {
   'BIC/SWIFT must be stored in upper-case': 'يجب حفظ رمز BIC/SWIFT بأحرف كبيرة',
   'Select an existing bank': 'اختر بنكاً موجوداً',
   'Select an active bank': 'اختر بنكاً نشطاً',
+  'Bank name and BIC must match the selected bank': 'يجب أن يتطابق اسم البنك ورمز BIC مع البنك المحدد',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

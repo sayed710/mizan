@@ -164,12 +164,31 @@ export const crmModels = {
         compute: (r, db) => (db?.records?.['res.partner.bank'] ?? []).filter((b) => b.partner_id === r?.id && b.active !== false).map((b) => read(db, 'res.partner.bank', b.id)),
         fields: {
           account_number: { type: 'char', label: 'Account Number', required: true },
-          bank_name: { type: 'char', label: 'Bank Name', placeholder: 'e.g. Bank of America' },
-          bank_bic: { type: 'char', label: 'BIC/SWIFT' },
+          bank_id: { type: 'many2one', relation: 'res.bank', label: 'Bank' },
+          bank_name: {
+            type: 'char',
+            label: 'Bank Name',
+            placeholder: 'e.g. Bank of America',
+            readonly: (r) => Boolean(r?.bank_id),
+          },
+          bank_bic: {
+            type: 'char',
+            label: 'BIC/SWIFT',
+            readonly: (r) => Boolean(r?.bank_id),
+          },
           holder_name: { type: 'char', label: 'Holder Name' },
           allow_out_payment: { type: 'boolean', label: 'Trust Bank Account' },
         },
-        newLine: () => ({ account_number: '', bank_name: '', bank_bic: '', allow_out_payment: false }),
+        newLine: () => ({ account_number: '', bank_id: null, bank_name: '', bank_bic: '', allow_out_payment: false }),
+        onchange: (line, key, db) => {
+          if (key === 'bank_id') {
+            const bank = line.bank_id && db ? read(db, 'res.bank', line.bank_id) : null;
+            return bank
+              ? { ...line, bank_name: bank.name ?? '', bank_bic: bank.bic ?? '' }
+              : { ...line, bank_name: '', bank_bic: '' };
+          }
+          return line;
+        },
       },
     },
     defaults: () => ({ tag_ids: [], followup_reminder_type: 'automatic' }),

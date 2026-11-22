@@ -30,9 +30,26 @@ export function invoiceQrPayload(settings, company, move, invoiceCurrency = move
   }
   // EPC is euro-only and needs at least 0.01 to pay.
   if (invoiceCurrency !== 'EUR' || !(move.amount_residual >= 0.01)) return null;
+  const IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/;
   const bankAccount = db && move?.partner_bank_id ? read(db, 'res.partner.bank', move.partner_bank_id) : null;
-  const bic = bankAccount ? partnerBankBic(db, bankAccount) : '';
-  return epcPayload({ name: company.name, iban: settings.company_iban, bic, amount: move.amount_residual, reference: move.payment_reference || move.name });
+  const bankAccountIban = bankAccount ? String(bankAccount.account_number ?? '').replace(/\s+/g, '').toUpperCase() : '';
+  const isBankAccountIban = Boolean(bankAccount && IBAN_RE.test(bankAccountIban));
+  const iban = isBankAccountIban ? bankAccountIban : (settings?.company_iban ?? '');
+
+  let bic = '';
+  if (isBankAccountIban) {
+    bic = partnerBankBic(db, bankAccount);
+  } else {
+    const cleanCompanyIban = String(iban).replace(/\s+/g, '').toUpperCase();
+    if (cleanCompanyIban && db) {
+      const match = (db.records?.['res.partner.bank'] ?? []).find(
+        (b) => String(b.account_number ?? '').replace(/\s+/g, '').toUpperCase() === cleanCompanyIban
+      );
+      if (match) bic = partnerBankBic(db, match);
+    }
+  }
+
+  return epcPayload({ name: company.name, iban, bic, amount: move.amount_residual, reference: move.payment_reference || move.name });
 }
 
 /** Resolve QR mode and issuer identity from the document company. */

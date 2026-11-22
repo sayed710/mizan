@@ -68,6 +68,9 @@ export function bankAccountGuard(db, before, r) {
     const bank = read(db, 'res.bank', r.bank_id);
     if (!bank) return 'Select an existing bank';
     if (r.bank_id !== before?.bank_id && bank.active === false) return 'Select an active bank';
+    if ((r.bank_name ?? '') !== (bank.name ?? '') || (r.bank_bic ?? '') !== (bank.bic ?? '')) {
+      return 'Bank name and BIC must match the selected bank';
+    }
   }
   if (r.bank_bic !== before?.bank_bic) {
     const err = bicError(r.bank_bic);
@@ -95,12 +98,14 @@ export function validatePartnerBankLines(db, partnerId, bankLines = []) {
   const candidates = [];
   for (const [index, line] of bankLines.entries()) {
     if (!line || (line.id != null && (!Number.isSafeInteger(line.id) || line.id < 1))) return 'The selected bank account is invalid or inactive';
-    const supplied = normalizePartnerBankVals(db, Object.fromEntries(Object.entries(line).filter(([, value]) => value !== undefined)));
+    const existing = line.id ? allBanks.find((b) => b.id === line.id) : null;
     if (line.id) {
-      const existing = allBanks.find((b) => b.id === line.id);
       if (!existing || existing.partner_id !== partnerId) return 'The selected bank account is invalid or inactive';
       if (seenIds.has(line.id)) return 'The selected bank account is invalid or inactive';
       seenIds.add(line.id);
+    }
+    const supplied = normalizePartnerBankVals(db, Object.fromEntries(Object.entries(line).filter(([, value]) => value !== undefined)), existing);
+    if (line.id) {
       candidates.push({ ...existing, ...supplied, partner_id: partnerId });
     } else {
       candidates.push({ ...supplied, id: -(index + 1), partner_id: partnerId });
@@ -108,7 +113,8 @@ export function validatePartnerBankLines(db, partnerId, bankLines = []) {
   }
   const staged = { ...db, records: { ...db.records, 'res.partner.bank': [...allBanks.filter((b) => !seenIds.has(b.id)), ...candidates.map((b) => ({ ...b, sanitized_account_number: sanitizeAccountNumber(b.account_number) }))] } };
   for (const candidate of candidates) {
-    const error = bankAccountGuard(staged, null, candidate);
+    const existing = candidate.id > 0 ? allBanks.find((b) => b.id === candidate.id) : null;
+    const error = bankAccountGuard(staged, existing, candidate);
     if (error) return error;
   }
   return null;

@@ -2,7 +2,7 @@
 import { writeMany } from '../orm.js';
 
 // ISO 9362: 4-character party prefix, 2-letter country code, 2-character location, optional 3-character branch.
-const BIC_RE = /^[A-Za-z0-9]{4}[A-Za-z]{2}[A-Za-z0-9]{2}(?:[A-Za-z0-9]{3})?$/;
+const BIC_RE = /^[A-Za-z]{4}[A-Za-z]{2}[A-Za-z0-9]{2}(?:[A-Za-z0-9]{3})?$/;
 
 /**
  * Normalize a BIC/SWIFT string by trimming whitespace and upper-casing characters.
@@ -59,7 +59,7 @@ export function resBankGuard(_db, before, r) {
   return null;
 }
 
-function syncLinkedPartnerBanks(db, after, before) {
+export function syncLinkedPartnerBanks(db, after, before) {
   if (!before) return db;
   if (after.name === before.name && after.bic === before.bic) return db;
   const linked = (db.records?.['res.partner.bank'] ?? []).filter((b) => b.bank_id === after.id);
