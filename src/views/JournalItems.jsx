@@ -20,7 +20,6 @@ const ITEM_COLUMNS = [
   { key: 'invoice_date', label: 'Invoice Date', optional: 'hide' },
   { key: 'date', label: 'Date', optional: false },
   { key: 'company_id', label: 'Company', optional: 'hide', multiCompanyOnly: true },
-  { key: 'company_currency_id', label: 'Company Currency', optional: 'hide', multiCompanyOnly: true },
   { key: 'journal_id', label: 'Journal', optional: 'hide' },
   { key: 'move_id', label: 'Journal Entry', optional: false },
   { key: 'status', label: 'Status', optional: 'hide' },
@@ -304,7 +303,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const availableCols = ITEM_COLUMNS.filter((c) => (!c.multiCompanyOnly || multiCompany) && (!c.multiCurrencyOnly || multiCurrency));
   const visibleCols = availableCols.filter((c) => !c.optional || isVisible(c.key, c.optional !== 'hide'));
   const optionalCols = availableCols.filter((c) => c.optional);
-  const sumCurrency = companyCurrencyRecord(db, filterCompany ?? db.settings?.current_company_id);
+  const sumCurrency = companyCurrencyRecord(db, db.settings?.current_company_id);
   // Lines of a company whose currency has no rate to the reporting currency are left out of the totals and counted.
   const unratedLines = rows.filter((l) => reportingBookedOrNull(db, l, 1) == null).length;
   const sumField = (lines, field) => roundCurrency(lines.reduce((acc, l) => acc + (reportingBookedOrNull(db, l, Number(l[field]) || 0) ?? 0), 0), sumCurrency);
@@ -463,7 +462,7 @@ export function JournalItems({ leaf = {} } = {}) {
           const sumValue = col.key === 'debit' ? totalDebit : col.key === 'credit' ? totalCredit : col.key === 'balance' ? totalBalance : col.key === 'amount_residual' ? totalResidual : null;
           const tip = col.numeric && unratedLines ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedLines }) : (col.sum ? t(col.sum) : undefined);
           return <td key={col.key} className={col.numeric ? 'num' : undefined} title={tip} aria-label={col.sum ? t(col.sum) : undefined}>
-            {sumValue != null ? money(sumValue) : ''}
+            {sumValue != null ? money(sumValue, null, sumCurrency) : ''}
             {col.key === 'debit' && <RateNote count={unratedLines} />}
           </td>;
         })}

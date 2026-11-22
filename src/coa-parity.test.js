@@ -186,6 +186,7 @@ test('account.account form renders Balance header, code+name title, and Accounti
       'Create Asset',
       'Depreciation Model',
       'Description',
+      'Internal Notes',
     ]);
   } finally {
     await ctx.done();

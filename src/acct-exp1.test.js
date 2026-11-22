@@ -628,3 +628,93 @@ test('EXP-7: Finding 3: Tiny sales quantities with exponent notation export as n
     spy.restore();
   }
 });
+
+test('EXP-8: Filtered JournalItems totals round with reporting company currency instead of filtered company currency', async () => {
+  const { makeEl } = setupDom();
+  const spy = setupDownloadSpy(makeEl);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  const { createCompanyWithDefaultInvoiceJournals, withDefaultBankJournal } = await import('./test-support/accounting-company.js');
+  let db = seed();
+  // Whole-unit currency (increment = 1) where 1 USD = 100 WHOLE => 149 WHOLE = 1.49 USD.
+  const wholeCurr = create(db, 'res.currency', {
+    name: 'WHOLE',
+    symbol: 'W',
+    rounding: 1,
+    decimal_places: 0,
+    rate_ids: [{ date: '2026-01-01', rate: 100 }],
+  });
+  const co2 = createCompanyWithDefaultInvoiceJournals(wholeCurr.db, { name: 'Whole Unit Branch', currency_id: wholeCurr.id });
+  db = withDefaultBankJournal(co2.db, co2.id);
+
+  const co2Bnk = search(db, 'account.journal').find((j) => j.company_id === co2.id && j.type === 'bank');
+  db = postEntry(db, {
+    journal: co2Bnk.id,
+    company: co2.id,
+    date: '2026-05-01',
+    ref: 'EXP8-WHOLE',
+    lines: [
+      { account_id: co2Bnk.default_account_id, name: 'Whole Debit', debit: 149 },
+      { account_id: accountId(db, '600000', co2.id), name: 'Whole Credit', credit: 149 },
+    ],
+  }).db;
+  // Unrelated entry in reporting company (co1) to verify the company filter isolates co2.
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: '2026-05-01',
+    ref: 'EXP8-CO1',
+    lines: [
+      { account_id: accountId(db, '101401'), name: 'Co1 Excluded', debit: 500 },
+      { account_id: accountId(db, '400000'), name: 'Co1 Excluded Credit', credit: 500 },
+    ],
+  }).db;
+
+  db = { ...db, settings: { ...db.settings, current_company_id: 1, allowed_company_ids: [1, co2.id] } };
+  await React.act(async () => store.commit(db));
+
+  const prevLocation = globalThis.location;
+  globalThis.location = { hash: `#/accounting/journal-items?company=${co2.id}` };
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(JournalItems, { leaf: { label: 'Journal Items', report: 'journalItems' } })));
+
+    const tfoot = find(host, (n) => n.tagName === 'TFOOT');
+    assert.ok(tfoot, 'Totals footer rendered');
+    assert.ok(tfoot.textContent.includes('$1.49'), `Footer rounds using reporting currency USD ($1.49), got: ${tfoot.textContent}`);
+
+    const xlsxBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export XLSX'));
+    assert.ok(xlsxBtn, 'Export XLSX button exists');
+    await React.act(async () => props(xlsxBtn).onClick());
+    const dl = await spy.takeLast();
+    assert.ok(dl, 'XLSX download triggered');
+    const parsed = readXlsx(dl.bytes);
+
+    const header = parsed.rows[0];
+    const debitColIdx = header.indexOf('Debit');
+    const creditColIdx = header.indexOf('Credit');
+    const currColIdx = header.indexOf('Company Currency');
+    assert.ok(debitColIdx >= 0 && creditColIdx >= 0 && currColIdx >= 0);
+    assert.ok(!parsed.rows.some((r) => r.includes('Co1 Excluded')), 'Filtered to co2 only');
+
+    const detailRow = parsed.rows.find((r) => r.includes('Whole Debit'));
+    assert.ok(detailRow, 'Filtered co2 line exported');
+    assert.equal(detailRow[currColIdx], 'WHOLE');
+    assert.equal(detailRow[debitColIdx], 149);
+
+    const totalsRow = parsed.rows.at(-1);
+    assert.ok(totalsRow.includes('Total'));
+    assert.equal(totalsRow[debitColIdx], 1.49, 'Exported total debit retains reporting currency USD precision (1.49, not 1)');
+    assert.equal(totalsRow[creditColIdx], 1.49, 'Exported total credit retains reporting currency USD precision (1.49, not 1)');
+  } finally {
+    globalThis.location = prevLocation;
+    await React.act(async () => root.unmount());
+    spy.restore();
+  }
+});
