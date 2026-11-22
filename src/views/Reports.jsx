@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
+import { models } from '../registry.js';
 import { today, validDate } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport, trialOpeningItems } from '../models/reports.js';
@@ -860,22 +861,41 @@ function ReportPage({ leaf }) {
         : null;
   const tableRef = useRef(null);
   const isAudit = leaf.report === 'audit';
+  const [auditUser, setAuditUser] = useState('');
+  const [auditModel, setAuditModel] = useState('');
+  const [auditRecord, setAuditRecord] = useState('');
+  const [auditField, setAuditField] = useState('');
   const [serverAuditLog, setServerAuditLog] = useState(undefined);
   const [auditPage, setAuditPage] = useState({ key: '', offset: 0 });
   const [isPrinting, setIsPrinting] = useState(false);
   const auditScopeKey = JSON.stringify(sourceDb.settings?.allowed_company_ids ?? [sourceDb.settings?.current_company_id ?? 1]);
+  const auditFiltersKey = `${auditUser}:${auditModel}:${auditRecord}:${auditField}:${period.from ?? ''}:${period.to ?? ''}`;
   useEffect(() => {
     let active = true;
     if (isAudit && isServer()) {
       setServerAuditLog(undefined);
-      listAuditAll(AUDIT_MODELS).then((rows) => { if (active) setServerAuditLog(rows); });
+      const filters = {
+        user: auditUser,
+        model: auditModel,
+        record: auditRecord ? auditRecord.replace(/^#/, '').trim() : '',
+        field: auditField,
+        date_from: period.from,
+        date_to: period.to,
+      };
+      listAuditAll(auditModel ? [auditModel] : AUDIT_MODELS, filters).then((rows) => { if (active) setServerAuditLog(rows); });
     }
     return () => { active = false; };
-  }, [isAudit, auditScopeKey]);
+  }, [isAudit, auditScopeKey, auditUser, auditModel, auditRecord, auditField, period.from, period.to]);
+  const auditFilters = useMemo(() => ({
+    user: auditUser,
+    model: auditModel,
+    record: auditRecord ? auditRecord.replace(/^#/, '').trim() : '',
+    field: auditField,
+  }), [auditUser, auditModel, auditRecord, auditField]);
   const auditAllRows = isAudit && (!isServer() || Array.isArray(serverAuditLog))
-    ? collectAuditTrailRows(db, sourceDb, period, isServer() ? serverAuditLog : null)
+    ? collectAuditTrailRows(db, sourceDb, period, isServer() ? serverAuditLog : null, auditFilters)
     : [];
-  const auditPageKey = `${auditScopeKey}:${periodKey}:${period.from ?? ''}:${period.to ?? ''}`;
+  const auditPageKey = `${auditScopeKey}:${periodKey}:${period.from ?? ''}:${period.to ?? ''}:${auditFiltersKey}`;
   const auditOffset = auditPage.key === auditPageKey ? auditPage.offset : 0;
   const auditWin = pageWindow(auditAllRows.length, auditOffset, PAGE_SIZE);
   const auditPagedRows = auditAllRows.slice(auditWin.start, auditWin.end);
@@ -916,10 +936,57 @@ function ReportPage({ leaf }) {
           <option value="quarter">{t('This Quarter')}</option>
           <option value="year">{t('This Year')}</option>
           {!isDeferred && <option value="all">{t('All Dates')}</option>}
-          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense', 'audit'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
         </select>
       </label>}
       {!isAged && periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+      {isAudit && (
+        <>
+          <label className="inline-select">
+            {t('User')}
+            <input
+              aria-label={t('User')}
+              type="text"
+              value={auditUser}
+              onChange={(e) => { setAuditUser(e.target.value); setAuditPage({ key: '', offset: 0 }); }}
+              placeholder={t('All Users')}
+            />
+          </label>
+          <label className="inline-select">
+            {t('Model')}
+            <select
+              aria-label={t('Model')}
+              value={auditModel}
+              onChange={(e) => { setAuditModel(e.target.value); setAuditPage({ key: '', offset: 0 }); }}
+            >
+              <option value="">{t('All Models')}</option>
+              {AUDIT_MODELS.map((m) => (
+                <option key={m} value={m}>{t(models[m]?.label ?? m)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Record')}
+            <input
+              aria-label={t('Record')}
+              type="text"
+              value={auditRecord}
+              onChange={(e) => { setAuditRecord(e.target.value); setAuditPage({ key: '', offset: 0 }); }}
+              placeholder={t('Record ID')}
+            />
+          </label>
+          <label className="inline-select">
+            {t('Field Changed')}
+            <input
+              aria-label={t('Field Changed')}
+              type="text"
+              value={auditField}
+              onChange={(e) => { setAuditField(e.target.value); setAuditPage({ key: '', offset: 0 }); }}
+              placeholder={t('Field name')}
+            />
+          </label>
+        </>
+      )}
       {LEDGER_REPORTS.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
         <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
           <option value="">{t('All Ledgers')}</option>

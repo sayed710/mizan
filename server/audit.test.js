@@ -747,3 +747,74 @@ test('GET /api/audit filters by models list with before pagination and rejects i
   }
 });
 
+test('GET /api/audit filters by user, model, record, field, date range and rejects invalid parameters', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    assert.equal((await admin('POST', '/api/login', { login: 'admin', password: PASSWORD })).status, 200);
+
+    // Unknown single model is rejected with 400
+    assert.equal((await admin('GET', '/api/audit?model=unknown.fake.model')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?model=')).status, 400);
+
+    // Invalid record parameter is rejected with 400
+    assert.equal((await admin('GET', '/api/audit?record=abc')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?record=-5')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?res_id=xyz')).status, 400);
+
+    // Invalid dates rejected with 400
+    assert.equal((await admin('GET', '/api/audit?date_from=invalid-date')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_to=invalid-date')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_from=2026-12-31&date_to=2026-01-01')).status, 400);
+
+    const snapshot = (await admin('GET', '/api/db')).body;
+    const lead = create(snapshot, 'crm.lead', { name: 'Audit Filter Lead', company_id: 1 });
+    const partner = create(lead.db, 'res.partner', { name: 'Audit Filter Partner', email: 'audit@example.com' });
+    const move = create(partner.db, 'account.move', { move_type: 'entry', company_id: 1, ref: 'AUD-REF-1' });
+    const saved = await admin('POST', '/api/diff', diffDb(snapshot, move.db));
+    assert.equal(saved.status, 200);
+
+    // User filter
+    const userFiltered = await admin('GET', '/api/audit?user=admin&limit=10');
+    assert.equal(userFiltered.status, 200);
+    assert.ok(userFiltered.body.length > 0);
+    assert.ok(userFiltered.body.every((r) => r.actor.toLowerCase() === 'admin'));
+
+    // Model filter (valid model)
+    const modelFiltered = await admin('GET', '/api/audit?model=crm.lead&limit=10');
+    assert.equal(modelFiltered.status, 200);
+    assert.ok(modelFiltered.body.every((r) => r.model === 'crm.lead'));
+    assert.ok(modelFiltered.body.some((r) => r.res_id === lead.id));
+
+    // Record filter (by record id)
+    const recordFiltered = await admin('GET', `/api/audit?model=crm.lead&record=${lead.id}`);
+    assert.equal(recordFiltered.status, 200);
+    assert.ok(recordFiltered.body.every((r) => r.res_id === lead.id));
+
+    // Field changed filter
+    const fieldFiltered = await admin('GET', '/api/audit?model=account.move&field=ref');
+    assert.equal(fieldFiltered.status, 200);
+    assert.ok(fieldFiltered.body.some((r) => r.res_id === move.id && 'ref' in r.changes));
+
+    // Date range filter
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const dateFiltered = await admin('GET', `/api/audit?model=crm.lead&date_from=${todayStr}&date_to=${todayStr}`);
+    assert.equal(dateFiltered.status, 200);
+    assert.ok(dateFiltered.body.some((r) => r.res_id === lead.id));
+
+    const pastFiltered = await admin('GET', '/api/audit?model=crm.lead&date_from=2000-01-01&date_to=2000-01-02');
+    assert.equal(pastFiltered.status, 200);
+    assert.equal(pastFiltered.body.length, 0);
+
+    // Combined with pagination (limit + before)
+    const p1 = await admin('GET', '/api/audit?user=admin&limit=2');
+    assert.equal(p1.status, 200);
+    assert.equal(p1.body.length, 2);
+    const p2 = await admin('GET', `/api/audit?user=admin&limit=2&before=${p1.body.at(-1).id}`);
+    assert.equal(p2.status, 200);
+    assert.ok(p2.body.every((r) => r.id < p1.body.at(-1).id && r.actor.toLowerCase() === 'admin'));
+  } finally {
+    await stop();
+  }
+});
+

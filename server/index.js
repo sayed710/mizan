@@ -854,23 +854,108 @@ async function api(req, res, path) {
     if (before !== null && !Number.isSafeInteger(before)) return send(res, 400, { error: 'before must be an audit entry id' });
     const id = q.has('id') ? Number(q.get('id')) : null;
     if (q.has('id') && (!/^\d+$/.test(q.get('id')) || !Number.isSafeInteger(id))) return send(res, 400, { error: 'id must be a nonnegative record id' });
+    let recordId = id;
+    if (q.has('record')) {
+      const raw = q.get('record').trim();
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+        return send(res, 400, { error: 'record must be a nonnegative record id' });
+      }
+      recordId = Number(raw);
+    } else if (q.has('res_id')) {
+      const raw = q.get('res_id').trim();
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+        return send(res, 400, { error: 'res_id must be a nonnegative record id' });
+      }
+      recordId = Number(raw);
+    }
     const granted = companiesFor(user);
     const selected = q.get('selected') === '1' ? selectionFor(user).allowed_company_ids.filter((company) => !granted || granted.has(company)) : user.companies;
     const filterCompanies = granted ? (selected ? new Set(selected) : granted) : null;
+    const isKnownAuditModel = (m) => Object.hasOwn(models, m) || ['mail.message', 'auth.user', 'auth.api_key', 'settings', '*'].includes(m);
+    let singleModel = null;
+    if (q.has('model')) {
+      const raw = q.get('model').trim();
+      if (!raw || !isKnownAuditModel(raw)) {
+        return send(res, 400, { error: `Unknown audit model: ${raw}` });
+      }
+      singleModel = raw;
+    }
     let modelList = [];
     if (q.has('models')) {
       const parts = q.get('models').split(',').map((m) => m.trim());
       if (!parts.length || parts.some((m) => !m)) return send(res, 400, { error: 'models must be a non-empty comma-separated list' });
       if (parts.length > MAX_AUDIT_MODELS) return send(res, 400, { error: `At most ${MAX_AUDIT_MODELS} models allowed` });
-      const unknown = parts.find((m) => !Object.hasOwn(models, m));
+      const unknown = parts.find((m) => !isKnownAuditModel(m));
       if (unknown) return send(res, 400, { error: `Unknown audit model: ${unknown}` });
       modelList = [...new Set(parts)];
     }
-    const modelClause = modelList.length ? `AND model IN (${modelList.map((_, i) => `?${i + 6}`).join(',')})` : '';
-    const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log
-      WHERE (?1 IS NULL OR model = ?1) ${modelClause} AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
-        AND audit_visible(company_id, model, res_id, changes, ?5) = 1 ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), id, limit, before, selected === null ? null : JSON.stringify(selected), ...modelList);
+    const actor = (q.get('user') ?? q.get('actor') ?? '').trim() || null;
+    const dateFrom = (q.get('date_from') ?? q.get('from') ?? '').trim() || null;
+    if (dateFrom && !/^\d{4}-\d{2}-\d{2}/.test(dateFrom)) {
+      return send(res, 400, { error: 'date_from must be a valid date or timestamp' });
+    }
+    const dateTo = (q.get('date_to') ?? q.get('to') ?? '').trim() || null;
+    if (dateTo && !/^\d{4}-\d{2}-\d{2}/.test(dateTo)) {
+      return send(res, 400, { error: 'date_to must be a valid date or timestamp' });
+    }
+    if (dateFrom && dateTo && dateFrom.slice(0, 10) > dateTo.slice(0, 10)) {
+      return send(res, 400, { error: 'date_from must be before or equal to date_to' });
+    }
+    const fieldParam = (q.get('field') ?? q.get('field_changed') ?? '').trim() || null;
+    const fieldCandidates = [];
+    if (fieldParam) {
+      const lower = fieldParam.toLowerCase();
+      const matched = new Set([lower]);
+      for (const m of Object.values(models)) {
+        for (const [k, f] of Object.entries(m.fields ?? {})) {
+          if (k.toLowerCase() === lower || f?.label?.toLowerCase() === lower) {
+            matched.add(k.toLowerCase());
+          }
+        }
+      }
+      fieldCandidates.push(...matched);
+    }
+
+    const conditions = [];
+    const params = [];
+    if (singleModel) {
+      conditions.push('model = ?');
+      params.push(singleModel);
+    } else if (modelList.length) {
+      conditions.push(`model IN (${modelList.map(() => '?').join(',')})`);
+      params.push(...modelList);
+    }
+    if (recordId !== null) {
+      conditions.push('res_id = ?');
+      params.push(recordId);
+    }
+    if (before !== null) {
+      conditions.push('id < ?');
+      params.push(before);
+    }
+    if (actor) {
+      conditions.push('LOWER(actor) = LOWER(?)');
+      params.push(actor);
+    }
+    if (dateFrom) {
+      conditions.push('((length(?) = 10 AND substr(at, 1, 10) >= ?) OR (length(?) > 10 AND at >= ?))');
+      params.push(dateFrom, dateFrom, dateFrom, dateFrom);
+    }
+    if (dateTo) {
+      conditions.push('((length(?) = 10 AND substr(at, 1, 10) <= ?) OR (length(?) > 10 AND at <= ?))');
+      params.push(dateTo, dateTo, dateTo, dateTo);
+    }
+    if (fieldCandidates.length) {
+      conditions.push(`(json_valid(changes) AND EXISTS (SELECT 1 FROM json_each(changes) WHERE LOWER(key) IN (${fieldCandidates.map(() => '?').join(',')})))`);
+      params.push(...fieldCandidates);
+    }
+    conditions.push('audit_visible(company_id, model, res_id, changes, ?) = 1');
+    params.push(selected === null ? null : JSON.stringify(selected));
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sqlQuery = `SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log ${whereClause} ORDER BY id DESC LIMIT ?`;
+    params.push(limit);
+    const rows = sql.prepare(sqlQuery).all(...params);
     return send(res, 200, rows.map((r) => {
       const parsed = JSON.parse(r.changes);
       const changes = filterCompanies ? scopeAuditChanges(r.model, parsed, filterCompanies) : parsed;
