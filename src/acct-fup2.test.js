@@ -1,13 +1,67 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import { find, setupDom } from './test-support/dom.js';
 import { create, read, search, write } from './orm.js';
 import { markSms } from './models/sms.js';
 import { sendSmsCampaign } from '../server/integrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
+import { addDays, today } from './models/common.js';
 import { postMove } from './models/accounting.js';
-import { financeModels, runFollowUps, logManualFollowUp } from './models/finance.js';
+import { financeModels, runFollowUps, logManualFollowUp, levelChannels, isFollowUpSmsDiff } from './models/finance.js';
+import { scopedWritableModels, writableModelsForApps } from './models/index.js';
+
+register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
+
+const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
+const textOf = (node) => (node?.nodeType === 3 ? node.nodeValue : (node?.childNodes ?? []).map(textOf).join(''));
+
+async function mountView(renderElement, initialDb) {
+  const prevStorage = globalThis.localStorage;
+  const mem = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => { mem.set(k, String(v)); },
+    removeItem: (k) => { mem.delete(k); },
+    clear: () => { mem.clear(); },
+  };
+  setupDom();
+  const origCreate = globalThis.document.createElement;
+  globalThis.document.createElement = (tag) => {
+    const el = origCreate(tag);
+    el.insertBefore = (child, before) => {
+      const idx = before ? el.childNodes.indexOf(before) : -1;
+      if (idx >= 0) el.childNodes.splice(idx, 0, child);
+      else el.childNodes.push(child);
+      child.parentNode = el;
+      if (child.tagName === 'OPTION') el.options.push(child);
+      return child;
+    };
+    return el;
+  };
+  globalThis.document.createElementNS = (_, tag) => globalThis.document.createElement(tag);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit, getDb } = await import('./store.js');
+  await initStore();
+  await commit(initialDb);
+  const host = globalThis.document.createElement('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  await React.act(async () => root.render(renderElement(React)));
+  return {
+    React,
+    host,
+    getDb,
+    commit,
+    done: async () => {
+      await React.act(async () => root.unmount());
+      globalThis.localStorage = prevStorage;
+    },
+  };
+}
 
 function fixture(phone = '+201001112233') {
   const partner = create(seed(), 'res.partner', { name: 'SMS customer', email: 'sms@example.test', mobile: phone });
@@ -106,4 +160,91 @@ test('the campaign transport records provider failures for a queued follow-up', 
     assert.match(read(db, 'sms.trace', trace.id).error, /400/);
     assert.equal(read(db, 'sms.campaign', trace.campaign_id).failed, 1);
   } finally { globalThis.fetch = original; }
+});
+
+test('Finding 2: dual-channel reminder queues SMS and advances level when customer has no email', async () => {
+  const f = fixture('+201001112233');
+  const noEmailDb = write(f.db, 'res.partner', f.partner, { email: '' });
+  let emails = 0;
+  const db = await runFollowUps(noEmailDb, '2026-01-20', () => { emails++; return { status: 'sent' }; });
+  assert.ok(search(db, 'sms.trace').some((t) => t.res_id === f.partner && t.state === 'outgoing'));
+  const line = read(db, 'res.partner', f.partner).followup_lines.find((l) => l.company_id === 1);
+  assert.equal(line.followup_level, f.level);
+  assert.equal(line.followup_channel, 'sms');
+  assert.equal(emails, 0);
+  assert.ok(db.messages.some((m) => m.res_id === f.partner && m.delivery_channel === 'email' && /email/i.test(m.delivery_error ?? m.body)));
+});
+
+test('Finding 3: missing phone number does not flood duplicate notes on repeated scheduler runs', async () => {
+  const f = fixture('');
+  let db = await runFollowUps(f.db, '2026-01-20', () => ({ status: 'sent' }));
+  const notesCount1 = db.messages.filter((m) => m.res_id === f.partner && m.delivery_channel === 'sms').length;
+  assert.equal(notesCount1, 1);
+  // Second scheduler run on same day with unchanged missing phone must not post duplicate note
+  db = await runFollowUps(db, '2026-01-20', () => ({ status: 'sent' }));
+  const notesCount2 = db.messages.filter((m) => m.res_id === f.partner && m.delivery_channel === 'sms').length;
+  assert.equal(notesCount2, 1);
+  // When phone is corrected, retry succeeds and queues SMS
+  db = write(db, 'res.partner', f.partner, { mobile: '+201001112233' });
+  db = await runFollowUps(db, '2026-01-20', () => ({ status: 'sent' }));
+  assert.ok(search(db, 'sms.trace').some((t) => t.res_id === f.partner && t.state === 'outgoing'));
+});
+
+test('Finding 1: accounting users can persist manual follow-up SMS diffs via scoped permission but not arbitrary campaigns', () => {
+  const f = fixture();
+  const next = logManualFollowUp(f.db, f.partner, '2026-01-20', { channel: 'sms' });
+  const acctApps = ['accounting'];
+  const diff = diffDb(f.db, next);
+
+  // Writable models for accounting does not include unrestricted sms.campaign
+  const baseAllowed = writableModelsForApps(acctApps);
+  assert.equal(baseAllowed.has('sms.campaign'), false);
+  assert.equal(baseAllowed.has('sms.trace'), false);
+
+  // But scoped permission recognizes validated follow-up SMS diff
+  assert.equal(isFollowUpSmsDiff(diff, f.db), true);
+  const scoped = scopedWritableModels(acctApps, diff, f.db);
+  assert.equal(scoped.has('sms.campaign'), true);
+  assert.equal(scoped.has('sms.trace'), true);
+
+  // Applying diff with scoped permission succeeds
+  const saved = applyDiff(f.db, diff, { allowed: scoped, author: 'Accountant' });
+  assert.ok(search(saved, 'sms.trace').some((t) => t.res_id === f.partner));
+
+  // An arbitrary marketing SMS campaign diff is rejected for accounting users
+  const promo = create(f.db, 'sms.campaign', { name: 'Promo blast', body: '50% off', mailing_model: 'res.partner' });
+  const promoDiff = diffDb(f.db, promo.db);
+  assert.equal(isFollowUpSmsDiff(promoDiff, f.db), false);
+  const promoScoped = scopedWritableModels(acctApps, promoDiff, f.db);
+  assert.equal(promoScoped.has('sms.campaign'), false);
+  assert.throws(() => applyDiff(f.db, promoDiff, { allowed: promoScoped, author: 'Accountant' }), /No access to sms\.campaign/);
+});
+
+test('Finding 4: dual-channel level provides levelChannels and distinct SMS manual action in Follow-ups screen', async () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.followup.level': [], 'account.move': [] } };
+  const lvl = create(db, 'account.followup.level', { delay: 10, reminder_timing: 'after', send_email: true, send_sms: true, sms_message: 'Pay now' });
+  const partner = create(lvl.db, 'res.partner', { name: 'Dual Customer', email: 'dual@example.test', mobile: '+20123456789' });
+  const due = addDays(today(), -15);
+  const inv = create(partner.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: partner.id, invoice_date: addDays(due, -10), invoice_date_due: due, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+
+  assert.deepEqual(levelChannels(read(db, 'account.followup.level', lvl.id)), ['email', 'sms']);
+
+  const { FollowUps } = await import('./views/Reports.jsx');
+  const mounted = await mountView((React) => React.createElement(FollowUps, { db }), db);
+  try {
+    const confirmBtn = find(mounted.host, (n) => n.tagName === 'BUTTON' && textOf(n).trim() === 'Confirm Sent');
+    assert.ok(confirmBtn, 'Confirm Sent button for email action exists');
+    const smsBtn = find(mounted.host, (n) => n.tagName === 'BUTTON' && textOf(n).trim() === 'Send SMS');
+    assert.ok(smsBtn, 'distinct Send SMS action button exists for dual-channel level');
+    await mounted.React.act(async () => props(smsBtn).onClick());
+    const saved = mounted.getDb();
+    const trace = search(saved, 'sms.trace').find((t) => t.res_id === partner.id);
+    assert.ok(trace, 'SMS trace queued by clicking Send SMS');
+    const line = read(saved, 'res.partner', partner.id).followup_lines.find((l) => l.company_id === 1);
+    assert.equal(line?.followup_channel, 'sms');
+  } finally {
+    await mounted.done();
+  }
 });

@@ -5,7 +5,7 @@ import { depreciationReport } from '../models/assets.js';
 import { deferredReport } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { filterByAnalytic, journalItems } from '../models/ledger.js';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -407,18 +407,25 @@ const Aged = (kind) => function AgedBody({ db, period, companyId, partnerIds, ag
 function FollowUpActions({ db, reminder, companyId }) {
   const partner = read(db, 'res.partner', reminder.partner_id);
   const email = partner?.email?.trim();
-  const channel = levelChannel(followUpLevel(db, reminder));
+  const lvl = followUpLevel(db, reminder);
+  const channels = levelChannels(lvl);
+  const channel = levelChannel(lvl);
   const isManual = partner?.followup_reminder_type === 'manual';
   const fallbackChannel = partner?.phone?.trim() ? 'phone' : 'letter';
   const manualChannel = ['sms', 'phone', 'letter'].includes(channel)
     ? channel
     : (isManual && !email ? fallbackChannel : 'email');
   const options = { scope: db, reminder, companyId };
+  const hasSms = channels.includes('sms');
+  const isDual = hasSms && channels.includes('email');
   return <>
     {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}
       onClick={() => commit(openManualFollowUp(getDb(), reminder.partner_id, today(), options))}>{t('Open Reminder in Mail App')}</a>{' '}</>}
     {(manualChannel !== 'email' || email) &&
-      <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: manualChannel }))}>{t('Confirm Sent')}</button>}
+      <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: isDual ? 'email' : manualChannel }))}>{t('Confirm Sent')}</button>}
+    {isDual && <>
+      {' '}<button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: 'sms' }))}>{t('Send SMS')}</button>
+    </>}
   </>;
 }
 

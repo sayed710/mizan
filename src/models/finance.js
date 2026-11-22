@@ -40,18 +40,18 @@ export function creditWarning(db, partnerId, amount, document = {}) {
  * or (when no reference is set) the same amount and bill date.
  */
 export function duplicateBillWarning(db, bill) {
-  if (!bill || bill.move_type !== 'in_invoice' || bill.state === 'cancel' || !bill.partner_id || !db) return '';
+  if (!bill || !['in_invoice', 'in_refund'].includes(bill.move_type) || bill.state === 'cancel' || !bill.partner_id || !db) return '';
   const companyId = bill.company_id ?? 1;
   const ref = String(bill.ref ?? '').trim();
   const docCurr = documentCurrency(db, bill);
   const billTotal = roundCurrency(total(bill, db), docCurr);
-  const candidates = (db.records?.['account.move'] ?? []).filter((m) =>
+  const candidates = search(db, 'account.move').filter((m) =>
     m.id !== bill.id
     && m.active !== false
-    && m.move_type === 'in_invoice'
+    && m.move_type === bill.move_type
     && m.state !== 'cancel'
     && (m.company_id ?? 1) === companyId
-    && m.partner_id === bill.partner_id
+    && sameCommercialPartner(db, m.partner_id, bill.partner_id)
   );
   const dups = ref
     ? candidates.filter((m) => String(m.ref ?? '').trim().toLowerCase() === ref.toLowerCase())
@@ -1705,7 +1705,7 @@ export function followUpLevelName(level) {
   return `${days} days ${timing}`;
 }
 
-function levelChannels(level) {
+export function levelChannels(level) {
   if (!level) return [];
   const channels = [];
   if (level.send_email) channels.push('email');
@@ -2099,7 +2099,17 @@ export function runFollowUps(db, at = today(), deliver = null) {
       (progress?.followup_oldest_date ?? null) !== (f.oldest ?? null)
       || progress?.followup_activity_level !== level.id
     ));
-    if (!canDeliverEmail && !channels.includes('sms') && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+    const hasPhone = Boolean(String(partner.mobile || partner.phone || '').trim());
+    const sameDaySmsFailure = Boolean(
+      channels.includes('sms')
+      && !hasPhone
+      && progress?.followup_date === at
+      && (progress?.followup_oldest_date ?? null) === (f.oldest ?? null)
+      && (progress?.followup_last_level === level.id || progress?.followup_level === level.id)
+      && progress?.followup_delivery_outcome === 'failed'
+      && progress?.followup_channel === 'sms'
+    );
+    if (!canDeliverEmail && (!channels.includes('sms') || sameDaySmsFailure) && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
     const sameDayOutboxOnly = Boolean(
       !hasPendingActivity
       && progress?.followup_delivery_state !== 'sent'
@@ -2128,25 +2138,33 @@ export function runFollowUps(db, at = today(), deliver = null) {
         followup_channel: channel ?? null,
         followup_delivery_state: deliveryState,
         followup_delivery_outcome: deliveryOutcome,
+        followup_last_level: level?.id ?? null,
         followup_next_action_date: null,
       });
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
     let smsFailed = false;
+    let smsQueued = false;
     const emailAlreadySent = progress?.followup_last_level === level.id && progress?.followup_channel === 'sms'
       && progress?.followup_delivery_outcome === 'failed' && progress?.followup_oldest_date === (f.oldest ?? null);
     if (channels.includes('sms')) {
-      try {
-        nextDb = queueFollowUpSms(nextDb, partner, f, level, at, true);
-        if (!channels.includes('email') || emailAlreadySent) return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
-      } catch (error) {
+      if (sameDaySmsFailure) {
         smsFailed = true;
-        const msg = error?.message ?? String(error);
-        const previousChannel = channel;
-        channel = 'sms';
-        nextDb = recordFailure(`SMS delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
-        channel = previousChannel;
         if (!channels.includes('email') || emailAlreadySent) return nextDb;
+      } else {
+        try {
+          nextDb = queueFollowUpSms(nextDb, partner, f, level, at, true);
+          smsQueued = true;
+          if (!channels.includes('email') || emailAlreadySent) return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
+        } catch (error) {
+          smsFailed = true;
+          const msg = error?.message ?? String(error);
+          const previousChannel = channel;
+          channel = 'sms';
+          nextDb = recordFailure(`SMS delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+          channel = previousChannel;
+          if (!channels.includes('email') || emailAlreadySent) return nextDb;
+        }
       }
     }
     if (channel === 'email' && partner.email?.trim() && deliver) {
@@ -2192,6 +2210,19 @@ export function runFollowUps(db, at = today(), deliver = null) {
         const msg = error?.message ?? String(error);
         return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
       }
+    }
+    if (smsQueued) {
+      const emailReason = partner.email?.trim() ? 'Automatic email delivery is not configured.' : 'The customer has no email address.';
+      const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+      nextDb = postNote(
+        nextDb,
+        'res.partner',
+        partner.id,
+        `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${emailReason}`,
+        reminderSource(f),
+        { delivery_channel: 'email', delivery_state: partner.email?.trim() ? 'outbox_only' : 'failed', delivery_error: emailReason },
+      );
+      return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
     }
     if (!channel && level.create_activity) {
       return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, null, f.oldest);
@@ -2256,6 +2287,48 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     ? groups.reduce((state, part) => queueFollowUpSms(state, read(state, 'res.partner', partnerId), part, followUpLevel(scope, part, at), at), db)
     : db;
   return applyFollowUpReminder(queued, scope, partnerId, groups, at, channel, nextLevelBaseDate);
+}
+
+/**
+ * Whether a diff contains only validated follow-up SMS campaigns and traces.
+ * Used to grant narrowly scoped sync permission to accounting users without granting general SMS Marketing write access.
+ */
+export function isFollowUpSmsDiff(diff, db) {
+  if (!diff || typeof diff !== 'object') return false;
+  if (diff.deletes?.['sms.campaign']?.length || diff.deletes?.['sms.trace']?.length || diff.deletes?.['phone.blacklist']?.length) {
+    return false;
+  }
+  if (diff.upserts?.['phone.blacklist']?.length) return false;
+
+  const campaigns = diff.upserts?.['sms.campaign'] ?? [];
+  const traces = diff.upserts?.['sms.trace'] ?? [];
+  if (!campaigns.length && !traces.length) return false;
+
+  const existingCampaigns = new Map((db?.records?.['sms.campaign'] ?? []).map((c) => [c.id, c]));
+  const followupCampaignIds = new Set();
+
+  for (const c of campaigns) {
+    if (!c || c.followup_sms !== true) return false;
+    const prior = existingCampaigns.get(c.id);
+    if (prior && prior.followup_sms !== true) return false;
+    followupCampaignIds.add(c.id);
+  }
+
+  const existingTraces = new Map((db?.records?.['sms.trace'] ?? []).map((t) => [t.id, t]));
+  for (const t of traces) {
+    if (!t) return false;
+    if (t.res_model && t.res_model !== 'res.partner') return false;
+    const campaignId = t.campaign_id;
+    const isFollowupCampaign = followupCampaignIds.has(campaignId) || existingCampaigns.get(campaignId)?.followup_sms === true;
+    if (!isFollowupCampaign) return false;
+    const prior = existingTraces.get(t.id);
+    if (prior) {
+      const priorCamp = existingCampaigns.get(prior.campaign_id);
+      if (priorCamp && priorCamp.followup_sms !== true) return false;
+    }
+  }
+
+  return true;
 }
 
 

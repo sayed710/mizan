@@ -62,7 +62,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels } from './finance.js';
+import { financeModels, isFollowUpSmsDiff } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -766,7 +766,7 @@ export const leavesOf = (app) => {
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
-  'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+  'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];
 /** Protected models without their own menu, explicitly owned by an app. */
 const OWNED_PROTECTED = { accounting: ['account.partial.reconcile', 'payment.transaction', 'account.payment.method', 'account.payment.method.line'] };
 const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
@@ -806,6 +806,18 @@ export function writableModelsForApps(appIds) {
   return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || owned.has(m) || !PROTECTED.includes(m)));
 }
 
+/**
+ * Models a user restricted to `appIds` may write for a specific diff: extends writable models
+ * with narrowly scoped models (such as validated follow-up SMS campaigns/traces for accounting users).
+ */
+export function scopedWritableModels(appIds, diff, db) {
+  const base = writableModelsForApps(appIds);
+  if (appIds?.includes('accounting') && isFollowUpSmsDiff(diff, db)) {
+    return new Set([...base, 'sms.campaign', 'sms.trace']);
+  }
+  return base;
+}
+
 /** `db` without the private employee fields the apps in `appIds` may not see. */
 export function redactForApps(db, appIds) {
   const base = menuModelsForApps(appIds);
@@ -824,6 +836,10 @@ export function modelsForApps(appIds) {
   const out = new Set(base);
   // Barcode counts update located stock through the same quantity path as inventory operations.
   if (appIds.includes('barcode')) out.add('stock.quant');
+  if (appIds.includes('accounting')) {
+    out.add('sms.campaign');
+    out.add('sms.trace');
+  }
   for (const id of appIds) for (const m of OWNED_PROTECTED[id] ?? []) out.add(m);
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {
