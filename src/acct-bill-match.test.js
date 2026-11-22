@@ -4,9 +4,36 @@ import { create, read, search, write } from './orm.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
-import { billControlModels, shouldBePaid, matchBill } from './models/billcontrol.js';
+import { billControlModels, shouldBePaid, matchBill, checkBillMatch } from './models/billcontrol.js';
 
 const run = (db, model, id, label) => (billControlModels[model] ?? models[model]).form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
+
+test('unordered products require payment approval even when free or services', () => {
+  let db = seed();
+  const company = search(db, 'res.company')[0];
+  db = write(db, 'res.company', company.id, { three_way_matching: true });
+  const vendor = search(db, 'res.partner')[0];
+  const ordered = create(db, 'product', { name: 'Ordered', type: 'goods', purchase_method: 'receive' });
+  const goods = create(ordered.db, 'product', { name: 'Extra goods', type: 'goods', purchase_method: 'receive' });
+  const service = create(goods.db, 'product', { name: 'Extra service', type: 'service' });
+  const po = create(service.db, 'purchase.order', { company_id: company.id, partner_id: vendor.id, state: 'purchase', order_line: [{ product_id: ordered.id, qty: 1, qty_delivered: 1, price_unit: 10 }] });
+  const bill = create(po.db, 'account.move', { company_id: company.id, partner_id: vendor.id, move_type: 'in_invoice', purchase_id: po.id, invoice_line_ids: [
+    { product_id: ordered.id, qty: 1, price_unit: 10 },
+    { product_id: goods.id, qty: 1, price_unit: 5 },
+    { product_id: service.id, qty: 1, price_unit: 0 },
+    { display_type: 'line_section', product_id: goods.id, name: 'Section' },
+    { display_type: 'line_note', name: 'Note' },
+    { display_type: 'line_subsection', name: 'Subsection' },
+    { name: 'Manual line', qty: 1, price_unit: 2 },
+  ] });
+  const record = read(bill.db, 'account.move', bill.id);
+  assert.deepEqual(matchBill(bill.db, bill.id).map((row) => row.status), ['ok', 'unmatched_product', 'unmatched_product']);
+  assert.equal(checkBillMatch(bill.db, record).length, 2);
+  assert.equal(shouldBePaid(bill.db, record), 'exception');
+  const posted = run(bill.db, 'account.move', bill.id, 'Confirm').db;
+  const approved = run(posted, 'account.move', bill.id, 'Approve for Payment').db;
+  assert.equal(shouldBePaid(approved, read(approved, 'account.move', bill.id)), 'yes');
+});
 
 test('BILL-1: shouldBePaid returns "no" when received quantity is 0 under receive policy', () => {
   let db = seed();

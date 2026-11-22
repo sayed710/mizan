@@ -84,7 +84,7 @@ function matches(db, bill) {
   const used = new Map();
   const prior = previousBills(db, bill, po).flatMap((m) => (m.invoice_line_ids ?? []).map((line) => ({ ...line, purchase_line_id: purchaseLineId(db, line, po.id) })));
   const curr = documentCurrency(db, bill);
-  return (bill.invoice_line_ids ?? []).map((line) => ({ ...line, purchase_line_id: purchaseLineId(db, line, po.id) })).filter((l) => l.product_id && !['line_section', 'line_note', 'line_subsection'].includes(l.display_type) && (po.order_line ?? []).some((p) => p.product_id === l.product_id && (!l.purchase_line_id || p.id === l.purchase_line_id))).map((l) => {
+  return (bill.invoice_line_ids ?? []).map((line) => ({ ...line, purchase_line_id: purchaseLineId(db, line, po.id) })).filter((l) => l.product_id && !['line_section', 'line_note', 'line_subsection'].includes(l.display_type)).map((l) => {
     const source = (po.order_line ?? []).filter((p) => p.product_id === l.product_id
       && (!l.purchase_line_id || p.id === l.purchase_line_id));
     const billedQty = number(l.qty);
@@ -104,7 +104,7 @@ function matches(db, bill) {
     used.set(key, (used.get(key) ?? 0) + billedQty);
     const hasPriceDiff = roundCurrency(Math.abs(priceDifference), curr) > 0;
     return { product_id: l.product_id, billedQty, receivedQty, orderedQty, priceDifference,
-      status: offset + billedQty > receivedQty + 1e-8 ? 'qty_exceeds_received' : hasPriceDiff ? 'price_differs' : 'ok' };
+      status: !source.length ? 'unmatched_product' : offset + billedQty > receivedQty + 1e-8 ? 'qty_exceeds_received' : hasPriceDiff ? 'price_differs' : 'ok' };
   });
 }
 
@@ -120,7 +120,7 @@ export function checkBillMatch(db, bill) {
   if (bill.move_type !== 'in_invoice' || !orderFor(db, bill)) return [];
   const rows = matches(db, bill);
   const curr = documentCurrency(db, bill);
-  return rows.filter((l) => roundCurrency(Math.abs(l.priceDifference), curr) > 0);
+  return rows.filter((l) => l.status === 'unmatched_product' || roundCurrency(Math.abs(l.priceDifference), curr) > 0);
 }
 
 /** Compute the review recommendation from current receipts and other posted bills. */
@@ -128,11 +128,11 @@ export function shouldBePaid(db, bill) {
   const company = read(db, 'res.company', bill.company_id ?? 1);
   if (bill.move_type !== 'in_invoice' || !company?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
   const rows = matches(db, bill);
-  if (rows.some((l) => method(read(db, 'product', l.product_id)) === 'receive' && (Number(l.receivedQty) || 0) === 0)) {
+  if (rows.some((l) => l.status !== 'unmatched_product' && method(read(db, 'product', l.product_id)) === 'receive' && (Number(l.receivedQty) || 0) === 0)) {
     return 'no';
   }
   const curr = documentCurrency(db, bill);
-  if (rows.some((l) => (l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') || roundCurrency(Math.abs(l.priceDifference), curr) > 0)) {
+  if (rows.some((l) => l.status === 'unmatched_product' || (l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') || roundCurrency(Math.abs(l.priceDifference), curr) > 0)) {
     return 'exception';
   }
   return 'yes';
