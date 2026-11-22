@@ -27,6 +27,7 @@ export function parseRel(db, model, raw) {
   const [field, rawIds] = raw.split(':');
   const parts = (rawIds ?? '').split(',').filter(Boolean).map(Number);
   const id = parts[0] ?? 0;
+  if (field === 'id') return { field, id, ids: parts, label: 'Selected records' };
   if (model === 'account.move' && field === 'payment_id') {
     const payment = read(db, 'account.payment', id);
     return { field, fieldLabel: 'Payment', id, label: payment?.name ?? `#${id}` };
