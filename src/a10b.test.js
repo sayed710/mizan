@@ -133,6 +133,13 @@ test('Area 2 (Vendor bill duplicate detection): warns on same vendor + reference
   assert.match(warn1, /VEND-2026-001/i);
   assert.equal(duplicateBillWarning(dupRef.db, dupRefRec), warn1);
 
+  // A credit note may carry the reference of the bill it reverses.
+  const refund = create(db1, 'account.move', {
+    move_type: 'in_refund', partner_id: 4, ref: 'VEND-2026-001',
+    invoice_date: '2026-04-01', invoice_line_ids: [{ product_id: 2, qty: 1, price_unit: 500, tax: 0 }],
+  });
+  assert.equal(duplicateBillWarning(refund.db, read(refund.db, 'account.move', refund.id)), '');
+
   // Different reference -> no warning
   const diffRef = write(dupRef.db, 'account.move', dupRef.id, { ref: 'VEND-2026-002' });
   assert.equal(models['account.move'].form.warning(read(diffRef, 'account.move', dupRef.id), diffRef), '');

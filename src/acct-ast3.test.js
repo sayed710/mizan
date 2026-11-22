@@ -34,7 +34,7 @@ test('activation transfers book value into a linked running asset', async () => 
   const { read } = await import('./orm.js');
   let db = seed();
   const accounts = assetAccounts(db);
-  const asset = create(db, 'account.asset', { ...accounts, name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'none', depreciation_ids: [] });
+  const asset = create(db, 'account.asset', { ...accounts, name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'no_depreciation', depreciation_ids: [] });
   db = activateDepreciation(asset.db, read(asset.db, 'account.asset', asset.id), { date: '2026-01-02', accountId: accounts.account_asset_id, method: 'linear', methodNumber: 5 });
   const child = db.records['account.asset'].find((a) => a.parent_id === asset.id);
   assert.equal(child.state, 'open');
@@ -66,7 +66,7 @@ test('activation and its source links survive server replay and resist forged tr
   const { read } = await import('./orm.js');
   const { applyDiff, diffDb } = await import('./sync.js');
   const base = seed();
-  const a = create(base, 'account.asset', { ...assetAccounts(base), name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'none', depreciation_ids: [] });
+  const a = create(base, 'account.asset', { ...assetAccounts(base), name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'no_depreciation', depreciation_ids: [] });
   const next = activateDepreciation(a.db, read(a.db, 'account.asset', a.id), { date: '2026-01-02', accountId: assetAccounts(base).account_asset_id, method: 'linear', methodNumber: 5 });
   const applied = applyDiff(a.db, diffDb(a.db, next), { isAdmin: true });
   assert.equal(read(applied, 'account.asset', a.id).state, 'close');
@@ -109,7 +109,7 @@ test('no-depreciation assets confirm without a schedule', async () => {
   const { assetAccounts } = await import('./test-support/asset-accounts.js');
   const { read } = await import('./orm.js');
   const db = seed();
-  const a = create(db, 'account.asset', { ...assetAccounts(db), name: 'Land', original_value: 100, acquisition_date: '2026-01-01', method: 'none' });
+  const a = create(db, 'account.asset', { ...assetAccounts(db), name: 'Land', original_value: 100, acquisition_date: '2026-01-01', method: 'no_depreciation' });
   const confirmed = confirmAsset(a.db, read(a.db, 'account.asset', a.id));
   assert.deepEqual(read(confirmed, 'account.asset', a.id).depreciation_ids, []);
   assert.equal(read(confirmed, 'account.asset', a.id).state, 'open');
@@ -134,4 +134,21 @@ test('activation metadata cannot close an asset without accounting entries', asy
   const forged = structuredClone(a.db);
   forged.records['account.asset'].find((r) => r.id === a.id).activation_date = '2026-01-01';
   assert.throws(() => applyDiff(a.db, diffDb(a.db, forged), { isAdmin: true }), /activation/i);
+});
+
+test('asset draft helper preserves model rate and prorata settings', async () => {
+  const { assetDraftValues } = await import('./models/accounting.js');
+  const { write } = await import('./orm.js');
+  const { assetAccounts } = await import('./test-support/asset-accounts.js');
+  let db = seed();
+  const account = assetAccounts(db).account_asset_id;
+  const model = create(db, 'account.asset.model', { name: 'Rate model', company_id: null, method: 'linear', method_mode: 'rate', method_rate: 0.25, method_number: 4, method_period: '12', prorata_computation_type: 'constant_periods', ...assetAccounts(db) });
+  db = write(model.db, 'account.account', account, { asset_model_id: model.id });
+  const move = { name: 'Entry', company_id: 1, partner_id: 2 };
+  const values = assetDraftValues(db, move, { name: 'Equipment' }, { amount: 100, accountId: account, date: '2026-04-01' });
+  assert.equal(values.model_id, model.id);
+  assert.equal(values.method_mode, 'rate');
+  assert.equal(values.method_rate, 0.25);
+  assert.equal(values.prorata_computation_type, 'constant_periods');
+  assert.ok(values.prorata_date);
 });

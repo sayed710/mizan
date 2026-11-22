@@ -166,7 +166,7 @@ test('invoice lines show Odoo 20 default columns, persist optional toggles in lo
     const menuItems = allFind(ctx.host, (n) => props(n)?.role === 'menuitemcheckbox');
     assert.deepEqual(
       menuItems.map((n) => n.textContent.replace('✓', '').trim()),
-      ['Account', 'Analytic', 'Deferred Start Date', 'Deferred End Date', 'Unit of Measure', 'Disc.%'],
+      ['Account', 'Analytic', 'Deferred Start Date', 'Deferred End Date', 'Unit of Measure', 'Disc.%', 'Purchase Order Line'],
     );
     assert.ok(menuItems.every((n) => props(n)['aria-checked'] === false), 'optional columns hidden by default');
 
@@ -210,7 +210,7 @@ test('vendor bill form shows Vendor and Bill Reference in the header and a Bill 
   const ctx = await mountMoveForm({ leaf, id: 'new' });
   try {
     const groups = allFind(ctx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
-    assert.deepEqual(fieldLabelsOf(groups[0]), ['Vendor', 'Bill Reference']);
+    assert.deepEqual(fieldLabelsOf(groups[0]), ['Vendor', 'Purchase Order', 'Bill Reference']);
     assert.deepEqual(fieldLabelsOf(groups[1]), ['Bill Date', 'Due Date', 'Journal', 'Currency']);
 
     const otherInfoTab = find(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab' && n.textContent.trim() === 'Other Info');
