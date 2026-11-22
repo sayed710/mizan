@@ -1,7 +1,7 @@
 import { create, read, write } from '../orm.js';
 import { today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { updatePartnerFollowUp } from './finance.js';
+import { partnerTotalDue, partnerTotalOverdue, updatePartnerFollowUp } from './finance.js';
 
 export function isRotting(db, model, r) {
   if (!r) return false;
@@ -125,6 +125,18 @@ export const crmModels = {
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       property_account_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
       property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
+      total_due: {
+        type: 'monetary',
+        label: 'Total Due',
+        readonly: true,
+        compute: (r, db) => (r?.id && db ? partnerTotalDue(db, r.id, db.settings?.current_company_id ?? 1) : 0),
+      },
+      total_overdue: {
+        type: 'monetary',
+        label: 'Total Overdue',
+        readonly: true,
+        compute: (r, db) => (r?.id && db ? partnerTotalOverdue(db, r.id, db.settings?.current_company_id ?? 1) : 0),
+      },
       user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson', hidden: true },
       followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible' },
       followup_reminder_type: { type: 'selection', label: 'Reminders', options: [['automatic', 'Automatic'], ['manual', 'Manual']], default: 'automatic' },
@@ -226,7 +238,7 @@ export const crmModels = {
       tabs: [
         {
           label: 'Accounting',
-          fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
+          fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'total_due', 'total_overdue', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
       ],

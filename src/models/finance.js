@@ -1430,7 +1430,7 @@ export function taxesByGrid(db, period = {}) {
 }
 
 /** Open installments in company currency, using the schedule recorded when the document was posted. */
-function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
+export function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
   const payments = m.payments ?? [];
   const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
@@ -1668,7 +1668,7 @@ export function journalCards(db, at = today()) {
   });
 }
 
-function followUpSummary(invoices) {
+export function followUpSummary(invoices) {
   const byCurrency = new Map();
   for (const invoice of invoices) {
     const currency = invoice.followup_currency;
@@ -1678,6 +1678,72 @@ function followUpSummary(invoices) {
   }
   const totals = [...byCurrency.values()];
   return { totals, total: totals.length === 1 ? totals[0].amount : null };
+}
+
+export function classifyDue(dueDate, at = today(), beforeCutoff = null) {
+  if (!dueDate) return null;
+  if (dueDate < at) return 'overdue';
+  if (beforeCutoff && dueDate <= beforeCutoff) return 'upcoming';
+  return null;
+}
+
+export function partnerReceivableLines(db, partnerId, companyId = 1, at = today()) {
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const compCurr = companyCurrencyRecord(db, cId);
+  const moves = (db?.records?.['account.move'] ?? []).filter((m) =>
+    m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice'
+    && m.partner_id === partnerId && (m.company_id ?? 1) === cId
+  );
+  const lines = [];
+  for (const m of moves) {
+    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: true });
+    if (dues.length) {
+      for (const due of dues) {
+        const isOverdue = classifyDue(due.date, at) === 'overdue';
+        lines.push({
+          move_id: m.id,
+          invoice_date: m.invoice_date ?? m.date,
+          due_date: due.date,
+          number: m.name,
+          reference: m.ref ?? '',
+          residual_amount: roundCurrency(due.amount, compCurr),
+          is_overdue: isOverdue,
+          move: m,
+        });
+      }
+    } else {
+      const res = models['account.move'].fields.amount_residual.compute(m, db);
+      if (res > 0) {
+        const compAmount = toCompany(db, m.currency_id, res, m.invoice_date ?? m.date, cId);
+        const dueDate = m.invoice_date_due ?? m.invoice_date ?? m.date;
+        const isOverdue = classifyDue(dueDate, at) === 'overdue';
+        lines.push({
+          move_id: m.id,
+          invoice_date: m.invoice_date ?? m.date,
+          due_date: dueDate,
+          number: m.name,
+          reference: m.ref ?? '',
+          residual_amount: compAmount,
+          is_overdue: isOverdue,
+          move: m,
+        });
+      }
+    }
+  }
+  lines.sort((a, b) => String(a.due_date ?? '').localeCompare(String(b.due_date ?? '')) || String(a.number ?? '').localeCompare(String(b.number ?? '')));
+  const total_due = roundCurrency(Math.max(0, lines.reduce((s, l) => s + l.residual_amount, 0)), compCurr);
+  const total_overdue = roundCurrency(Math.max(0, lines.filter((l) => l.is_overdue).reduce((s, l) => s + l.residual_amount, 0)), compCurr);
+  return { total_due, total_overdue, lines };
+}
+
+export function partnerTotalDue(db, partnerId, companyId = null, at = today()) {
+  if (!partnerId || !db) return 0;
+  return partnerReceivableLines(db, partnerId, companyId, at).total_due;
+}
+
+export function partnerTotalOverdue(db, partnerId, companyId = null, at = today()) {
+  if (!partnerId || !db) return 0;
+  return partnerReceivableLines(db, partnerId, companyId, at).total_overdue;
 }
 
 
@@ -1758,11 +1824,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
   const levels = search(db, 'account.followup.level');
   const minNegative = levels.reduce((min, l) => Math.min(min, Number(l.delay) || 0), 0);
   const beforeCutoff = minNegative < 0 ? addDays(at, -minNegative) : null;
-  const classifyDue = (dueDate) => {
-    if (!dueDate) return null;
-    if (dueDate < at) return 'overdue';
-    return beforeCutoff && dueDate <= beforeCutoff ? 'upcoming' : null;
-  };
+  const bucketDue = (dueDate) => classifyDue(dueDate, at, beforeCutoff);
 
   const groups = new Map();
   const ensureGroup = (partnerId, compId) => {
@@ -1787,7 +1849,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
     if (!ignoreNextActionDate && compLine?.followup_next_action_date && compLine.followup_next_action_date > at) continue;
 
     if (!m.invoice_date || !(m.line_ids ?? []).length) {
-      const bucket = m.amount_residual > 0 ? classifyDue(m.invoice_date_due) : null;
+      const bucket = m.amount_residual > 0 ? bucketDue(m.invoice_date_due) : null;
       if (!bucket) continue;
       const group = ensureGroup(m.partner_id, compId);
       const companyAmount = Number(m.amount_residual);
@@ -1799,7 +1861,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
 
     const openDues = openInstallments(db, m, 'receivable', at, { includeBlocked: false });
     const overdueDues = openDues.filter((due) => due.date < at);
-    const upcomingDues = openDues.filter((due) => classifyDue(due.date) === 'upcoming');
+    const upcomingDues = openDues.filter((due) => bucketDue(due.date) === 'upcoming');
     if (!overdueDues.length && !upcomingDues.length) continue;
     const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
     const docCurr = documentCurrency(db, m);
@@ -1862,7 +1924,16 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
   return [...by].map(([partner_id, invoices]) => {
     const upcoming = invoices.some((m) => Number(m.amount_residual) > 0 && m.upcoming)
       && !invoices.some((m) => Number(m.amount_residual) > 0 && !m.upcoming);
-    return { partner_id, invoices, ...followUpSummary(invoices), oldest: oldestOverdueDate(invoices), ...(upcoming ? { upcoming: true } : {}) };
+    const summary = followUpSummary(invoices);
+    return {
+      partner_id,
+      invoices,
+      ...summary,
+      total_due: partnerTotalDue(db, partner_id, companyId, at),
+      total_overdue: partnerTotalOverdue(db, partner_id, companyId, at),
+      oldest: oldestOverdueDate(invoices),
+      ...(upcoming ? { upcoming: true } : {}),
+    };
   });
 }
 
