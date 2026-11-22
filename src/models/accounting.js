@@ -1,4 +1,4 @@
-import { create, postNote, read, search, unlink, write } from '../orm.js';
+import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
@@ -42,6 +42,22 @@ import {
 } from './paymentmethod.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines };
+
+function invoiceCompanyDefaults(db, move, previous) {
+  const company = read(db, 'res.company', move.company_id);
+  const oldCompany = previous?.company_id ? read(db, 'res.company', previous.company_id) : null;
+  const termsEligible = ['out_invoice', 'out_refund'].includes(move.move_type);
+  const result = {};
+  if (termsEligible && (move.narration === undefined || (previous && oldCompany?.use_invoice_terms && move.narration === oldCompany.invoice_terms))) {
+    if (company?.use_invoice_terms) result.narration = company.invoice_terms ?? '';
+    else if (previous) result.narration = '';
+  }
+  if (move.move_type === 'out_invoice' && (move.incoterm_id === undefined || (previous && oldCompany?.incoterm_id != null && move.incoterm_id === oldCompany.incoterm_id))) {
+    if (company?.incoterm_id != null) result.incoterm_id = company.incoterm_id;
+    else if (previous) result.incoterm_id = null;
+  }
+  return result;
+}
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -3344,6 +3360,7 @@ export const accountingModels = {
           : {};
         return {
           ...fiscal,
+          ...(key === 'company_id' && !r.id ? invoiceCompanyDefaults(db, r, previous) : {}),
           ...(partnerChange && isPurchase(r) ? { partner_bank_id: partnerBank } : {}),
           ...linesUpdate,
           ...(partnerChange ? {
@@ -3539,6 +3556,7 @@ export const accountingModels = {
           ? resolveDocumentJournal(db, { move_type: moveType, company_id: companyId })?.id ?? null
           : null;
         return {
+          ...invoiceCompanyDefaults(db, { ...vals, move_type: moveType, company_id: vals.company_id ?? getActiveCompany() ?? 1 }),
           ...(salesperson ? { invoice_user_id: salesperson } : {}),
           ...(defaultJournal ? { journal_id: defaultJournal } : {}),
         };
