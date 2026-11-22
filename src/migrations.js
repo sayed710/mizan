@@ -1795,7 +1795,6 @@ function migrateStatementLinesBankSuspense(db) {
   }
   return currentDb;
 }
-MIGRATIONS.push({ version: 62, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 function convertLegacyBoardLineCreditAdjustments(line, deferral, movesById) {
   const creditMoveIds = new Set(
@@ -1903,6 +1902,7 @@ export function migrateDeferralCreditAdjustments(db) {
 }
 
 MIGRATIONS.push({ version: 62, name: 'canonical-deferral-credit-adjustments', up: migrateDeferralCreditAdjustments });
+MIGRATIONS.push({ version: 63, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
