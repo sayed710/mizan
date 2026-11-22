@@ -319,12 +319,12 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false, e
   // An account number held by several partners identifies none of them.
   const partnerByAccount = new Map();
   for (const b of bankAccounts) {
-    const key = b.sanitized_account_number || sanitizeAccountNumber(b.account_number);
+    const key = sanitizeAccountNumber(b.account_number);
     partnerByAccount.set(key, partnerByAccount.has(key) && partnerByAccount.get(key) !== b.partner_id ? null : b.partner_id);
   }
   // The journal's own account (online sync stamps it on every line) is not a counterparty.
   const ownBank = journal?.bank_account_id ? read(db, 'res.partner.bank', journal.bank_account_id) : null;
-  const ownKey = ownBank ? ownBank.sanitized_account_number || sanitizeAccountNumber(ownBank.account_number) : null;
+  const ownKey = ownBank ? sanitizeAccountNumber(ownBank.account_number) : null;
   const line_ids = [];
   let next = db;
   for (const { currency: _currency, ...l } of fresh) {
@@ -426,7 +426,7 @@ function findJournalForAccount(db, acctNumber, companyId = 1) {
   if (!clean) return null;
   const bankAccounts = search(db, 'res.partner.bank').filter(
     (b) => b.active !== false && (!b.company_id || b.company_id === companyId)
-      && (b.sanitized_account_number || sanitizeAccountNumber(b.account_number)) === clean
+      && sanitizeAccountNumber(b.account_number) === clean
   );
   if (!bankAccounts.length) return null;
   const bankIds = new Set(bankAccounts.map((b) => b.id));

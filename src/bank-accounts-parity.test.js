@@ -94,19 +94,16 @@ test('res.partner.bank opens in list view with Odoo list columns, optional state
     'account_number',
     'partner_id',
     'holder_name',
-    'bank_name',
-    'bank_bic',
+    'bank_id',
     'clearing_number',
     'company_id',
     'allow_out_payment',
     'active',
   ]);
-  assert.deepEqual(def.listLabels, { bank_name: 'Bank' });
   assert.deepEqual(def.listFields, {
     partner_id: { optional: 'hide' },
     holder_name: { optional: 'hide' },
-    bank_name: { optional: 'hide' },
-    bank_bic: { optional: 'show' },
+    bank_id: { optional: 'show' },
     clearing_number: { optional: 'hide' },
     company_id: { optional: 'hide', multiCompanyOnly: true },
     allow_out_payment: { optional: 'show', widget: 'toggle' },
@@ -116,17 +113,20 @@ test('res.partner.bank opens in list view with Odoo list columns, optional state
 
   let db = seed();
   const partner = search(db, 'res.partner')[0];
+  const deutsche = create(db, 'res.bank', { name: 'Deutsche Bank', bic: 'DEUTDEFF' });
+  db = deutsche.db;
+  const chase = create(db, 'res.bank', { name: 'Chase', bic: 'CHASUS33' });
+  db = chase.db;
   const activeBank = create(db, 'res.partner.bank', {
     partner_id: partner.id,
     account_number: 'ACC-100',
-    bank_bic: 'DEUTDEFF',
-    bank_name: 'Deutsche Bank',
+    bank_id: deutsche.id,
   });
   db = activeBank.db;
   const archivedBank = create(db, 'res.partner.bank', {
     partner_id: partner.id,
     account_number: 'ACC-200',
-    bank_bic: 'CHASUS33',
+    bank_id: chase.id,
     active: false,
   });
   db = archivedBank.db;
@@ -137,7 +137,7 @@ test('res.partner.bank opens in list view with Odoo list columns, optional state
   assert.equal(isMultiCompany(db), false);
   assert.deepEqual(
     visibleListColumns(def, db, {}, { listFields: def.listFields }).cols,
-    ['sequence', 'account_number', 'bank_bic', 'allow_out_payment'],
+    ['sequence', 'account_number', 'bank_id', 'allow_out_payment'],
   );
 
   const { ActionView } = await import('./views/ActionView.jsx');
@@ -153,10 +153,11 @@ test('res.partner.bank opens in list view with Odoo list columns, optional state
     const table = find(ctx.host, (n) => n.tagName === 'TABLE' && hasClass(n, 'list'));
     assert.ok(table, 'opens in list view by default');
     const headers = allFind(table, (n) => n.tagName === 'TH').map((th) => th.textContent.trim()).filter((h) => h && h !== '⋯');
-    assert.deepEqual(headers, ['Account Number', 'BIC/SWIFT', 'Trust Bank Account']);
+    assert.deepEqual(headers, ['Account Number', 'Bank', 'Trust Bank Account']);
 
     const tbody = find(table, (n) => n.tagName === 'TBODY');
     assert.equal(tbody.textContent.includes('ACC-100'), true);
+    assert.equal(tbody.textContent.includes('Deutsche Bank - DEUTDEFF'), true);
     assert.equal(tbody.textContent.includes('ACC-200'), false);
 
     const row = tbody.childNodes[0];
@@ -176,7 +177,7 @@ test('res.partner.bank opens in list view with Odoo list columns, optional state
     assert.ok(colBtn, 'optional column toggle menu exists');
     await ctx.React.act(async () => props(colBtn).onClick());
     const colMenu = find(ctx.host, (n) => hasClass(n, 'o2m-cols-menu'));
-    assert.ok(colMenu.textContent.includes('Bank'), 'optional menu uses listLabel "Bank"');
+    assert.ok(colMenu.textContent.includes('Bank'), 'optional menu includes Bank column');
     assert.equal(colMenu.textContent.includes('Company'), false, 'multiCompanyOnly column hidden in single-company');
 
     const toggleSearch = find(ctx.host, (n) => n.tagName === 'BUTTON' && hasClass(n, 'search-toggle'));
@@ -191,37 +192,40 @@ test('res.partner.bank opens in list view with Odoo list columns, optional state
   }
 });
 
-test('res.partner.bank search matches bank_name, account_number, partner_id, and multi-company company_id', () => {
+test('res.partner.bank search matches bank_id, bank_name, account_number, partner_id, and multi-company company_id', () => {
   const def = models['res.partner.bank'];
-  assert.deepEqual(def.searchFields, ['bank_name', 'account_number', 'company_id', 'partner_id']);
+  assert.deepEqual(def.searchFields, ['bank_id', 'bank_name', 'account_number', 'company_id', 'partner_id']);
 
   let db = seed();
   const sub = create(db, 'res.company', { name: 'Subsidiary Corp' });
   db = sub.db;
   const partner = create(db, 'res.partner', { name: 'Delta Industrial' });
   db = partner.db;
+  const boa = create(db, 'res.bank', { name: 'Bank of America', bic: 'BOFAUS3N' });
+  db = boa.db;
   const created = create(db, 'res.partner.bank', {
     partner_id: partner.id,
     account_number: 'US-9988-7766',
-    bank_name: 'Bank of America',
+    bank_id: boa.id,
     company_id: sub.id,
   });
   db = created.db;
   const rec = read(db, 'res.partner.bank', created.id);
 
   assert.equal(matches(db, 'res.partner.bank', rec, ['Bank of America'], def.searchFields), true);
+  assert.equal(matches(db, 'res.partner.bank', rec, ['BOFAUS3N'], def.searchFields), true);
   assert.equal(matches(db, 'res.partner.bank', rec, ['9988'], def.searchFields), true);
   assert.equal(matches(db, 'res.partner.bank', rec, ['Delta'], def.searchFields), true);
   assert.equal(matches(db, 'res.partner.bank', rec, ['Subsidiary'], def.searchFields), true);
   assert.equal(matches(db, 'res.partner.bank', rec, ['Unrelated'], def.searchFields), false);
 });
 
-test('res.partner.bank form renders Odoo groups, no duplicate title field, multi-company Company, Note tab, and Bank Information tab', async () => {
+test('res.partner.bank form renders Odoo groups with bank_id, no duplicate title field, multi-company Company, and Note tab', async () => {
   const def = models['res.partner.bank'];
   assert.equal(def.form.hideTitle, true);
   assert.equal(def.form.chatter, true);
   assert.deepEqual(def.form.groups, [
-    ['account_number', 'clearing_number', 'bank_bic', 'partner_id', 'holder_name'],
+    ['account_number', 'clearing_number', 'bank_id', 'partner_id', 'holder_name'],
     ['allow_out_payment', 'company_id'],
   ]);
 
@@ -250,7 +254,7 @@ test('res.partner.bank form renders Odoo groups, no duplicate title field, multi
     assert.deepEqual(visibleLabels, [
       'Account Number',
       'Clearing Number',
-      'BIC/SWIFT',
+      'Bank',
       'Partner',
       'Holder Name',
       'Trust Bank Account',
@@ -258,6 +262,9 @@ test('res.partner.bank form renders Odoo groups, no duplicate title field, multi
     assert.equal(visibleLabels.filter((l) => l === 'Account Number').length, 1, 'Account Number appears only once');
     assert.equal(visibleLabels.includes('Sanitized Account Number'), false);
     assert.equal(visibleLabels.includes('Legacy Account Numbers'), false);
+    assert.equal(find(singleCtx.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-bank_id') !== null, true);
+    assert.equal(find(singleCtx.host, (n) => props(n)?.id === 'f-bank_name'), null);
+    assert.equal(find(singleCtx.host, (n) => props(n)?.id === 'f-bank_bic'), null);
 
     const ribbon = find(singleCtx.host, (n) => hasClass(n, 'ribbon'));
     assert.ok(ribbon && ribbon.textContent.includes('Archived'), 'archived record shows generic Archived ribbon');
@@ -268,20 +275,7 @@ test('res.partner.bank form renders Odoo groups, no duplicate title field, multi
     assert.ok(noteArea, 'Note tab renders note textarea by default');
     assert.equal(props(noteArea).placeholder, 'Internal notes...');
     assert.equal(visibleLabels.includes('Notes'), false, 'Note tab renders note without field label');
-
-    // Switch to Bank Information tab
-    const infoTabBtn = find(singleCtx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Bank Information');
-    assert.ok(infoTabBtn, 'Bank Information tab exists');
-    await singleCtx.React.act(async () => props(infoTabBtn).onClick());
-
-    const bankNameInput = find(singleCtx.host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-bank_name');
-    assert.equal(props(bankNameInput).placeholder, 'e.g. Bank of America');
-    const infoText = singleCtx.host.textContent;
-    assert.ok(infoText.includes('Bank Address'), 'Bank Information tab shows Bank Address section');
-    const infoLabels = allFind(singleCtx.host, (n) => hasClass(n, 'field')).map(labelText);
-    for (const expected of ['Bank Name', 'Street', 'Street 2', 'City', 'State', 'ZIP', 'Country']) {
-      assert.ok(infoLabels.includes(expected), `Bank Information tab renders ${expected}`);
-    }
+    assert.equal(find(singleCtx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Bank Information'), null);
   } finally {
     await singleCtx.done();
   }
@@ -312,8 +306,7 @@ test('res.partner.bank form renders Odoo groups, no duplicate title field, multi
 test('new bank accounts default to untrusted and outbound payments are refused until trusted', () => {
   assert.deepEqual(models['res.partner'].fields.bank_ids.newLine(), {
     account_number: '',
-    bank_name: '',
-    bank_bic: '',
+    bank_id: null,
     allow_out_payment: false,
   });
 
@@ -402,18 +395,26 @@ test('migration keeps existing stored bank accounts allow_out_payment values unc
   assert.equal(read(migrated, 'res.partner.bank', bFalse.id).allow_out_payment, false);
 });
 
-test('Arabic translations exist for all res.partner.bank labels, helps, placeholders, tabs, and validation messages', async () => {
+test('Arabic translations exist for all res.bank and res.partner.bank labels, helps, placeholders, tabs, and validation messages', async () => {
   const prevStorage = globalThis.localStorage;
   globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem() {} };
   try {
     const { t } = await import('./i18n.js?bank-ar-test');
     const def = models['res.partner.bank'];
+    const bankDef = models['res.bank'];
     const strings = [
       def.label,
-      def.listLabels.bank_name,
+      bankDef.label,
       ...Object.values(def.fields).flatMap((f) => [f.label, f.help, f.placeholder].filter(Boolean)),
+      ...Object.values(bankDef.fields).flatMap((f) => [f.label, f.help, f.placeholder].filter(Boolean)),
       ...def.form.tabs.map((tab) => tab.label),
       'Bank Address',
+      'Communication',
+      'Bank name is required',
+      'Select an existing bank',
+      'Select a partner for the bank account',
+      'Bank account number is required',
+      'The bank account number must be unique per partner',
       'BIC/SWIFT must be 8 or 11 alphanumeric characters',
     ];
     for (const s of strings) {

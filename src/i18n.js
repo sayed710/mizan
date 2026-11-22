@@ -3684,6 +3684,13 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  Banks: 'البنوك',
+  Communication: 'التواصل',
+  'Bank name is required': 'اسم البنك مطلوب',
+  'Select an existing bank': 'اختر بنكاً موجوداً',
+  'Select a partner for the bank account': 'اختر شريكاً للحساب البنكي',
+  'Bank account number is required': 'رقم الحساب البنكي مطلوب',
+  'The bank account number must be unique per partner': 'يجب أن يكون رقم الحساب البنكي فريداً لكل شريك',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

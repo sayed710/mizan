@@ -2000,6 +2000,68 @@ export function migrateTaxPriceIncludeOverride(db) {
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
 
+/** Create res.bank records from distinct exact name+BIC pairs on existing res.partner.bank records. */
+export function migrateBanksAsRecords(db) {
+  if (!db?.records) return db;
+  const partnerBanks = db.records['res.partner.bank'];
+  if (!Array.isArray(partnerBanks) || !partnerBanks.length) return db;
+  const existingBanks = db.records['res.bank'] ?? [];
+  const banks = [...existingBanks];
+  let maxBankId = Math.max(0, db.seq?.['res.bank'] ?? 0, ...banks.map((b) => b.id ?? 0));
+  const bankIdsById = new Set(banks.map((b) => b.id));
+  const pairKey = (name, bic) => JSON.stringify([name ?? '', bic ?? '']);
+  const bankByPair = new Map();
+  for (const bank of banks) {
+    const key = pairKey(bank.name, bank.bic);
+    if (!bankByPair.has(key)) bankByPair.set(key, bank.id);
+  }
+  let changed = false;
+  let banksAdded = false;
+  const nextPartnerBanks = partnerBanks.map((pb) => {
+    if (!pb || (pb.bank_id != null && bankIdsById.has(pb.bank_id))) return pb;
+    const name = typeof pb.bank_name === 'string' ? pb.bank_name : '';
+    if (!name.trim()) return pb;
+    const bic = typeof pb.bank_bic === 'string' ? pb.bank_bic : '';
+    const key = pairKey(name, bic);
+    let bankId = bankByPair.get(key);
+    if (!bankId) {
+      maxBankId += 1;
+      bankId = maxBankId;
+      const address = Object.fromEntries(
+        ['street', 'street2', 'city', 'state', 'zip', 'country']
+          .filter((k) => pb[k] != null && pb[k] !== '')
+          .map((k) => [k, pb[k]])
+      );
+      banks.push({
+        id: bankId,
+        name,
+        ...(bic ? { bic } : {}),
+        ...address,
+        active: true,
+      });
+      bankIdsById.add(bankId);
+      bankByPair.set(key, bankId);
+      banksAdded = true;
+    }
+    changed = true;
+    return { ...pb, bank_id: bankId };
+  });
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(banksAdded ? { 'res.bank': banks } : {}),
+      'res.partner.bank': nextPartnerBanks,
+    },
+    seq: {
+      ...(db.seq ?? {}),
+      ...(banksAdded ? { 'res.bank': Math.max(db.seq?.['res.bank'] ?? 0, maxBankId) } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 67, name: 'banks-as-records', up: migrateBanksAsRecords });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

@@ -3,7 +3,7 @@ import { create, read, search, write } from '../orm.js';
 import { nextName, today, validDate } from './common.js';
 import { discountAvailable, payMove, payWithDiscount } from './accounting.js';
 import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
-import { resolveAndValidateRecipientBank } from './partnerbank.js';
+import { partnerBankBic, resolveAndValidateRecipientBank } from './partnerbank.js';
 import { defaultPaymentJournalId, isLiquidityJournal, paymentJournal } from './ledger.js';
 import { journalMethodLines } from './paymentmethod.js';
 import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks } from './pay.js';
@@ -355,7 +355,7 @@ export function generateSepaFile(db, batch, createdAt = new Date().toISOString()
       createdAt,
       date,
       painVersion: journal?.sepa_pain_version || DEFAULT_SEPA_PAIN_VERSION,
-      debtor: { name: company?.name, iban: bank?.account_number, bic: bank?.bank_bic },
+      debtor: { name: company?.name, iban: bank?.account_number, bic: partnerBankBic(db, bank) },
       payments,
     }),
   };

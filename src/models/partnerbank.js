@@ -1,9 +1,9 @@
-// Partner Bank Accounts (Odoo 20 parity).
-import { create, writeManyAtomic } from '../orm.js';
+// Partner Bank Accounts & Banks (Odoo 20 parity).
+import { create, read, writeManyAtomic } from '../orm.js';
 import { sameCommercialPartner } from './common.js';
 
 export function sanitizeAccountNumber(val) {
-  return String(val ?? '').replace(/\s+/g, '').toUpperCase();
+  return String(val ?? '').replace(/\W+/g, '').toUpperCase();
 }
 
 // ISO 9362: 4-character party prefix, 2-letter country code, 2-character location, optional 3-character branch.
@@ -20,9 +20,33 @@ export function isValidBankBic(bic) {
   return trimmed === '' || BIC_RE.test(trimmed);
 }
 
+/** Resolve the linked res.bank record for a partner bank account, if any. */
+export function linkedBank(db, bankAccount) {
+  return bankAccount?.bank_id && db ? read(db, 'res.bank', bankAccount.bank_id) : null;
+}
+
+/** Resolve the canonical BIC for a partner bank account from its linked res.bank, else legacy bank_bic. */
+export function partnerBankBic(db, bankAccount) {
+  const bank = linkedBank(db, bankAccount);
+  return bank ? (bank.bic ?? '') : (bankAccount?.bank_bic ?? '');
+}
+
 /**
- * Validate a partner bank account before create or write: required fields, BIC format and per-partner
- * uniqueness across all accounts (including archived).
+ * Validate a bank record before create or write: required name and BIC format.
+ * @param {object} _db
+ * @param {object|null} before
+ * @param {object} r
+ * @returns {string|null}
+ */
+export function bankGuard(_db, before, r) {
+  if (!String(r?.name ?? '').trim()) return 'Bank name is required';
+  if (r.bic !== before?.bic && !isValidBankBic(r.bic)) return 'BIC/SWIFT must be 8 or 11 alphanumeric characters';
+  return null;
+}
+
+/**
+ * Validate a partner bank account before create or write: required fields, bank link, BIC format and per-partner
+ * uniqueness across all accounts (including archived) on (sanitized_account_number, partner_id).
  * @param {object} db
  * @param {object|null} before
  * @param {object} r
@@ -32,13 +56,17 @@ export function bankAccountGuard(db, before, r) {
   if (!r.partner_id) return 'Select a partner for the bank account';
   if (!r.account_number || !String(r.account_number).trim()) return 'Bank account number is required';
   if (r.bank_bic !== before?.bank_bic && !isValidBankBic(r.bank_bic)) return 'BIC/SWIFT must be 8 or 11 alphanumeric characters';
+  if (r.bank_id != null && r.bank_id !== '' && !(db?.records?.['res.bank'] ?? []).some((bank) => bank.id === r.bank_id)) {
+    return 'Select an existing bank';
+  }
 
   const sanitized = sanitizeAccountNumber(r.account_number);
+  if (!sanitized) return 'Bank account number is required';
   const allBanks = db?.records?.['res.partner.bank'] ?? [];
   const duplicate = allBanks.find(
     (b) => b.id !== r.id
       && b.partner_id === r.partner_id
-      && (b.sanitized_account_number === sanitized || sanitizeAccountNumber(b.account_number) === sanitized)
+      && sanitizeAccountNumber(b.account_number) === sanitized
   );
   if (duplicate) {
     return 'The bank account number must be unique per partner';
@@ -83,7 +111,7 @@ export function syncPartnerBankAccounts(db, partnerId, bankLines) {
   let next = (db.seq?.['res.partner.bank'] ?? 0) < maxId
     ? { ...db, seq: { ...db.seq, 'res.partner.bank': maxId } } : db;
   const lineIds = new Set(bankLines.map((line) => line.id).filter(Boolean));
-  const fields = ['account_number', 'holder_name', 'bank_name', 'bank_bic', 'allow_out_payment', 'currency', 'company_id', 'active'];
+  const fields = ['account_number', 'holder_name', 'bank_id', 'bank_name', 'bank_bic', 'allow_out_payment', 'currency', 'company_id', 'active'];
   const valuesOf = (line) => Object.fromEntries(fields.filter((field) => Object.hasOwn(line, field) && line[field] !== undefined).map((field) => [field, line[field]]));
   const updates = new Map(existingBanks.filter((bank) => bank.partner_id === partnerId && bank.active !== false && !lineIds.has(bank.id))
     .map((bank) => [bank.id, { active: false }]));
@@ -133,6 +161,44 @@ export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, 
 }
 
 export const partnerBankModels = {
+  'res.bank': {
+    label: 'Banks',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      display_name: {
+        type: 'char',
+        label: 'Display Name',
+        hidden: true,
+        compute: (r) => [r.name, r.bic].filter(Boolean).join(' - '),
+      },
+      bic: {
+        type: 'char',
+        label: 'Bank Identifier Code',
+        help: 'Bank Identifier Code for international wires in the format Bank Code (4 letters) + Country Code (2 letters) + Location Code (2 letters/numbers) + Optional Branch Code (3 letters/numbers).',
+      },
+      street: { type: 'char', label: 'Street' },
+      street2: { type: 'char', label: 'Street 2' },
+      city: { type: 'char', label: 'City' },
+      state: { type: 'char', label: 'State' },
+      zip: { type: 'char', label: 'ZIP' },
+      country: { type: 'char', label: 'Country' },
+      email: { type: 'char', label: 'Email' },
+      phone: { type: 'char', label: 'Phone' },
+      active: { type: 'boolean', label: 'Active' },
+    },
+    defaults: () => ({ active: true }),
+    guard: bankGuard,
+    searchFields: ['name', 'bic', 'city', 'country'],
+    list: ['name', 'bic', 'city', 'country', 'phone', 'email'],
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'bic'],
+        { title: 'Bank Address', fields: ['street', 'street2', 'city', 'state', 'zip', 'country'] },
+        { title: 'Communication', fields: ['phone', 'email'] },
+      ],
+    },
+  },
   'res.partner.bank': {
     label: 'Bank Accounts',
     views: ['list'],
@@ -153,10 +219,12 @@ export const partnerBankModels = {
         label: 'Holder Name',
         help: 'Account holder name in case it is different than the name of the partner.',
       },
-      bank_name: { type: 'char', label: 'Bank Name', placeholder: 'e.g. Bank of America' },
+      bank_id: { type: 'many2one', relation: 'res.bank', label: 'Bank' },
+      bank_name: { type: 'char', label: 'Bank Name', placeholder: 'e.g. Bank of America', hidden: true },
       bank_bic: {
         type: 'char',
         label: 'BIC/SWIFT',
+        hidden: true,
         help: 'Bank Identifier Code for international wires in the format Bank Code (4 letters) + Country Code (2 letters) + Location Code (2 letters/numbers) + Optional Branch Code (3 letters/numbers).',
       },
       allow_out_payment: {
@@ -171,12 +239,12 @@ export const partnerBankModels = {
         help: 'A clearing number (or routing number) refers to a bank, branch, or location and is used by domestic money transfer protocols (from/to bank accounts in the same country).',
       },
       note: { type: 'text', label: 'Notes', placeholder: 'Internal notes...' },
-      street: { type: 'char', label: 'Street' },
-      street2: { type: 'char', label: 'Street 2' },
-      city: { type: 'char', label: 'City' },
-      state: { type: 'char', label: 'State' },
-      zip: { type: 'char', label: 'ZIP' },
-      country: { type: 'char', label: 'Country' },
+      street: { type: 'char', label: 'Street', hidden: true },
+      street2: { type: 'char', label: 'Street 2', hidden: true },
+      city: { type: 'char', label: 'City', hidden: true },
+      state: { type: 'char', label: 'State', hidden: true },
+      zip: { type: 'char', label: 'ZIP', hidden: true },
+      country: { type: 'char', label: 'Country', hidden: true },
       currency: { type: 'char', label: 'Currency', hidden: true },
       company_id: {
         type: 'many2one',
@@ -194,15 +262,28 @@ export const partnerBankModels = {
     }),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     guard: bankAccountGuard,
-    onchange: (r, key) => (key === 'account_number' ? { sanitized_account_number: sanitizeAccountNumber(r.account_number) } : {}),
-    searchFields: ['bank_name', 'account_number', 'company_id', 'partner_id'],
-    list: ['sequence', 'account_number', 'partner_id', 'holder_name', 'bank_name', 'bank_bic', 'clearing_number', 'company_id', 'allow_out_payment', 'active'],
-    listLabels: { bank_name: 'Bank' },
+    prepareWrite: (db, vals, before) => {
+      if (vals && 'bank_id' in vals && vals.bank_id !== before?.bank_id) {
+        return {
+          db,
+          vals: {
+            ...vals,
+            ...(!('bank_name' in vals) ? { bank_name: null } : {}),
+            ...(!('bank_bic' in vals) ? { bank_bic: null } : {}),
+          },
+        };
+      }
+      return null;
+    },
+    onchange: (r, key) => (key === 'account_number' ? {
+      sanitized_account_number: sanitizeAccountNumber(r.account_number),
+    } : {}),
+    searchFields: ['bank_id', 'bank_name', 'account_number', 'company_id', 'partner_id'],
+    list: ['sequence', 'account_number', 'partner_id', 'holder_name', 'bank_id', 'clearing_number', 'company_id', 'allow_out_payment', 'active'],
     listFields: {
       partner_id: { optional: 'hide' },
       holder_name: { optional: 'hide' },
-      bank_name: { optional: 'hide' },
-      bank_bic: { optional: 'show' },
+      bank_id: { optional: 'show' },
       clearing_number: { optional: 'hide' },
       company_id: { optional: 'hide', multiCompanyOnly: true },
       allow_out_payment: { optional: 'show', widget: 'toggle' },
@@ -214,18 +295,11 @@ export const partnerBankModels = {
       title: 'account_number',
       hideTitle: true,
       groups: [
-        ['account_number', 'clearing_number', 'bank_bic', 'partner_id', 'holder_name'],
+        ['account_number', 'clearing_number', 'bank_id', 'partner_id', 'holder_name'],
         ['allow_out_payment', 'company_id'],
       ],
       tabs: [
         { label: 'Note', fields: ['note'] },
-        {
-          label: 'Bank Information',
-          groups: [
-            ['bank_name'],
-            { title: 'Bank Address', fields: ['street', 'street2', 'city', 'state', 'zip', 'country'] },
-          ],
-        },
       ],
       chatter: true,
     },

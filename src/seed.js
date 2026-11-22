@@ -555,6 +555,10 @@ export function seed() {
     add('account.incoterm', { code, name, active: true });
   });
 
+  // Sample banks
+  add('res.bank', { name: 'Commercial International Bank', bic: 'CIBEEGCXXXX', street: '21-23 Charles de Gaulle St', city: 'Giza', country: 'Egypt', phone: '+20 2 3747 2000', email: 'info@cibeg.example' });
+  add('res.bank', { name: 'National Bank of Egypt', bic: 'NBEGEGCXXXX', street: '1187 Corniche El Nil', city: 'Cairo', country: 'Egypt', phone: '+20 2 2594 5000', email: 'contact@nbe.example' });
+
   // eCommerce: payment providers, website categories, published carriers, a selectable pricelist and desk variants.
   add('payment.provider', { name: 'Wire Transfer', code: 'wire', state: 'enabled', pending_msg: 'Please transfer the amount to IBAN EG00 0000 0000 0000 0000 0000 0000, using your order number as the reference.', done_msg: 'Your order will ship once we receive the transfer.' });
   add('payment.provider', { name: 'Cash on Delivery', code: 'cod', state: 'enabled', pending_msg: 'Pay the courier in cash when your order arrives.', done_msg: '' });

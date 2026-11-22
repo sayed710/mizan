@@ -361,6 +361,7 @@ const allApps = [
           { key: 'budgets', label: 'Financial Budgets', model: 'account.budget' },
           { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model', listLabels: { match_journal_ids: 'Journals' } },
           { key: 'followup-levels', label: 'Invoice Reminders', model: 'account.followup.level' },
+          { key: 'banks', label: 'Banks', model: 'res.bank' },
           { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
         ] },
                 { label: 'Analytic Accounting', children: [
@@ -413,7 +414,7 @@ const allApps = [
       ] },
     ],
   },
-  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }] },
+  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'banks', label: 'Banks', model: 'res.bank' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }] },
   { id: 'calendar', name: 'Calendar', color: ['#0ea5e9', '#1d4ed8'], menus: [{ key: 'meetings', label: 'Meetings', model: 'calendar.event' }] },
   {
     id: 'project', name: 'Project', color: ['#22c55e', '#15803d'],
