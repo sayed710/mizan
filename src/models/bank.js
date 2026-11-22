@@ -1113,7 +1113,7 @@ export const bankModels = {
       ],
       [{ id: 'unassigned', label: 'Without a Journal', fn: isStatementLineWithoutJournal }],
     ],
-    groupBys: ['currency_id', 'company_id', 'journal_id', 'statement_id', 'date'],
+    groupBys: ['currency_id', 'company_id', 'journal_id', 'date'],
     kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'] },
     list: ['sequence', 'date', 'payment_ref', 'partner_id', 'amount', 'journal_id', 'running_balance', 'bank_move_id', 'account_number', 'narration', 'ref', 'transaction_type', 'state'],
     listLabels: { journal_id: 'Journal', bank_move_id: 'Journal Entry' },
