@@ -222,6 +222,21 @@ test('cancellation reverses posted depreciation and adjustments through sync', (
   assert.throws(() => sync(increased, forged(increased, initial.id, { state: 'draft' })), /Cannot reset/);
 });
 
+test('cancellation reverses unallocated depreciation under a mandatory analytic plan', () => {
+  const initial = running();
+  const db = create(initial.db, 'account.analytic.plan', { name: 'Mandatory', default_applicability: 'mandatory' }).db;
+  const posted = postDepreciation(db, read(db, 'account.asset', initial.id), '2026-12-31');
+  const asset = read(posted, 'account.asset', initial.id);
+  assert.equal(asset.state, 'open');
+  const original = read(posted, 'account.move', asset.depreciation_ids[0].move_id);
+  assert.equal(original.line_ids.find((line) => line.account_id === asset.account_depreciation_expense_id).analytic_distribution, undefined);
+  const next = models['account.asset'].form.buttons.find((button) => button.label === 'Cancel Asset').run(posted, asset).db;
+  const reversal = search(next, 'account.move').find((move) => move.reversed_entry_id === original.id);
+  assert.equal(read(next, 'account.asset', initial.id).state, 'cancel');
+  assert.deepEqual(reversal.line_ids.map((line) => [line.account_id, line.debit, line.credit]), original.line_ids.map((line) => [line.account_id, line.credit, line.debit]));
+  assert.equal(read(sync(posted, next), 'account.asset', initial.id).state, 'cancel');
+});
+
 test('period edits require a regenerated board and explicit remaining duration', () => {
   const { db, id } = running();
   assert.throws(() => sync(db, forged(db, id, { method_period: '1' })), /Cannot modify core/);
@@ -255,4 +270,19 @@ test('sale with mixed-sign invoice lines produces a balanced disposal', () => {
   const next = disposeAsset(db, read(db, 'account.asset', initial.id), { date: '2026-02-01', invoiceLines: [{ invoice_id: made.id, line_index: 0 }, { invoice_id: made.id, line_index: 1 }], lossAccountId: accountId(db, '680000') });
   assert.equal(read(next, 'account.asset', initial.id).sale_value, 200);
   assert.equal(read(sync(db, next), 'account.asset', initial.id).sale_value, 200);
+});
+
+test('sync rejects disposal that omits a selected negative invoice account', () => {
+  const initial = running();
+  const negativeAccount = accountId(initial.db, '101402');
+  const made = create(initial.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-15', invoice_line_ids: [
+    { name: 'Sale', qty: 1, price_unit: 300, tax: 0, account_id: accountId(initial.db, '101401') },
+    { name: 'Discount', qty: 1, price_unit: -100, tax: 0, account_id: negativeAccount },
+  ] });
+  const db = postMove(made.db, made.id);
+  const next = disposeAsset(db, read(db, 'account.asset', initial.id), { date: '2026-02-01', invoiceLines: [{ invoice_id: made.id, line_index: 0 }, { invoice_id: made.id, line_index: 1 }], lossAccountId: accountId(db, '680000') });
+  const asset = read(next, 'account.asset', initial.id);
+  assert.equal(read(sync(db, next), 'account.asset', initial.id).sale_value, 200);
+  const tampered = { ...next, records: { ...next.records, 'account.move': next.records['account.move'].map((move) => move.id !== asset.disposal_move_id ? move : { ...move, line_ids: move.line_ids.filter((line) => line.account_id !== negativeAccount).map((line) => line.account_id === accountId(db, '680000') ? { ...line, debit: line.debit - 100 } : line) }) } };
+  assert.throws(() => sync(db, tampered), /Disposal move must book the sale/);
 });

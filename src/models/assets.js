@@ -193,7 +193,7 @@ export function validateAssetIntegrity(db, before, asset, vals) {
       if (total !== cents(asset.sale_value)) return 'Sale price must match the invoice line amount';
       for (const [account, amount] of accounts) {
         const debit = (dispMove.line_ids ?? []).filter((line) => line.account_id === account).reduce((sum, line) => sum + cents(line.debit) - cents(line.credit), 0);
-        if (debit < amount) return 'Disposal move must book the sale on the sale invoice line account';
+        if (amount < 0 ? debit > amount : debit < amount) return 'Disposal move must book the sale on the sale invoice line account';
       }
     } else if (asset.sale_invoice_id != null) {
       const saleInv = read(db, 'account.move', asset.sale_invoice_id);
@@ -569,13 +569,14 @@ export function cancelAsset(db, asset) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
   if (asset.state !== 'open' || asset.origin_asset_id || asset.parent_id || search(db, 'account.asset').some((child) => child.parent_id === asset.id || child.origin_asset_id === asset.id)) throw new Error('Cannot cancel an asset with posted entries or linked assets');
   let next = db;
+  const depreciationMoveIds = new Set((asset.depreciation_ids ?? []).filter((line) => line.posted).map((line) => line.move_id));
   const moveIds = [...new Set([...(asset.depreciation_ids ?? []).filter((line) => line.posted).map((line) => line.move_id), ...(asset.revaluation_ids ?? []).filter((entry) => entry.move_id).map((entry) => entry.move_id)])];
   for (const id of moveIds) {
     const move = read(next, 'account.move', id);
     if (hasAssetReversal(next, id)) continue;
     if (!move || move.state !== 'posted' || search(next, 'account.move').some((entry) => entry.state === 'posted' && entry.reversed_entry_id === id)) throw new Error('Cannot cancel an asset with posted entries or linked assets');
     const date = [today(), move.date ?? move.invoice_date].sort().at(-1);
-    const reversal = postEntry(next, { journal: move.journal_id, date, company: move.company_id ?? 1, ref: `Reversal of ${move.name}`, archivedOriginIds: [id], lines: move.line_ids.map(reversalLine) });
+    const reversal = postEntry(next, { journal: move.journal_id, date, company: move.company_id ?? 1, ref: `Reversal of ${move.name}`, archivedOriginIds: [id], lines: move.line_ids.map(reversalLine), system_generated: depreciationMoveIds.has(id) });
     next = postAnalytic(write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: id }), reversal.id);
   }
   return write(next, 'account.asset', asset.id, { state: 'cancel', depreciation_ids: (asset.depreciation_ids ?? []).filter((line) => line.posted) });
