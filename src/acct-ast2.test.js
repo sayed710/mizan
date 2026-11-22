@@ -352,3 +352,158 @@ test('Set to Running rejects fully depreciated, disposed and transferred assets,
   assert.deepEqual(rebuiltUnposted.map((l) => l.date), ['2027-12-31', '2028-12-31', '2029-12-31', '2030-12-31']);
   assert.equal(read(postDepreciation(syncedRebuiltDb, rebuilt, '2027-06-01'), 'account.asset', partial.id).state, 'open');
 });
+
+test('Qodo finding 1: non-admin synchronization cannot alter locked depreciation board on reopening', () => {
+  const user = { author: 'Staff User', isAdmin: false };
+  const userSync = (db, next) => applyDiff(db, diffDb(db, next), user);
+
+  // 1. Existing valid pending board: non-admin cannot alter dates or amounts while reopening
+  const partial = running();
+  const onePostedDb = postDepreciation(partial.db, read(partial.db, 'account.asset', partial.id), '2026-12-31');
+  const closedWithPendingDb = forged(onePostedDb, partial.id, { state: 'close' });
+  const asset = read(closedWithPendingDb, 'account.asset', partial.id);
+  const pending = asset.depreciation_ids.filter((l) => !l.posted);
+  assert.equal(pending.length, 4);
+
+  // Tamper allocations (total 800 remains the same, but line amounts changed)
+  const tamperedAmounts = asset.depreciation_ids.map((l) => l.posted ? l : { ...l, amount: l.date === '2027-12-31' ? 100 : l.date === '2028-12-31' ? 300 : l.amount });
+  assert.throws(() => userSync(closedWithPendingDb, forged(closedWithPendingDb, partial.id, { state: 'open', depreciation_ids: tamperedAmounts })), /cannot alter the depreciation board|locked/i);
+
+  // Tamper dates (e.g. shift first pending date)
+  const tamperedDates = asset.depreciation_ids.map((l) => l.posted ? l : { ...l, date: l.date === '2027-12-31' ? '2027-12-30' : l.date });
+  assert.throws(() => userSync(closedWithPendingDb, forged(closedWithPendingDb, partial.id, { state: 'open', depreciation_ids: tamperedDates })), /cannot alter the depreciation board|locked/i);
+
+  // 2. Missing pending board: non-admin cannot supply arbitrary board matching residual
+  const missingBoardDb = forged(onePostedDb, partial.id, {
+    state: 'close',
+    depreciation_ids: asset.depreciation_ids.filter((l) => l.posted),
+  });
+  const arbitraryBoard = [...asset.depreciation_ids.filter((l) => l.posted), { date: '2027-06-30', amount: 800, cumulated: 1000, remaining: 0, posted: false, move_id: null }];
+  assert.throws(() => userSync(missingBoardDb, forged(missingBoardDb, partial.id, { state: 'open', depreciation_ids: arbitraryBoard })), /cannot alter the depreciation board|locked/i);
+});
+
+test('Qodo finding 2: rebuilding a closed asset missing pending board preserves mid-period prorata and fractional durations', () => {
+  const base = seed();
+
+  // 1. Five-year asset acquired midyear with prorata: full schedule has 6 lines
+  const madeProrata = create(base, 'account.asset', {
+    name: 'Midyear Truck',
+    acquisition_date: '2026-07-01',
+    original_value: 12000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    prorata: true,
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(base, '151000'),
+    account_depreciation_id: accountId(base, '152000'),
+    account_depreciation_expense_id: accountId(base, '680000'),
+  });
+  const prorataDb = confirmAsset(madeProrata.db, read(madeProrata.db, 'account.asset', madeProrata.id));
+  const prorataAsset = read(prorataDb, 'account.asset', madeProrata.id);
+  assert.equal(prorataAsset.depreciation_ids.length, 6);
+
+  // First line posts (2026-12-31)
+  const postedProrataDb = postDepreciation(prorataDb, prorataAsset, '2026-12-31');
+  const closedProrataDb = forged(postedProrataDb, madeProrata.id, {
+    state: 'close',
+    depreciation_ids: read(postedProrataDb, 'account.asset', madeProrata.id).depreciation_ids.filter((l) => l.posted),
+  });
+  const reopenedProrataDb = setAssetRunning(closedProrataDb, read(closedProrataDb, 'account.asset', madeProrata.id));
+  const reopenedProrata = read(reopenedProrataDb, 'account.asset', madeProrata.id);
+  const remainingProrata = reopenedProrata.depreciation_ids.filter((l) => !l.posted);
+
+  // Must have 5 remaining lines (ending on 2031-12-31), NOT 4 lines ending on 2030-12-31
+  assert.equal(remainingProrata.length, 5);
+  assert.equal(remainingProrata.at(-1).date, '2031-12-31');
+  assert.equal(remainingProrata.reduce((sum, l) => sum + Math.round(l.amount * 100), 0), 1200000 - Math.round(prorataAsset.depreciation_ids[0].amount * 100));
+
+  // 2. Fractional duration 3.5 periods: full schedule has 4 lines (3 full + 1 half)
+  const madeFrac = create(base, 'account.asset', {
+    name: 'Frac Asset',
+    acquisition_date: '2026-01-01',
+    original_value: 7000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 3.5,
+    method_period: '12',
+    prorata: false,
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(base, '151000'),
+    account_depreciation_id: accountId(base, '152000'),
+    account_depreciation_expense_id: accountId(base, '680000'),
+  });
+  const fracDb = confirmAsset(madeFrac.db, read(madeFrac.db, 'account.asset', madeFrac.id));
+  const fracAsset = read(fracDb, 'account.asset', madeFrac.id);
+  assert.equal(fracAsset.depreciation_ids.length, 4);
+
+  const postedFracDb = postDepreciation(fracDb, fracAsset, '2026-12-31');
+  const closedFracDb = forged(postedFracDb, madeFrac.id, {
+    state: 'close',
+    depreciation_ids: read(postedFracDb, 'account.asset', madeFrac.id).depreciation_ids.filter((l) => l.posted),
+  });
+  const reopenedFracDb = setAssetRunning(closedFracDb, read(closedFracDb, 'account.asset', madeFrac.id));
+  const reopenedFrac = read(reopenedFracDb, 'account.asset', madeFrac.id);
+  const remainingFrac = reopenedFrac.depreciation_ids.filter((l) => !l.posted);
+
+  // Must have 3 remaining lines (2 full periods + 1 half period)
+  assert.equal(remainingFrac.length, 3);
+  assert.equal(remainingFrac[0].amount, 2000);
+  assert.equal(remainingFrac[1].amount, 2000);
+  assert.equal(remainingFrac[2].amount, 1000);
+  assert.equal(remainingFrac.at(-1).date, '2029-12-31');
+});
+
+test('Qodo finding 3: reopening rejects or rebuilds pending depreciation lines with invalid dates predating acquisition or posted lines', () => {
+  const { db, id } = running();
+  const postedDb = postDepreciation(db, read(db, 'account.asset', id), '2026-12-31');
+  const postedAsset = read(postedDb, 'account.asset', id);
+  const postedLine = postedAsset.depreciation_ids.find((l) => l.posted);
+
+  // 1. Pending line date predates last posted depreciation line (e.g. 2026-06-30 precedes 2026-12-31)
+  const earlyDatedBoard = [
+    postedLine,
+    { date: '2026-06-30', amount: 800, cumulated: 1000, remaining: 0, posted: false, move_id: null },
+  ];
+  const closedEarlyDb = forged(postedDb, id, { state: 'close', depreciation_ids: earlyDatedBoard });
+
+  // Direct reopen with early dates must be rejected
+  assert.throws(() => write(closedEarlyDb, 'account.asset', id, { state: 'open' }), /no remaining depreciation|cannot alter/i);
+
+  // setAssetRunning must rebuild the board instead of preserving the early date
+  const fixedDb = setAssetRunning(closedEarlyDb, read(closedEarlyDb, 'account.asset', id));
+  const fixedAsset = read(fixedDb, 'account.asset', id);
+  assert.equal(fixedAsset.state, 'open');
+  const unposted = fixedAsset.depreciation_ids.filter((l) => !l.posted);
+  assert.ok(unposted.length > 0);
+  assert.ok(unposted.every((l) => l.date > postedLine.date));
+
+  // 2. Pending line date predates asset acquisition date
+  const base = seed();
+  const madeMid = create(base, 'account.asset', {
+    name: 'Mid Asset',
+    acquisition_date: '2026-06-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 2,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(base, '151000'),
+    account_depreciation_id: accountId(base, '152000'),
+    account_depreciation_expense_id: accountId(base, '680000'),
+  });
+  const midDb = confirmAsset(madeMid.db, read(madeMid.db, 'account.asset', madeMid.id));
+  const predatedBoard = [
+    { date: '2026-01-01', amount: 500, cumulated: 500, remaining: 500, posted: false, move_id: null },
+    { date: '2027-12-31', amount: 500, cumulated: 1000, remaining: 0, posted: false, move_id: null },
+  ];
+  const closedPredatedDb = forged(midDb, madeMid.id, { state: 'close', depreciation_ids: predatedBoard });
+  assert.throws(() => write(closedPredatedDb, 'account.asset', madeMid.id, { state: 'open' }), /no remaining depreciation|cannot alter/i);
+  const fixedPredatedDb = setAssetRunning(closedPredatedDb, read(closedPredatedDb, 'account.asset', madeMid.id));
+  assert.ok(read(fixedPredatedDb, 'account.asset', madeMid.id).depreciation_ids.filter((l) => !l.posted).every((l) => l.date >= '2026-06-01'));
+});

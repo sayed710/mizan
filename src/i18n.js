@@ -3572,6 +3572,7 @@ const ar = {
   'Only closed assets can be set to running': 'يمكن تعيين الأصول المغلقة فقط كأصل جارٍ',
   'Cannot set a disposed or transferred asset to running': 'لا يمكن تعيين أصل مستبعد أو محوّل كأصل جارٍ',
   'Closed asset has no remaining depreciation to run': 'لا يحتوي الأصل المغلق على إهلاك متبقٍ لتشغيله',
+  'Reopening cannot alter the depreciation board': 'لا يمكن لإعادة الفتح تعديل جدول الإهلاك',
   'Only running assets can activate depreciation': 'يمكن تفعيل إهلاك الأصول الجارية فقط',
   'Set an activation date': 'حدد تاريخ التفعيل',
   'The asset book value must be positive': 'يجب أن تكون القيمة الدفترية للأصل موجبة',

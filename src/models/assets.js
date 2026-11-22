@@ -1,6 +1,6 @@
 // Fixed assets: depreciation boards and their posting.
 import { create, postNote, read, search, write } from '../orm.js';
-import { addDays, today } from './common.js';
+import { addDays, today, validDate } from './common.js';
 import { journalId, postEntry, reversalLine } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
@@ -52,13 +52,27 @@ const remainingDepreciableCents = (asset) => cents(asset.original_value)
 const isDisposedAsset = (asset) => Boolean(asset?.disposal_date || asset?.disposal_move_id);
 const hasDerivedAsset = (db, asset) => Boolean(db && search(db, 'account.asset').some((a) => a.origin_asset_id === asset.id));
 
-function pendingScheduleValid(asset, remaining) {
+export function pendingScheduleValid(asset, remaining) {
   const unposted = (asset.depreciation_ids ?? []).filter((line) => !line.posted);
   const unpostedTotal = unposted.reduce((sum, line) => sum + cents(line.amount), 0);
-  return remaining > 0
-    && unposted.length > 0
-    && unpostedTotal === remaining
-    && unposted.every((line) => line.date && cents(line.amount) >= 0 && line.move_id == null);
+  if (remaining <= 0 || unposted.length === 0 || unpostedTotal !== remaining) return false;
+  const posted = (asset.depreciation_ids ?? []).filter((line) => line.posted);
+  const lastPostedDate = posted.length ? posted.at(-1).date : null;
+  let prevDate = lastPostedDate;
+  for (let i = 0; i < unposted.length; i++) {
+    const line = unposted[i];
+    if (!line.date || !validDate(line.date) || cents(line.amount) < 0 || line.move_id != null) {
+      return false;
+    }
+    if (asset.acquisition_date && line.date < asset.acquisition_date) {
+      return false;
+    }
+    if (prevDate != null) {
+      if (line.date <= prevDate) return false;
+    }
+    prevDate = line.date;
+  }
+  return true;
 }
 
 function reopenAssetError(db, before, asset) {
@@ -67,6 +81,9 @@ function reopenAssetError(db, before, asset) {
   }
   if (!pendingScheduleValid(asset, remainingDepreciableCents(asset))) {
     return 'Closed asset has no remaining depreciation to run';
+  }
+  if (!isVerifiedReopenBoard(before, asset)) {
+    return 'Reopening cannot alter the depreciation board';
   }
   return null;
 }
@@ -491,6 +508,87 @@ export function depreciationBoard(asset, { periods: overridePeriods = null, date
   });
 }
 
+export function rebuildPendingBoard(asset) {
+  const remaining = remainingDepreciableCents(asset);
+  if (!(remaining > 0)) return [];
+  const full = depreciationBoard(asset);
+  const posted = (asset.depreciation_ids ?? []).filter((l) => l.posted);
+  const k = posted.length;
+  if (k >= full.length) {
+    const yearly = String(asset.method_period) === '12';
+    const [y, m] = (asset.acquisition_date || today()).split('-').map(Number);
+    const date = periodEnd(y, m, yearly, k);
+    const cumulated = cents(asset.already_depreciated) + postedCents(asset) + remaining;
+    return [{
+      date,
+      amount: remaining / 100,
+      cumulated: cumulated / 100,
+      remaining: (cents(asset.original_value) - cumulated) / 100,
+      posted: false,
+      move_id: null,
+    }];
+  }
+
+  const remainingLines = full.slice(k);
+  const yearly = String(asset.method_period) === '12';
+  const [y, m] = (asset.acquisition_date || today()).split('-').map(Number);
+  const frac = firstFraction(asset, y, m, yearly);
+  const n = Number(asset.method_number);
+  const elapsedAtK = k === 0 ? 0 : frac + k - 1;
+  const remainingDuration = Math.max(0.0001, n - elapsedAtK);
+  const rate = (Number(asset.method_progress_factor) || 0) / (yearly ? 1 : 12);
+  const method = asset.method || 'linear';
+
+  let remValue = remaining;
+  let cumulated = cents(asset.already_depreciated) + postedCents(asset);
+
+  return remainingLines.map((line, idx) => {
+    const i = k + idx;
+    const elapsed = i === 0 ? 0 : frac + i - 1;
+    const len = Math.min(i === 0 ? frac : 1, n - elapsed);
+    const remDurAtIdx = Math.max(0.0001, n - elapsed);
+    const linear = method === 'linear'
+      ? Math.round((remaining / remainingDuration) * len)
+      : Math.round((remValue * len) / remDurAtIdx);
+    const declining = Math.round(remValue * rate * len);
+    const due = { linear, degressive: declining, degressive_then_linear: Math.max(declining, linear) }[method] ?? linear;
+    const amount = idx === remainingLines.length - 1 ? remValue : Math.min(remValue, due);
+    remValue -= amount;
+    cumulated += amount;
+    return {
+      date: line.date,
+      amount: amount / 100,
+      cumulated: cumulated / 100,
+      remaining: (cents(asset.original_value) - cumulated) / 100,
+      posted: false,
+      move_id: null,
+    };
+  });
+}
+
+export function reopenedDepreciationBoard(asset) {
+  const remaining = remainingDepreciableCents(asset);
+  if (pendingScheduleValid(asset, remaining)) {
+    return asset.depreciation_ids ?? [];
+  }
+  const posted = (asset.depreciation_ids ?? []).filter((l) => l.posted);
+  return [...posted, ...rebuildPendingBoard(asset)];
+}
+
+export function isVerifiedReopenBoard(before, asset) {
+  if (!before) return false;
+  const expected = reopenedDepreciationBoard(before);
+  const actual = asset?.depreciation_ids ?? [];
+  if (actual.length !== expected.length) return false;
+  return actual.every((line, i) => {
+    const exp = expected[i];
+    return line.date === exp.date
+      && cents(line.amount) === cents(exp.amount)
+      && Boolean(line.posted) === Boolean(exp.posted)
+      && (line.move_id ?? null) === (exp.move_id ?? null);
+  });
+}
+
 function validate(db, asset) {
   if (!(Number(asset.original_value) > 0)) throw new Error('The original value must be positive');
   if (!Number.isFinite(Number(asset.method_number)) || Number(asset.method_number) < 1) throw new Error('The duration must be at least 1 period');
@@ -579,16 +677,7 @@ export function setAssetRunning(db, asset) {
   }
   validate(db, asset);
   const posted = (asset.depreciation_ids ?? []).filter((line) => line.posted);
-  const accumulated = cents(asset.already_depreciated) + postedCents(asset);
-  const board = (posted.length
-    ? depreciationBoard(asset, {
-      periods: Math.max(1, Math.ceil(Number(asset.method_number) - posted.length)),
-      startDate: posted.at(-1).date,
-      remainingBase: remaining,
-      initialCumulated: accumulated,
-    })
-    : depreciationBoard(asset)
-  ).map((line) => ({ ...line, posted: false, move_id: null }));
+  const board = rebuildPendingBoard(asset);
   return write(db, 'account.asset', asset.id, { state: 'open', depreciation_ids: [...posted, ...board] });
 }
 
