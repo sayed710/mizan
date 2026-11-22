@@ -624,22 +624,18 @@ function Valuation({ db, money: fmtMoney = money }) {
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
 function Depreciation({ db, period, companyId, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const { rows, totals } = depreciationReport(db, period, companyId);
-  return (
-    <tbody>
-      {rows.map(({ a, original, inPeriod, accumulated, book }) => (
-        <tr key={a.id} className="rep-detail">
-          <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td>
-          <td>{a.acquisition_date}</td>
-          <td className="num">{fmtMoney(original)}</td>
-          <td className="num">{fmtMoney(inPeriod)}</td>
-          <td className="num">{fmtMoney(accumulated)}</td>
-          <td className="num">{fmtMoney(book)}</td>
-        </tr>
-      ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td className="num">{fmtMoney(totals.original)}</td><td className="num">{fmtMoney(totals.inPeriod)}</td><td className="num">{fmtMoney(totals.accumulated)}</td><td className="num">{fmtMoney(totals.book)}</td></tr>
-    </tbody>
-  );
+  const [groupBy, setGroupBy] = useState('');
+  const { rows, totals, groups } = depreciationReport(db, period, companyId, groupBy);
+  const renderRow = ({ a, original, inPeriod, accumulated, book }) => <tr key={a.id} className="rep-detail">
+    <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td><td>{a.acquisition_date}</td>
+    {[original, inPeriod, accumulated, book].map ( (value, i) => <td key={i} className="num">{fmtMoney(value)}</td>)}
+  </tr>;
+  const totalRow = (label, values) => <tr className="rep-total strong"><td>{label}</td><td />{['original', 'inPeriod', 'accumulated', 'book'].map((key) => <td key={key} className="num">{fmtMoney(values[key])}</td>)}</tr>;
+  return <tbody>
+    <tr><td colSpan={6}><label>{t('Group By')} <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)}><option value="">{t('None')}</option><option value="asset_group_id">{t('Asset Group')}</option></select></label></td></tr>
+    {groupBy ? groups.map((group) => <Fragment key={group.id ?? 'none'}><tr className="rep-section"><td colSpan={6}>{group.name || t('Undefined')}</td></tr>{group.rows.map(renderRow)}{totalRow(t('Subtotal'), group.totals)}</Fragment>) : rows.map(renderRow)}
+    {totalRow(t('Total'), totals)}
+  </tbody>;
 }
 
 function JournalAudit({ db, period, companyId, sort = 'date', money: moneyProp }) {

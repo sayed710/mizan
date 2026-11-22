@@ -1,4 +1,5 @@
 import { Fragment, useState } from 'react';
+import { createAssetsFromJournalItems } from '../models/assets.js';
 import { companyViewDb } from '../companyView.js';
 import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, matchedMoveIds } from '../models/ledger.js';
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
@@ -214,6 +215,7 @@ export function JournalItems({ leaf = {} } = {}) {
         }),
         Unreconcile: (d, sel, opts) => unreconcileLedgerItems(d, sel, { date: opts.date }),
         'Write Off': writeoffJournalItem,
+        'Create Asset': createAssetsFromJournalItems,
       }[action];
       const result = execute(getDb(), selected, { date, amount: amount === '' ? null : Number(amount), journalId: Number(journalId), accountId: Number(accountId), label });
       if ((await commit(result)).ok) { setSelected([]); setAction(''); }
@@ -311,7 +313,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const totalBalance = roundCurrency(totalDebit - totalCredit, sumCurrency);
   const totalResidual = sumField(rows, 'amount_residual');
   const todayDate = today();
-  const selectableRows = rows.filter((line) => line.move_state !== 'draft');
+  const selectableRows = rows.filter((line) => line.move_state === 'posted');
   const visibleKeys = new Set(selectableRows.map(keyOf));
   const selectedKeys = new Set(selected.map(keyOf));
   const allSelected = selectableRows.length > 0 && selectableRows.every((line) => selectedKeys.has(keyOf(line)));
@@ -366,12 +368,12 @@ export function JournalItems({ leaf = {} } = {}) {
     </div>
     {mode !== 'draft' && <div className="control-panel">
       <span>{t('{n} selected', { n: selected.length })}</span>
-      {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off'].map((btn) => <button type="button" className="btn" key={btn} disabled={!selected.length || busy} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>)}
+      {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off', 'Create Asset'].map((btn) => <button type="button" className="btn" key={btn} disabled={!selected.length || busy} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>)}
     </div>}
     {action && <form onSubmit={run} className="control-panel" aria-label={t(action)}>
       <h2>{t(action)}</h2>
       {action === 'Unreconcile' && <p>{t('This removes the matching: payments stay posted with their credit available again, and GL entries (including write-offs created by Reconcile with write-off) stay posted with their open balance restored. Standalone Write Off entries and direct bank matches are reversed on the selected date.')}</p>}
-      <label>{t('Date')} <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+      {action !== 'Create Asset' && <label>{t('Date')} <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>}
       {(action === 'Reconcile' || action === 'Write Off') && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
       {(action === 'Write Off' || action === 'Reconcile with write-off') && <>
         <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => action === 'Write Off' ? isLiquidityJournal(j) : (j.active !== false && ['general', 'bank', 'cash', 'credit'].includes(j.type))).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
@@ -385,7 +387,7 @@ export function JournalItems({ leaf = {} } = {}) {
       <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
         {group && <tr className="group-row"><th /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th /></tr>}
         {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
-          <td><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={line.move_state === 'draft' || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
+          <td><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={line.move_state !== 'posted' || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
           {visibleCols.map((col) => <td key={col.key} className={cellClassName(col, line, todayDate)}>{renderCell(line, col)}</td>)}
           <td className="o2m-cols-td" />
         </tr>)}

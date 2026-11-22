@@ -947,28 +947,16 @@ function offsetCreditNote(db, noteId) {
 }
 
 /** Bill lines booked on an account configured to create assets generate draft or validated assets (once per bill line). */
-function draftAssetsFromBill(db, bill) {
-  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
-  const existing = billAssets.filter((a) => a.state === 'draft');
-  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
-  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
-  const retained = new Set();
-  // Without a model journal, assets use the company's configured general journal.
-  const defaultJournal = read(db, 'res.company', bill.company_id ?? 1)?.default_general_journal_id ?? null;
-  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
-    const booked = postedBillLine(bill, index);
-    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
-    const account = read(next, 'account.account', booked.account);
-    const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
-    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
-    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
-    if (mode === 'no') return next;
-    const modelJournal = model?.journal_id && read(next, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
-    const product = read(next, 'product', line.product_id);
-    const values = {
-      name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
-      partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-      account_asset_id: booked.account,
+export function assetDraftValues(db, move, line, { amount, accountId, date }) {
+  const account = read(db, 'account.account', accountId);
+  const model = account?.asset_model_id ? read(db, 'account.asset.model', account.asset_model_id) : null;
+  const defaultJournal = read(db, 'res.company', move.company_id ?? 1)?.default_general_journal_id ?? null;
+  const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
+  const product = read(db, 'product', line.product_id);
+  return {
+      name: line.name || product?.name || move.name, original_value: amount, acquisition_date: date,
+      partner_id: line.partner_id ?? move.partner_id ?? null, company_id: move.company_id ?? 1,
+      account_asset_id: accountId,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
@@ -989,6 +977,23 @@ function draftAssetsFromBill(db, bill) {
         analytic_distribution: null,
       }),
     };
+}
+
+function draftAssetsFromBill(db, bill) {
+  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
+  const existing = billAssets.filter((a) => a.state === 'draft');
+  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
+  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
+  const retained = new Set();
+  // Without a model journal, assets use the company's configured general journal.
+  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
+    const booked = postedBillLine(bill, index);
+    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
+    const account = read(next, 'account.account', booked.account);
+    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
+    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
+    if (mode === 'no') return next;
+    const values = { ...assetDraftValues(next, bill, { ...line, partner_id: bill.partner_id }, { amount: booked.amount, accountId: booked.account, date: bill.invoice_date ?? today() }), bill_id: bill.id, bill_line: index };
     const asset = existing.find((a) => a.bill_line === index);
     let assetId;
     let nextDb;
