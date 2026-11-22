@@ -172,6 +172,7 @@ export function reconcileFollowUp(current, snapshot, sent, opts, partnerId, comp
   const newActivities = (sent.records?.['mail.activity'] ?? []).filter((a) => !snapshotActs.has(a.id));
 
   const freshPartner = read(current, 'res.partner', partnerId);
+  const originalPartner = read(snapshot, 'res.partner', partnerId);
   const sentPartner = read(sent, 'res.partner', partnerId);
   const sentLine = sentPartner ? partnerFollowUp(sentPartner, companyId) : null;
 
@@ -183,6 +184,28 @@ export function reconcileFollowUp(current, snapshot, sent, opts, partnerId, comp
       notice: 'The email was sent, but the contact was deleted meanwhile, so partner follow-up progression could not be recorded.',
     };
   }
+
+  const originalLine = originalPartner ? partnerFollowUp(originalPartner, companyId) : null;
+  const currentLine = partnerFollowUp(freshPartner, companyId);
+  if (JSON.stringify(currentLine ?? null) !== JSON.stringify(originalLine ?? null)) {
+    const notesOnly = { ...current, messages: [...(current.messages ?? []), ...newMessages] };
+    return {
+      db: applyDiff(current, diffDb(current, notesOnly), opts),
+      notice: 'The email was sent, but the company follow-up changed meanwhile, so progression could not be recorded.',
+    };
+  }
+
+  const currentActivities = current.records?.['mail.activity'] ?? [];
+  const usedIds = new Set(currentActivities.map((activity) => activity.id));
+  let nextActivityId = Math.max(current.seq?.['mail.activity'] ?? 0, ...usedIds, 0);
+  const incomingActivities = newActivities.map((activity) => {
+    let id = activity.id;
+    if (usedIds.has(id)) {
+      do { id = ++nextActivityId; } while (usedIds.has(id));
+    }
+    usedIds.add(id);
+    return id === activity.id ? activity : { ...activity, id };
+  });
 
   const existingLines = (freshPartner.followup_lines ?? []).filter((l) => l.company_id !== companyId);
   const updatedLines = sentLine ? [...existingLines, sentLine] : existingLines;
@@ -196,8 +219,8 @@ export function reconcileFollowUp(current, snapshot, sent, opts, partnerId, comp
     records: {
       ...current.records,
       'res.partner': (current.records?.['res.partner'] ?? []).map((p) => (p.id === partnerId ? updatedPartner : p)),
-      ...(newActivities.length ? {
-        'mail.activity': [...(current.records?.['mail.activity'] ?? []), ...newActivities],
+      ...(incomingActivities.length ? {
+        'mail.activity': [...currentActivities, ...incomingActivities],
       } : {}),
     },
     messages: [...(current.messages ?? []), ...newMessages],
