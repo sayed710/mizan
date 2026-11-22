@@ -1,3 +1,4 @@
+import { purchaseLineId } from './purchase-links.js';
 import { create, read, search, write } from '../orm.js';
 import { addDays, subtotal, today } from './common.js';
 import { dueDate } from './terms.js';
@@ -6,7 +7,7 @@ import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { stockAccount, valuationModels } from './valuation.js';
 import { isPeriodicValuation } from './productconfig-helpers.js';
-import { round } from '../money.js';
+import { documentCurrency, round, roundCurrency } from '../money.js';
 import { sameCommercialPartner } from './reconcile.js';
 
 const number = (n) => Number(n) || 0;
@@ -40,7 +41,15 @@ const status = (r, db) => {
   if (lines.some((l) => l.toBill > 0)) return 'to_invoice';
   return lines.every((l) => l.billed >= l.ordered) ? 'invoiced' : 'no';
 };
-const policyLines = (db, r) => (r.order_line ?? []).map((l) => ({ ...l, purchase_method: method(read(db, 'product', l.product_id)) }));
+const policyLines = (db, r) => {
+  let nextId = Math.max(0, ...(db.records['purchase.order'] ?? []).flatMap((po) => (po.order_line ?? []).map((l) => Number(l.id) || 0)), ...(r.order_line ?? []).map((l) => Number(l.id) || 0));
+  return (r.order_line ?? []).map((l) => ({
+  ...l,
+  id: l.id ?? ++nextId,
+  purchase_line_key: l.purchase_line_key || crypto.randomUUID(),
+  purchase_method: method(read(db, 'product', l.product_id)),
+}));
+};
 
 function createBill(db, r) {
   let po = read(db, 'purchase.order', r.id);
@@ -49,10 +58,9 @@ function createBill(db, r) {
   const journal = resolveDocumentJournal(db, { move_type: 'in_invoice', company_id: companyId }, { required: true }).id;
   const eligible = billableLines(db, po.id);
   if (!eligible.some((l) => l.toBill > 0)) throw new Error('Nothing is eligible for billing');
-  const keyed = po.order_line.map((l) => ({ ...l, purchase_line_key: l.purchase_line_key || crypto.randomUUID() }));
-  db = write(db, 'purchase.order', po.id, { order_line: keyed });
-  po = read(db, 'purchase.order', po.id);
-  const lines = po.order_line.map(({ qty_delivered, qty_invoiced, purchase_method, ...l }, i) => ({ ...l, qty: eligible[i].toBill })).filter((l) => l.qty > 0);
+  const lines = po.order_line.map(({ qty_delivered, qty_invoiced, purchase_method, purchase_line_key, id, ...l }, i) => ({
+    ...l, purchase_line_id: id, qty: eligible[i].toBill,
+  })).filter((l) => l.qty > 0);
   if (!lines.length) throw new Error('Nothing is eligible for billing');
   const term = read(db, 'account.payment.term', po.payment_term_id);
   const out = create(db, 'account.move', {
@@ -74,14 +82,16 @@ function matches(db, bill) {
   const po = orderFor(db, bill);
   if (!po) throw new Error('Link the vendor bill to a purchase order');
   const used = new Map();
-  const prior = previousBills(db, bill, po).flatMap((m) => m.invoice_line_ids ?? []);
-  return (bill.invoice_line_ids ?? []).map((l) => {
-    const source = (po.order_line ?? []).filter((p) => p.product_id === l.product_id && (!l.purchase_line_key || p.purchase_line_key === l.purchase_line_key));
+  const prior = previousBills(db, bill, po).flatMap((m) => (m.invoice_line_ids ?? []).map((line) => ({ ...line, purchase_line_id: purchaseLineId(db, line, po.id) })));
+  const curr = documentCurrency(db, bill);
+  return (bill.invoice_line_ids ?? []).map((line) => ({ ...line, purchase_line_id: purchaseLineId(db, line, po.id) })).filter((l) => l.product_id && !['line_section', 'line_note', 'line_subsection'].includes(l.display_type)).map((l) => {
+    const source = (po.order_line ?? []).filter((p) => p.product_id === l.product_id
+      && (!l.purchase_line_id || p.id === l.purchase_line_id));
     const billedQty = number(l.qty);
     const receivedQty = source.reduce((s, p) => s + number(p.qty_delivered), 0);
     const orderedQty = totalQty(source, l.product_id);
-    const key = l.purchase_line_key || l.product_id;
-    const offset = (used.get(key) ?? 0) + totalQty(l.purchase_line_key ? prior.filter((p) => p.purchase_line_key === l.purchase_line_key || !p.purchase_line_key) : prior, l.product_id);
+    const key = l.purchase_line_id || l.product_id;
+    const offset = (used.get(key) ?? 0) + totalQty(l.purchase_line_id ? prior.filter((p) => p.purchase_line_id === l.purchase_line_id || !p.purchase_line_id) : prior, l.product_id);
     let skip = offset, left = billedQty, expected = 0;
     for (const p of source) {
       const available = Math.max(0, number(p.qty) - skip);
@@ -90,10 +100,11 @@ function matches(db, bill) {
       expected += take * number(p.price_unit) * (1 - number(p.discount) / 100);
       left -= take;
     }
-    const priceDifference = round(subtotal(l) - expected);
+    const priceDifference = roundCurrency(subtotal(l, db) - expected, curr);
     used.set(key, (used.get(key) ?? 0) + billedQty);
+    const hasPriceDiff = roundCurrency(Math.abs(priceDifference), curr) > 0;
     return { product_id: l.product_id, billedQty, receivedQty, orderedQty, priceDifference,
-      status: offset + billedQty > receivedQty + 1e-8 ? 'qty_exceeds_received' : Math.abs(priceDifference) >= 0.01 ? 'price_differs' : 'ok' };
+      status: !source.length ? 'unmatched_product' : offset + billedQty > receivedQty + 1e-8 ? 'qty_exceeds_received' : hasPriceDiff ? 'price_differs' : 'ok' };
   });
 }
 
@@ -108,14 +119,23 @@ export function matchBill(db, billId) {
 export function checkBillMatch(db, bill) {
   if (bill.move_type !== 'in_invoice' || !orderFor(db, bill)) return [];
   const rows = matches(db, bill);
-  return rows.filter((l) => Math.abs(l.priceDifference) >= 0.01);
+  const curr = documentCurrency(db, bill);
+  return rows.filter((l) => l.status === 'unmatched_product' || roundCurrency(Math.abs(l.priceDifference), curr) > 0);
 }
 
 /** Compute the review recommendation from current receipts and other posted bills. */
 export function shouldBePaid(db, bill) {
   const company = read(db, 'res.company', bill.company_id ?? 1);
   if (bill.move_type !== 'in_invoice' || !company?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
-  return matches(db, bill).some((l) => l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') ? 'exception' : 'yes';
+  const rows = matches(db, bill);
+  if (rows.some((l) => l.status !== 'unmatched_product' && method(read(db, 'product', l.product_id)) === 'receive' && (Number(l.receivedQty) || 0) === 0)) {
+    return 'no';
+  }
+  const curr = documentCurrency(db, bill);
+  if (rows.some((l) => l.status === 'unmatched_product' || (l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') || roundCurrency(Math.abs(l.priceDifference), curr) > 0)) {
+    return 'exception';
+  }
+  return 'yes';
 }
 
 /** Balanced company-currency adjustments to append to invoiceLines, using receipt interim values. */
@@ -160,6 +180,11 @@ export function priceDifferenceLines(db, bill) {
 const BILL_POLICY = { type: 'selection', label: 'Bill Control', options: [['purchase', 'Ordered Quantities'], ['receive', 'Received Quantities']] };
 
 export const billControlModels = {
+  'purchase.order.line': {
+    label: 'Purchase Order Line', readonly: true,
+    records: (db) => (db.records['purchase.order'] ?? []).flatMap((po) => (po.order_line ?? []).map((line) => ({ ...line, name: line.name ?? po.name, purchase_id: po.id }))),
+    fields: { name: { type: 'char', label: 'Name' }, purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order' } },
+  },
   get product() {
     const product = valuationModels.product;
     return { ...product, fields: { ...product.fields,
@@ -173,8 +198,27 @@ export const billControlModels = {
     return { ...purchase,
       fields: { ...purchase.fields,
         invoice_status: { ...purchase.fields.invoice_status, compute: status },
-        order_line: { ...purchase.fields.order_line, fields: { ...purchase.fields.order_line.fields, purchase_method: { ...BILL_POLICY, readonly: true, hidden: true }, purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true } } },
+        order_line: { ...purchase.fields.order_line, fields: { ...purchase.fields.order_line.fields, id: { type: 'integer', label: 'ID', readonly: true, hidden: true }, purchase_method: { ...BILL_POLICY, readonly: true, hidden: true }, purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true } } },
       },
+      prepareCreate: (db, vals) => {
+        const base = purchase.prepareCreate?.(db, vals) ?? { db, vals };
+        return {
+          db: base.db,
+          vals: base.vals?.order_line
+            ? { ...base.vals, order_line: policyLines(base.db, base.vals) }
+            : base.vals,
+        };
+      },
+      createDefaults: (db, vals) => ({
+        ...purchase.createDefaults?.(db, vals),
+        ...(vals?.order_line ? { order_line: policyLines(db, vals) } : {}),
+      }),
+      prepareWrite: (db, vals) => ({
+        db,
+        vals: vals?.order_line
+          ? { ...vals, order_line: policyLines(db, vals) }
+          : vals,
+      }),
       onchange: (r, key, db) => ({ ...purchase.onchange?.(r, key, db), ...(['order_line', 'state'].includes(key) ? { order_line: policyLines(db, r) } : {}) }),
       form: { ...purchase.form, buttons: purchase.form.buttons.map((b) => b.label === 'Create Bill'
         ? { ...b, when: (r, db) => (r.invoice_status ?? status(r, db)) === 'to_invoice', run: createBill }

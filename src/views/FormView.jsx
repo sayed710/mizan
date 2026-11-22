@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { models } from '../models/index.js';
 import { fieldReadonly, fieldRequired } from '../field-metadata.js';
 import { aggregate, create, isMultiCompany, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
@@ -6,7 +6,7 @@ import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { invoiceTaxTotals } from '../models/ledger.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
-import { myEmployeeId } from '../access.js';
+import { appOpen, myEmployeeId } from '../access.js';
 import { dateLocale, t } from '../i18n.js';
 import { Avatar, display, FieldInput, isLabelable, money, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
@@ -154,7 +154,7 @@ function SmartButtons({ db, model, rec, smart }) {
   return (
     <div className="smart-buttons">
       {smart.map((s) => {
-        if (s.when && !s.when(rec, db)) return null;
+        if ((s.app && !appOpen(db, getUser(), s.app)) || (s.when && !s.when(rec, db))) return null;
         if (s.valueField || s.value) {
           const field = s.valueField && model ? models[model]?.fields?.[s.valueField] : null;
           const value = s.value ? s.value(db, rec) : rec[s.valueField];
@@ -312,7 +312,7 @@ function Activities({ db, model, id, name }) {
   );
 }
 
-function ActionsMenu({ model, rec, backHash, base, query }) {
+function ActionsMenu({ model, rec, backHash, base, query, onAction, isNew }) {
   const [open, setOpen] = useState(false);
   const run = (fn) => { setOpen(false); fn(); };
   const duplicate = () => {
@@ -320,19 +320,22 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
     commit(res.db);
     location.hash = `${base}/${res.id}${query}`;
   };
-  const archived = rec.active === false;
+  const archived = rec?.active === false;
   return (
     <div className="nav-group actions-menu">
       <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
       {open && (
         <div className="nav-dropdown" role="menu">
-          <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>
-          <button type="button" role="menuitem" onClick={() => run(() => commit(write(getDb(), model, rec.id, { active: archived })))}>{t(archived ? 'Unarchive' : 'Archive')}</button>
-          <button type="button" role="menuitem" className="danger" onClick={() => run(() => {
+          {(models[model].menuActions ?? []).filter((a) => a.when?.(rec) ?? true).map((a) => (
+            <button key={a.label} type="button" role="menuitem" onClick={() => run(() => onAction(a))}>{t(a.label)}</button>
+          ))}
+          {!isNew && <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>}
+          {!isNew && <button type="button" role="menuitem" onClick={() => run(() => commit(write(getDb(), model, rec.id, { active: archived })))}>{t(archived ? 'Unarchive' : 'Archive')}</button>}
+          {!isNew && <button type="button" role="menuitem" className="danger" onClick={() => run(() => {
             if (!confirm(t('Delete {n} record(s)?', { n: 1 }))) return;
             commit(unlink(getDb(), model, [rec.id]));
             location.hash = backHash;
-          })}>{t('Delete')}</button>
+          })}>{t('Delete')}</button>}
         </div>
       )}
     </div>
@@ -409,7 +412,23 @@ export function FormView({ leaf, id, base, params }) {
   const [tab, setTab] = useState(0);
   const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params, parseRel(db, model, params.get('rel'))) : null));
   const stageExplicit = useRef(!isNew || Object.hasOwn(restored?.values ?? {}, 'stage_id') || Object.hasOwn(leaf.defaults ?? {}, 'stage_id') || params.has('default_stage_id'));
+  const editedFields = useRef(new Set([
+    ...(restored ? Object.keys(restored.values ?? {}) : []),
+    ...Object.keys(leaf.defaults ?? {}),
+    ...[...params].filter(([k]) => k.startsWith('default_') && def.fields[k.slice(8)]).map(([k]) => k.slice(8)),
+  ]));
   const revRef = useRef(0);
+  const pendingSaveRef = useRef(null);
+  const remappedIdsRef = useRef({});
+
+  useEffect(() => {
+    const onRemap = (e) => {
+      const map = e.detail?.[model];
+      if (map) Object.assign(remappedIdsRef.current, map);
+    };
+    window.addEventListener('mizan:remapped', onRemap);
+    return () => window.removeEventListener('mizan:remapped', onRemap);
+  }, [model]);
 
   const view = params.get('view') ?? '';
   const relRaw = params.get('rel');
@@ -426,7 +445,8 @@ export function FormView({ leaf, id, base, params }) {
   const dirty = Object.keys(changes).length > 0;
   const set = (k) => (v) => {
     if (k === 'stage_id') stageExplicit.current = true;
-    setChanges((c) => changeFormValue(model, isNew ? initial : rec, c, k, v, getDb(), stageExplicit.current));
+    editedFields.current.add(k);
+    setChanges((c) => changeFormValue(model, isNew ? initial : rec, c, k, v, getDb(), stageExplicit.current, editedFields.current));
     setError(null);
   };
   const fail = (e) => setError(e instanceof Error ? t(e.message) : t('Could not save'));
@@ -442,7 +462,12 @@ export function FormView({ leaf, id, base, params }) {
         const values = { ...changes, ...extra };
         const res = saveFormRecord(getDb(), model, null, { ...current, ...extra });
         const expectedHash = `${base}/${res.id}${query}`;
-        commit(res.db, { quiet: true }).then((r) => {
+        const commitPromise = commit(res.db, { quiet: true });
+        pendingSaveRef.current = { id: res.id, promise: commitPromise };
+        commitPromise.then((r) => {
+          if (pendingSaveRef.current?.promise === commitPromise) {
+            pendingSaveRef.current = null;
+          }
           if (r.ok || curRev !== revRef.current) return;
           if (location.hash === expectedHash) {
             refusedNew = { base, values, error: r.error };
@@ -455,7 +480,12 @@ export function FormView({ leaf, id, base, params }) {
       }
       const vals = { ...changes, ...extra };
       if (Object.keys(vals).length) {
-        commit(saveFormRecord(getDb(), model, rec.id, vals).db, { quiet: true }).then((r) => {
+        const commitPromise = commit(saveFormRecord(getDb(), model, rec.id, vals).db, { quiet: true });
+        pendingSaveRef.current = { id: rec.id, promise: commitPromise };
+        commitPromise.then((r) => {
+          if (pendingSaveRef.current?.promise === commitPromise) {
+            pendingSaveRef.current = null;
+          }
           if (r.ok || curRev !== revRef.current) return;
           setChanges((c) => ({ ...vals, ...c }));
           setError(r.error);
@@ -537,16 +567,38 @@ export function FormView({ leaf, id, base, params }) {
     }
     const savedId = save();
     if (savedId == null) return;
+    // A save still syncing may renumber the record; wait for it so the button acts on the stored id.
+    if (pendingSaveRef.current) {
+      const r = await pendingSaveRef.current.promise;
+      if (r && !r.ok) {
+        setError(r.error || t('Could not save'));
+        return;
+      }
+    }
+    const finalId = remappedIdsRef.current[savedId] ?? savedId;
+    const finalRec = read(getDb(), model, finalId);
+    if (!finalRec) {
+      setError(t('Record not found.'));
+      return;
+    }
     try {
       if (b.posts && isServer()) {
-        const out = await serverAction('/api/button', { model, id: savedId, label: b.label });
+        const out = await serverAction('/api/button', { model, id: finalId, label: b.label });
         if (out.go) location.hash = out.go;
         return;
       }
-      const res = b.run(getDb(), read(getDb(), model, savedId), answers);
+      const res = b.run(getDb(), finalRec, answers);
       commit(res.db);
-      noteUnsent(savedId);
+      noteUnsent(finalId);
       if (res.message) alert(res.message);
+      if (res.download) {
+        const url = URL.createObjectURL(new Blob([res.download.content], { type: 'application/xml' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = res.download.name;
+        link.click();
+        URL.revokeObjectURL(url);
+      }
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
@@ -574,7 +626,7 @@ export function FormView({ leaf, id, base, params }) {
   const resolve = (v) => (typeof v === 'function' ? v(current, db, { leaf, isNew }) : v);
   const statusKey = resolve(def.form.statusbarFor ?? def.form.statusbar);
   const statusField = statusKey && def.fields[statusKey];
-  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())) && (!b.visible || b.visible(current, getDb())));
+  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.app || appOpen(getDb(), getUser(), b.app)) && (!b.when || b.when(current, getDb(), getUser())) && (!b.visible || b.visible(current, getDb(), getUser())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
   const tabs = resolve(def.form.tabs)?.filter((tb) => !tb.when || tb.when(current, db));
@@ -596,7 +648,7 @@ export function FormView({ leaf, id, base, params }) {
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : displayTitle}</span>
           </nav>
-          {!isNew && <ActionsMenu model={model} rec={rec} backHash={backHash} base={base} query={query} />}
+          {(!isNew || (models[model].menuActions ?? []).length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} />}
           {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && current.move_type === 'out_invoice')) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
           {dirty && (
             <span className="dirty">

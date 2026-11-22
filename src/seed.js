@@ -140,6 +140,7 @@ export function seed() {
       ...(journal.refund_sequence != null ? { refund_sequence: journal.refund_sequence } : {}),
       ...(journal.payment_sequence != null ? { payment_sequence: journal.payment_sequence } : {}),
       ...(journal.bank_statements_source ? { bank_statements_source: journal.bank_statements_source } : {}),
+      ...(journal.sepa_pain_version ? { sepa_pain_version: journal.sepa_pain_version } : {}),
       ...(journal.invoice_reference_type ? { invoice_reference_type: journal.invoice_reference_type } : {}),
       ...(journal.invoice_reference_model ? { invoice_reference_model: journal.invoice_reference_model } : {}),
       ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
@@ -164,7 +165,6 @@ export function seed() {
       amount,
       amount_type: 'percent',
       tax_exigibility: 'on_invoice',
-      price_include: false,
       active: true,
       tax_group_id: vatGroupId,
       invoice_repartition_line_ids: [
@@ -314,7 +314,8 @@ export function seed() {
   set('purchase.order', po1, { state: 'purchase', receipt_done: true, order_line: po1rec.order_line.map((l) => ({ ...l, qty_delivered: l.qty })) });
   const bill = add('account.move', {
     move_type: 'in_invoice', partner_id: 7, purchase_id: po1, invoice_origin: po1rec.name,
-    invoice_date: addDays(today(), -10), invoice_date_due: addDays(today(), 20), invoice_line_ids: po1rec.order_line,
+    invoice_date: addDays(today(), -10), invoice_date_due: addDays(today(), 20),
+    invoice_line_ids: po1rec.order_line.map(({ id, purchase_line_key, purchase_method, ...line }) => ({ ...line, purchase_line_id: id })),
   });
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });

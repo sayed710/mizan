@@ -260,7 +260,17 @@ export function parseCellNumber(val, { allowAnyCurrency = false } = {}) {
   // Recheck leading zero guard after stripping sign and affixes
   if (!s || LEADING_ZERO_CODE_RE.test(s)) return null;
 
-  const num = parseAmount(s);
+  let num = parseAmount(s);
+  if (!Number.isFinite(num)) {
+    const normalized = s
+      .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+      .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0))
+      .replace(/\u066B/g, '.');
+    if (/^[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+$/.test(normalized)) {
+      const parsed = Number(normalized);
+      if (Number.isFinite(parsed)) num = parsed;
+    }
+  }
   if (!Number.isFinite(num)) return null;
   return isNegative ? -Math.abs(num) : num;
 }
@@ -287,8 +297,9 @@ const WORKBOOK_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"
 
 const STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <numFmts count="1">
+  <numFmts count="2">
     <numFmt numFmtId="164" formatCode="#,##0.00;(#,##0.00);&quot;-&quot;"/>
+    <numFmt numFmtId="165" formatCode="#,##0.000000;(#,##0.000000);&quot;-&quot;"/>
   </numFmts>
   <fonts count="2">
     <font><sz val="11"/><name val="Calibri"/></font>
@@ -304,11 +315,15 @@ const STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <cellStyleXfs count="1">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
   </cellStyleXfs>
-  <cellXfs count="4">
+  <cellXfs count="8">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
     <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
     <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="165" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
   </cellXfs>
   <cellStyles count="1">
     <cellStyle name="Normal" xfId="0" builtinId="0"/>
@@ -361,8 +376,11 @@ export function extractTableGrid(table) {
       const colSpan = Number(cell.colSpan || cell.getAttribute?.('colspan') || cell.getAttribute?.('colSpan')) || 1;
       const rowSpan = Number(cell.rowSpan || cell.getAttribute?.('rowspan') || cell.getAttribute?.('rowSpan')) || 1;
       const text = extractTableCellText(cell);
-      const isNum = Boolean(cell.classList?.contains?.('num') || /\bnum\b/.test(cell.className || '') || cell.getAttribute?.('class')?.includes('num'));
-      setCell(rIdx, cIdx, text, isNum, isHeaderRow);
+      const isRate = Boolean(cell.classList?.contains?.('rate') || /\brate\b/.test(cell.className || '') || cell.getAttribute?.('class')?.includes('rate'));
+      const isQty = Boolean(cell.classList?.contains?.('qty') || /\bqty\b/.test(cell.className || '') || cell.getAttribute?.('class')?.includes('qty'));
+      const isNum = Boolean(isRate || isQty || cell.classList?.contains?.('num') || /\bnum\b/.test(cell.className || '') || cell.getAttribute?.('class')?.includes('num'));
+      const cellType = isRate ? 'rate' : isQty ? 'quantity' : isNum ? 'number' : null;
+      setCell(rIdx, cIdx, text, cellType, isHeaderRow);
 
       if (colSpan > 1 || rowSpan > 1) {
         const fromRef = `${colName(cIdx)}${rIdx + 1}`;
@@ -401,11 +419,19 @@ function buildSheetXml(rows, { headerRowCount = 1, merges = [], columnTypes, cel
         cellXmls.push(isHeader ? `<c r="${ref}" s="1"/>` : `<c r="${ref}"/>`);
         continue;
       }
-      const isExplicitText = !isHeader && ((columnTypes && (columnTypes[cIdx] === 'text' || columnTypes[cIdx] === 'string')) || (cellTypes && cellTypes[rIdx]?.[cIdx] === false));
-      const isExplicitNumber = !isHeader && ((columnTypes && columnTypes[cIdx] === 'number') || (cellTypes && cellTypes[rIdx]?.[cIdx] === true));
-      const num = (isHeader || isExplicitText) ? null : parseCellNumber(val, { allowAnyCurrency: isExplicitNumber });
+      const colType = (columnTypes && columnTypes[cIdx]) || (cellTypes && cellTypes[rIdx]?.[cIdx]);
+      const isExplicitText = !isHeader && (colType === 'text' || colType === 'string' || colType === false);
+      const isExplicitNumber = !isHeader && (colType === 'number' || colType === 'currency' || colType === 'monetary' || colType === 'rate' || colType === 'exchange_rate' || colType === 'quantity' || colType === 'qty' || colType === 'float' || colType === 'integer' || colType === true);
+      const num = (isHeader || isExplicitText) ? null : parseCellNumber(val, { allowAnyCurrency: Boolean(isExplicitNumber) });
       if (num != null) {
-        const styleId = isHeader ? 3 : 2;
+        let styleId;
+        if (colType === 'rate' || colType === 'exchange_rate') {
+          styleId = isHeader ? 5 : 4;
+        } else if (colType === 'quantity' || colType === 'qty' || colType === 'float' || colType === 'integer') {
+          styleId = isHeader ? 7 : 6;
+        } else {
+          styleId = isHeader ? 3 : 2;
+        }
         cellXmls.push(`<c r="${ref}" s="${styleId}"><v>${num}</v></c>`);
         continue;
       }
@@ -450,7 +476,13 @@ export function buildXlsx(data, options = {}) {
     if (grid.numericCols?.size) {
       cellTypes = options.cellTypes ?? grid.cellTypes;
       if (!columnTypes) {
-        columnTypes = Array.from({ length: rows[0]?.length || 0 }, (_, i) => (grid.numericCols.has(i) ? 'number' : 'text'));
+        columnTypes = Array.from({ length: rows[0]?.length || 0 }, (_, i) => {
+          if (!grid.numericCols.has(i)) return 'text';
+          const typesInCol = (cellTypes ?? []).map((r) => r[i]).filter(Boolean);
+          if (typesInCol.includes('rate')) return 'rate';
+          if (typesInCol.includes('quantity')) return 'quantity';
+          return 'number';
+        });
       }
     }
   } else if (typeof data === 'string') {
@@ -478,23 +510,30 @@ export function buildXlsx(data, options = {}) {
 export function readXlsx(bytes) {
   const { files } = parseZip(bytes);
   const workbookXml = files['xl/workbook.xml'] ? new TextDecoder().decode(files['xl/workbook.xml'].data) : '';
+  const stylesXml = files['xl/styles.xml'] ? new TextDecoder().decode(files['xl/styles.xml'].data) : '';
   const sheetMatch = workbookXml.match(/<sheet[^>]*name="([^"]+)"/);
   const sheetName = sheetMatch ? sheetMatch[1] : 'Sheet1';
 
   const sheetXml = files['xl/worksheets/sheet1.xml'] ? new TextDecoder().decode(files['xl/worksheets/sheet1.xml'].data) : '';
   const rows = [];
+  const cellStyles = [];
+  const formattedRows = [];
   const rowRegex = /<row[^>]*>([\s\S]*?)<\/row>/gi;
-  const cellRegex = /<c\b([^>]*)>([\s\S]*?)<\/c>|<c\b([^>]*)\/>/gi;
+  const cellRegex = /<c\b([^/>]*)\/>|<c\b([^>]*)>([\s\S]*?)<\/c>/gi;
 
   let rowMatch;
   while ((rowMatch = rowRegex.exec(sheetXml)) !== null) {
     const rowContent = rowMatch[1];
     const rowCells = [];
+    const rowStyles = [];
+    const rowFormatted = [];
     let cellMatch;
     while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
-      const attrs = cellMatch[1] || cellMatch[3] || '';
-      const body = cellMatch[2] || '';
+      const attrs = cellMatch[1] ?? cellMatch[2] ?? '';
+      const body = cellMatch[3] ?? '';
       const refMatch = attrs.match(/r="([A-Z]+)(\d+)"/i);
+      const sMatch = attrs.match(/\bs="(\d+)"/);
+      const styleId = sMatch ? Number(sMatch[1]) : 0;
       let colIdx = rowCells.length;
       if (refMatch) {
         const colLetters = refMatch[1].toUpperCase();
@@ -515,12 +554,24 @@ export function readXlsx(bytes) {
         val = Number.isFinite(num) ? num : raw;
       }
       rowCells[colIdx] = val;
+      rowStyles[colIdx] = styleId;
+      let formatted = val;
+      if (typeof val === 'number') {
+        if (styleId === 2 || styleId === 3) formatted = val.toFixed(2);
+        else if (styleId === 4 || styleId === 5) formatted = val.toFixed(6);
+        else formatted = String(val);
+      }
+      rowFormatted[colIdx] = formatted;
     }
     // Fill gaps
     for (let i = 0; i < rowCells.length; i += 1) {
       if (rowCells[i] === undefined) rowCells[i] = '';
+      if (rowStyles[i] === undefined) rowStyles[i] = 0;
+      if (rowFormatted[i] === undefined) rowFormatted[i] = '';
     }
     rows.push(rowCells);
+    cellStyles.push(rowStyles);
+    formattedRows.push(rowFormatted);
   }
 
   const merges = [];
@@ -530,7 +581,7 @@ export function readXlsx(bytes) {
     merges.push(mMatch[1]);
   }
 
-  return { sheetName, rows, merges };
+  return { sheetName, rows, merges, cellStyles, stylesXml, formattedRows };
 }
 
 /**

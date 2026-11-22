@@ -236,8 +236,8 @@ const rawProductLines = (label, priceField, extraFields = {}) => ({
     const mapped = db && taxId ? mapTax(db, record?.fiscal_position_id, taxId) : [];
     const remapped = mapped.length !== 1 || mapped[0] !== taxId;
     const tax = db && mapped[0] ? read(db, 'account.tax', mapped[0]) : null;
-    const snap = tax ? taxSnapshot(tax, db, remapped ? null : record?.fiscal_position_id) : taxSnapshot(null);
-    const multi = mapped.length > 1 ? { tax_ids: mapped, tax_breakdown: expandTaxIds(db, mapped).map((t) => taxSnapshot(t)) } : {};
+    const snap = tax ? taxSnapshot(tax, db, remapped ? null : record?.fiscal_position_id, record?.company_id) : taxSnapshot(null);
+    const multi = mapped.length > 1 ? { tax_ids: mapped, tax_breakdown: expandTaxIds(db, mapped).map((t) => taxSnapshot(t, db, null, record?.company_id)) } : {};
     return withTaxIds({ product_id: null, qty: 1, price_unit: 0, discount: 0, ...snap, ...multi });
   },
   // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.
@@ -245,14 +245,14 @@ const rawProductLines = (label, priceField, extraFields = {}) => ({
   onchange: (line, key, db, record) => {
     if (key === 'tax_id') {
       validateTaxCompany(db, [line.tax_id], record?.company_id);
-      return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', line.tax_id), db)), tax_source_id: null, tax_ids: [] };
+      return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', line.tax_id), db, null, record?.company_id)), tax_source_id: null, tax_ids: [] };
     }
     if (key === 'tax_ids') {
       const ids = line.tax_ids ?? [];
       validateTaxCompany(db, ids, record?.company_id);
       const expanded = expandTaxIds(db, ids);
       // tax_id stays the first selected tax; the breakdown carries every selected tax for the computations.
-      return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', ids[0]) ?? null, db)), tax_source_id: null, tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
+      return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', ids[0]) ?? null, db, null, record?.company_id)), tax_source_id: null, tax_breakdown: expanded.map((t) => taxSnapshot(t, db, null, record?.company_id)) };
     }
     if (!['product_id', 'uom_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = read(db, 'product', line.product_id);

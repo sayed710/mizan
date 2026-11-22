@@ -8,7 +8,7 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import { create, read } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
-import { partnerTotalDue, partnerTotalOverdue, partnerReceivableLines, classifyDue, followUps } from './models/finance.js';
+import { partnerTotalDue, partnerTotalOverdue, partnerReceivableLines, classifyDue, followUps, followUpLetter } from './models/finance.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const { FollowUps, REPORTS } = await import('./views/Reports.jsx');
@@ -263,5 +263,26 @@ test('i18n: Total Due and Total Overdue have Modern Standard Arabic translations
     assert.equal(tAr('Residual Amount'), 'المبلغ المتبقي');
   } finally {
     globalThis.localStorage = prevStorage;
+  }
+});
+
+
+test('partner and letter totals agree independently in two companies', () => {
+  const base = seed();
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Second company', currency_id: base.records['res.company'][0].currency_id });
+  const partner = create(branch.db, 'res.partner', { name: 'Shared customer' });
+  let db = partner.db;
+  for (const [companyId, amounts] of [[1, [100, 50]], [branch.id, [80, 20]]]) {
+    for (const [index, amount] of amounts.entries()) {
+      const invoice = create(db, 'account.move', { move_type: 'out_invoice', company_id: companyId, partner_id: partner.id, invoice_date: '2026-01-01', invoice_date_due: index ? '2026-04-01' : '2026-02-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: amount, tax: 0 }] });
+      db = postMove(invoice.db, invoice.id);
+    }
+  }
+  for (const [companyId, due, overdue] of [[1, 150, 100], [branch.id, 100, 80]]) {
+    const letter = followUpLetter(db, partner.id, companyId, '2026-03-01');
+    assert.equal(partnerTotalDue(db, partner.id, companyId, '2026-03-01'), due);
+    assert.equal(partnerTotalOverdue(db, partner.id, companyId, '2026-03-01'), overdue);
+    assert.equal(letter.due[0].amount, due);
+    assert.equal(letter.overdue[0].amount, overdue);
   }
 });
