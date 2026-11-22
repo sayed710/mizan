@@ -429,6 +429,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
   'to_check', // a review flag belongs to the reviewed entry only
+  'is_storno',
 ]);
 function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
@@ -463,7 +464,7 @@ function spawnRecurringMove(db, move) {
     ...(nextDue ? { invoice_date_due: nextDue } : {}),
     ...(move.auto_reverse ? { reverse_date: recurringReversalDate(read(db, 'account.move', origin), nextDate) } : {}),
     auto_post_origin_id: origin,
-    invoice_line_ids: isInvoice(move) ? copyInvoiceLines(raw.invoice_line_ids, { months, preserveSourceLineId: Boolean(move.reversed_entry_id) }) : [],
+    invoice_line_ids: isInvoice(move) ? copyInvoiceLines(raw.invoice_line_ids, { months }) : [],
     line_ids: !isInvoice(move) ? (raw.line_ids ?? []).map((l) => ({
       ...l,
       ...(l.date_maturity ? { date_maturity: shiftMonth(l.date_maturity, months) } : {}),
@@ -3272,7 +3273,7 @@ export const accountingModels = {
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
         return 'The inter-company bill is posted or paid; issue a credit note instead';
       }
-      return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
+      return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
     invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),

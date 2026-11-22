@@ -243,7 +243,7 @@ export function accountDeleteGuard(db, account, pending = db) {
 }
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active', 'is_storno', 'reversed_entry_id'];
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(db, before, after) {
@@ -270,7 +270,7 @@ function postedMoveRule(db, before, after) {
       if (po && (po.company_id ?? 1) !== (after.company_id ?? 1)) return 'Bill and purchase order must belong to the same company';
     }
     const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
-    if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0) && !validStornoMove(db, after)) return 'Debits and credits cannot be negative';
+    if ((lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0) || after.is_storno) && !validStornoMove(db, after)) return 'Debits and credits cannot be negative';
     if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) return 'A posted entry needs balanced journal items';
     if (!after.name || after.name === '/') return 'A posted entry needs a number';
   }

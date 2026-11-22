@@ -122,13 +122,88 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   return null;
 }
 
-/** Verify storno provenance from the company and linked posted source. */
+/** Verify storno provenance from the linked posted source and validate reversal lines. */
 export function validStornoMove(db, move) {
-  if (!move?.is_storno || !read(db, 'res.company', move.company_id ?? 1)?.account_storno) return false;
+  if (!move?.is_storno || !move?.reversed_entry_id) return false;
   const source = read(db, 'account.move', move.reversed_entry_id);
   const expected = { entry: 'entry', out_refund: 'out_invoice', in_refund: 'in_invoice' };
-  return Boolean(source && source.state === 'posted' && source.id !== move.id
-    && (source.company_id ?? 1) === (move.company_id ?? 1) && source.move_type === expected[move.move_type]);
+  if (!source || source.state !== 'posted' || source.id === move.id
+    || (source.company_id ?? 1) !== (move.company_id ?? 1) || source.move_type !== expected[move.move_type]) {
+    return false;
+  }
+  if (move.partner_id && source.partner_id && move.partner_id !== source.partner_id) return false;
+  if ((move.currency_id ?? null) !== (source.currency_id ?? null)) return false;
+
+  const lines = Array.isArray(move.line_ids) ? move.line_ids : [];
+  if (!lines.length) return false;
+  if (!lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0)) return false;
+
+  if (move.move_type === 'entry') {
+    const sourceLines = source.line_ids ?? [];
+    if (lines.length !== sourceLines.length) return false;
+    const remaining = [...sourceLines];
+    for (const line of lines) {
+      const idx = remaining.findIndex((s) =>
+        s.account_id === line.account_id
+        && (Number(s.partner_id) || null) === (Number(line.partner_id) || null)
+        && Math.abs((Number(line.debit) || 0) - (-(Number(s.debit) || 0))) < 1e-6
+        && Math.abs((Number(line.credit) || 0) - (-(Number(s.credit) || 0))) < 1e-6
+        && (!s.currency_id || (s.currency_id === line.currency_id && Math.abs((Number(line.amount_currency) || 0) - (-(Number(s.amount_currency) || 0))) < 1e-6))
+      );
+      if (idx === -1) return false;
+      remaining.splice(idx, 1);
+    }
+    return true;
+  }
+
+  if (['out_refund', 'in_refund'].includes(move.move_type)) {
+    const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
+    const roundingAccs = new Set();
+    if (rounding) {
+      if (rounding.profit_account_id) roundingAccs.add(rounding.profit_account_id);
+      if (rounding.loss_account_id) roundingAccs.add(rounding.loss_account_id);
+      try {
+        roundingAccs.add(roundingAccount(db, rounding, true, move.company_id));
+        roundingAccs.add(roundingAccount(db, rounding, false, move.company_id));
+      } catch {
+        // ignore fallback errors
+      }
+    }
+
+    const sourceDebits = new Map();
+    const sourceCredits = new Map();
+    for (const s of source.line_ids ?? []) {
+      const d = Number(s.debit) || 0;
+      const c = Number(s.credit) || 0;
+      if (d > 0) sourceDebits.set(s.account_id, (sourceDebits.get(s.account_id) ?? 0) + d);
+      if (c > 0) sourceCredits.set(s.account_id, (sourceCredits.get(s.account_id) ?? 0) + c);
+    }
+
+    const moveDebits = new Map();
+    const moveCredits = new Map();
+    for (const line of lines) {
+      const d = Number(line.debit) || 0;
+      const c = Number(line.credit) || 0;
+      if (d > 1e-6 && !roundingAccs.has(line.account_id)) return false;
+      if (c > 1e-6 && !roundingAccs.has(line.account_id)) return false;
+      if (d < -1e-6) moveDebits.set(line.account_id, (moveDebits.get(line.account_id) ?? 0) + Math.abs(d));
+      if (c < -1e-6) moveCredits.set(line.account_id, (moveCredits.get(line.account_id) ?? 0) + Math.abs(c));
+    }
+
+    for (const [accId, amt] of moveDebits) {
+      if (roundingAccs.has(accId)) continue;
+      const srcAmt = sourceDebits.get(accId) ?? 0;
+      if (amt > srcAmt + 1e-6) return false;
+    }
+    for (const [accId, amt] of moveCredits) {
+      if (roundingAccs.has(accId)) continue;
+      const srcAmt = sourceCredits.get(accId) ?? 0;
+      if (amt > srcAmt + 1e-6) return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 /** Whether any line has a negative debit or credit. */
