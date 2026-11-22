@@ -463,7 +463,7 @@ test('migration 45 backfills tax group company_id from owning taxes (else main c
   };
 
   const migrated = migrate(legacy);
-  assert.equal(SCHEMA_VERSION, 62);
+  assert.equal(SCHEMA_VERSION, 63);
   assert.equal(migrated.schema_version, 62);
 
   const migratedBranchGroup = read(migrated, 'account.tax.group', groupBranch.id);

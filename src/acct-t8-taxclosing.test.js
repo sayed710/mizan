@@ -1221,7 +1221,7 @@ test('TAX-13: use_in_tax_closing stored defaults on create, migration v60, and s
       })),
     },
   };
-  assert.equal(SCHEMA_VERSION, 62);
+  assert.equal(SCHEMA_VERSION, 63);
   const migrated = migrate(legacyDb);
   assert.equal(migrated.schema_version, 62);
   const migratedTax = read(migrated, 'account.tax', createdTax.id);

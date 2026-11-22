@@ -1,6 +1,13 @@
 import { create, read, write } from '../orm.js';
-import { today } from './common.js';
+import { commercialPartnerId, today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
+
+export function incrementPartnerRank(db, partnerId, field) {
+  const id = commercialPartnerId(db, partnerId);
+  const partner = id == null ? null : read(db, 'res.partner', id);
+  if (!partner) return db;
+  return { ...db, records: { ...db.records, 'res.partner': db.records['res.partner'].map((row) => row.id === id ? { ...row, [field]: (Number(row[field]) || 0) + 1 } : row) } };
+}
 
 export function isRotting(db, model, r) {
   if (!r) return false;
@@ -110,6 +117,8 @@ export const crmModels = {
     label: 'Contacts',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      customer_rank: { type: 'integer', label: 'Customer Rank', readonly: true },
+      supplier_rank: { type: 'integer', label: 'Vendor Rank', readonly: true },
       is_company: { type: 'boolean', label: 'Company' },
       email: { type: 'char', label: 'Email' },
       phone: { type: 'char', label: 'Phone' },
@@ -162,10 +171,12 @@ export const crmModels = {
         newLine: () => ({ account_number: '', bank_name: '', bank_bic: '', allow_out_payment: false }),
       },
     },
-    defaults: () => ({ tag_ids: [] }),
+    defaults: () => ({ tag_ids: [], customer_rank: 0, supplier_rank: 0 }),
     guard: (db, before, after) => validatePartnerBankLines(db, after?.id, after?.bank_ids),
     onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
+      { id: 'customers', label: 'Customers', fn: (r) => (r.customer_rank ?? 0) > 0 },
+      { id: 'vendors', label: 'Vendors', fn: (r) => (r.supplier_rank ?? 0) > 0 },
       { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
       { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
     ]],
@@ -184,7 +195,7 @@ export const crmModels = {
       tabs: [
         {
           label: 'Accounting',
-          fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id'],
+          fields: ['customer_rank', 'supplier_rank', 'property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id'],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
       ],

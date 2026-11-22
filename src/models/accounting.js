@@ -1,3 +1,4 @@
+import { incrementPartnerRank } from './crm.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
@@ -795,6 +796,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
       })()
     : {};
   let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  if (r.move_type === 'out_invoice' || r.move_type === 'in_invoice') posted = incrementPartnerRank(posted, r.partner_id, r.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });

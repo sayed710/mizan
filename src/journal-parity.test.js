@@ -90,7 +90,7 @@ test('migration 40 backfills journal parity fields without changing existing num
     },
   };
 
-  assert.equal(SCHEMA_VERSION, 62);
+  assert.equal(SCHEMA_VERSION, 63);
   const upgraded = migrate(v39Db);
   assert.equal(upgraded.schema_version, 62);
 

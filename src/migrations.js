@@ -1,5 +1,6 @@
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
+import { incrementPartnerRank } from './models/crm.js';
 import { models } from './models/index.js';
 import { create, postNote, search, write } from './orm.js';
 import { migrateAppointments } from './models/appointments.js';
@@ -1880,6 +1881,16 @@ export function migrateDeferralCreditAdjustments(db) {
 }
 
 MIGRATIONS.push({ version: 62, name: 'canonical-deferral-credit-adjustments', up: migrateDeferralCreditAdjustments });
+
+MIGRATIONS.push({ version: 63, name: 'partner-ranks', up: (db) => {
+  let next = { ...db, records: { ...db.records, 'res.partner': (db.records['res.partner'] ?? []).map((p) => ({ ...p, customer_rank: 0, supplier_rank: 0 })) } };
+  for (const move of db.records['account.move'] ?? []) {
+    if (move.state === 'posted' && ['out_invoice', 'in_invoice'].includes(move.move_type)) next = incrementPartnerRank(next, move.partner_id, move.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
+  }
+  for (const order of db.records['sale.order'] ?? []) if (order.state === 'sale' || order.state === 'done') next = incrementPartnerRank(next, order.partner_id, 'customer_rank');
+  for (const order of db.records['purchase.order'] ?? []) if (order.state === 'purchase' || order.state === 'done') next = incrementPartnerRank(next, order.partner_id, 'supplier_rank');
+  return next;
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
