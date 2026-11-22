@@ -27,9 +27,13 @@ const escapeXml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '
 const normalizedIban = (value) => String(value ?? '').replace(/\s/g, '').toUpperCase();
 
 /** Build a pain.001.001.03 document from already resolved payment data. */
-export function buildSepaXml({ id, createdAt, date, debtor, payments }) {
-  if (!id) throw new Error('The batch reference is required');
-  if (String(id).length > 35) throw new Error('Batch reference cannot exceed 35 characters');
+export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, debtor, payments }) {
+  const effectiveId = id ?? msgId;
+  const effectiveMsgId = msgId ?? effectiveId;
+  const effectivePmtInfId = pmtInfId ?? effectiveId;
+  if (!effectiveMsgId) throw new Error('The batch reference is required');
+  if (String(effectiveMsgId).length > 35) throw new Error('Batch reference cannot exceed 35 characters');
+  if (effectivePmtInfId && String(effectivePmtInfId).length > 35) throw new Error('Payment information identifier cannot exceed 35 characters');
   if (!debtor?.iban) throw new Error('The journal account has no IBAN');
   if (!isValidIban(debtor.iban)) throw new Error('The journal account has an invalid IBAN');
   const debtorCountry = normalizedIban(debtor.iban).slice(0, 2);
@@ -54,5 +58,5 @@ export function buildSepaXml({ id, createdAt, date, debtor, payments }) {
   }).join('');
   const sum = (total / 100).toFixed(2);
   const count = payments.length;
-  return `<?xml version="1.0" encoding="UTF-8"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03"><CstmrCdtTrfInitn><GrpHdr><MsgId>${escapeXml(id)}</MsgId><CreDtTm>${escapeXml(createdAt)}</CreDtTm><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><InitgPty><Nm>${escapeXml(debtor.name)}</Nm></InitgPty></GrpHdr><PmtInf><PmtInfId>${escapeXml(id)}</PmtInfId><PmtMtd>TRF</PmtMtd><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf><ReqdExctnDt>${escapeXml(date)}</ReqdExctnDt><Dbtr><Nm>${escapeXml(debtor.name)}</Nm></Dbtr><DbtrAcct><Id><IBAN>${normalizedIban(debtor.iban)}</IBAN></Id></DbtrAcct><DbtrAgt><FinInstnId><BIC>${escapeXml(debtor.bic)}</BIC></FinInstnId></DbtrAgt><ChrgBr>SLEV</ChrgBr>${transactions}</PmtInf></CstmrCdtTrfInitn></Document>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03"><CstmrCdtTrfInitn><GrpHdr><MsgId>${escapeXml(effectiveMsgId)}</MsgId><CreDtTm>${escapeXml(createdAt)}</CreDtTm><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><InitgPty><Nm>${escapeXml(debtor.name)}</Nm></InitgPty></GrpHdr><PmtInf><PmtInfId>${escapeXml(effectivePmtInfId)}</PmtInfId><PmtMtd>TRF</PmtMtd><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf><ReqdExctnDt>${escapeXml(date)}</ReqdExctnDt><Dbtr><Nm>${escapeXml(debtor.name)}</Nm></Dbtr><DbtrAcct><Id><IBAN>${normalizedIban(debtor.iban)}</IBAN></Id></DbtrAcct><DbtrAgt><FinInstnId><BIC>${escapeXml(debtor.bic)}</BIC></FinInstnId></DbtrAgt><ChrgBr>SLEV</ChrgBr>${transactions}</PmtInf></CstmrCdtTrfInitn></Document>`;
 }

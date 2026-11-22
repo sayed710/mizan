@@ -224,11 +224,38 @@ const paymentMethodCode = (db, payment) => {
   return method?.payment_type === payment?.payment_type ? method?.code : null;
 };
 
+export function formatReplacementIdentifier(name, sequence = 1) {
+  const suffix = `-R${sequence}`;
+  const maxBaseLen = Math.max(1, 35 - suffix.length);
+  const base = String(name || 'SEPA').slice(0, maxBaseLen);
+  return `${base}${suffix}`;
+}
+
 /** Prepare an XML download from explicitly linked SEPA payments. */
-export function generateSepaFile(db, batch, createdAt = new Date().toISOString()) {
+export function generateSepaFile(db, batch, createdAt = new Date().toISOString(), options = {}) {
+  if (typeof createdAt === 'object' && createdAt !== null) {
+    options = createdAt;
+    createdAt = options.createdAt ?? new Date().toISOString();
+  }
   const journal = read(db, 'account.journal', batch.journal_id);
   const bank = read(db, 'res.partner.bank', journal?.bank_account_id);
   const company = read(db, 'res.company', batch.company_id ?? journal?.company_id);
+  const isReplacement = Boolean(options.replacement || batch.replacement_identifier || (batch.lines ?? []).some((line) => line.cancelled));
+  let id = batch.name;
+  let date = batch.date;
+  if (isReplacement) {
+    const nextSeq = (batch.replacement_sequence ?? 0) + 1;
+    id = options.id ?? options.identifier ?? batch.replacement_identifier ?? formatReplacementIdentifier(batch.name, batch.replacement_sequence || nextSeq);
+    const candidateDate = options.executionDate ?? options.date ?? batch.replacement_date;
+    if (candidateDate) {
+      if (!validDate(candidateDate) || candidateDate < today()) {
+        throw new Error('The replacement execution date must be a valid current or future date');
+      }
+      date = candidateDate;
+    } else if (batch.date && batch.date < today()) {
+      date = today();
+    }
+  }
   const payments = (batch.lines ?? []).filter((line) => !line.cancelled).map((line) => {
     const payment = read(db, 'account.payment', line.payment_id);
     if (!payment) throw new Error('Each batch line must have a payment');
@@ -241,7 +268,7 @@ export function generateSepaFile(db, batch, createdAt = new Date().toISOString()
     const recipient = read(db, 'res.partner.bank', payment.partner_bank_id);
     return { id: String(payment.id), amount: payment.amount, name: read(db, 'res.partner', payment.partner_id)?.name, iban: recipient?.account_number, memo: payment.memo };
   });
-  return { name: `sepa-${batch.id}.xml`, content: buildSepaXml({ id: batch.name, createdAt, date: batch.date, debtor: { name: company?.name, iban: bank?.account_number, bic: bank?.bank_bic }, payments }) };
+  return { name: `sepa-${batch.id}.xml`, content: buildSepaXml({ id, createdAt, date, debtor: { name: company?.name, iban: bank?.account_number, bic: bank?.bank_bic }, payments }) };
 }
 
 function validBatchLinesTransition(beforeLines = [], afterLines = []) {
@@ -262,6 +289,9 @@ function sepaBatchGuard(db, before, after) {
     if (before.sepa_file !== after.sepa_file) return 'The SEPA file cannot be changed after validation';
     if (['state', 'name', 'batch_type', 'journal_id', 'company_id', 'date'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return 'A validated SEPA batch cannot be changed';
     if (!validBatchLinesTransition(before.lines, after.lines)) return 'A validated SEPA batch cannot be changed';
+    if (after.replacement_date && (!validDate(after.replacement_date) || after.replacement_date < today())) {
+      return 'The replacement execution date must be a valid current or future date';
+    }
   }
   if (after.state !== 'posted' || before?.state === 'posted') return null;
   const sepa = (after.lines ?? []).some((line) => paymentMethodCode(db, read(db, 'account.payment', line.payment_id)) === 'sepa_ct');
@@ -335,6 +365,10 @@ export const paymentModels = {
         readonly: true,
         compute: (r) => Boolean(r.sepa_file) && !(r.lines ?? []).some((l) => l.cancelled),
       },
+      replacement_identifier: { type: 'char', label: 'Replacement Identifier', readonly: true },
+      replacement_date: { type: 'date', label: 'Replacement Execution Date' },
+      replacement_sequence: { type: 'integer', label: 'Replacement Sequence', readonly: true },
+      replacement_sepa_file: { type: 'text', label: 'Replacement SEPA File', readonly: true },
       batch_type: { type: 'selection', label: 'Batch Type', required: true, options: [['inbound', 'Inbound'], ['outbound', 'Outbound']] },
       date: { type: 'date', label: 'Date' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
@@ -410,6 +444,7 @@ export const paymentModels = {
     form: {
       statusbar: 'status',
       lockedWhen: (r) => r.state === 'posted',
+      unlockedFields: (r) => ((r?.lines ?? []).some((l) => l.cancelled) ? ['replacement_date'] : []),
       buttons: [
         { label: 'Add Open Invoices', when: (r) => r.state === 'draft', run: (db, r) => ({ db: fillOpenInvoices(db, r) }) },
         { label: 'Validate', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postBatch(db, r) }) },
@@ -422,13 +457,44 @@ export const paymentModels = {
         {
           label: 'Generate Replacement SEPA file',
           when: (r) => r.state === 'posted' && Boolean(r.sepa_file) && (r.lines ?? []).some((l) => l.cancelled) && (r.lines ?? []).some((l) => !l.cancelled),
-          run: (db, r) => ({ db, download: generateSepaFile(db, r) }),
+          run: (db, r, options = {}) => {
+            const nextSeq = (r.replacement_sequence ?? 0) + 1;
+            const replacementIdentifier = options.id ?? options.identifier ?? formatReplacementIdentifier(r.name, nextSeq);
+            let executionDate = options.executionDate ?? options.date ?? r.replacement_date;
+            if (executionDate) {
+              if (!validDate(executionDate) || executionDate < today()) {
+                throw new Error('The replacement execution date must be a valid current or future date');
+              }
+            } else {
+              executionDate = r.date && r.date >= today() ? r.date : today();
+            }
+            const file = generateSepaFile(db, {
+              ...r,
+              replacement_identifier: replacementIdentifier,
+              replacement_date: executionDate,
+            }, options.createdAt ?? new Date().toISOString(), {
+              replacement: true,
+              id: replacementIdentifier,
+              executionDate,
+            });
+            const nextDb = write(db, 'account.batch.payment', r.id, {
+              replacement_identifier: replacementIdentifier,
+              replacement_sequence: nextSeq,
+              replacement_date: executionDate,
+              replacement_sepa_file: file.content,
+            });
+            return { db: nextDb, download: file };
+          },
         },
         { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound' && !r.sepa_file, run: (db, r) => ({ db: printBatchChecks(db, r), go: '#/print/account.batch.payment/' + r.id }) },
         { label: 'Print Deposit Slip', when: (r) => r.state === 'posted' && r.batch_type === 'inbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],
       title: 'name',
-      groups: [['batch_type'], ['date', 'journal_id'], ['currency_id', 'amount_total', 'currency_warning']],
+      groups: (r) => [
+        ['batch_type'],
+        ['date', 'journal_id', ...((r?.lines ?? []).some((l) => l.cancelled) ? ['replacement_date'] : [])],
+        ['currency_id', 'amount_total', 'currency_warning'],
+      ],
       tabs: [{ label: 'Payment Lines', fields: ['lines'] }],
       chatter: true,
     },

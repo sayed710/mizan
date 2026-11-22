@@ -452,3 +452,209 @@ test('EPC409-09 non-EEA countries AL, MD, ME, MK, RS are valid SEPA debtor and r
     assert.match(xmlDebtor, new RegExp(iban));
   }
 });
+
+test('replacement files receive distinct persisted MsgId and PmtInfId within 35 chars while preserving original file for audit', async () => {
+  const { seed } = await import('./seed.js');
+  const { read } = await import('./orm.js');
+  const { postBatch, paymentModels, formatReplacementIdentifier } = await import('./models/payments.js');
+  const { reversePayment } = await import('./models/pay.js');
+  let db = await addJournalMethods(seed());
+  const bank = db.records['account.journal'].find((j) => j.type === 'bank');
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const sepa = db.records['account.payment.method'].find((m) => m.code === 'sepa_ct');
+  const method = db.records['account.payment.method.line'].find((l) => l.journal_id === bank.id && l.payment_method_id === sepa.id);
+  const partner1 = db.records['res.partner'][0];
+  const partner2 = db.records['res.partner'][1];
+  const partner3 = db.records['res.partner'][2] ?? partner1;
+
+  // 35-character batch reference: maximum permitted by SEPA EPC rules
+  const longBatchName = 'SEPA-BATCH-20261122-000000000000001';
+  assert.equal(longBatchName.length, 35);
+
+  const batch = {
+    id: 300,
+    name: longBatchName,
+    state: 'draft',
+    batch_type: 'outbound',
+    date: '2026-11-20',
+    company_id: 1,
+    journal_id: bank.id,
+    lines: [
+      { payment_id: 301, amount: 20 },
+      { payment_id: 302, amount: 30 },
+      { payment_id: 303, amount: 40 },
+    ],
+  };
+
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, currency_id: eur.id } : c)),
+      'account.journal': db.records['account.journal'].map((j) => (j.id === bank.id ? { ...j, bank_account_id: 300, currency_id: eur.id } : j)),
+      'res.partner.bank': [
+        ...(db.records['res.partner.bank'] ?? []),
+        { id: 300, account_number: 'DE89370400440532013000', bank_bic: 'COBADEFFXXX' },
+        { id: 301, account_number: 'FR7630006000011234567890189', partner_id: partner1.id, allow_out_payment: true },
+        { id: 302, account_number: 'IT60X0542811101000000123456', partner_id: partner2.id, allow_out_payment: true },
+        { id: 303, account_number: 'ES9121000418450200051332', partner_id: partner3.id, allow_out_payment: true },
+      ],
+      'account.move': [
+        ...db.records['account.move'],
+        { id: 301, name: 'ENTRY/301', state: 'posted', move_type: 'entry', date: '2026-11-20', line_ids: [{ id: 3011, account_id: bank.default_account_id ?? 1, debit: 0, credit: 20 }, { id: 3012, account_id: 2, debit: 20, credit: 0 }], company_id: 1 },
+        { id: 302, name: 'ENTRY/302', state: 'posted', move_type: 'entry', date: '2026-11-20', line_ids: [{ id: 3021, account_id: bank.default_account_id ?? 1, debit: 0, credit: 30 }, { id: 3022, account_id: 2, debit: 30, credit: 0 }], company_id: 1 },
+        { id: 303, name: 'ENTRY/303', state: 'posted', move_type: 'entry', date: '2026-11-20', line_ids: [{ id: 3031, account_id: bank.default_account_id ?? 1, debit: 0, credit: 40 }, { id: 3032, account_id: 2, debit: 40, credit: 0 }], company_id: 1 },
+      ],
+      'account.payment': [
+        ...(db.records['account.payment'] ?? []),
+        { id: 301, name: 'PAY/301', state: 'posted', move_id: 301, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner1.id, partner_bank_id: 301, payment_method_line_id: method.id, amount: 20, currency_id: eur.id, memo: 'Bill 1', date: '2026-11-20' },
+        { id: 302, name: 'PAY/302', state: 'posted', move_id: 302, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner2.id, partner_bank_id: 302, payment_method_line_id: method.id, amount: 30, currency_id: eur.id, memo: 'Bill 2', date: '2026-11-20' },
+        { id: 303, name: 'PAY/303', state: 'posted', move_id: 303, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner3.id, partner_bank_id: 303, payment_method_line_id: method.id, amount: 40, currency_id: eur.id, memo: 'Bill 3', date: '2026-11-20' },
+      ],
+      'account.batch.payment': [batch],
+    },
+    seq: { ...db.seq, 'account.batch.payment': 300, 'account.payment': 303, 'account.move': 303, 'res.partner.bank': 303 },
+  };
+
+  const postedDb = postBatch(db, batch);
+  const postedBatch = read(postedDb, 'account.batch.payment', 300);
+  assert.equal(postedBatch.state, 'posted');
+
+  // Original file uses the original batch name as both MsgId and PmtInfId
+  assert.match(postedBatch.sepa_file, new RegExp(`<MsgId>${longBatchName}</MsgId>`));
+  assert.match(postedBatch.sepa_file, new RegExp(`<PmtInfId>${longBatchName}</PmtInfId>`));
+
+  // Cancel payment 301
+  const reversedDb = reversePayment(postedDb, read(postedDb, 'account.payment', 301), '2026-11-21');
+  const batchAfterCancel1 = read(reversedDb, 'account.batch.payment', 300);
+
+  const replaceBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate Replacement SEPA file');
+  assert.equal(replaceBtn.when(batchAfterCancel1), true);
+
+  // Generate 1st replacement
+  const replacement1 = replaceBtn.run(reversedDb, batchAfterCancel1);
+  assert.ok(replacement1.download);
+
+  // Replacement identifier is distinct from original and fits within 35 characters
+  const rep1Id = formatReplacementIdentifier(longBatchName, 1);
+  assert.ok(rep1Id.length <= 35, `Replacement 1 identifier length ${rep1Id.length} must be <= 35`);
+  assert.notEqual(rep1Id, longBatchName, 'Replacement identifier must differ from original batch name');
+  assert.match(replacement1.download.content, new RegExp(`<MsgId>${rep1Id}</MsgId>`));
+  assert.match(replacement1.download.content, new RegExp(`<PmtInfId>${rep1Id}</PmtInfId>`));
+
+  // The original file and original batch name remain strictly preserved for audit
+  const persistedBatch1 = read(replacement1.db, 'account.batch.payment', 300);
+  assert.equal(persistedBatch1.name, longBatchName, 'Batch reference stays unchanged');
+  assert.equal(persistedBatch1.sepa_file, postedBatch.sepa_file, 'Original SEPA file is untouched');
+  assert.match(persistedBatch1.sepa_file, new RegExp(`<MsgId>${longBatchName}</MsgId>`), 'Original file MsgId unchanged');
+  assert.equal(persistedBatch1.replacement_identifier, rep1Id, 'Replacement identifier is persisted');
+  assert.equal(persistedBatch1.replacement_sequence, 1);
+
+  // Cancel payment 302 and generate 2nd replacement
+  const reversedDb2 = reversePayment(replacement1.db, read(replacement1.db, 'account.payment', 302), '2026-11-22');
+  const batchAfterCancel2 = read(reversedDb2, 'account.batch.payment', 300);
+  const replacement2 = replaceBtn.run(reversedDb2, batchAfterCancel2);
+
+  const rep2Id = formatReplacementIdentifier(longBatchName, 2);
+  assert.ok(rep2Id.length <= 35, `Replacement 2 identifier length ${rep2Id.length} must be <= 35`);
+  assert.notEqual(rep2Id, rep1Id, 'Second replacement gets a distinct identifier');
+  assert.match(replacement2.download.content, new RegExp(`<MsgId>${rep2Id}</MsgId>`));
+  assert.match(replacement2.download.content, new RegExp(`<PmtInfId>${rep2Id}</PmtInfId>`));
+
+  const persistedBatch2 = read(replacement2.db, 'account.batch.payment', 300);
+  assert.equal(persistedBatch2.replacement_identifier, rep2Id, 'Latest replacement identifier is persisted');
+  assert.equal(persistedBatch2.replacement_sequence, 2);
+  assert.equal(persistedBatch2.sepa_file, postedBatch.sepa_file, 'Original audit file remains preserved');
+});
+
+test('cancellation well after original execution date produces an eligible current or future date without modifying batch date', async () => {
+  const { seed } = await import('./seed.js');
+  const { read } = await import('./orm.js');
+  const { postBatch, paymentModels } = await import('./models/payments.js');
+  const { reversePayment } = await import('./models/pay.js');
+  const { addDays, today } = await import('./models/common.js');
+  let db = await addJournalMethods(seed());
+  const bank = db.records['account.journal'].find((j) => j.type === 'bank');
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const sepa = db.records['account.payment.method'].find((m) => m.code === 'sepa_ct');
+  const method = db.records['account.payment.method.line'].find((l) => l.journal_id === bank.id && l.payment_method_id === sepa.id);
+  const partner1 = db.records['res.partner'][0];
+  const partner2 = db.records['res.partner'][1];
+
+  // Batch posted 60 days before today
+  const historicalDate = addDays(today(), -60);
+  const batch = {
+    id: 400,
+    name: 'BATCH-HISTORICAL',
+    state: 'draft',
+    batch_type: 'outbound',
+    date: historicalDate,
+    company_id: 1,
+    journal_id: bank.id,
+    lines: [
+      { payment_id: 401, amount: 50 },
+      { payment_id: 402, amount: 75 },
+    ],
+  };
+
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, currency_id: eur.id } : c)),
+      'account.journal': db.records['account.journal'].map((j) => (j.id === bank.id ? { ...j, bank_account_id: 400, currency_id: eur.id } : j)),
+      'res.partner.bank': [
+        ...(db.records['res.partner.bank'] ?? []),
+        { id: 400, account_number: 'DE89370400440532013000', bank_bic: 'COBADEFFXXX' },
+        { id: 401, account_number: 'FR7630006000011234567890189', partner_id: partner1.id, allow_out_payment: true },
+        { id: 402, account_number: 'IT60X0542811101000000123456', partner_id: partner2.id, allow_out_payment: true },
+      ],
+      'account.move': [
+        ...db.records['account.move'],
+        { id: 401, name: 'ENTRY/401', state: 'posted', move_type: 'entry', date: historicalDate, line_ids: [{ id: 4011, account_id: bank.default_account_id ?? 1, debit: 0, credit: 50 }, { id: 4012, account_id: 2, debit: 50, credit: 0 }], company_id: 1 },
+        { id: 402, name: 'ENTRY/402', state: 'posted', move_type: 'entry', date: historicalDate, line_ids: [{ id: 4021, account_id: bank.default_account_id ?? 1, debit: 0, credit: 75 }, { id: 4022, account_id: 2, debit: 75, credit: 0 }], company_id: 1 },
+      ],
+      'account.payment': [
+        ...(db.records['account.payment'] ?? []),
+        { id: 401, name: 'PAY/401', state: 'posted', move_id: 401, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner1.id, partner_bank_id: 401, payment_method_line_id: method.id, amount: 50, currency_id: eur.id, memo: 'Bill 1', date: historicalDate },
+        { id: 402, name: 'PAY/402', state: 'posted', move_id: 402, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner2.id, partner_bank_id: 402, payment_method_line_id: method.id, amount: 75, currency_id: eur.id, memo: 'Bill 2', date: historicalDate },
+      ],
+      'account.batch.payment': [batch],
+    },
+    seq: { ...db.seq, 'account.batch.payment': 400, 'account.payment': 402, 'account.move': 402, 'res.partner.bank': 402 },
+  };
+
+  const postedDb = postBatch(db, batch);
+  const postedBatch = read(postedDb, 'account.batch.payment', 400);
+  assert.equal(postedBatch.date, historicalDate);
+  assert.match(postedBatch.sepa_file, new RegExp(`<ReqdExctnDt>${historicalDate}</ReqdExctnDt>`));
+
+  // Cancellation occurs well after the original execution date (today)
+  const reversedDb = reversePayment(postedDb, read(postedDb, 'account.payment', 401), today());
+  const afterCancel = read(reversedDb, 'account.batch.payment', 400);
+
+  const replaceBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate Replacement SEPA file');
+
+  // 1. Without supplying a date, an eligible current/future date (today) is chosen automatically
+  const autoReplacement = replaceBtn.run(reversedDb, afterCancel);
+  assert.match(autoReplacement.download.content, new RegExp(`<ReqdExctnDt>${today()}</ReqdExctnDt>`));
+  assert.ok(!autoReplacement.download.content.includes(`<ReqdExctnDt>${historicalDate}</ReqdExctnDt>`), 'Old execution date is not retained');
+
+  // The original batch record's date and original file remain unchanged for audit
+  const persistedAuto = read(autoReplacement.db, 'account.batch.payment', 400);
+  assert.equal(persistedAuto.date, historicalDate, 'Posted batch date must not be changed');
+  assert.equal(persistedAuto.sepa_file, postedBatch.sepa_file, 'Original stored file must not be changed');
+  assert.match(persistedAuto.sepa_file, new RegExp(`<ReqdExctnDt>${historicalDate}</ReqdExctnDt>`));
+
+  // 2. Supplying a valid future date uses that date
+  const futureDate = addDays(today(), 5);
+  const explicitReplacement = replaceBtn.run(reversedDb, afterCancel, { executionDate: futureDate });
+  assert.match(explicitReplacement.download.content, new RegExp(`<ReqdExctnDt>${futureDate}</ReqdExctnDt>`));
+
+  // 3. Supplying an invalid past execution date throws
+  const pastDate = addDays(today(), -5);
+  assert.throws(
+    () => replaceBtn.run(reversedDb, afterCancel, { executionDate: pastDate }),
+    /valid current or future date/i,
+  );
+});

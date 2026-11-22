@@ -3584,6 +3584,13 @@ const ar = {
   'SEPA File Eligible': 'ملف التحويل الأوروبي صالح',
   'Generate Replacement SEPA file': 'إنشاء ملف تحويل أوروبي بديل',
   'The original SEPA file is ineligible for download because one or more transfers were cancelled': 'ملف التحويل الأوروبي الأصلي غير صالح للتنزيل بسبب إلغاء تحويل أو أكثر',
+  'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
+  'The replacement execution date must be a valid current or future date': 'يجب أن يكون تاريخ التنفيذ البديل تاريخًا صالحًا حاليًا أو مستقبليًا',
+  'Replacement Identifier': 'المعرف البديل',
+  'Replacement Execution Date': 'تاريخ التنفيذ البديل',
+  'Replacement Sequence': 'تسلسل الاستبدال',
+  'Replacement SEPA File': 'ملف التحويل الأوروبي البديل',
+  'Payment information identifier cannot exceed 35 characters': 'لا يمكن أن يتجاوز معرف معلومات الدفع 35 حرفًا',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
