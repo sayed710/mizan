@@ -12,6 +12,7 @@ import { monthFilters, parseAmount, today } from '../models/common.js';
 import { money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
+import { downloadXlsx } from '../xlsx.js';
 
 const OPTIONAL_STORAGE_KEY = 'mizan-report-cols:journalItems';
 
@@ -316,14 +317,14 @@ export function JournalItems({ leaf = {} } = {}) {
   const selectedKeys = new Set(selected.map(keyOf));
   const allSelected = selectableRows.length > 0 && selectableRows.every((line) => selectedKeys.has(keyOf(line)));
 
-  const renderCell = (line, col) => {
+  const cellValue = (line, col) => {
     switch (col.key) {
       case 'invoice_date': return line.invoice_date ?? '';
       case 'date': return line.date ?? '';
       case 'company_id': return line.company;
       case 'journal_id': return line.journal;
-      case 'move_id': return <a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a>;
-      case 'status': return line.status ? <span className={`badge badge-${stateField.badge[line.move_state]}`}>{t(line.status)}</span> : '';
+      case 'move_id': return line.move_name ?? '';
+      case 'status': return line.status ? t(line.status) : '';
       case 'account_id': return line.account;
       case 'partner_id': return line.partner;
       case 'ref': return line.ref ?? '';
@@ -331,21 +332,52 @@ export function JournalItems({ leaf = {} } = {}) {
       case 'name': return line.name ?? '';
       case 'analytic_distribution': return line.analytic_distribution_label;
       case 'taxes': return line.taxes;
-      case 'amount_currency': return line._isForeign && line.amount_currency != null ? money(line.amount_currency, null, line._currency) : '';
+      case 'amount_currency': return line._isForeign && line.amount_currency != null ? line.amount_currency : '';
       case 'currency_id': return line._isForeign ? (line._currency?.name ?? '') : '';
-      case 'debit': return money(line.debit || 0, null, line._companyCurrency);
-      case 'credit': return money(line.credit || 0, null, line._companyCurrency);
+      case 'debit': return Number(line.debit) || 0;
+      case 'credit': return Number(line.credit) || 0;
       case 'tax_grids': return line.tax_grids;
       case 'discount_date': return line.discount_date ?? '';
-      case 'discount_amount_currency': return line.discount_amount_currency != null ? money(line.discount_amount_currency, null, line._isForeign ? line._currency : line._companyCurrency) : '';
+      case 'discount_amount_currency': return line.discount_amount_currency ?? '';
       case 'tax_line_id': return line.originator_tax;
       case 'date_maturity': return line.date_maturity ?? '';
-      case 'balance': return money(line.balance, null, line._companyCurrency);
+      case 'balance': return line.balance;
       case 'matching': return line.matchingText;
-      case 'amount_residual': return line.amount_residual != null ? money(line.amount_residual, null, line._companyCurrency) : '';
-      case 'amount_residual_currency': return line._isForeign && line.amount_residual_currency != null ? money(line.amount_residual_currency, null, line._currency) : '';
+      case 'amount_residual': return line.amount_residual ?? '';
+      case 'amount_residual_currency': return line._isForeign && line.amount_residual_currency != null ? line.amount_residual_currency : '';
       default: return '';
     }
+  };
+
+  const renderCell = (line, col) => {
+    switch (col.key) {
+      case 'move_id': return <a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a>;
+      case 'status': return line.status ? <span className={`badge badge-${stateField.badge[line.move_state]}`}>{t(line.status)}</span> : '';
+      case 'amount_currency': return line._isForeign && line.amount_currency != null ? money(line.amount_currency, null, line._currency) : '';
+      case 'debit': return money(line.debit || 0, null, line._companyCurrency);
+      case 'credit': return money(line.credit || 0, null, line._companyCurrency);
+      case 'discount_amount_currency': return line.discount_amount_currency != null ? money(line.discount_amount_currency, null, line._isForeign ? line._currency : line._companyCurrency) : '';
+      case 'balance': return money(line.balance, null, line._companyCurrency);
+      case 'amount_residual': return line.amount_residual != null ? money(line.amount_residual, null, line._companyCurrency) : '';
+      case 'amount_residual_currency': return line._isForeign && line.amount_residual_currency != null ? money(line.amount_residual_currency, null, line._currency) : '';
+      default: return cellValue(line, col);
+    }
+  };
+
+  const exportXlsx = () => {
+    const displayedRows = [...groups.values()].flat();
+    const baseName = mode === 'unreconciled' ? 'unreconciled' : mode === 'draft' ? 'draft_entries' : 'journal_items';
+    downloadXlsx(
+      `${baseName}.xlsx`,
+      [
+        visibleCols.map((col) => t(col.label)),
+        ...displayedRows.map((line) => visibleCols.map((col) => cellValue(line, col))),
+      ],
+      {
+        sheetName: t(title),
+        columnTypes: visibleCols.map((col) => (col.numeric ? 'number' : 'text')),
+      },
+    );
   };
 
   return <main className="action report-page">
@@ -357,6 +389,8 @@ export function JournalItems({ leaf = {} } = {}) {
       <label>{t('Group By')} <select aria-label={t('Group By')} value={group} onChange={(e) => setGroup(e.target.value)}>
         <option value="">{t('None')}</option>{GROUP_OPTIONS.map((opt) => <option key={opt.key} value={opt.key}>{t(opt.label)}</option>)}
       </select></label>
+      <span className="spacer" />
+      <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
     </div>
     <div className="control-panel" role="group" aria-label={t('Filters')}>
       {ITEM_FILTER_GROUPS.map((grp, gi) => <Fragment key={gi}>
