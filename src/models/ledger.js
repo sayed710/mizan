@@ -945,15 +945,54 @@ export function statementPaymentIds(db, line) {
   return [...new Set([...allocated, ...current].filter(Boolean))];
 }
 
+/** Resolve the suspense account ID from an already booked bank entry, falling back to current journal/company configuration. */
+export function bookedBankSuspenseAccountId(db, line, move = null) {
+  if (!line?.bank_move_id) return null;
+  const bankEntry = move ?? read(db, 'account.move', line.bank_move_id);
+  const company = line.company_id ?? 1;
+  const journalId = line.journal_id ?? bankEntry?.journal_id ?? paymentJournal(db, null, company).id;
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  const liquidity = journal?.default_account_id ?? paymentJournal(db, journalId, company)?.accountId;
+  const lines = bankEntry?.line_ids ?? [];
+  const nonLiquidity = lines.filter((l) => l.account_id !== liquidity);
+  if (nonLiquidity.length === 1) {
+    const acc = read(db, 'account.account', nonLiquidity[0].account_id);
+    if (!acc || !['asset_receivable', 'liability_payable'].includes(acc.account_type)) {
+      return nonLiquidity[0].account_id;
+    }
+  }
+  const configured = journal?.suspense_account_id && journal.suspense_account_id !== liquidity
+    ? journal.suspense_account_id
+    : read(db, 'res.company', company)?.account_journal_suspense_account_id;
+  if (configured && lines.some((l) => l.account_id === configured)) return configured;
+  const candidate = nonLiquidity.find((l) => {
+    const acc = read(db, 'account.account', l.account_id);
+    return acc && !['asset_receivable', 'liability_payable'].includes(acc.account_type);
+  });
+  if (candidate) return candidate.account_id;
+  return configured ?? nonLiquidity[0]?.account_id ?? null;
+}
+
+/** Whether any statement line booked to a suspense account remains unreconciled (to_check with a bank_move_id). */
+export function unreconciledSuspenseTransactionsExist(db, { journalId = null, companyId = null } = {}) {
+  const lines = db.records['account.bank.statement.line'] ?? [];
+  return lines.some((line) => {
+    if (line.state !== 'to_check' || !line.bank_move_id) return false;
+    const company = line.company_id ?? 1;
+    if (journalId != null && line.journal_id !== journalId) return false;
+    if (companyId != null) {
+      if (company !== companyId) return false;
+      const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
+      if (journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id) return false;
+    }
+    return true;
+  });
+}
+
 /** Whether a statement line's bank_move_id was booked through its journal's suspense account (not a direct-payment bank entry). */
 export function isBookedToSuspense(db, line) {
   if (!line?.bank_move_id) return false;
-  const company = line.company_id ?? 1;
-  const journalId = line.journal_id ?? paymentJournal(db, null, company).id;
-  const journal = read(db, 'account.journal', journalId);
-  const suspenseId = journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
-    ? journal.suspense_account_id
-    : read(db, 'res.company', line.company_id ?? journal?.company_id ?? 1)?.account_journal_suspense_account_id;
+  const suspenseId = bookedBankSuspenseAccountId(db, line);
   if (!suspenseId) return false;
   const bankEntry = read(db, 'account.move', line.bank_move_id);
   return (bankEntry?.line_ids ?? []).some((l) => l.account_id === suspenseId);

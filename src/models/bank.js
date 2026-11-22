@@ -1,7 +1,7 @@
 // Bank reconciliation: statement lines matched to open invoices/bills, or booked directly to an account.
 import { read, search, write } from '../orm.js';
 import { monthFilters, shiftMonth, today } from './common.js';
-import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
+import { bookedBankSuspenseAccountId, bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { appendDocumentSettlement, residual, settleWriteoff } from './accounting.js';
 import { settlementCompanyAmount } from './settlement.js';
@@ -175,8 +175,9 @@ export function reconcileWith(db, line, moveId) {
     bankMoveId = bookedBank.bankMoveId;
   }
   const bankMove = read(current, 'account.move', bankMoveId);
-  const { db: suspDb, id: suspenseId } = ensureBankSuspense(current, company, line.journal_id);
+  const { db: suspDb, id: sId } = ensureBankSuspense(current, company, line.journal_id);
   current = suspDb;
+  const suspenseId = bookedBankSuspenseAccountId(current, line, bankMove) ?? sId;
   const receivableAccount = invoiceCounterpartAccount(current, move);
   const incoming = line.amount > 0;
   const sale = inboundTypes.includes(move.move_type);
@@ -251,7 +252,7 @@ const batchPaymentCompany = (db, batch) => {
   return (batch.company_id ?? 1) === common ? common : null;
 };
 
-export { bookedStatementAmount, isPaymentMatched, statementCompanyAmount } from './ledger.js';
+export { bookedBankSuspenseAccountId, bookedStatementAmount, isPaymentMatched, statementCompanyAmount, unreconciledSuspenseTransactionsExist } from './ledger.js';
 
 /**
  * Resolve the outstanding receipts or payments account ID of a payment, or null when booked directly to liquidity.
@@ -577,8 +578,9 @@ export function bookToAccount(db, line, opts = {}) {
     bankMoveId = bookedBank.bankMoveId;
   }
   const bankMove = read(current, 'account.move', bankMoveId);
-  const { db: suspDb, id: suspenseId } = ensureBankSuspense(current, line.company_id ?? 1, line.journal_id);
+  const { db: suspDb, id: sId } = ensureBankSuspense(current, line.company_id ?? 1, line.journal_id);
   current = suspDb;
+  const suspenseId = bookedBankSuspenseAccountId(current, line, bankMove) ?? sId;
   const currency = read(current, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(current, line.company_id)?.id;
   const foreignValue = foreign
@@ -688,11 +690,6 @@ function unreconcileError(db, before, after, ctx = null) {
     if (after.bank_move_id || after.open_amount != null) {
       return 'Unreconciliation requires reversing entries and clearing the bank links';
     }
-    const directMoveIds = new Set(linkedPayments.map((p) => p.move_id).filter(Boolean));
-    if (bankId && !directMoveIds.has(bankId)) {
-      const mirrors = (db.records['account.move'] ?? []).filter((m) => m.state === 'posted' && m.reversed_entry_id === bankId);
-      if (mirrors.length !== 1) return 'Unreconciliation requires linked reversing entries';
-    }
     for (const pid of before.payment_ids ?? (before.payment_id ? [before.payment_id] : [])) {
       if (read(db, 'account.payment', pid)?.state !== 'posted') return 'The matched payment must remain posted';
     }
@@ -757,10 +754,6 @@ export function unreconcile(db, line, reversalDate = null, ctx = null) {
   const linkedPayments = statementPaymentIds(db, target).map((id) => read(db, 'account.payment', id));
   const isDirect = linkedPayments.length > 0 && linkedPayments.every((p) => p && !paymentOutstandingAccountId(db, p));
   if (isDirect && linkedPayments.some((payment) => payment?.move_id === bankId)) {
-    const directMoveIds = new Set(linkedPayments.map((p) => p.move_id).filter(Boolean));
-    if (bankId && !directMoveIds.has(bankId) && !(current.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === bankId)) {
-      current = reverseEntry(current, read(current, 'account.move', bankId), date).db;
-    }
     current = write(current, 'account.bank.statement.line', target.id, {
       state: 'to_check',
       move_id: null,
@@ -887,7 +880,9 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
   }
   if (previousEntry && (addedPayments.length || addedInvoices.length) && addedBankAllocations.every((allocation) => allocation.invoice_id || (allocation.payment_ids ?? []).length)) {
     const companyRecord = read(db, 'res.company', company);
-    const allowed = new Set([bankAccount, ensureBankSuspense(db, company, after.journal_id).id, after.writeoff_account_id,
+    const bookedSuspense = bookedBankSuspenseAccountId(db, after, previousEntry);
+    const allowed = new Set([bankAccount, ensureBankSuspense(db, company, after.journal_id).id,
+      ...(bookedSuspense ? [bookedSuspense] : []), after.writeoff_account_id,
       companyRecord?.income_currency_exchange_account_id, companyRecord?.expense_currency_exchange_account_id,
       ...addedPayments.map((payment) => paymentOutstandingAccountId(db, payment)),
       ...addedInvoices.filter(Boolean).map((invoice) => invoiceCounterpartAccount(db, invoice))]);
@@ -1010,7 +1005,8 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
           incoming, currency, foreignCurrency: foreign ? currency.id : null, companyValue: requested, balance: foreignValue,
           date: after.date, partner_id: after.partner_id ?? null, name: after.payment_ref });
       });
-      const allowed = new Set([bankAccount, ensureBankSuspense(db, company, after.journal_id).id]);
+      const bookedSuspense = bookedBankSuspenseAccountId(db, after, priorEntry);
+      const allowed = new Set([bankAccount, ensureBankSuspense(db, company, after.journal_id).id, ...(bookedSuspense ? [bookedSuspense] : [])]);
       const totals = (entry) => {
         const result = new Map();
         for (const item of entry.line_ids ?? []) {
@@ -1147,8 +1143,9 @@ function untouchedBankEntry(db, line) {
   if (!line?.bank_move_id || line.state !== 'to_check' || (line.allocations ?? []).length || line.move_id) return false;
   const move = read(db, 'account.move', line.bank_move_id);
   const journal = read(db, 'account.journal', line.journal_id);
-  const suspense = journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
-    ? journal.suspense_account_id : read(db, 'res.company', line.company_id ?? 1)?.account_journal_suspense_account_id;
+  const suspense = bookedBankSuspenseAccountId(db, line, move)
+    ?? (journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
+      ? journal.suspense_account_id : read(db, 'res.company', line.company_id ?? 1)?.account_journal_suspense_account_id);
   if (!move || move.state !== 'posted' || move.inalterable_hash || move.journal_id !== line.journal_id || !suspense) return false;
   const lines = move.line_ids ?? [];
   const bank = lines.filter((item) => item.account_id === journal.default_account_id);
@@ -1302,9 +1299,10 @@ function lineGuard(db, before, after, ctx = null) {
       return 'The bank entry is already linked to another transaction';
     }
     const move = read(db, 'account.move', after.bank_move_id);
-    const suspenseId = journal.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
-      ? journal.suspense_account_id
-      : read(db, 'res.company', company)?.account_journal_suspense_account_id;
+    const suspenseId = bookedBankSuspenseAccountId(db, after, move)
+      ?? (journal.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
+        ? journal.suspense_account_id
+        : read(db, 'res.company', company)?.account_journal_suspense_account_id);
     const lines = move?.line_ids ?? [];
     const bank = lines.filter((item) => item.account_id === journal.default_account_id);
     const suspense = lines.filter((item) => item.account_id === suspenseId);

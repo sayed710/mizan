@@ -1,6 +1,6 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
-import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
+import { bookedBankSuspenseAccountId, ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { writeBankStatementMove } from './finance.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
@@ -437,8 +437,8 @@ function writeOff(db, rule, line) {
     }
     const suspense = ensureBankSuspense(current, company, line.journal_id);
     current = suspense.db;
-    const suspenseId = suspense.id;
     const bankMove = read(current, 'account.move', bankMoveId);
+    const suspenseId = bookedBankSuspenseAccountId(current, line, bankMove) ?? suspense.id;
     const bankLines = (bankMove?.line_ids ?? []).filter((l) => l.account_id !== suspenseId);
     const externalAllocated = (line.allocations ?? []).filter((a) => a.payment_move_id && a.payment_move_id !== bankMoveId).reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
     const suspLine = externalAllocated > 0 ? (incoming

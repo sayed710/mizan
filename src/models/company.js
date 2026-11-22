@@ -11,7 +11,7 @@ import { returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
 import { taxUnitCompatibilityError } from './accounting.js';
-import { fiscalYearStart } from './ledger.js';
+import { fiscalYearStart, unreconciledSuspenseTransactionsExist } from './ledger.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -342,6 +342,11 @@ function companyGuard(db, before, r, ctx) {
     && !(field === 'tax_lock_date' && returnLockChange(db, r.id, before?.tax_lock_date || null, r.tax_lock_date || null))
   ))) {
     return 'Only administrators can change lock dates or the audit trail or other company accounting settings';
+  }
+  if (before?.account_journal_suspense_account_id && r.account_journal_suspense_account_id !== before.account_journal_suspense_account_id) {
+    if (unreconciledSuspenseTransactionsExist(db, { companyId: r.id })) {
+      return 'Cannot change the suspense account while bank transactions remain unreconciled';
+    }
   }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';

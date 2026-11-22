@@ -1780,9 +1780,18 @@ function migrateStatementLinesBankSuspense(db) {
   for (const line of lines) {
     if (line.state === 'to_check' && !line.bank_move_id && line.journal_id && Number(line.amount) !== 0) {
       const journal = read(currentDb, 'account.journal', line.journal_id);
-      if (!journal?.default_account_id) throw new Error(`Cannot book bank statement line ${line.id}: journal or liquidity account is missing`);
-      const company = line.company_id ?? journal.company_id ?? 1;
+      const company = line.company_id ?? journal?.company_id ?? 1;
       const normalizedLine = { ...line, company_id: company };
+      if (!journal?.default_account_id) {
+        const openAmount = line.open_amount ?? statementCompanyAmount(currentDb, normalizedLine);
+        const updates = {};
+        if (line.company_id == null) updates.company_id = company;
+        if (line.open_amount == null) updates.open_amount = openAmount;
+        if (Object.keys(updates).length > 0) {
+          currentDb = write(currentDb, 'account.bank.statement.line', line.id, updates);
+        }
+        continue;
+      }
       try {
         if (line.company_id == null) currentDb = write(currentDb, 'account.bank.statement.line', line.id, { company_id: company });
         const openAmount = statementCompanyAmount(currentDb, normalizedLine);
