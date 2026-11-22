@@ -313,7 +313,8 @@ export function seed() {
   set('purchase.order', po1, { state: 'purchase', receipt_done: true, order_line: po1rec.order_line.map((l) => ({ ...l, qty_delivered: l.qty })) });
   const bill = add('account.move', {
     move_type: 'in_invoice', partner_id: 7, purchase_id: po1, invoice_origin: po1rec.name,
-    invoice_date: addDays(today(), -10), invoice_date_due: addDays(today(), 20), invoice_line_ids: po1rec.order_line,
+    invoice_date: addDays(today(), -10), invoice_date_due: addDays(today(), 20),
+    invoice_line_ids: po1rec.order_line.map(({ id, purchase_line_key, purchase_method, ...line }) => ({ ...line, purchase_line_id: id })),
   });
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });

@@ -45,12 +45,13 @@ test('deferred future buckets use a calendar year, including leap-day cutoffs', 
 test('Deferrals smart button is visible on linked invoices and bills', () => {
   const db = seed();
   db.records['account.deferral'] = [{ id: 101, source_move_id: 201 }, { id: 102, source_move_id: 202 }];
-  const smart = models['account.move'].form.smart.find((item) => item.label === 'Deferrals');
+  const smart = models['account.move'].form.smart.find((item) => (typeof item.label === 'function' ? item.label({ move_type: 'out_invoice' }) : item.label) === 'Deferrals');
   for (const [id, move_type] of [[201, 'out_invoice'], [202, 'in_invoice']]) {
     const move = { id, move_type };
     assert.equal(smart.when(move, db), true);
     assert.equal(smart.value(db, move), 1);
-    assert.equal(smart.target(move, db), `accounting/deferrals/${id === 201 ? 101 : 102}`);
+    const base = move_type === 'in_invoice' ? 'accounting/deferred-expenses' : 'accounting/deferrals';
+    assert.equal(smart.target(move, db), `${base}/${id === 201 ? 101 : 102}`);
   }
   assert.equal(smart.when({ id: 203, move_type: 'in_invoice' }, db), false);
 });
