@@ -144,6 +144,7 @@ export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
     tax_include: taxPriceInclude(db, tax, companyId),
     tax_cash_basis: tax.tax_exigibility === 'on_payment',
     tax_name: tax.name,
+    invoice_legal_notes: tax.invoice_legal_notes ?? '',
     invoice_repartition_line_ids: invRepart,
     refund_repartition_line_ids: refRepart,
     ...(invoiceLabel ? { tax_invoice_label: invoiceLabel } : {}),
@@ -162,7 +163,19 @@ export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
 };
 
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
-export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', tax_group_id: null, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', invoice_legal_notes: '', tax_group_id: null, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+
+/** Distinct legal notes captured on taxable invoice lines and their tax components. */
+export function invoiceTaxLegalNotes(lines) {
+  const notes = new Set();
+  const collect = (snapshot) => {
+    const note = String(snapshot?.invoice_legal_notes ?? '').trim();
+    if (note) notes.add(note);
+    for (const child of snapshot?.tax_breakdown ?? []) collect(child);
+  };
+  for (const line of lines ?? []) if (!isSectionOrNote(line)) collect(line);
+  return [...notes];
+}
 
 /** All tax IDs carried by a line (scalar tax_id, multi tax_ids, and tax_breakdown). */
 export function lineTaxIds(line) {

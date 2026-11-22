@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read } from './orm.js';
+import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { taxModels, taxSnapshot } from './models/taxes.js';
 import { readFileSync } from 'node:fs';
@@ -32,6 +32,7 @@ test('printed customer invoices show distinct tax legal notes and exclude descri
   const second = create(first.db, 'account.tax', { name: 'Other VAT', amount: 5, type_tax_use: 'sale', invoice_legal_notes: 'Shared legal note' });
   db = second.db;
   const lines = [first.id, second.id].map((id) => ({ product_id: 1, qty: 1, price_unit: 100, ...taxSnapshot(read(db, 'account.tax', id)) }));
+  lines.push({ display_type: 'line_section', name: 'Section', ...taxSnapshot({ id: 900, invoice_legal_notes: 'Display-only note' }) });
   const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_line_ids: lines });
   const host = makeEl('div'); host.ownerDocument = globalThis.document;
   const root = createRoot(host);
@@ -43,6 +44,20 @@ test('printed customer invoices show distinct tax legal notes and exclude descri
     assert.equal(text.split('Shared legal note').length - 1, 1);
     assert.ok(text.includes('Invoice VAT'));
     assert.ok(!text.includes('PRIVATE DESCRIPTION'));
+    assert.ok(!text.includes('Display-only note'));
+    const changed = write(inv.db, 'account.tax', first.id, { invoice_legal_notes: 'Changed note' });
+    const cleared = write(changed, 'account.tax', second.id, { invoice_legal_notes: '' });
+    await React.act(async () => commit(cleared));
+    assert.ok(textOf(host).includes('Shared legal note'));
+    assert.ok(!textOf(host).includes('Changed note'));
   } finally { await React.act(async () => root.unmount()); }
   assert.ok(readFileSync(new URL('./views/PrintDoc.jsx', import.meta.url), 'utf8').includes('invoice_legal_notes'));
+});
+
+test('group tax snapshots retain component legal notes after membership and notes change', () => {
+  const child = { id: 91, amount: 5, invoice_legal_notes: 'Original component note' };
+  const snapshot = taxSnapshot({ id: 92, amount_type: 'group', children_taxes: [child], invoice_legal_notes: 'Group note' });
+  child.invoice_legal_notes = 'Changed component note';
+  assert.equal(snapshot.tax_breakdown[0].invoice_legal_notes, 'Original component note');
+  assert.equal(snapshot.invoice_legal_notes, 'Group note');
 });
