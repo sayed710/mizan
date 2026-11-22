@@ -1,5 +1,7 @@
 // Payment QR codes printed on customer invoices: ZATCA (Saudi e-invoicing TLV) or EPC/SEPA credit transfer.
 import qrcode from 'qrcode-generator';
+import { read } from '../orm.js';
+import { partnerBankBic } from './partnerbank.js';
 
 qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
 
@@ -21,14 +23,16 @@ export function epcPayload({ name, iban, bic = '', amount, reference }) {
 }
 
 /** QR payload for a posted customer invoice per the company setting, or null when off / not applicable. */
-export function invoiceQrPayload(settings, company, move, invoiceCurrency = move.currency_id ? null : company.currency) {
+export function invoiceQrPayload(settings, company, move, invoiceCurrency = move.currency_id ? null : company.currency, db = null) {
   if (move.move_type !== 'out_invoice' || move.state !== 'posted' || !settings?.invoice_qr) return null;
   if (settings.invoice_qr === 'zatca') {
     return zatcaPayload({ seller: company.name, vat: settings.company_vat ?? '', timestamp: `${move.invoice_date}T00:00:00Z`, total: move.amount_total, tax: move.amount_tax });
   }
   // EPC is euro-only and needs at least 0.01 to pay.
   if (invoiceCurrency !== 'EUR' || !(move.amount_residual >= 0.01)) return null;
-  return epcPayload({ name: company.name, iban: settings.company_iban, amount: move.amount_residual, reference: move.payment_reference || move.name });
+  const bankAccount = db && move?.partner_bank_id ? read(db, 'res.partner.bank', move.partner_bank_id) : null;
+  const bic = bankAccount ? partnerBankBic(db, bankAccount) : '';
+  return epcPayload({ name: company.name, iban: settings.company_iban, bic, amount: move.amount_residual, reference: move.payment_reference || move.name });
 }
 
 /** Resolve QR mode and issuer identity from the document company. */

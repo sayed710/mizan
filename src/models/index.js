@@ -88,6 +88,7 @@ import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
 import { isAuditReturn, taxReturnModels } from './taxreturn.js';
 import { auditReportModels } from './auditreport.js';
+import { resBankModels } from './resbank.js';
 import { partnerBankModels } from './partnerbank.js';
 import { calendarModels } from './calendar.js';
 import { declareWorkflowFields } from './workflowFields.js';
@@ -107,7 +108,7 @@ const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys',
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
+export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, resBankModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -361,6 +362,7 @@ const allApps = [
           { key: 'budgets', label: 'Financial Budgets', model: 'account.budget' },
           { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model', listLabels: { match_journal_ids: 'Journals' } },
           { key: 'followup-levels', label: 'Invoice Reminders', model: 'account.followup.level' },
+          { key: 'banks', label: 'Banks', model: 'res.bank' },
           { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
         ] },
                 { label: 'Analytic Accounting', children: [
@@ -413,7 +415,7 @@ const allApps = [
       ] },
     ],
   },
-  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }] },
+  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }, { label: 'Configuration', children: [{ key: 'banks', label: 'Banks', model: 'res.bank' }] }] },
   { id: 'calendar', name: 'Calendar', color: ['#0ea5e9', '#1d4ed8'], menus: [{ key: 'meetings', label: 'Meetings', model: 'calendar.event' }] },
   {
     id: 'project', name: 'Project', color: ['#22c55e', '#15803d'],

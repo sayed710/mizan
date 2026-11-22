@@ -20,7 +20,7 @@ import { ReportPrintView } from './ReportPrintView.jsx';
 function PaymentQr({ db, company, settings, move }) {
   let payload;
   try {
-    payload = invoiceQrPayload(settings, company, move, documentCurrency(db, move)?.name ?? null);
+    payload = invoiceQrPayload(settings, company, move, documentCurrency(db, move)?.name ?? null, db);
   } catch (e) {
     return <p className="muted no-print">{t(e.message)}</p>;
   }

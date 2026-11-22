@@ -3567,6 +3567,10 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Banks': 'البنوك',
+  'BIC/SWIFT must be stored in upper-case': 'يجب حفظ رمز BIC/SWIFT بأحرف كبيرة',
+  'Select an existing bank': 'اختر بنكاً موجوداً',
+  'Select an active bank': 'اختر بنكاً نشطاً',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
