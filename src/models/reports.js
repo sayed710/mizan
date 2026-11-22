@@ -37,7 +37,7 @@ const cashFlowSelectedSources = (sources, analyticAccountIds) => !analyticAccoun
 const itemsBefore = (db, from, company_id, analyticAccountIds, reviewMode = 'posted') => (from ? filterByAnalytic(journalItems(db, { company_id, reviewMode }), analyticAccountIds).filter((l) => l.date < from) : []);
 
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
-export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
+export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, includeClosing = false } = {}) {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const opening = new Map(balances(db, itemsBefore(db, from, company_id, analyticAccountIds, mode)).map((b) => [b.account.id, b.balance]));
   const rows = new Map();
@@ -46,7 +46,7 @@ export function trialBalance(db, { from, to, company_id, analyticAccountIds, inc
     return rows.get(id);
   };
   for (const id of opening.keys()) row(id);
-  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode }), analyticAccountIds)) {
+  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing }), analyticAccountIds)) {
     const r = row(l.account_id);
     r.debit += reportingBookedAmount(db, l, l.debit);
     r.credit += reportingBookedAmount(db, l, l.credit);
@@ -168,7 +168,7 @@ export function accountCashFlowActivity(db, account) {
     const explicit = tags.find((tag) => ['operating', 'investing', 'financing'].includes(tag?.cash_flow_activity));
     if (explicit) return explicit.cash_flow_activity;
   }
-  return 'unclassified';
+  return ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'asset_receivable', 'liability_payable'].includes(account.account_type) ? 'operating' : 'unclassified';
 }
 
 /**

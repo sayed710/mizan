@@ -260,7 +260,7 @@ test('a line with only a legacy analytic account shows and edits it as its 100% 
 test('migration skips secured moves so version-2 hash chains stay valid while migrating unsecured invoices and displaying derived allocation', async () => {
   const { read, write } = await import('./orm.js');
   const { postMove } = await import('./models/accounting.js');
-  const { checkInalterability, secureEntries } = await import('./models/hash_chain.js');
+  const { checkInalterability, computeMoveHash, secureEntries } = await import('./models/hash_chain.js');
   const { migrate, SCHEMA_VERSION } = await import('./migrations.js');
   const { applyDiff, diffDb } = await import('./sync.js');
 
@@ -277,7 +277,7 @@ test('migration skips secured moves so version-2 hash chains stay valid while mi
     default_account_id: accountId(db, '400000'),
     invoice_sequence_prefix: 'SECS/',
     invoice_sequence_next_number: 1,
-    restrict_mode_hash_table: true,
+    restrict_mode_hash_table: false,
   });
   db = journalRes.db;
   const journalId = journalRes.id;
@@ -303,6 +303,9 @@ test('migration skips secured moves so version-2 hash chains stay valid while mi
       } : m)),
     },
   };
+  db = write(db, 'account.journal', journalId, { restrict_mode_hash_table: true });
+  const legacyMove = read(db, 'account.move', securedDraft.id);
+  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => m.id === legacyMove.id ? { ...m, inalterable_hash: computeMoveHash(m, '', 2), secure_sequence_number: 1, inalterable_hash_version: 2 } : m) } };
   db = secureEntries(db, { companyId: 1, hashDate: '2026-01-31' });
   const securedBefore = read(db, 'account.move', securedDraft.id);
   assert.equal(securedBefore.inalterable_hash_version, 2);

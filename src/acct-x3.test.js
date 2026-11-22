@@ -6,7 +6,7 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
 import { addDays, today } from './models/common.js';
-import { rateAt, toCompany } from './models/currency.js';
+import { rateAt, toCompany, upsertCurrencyRates } from './models/currency.js';
 import { applyDiff, diffDb } from './sync.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
@@ -386,4 +386,33 @@ test('Finding 3: base currency Rates tab is visible but read-only and base rate_
   };
   assert.throws(() => applyDiff(db, diffDb(db, forgedRates), { isAdmin: true }), /fixed at 1/i);
   assert.doesNotThrow(() => write(db, 'res.currency', usd.id, { symbol: 'US$' }));
+});
+
+test('Finding 4: array-form rate imports skip base-currency entries and import foreign rates without failing guard', () => {
+  let db = seed();
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  assert.ok(usd && eur);
+  const testDate = '2026-11-20';
+
+  // Array containing base-currency entry (USD) and foreign-currency entry (EUR)
+  const arrayRates = [
+    { currency_id: usd.id, rate: 1.0, date: testDate },
+    { currency_id: eur.id, rate: 0.95, date: testDate },
+  ];
+
+  // Under the bug, this throws "The base currency rate is fixed at 1 and cannot be modified"
+  // When fixed, it skips the base-currency entry and writes the foreign rate
+  assert.doesNotThrow(() => {
+    db = upsertCurrencyRates(db, arrayRates, { date: testDate });
+  });
+
+  const usdAfter = read(db, 'res.currency', usd.id);
+  const eurAfter = read(db, 'res.currency', eur.id);
+  const usdRows = (usdAfter.rate_ids ?? []).filter((r) => r.date === testDate);
+  const eurRows = (eurAfter.rate_ids ?? []).filter((r) => r.date === testDate);
+
+  assert.equal(usdRows.length, 0, 'Base currency must not receive rate rows');
+  assert.equal(eurRows.length, 1, 'Foreign currency rate must be imported');
+  assert.equal(eurRows[0].rate, 0.95);
 });

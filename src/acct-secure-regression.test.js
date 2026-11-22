@@ -189,7 +189,7 @@ test('legacy version 1 chain verifies and is anchored before version 2 entries e
   const second = entry(db, 1, '2026-02-01'); db = second.db;
   db = server(db, secureEntries(db, { companyId: 1, hashDate: '2026-02-28' }));
   assert.equal(read(db, 'account.move', first.id).inalterable_hash, legacy.inalterable_hash);
-  assert.equal(read(db, 'account.move', second.id).inalterable_hash_version, 2);
+  assert.equal(read(db, 'account.move', second.id).inalterable_hash_version, 3);
   assert.equal(checkInalterability(db, { journalId: journal })[0].status, 'ok');
 });
 
