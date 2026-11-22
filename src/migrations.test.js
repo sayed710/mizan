@@ -15,6 +15,13 @@ test('migration versions are strictly increasing', () => {
   ));
 });
 
+test('migration output follows the latest registered schema version', () => {
+  assert.equal(SCHEMA_VERSION, MIGRATIONS.at(-1).version);
+  const migrated = migrate({ ...seed(), schema_version: 0 });
+  assert.equal(migrated.schema_version, MIGRATIONS.at(-1).version);
+  assert.equal(migrate(migrated).schema_version, MIGRATIONS.at(-1).version);
+});
+
 test('the shipped seed is current and every seeded record can be saved again unchanged', () => {
   const db = seed();
   assert.equal(db.schema_version, SCHEMA_VERSION);

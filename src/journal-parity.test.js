@@ -90,9 +90,8 @@ test('migration 40 backfills journal parity fields without changing existing num
     },
   };
 
-  assert.equal(SCHEMA_VERSION, 65);
   const upgraded = migrate(v39Db);
-  assert.equal(upgraded.schema_version, 65);
+  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
 
   const sd = read(upgraded, 'account.journal', 901);
   const ss = read(upgraded, 'account.journal', 902);
@@ -114,7 +113,7 @@ test('migration 40 backfills journal parity fields without changing existing num
 
   // Idempotent on second pass
   const again = migrate(upgraded);
-  assert.equal(again.schema_version, 65);
+  assert.equal(again.schema_version, SCHEMA_VERSION);
   assert.equal(read(again, 'account.journal', 901).refund_sequence, true);
   assert.equal(read(again, 'account.journal', 902).refund_sequence, false);
 });

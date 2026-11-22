@@ -6,6 +6,8 @@ export const SEEDED_PAYMENT_METHODS = [
   { code: 'manual', payment_type: 'inbound', name: 'Manual' },
   { code: 'manual', payment_type: 'outbound', name: 'Manual' },
   { code: 'check_printing', payment_type: 'outbound', name: 'Checks' },
+  { code: 'electronic', payment_type: 'inbound', name: 'Electronic' },
+  { code: 'sepa_ct', payment_type: 'outbound', name: 'SEPA Credit Transfer' },
 ];
 
 const METHOD_LINE_JOURNAL_TYPES = ['bank', 'cash'];
@@ -362,7 +364,7 @@ export const paymentMethodModels = {
         type: 'selection',
         label: 'Code',
         required: true,
-        options: [['manual', 'Manual'], ['check_printing', 'Checks']],
+        options: [['manual', 'Manual'], ['check_printing', 'Checks'], ['electronic', 'Electronic'], ['sepa_ct', 'SEPA Credit Transfer']],
       },
       payment_type: {
         type: 'selection',

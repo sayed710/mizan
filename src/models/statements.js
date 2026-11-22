@@ -3,11 +3,12 @@ import { create, read, search, write } from '../orm.js';
 import { isLiquidityJournal, journalCompany } from './ledger.js';
 import { sanitizeAccountNumber } from './partnerbank.js';
 import { today } from './common.js';
+import { currentCompany } from './currentCompany.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
 
 /** Resolve the company for a statement or line: statement's company, else journal's company, else active company. */
 export const resolveStatementCompany = (db, statement = null, journal = null) =>
-  statement?.company_id ?? journal?.company_id ?? db?.settings?.current_company_id ?? 1;
+  statement?.company_id ?? journal?.company_id ?? currentCompany(db);
 
 const isValidCalendarDate = (y, m, d) => {
   if (!Number.isSafeInteger(y) || y < 1000 || y > 9999) return false;
@@ -291,7 +292,7 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false, e
   if (!journal) throw new Error('The bank journal does not exist');
   if (!isLiquidityJournal(journal)) throw new Error('Choose a bank or cash journal');
   if (defaults.company_id && journalCompany(journal) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
-  const company = journal?.company_id ?? defaults.company_id ?? 1;
+  const company = defaults.company_id ?? resolveStatementCompany(db, null, journal);
   const currencyId = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id ?? null;
   const currency = read(db, 'res.currency', currencyId);
   if (lines.some((l) => (camt && !l.currency) || (l.currency && l.currency !== currency?.name))) throw new Error(`Statement currency does not match journal currency ${currency?.name ?? ''}`);
@@ -489,7 +490,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
 
     const baseJournalId = existingStmt ? existingStmt.journal_id : defaults.journal_id;
     const targetJournal = baseJournalId ? read(currentDb, 'account.journal', baseJournalId) : null;
-    const companyId = existingStmt?.company_id ?? defaults.company_id ?? resolveStatementCompany(currentDb, null, targetJournal);
+    const companyId = existingStmt ? resolveStatementCompany(currentDb, existingStmt, targetJournal) : (defaults.company_id ?? resolveStatementCompany(currentDb, null, targetJournal));
     const matchedJournal = findJournalForAccount(currentDb, blockAcctNumber, companyId);
     if (existingStmt && matchedJournal && matchedJournal.id !== existingStmt.journal_id) {
       throw new Error('The file belongs to another bank account than this statement');
@@ -501,7 +502,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
     const blockDefaults = {
       ...defaults,
       journal_id: targetJournalId,
-      company_id: existingStmt?.company_id ?? defaults.company_id ?? resolveStatementCompany(currentDb, null, finalJournal),
+      company_id: existingStmt ? resolveStatementCompany(currentDb, existingStmt, finalJournal) : (defaults.company_id ?? resolveStatementCompany(currentDb, null, finalJournal)),
       ...(existingStmt ? { statement_id: existingStmt.id } : {}),
     };
 
@@ -523,7 +524,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
       : (isQif ? { balance_start: null, balance_end_real: null } : parseOfxBalances(blockText));
 
     const finalTargetJournal = read(currentDb, 'account.journal', targetJournalId);
-    const company = finalTargetJournal?.company_id ?? blockDefaults.company_id ?? 1;
+    const company = blockDefaults.company_id ?? resolveStatementCompany(currentDb, null, finalTargetJournal);
     const currencyId = finalTargetJournal?.currency_id ?? read(currentDb, 'res.company', company)?.currency_id ?? null;
     const currency = read(currentDb, 'res.currency', currencyId);
 

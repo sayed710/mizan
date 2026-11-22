@@ -32,7 +32,7 @@ export function roundStatementAmount(db, statement, amount) {
   const num = Number(amount) || 0;
   if (!db || !statement?.journal_id) return num;
   const journal = read(db, 'account.journal', statement.journal_id);
-  const companyId = statement.company_id ?? journal?.company_id ?? 1;
+  const companyId = resolveStatementCompany(db, statement, journal);
   const currencyId = journal?.currency_id ?? read(db, 'res.company', companyId)?.currency_id;
   const currency = currencyId ? read(db, 'res.currency', currencyId) : null;
   return currency ? roundCurrency(num, currency) : num;
@@ -153,7 +153,7 @@ function statementGuard(db, before, after) {
       before.balance_start !== after.balance_start ||
       before.balance_end_real !== after.balance_end_real ||
       before.journal_id !== after.journal_id ||
-      (before.company_id ?? 1) !== (after.company_id ?? 1) ||
+      resolveStatementCompany(db, before, read(db, 'account.journal', before.journal_id)) !== resolveStatementCompany(db, after, read(db, 'account.journal', after.journal_id)) ||
       before.date !== after.date
     ) {
       return 'A closed statement cannot be modified';
@@ -164,16 +164,16 @@ function statementGuard(db, before, after) {
   const journal = read(db, 'account.journal', after.journal_id);
   if (!journal) return 'The journal does not exist';
   if (!isLiquidityJournal(journal)) return 'Choose a bank or cash journal';
-  const company = after.company_id ?? journal.company_id ?? 1;
+  const company = resolveStatementCompany(db, after, journal);
   if (journal.company_id && journal.company_id !== company) return 'The bank journal belongs to another company';
 
   const lines = linesByStatement(db).get(after.id) ?? [];
-  if (lines.some((l) => l.journal_id !== after.journal_id || (l.company_id ?? 1) !== company)) {
+  if (lines.some((l) => l.journal_id !== after.journal_id || resolveStatementCompany(db, l, journal) !== company)) {
     return 'Statement lines must belong to the statement journal and company';
   }
 
   if (before && lines.some((l) => l.state === 'reconciled' || Boolean(l.bank_move_id))) {
-    if (before.journal_id !== after.journal_id || (before.company_id ?? 1) !== company) {
+    if (before.journal_id !== after.journal_id || resolveStatementCompany(db, before, journal) !== company) {
       return 'A statement with reconciled lines cannot change its journal or company';
     }
   }
@@ -210,8 +210,8 @@ export function closeStatement(db, statementId) {
     }
     const lineRes = create(currentDb, 'account.bank.statement.line', {
       journal_id: journal.id,
-      company_id: statement.company_id ?? journal.company_id ?? 1,
-      currency_id: journal.currency_id ?? read(currentDb, 'res.company', statement.company_id ?? journal.company_id ?? 1)?.currency_id ?? null,
+      company_id: resolveStatementCompany(currentDb, statement, journal),
+      currency_id: journal.currency_id ?? read(currentDb, 'res.company', resolveStatementCompany(currentDb, statement, journal))?.currency_id ?? null,
       date: statement.date || today(),
       payment_ref: isSurplus ? 'Cash Difference Gain' : 'Cash Difference Loss',
       amount: diff,

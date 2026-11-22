@@ -5,7 +5,7 @@ import { create, read, search, write } from './orm.js';
 import { models } from './registry.js';
 import { accountId } from './models/ledger.js';
 import { seed } from './seed.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import { postMove } from './models/accounting.js';
 import { confirmAsset } from './models/assets.js';
@@ -362,7 +362,7 @@ test('migration 56 keeps draft asset creation on accounts that created assets be
   const expense = db.records['account.account'].find((a) => a.account_type === 'expense');
   const legacy = { ...db, schema_version: 55, records: { ...db.records, 'account.account': db.records['account.account'].map(strip) } };
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 65);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
   assert.equal(migrated.records['account.account'].find((a) => a.id === fixed.id).create_asset, 'draft');
   assert.equal(migrated.records['account.account'].find((a) => a.id === expense.id).create_asset, 'no');
 });

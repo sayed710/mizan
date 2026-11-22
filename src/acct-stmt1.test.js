@@ -10,6 +10,7 @@ import { models } from './models/index.js';
 import { fieldReadonly } from './field-metadata.js';
 import { diffDb, applyDiff } from './sync.js';
 import { importStatement } from './models/statements.js';
+import { importCsvRows } from './csv.js';
 import { bookToAccount } from './models/bank.js';
 import { closeStatement, computeBalanceEnd, computeIsComplete, previousStatementEndingBalance } from './models/bankstatement.js';
 import { find, setupDom } from './test-support/dom.js';
@@ -420,6 +421,22 @@ test('ST-2: Statement shows Complete when computed ending balance equals entered
 // -----------------------------------------------------------------------------
 // ST-3: Import action on statement form adds lines to this statement
 // -----------------------------------------------------------------------------
+
+test('ST-3: CSV cannot override the statement import target', () => {
+  let db = seed();
+  const journal = getBankJournal(db);
+  const stmt = create(db, 'account.bank.statement', { name: 'CSV statement', journal_id: journal.id, date: '2026-08-01' });
+  db = stmt.db;
+  const result = importCsvRows(db, 'account.bank.statement.line', {
+    statement_id: stmt.id, journal_id: journal.id, company_id: journal.company_id,
+  }, [
+    ['statement_id', 'journal_id', 'company_id', 'date', 'payment_ref', 'amount'],
+    ['99999', '99999', '99999', '2026-08-01', 'CSV line', '25'],
+  ]);
+  const line = read(result.db, 'account.bank.statement', stmt.id).line_ids[0];
+  assert.equal(line.journal_id, journal.id);
+  assert.equal(read(result.db, 'account.move', line.bank_move_id).journal_id, journal.id);
+});
 
 test('ST-3: Statement form Import button opens file picker and imports lines into this statement journal and bank move', async () => {
   const { makeEl } = setupDom();

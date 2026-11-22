@@ -5,7 +5,7 @@ import { bookedBankSuspenseAccountId, bookedStatementAmount, ensureBankSuspense,
 import { rateAt, toCompany } from './currency.js';
 import { appendDocumentSettlement, residual, settleWriteoff } from './accounting.js';
 import { settlementCompanyAmount } from './settlement.js';
-import { applyRule, counterpartTaxLines, sameCommercialPartner, suggestRule } from './reconcile.js';
+import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement, resolveStatementCompany } from './statements.js';
 import { roundStatementAmount } from './bankstatement.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate, writeBankStatementMove } from './finance.js';
@@ -252,7 +252,7 @@ const batchPaymentCompany = (db, batch) => {
   return (batch.company_id ?? 1) === common ? common : null;
 };
 
-export { bookedBankSuspenseAccountId, bookedStatementAmount, isPaymentMatched, statementCompanyAmount, unreconciledSuspenseTransactionsExist } from './ledger.js';
+export { bookedBankSuspenseAccountId, bookedStatementAmount, isPaymentMatched, statementCompanyAmount } from './ledger.js';
 
 /**
  * Resolve the outstanding receipts or payments account ID of a payment, or null when booked directly to liquidity.
@@ -544,6 +544,8 @@ export function matchPayment(db, line) {
 }
 
 function autoReconcile(db, line) {
+  db = mapStatementPartner(db, line);
+  line = read(db, 'account.bank.statement.line', line.id);
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? statementCompanyAmount(db, line)));
   if (!line.partner_id) {
@@ -846,7 +848,10 @@ export function setStatementLinePartner(db, line, partnerId) {
       throw new Error('Partner belongs to another company');
     }
   }
-  return write(db, 'account.bank.statement.line', lineId, { partner_id: pid });
+  let current = write(db, 'account.bank.statement.line', lineId, { partner_id: pid });
+  const move = target.bank_move_id && read(current, 'account.move', target.bank_move_id);
+  if (move) current = writeBankStatementMove(current, move.id, (move.line_ids ?? []).map((item) => ({ ...item, partner_id: pid })), pid);
+  return current;
 }
 
 /** Validate the booked bank entry and payment allocations against the statement line amount and journal. */
@@ -1272,8 +1277,16 @@ function lineGuard(db, before, after, ctx = null) {
       }
     }
   }
-  const referenceAmount = bookedStatementAmount(db, after);
-  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > referenceAmount)) return 'Invalid open bank transaction amount';
+  const needsReference = Boolean(after.bank_move_id) || (
+    after.open_amount != null
+    && (!before || (after.open_amount ?? null) !== (before.open_amount ?? null)
+      || Number(after.amount) !== Number(before.amount)
+      || (after.journal_id ?? null) !== (before.journal_id ?? null)
+      || (after.date ?? null) !== (before.date ?? null))
+  );
+  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0)) return 'Invalid open bank transaction amount';
+  const referenceAmount = needsReference ? bookedStatementAmount(db, after) : null;
+  if (needsReference && after.open_amount != null && round(after.open_amount) > referenceAmount) return 'Invalid open bank transaction amount';
 
   if (after.state === 'reconciled' && !after.move_id) return 'A bank transaction can only be reconciled against a posted journal entry';
   // The server validates bank lines after the entries of the same change set (guardLast).
@@ -1570,6 +1583,8 @@ export const bankModels = {
         {
           label: 'Apply Reconciliation Model', when: (r) => r.state === 'to_check',
           run: (db, r) => {
+            db = mapStatementPartner(db, r);
+            r = read(db, 'account.bank.statement.line', r.id);
             const model = modelFor(db, r);
             if (!model) throw new Error('No reconciliation model matches this transaction');
             return { db: applyRule(db, model, r) };

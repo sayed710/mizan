@@ -64,8 +64,11 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
     keys.forEach((key, index) => {
       const field = fields[key];
       if (!key || fieldReadonly(field, vals, next)) return;
+      if (model === 'account.bank.statement.line' && defaults?.statement_id && ['statement_id', 'journal_id', 'company_id'].includes(key)) return;
       const raw = (row[index] ?? '').trim();
-      if (field.type === 'many2one') {
+      // A field may parse its own import text (e.g. legacy boolean exports of a now-selection field).
+      if (field.parseImport) vals[key] = field.parseImport(raw);
+      else if (field.type === 'many2one') {
         if (!raw) {
           vals[key] = null;
           return;
