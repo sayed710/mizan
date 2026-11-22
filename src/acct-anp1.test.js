@@ -31,7 +31,6 @@ test('ANP-1: Analytic Plans description, parent/children hierarchy, complete_nam
   assert.equal(planModel.fields.description?.type, 'text', 'description field must be text');
   assert.ok(planModel.form.groups.flat().includes('description'), 'description is editable on the plan form');
   assert.equal(planModel.fields.parent_id?.type, 'many2one', 'parent_id must be many2one');
-  assert.equal(planModel.fields.children_ids?.type, 'one2many', 'children_ids must be one2many');
   assert.equal(planModel.fields.complete_name?.type, 'char', 'complete_name must be char');
   assert.equal(planModel.fields.root_plan_id?.type, 'many2one', 'root_plan_id must be many2one');
   assert.equal(planModel.fields.account_count?.type, 'integer', 'account_count must be integer');

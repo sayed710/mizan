@@ -522,7 +522,7 @@ export const analyticPlusModels = {
         compute: (r, db) => completePlanName(db, r),
       },
       children_ids: {
-        type: 'one2many', relation: 'account.analytic.plan', label: 'Subplans', readonly: true,
+        type: 'many2many', relation: 'account.analytic.plan', label: 'Subplans', readonly: true,
         compute: (r, db) => (db ? rawPlans(db).filter((p) => p.parent_id === r?.id).map((p) => p.id) : (r?.children_ids ?? [])),
       },
       root_plan_id: {
