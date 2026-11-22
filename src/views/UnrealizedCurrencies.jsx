@@ -1,6 +1,5 @@
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { downloadCsv, tableToRows } from '../csv.js';
-import { downloadXlsx } from '../xlsx.js';
 import { useRef, useState } from 'react';
 import { read } from '../orm.js';
 import { today } from '../models/common.js';
@@ -10,6 +9,7 @@ import { foreignBalanceReport, revalueForeignBalances } from '../models/closing.
 import { commit, getDb, useDb } from '../store.js';
 import { display, money } from '../ui.jsx';
 import { t } from '../i18n.js';
+import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
 
 const RATE_FIELD = { type: 'float', digits: [6, 6] };
@@ -28,6 +28,11 @@ export function UnrealizedCurrencies() {
     try { commit(revalueForeignBalances(getDb(), date, selectedCompany === 'all' ? { companyScoped: true } : { companyId: Number(selectedCompany), companyScoped: true })); }
     catch (e) { alert(e.message); }
   };
+  const exportXlsx = () => {
+    if (!tableRef.current) return;
+    const columnTypes = ['text', 'text', 'text', 'text', 'text', 'number', 'rate', 'number', 'number', 'number'];
+    downloadXlsx('unrealized_currencies.xlsx', tableRef.current, { sheetName: t('Unrealized Currencies'), columnTypes });
+  };
   const controls = (
     <div className="control-panel">
       <h1 className="cp-title">{t('Unrealized Currencies')}</h1>
@@ -37,7 +42,7 @@ export function UnrealizedCurrencies() {
       <span className="spacer" />
       <button type="button" className="btn sm" disabled={!!error} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
       <button type="button" className="btn sm" disabled={!!error} onClick={() => downloadCsv('unrealized-currencies.csv', tableToRows(tableRef.current))}>{t('Download CSV')}</button>
-      <button type="button" className="btn sm" disabled={!!error} onClick={() => downloadXlsx('unrealized-currencies.xlsx', tableRef.current, { sheetName: 'Unrealized Currencies' })}>{t('Export XLSX')}</button>
+      <button type="button" className="btn sm" disabled={!!error} onClick={exportXlsx}>{t('Export XLSX')}</button>
     </div>
   );
   const allowedIds = selectedCompany === 'all' ? (db.settings?.allowed_company_ids ?? [currentCompany(db)]) : [Number(selectedCompany)];
@@ -70,7 +75,7 @@ export function UnrealizedCurrencies() {
               <td>{read(db, 'account.account', row.account_id)?.name ?? row.account}</td>
               <td>{currency?.name}</td>
               <td className="num">{money(row.residual ?? row.foreign, currency?.name ?? null, currency ?? null)}</td>
-              <td className="num">{display(db, RATE_FIELD, rate)}</td>
+              <td className="num rate">{display(db, RATE_FIELD, rate)}</td>
               <td className="num">{money(row.booked)}</td>
               <td className="num">{money(row.value ?? row.booked + row.difference)}</td>
               <td className="num">{money(row.difference)}</td>
