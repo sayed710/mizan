@@ -105,6 +105,32 @@ export function taxPriceInclude(db, tax, companyId = null) {
   return Boolean(tax.price_include);
 }
 
+/** Canonical helper normalizing boolean-like or legacy price include inputs into a valid price_include_override. */
+export function normalizePriceIncludeOverride(overrideVal, legacyVal) {
+  if (overrideVal !== undefined) {
+    if (overrideVal === '' || overrideVal === null) return null;
+    if (overrideVal === true || overrideVal === 'tax_included') return 'tax_included';
+    if (overrideVal === false || overrideVal === 'tax_excluded') return 'tax_excluded';
+    if (typeof overrideVal === 'string') {
+      const s = overrideVal.trim().toLowerCase();
+      if (['true', 'yes', '1', 'tax_included'].includes(s)) return 'tax_included';
+      if (['false', 'no', '0', 'tax_excluded'].includes(s)) return 'tax_excluded';
+    }
+    return overrideVal;
+  }
+  if (legacyVal !== undefined) {
+    if (legacyVal === true || legacyVal === 1) return 'tax_included';
+    if (legacyVal === false || legacyVal === 0) return 'tax_excluded';
+    if (typeof legacyVal === 'string') {
+      const s = legacyVal.trim().toLowerCase();
+      if (['true', 'yes', '1', 't'].includes(s)) return 'tax_included';
+      if (['false', 'no', '0', 'f'].includes(s)) return 'tax_excluded';
+    }
+    return legacyVal ? 'tax_included' : 'tax_excluded';
+  }
+  return undefined;
+}
+
 /** What an order/invoice line keeps of its tax, so totals never need the db. */
 export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
   if (!tax) return { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_name: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [] };
@@ -805,7 +831,6 @@ export const taxModels = {
       },
       price_include: {
         type: 'boolean',
-        label: 'Included in Price',
         hidden: true,
         compute: (r, db) => taxPriceInclude(db, r),
       },
@@ -844,11 +869,11 @@ export const taxModels = {
     }),
     prepareCreate: (db, vals) => {
       const nextVals = { ...vals };
-      if (nextVals.price_include_override === '') nextVals.price_include_override = null;
-      if (nextVals.price_include_override === undefined && 'price_include' in nextVals) {
-        if (nextVals.price_include === true) nextVals.price_include_override = 'tax_included';
-        delete nextVals.price_include;
+      const normalized = normalizePriceIncludeOverride(nextVals.price_include_override, nextVals.price_include);
+      if (normalized !== undefined) {
+        nextVals.price_include_override = normalized;
       }
+      delete nextVals.price_include;
       return {
         db,
         vals: {
@@ -864,11 +889,11 @@ export const taxModels = {
     },
     prepareWrite: (db, vals) => {
       const nextVals = { ...vals };
-      if (nextVals.price_include_override === '') nextVals.price_include_override = null;
-      if (nextVals.price_include_override === undefined && 'price_include' in nextVals) {
-        nextVals.price_include_override = nextVals.price_include === true ? 'tax_included' : 'tax_excluded';
-        delete nextVals.price_include;
+      const normalized = normalizePriceIncludeOverride(nextVals.price_include_override, nextVals.price_include);
+      if (normalized !== undefined) {
+        nextVals.price_include_override = normalized;
       }
+      delete nextVals.price_include;
       return {
         db,
         vals: {

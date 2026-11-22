@@ -7,7 +7,7 @@ import { applyPaymentCredit, paymentDocuments, reconcileReversalLines, registerP
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxPriceInclude, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
+import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
@@ -41,7 +41,7 @@ import {
   unlinkJournalMethodLines,
 } from './paymentmethod.js';
 
-export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines };
+export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -2049,12 +2049,13 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       continue;
     }
 
-    const hasPriceIncludeTax = taxIds.some((id) => taxPriceInclude(db, read(db, 'account.tax', id), companyId));
     let grossDocAmount = docAmount;
-    if (hasPriceIncludeTax && existingForBase.length) {
+    if (existingForBase.length) {
       const existingPriceInclDoc = existingForBase.reduce((sum, el) => {
-        const tRec = read(db, 'account.tax', el.tax_id);
-        if (!taxPriceInclude(db, tRec, companyId)) return sum;
+        const isIncl = el.tax_include !== undefined
+          ? Boolean(el.tax_include)
+          : Boolean(read(db, 'account.tax', el.tax_id)?.price_include);
+        if (!isIncl) return sum;
         const amt = isForeign
           ? Math.abs(Number(el.amount_currency) || 0)
           : (Number(el.debit) || Number(el.credit) || 0);
@@ -2076,7 +2077,6 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
     const allBaseTags = new Set();
     const rawSplits = [];
     let totalUntaxedDoc = grossDocAmount;
-    let hasPriceInclude = false;
 
     for (const [side, groupTaxIds] of taxesBySide) {
       const expanded = expandTaxIds(db, groupTaxIds, move.fiscal_position_id);
@@ -2091,7 +2091,6 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
 
       if (computed.untaxed < grossDocAmount) {
-        hasPriceInclude = true;
         totalUntaxedDoc -= (grossDocAmount - computed.untaxed);
       }
 
@@ -2148,18 +2147,18 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       : (baseSide === 'credit' ? 'sale' : 'purchase');
 
     const roundedUntaxedDoc = roundCurrency(totalUntaxedDoc, docCurrency);
-    const untaxedCompany = hasPriceInclude
-      ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
-      : baseAmount;
+    const untaxedCompany = isForeign
+      ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId)
+      : roundCurrency(roundedUntaxedDoc, companyCurrencyRec);
 
     const updatedBase = {
       ...baseLine,
-      debit: baseSide === 'debit' ? (hasPriceInclude ? untaxedCompany : baseLine.debit) : 0,
-      credit: baseSide === 'credit' ? (hasPriceInclude ? untaxedCompany : baseLine.credit) : 0,
+      debit: baseSide === 'debit' ? untaxedCompany : 0,
+      credit: baseSide === 'credit' ? untaxedCompany : 0,
       tax_tag_ids: baseTags,
       tax_grid_base: baseTags.length > 0,
       tax_side: baseReportingSide,
-      ...(isForeign && hasPriceInclude ? {
+      ...(isForeign ? {
         amount_currency: baseSide === 'debit' ? roundedUntaxedDoc : -roundedUntaxedDoc,
       } : {}),
     };
@@ -2223,6 +2222,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         debit: effectiveSide === 'debit' ? absTaxAmount : 0,
         credit: effectiveSide === 'credit' ? absTaxAmount : 0,
         tax_id: g.t.tax_id,
+        tax_include: Boolean(g.t.tax_include),
         tax_name: g.t.name || g.t.tax_name || taxLabel(g.t),
         tax_repartition_line_id: g.row.id ?? null,
         tax_base: taxBase,
@@ -2247,6 +2247,26 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
   }
 
   return resultLines;
+}
+
+/** Recompute tax lines on all draft manual entries of a company (e.g. after default sales price inclusion changes). */
+function refreshDraftEntryTaxes(db, companyId) {
+  if (!db?.records?.['account.move']) return db;
+  const targetCompany = companyId ?? db.settings?.current_company_id ?? 1;
+  const draftMoves = (db.records['account.move'] ?? []).filter((m) =>
+    m.move_type === 'entry' &&
+    m.state === 'draft' &&
+    (m.company_id ?? 1) === targetCompany &&
+    Array.isArray(m.line_ids) &&
+    m.line_ids.some((l) => (l.tax_ids?.length || l.tax_id != null))
+  );
+  if (!draftMoves.length) return db;
+  let next = db;
+  for (const m of draftMoves) {
+    const refreshedLines = computeEntryTaxLines(m.line_ids, m, next);
+    next = write(next, 'account.move', m.id, { line_ids: refreshedLines });
+  }
+  return next;
 }
 
 /** A journal item tied to one tax (tax_id or repartition line): its tags come from that tax, so base-line tag updates must skip it. */
@@ -2329,6 +2349,7 @@ const lineItem = {
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Tax', hidden: true },
+    tax_include: { type: 'boolean', label: 'Included in Price', hidden: true },
     tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', widget: 'many2many_tags', hidden: true },
     tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
     tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },

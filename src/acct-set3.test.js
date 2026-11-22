@@ -4,7 +4,7 @@ import { register } from 'node:module';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
-const { create, read, write } = await import('./orm.js');
+const { create, read, write, setActiveCompany } = await import('./orm.js');
 const { seed } = await import('./seed.js');
 const { models } = await import('./models/index.js');
 const { createCompany } = await import('./models/company.js');
@@ -16,6 +16,7 @@ const { MIGRATIONS, SCHEMA_VERSION, migrate } = await import('./migrations.js');
 const { applyDiff, diffDb } = await import('./sync.js');
 const { find, setupDom } = await import('./test-support/dom.js');
 const { Settings, validateCompanySettingWrite } = await import('./views/Settings.jsx');
+const { importCsvRows } = await import('./csv.js');
 
 const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
 
@@ -309,4 +310,239 @@ test('PI-4: changing company account_price_include changes un-overridden tax com
   assert.deepEqual(amounts([line1Restored], null, { roundingMethod: companyRoundingMethod(db, 1) }), { untaxed: 114, tax: 15.96, total: 129.96 });
   const line2Included = { product_id: prod2.id, qty: 1, price_unit: 114, ...productTax(db, read(db, 'product', prod2.id), 'sale', null, c2.id) };
   assert.deepEqual(amounts([line2Included], null, { roundingMethod: companyRoundingMethod(db, c2.id) }), { untaxed: 100, tax: 14, total: 114 });
+});
+
+test('Finding 1: draft entry taxes refresh on company default change in both directions without altering posted entries and edits recover gross', () => {
+  let db = seed();
+  const bankAcc = accountId(db, '101401', 1);
+  const revAcc = accountId(db, '400000', 1);
+  const taxAcc = accountId(db, '251000', 1);
+
+  // Standard tax with no override (follows company default):
+  const defaultTax = create(db, 'account.tax', {
+    name: 'Auto VAT 14%',
+    amount_type: 'percent',
+    amount: 14,
+    type_tax_use: 'sale',
+    company_id: 1,
+    ...defaultTaxRepartitionLines(taxAcc, []),
+  });
+  db = defaultTax.db;
+
+  // Direction A: starts as tax_excluded
+  assert.equal(read(db, 'res.company', 1).account_price_include, 'tax_excluded');
+
+  const draftEntry = create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: 1,
+    date: '2026-05-01',
+    line_ids: [
+      { account_id: bankAcc, debit: 114, credit: 0 },
+      { account_id: revAcc, debit: 0, credit: 100, tax_ids: [defaultTax.id] },
+    ],
+  });
+  db = draftEntry.db;
+
+  const postedEntry = create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: 1,
+    date: '2026-05-01',
+    line_ids: [
+      { account_id: bankAcc, debit: 114, credit: 0 },
+      { account_id: revAcc, debit: 0, credit: 100, tax_ids: [defaultTax.id] },
+    ],
+  });
+  db = postMove(postedEntry.db, postedEntry.id);
+
+  // Verify initial draft entry lines under tax_excluded:
+  const draftInitial = read(db, 'account.move', draftEntry.id);
+  const draftRevInitial = draftInitial.line_ids.find((l) => l.account_id === revAcc);
+  const draftTaxInitial = draftInitial.line_ids.find((l) => l.tax_id === defaultTax.id);
+  assert.equal(draftRevInitial.credit, 100);
+  assert.equal(draftTaxInitial.credit, 14);
+  assert.equal(draftTaxInitial.tax_include, false);
+
+  // Company default changes from tax_excluded -> tax_included:
+  db = write(db, 'res.company', 1, { account_price_include: 'tax_included' });
+
+  // 1) Draft entry was refreshed automatically:
+  const draftAfterIncl = read(db, 'account.move', draftEntry.id);
+  const draftRevAfterIncl = draftAfterIncl.line_ids.find((l) => l.account_id === revAcc);
+  const draftTaxAfterIncl = draftAfterIncl.line_ids.find((l) => l.tax_id === defaultTax.id);
+  assert.equal(draftRevAfterIncl.credit, 87.72);
+  assert.equal(draftTaxAfterIncl.credit, 12.28);
+  assert.equal(draftTaxAfterIncl.tax_include, true);
+
+  // 2) Posted entry was NOT changed:
+  const postedAfter = read(db, 'account.move', postedEntry.id);
+  const postedRev = postedAfter.line_ids.find((l) => l.account_id === revAcc);
+  const postedTax = postedAfter.line_ids.find((l) => l.tax_id === defaultTax.id);
+  assert.equal(postedRev.credit, 100);
+  assert.equal(postedTax.credit, 14);
+
+  // 3) Editing the draft entry retains the recovered calculation:
+  db = write(db, 'account.move', draftEntry.id, { ref: 'Draft edit 1' });
+  const draftEdited = read(db, 'account.move', draftEntry.id);
+  const draftRevEdited = draftEdited.line_ids.find((l) => l.account_id === revAcc);
+  const draftTaxEdited = draftEdited.line_ids.find((l) => l.tax_id === defaultTax.id);
+  assert.equal(draftRevEdited.credit, 87.72);
+  assert.equal(draftTaxEdited.credit, 12.28);
+
+  // Direction B: flip back from tax_included -> tax_excluded:
+  db = write(db, 'res.company', 1, { account_price_include: 'tax_excluded' });
+
+  // Draft entry recovers gross (87.72 + 12.28 = 100) and recomputes under tax_excluded:
+  const draftRestored = read(db, 'account.move', draftEntry.id);
+  const draftRevRestored = draftRestored.line_ids.find((l) => l.account_id === revAcc);
+  const draftTaxRestored = draftRestored.line_ids.find((l) => l.tax_id === defaultTax.id);
+  assert.equal(draftRevRestored.credit, 100);
+  assert.equal(draftTaxRestored.credit, 14);
+  assert.equal(draftTaxRestored.tax_include, false);
+
+  // Posted entry remains untouched:
+  const postedRestored = read(db, 'account.move', postedEntry.id);
+  assert.equal(postedRestored.line_ids.find((l) => l.account_id === revAcc).credit, 100);
+});
+
+test('Finding 2: migration preserves truthy non-boolean legacy price_include scalars under excluded company default', () => {
+  const base = seed();
+  const taxAcc = accountId(base, '251000', 1);
+
+  const legacy = {
+    ...base,
+    schema_version: 63,
+    records: {
+      ...base.records,
+      'res.company': base.records['res.company'].map((c) => ({ ...c, account_price_include: 'tax_excluded' })),
+      'account.tax': [
+        { id: 901, name: 'Tax Num 1', amount_type: 'percent', amount: 14, type_tax_use: 'sale', company_id: 1, price_include: 1, ...defaultTaxRepartitionLines(taxAcc, []) },
+        { id: 902, name: 'Tax Str True', amount_type: 'percent', amount: 14, type_tax_use: 'sale', company_id: 1, price_include: 'true', ...defaultTaxRepartitionLines(taxAcc, []) },
+        { id: 903, name: 'Tax Str Yes', amount_type: 'percent', amount: 14, type_tax_use: 'sale', company_id: 1, price_include: 'yes', ...defaultTaxRepartitionLines(taxAcc, []) },
+        { id: 904, name: 'Tax Num 0', amount_type: 'percent', amount: 14, type_tax_use: 'sale', company_id: 1, price_include: 0, ...defaultTaxRepartitionLines(taxAcc, []) },
+        { id: 905, name: 'Tax Str False', amount_type: 'percent', amount: 14, type_tax_use: 'sale', company_id: 1, price_include: 'false', ...defaultTaxRepartitionLines(taxAcc, []) },
+        { id: 906, name: 'Tax Bool False', amount_type: 'percent', amount: 14, type_tax_use: 'sale', company_id: 1, price_include: false, ...defaultTaxRepartitionLines(taxAcc, []) },
+      ],
+    },
+  };
+
+  const migrated = migrate(legacy);
+
+  const t901 = read(migrated, 'account.tax', 901);
+  const t902 = read(migrated, 'account.tax', 902);
+  const t903 = read(migrated, 'account.tax', 903);
+  const t904 = read(migrated, 'account.tax', 904);
+  const t905 = read(migrated, 'account.tax', 905);
+  const t906 = read(migrated, 'account.tax', 906);
+
+  assert.equal(t901.price_include_override, 'tax_included');
+  assert.equal(t902.price_include_override, 'tax_included');
+  assert.equal(t903.price_include_override, 'tax_included');
+  assert.equal(t904.price_include_override ?? null, null);
+  assert.equal(t905.price_include_override ?? null, null);
+  assert.equal(t906.price_include_override ?? null, null);
+
+  assert.equal(taxPriceInclude(migrated, t901), true);
+  assert.equal(taxPriceInclude(migrated, t902), true);
+  assert.equal(taxPriceInclude(migrated, t903), true);
+  assert.equal(taxPriceInclude(migrated, t904), false);
+  assert.equal(taxPriceInclude(migrated, t905), false);
+  assert.equal(taxPriceInclude(migrated, t906), false);
+});
+
+test('Finding 3: shared taxes on invoice lines use document company default rather than active company default', () => {
+  let db = seed();
+  const c2 = createCompany(db, { name: 'Subsidiary Co' });
+  db = c2.db;
+
+  // Company 1 defaults to tax_excluded; Company 2 defaults to tax_included
+  db = write(db, 'res.company', 1, { account_price_include: 'tax_excluded' });
+  db = write(db, 'res.company', c2.id, { account_price_include: 'tax_included' });
+
+  // Create shared tax (company_id: null) without override
+  const taxAcc1 = accountId(db, '251000', 1);
+  const sharedTax = create(db, 'account.tax', {
+    name: 'Shared VAT 14%',
+    amount_type: 'percent',
+    amount: 14,
+    type_tax_use: 'sale',
+    company_id: null,
+    ...defaultTaxRepartitionLines(taxAcc1, []),
+  });
+  db = sharedTax.db;
+
+  // Active company is Company 1:
+  setActiveCompany(1);
+
+  // 1) Onchange tax_id on document belonging to Company 2
+  const doc2 = { company_id: c2.id, move_type: 'out_invoice' };
+  const lineSingle = models['account.move'].fields.invoice_line_ids.onchange({ tax_id: sharedTax.id }, 'tax_id', db, doc2);
+  assert.equal(lineSingle.tax_include, true, 'Shared tax on Company 2 document gets tax_included from document company');
+
+  // 2) Onchange tax_ids on document belonging to Company 2
+  const lineMulti = models['account.move'].fields.invoice_line_ids.onchange({ tax_ids: [sharedTax.id] }, 'tax_ids', db, doc2);
+  assert.equal(lineMulti.tax_breakdown[0].tax_include, true, 'Shared breakdown on Company 2 document gets tax_included from document company');
+
+  // 3) newLine with default tax for Company 2:
+  db = write(db, 'res.company', c2.id, { account_sale_tax_id: sharedTax.id });
+  const newLineForCo2 = models['account.move'].fields.invoice_line_ids.newLine(doc2, db);
+  assert.equal(newLineForCo2.tax_include, true, 'newLine default tax snapshot uses document company default');
+
+  // Reset activeCompany
+  setActiveCompany(null);
+});
+
+test('Findings 4 & 5: CSV imports with Included in Price column resolve boolean-like values, and explicit price_include: false sets tax_excluded override', () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { account_price_include: 'tax_included' });
+
+  // Finding 5: creating tax with explicit price_include: false under tax_included company default
+  const exclCreated = create(db, 'account.tax', {
+    name: 'Explicit False Tax',
+    amount: 14,
+    type_tax_use: 'sale',
+    company_id: 1,
+    price_include: false,
+  });
+  db = exclCreated.db;
+  const exclRec = read(db, 'account.tax', exclCreated.id);
+  assert.equal(exclRec.price_include_override, 'tax_excluded', 'Explicit price_include: false sets tax_excluded override');
+  assert.equal(taxPriceInclude(db, exclRec), false, 'Explicit price_include: false overrides tax_included company default');
+
+  // Creating without price_include inherits company default (override stays null):
+  const defaultCreated = create(db, 'account.tax', {
+    name: 'Unset Override Tax',
+    amount: 14,
+    type_tax_use: 'sale',
+    company_id: 1,
+  });
+  db = defaultCreated.db;
+  const defaultRec = read(db, 'account.tax', defaultCreated.id);
+  assert.equal(defaultRec.price_include_override ?? null, null);
+  assert.equal(taxPriceInclude(db, defaultRec), true, 'Un-overridden tax inherits tax_included company default');
+
+  // Finding 4: CSV import with column header 'Included in Price'
+  const rows = [
+    ['Tax Name', 'Amount', 'Type Tax Use', 'Included in Price'],
+    ['CSV Tax True', '14', 'sale', 'true'],
+    ['CSV Tax Yes', '14', 'sale', 'yes'],
+    ['CSV Tax One', '14', 'sale', '1'],
+    ['CSV Tax False', '14', 'sale', 'false'],
+    ['CSV Tax No', '14', 'sale', 'no'],
+    ['CSV Tax Zero', '14', 'sale', '0'],
+  ];
+  const { db: importedDb } = importCsvRows(db, 'account.tax', models['account.tax'].defaults(), rows);
+
+  const tTrue = importedDb.records['account.tax'].find((t) => t.name === 'CSV Tax True');
+  const tYes = importedDb.records['account.tax'].find((t) => t.name === 'CSV Tax Yes');
+  const tOne = importedDb.records['account.tax'].find((t) => t.name === 'CSV Tax One');
+  const tFalse = importedDb.records['account.tax'].find((t) => t.name === 'CSV Tax False');
+  const tNo = importedDb.records['account.tax'].find((t) => t.name === 'CSV Tax No');
+  const tZero = importedDb.records['account.tax'].find((t) => t.name === 'CSV Tax Zero');
+
+  assert.equal(tTrue.price_include_override, 'tax_included');
+  assert.equal(tYes.price_include_override, 'tax_included');
+  assert.equal(tOne.price_include_override, 'tax_included');
+  assert.equal(tFalse.price_include_override, 'tax_excluded');
+  assert.equal(tNo.price_include_override, 'tax_excluded');
+  assert.equal(tZero.price_include_override, 'tax_excluded');
 });

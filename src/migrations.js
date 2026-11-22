@@ -1932,6 +1932,14 @@ export function migrateTaxPriceIncludeOverride(db) {
 
   const taxes = db?.records?.['account.tax'];
   let taxesChanged = false;
+  const isTruthyLegacy = (v) => {
+    if (v === true || v === 1 || v === '1') return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      return s === 'true' || s === 'yes' || s === 't' || s === '1';
+    }
+    return Boolean(v);
+  };
   const nextTaxes = Array.isArray(taxes) ? taxes.map((t) => {
     if (!t || typeof t !== 'object') return t;
     const hasLegacy = 'price_include' in t;
@@ -1944,7 +1952,7 @@ export function migrateTaxPriceIncludeOverride(db) {
     if (!hasLegacy) return t;
     taxesChanged = true;
     const { price_include, ...rest } = t;
-    return price_include === true ? { ...rest, price_include_override: 'tax_included' } : rest;
+    return isTruthyLegacy(price_include) ? { ...rest, price_include_override: 'tax_included' } : rest;
   }) : taxes;
 
   if (!companiesChanged && !taxesChanged) return db;

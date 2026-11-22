@@ -79,7 +79,10 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
       else if (['monetary', 'float', 'integer', 'priority'].includes(field.type)) vals[key] = raw === '' ? null : Number(raw);
       else if (field.type === 'boolean') vals[key] = /^(1|true|yes|نعم)$/i.test(raw);
       else if (field.type === 'tags') vals[key] = raw ? raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean) : [];
-      else if (field.type === 'selection') vals[key] = field.options.find((option) => option[0] === raw || option[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
+      else if (field.type === 'selection') {
+        const match = field.options.find((option) => option[0] === raw || option[1].toLowerCase() === raw.toLowerCase());
+        vals[key] = match ? match[0] : (raw || undefined);
+      }
       else vals[key] = raw;
     });
     next = create(next, model, vals).db;

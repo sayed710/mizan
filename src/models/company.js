@@ -10,7 +10,7 @@ import { STOCK_CHART_ROLES } from './stock-accounts.js';
 import { returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
-import { taxUnitCompatibilityError } from './accounting.js';
+import { refreshDraftEntryTaxes, taxUnitCompatibilityError } from './accounting.js';
 import { fiscalYearStart } from './ledger.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
@@ -522,11 +522,14 @@ function legacyDeferredFieldPatch(after, vals = {}) {
 }
 
 /** Sync legacy shared deferred fields and tax return types after writing `res.company`. */
-function onCompanyWrite(db, after, _before, vals) {
+function onCompanyWrite(db, after, before, vals) {
   let next = vals && (vals.tax_periodicity !== undefined || vals.tax_start_date !== undefined) ? ensureReturnTypes(db) : db;
   if (vals) {
     const patch = legacyDeferredFieldPatch(after, vals);
     if (Object.keys(patch).length) next = write(next, 'res.company', after.id, patch);
+  }
+  if (vals && vals.account_price_include !== undefined && vals.account_price_include !== before?.account_price_include) {
+    next = refreshDraftEntryTaxes(next, after.id);
   }
   return next;
 }
