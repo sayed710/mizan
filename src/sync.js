@@ -816,6 +816,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     }
     if (model === 'res.bank') {
       const nextDb = syncLinkedPartnerBanks({ ...db, records, seq: stagedSeq }, rec, before);
+      growth += json(nextDb.records['res.partner.bank']) - json(records['res.partner.bank']);
       records = nextDb.records;
       stagedSeq = nextDb.seq;
       seen.records = records;

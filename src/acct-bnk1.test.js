@@ -10,7 +10,7 @@ import { postMove } from './models/accounting.js';
 import { partnerBankBic, partnerBankName, validatePartnerBankLines } from './models/partnerbank.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany } from './models/qr.js';
 import { createCompany } from './models/company.js';
-import { applyDiff, diffDb } from './sync.js';
+import { applyDiff, dbSize, diffDb } from './sync.js';
 import { handleApi } from '../server/api.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
@@ -808,4 +808,47 @@ test('Qodo review (PR #223): Finding 2 - company-limited user API PATCH on share
     company: 1,
   });
   assert.equal(badRes.status, 400);
+});
+
+test('vendor refund onchange keeps only a picker-eligible company bank', () => {
+  let db = seed();
+  const company = read(db, 'res.company', 1);
+  const vendor = search(db, 'res.partner').find((p) => p.id !== company.partner_id);
+  const vendorBank = create(db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'REF-VENDOR', allow_out_payment: true });
+  const companyBank = create(vendorBank.db, 'res.partner.bank', { partner_id: company.partner_id, company_id: 1, account_number: 'REF-COMPANY' });
+  db = companyBank.db;
+  const domain = models['account.move'].fields.partner_bank_id.domain;
+  const onchange = models['account.move'].onchange;
+  const refund = { move_type: 'in_refund', company_id: 1, partner_id: vendor.id };
+  assert.equal(domain(read(db, 'res.partner.bank', vendorBank.id), refund, db), false);
+  assert.equal(domain(read(db, 'res.partner.bank', companyBank.id), refund, db), true);
+  assert.equal(onchange(refund, 'partner_id', db).partner_bank_id, null);
+  assert.equal(onchange({ ...refund, partner_bank_id: vendorBank.id }, 'partner_id', db).partner_bank_id, null);
+  assert.equal(onchange({ ...refund, partner_bank_id: companyBank.id }, 'partner_id', db).partner_bank_id, companyBank.id);
+});
+
+test('bank synchronization counts linked-account growth against database limit', () => {
+  let db = seed();
+  const bank = create(db, 'res.bank', { name: 'Old', bic: 'OLDXUS33' });
+  const account = create(bank.db, 'res.partner.bank', { partner_id: search(bank.db, 'res.partner')[0].id, account_number: 'SIZE-1', bank_id: bank.id });
+  db = account.db;
+  const name = 'Longer bank name for linked accounts';
+  const full = diffDb(db, write(db, 'res.bank', bank.id, { name }));
+  const { 'res.partner.bank': _accounts, ...upserts } = full.upserts;
+  const { 'res.partner.bank': _bases, ...bases } = full.bases;
+  const { 'res.partner.bank': _created, ...created } = full.created;
+  const diff = { ...full, upserts, bases, created, messages: full.messages.filter((m) => m.model !== 'res.partner.bank') };
+  const synced = applyDiff(db, diff, { isAdmin: true, author: 'Admin' });
+  const submitted = applyDiff(db, full, { isAdmin: true, author: 'Admin' });
+  assert.ok(Math.abs(dbSize(submitted) - JSON.stringify(submitted).length) <= 1);
+  const hookGrowth = JSON.stringify(synced.records['res.partner.bank']).length - JSON.stringify(db.records['res.partner.bank']).length;
+  const growth = JSON.stringify(synced).length - JSON.stringify(db).length;
+  assert.ok(Math.abs(dbSize(synced) - JSON.stringify(synced).length) <= 1);
+  assert.ok(hookGrowth > 1);
+  const pad = 200 * 1024 * 1024 - dbSize(db) - growth + hookGrowth - 1 - ',"padding":""'.length;
+  const nearLimit = { ...db, padding: 'x'.repeat(pad) };
+  assert.throws(() => applyDiff(nearLimit, diff, { isAdmin: true, author: 'Admin' }), /Database size limit reached/);
+  const result = handleApi({ method: 'PATCH', path: `/api/v1/res.bank/${bank.id}`, query: new URLSearchParams(), body: { name }, db: nearLimit, user: { name: 'Admin', isAdmin: true } });
+  assert.equal(result.status, 400);
+  assert.match(result.body.error, /Database size limit reached/);
 });
