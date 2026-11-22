@@ -37,9 +37,23 @@ function PaymentQr({ db, company, settings, move }) {
   );
 }
 
+const isProformaMove = (r, isProforma = false) => Boolean(
+  isProforma && r?.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r?.move_type)
+);
+
 // Document layouts per model: which fields form the header block and which one2many holds the lines.
 const LAYOUTS = {
-  'account.move': { title: (r) => t(({ draft: { out_invoice: 'Draft Invoice', out_refund: 'Draft Credit Note', in_invoice: 'Draft Bill', in_refund: 'Draft Refund' }, cancel: { out_invoice: 'Cancelled Invoice', out_refund: 'Cancelled Credit Note', in_invoice: 'Cancelled Bill', in_refund: 'Cancelled Refund' } })[r.state]?.[r.move_type] ?? models['account.move'].form.subtitle(r)), lines: 'invoice_line_ids', info: ['invoice_date', 'invoice_date_due', 'ref', 'invoice_origin', 'payment_reference', 'incoterm_id', 'incoterm_location'], totals: (r) => (r.state === 'posted' ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_untaxed', 'amount_tax', 'amount_total']) },
+  'account.move': {
+    title: (r, isProforma = false) => {
+      if (isProformaMove(r, isProforma)) {
+        return t('Proforma Invoice');
+      }
+      return t(({ draft: { out_invoice: 'Draft Invoice', out_refund: 'Draft Credit Note', in_invoice: 'Draft Bill', in_refund: 'Draft Refund' }, cancel: { out_invoice: 'Cancelled Invoice', out_refund: 'Cancelled Credit Note', in_invoice: 'Cancelled Bill', in_refund: 'Cancelled Refund' } })[r.state]?.[r.move_type] ?? models['account.move'].form.subtitle(r));
+    },
+    lines: 'invoice_line_ids',
+    info: ['invoice_date', 'invoice_date_due', 'ref', 'invoice_origin', 'payment_reference', 'incoterm_id', 'incoterm_location'],
+    totals: (r) => (r.state === 'posted' ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_untaxed', 'amount_tax', 'amount_total']),
+  },
   'sale.order': { title: (r) => t(r.state === 'sale' ? 'Sales Order' : 'Quotation'), lines: 'order_line', info: ['date_order', 'validity_date', 'user'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'purchase.order': { title: (r) => t(r.state === 'purchase' ? 'Purchase Order' : 'Request for Quotation'), lines: 'order_line', info: ['date_order', 'date_planned'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
@@ -274,12 +288,13 @@ function printCell(db, model, k, f, l, rec) {
 }
 
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */
-export function PrintDoc({ model, id }) {
+export function PrintDoc({ model, id, proforma = false }) {
   const db = useDb();
   const def = models[model];
   const layout = LAYOUTS[model];
   const rec = read(db, model, Number(id));
   const recId = rec?.id;
+  const isProformaInvoice = model === 'account.move' && isProformaMove(rec, proforma);
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
     if (!recId || isDraftInboundBatch) return undefined;
@@ -335,6 +350,11 @@ export function PrintDoc({ model, id }) {
         <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
       </div>
       <article className="paper">
+        {isProformaInvoice && (
+          <div className="paper-watermark" aria-label={t('Proforma Invoice')}>
+            {t('PRO-FORMA')}
+          </div>
+        )}
         <header className="paper-head">
           <div>
             <b className="paper-company">{company.name}</b>
@@ -349,7 +369,7 @@ export function PrintDoc({ model, id }) {
             </address>
           )}
         </header>
-        <h1>{layout.title(rec)} {rec.name && rec.name !== '/' && !(model === 'account.move' && rec.state === 'draft' && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(rec.move_type)) ? rec.name : ''}</h1>
+        <h1>{layout.title(rec, proforma)} {rec.name && rec.name !== '/' && !(model === 'account.move' && rec.state === 'draft' && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(rec.move_type)) ? rec.name : ''}</h1>
         <dl className="paper-info">
           {layout.info.filter((f) => rec[f]).map((f) => (
             <div key={f}><dt>{t(def.fields[f].label)}</dt><dd>{def.fields[f].type === 'date' ? formatDate(rec[f]) : display(db, def.fields[f], rec[f], rec)}</dd></div>
