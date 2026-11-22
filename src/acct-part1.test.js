@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read } from './orm.js';
-import { models, menusFor } from './models/index.js';
+import { models, menusFor, apps, findLeaf } from './models/index.js';
 import { migrate } from './migrations.js';
 import { seed } from './seed.js';
+import { newDefaults } from './views/formDefaults.js';
 
 const press = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -32,9 +33,9 @@ test('migration counts only posted invoices and confirmed orders for commercial 
 
 test('accounting partner and product leaves use removable default filters', () => {
   const sections = menusFor('accounting');
-  for (const [section, partnerKey, partnerFilter, productFilter] of [['Customers', 'customers', 'customers', 'sale_ok'], ['Vendors', 'vendors', 'vendors', 'purchase_ok']]) {
+  for (const [section, partnerKey, partnerFilter, productKey, productFilter] of [['Customers', 'customers', 'customers', 'customer-products', 'sale_ok'], ['Vendors', 'vendors', 'vendors', 'vendor-products', 'purchase_ok']]) {
     const children = sections.find((m) => m.label === section).children;
-    for (const [key, filter, model] of [[partnerKey, partnerFilter, 'res.partner'], ['products', productFilter, 'product']]) {
+    for (const [key, filter, model] of [[partnerKey, partnerFilter, 'res.partner'], [productKey, productFilter, 'product']]) {
       const leaf = children.find((m) => m.key === key);
       assert.deepEqual(leaf.defaultFilters, [filter]);
       assert.equal(leaf.domain, undefined);
@@ -47,4 +48,75 @@ test('accounting partner and product leaves use removable default filters', () =
   const product = create(seed(), 'product', { name: 'Product' });
   assert.equal(read(product.db, 'product', product.id).sale_ok, true);
   assert.equal(read(product.db, 'product', product.id).purchase_ok, true);
+});
+
+test('accounting products leaves have distinct keys and resolve to their own filters and defaults via findLeaf', () => {
+  const app = apps.find((a) => a.id === 'accounting');
+  const customerLeaf = findLeaf(app, 'customer-products');
+  assert.equal(customerLeaf.key, 'customer-products');
+  assert.deepEqual(customerLeaf.defaultFilters, ['sale_ok']);
+  assert.deepEqual(customerLeaf.defaults, { sale_ok: true });
+
+  const vendorLeaf = findLeaf(app, 'vendor-products');
+  assert.equal(vendorLeaf.key, 'vendor-products');
+  assert.deepEqual(vendorLeaf.defaultFilters, ['purchase_ok']);
+  assert.deepEqual(vendorLeaf.defaults, { purchase_ok: true });
+});
+
+test('creating partners from Accounting Customers and Vendors leaves assigns rank 1 while unrelated defaults to 0', () => {
+  const app = apps.find((a) => a.id === 'accounting');
+  const custLeaf = findLeaf(app, 'customers');
+  const vendLeaf = findLeaf(app, 'vendors');
+
+  assert.equal(custLeaf.defaults?.customer_rank, 1);
+  assert.equal(vendLeaf.defaults?.supplier_rank, 1);
+
+  const db = seed();
+  const custVals = newDefaults(db, 'res.partner', custLeaf, new URLSearchParams(), null);
+  const custCreated = create(db, 'res.partner', { ...custVals, name: 'New Customer' });
+  const custRecord = read(custCreated.db, 'res.partner', custCreated.id);
+  assert.equal(custRecord.customer_rank, 1);
+
+  const custFilter = models['res.partner'].filters.flat().find((f) => f.id === 'customers').fn;
+  assert.equal(custFilter(custRecord), true);
+
+  const vendVals = newDefaults(db, 'res.partner', vendLeaf, new URLSearchParams(), null);
+  const vendCreated = create(db, 'res.partner', { ...vendVals, name: 'New Vendor' });
+  const vendRecord = read(vendCreated.db, 'res.partner', vendCreated.id);
+  assert.equal(vendRecord.supplier_rank, 1);
+
+  const vendFilter = models['res.partner'].filters.flat().find((f) => f.id === 'vendors').fn;
+  assert.equal(vendFilter(vendRecord), true);
+
+  const unrelated = create(db, 'res.partner', { name: 'Unrelated' });
+  const unrelatedRecord = read(unrelated.db, 'res.partner', unrelated.id);
+  assert.equal(unrelatedRecord.customer_rank, 0);
+  assert.equal(unrelatedRecord.supplier_rank, 0);
+  assert.equal(custFilter(unrelatedRecord), false);
+  assert.equal(vendFilter(unrelatedRecord), false);
+});
+
+test('migration 64 aggregates ranks efficiently without repeatedly remapping partner array', () => {
+  const partnerCount = 2000;
+  const partners = Array.from({ length: partnerCount }, (_, i) => ({ id: i + 1, name: `Partner ${i + 1}` }));
+  partners.push({ id: partnerCount + 1, name: 'Child of 1', parent_id: 1 });
+
+  const moveCount = 3000;
+  const moves = Array.from({ length: moveCount }, (_, i) => ({
+    id: i + 1,
+    partner_id: (i % 5 === 0) ? partnerCount + 1 : (i % partnerCount) + 1,
+    state: 'posted',
+    move_type: i % 2 === 0 ? 'out_invoice' : 'in_invoice',
+  }));
+
+  const start = performance.now();
+  const migrated = migrate({ schema_version: 62, records: { 'res.partner': partners, 'account.move': moves } });
+  const elapsed = performance.now() - start;
+
+  assert.equal(migrated.schema_version, 64);
+  assert.ok(elapsed < 300, `Migration took too long: ${elapsed}ms`);
+
+  const p1 = migrated.records['res.partner'].find((p) => p.id === 1);
+  assert.ok(p1.customer_rank > 0);
+  assert.ok(p1.supplier_rank > 0);
 });

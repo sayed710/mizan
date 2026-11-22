@@ -1700,6 +1700,7 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   if (discount > 0 && !discountAccount) throw new Error(`Configure the early payment discount ${sale ? 'expense' : 'income'} account on company ${company?.name ?? r.company_id ?? 1}`);
   const paid = payMove(db, id, docAmount, date, {
     journalId: journalIdVal,
+    ...(opts.paymentId ? { paymentId: opts.paymentId } : {}),
     ...(opts.checkNumber != null ? { checkNumber: opts.checkNumber } : {}),
     ...(opts.memo !== undefined ? { memo: opts.memo } : {}),
     ...(opts.currencyId ? { currencyId: opts.currencyId } : {}),
