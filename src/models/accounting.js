@@ -707,13 +707,7 @@ export function suggestBillAutopost(db, bill) {
     Boolean(m.digitized_document) &&
     (m.partner_id === bill.partner_id || m.digitized_vendor_id === bill.partner_id) &&
     (m.company_id ?? 1) === (bill.company_id ?? 1)
-  ).sort((a, b) => {
-    const dateA = a.date ?? a.invoice_date ?? '';
-    const dateB = b.date ?? b.invoice_date ?? '';
-    const cmp = String(dateB).localeCompare(String(dateA));
-    if (cmp !== 0) return cmp;
-    return b.id - a.id;
-  });
+  ).sort((a, b) => b.id - a.id);
   return postedBills.length >= 3 && postedBills.slice(0, 3).every((m) => Boolean(m.digitized_unedited));
 }
 

@@ -29,6 +29,7 @@ test('AP-2 vendor policy defaults to ask and follows active company setting', ()
 });
 
 import { applyDiff, diffDb } from './sync.js';
+import { applyDigitizedBill } from '../server/digitized-store.js';
 
 test('AP-3 digitization result identifies the filled bill for automatic posting', async () => {
   const { finishDigitizedBill } = await import('../server/integrations.js');
@@ -94,7 +95,7 @@ test('AP-3 commits digitization before posting, surfaces failure, and honors ven
       const made = create(db, 'account.move', { move_type: 'in_invoice' });
       db = made.db;
       const snapshots = [];
-      const store = { get: () => db, commit: (next) => { db = next; snapshots.push(db); } };
+      const store = { get: () => db, commit: (next) => { db = next; snapshots.push(db); }, commitDigitizedBill: (next) => { db = next; snapshots.push(db); } };
       globalThis.fetch = async () => new Response(JSON.stringify({ content: [{ type: 'tool_use', id: 'tool', name: 'record_bill', input: { vendor: vendor.name, reference: 'INV-7', invoice_date: '2026-10-20', lines: scenario === 'failure' ? [] : [{ description: 'Goods', quantity: 1, unit_price: 100, tax_percent: 0 }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
       const out = await finishDigitizedBill(store, { id: made.id, file: { name: 'bill.pdf', type: 'application/pdf', data: 'JVBERi0xLjQ=' } });
       assert.equal(read(snapshots[0], 'account.move', made.id).state, 'draft');
@@ -128,13 +129,15 @@ test('AP-4 latest digitization resets the unedited flag, then later edits clear 
       const vendor = read(db, 'res.partner', 7);
       const made = create(db, 'account.move', { move_type: 'in_invoice' });
       db = made.db;
-      const store = { get: () => db, commit: (next) => { db = next; } };
+      let base = db;
+      const store = { get: () => { base = db; return db; }, commit: (next) => { db = next; }, commitDigitizedBill: (next, id) => { db = applyDigitizedBill(db, base, next, id, { isAdmin: true }); } };
       let call = 0;
       globalThis.fetch = async () => new Response(JSON.stringify({ content: [{ type: 'tool_use', id: 'tool', name: 'record_bill', input: { vendor: vendor.name, reference: `OCR-${++call}`, invoice_date: '2026-10-20', lines: [{ description: 'Goods', quantity: 1, unit_price: 100, tax_percent: 0 }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
       for (const step of steps) {
         if (step === 'digitize') await finishDigitizedBill(store, { id: made.id, file: { name: 'bill.pdf', type: 'application/pdf', data: 'JVBERi0xLjQ=' } });
         else store.commit(write(db, 'account.move', made.id, { ref: 'user edit' }));
         assert.equal(read(db, 'account.move', made.id).digitized_unedited, step === 'digitize', steps.join(', '));
+        if (step === 'digitize') assert.equal(read(db, 'account.move', made.id).ref, `OCR-${call}`);
       }
       const posted = postMove(db, made.id);
       db = applyDiff(db, diffDb(db, posted), { isAdmin: true });
@@ -285,7 +288,7 @@ test('Finding 5 regression: finishDigitizedBill tells user when bill is posted a
     const vendor = read(db, 'res.partner', 7);
     const made = create(db, 'account.move', { move_type: 'in_invoice' });
     db = made.db;
-    const store = { get: () => db, commit: (next) => { db = next; } };
+    const store = { get: () => db, commit: (next) => { db = next; }, commitDigitizedBill: (next) => { db = next; } };
     globalThis.fetch = async () => new Response(JSON.stringify({ content: [{ type: 'tool_use', id: 'tool', name: 'record_bill', input: { vendor: vendor.name, reference: 'AUTO-1', invoice_date: '2026-10-20', lines: [{ description: 'Goods', quantity: 1, unit_price: 100, tax_percent: 0 }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     const out = await finishDigitizedBill(store, { id: made.id, file: { name: 'bill.pdf', type: 'application/pdf', data: 'JVBERi0xLjQ=' } });
     assert.match(out.message, /posted automatically/i);
@@ -296,4 +299,16 @@ test('Finding 5 regression: finishDigitizedBill tells user when bill is posted a
     if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = previousKey;
   }
+});
+
+
+test('Suggestion uses immutable bill IDs rather than accounting dates', () => {
+  let db = write(seed(), 'res.company', 1, { autopost_bills: true });
+  for (let i = 0; i < 4; i++) {
+    const made = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 7, digitized_vendor_id: 7, digitized_document: true, digitized_unedited: true, date: i === 0 ? '2030-01-01' : '2026-01-01', invoice_line_ids: [{ name: 'Goods', qty: 1, price_unit: 100, tax: 0 }] });
+    db = postMove(made.db, made.id);
+    if (i === 0) db = write(db, 'account.move', made.id, { ref: 'edited after posting' });
+  }
+  const draft = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 7, digitized_vendor_id: 7, digitized_document: true, digitized_unedited: true });
+  assert.equal(suggestBillAutopost(draft.db, read(draft.db, 'account.move', draft.id)), true);
 });

@@ -19,6 +19,7 @@ import { scopeAuditRows } from '../src/companyView.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { claimWriter, loadRepaired, openStorage } from './storage.js';
 import { runPosting } from './posting.js';
+import { applyDigitizedBill } from './digitized-store.js';
 import { openBlobs, RASTER, referencesBlob } from './blobs.js';
 import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -237,6 +238,7 @@ const storeFor = (opts, actor = opts.author, view = (d) => d) => {
   return {
     get: () => { base = view(db); at = epoch; return base; },
     commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts), { actor }); base = view(db); },
+    commitDigitizedBill: (next, id) => { sameEpoch(at); commitDb(applyDigitizedBill(db, base, next, id, opts), { actor }); base = view(db); },
     check: ownLease,
   };
 };

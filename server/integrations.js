@@ -227,16 +227,9 @@ export async function digitizeBill(db, { id, file }) {
 /** Commit the filled draft before attempting a separately validated post. */
 export async function finishDigitizedBill(store, input) {
   const filled = await digitizeBill(store.get(), input);
-  store.commit(filled.db);
-  let db = store.get();
-  let bill = read(db, 'account.move', Number(input.id));
-  // A replacement of an already digitized draft first clears the flag through the normal edit guard.
-  // Once the replacement values are saved, mark that latest digitization as unedited.
-  if (!bill.digitized_unedited) {
-    store.commit(write(db, 'account.move', bill.id, { digitized_unedited: true }));
-    db = store.get();
-    bill = read(db, 'account.move', bill.id);
-  }
+  store.commitDigitizedBill(filled.db, Number(input.id));
+  const db = store.get();
+  const bill = read(db, 'account.move', Number(input.id));
   const company = read(db, 'res.company', bill.company_id ?? 1);
   const vendor = read(db, 'res.partner', bill.partner_id);
   if (company?.autopost_bills && vendor?.autopost_bills === 'always') {
