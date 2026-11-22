@@ -135,7 +135,7 @@ test('MGR-1: Unrealized Currencies CSV/XLSX export and company selector with for
   }
 });
 
-test('MGR-2: Loans Analysis Print/CSV/XLSX, company selector, totals row, and real entry links fallback replacement', async () => {
+test('MGR-2: Loans Analysis Print/CSV/XLSX, company selector, totals row, and and unavailable historical rows', async () => {
   const { makeEl } = setupDom();
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
@@ -283,11 +283,10 @@ test('MGR-2: Loans Analysis Print/CSV/XLSX, company selector, totals row, and re
     assert.ok(table, 'Table is present');
     let rows = tableToRows(table);
 
-    // 2. Verify LOAN-HIST has replaced fallback with real amounts because data exists
+    // 2. A loan without its receipt link is never matched to entries by reference text
     const histRow = rows.find((r) => r.includes('LOAN-HIST'));
     assert.ok(histRow, 'LOAN-HIST is rendered');
-    assert.ok(!histRow.includes(t('Historical entry links unavailable')), 'LOAN-HIST does not use fallback because move exists');
-    assert.ok(histRow.some((cell) => cell.includes('2,000.00')), 'LOAN-HIST shows 2,000.00 borrowed');
+    assert.ok(histRow.includes(t('Historical entry links unavailable')), 'LOAN-HIST without receipt_move_id stays unavailable');
 
     // 3. Verify LOAN-ORPHAN uses fallback because no move exists
     const orphanRow = rows.find((r) => r.includes('LOAN-ORPHAN'));
@@ -297,8 +296,8 @@ test('MGR-2: Loans Analysis Print/CSV/XLSX, company selector, totals row, and re
     // 4. Verify Totals row exists at the end of the table
     const totalRow = rows.find((r) => r[0] === t('Total'));
     assert.ok(totalRow, 'Totals row is rendered in LoansAnalysis');
-    // Sum of available borrowed loans: LOAN-001 (1,200) + LOAN-HIST (2,000) + LOAN-C2 (3,000) = 6,200
-    assert.ok(totalRow.some((cell) => cell.includes('6,200.00')), 'Total amount borrowed sums available loans (6,200.00)');
+    // Sum of available borrowed loans: LOAN-001 (1,200) + LOAN-C2 (3,000) = 4,200
+    assert.ok(totalRow.some((cell) => cell.includes('4,200.00')), 'Total amount borrowed sums available loans (4,200.00)');
 
     // 5. Test company filtering: filter to Company 1
     await React.act(async () => props(companySelect).onChange({ target: { value: '1' } }));
@@ -307,8 +306,8 @@ test('MGR-2: Loans Analysis Print/CSV/XLSX, company selector, totals row, and re
     assert.ok(!rows.some((r) => r.includes('LOAN-C2')), 'Company 2 loan is excluded when company 1 is selected');
     assert.ok(rows.some((r) => r.includes('LOAN-001')), 'Company 1 loan is included');
     const c1TotalRow = rows.find((r) => r[0] === t('Total'));
-    // In Company 1: LOAN-001 (1,200) + LOAN-HIST (2,000) = 3,200
-    assert.ok(c1TotalRow.some((cell) => cell.includes('3,200.00')), 'Company 1 total amount borrowed is 3,200.00');
+    // In Company 1: LOAN-001 (1,200)
+    assert.ok(c1TotalRow.some((cell) => cell.includes('1,200.00')), 'Company 1 total amount borrowed is 1,200.00');
   } finally {
     await React.act(async () => root.unmount());
   }
