@@ -74,14 +74,14 @@ test('budget commitments track confirmed unbilled allocations through partial bi
   assert.equal(actual(cancelled, b.id).committed, 0);
 });
 
-test('commitments use explicit line keys for repeated products and reject unlinked posted bills', () => {
+test('commitments use explicit line IDs for repeated products and reject unlinked posted bills', () => {
   const a = create(seed(), 'account.analytic.account', { name: 'Allocated purchase' });
   const b = budget(a.db, a.id);
   const po = create(b.db, 'purchase.order', { state: 'purchase', partner_id: 2, date_order: '2026-01-10', order_line: [
     { purchase_line_key: 'allocated', product_id: 5, qty: 10, price_unit: 20, tax: 0, analytic_account_id: a.id },
     { purchase_line_key: 'unallocated', product_id: 5, qty: 10, price_unit: 100, tax: 0 },
   ] });
-  const bill = create(po.db, 'account.move', { move_type: 'in_invoice', purchase_id: po.id, partner_id: 2, invoice_date: '2026-01-15', invoice_line_ids: [{ purchase_line_key: 'unallocated', product_id: 5, qty: 10, price_unit: 100, tax: 0 }] });
+  const bill = create(po.db, 'account.move', { move_type: 'in_invoice', purchase_id: po.id, partner_id: 2, invoice_date: '2026-01-15', invoice_line_ids: [{ purchase_line_id: read(po.db, 'purchase.order', po.id).order_line[1].id, product_id: 5, qty: 10, price_unit: 100, tax: 0 }] });
   const db = postMove(bill.db, bill.id);
   assert.equal(actual(db, b.id).committed, -200);
   const unlinked = create(po.db, 'account.move', { move_type: 'in_invoice', purchase_id: po.id, partner_id: 2, invoice_date: '2026-01-15', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });

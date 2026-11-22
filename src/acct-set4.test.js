@@ -514,3 +514,118 @@ test('QE i18n: Arabic translations exist for all new labels, options, descriptio
   }
   assert.deepEqual(dups, [], 'No duplicate keys in src/i18n.js');
 });
+
+test('QE finding 1 regression: missing currency suppresses mismatch warning and does not crash invoice form', async () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { quick_edit_mode: 'out_and_in_invoices' });
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    quick_edit_total_amount: 100,
+    invoice_line_ids: [],
+  });
+  // Unconfigure company currency so documentCurrency throws "Configure the company currency"
+  const noCurrDb = {
+    ...inv.db,
+    records: {
+      ...inv.db.records,
+      'res.company': inv.db.records['res.company'].map((c) => (c.id === 1 ? { ...c, currency_id: null } : c)),
+    },
+  };
+  const rec = read(noCurrDb, 'account.move', inv.id);
+  // Before fix: quickEditMismatch calls documentCurrency without catch, throwing Configure company currency
+  assert.equal(models['account.move'].form.warning(rec, noCurrDb), '');
+  // Adding a new line also suppresses mismatch calculation cleanly and returns a default line with price_unit 0
+  const newLine = models['account.move'].fields.invoice_line_ids.newLine(rec, noCurrDb);
+  assert.equal(newLine.price_unit, 0);
+  const form = await renderMoveForm(noCurrDb, inv.id, 'out_invoice');
+  try {
+    assert.ok(form.host);
+  } finally {
+    await form.cleanup();
+  }
+});
+
+test('QE finding 2 regression: discounted invoice with mixed early-payment discount term matches entered total', async () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { quick_edit_mode: 'out_and_in_invoices' });
+  const saleTax14 = (db.records?.['account.tax'] ?? []).find((t) => t.id === 1 || t.name === 'VAT 14%')
+    ?? create(db, 'account.tax', { name: 'VAT 14%', amount: 14, type_tax_use: 'sale', amount_type: 'percent', ...defaultTaxRepartitionLines(null, [], null, db) });
+  db = write(db, 'res.company', 1, { account_sale_tax_id: saleTax14.id });
+
+  const term = create(db, 'account.payment.term', {
+    name: '10% Early Mixed',
+    early_discount: true,
+    discount_percentage: 10,
+    discount_percent: 10,
+    discount_days: 10,
+    discount_tax_computation: 'mixed',
+    line_ids: [{ value: 100, value_type: 'percent', nb_days: 30, delay_type: 'days_after' }],
+  });
+  db = term.db;
+
+  const lineDef = models['account.move'].fields.invoice_line_ids;
+
+  // Case A: Target 112.60 with 14% exclusive tax and 10% mixed discount -> unit price should be 100, total 112.60
+  const invA = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_payment_term_id: term.id,
+    quick_edit_total_amount: 112.60,
+    invoice_line_ids: [],
+  });
+  const moveA = read(invA.db, 'account.move', invA.id);
+  const lineA = lineDef.newLine(moveA, invA.db);
+  assert.equal(lineA.price_unit, 100);
+  const dbLineA = write(invA.db, 'account.move', invA.id, { invoice_line_ids: [lineA] });
+  const savedA = read(dbLineA, 'account.move', invA.id);
+  assert.equal(total(savedA, dbLineA), 112.60);
+  assert.equal(models['account.move'].form.warning(savedA, dbLineA), '');
+
+  // Case B: In round_globally, target 114 with 14% tax and 10% mixed discount -> total() matches entered target 114
+  const dbGlob = write(db, 'res.company', 1, { tax_calculation_rounding_method: 'round_globally' });
+  const invB = create(dbGlob, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_payment_term_id: term.id,
+    quick_edit_total_amount: 114,
+    invoice_line_ids: [],
+  });
+  const moveB = read(invB.db, 'account.move', invB.id);
+  const lineB = lineDef.newLine(moveB, invB.db);
+  // Before fix: derived price using undiscounted tax was 100, so total was 112.60 != 114
+  assert.notEqual(lineB.price_unit, 100);
+  const dbLineB = write(invB.db, 'account.move', invB.id, { invoice_line_ids: [lineB] });
+  const savedB = read(dbLineB, 'account.move', invB.id);
+  assert.equal(total(savedB, dbLineB), 114);
+  assert.equal(models['account.move'].form.warning(savedB, dbLineB), '');
+
+  // Case C: Tax-included default tax (14% price_include: true) with 10% mixed discount -> target 112.60 -> unit price 114, total 112.60
+  const inclTax = create(db, 'account.tax', {
+    name: 'VAT 14% Incl Mixed',
+    amount: 14,
+    type_tax_use: 'sale',
+    amount_type: 'percent',
+    price_include: true,
+    ...defaultTaxRepartitionLines(null, [], null, db),
+  });
+  const dbIncl = write(inclTax.db, 'res.company', 1, { account_sale_tax_id: inclTax.id });
+  const invC = create(dbIncl, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_payment_term_id: term.id,
+    quick_edit_total_amount: 112.60,
+    invoice_line_ids: [],
+  });
+  const moveC = read(invC.db, 'account.move', invC.id);
+  const lineC = lineDef.newLine(moveC, invC.db);
+  assert.equal(lineC.price_unit, 114);
+  const dbLineC = write(invC.db, 'account.move', invC.id, { invoice_line_ids: [lineC] });
+  const savedC = read(dbLineC, 'account.move', invC.id);
+  assert.equal(total(savedC, dbLineC), 112.60);
+  assert.equal(models['account.move'].form.warning(savedC, dbLineC), '');
+});
