@@ -687,7 +687,7 @@ const allApps = [
       { key: 'report', label: 'Report', model: 'livechat.session', view: 'pivot' },
     ],
   },
-  { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign' }, { key: 'traces', label: 'SMS Traces', model: 'sms.trace' }, { key: 'blacklist', label: 'Blacklisted Numbers', model: 'phone.blacklist' }] },
+  { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign', domain: (r) => !r.followup_sms }, { key: 'traces', label: 'SMS Traces', model: 'sms.trace' }, { key: 'blacklist', label: 'Blacklisted Numbers', model: 'phone.blacklist' }] },
   {
     id: 'whatsapp', name: 'WhatsApp', color: ['#22c55e', '#0f766e'],
     menus: [

@@ -1157,6 +1157,11 @@ const runJobs = async () => {
     };
     const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP }), commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+    if (integrationStatus(ENV).sms) {
+      const store = storeFor({ author: 'Scheduler', isAdmin: true }, 'scheduler');
+      const pending = search(db, 'sms.campaign').filter((campaign) => campaign.followup_sms && search(db, 'sms.trace').some((trace) => trace.campaign_id === campaign.id && trace.state === 'outgoing'));
+      for (const campaign of pending) await sendSmsCampaign(ENV, store, { id: campaign.id });
+    }
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });
   } finally {

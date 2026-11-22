@@ -3585,6 +3585,10 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'SMS Text': 'نص الرسالة النصية',
+  'Follow-up SMS': 'رسالة المتابعة النصية',
+  'Oldest Due Date': 'أقدم تاريخ استحقاق',
+  'The customer has no mobile or phone number.': 'لا يوجد لدى العميل رقم جوال أو هاتف.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
