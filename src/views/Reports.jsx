@@ -17,7 +17,7 @@ import { PAGE_SIZE, pageWindow } from './paging.js';
 import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { dateLocale, t } from '../i18n.js';
-import { money } from '../ui.jsx';
+import { money, PagerButtons } from '../ui.jsx';
 import { companyCurrencyRecord, findCompanyCurrencyRecord } from '../money.js';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
@@ -955,8 +955,7 @@ function ReportPage({ leaf }) {
       {isAudit && (
         <span className="pager" role="group" aria-label={t('Pager')}>
           <span aria-live="polite">{auditWin.label} / {auditWin.total}</span>
-          <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={auditWin.prev == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.prev })}>‹</button>
-          <button type="button" className="btn sm" aria-label={t('Next page')} disabled={auditWin.next == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.next })}>›</button>
+          <PagerButtons prevLabel={t('Previous page')} nextLabel={t('Next page')} prevDisabled={auditWin.prev == null} nextDisabled={auditWin.next == null} onPrev={() => setAuditPage({ key: auditPageKey, offset: auditWin.prev })} onNext={() => setAuditPage({ key: auditPageKey, offset: auditWin.next })} />
         </span>
       )}
       <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
