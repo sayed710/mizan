@@ -27,6 +27,7 @@ import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
 import { onlineAccountForJournal } from './onlineSync.js';
 import { openingAmounts, setOpeningBalance } from './opening.js';
+import { DEFAULT_SEPA_PAIN_VERSION, SEPA_PAIN_VERSIONS, isValidSepaPainVersion } from './sepa.js';
 import {
   computeJournalMethodLines,
   defaultJournalLinesForForm,
@@ -43,6 +44,9 @@ import {
 } from './paymentmethod.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
+
+export const includeInitialBalance = (account) => !['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'off_balance'].includes(account?.account_type);
+const canBeNonTrade = (account) => ['asset_receivable', 'liability_payable'].includes(account?.account_type);
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -2807,6 +2811,9 @@ export const accountingModels = {
       name: { type: 'char', label: 'Account Name', required: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES, tracking: true },
+      include_initial_balance: { type: 'boolean', label: 'Bring Accounts Balance Forward', readonly: true, compute: includeInitialBalance },
+      non_trade: { type: 'boolean', label: 'Non Trade', hideWhen: (r) => !canBeNonTrade(r) },
+      note: { type: 'text', label: 'Internal Notes' },
       currency_id: {
         type: 'many2one',
         relation: 'res.currency',
@@ -2857,6 +2864,7 @@ export const accountingModels = {
     },
     defaults: () => ({ account_type: 'expense', active: true, tax_ids: [] }),
     guard: (db, before, after) => {
+      if (after.non_trade && !canBeNonTrade(after)) return 'Non Trade requires a receivable or payable account';
       const useError = accountTypeGuard(db, before, after);
       if (useError) return useError;
       const codeError = accountCodeGuard(db, before, after);
@@ -2912,6 +2920,7 @@ export const accountingModels = {
     list: ['code', 'name', 'account_type', 'opening_debit', 'opening_credit', 'reconcile', 'currency_id'],
     listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') }, opening_debit: { optional: 'hide' }, opening_credit: { optional: 'hide' } },
     editableList: ['reconcile', 'opening_debit', 'opening_credit'],
+    onchange: (r, key) => key === 'account_type' && !canBeNonTrade(r) ? { non_trade: false } : {},
     prepareWrite: (db, vals, before) => {
       const hasOpeningDebit = vals && 'opening_debit' in vals;
       const hasOpeningCredit = vals && 'opening_credit' in vals;
@@ -2933,9 +2942,9 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
+            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'non_trade', 'active'],
             ['is_deferred', 'deferred_account_id', 'create_asset', 'asset_model_id'],
-            ['description'],
+            ['description', 'note'],
           ],
         },
       ],
@@ -3013,6 +3022,10 @@ export const accountingModels = {
         if (!bankAcc || bankAcc.active === false || (bankAcc.company_id && bankAcc.company_id !== companyId)) {
           return 'Select an active bank account belonging to this journal company';
         }
+      }
+      if (after.sepa_pain_version != null && after.sepa_pain_version !== '') {
+        if (after.type !== 'bank') return 'SEPA Pain Version is only valid for bank journals';
+        if (!isValidSepaPainVersion(after.sepa_pain_version)) return 'Select a valid SEPA Pain Version';
       }
       return journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after) ?? journalMethodLineGuard(db, before, after, vals);
     },
@@ -3126,6 +3139,11 @@ export const accountingModels = {
           ['bottom', 'Bottom'],
         ],
       },
+      sepa_pain_version: {
+        type: 'selection',
+        label: 'SEPA Pain Version',
+        options: SEPA_PAIN_VERSIONS,
+      },
       bank_account_id: {
         type: 'many2one', relation: 'res.partner.bank', label: 'Bank Account Number',
         domain: (b, j, db) => {
@@ -3186,11 +3204,25 @@ export const accountingModels = {
       }
       return { db, vals: nextVals };
     },
+    prepareWrite: (db, vals, before) => {
+      let nextVals = { ...vals };
+      if (nextVals.type !== undefined) {
+        if (nextVals.type === 'bank') {
+          if (nextVals.sepa_pain_version === undefined && (before?.type !== 'bank' || !before?.sepa_pain_version)) {
+            nextVals.sepa_pain_version = DEFAULT_SEPA_PAIN_VERSION;
+          }
+        } else if (nextVals.sepa_pain_version === undefined) {
+          nextVals.sepa_pain_version = null;
+        }
+      }
+      return { db, vals: nextVals };
+    },
     createDefaults: (db, vals = {}) => ({
       ...(isLiquidityJournal(vals) && vals.company_id === undefined ? { company_id: currentCompany(db) } : {}),
       ...(vals.payment_sequence === undefined ? { payment_sequence: isLiquidityJournal(vals) } : {}),
       ...(vals.refund_sequence === undefined ? derivedRefundSequence(vals) : {}),
       ...(vals.type === 'bank' && vals.bank_statements_source === undefined ? { bank_statements_source: 'undefined' } : {}),
+      ...(vals.type === 'bank' && vals.sepa_pain_version === undefined ? { sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_type === undefined ? { invoice_reference_type: 'invoice' } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_model === undefined ? { invoice_reference_model: 'odoo' } : {}),
     }),
@@ -3206,6 +3238,7 @@ export const accountingModels = {
         return {
           ...(isLiquidityJournal(r) && !r.company_id ? { company_id: db ? currentCompany(db) : 1 } : {}),
           ...(r.type === 'bank' && !r.bank_statements_source ? { bank_statements_source: 'undefined' } : {}),
+          ...(r.type === 'bank' && !r.sepa_pain_version ? { sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION } : r.type !== 'bank' && r.sepa_pain_version ? { sepa_pain_version: null } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_type ? { invoice_reference_type: 'invoice' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_model ? { invoice_reference_model: 'odoo' } : {}),
           payment_sequence: isLiquidityJournal(r),
@@ -3295,7 +3328,7 @@ export const accountingModels = {
           { label: 'Journal Entries', groups: entryGroups },
           ...(liquidity ? [
             { label: 'Incoming Payments', ...(cashOrBank ? { fields: ['inbound_payment_method_line_ids'] } : {}), groups: [['outstanding_receipts_account_id']] },
-            { label: 'Outgoing Payments', ...(cashOrBank ? { fields: ['outbound_payment_method_line_ids'] } : {}), groups: [['outstanding_payments_account_id', 'check_next_number', 'check_manual_sequencing', 'check_printing_layout']] },
+            { label: 'Outgoing Payments', ...(cashOrBank ? { fields: ['outbound_payment_method_line_ids'] } : {}), groups: [['outstanding_payments_account_id', ...(j.type === 'bank' ? ['sepa_pain_version'] : []), 'check_next_number', 'check_manual_sequencing', 'check_printing_layout']] },
           ] : []),
           ...(advancedGroups.length ? [{ label: 'Advanced Settings', groups: advancedGroups }] : []),
         ];
@@ -3721,6 +3754,8 @@ export const accountingModels = {
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
+    // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
+    menuActions: [{ label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) }],
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
