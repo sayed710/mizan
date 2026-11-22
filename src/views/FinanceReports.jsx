@@ -11,15 +11,18 @@ import { ReportFoldAll } from './FinancialReportPrint.jsx';
 const num = (v) => <td className="num">{money(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
 
-export function TrialBalance({ db, period, companyId, analyticAccountIds }) {
+export function TrialBalance({ db, period, periods, companyId, analyticAccountIds }) {
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
-  const { rows, totals } = trialBalance(db, { ...period, company_id, analyticAccountIds });
+  const reports = (periods ?? [period]).map((p) => trialBalance(db, { ...p, reviewMode: period.reviewMode, company_id, analyticAccountIds }));
+  const accounts = new Map(reports.flatMap((report) => report.rows.map((row) => [row.account.id, row.account])));
+  const rows = [...accounts.values()].sort((a, b) => a.code.localeCompare(b.code));
+  const keys = ['initial', 'debit', 'credit', 'end'];
   return (
     <tbody>
       {rows.map((r) => (
-        <tr key={r.account.id} className="rep-detail"><td><a href={`#/open/account.account/${r.account.id}`}>{r.account.code} {r.account.name}</a></td>{num(r.initial)}{num(r.debit)}{num(r.credit)}{num(r.end)}</tr>
+        <tr key={r.id} className="rep-detail"><td><a href={`#/open/account.account/${r.id}`}>{r.code} {r.name}</a></td>{reports.flatMap((report, index) => { const row = report.rows.find((item) => item.account.id === r.id); return keys.map((key) => <td key={`${index}-${key}`} className="num">{money(row?.[key] ?? 0)}</td>); })}</tr>
       ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.initial)}{num(totals.debit)}{num(totals.credit)}{num(totals.end)}</tr>
+      <tr className="rep-total strong"><td>{t('Total')}</td>{reports.flatMap((report, index) => keys.map((key) => <td key={`${index}-${key}`} className="num">{money(report.totals[key])}</td>))}</tr>
     </tbody>
   );
 }

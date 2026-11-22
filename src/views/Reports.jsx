@@ -378,9 +378,10 @@ export function Tax({ db, period, companyId = 'all', variant = null }) {
   );
 }
 
-const Aged = (kind) => function AgedBody({ db, period, companyId }) {
+const Aged = (kind) => function AgedBody({ db, period, companyId, partnerIds }) {
   const company = companyId && companyId !== 'all' ? Number(companyId) : null;
-  const { buckets, rows } = agedBalance(db, kind, agedReportDate(period.to), company);
+  const { buckets, rows: allRows } = agedBalance(db, kind, agedReportDate(period.to), company);
+  const rows = partnerIds?.length ? allRows.filter((row) => partnerIds.includes(row.partner_id)) : allRows;
   const [open, setOpen] = useState(() => new Set());
   const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
   return (
@@ -730,6 +731,8 @@ function ReportPage({ leaf }) {
   const [companyId, setCompanyId] = useState('all');
   const { companyDb, availableCompanies, companies, selectedCompany } = reportCompanyScope(sourceDb, companyId, { allowAll: leaf.report !== 'customerStatement' && !isDeferred });
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
+  const [asOf, setAsOf] = useState(today());
+  const isAged = ['agedReceivable', 'agedPayable'].includes(leaf.report);
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
@@ -752,18 +755,21 @@ function ReportPage({ leaf }) {
     : ledger
       ? (ledger.journal_ids ?? [])
       : null;
+  const scopedCompanyDb = selectedCompany !== 'all' && ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic'].includes(leaf.report)
+    ? reportCompanyScope({ ...sourceDb, settings: { ...sourceDb.settings, allowed_company_ids: [Number(selectedCompany)] } }, selectedCompany).companyDb
+    : companyDb;
   const db = targetJournalIds
     ? {
-        ...companyDb,
-        unfilteredDb: companyDb,
+        ...scopedCompanyDb,
+        unfilteredDb: scopedCompanyDb,
         records: {
-          ...companyDb.records,
-          'account.move': (companyDb.records['account.move'] ?? []).filter((move) =>
+          ...scopedCompanyDb.records,
+          'account.move': (scopedCompanyDb.records['account.move'] ?? []).filter((move) =>
             (!ledger || (move.company_id ?? 1) === ledger.company_id) && targetJournalIds.includes(move.journal_id)
           ),
         },
       }
-    : companyDb;
+    : scopedCompanyDb;
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
   const countryTemplateKey = leaf.report === 'tax' ? resolveTaxReportTemplate(companyDb, selectedCompany, companies) : null;
@@ -778,13 +784,13 @@ function ReportPage({ leaf }) {
     ? taxVariant
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
-  const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
+  const period = isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
   const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : isDeferred ? cols.map((col) => col === 'Current' ? periodName : col) : cols;
   const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
-  const comparable = ['pnl', 'balance', 'cashflow', 'executive'].includes(leaf.report) && periodKey !== 'all';
+  const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial'].includes(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
   const effectivePeriod = showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period;
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
@@ -797,7 +803,8 @@ function ReportPage({ leaf }) {
   const canComputePeriods = periodKey !== 'custom' || (validDate(period.from) && validDate(period.to) && period.from <= period.to);
   const periods = comparable && comparison !== 'none' && canComputePeriods ? periodsFor(periodKey, comparison, period) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
-  const partnerChoices = isPartnerLedger ? search(companyDb, 'res.partner', { includeArchived: true }).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
+  const agedPartnerIds = isAged ? new Set(agedBalance(db, leaf.report === 'agedPayable' ? 'payable' : 'receivable', period.to).rows.map((row) => row.partner_id)) : null;
+  const partnerChoices = isPartnerLedger || isAged ? search(companyDb, 'res.partner', { includeArchived: true }).filter((p) => !agedPartnerIds || agedPartnerIds.has(p.id)).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const horizontalGroup = horizontalGroups.find((g) => g.id === Number(horizontalGroupId));
   const data = periods && leaf.report === 'cashflow'
     ? cashflowColumns(db, periods, {
@@ -862,7 +869,8 @@ function ReportPage({ leaf }) {
   const controls = (
     <div className="control-panel">
       <h1 className="cp-title">{t(title)}</h1>
-      {leaf.report !== 'inalterability' && <label className="inline-select">
+      {isAged && <label>{t('As of')}<input aria-label={t('As of')} type="date" max={today()} value={period.to} onChange={(e) => setAsOf(agedReportDate(e.target.value))} /></label>}
+      {leaf.report !== 'inalterability' && !isAged && <label className="inline-select">
         {t('Period')}
         <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
           <option value="month">{t('This Month')}</option>
@@ -872,7 +880,7 @@ function ReportPage({ leaf }) {
           {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
         </select>
       </label>}
-      {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+      {!isAged && periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
       {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
         <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
           <option value="">{t('All Ledgers')}</option>
@@ -890,7 +898,7 @@ function ReportPage({ leaf }) {
           <option value="number">{t('Journal Entry Number')}</option>
         </select>
       </label>}
-      {(isDeferred ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+      {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
         <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement' && !isDeferred} />
       )}
       {leaf.report === 'tax' && countryTemplate && (
@@ -917,6 +925,8 @@ function ReportPage({ leaf }) {
         <label className="inline-select">
           <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
         </label>
+      </>}
+      {(isPartnerLedger || isAged) && <>
         <label className="inline-select">
           {t('Partners')}
           <select aria-label={t('Partners')} multiple value={partnerFilterIds} onChange={(e) => setPartnerFilterIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}>
@@ -976,8 +986,8 @@ function ReportPage({ leaf }) {
     >
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
-          <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} />}
+          <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && leaf.report === 'trial' ? periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`)) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
+          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} />}
         </table>
       </div>
     </ReportPrintView>
