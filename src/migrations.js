@@ -1,3 +1,4 @@
+import { purchaseLineId } from './models/purchase-links.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -1880,6 +1881,62 @@ export function migrateDeferralCreditAdjustments(db) {
 }
 
 MIGRATIONS.push({ version: 62, name: 'canonical-deferral-credit-adjustments', up: migrateDeferralCreditAdjustments });
+
+export function migrateFollowUpNextActionDate(db) {
+  if (!db?.records?.['res.partner']) return db;
+  const currentCompanyId = db.settings?.current_company_id ?? 1;
+  let changed = false;
+  const partners = db.records['res.partner'].map((p) => {
+    let partnerChanged = false;
+    let nextPartner = p;
+
+    if (!nextPartner.followup_reminder_type) {
+      nextPartner = { ...nextPartner, followup_reminder_type: 'automatic' };
+      partnerChanged = true;
+    }
+
+    if ('followup_next_action_date' in nextPartner) {
+      partnerChanged = true;
+      const { followup_next_action_date, ...rest } = nextPartner;
+      if (followup_next_action_date != null) {
+        const lines = [...(nextPartner.followup_lines ?? [])];
+        const idx = lines.findIndex((l) => l.company_id === currentCompanyId);
+        if (idx >= 0) {
+          if (lines[idx].followup_next_action_date == null) {
+            lines[idx] = { ...lines[idx], followup_next_action_date };
+          }
+        } else {
+          lines.push({ company_id: currentCompanyId, followup_next_action_date });
+        }
+        nextPartner = { ...rest, followup_lines: lines };
+      } else {
+        nextPartner = rest;
+      }
+    }
+
+    if (partnerChanged) changed = true;
+    return nextPartner;
+  });
+  if (!changed) return db;
+  return { ...db, records: { ...db.records, 'res.partner': partners } };
+}
+MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
+MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (db) => {
+  const orders = db.records?.['purchase.order'] ?? [];
+  let nextId = Math.max(0, ...orders.flatMap((po) => (po.order_line ?? []).map((line) => Number(line.id) || 0)));
+  const nextOrders = orders.map((po) => ({ ...po, order_line: (po.order_line ?? []).map((line) => line.id == null ? { ...line, id: ++nextId } : line) }));
+  const nextMoves = (db.records?.['account.move'] ?? []).map((move) => {
+    if (move.inalterable_hash || !['in_invoice', 'in_refund'].includes(move.move_type) || !Array.isArray(move.invoice_line_ids)) return move;
+    return { ...move, invoice_line_ids: move.invoice_line_ids.map((line) => {
+      if (!line.purchase_line_key) return line;
+      const id = purchaseLineId({ records: { 'purchase.order': nextOrders } }, line, move.purchase_id);
+      if (id == null) return line;
+      const { purchase_line_key, ...rest } = line;
+      return { ...rest, purchase_line_id: id };
+    }) };
+  });
+  return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
