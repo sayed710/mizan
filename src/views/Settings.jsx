@@ -274,7 +274,6 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const showCurrencies = hasField('currency_id') || !company;
   const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
   const showVendorBills = hasField('three_way_matching');
-  const showVendorPayments = hasField('account_check_printing_layout');
   const showFiscalPeriods = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail'].some(hasField);
   const priceIncludeOptions = fields.account_price_include?.options ?? [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']];
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
@@ -502,6 +501,25 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
             {(db.records['account.incoterm'] ?? []).filter((item) => item.active !== false || item.id === company?.incoterm_id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </SettingRow>
+          {hasField('account_check_printing_layout') && (
+            <SettingRow id="account_check_printing_layout" label="Check Layout" description="Select the layout used when printing checks.">
+              <select
+                id="account_check_printing_layout"
+                disabled={readOnly || !company}
+                value={company?.account_check_printing_layout ?? 'top'}
+                onChange={(e) => onWriteCompany({ account_check_printing_layout: e.target.value })}
+              >
+                {(fields.account_check_printing_layout?.options ?? [
+                  ['none', 'None'],
+                  ['top', 'Check on top'],
+                  ['middle', 'Check in middle'],
+                  ['bottom', 'Check in bottom'],
+                ]).map(([val, label]) => (
+                  <option key={val} value={val}>{t(label)}</option>
+                ))}
+              </select>
+            </SettingRow>
+          )}
       </div>
 
       {showCustomerPayments && (
@@ -533,31 +551,6 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
             <SettingRow id="three_way_matching" label="Three-Way Matching" description="Verify that vendor bill quantities match the purchase order and receipt before marking bills ready to pay.">
               <input id="three_way_matching" type="checkbox" checked={!!company?.three_way_matching} disabled={readOnly || !company}
                 onChange={(e) => onWriteCompany({ three_way_matching: e.target.checked })} />
-            </SettingRow>
-          )}
-        </div>
-      )}
-
-      {showVendorPayments && (
-        <div className="settings-block" data-block="vendor_payments">
-          <h3>{t('Vendor Payments')}</h3>
-          {hasField('account_check_printing_layout') && (
-            <SettingRow id="account_check_printing_layout" label="Check Layout" description="Select the layout used when printing checks.">
-              <select
-                id="account_check_printing_layout"
-                disabled={readOnly || !company}
-                value={company?.account_check_printing_layout ?? 'top'}
-                onChange={(e) => onWriteCompany({ account_check_printing_layout: e.target.value })}
-              >
-                {(fields.account_check_printing_layout?.options ?? [
-                  ['none', 'None'],
-                  ['top', 'Check on top'],
-                  ['middle', 'Check in middle'],
-                  ['bottom', 'Check in bottom'],
-                ]).map(([val, label]) => (
-                  <option key={val} value={val}>{t(label)}</option>
-                ))}
-              </select>
             </SettingRow>
           )}
         </div>

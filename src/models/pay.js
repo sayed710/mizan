@@ -1254,7 +1254,7 @@ const consumedCheckNumbers = (db, journalId) => {
 /** First check number a journal may print next: its "Next Check Number" setting, pushed past every number already consumed. */
 export function nextCheckNumber(db, journalId, requested = 0) {
   const journal = read(db, 'account.journal', journalId);
-  return consumedCheckNumbers(db, journalId).reduce((next, n) => Math.max(next, n + 1), Number(requested || journal?.check_next_number || 1));
+  return consumedCheckNumbers(db, journalId).reduce((next, n) => Math.max(next, n + 1), Math.max(Number(requested || 1), Number(journal?.check_next_number || 1)));
 }
 
 /** True when payment pays by check (method code 'check_printing'). Never infer from names. */
@@ -1289,7 +1289,7 @@ export function isCheckNumberUsedOnJournal(db, journalId, checkNumber, excludePa
  * and maintains void history on reprints.
  */
 export function issueCheckNumber(db, payment, { number = null, isReprint = false } = {}) {
-  const p = typeof payment === 'object' && payment !== null ? payment : read(db, 'account.payment', payment);
+  const p = read(db, 'account.payment', typeof payment === 'object' && payment !== null ? payment.id : payment);
   if (!p || p.state !== 'posted' || p.payment_type !== 'outbound') {
     throw new Error(isReprint ? 'Only posted checks can be reprinted' : 'Only posted outbound payments can be printed');
   }
@@ -1301,9 +1301,9 @@ export function issueCheckNumber(db, payment, { number = null, isReprint = false
   const isVoided = (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
 
   if (isReprint) {
-    if (p.check_number == null) throw new Error('Only issued checks can be reprinted');
+    if (p.check_number == null || (p.check_printed === false && !isVoided)) throw new Error('Only issued checks can be reprinted');
   } else {
-    if (p.check_printed && !isVoided) {
+    if (p.check_number != null && p.check_printed !== false && !isVoided) {
       throw new Error('Check has already been printed');
     }
     if (p.check_number != null && !isVoided && !isManual && number == null) {
@@ -1441,7 +1441,7 @@ export function printBatchChecks(db, batchOrId, requestedStartNumber = null) {
   let changed = false;
 
   const isManual = Boolean(journal.check_manual_sequencing);
-  let nextStartNumber = requestedStartNumber != null ? Number(requestedStartNumber) : null;
+  let nextStartNumber = requestedStartNumber != null && typeof requestedStartNumber !== 'object' ? Number(requestedStartNumber) : null;
 
   for (let i = 0; i < nextLines.length; i++) {
     const line = nextLines[i];
@@ -1452,11 +1452,13 @@ export function printBatchChecks(db, batchOrId, requestedStartNumber = null) {
 
     const isVoided = (payment.voided_check_numbers ?? []).some((v) => v.check_number === payment.check_number);
     if (isManual) {
-      const num = line.check_number ?? (payment.check_number != null && !isVoided ? payment.check_number : null);
+      const num = isVoided ? requestedStartNumber?.[payment.id] : (payment.check_number ?? requestedStartNumber?.[payment.id] ?? line.check_number);
       if (num == null) {
         throw new Error('Check number is required for manual numbering');
       }
-      next = issueCheckNumber(next, payment, { number: num, isReprint: false });
+      if (payment.check_printed === false || payment.check_number == null || isVoided) {
+        next = issueCheckNumber(next, payment, { number: num, isReprint: false });
+      }
       if (line.check_number !== num) {
         nextLines[i] = { ...line, check_number: num };
         changed = true;
@@ -1619,13 +1621,20 @@ const validCheckWrite = (db, before, after) => {
   const priorVoided = before?.voided_check_numbers ?? [];
   const nextVoided = after.voided_check_numbers ?? [];
   const voidedUnchanged = JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
-  if (!before) return !nextVoided.length && (after.check_number == null || after.state === 'posted');
+  if (!before) return !nextVoided.length && (after.check_printed !== true || (after.check_number != null && after.state === 'posted' && after.payment_type === 'outbound')) && (after.check_number == null || after.state === 'posted');
+  if (before.check_printed !== after.check_printed) {
+    if (after.check_printed === true) {
+      if (after.check_number == null || after.state !== 'posted' || after.payment_type !== 'outbound') return false;
+    } else if (after.check_printed === false) {
+      if (before.check_number == null || after.check_number !== before.check_number || !appendsVoidOf(priorVoided, nextVoided, before.check_number)) return false;
+    } else return false;
+  }
   if (before.check_number == null) {
     return voidedUnchanged && (after.check_number == null || (after.state === 'posted' && after.payment_type === 'outbound'));
   }
   const journal = (after.journal_id ?? before.journal_id) ? read(db, 'account.journal', after.journal_id ?? before.journal_id) : null;
   const isManual = Boolean(journal?.check_manual_sequencing);
-  if (isManual && !before.check_printed && !after.check_printed) {
+  if (isManual && before.check_printed === false && after.check_printed === false && !priorVoided.some((v) => v.check_number === before.check_number)) {
     if (before.journal_id !== after.journal_id) return false;
     return voidedUnchanged && after.payment_type === 'outbound';
   }
@@ -1780,7 +1789,7 @@ export const payModels = {
         label: 'Check Number',
         readonly: (r, db) => {
           if (!r?.journal_id || !db) return true;
-          if (r.check_printed) return true;
+          if (r.check_printed === true || (r.check_number != null && r.check_printed !== false)) return true;
           const j = read(db, 'account.journal', r.journal_id);
           return !j?.check_manual_sequencing;
         },
@@ -1857,7 +1866,7 @@ export const payModels = {
         const lock = r && db ? recordLockDate(db, r) : null;
         if (lock && String(r.date ?? today()) <= lock) return [];
         const res = ['memo'];
-        if (r && db && r.payment_type === 'outbound' && !r.check_printed && r.journal_id) {
+        if (r && db && r.payment_type === 'outbound' && (r.check_printed === false || (r.check_printed == null && r.check_number == null)) && r.journal_id) {
           const j = read(db, 'account.journal', r.journal_id);
           if (j?.check_manual_sequencing && paymentPaysByCheck(db, r)) {
             res.push('check_number');
@@ -1935,7 +1944,7 @@ export const payModels = {
             if (r.state !== 'posted' || r.payment_type !== 'outbound') return false;
             if (!db || !paymentPaysByCheck(db, r)) return false;
             const isVoided = (r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number);
-            if (r.check_printed && !isVoided) return false;
+            if (r.check_number != null && r.check_printed !== false && !isVoided) return false;
             const journal = r.journal_id ? read(db, 'account.journal', r.journal_id) : null;
             if (journal?.check_manual_sequencing && isVoided) {
               return false;
@@ -1973,14 +1982,14 @@ export const payModels = {
         },
         {
           label: 'Reprint Check',
-          when: (r, db) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null
+          when: (r, db) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null && r.check_printed !== false
             && !(r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number)
             && !(db && r.journal_id && read(db, 'account.journal', r.journal_id)?.check_manual_sequencing),
           run: (db, r) => ({ db: reprintCheck(db, r), go: `#/print/account.payment/${r.id}` }),
         },
         {
           label: 'Reprint Check',
-          when: (r, db) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null
+          when: (r, db) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null && r.check_printed !== false
             && !(r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number)
             && Boolean(db && r.journal_id && read(db, 'account.journal', r.journal_id)?.check_manual_sequencing),
           ask: [{ label: 'New Check Number', type: 'number' }],

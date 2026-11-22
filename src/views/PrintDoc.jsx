@@ -98,7 +98,7 @@ function Checks({ db, batch }) {
         if (!totalsByCurrency.length) {
           totalsByCurrency.push({ currency: amounts.currency, total: payment?.amount ?? l.amount ?? 0 });
         }
-        const stubPages = splitStubLines(stubLines);
+        const stubPages = layout === 'none' ? [[]] : splitStubLines(stubLines);
 
         const checkBody = (isVoid = false) => (
           <section key="check-main" className={`check-main-area${isVoid ? ' void' : ''}`}>

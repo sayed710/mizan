@@ -3668,6 +3668,7 @@ const ar = {
   'Depreciation reversal must match the excess from a vendor refund': 'يجب أن يطابق عكس الإهلاك الزيادة الناتجة عن مرتجع المورد',
   'Check on top': 'شيك في الأعلى',
   'Check in middle': 'شيك في المنتصف',
+  'Check in bottom': 'شيك في الأسفل',
   'Check on bottom': 'شيك في الأسفل',
   'Check Printed': 'تمت طباعة الشيك',
   'Select a valid check layout': 'اختر تخطيط شيك صالح',
