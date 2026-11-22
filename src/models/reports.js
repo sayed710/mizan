@@ -2,13 +2,15 @@
 import { read, search } from '../orm.js';
 import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { deferredSettings, lineCreditAdjustmentAmount, recognitionTargetThroughDate, scheduleAsOf } from './deferred.js';
-import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, journalItems, profitAndLoss, weighted } from './ledger.js';
+import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
 import { currentCompany } from './company.js';
 import { reportingBookedAmount } from './money.js';
 import { isLiquidityJournal } from './ledger.js';
+import { configuredEarningsAccount } from './earnings.js';
+import { includeInitialBalance } from './accounting.js';
 
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
 
@@ -37,10 +39,19 @@ const cashFlowSelectedSources = (sources, analyticAccountIds) => !analyticAccoun
 /** Journal items dated strictly before `from` (none without a `from`): the opening column of every report. */
 const itemsBefore = (db, from, company_id, analyticAccountIds, reviewMode = 'posted') => (from ? filterByAnalytic(journalItems(db, { company_id, reviewMode }), analyticAccountIds).filter((l) => l.date < from) : []);
 
+/** Accounts without include_initial_balance restart at their company's fiscal-year start; earlier results open on its earnings account (Odoo's undistributed profits), so the opening column stays balanced. */
+export function trialOpeningItems(db, items, from) {
+  return items.map((line) => {
+    if (includeInitialBalance(read(db, 'account.account', line.account_id)) || line.date >= fiscalYearStart(db, from, line.company_id)) return line;
+    const earnings = configuredEarningsAccount(db, line.company_id);
+    return earnings ? { ...line, account_id: earnings.id } : line;
+  });
+}
+
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
 export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, includeClosing = false } = {}) {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
-  const opening = new Map(balances(db, itemsBefore(db, from, company_id, analyticAccountIds, mode)).map((b) => [b.account.id, b.balance]));
+  const opening = new Map(balances(db, trialOpeningItems(db, itemsBefore(db, from, company_id, analyticAccountIds, mode), from)).map((b) => [b.account.id, b.balance]));
   const rows = new Map();
   const row = (id) => {
     if (!rows.has(id)) rows.set(id, { account: read(db, 'account.account', id), initial: round(opening.get(id) ?? 0), debit: 0, credit: 0 });
