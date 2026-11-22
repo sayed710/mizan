@@ -180,7 +180,7 @@ export function total(r, db) {
   }
   const selected = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
   const hasTax = selected?.strategy === 'biggest_tax' && (mixed
-    ? invoiceTaxGroups(db, r, roundingMethod).some((g) => g.document_amount !== 0)
+    ? roundCurrency(invoiceTaxGroups(db, r, roundingMethod).reduce((s, g) => s + g.document_amount, 0), docCurr) !== 0
     : amounts(r.invoice_line_ids, docCurr, { roundingMethod, side }).tax !== 0);
   const rounding = appliedCashRounding(selected, hasTax);
   if (rounding) return roundCurrency(cashRound(base, rounding.rounding, rounding.rounding_method), docCurr);

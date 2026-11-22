@@ -3684,6 +3684,7 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

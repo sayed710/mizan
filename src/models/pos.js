@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { roundingAccount } from './configured-account.js';
+import { posCashRounding, roundingAccount } from './configured-account.js';
 import { stockAccount } from './stock-accounts.js';
 import { assertCompanyAccount, invoiceLineAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { computeLineTaxes, fiscalPositionFor, productTax, taxLabel, taxRepartitionLines } from './taxes.js';
@@ -103,9 +103,10 @@ export const tendersOf = (order, db = null) => (order.payment_ids?.length
 
 export function posOrderTotal(db, lines, { configId = null, companyId = null, method = null, payments = null } = {}) {
   const config = configId ? read(db, 'pos.config', configId) : null;
-  const currency = companyCurrencyRecord(db, companyId ?? config?.company_id ?? openSession(db)?.company_id);
+  const resolvedCompanyId = companyId ?? config?.company_id ?? openSession(db)?.company_id ?? 1;
+  const currency = companyCurrencyRecord(db, resolvedCompanyId);
   const total = amounts(lines, currency);
-  const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
+  const rounding = posCashRounding(db, config, resolvedCompanyId, currency?.id);
   if (!rounding) {
     return { ...total, roundedTotal: roundCurrency(total.total, currency), roundingDifference: 0, isCash: false };
   }
@@ -437,7 +438,7 @@ function orderRoundingAccount(db, { original = null, config = null, roundingDiff
     return acc.id;
   }
   const isProfit = Number(roundingDiff) > 0;
-  const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
+  const rounding = posCashRounding(db, config, companyId, companyCurrencyRecord(db, companyId)?.id);
   return roundingAccount(db, rounding, isProfit, companyId);
 }
 
