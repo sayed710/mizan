@@ -29,8 +29,8 @@ const normalizedIban = (value) => String(value ?? '').replace(/\s/g, '').toUpper
 export const DEFAULT_SEPA_PAIN_VERSION = 'pain.001.001.09';
 
 export const SEPA_PAIN_VERSIONS = [
-  ['pain.001.001.03', 'pain.001.001.03'],
-  ['pain.001.001.09', 'pain.001.001.09'],
+  ['pain.001.001.03', 'Generic'],
+  ['pain.001.001.09', 'New generic version (09)'],
 ];
 
 const PAIN_VARIANTS = {

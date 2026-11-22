@@ -3553,6 +3553,8 @@ const ar = {
   'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
   'Electronic': 'إلكتروني',
+  'Generic': 'عام',
+  'New generic version (09)': 'الإصدار العام الجديد (09)',
   'SEPA Credit Transfer': 'التحويل الائتماني الأوروبي',
   'Generate SEPA file': 'إنشاء ملف التحويل الأوروبي',
   'SEPA file': 'ملف التحويل الأوروبي',
