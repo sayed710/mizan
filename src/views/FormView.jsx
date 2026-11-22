@@ -570,19 +570,32 @@ export function FormView({ leaf, id, base, params }) {
 
       const savedId = wizard.id ?? save();
       if (savedId == null) return;
-      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), values);
-      commit(res.db);
-      setWizard(null);
-      setError(null);
+      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), shouldEmail && live ? { ...values, live: true } : values);
+      await commit(res.db);
 
       if (shouldEmail) {
         if (live) {
-          serverAction(endpoint, { model, id: savedId })
-            .then((out) => { setError(null); if (out?.message) alert(out.message); if (out?.go) location.hash = out.go; }, (e) => fail(e));
+          try {
+            const out = await serverAction(endpoint, { model, id: savedId });
+            await commit(write(getDb(), model, savedId, { is_move_sent: true }));
+            setWizard(null);
+            setError(null);
+            if (out?.message) alert(out.message);
+            if (out?.go) location.hash = out.go;
+            else if (res.go) location.hash = res.go;
+            return;
+          } catch (e) {
+            setWizard(null);
+            fail(e);
+            return;
+          }
         } else if (channel) {
           commit(postNote(getDb(), model, savedId, t('Not sent: {channel} is not configured.', { channel: t(channel) })));
         }
       }
+
+      setWizard(null);
+      setError(null);
 
       if (res.message) alert(res.message);
       if (res.go) location.hash = res.go;

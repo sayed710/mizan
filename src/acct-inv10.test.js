@@ -86,9 +86,9 @@ test('SND-1: Send button replaces Send by Email and defines wizard with Email an
   assert.equal(read(resDl.db, 'account.move', postedWithEmail.id).is_move_sent, true);
   assert.equal(resDl.go, `#/print/account.move/${postedWithEmail.id}`);
 
-  // Confirming with email only: sets is_move_sent and does not navigate
+  // Email only without the server sends nothing, so the invoice is not marked sent
   const resEmail = sendBtn.run(db, postedWithEmail, { email: true, download: false });
-  assert.equal(read(resEmail.db, 'account.move', postedWithEmail.id).is_move_sent, true);
+  assert.equal(read(resEmail.db, 'account.move', postedWithEmail.id).is_move_sent ?? false, false);
   assert.equal(resEmail.go, undefined);
 
   // Confirming with both: sets is_move_sent and opens print route
@@ -187,7 +187,7 @@ test('SND-1: FormView integration reuses existing document email path on Send co
     // Check that confirm was called for unconfigured SMTP and chatter note posted
     assert.ok(confirmCalled, 'confirm() was called because SMTP is not configured');
     const updated = read(getDb(), 'account.move', inv.id);
-    assert.equal(updated.is_move_sent, true, 'is_move_sent is set to true on account.move');
+    assert.equal(updated.is_move_sent ?? false, false, 'an email that was not sent does not mark the invoice as sent');
 
     const messages = (getDb().messages ?? []).filter((m) => m.model === 'account.move' && m.res_id === inv.id);
     assert.ok(messages.some((m) => m.body.includes('Not sent: Email is not configured')), 'Chatter note posted via existing email path');
@@ -292,4 +292,291 @@ test('SND-3: Apply Send button and list filters to customer invoices and credit 
   const purchaseFilterLabels = purchaseInvoiceView.filters.flat().map((f) => f.label);
   assert.ok(!purchaseFilterLabels.includes('Sent'), 'Sent filter must NOT be on purchaseInvoiceView');
   assert.ok(!purchaseFilterLabels.includes('Not Sent'), 'Not Sent filter must NOT be on purchaseInvoiceView');
+});
+
+test('Finding 3 regression: Reset to Draft clears is_move_sent so reposted invoice requires Send again', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: '2026-05-01',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100 }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  const sendBtn = models['account.move'].form.buttons.find((b) => b.label === 'Send');
+  const resetBtn = models['account.move'].form.buttons.find((b) => b.label === 'Reset to Draft');
+
+  // Mark sent via Send
+  const sentRes = sendBtn.run(db, read(db, 'account.move', inv.id), { email: false, download: true });
+  db = sentRes.db;
+  assert.equal(read(db, 'account.move', inv.id).is_move_sent, true, 'is_move_sent is true after Send');
+
+  // Reset to Draft
+  const resetRes = resetBtn.run(db, read(db, 'account.move', inv.id));
+  db = resetRes.db;
+  const draft = read(db, 'account.move', inv.id);
+  assert.equal(draft.state, 'draft', 'state is draft');
+  assert.equal(draft.is_move_sent, false, 'Reset to Draft must clear is_move_sent to false');
+
+  // Repost invoice
+  db = postMove(db, inv.id);
+  const reposted = read(db, 'account.move', inv.id);
+  assert.equal(reposted.state, 'posted');
+  assert.equal(reposted.is_move_sent, false, 'Reposted invoice retains is_move_sent=false');
+  assert.equal(sendBtn.primary(reposted), true, 'Send button must be primary again after reposting');
+
+  // Filter check
+  const sentFilter = salesInvoiceView.filters.flat().find((f) => f.label === 'Sent');
+  const notSentFilter = salesInvoiceView.filters.flat().find((f) => f.label === 'Not Sent');
+  assert.deepEqual(applyFilters('account.move', [reposted], [sentFilter.id], db, salesInvoiceView.filters), []);
+  assert.deepEqual(applyFilters('account.move', [reposted], [notSentFilter.id], db, salesInvoiceView.filters).map((m) => m.id), [inv.id]);
+});
+
+test('Finding 1 regression: Send.run refuses when neither Email nor Download is selected', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: '2026-05-01',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100 }],
+  });
+  db = postMove(inv.db, inv.id);
+  const posted = read(db, 'account.move', inv.id);
+
+  const sendBtn = models['account.move'].form.buttons.find((b) => b.label === 'Send');
+  assert.throws(
+    () => sendBtn.run(db, posted, { email: false, download: false }),
+    /Select at least one channel/i,
+    'Send.run must throw when neither email nor download is selected'
+  );
+  assert.throws(
+    () => sendBtn.run(db, posted, {}),
+    /Select at least one channel/i,
+    'Send.run must throw when empty values are passed'
+  );
+});
+
+test('Findings 1 & 2 regression: FormView Send wizard handles unselected channels and live email failure', async () => {
+  const prevStorage = globalThis.localStorage;
+  const mem = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => { mem.set(k, String(v)); },
+    removeItem: (k) => { mem.delete(k); },
+    clear: () => { mem.clear(); },
+  };
+  setupDom();
+  const origCreate = globalThis.document.createElement;
+  globalThis.document.createElement = (tag) => {
+    const el = origCreate(tag);
+    el.ownerDocument = globalThis.document;
+    el.insertBefore = (child, before) => {
+      const idx = before ? el.childNodes.indexOf(before) : -1;
+      if (idx >= 0) el.childNodes.splice(idx, 0, child);
+      else el.childNodes.push(child);
+      child.parentNode = el;
+      if (child.tagName === 'OPTION') el.options.push(child);
+      return child;
+    };
+    return el;
+  };
+  globalThis.document.createElementNS = (_, tag) => globalThis.document.createElement(tag);
+
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { FormView } = await import('./views/FormView.jsx');
+  const { initStore, commit, getDb } = await import('./store.js');
+  await initStore();
+
+  let db = getDb();
+  // Partner without email
+  const partnerNoEmail = create(db, 'res.partner', { name: 'No Email Cust', email: '' });
+  db = partnerNoEmail.db;
+  const invNoEmail = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partnerNoEmail.id,
+    invoice_date: '2026-05-01',
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100 }],
+  });
+  db = postMove(invNoEmail.db, invNoEmail.id);
+  await commit(db);
+
+  const leaf = { key: 'invoices', label: 'Invoices', model: 'account.move' };
+  const host = globalThis.document.createElement('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  const origFetch = globalThis.fetch;
+  const origLoc = globalThis.location;
+  const origAlert = globalThis.alert;
+  const origSetInterval = globalThis.setInterval;
+  globalThis.alert = () => {};
+  globalThis.setInterval = () => ({ unref() {} });
+
+  try {
+    // 1. Submit wizard when neither channel is chosen (partner without email)
+    await React.act(async () => {
+      root.render(React.createElement(FormView, {
+        leaf,
+        id: invNoEmail.id,
+        base: '#/accounting/invoices',
+        params: new URLSearchParams('view=form'),
+      }));
+    });
+
+    const sendButton = allFind(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.trim() === 'Send');
+    assert.ok(sendButton);
+
+    await React.act(async () => {
+      props(sendButton).onClick();
+    });
+
+    let dialog = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+    assert.ok(dialog, 'Wizard dialog open');
+
+    // Submit wizard with default (both false)
+    await React.act(async () => {
+      props(dialog).onSubmit({ preventDefault() {} });
+    });
+
+    // Dialog must STILL be open, error message must be shown, and invoice must NOT be sent
+    dialog = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+    assert.ok(dialog, 'Wizard dialog must remain open when confirmation is rejected');
+    const alertEl = find(host, (n) => n.className?.includes('alert'));
+    assert.ok(alertEl, 'Alert message must be shown in wizard');
+    assert.equal(read(getDb(), 'account.move', invNoEmail.id).is_move_sent, false, 'Invoice must not be marked sent');
+
+    // Cancel to close dialog
+    const cancelBtn = allFind(dialog, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.trim() === 'Cancel');
+    if (cancelBtn) await React.act(async () => { props(cancelBtn).onClick(); });
+
+    // 2. Live email failure when Email and Download are both chosen
+    const partnerWithEmail = create(getDb(), 'res.partner', { name: 'With Email Cust', email: 'cust@example.com' });
+    const invWithEmail = create(partnerWithEmail.db, 'account.move', {
+      move_type: 'out_invoice',
+      partner_id: partnerWithEmail.id,
+      invoice_date: '2026-05-01',
+      invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100 }],
+    });
+    const postedWithEmailDb = postMove(invWithEmail.db, invWithEmail.id);
+    await commit(postedWithEmailDb);
+
+    let failEmail = true;
+    globalThis.location = { hash: '#/accounting/invoices' };
+    globalThis.fetch = async (url) => {
+      if (url === '/api/session') {
+        return new Response(JSON.stringify({ name: 'Admin', isAdmin: true, integrations: { smtp: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/db') {
+        return new Response(JSON.stringify(getDb()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/diff') {
+        return new Response(JSON.stringify(getDb()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/mail/document') {
+        if (failEmail) {
+          return new Response(JSON.stringify({ error: 'SMTP delivery failed' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ message: 'Email sent successfully' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+
+    // Re-init store in server mode with smtp enabled
+    await React.act(async () => {
+      await initStore();
+    });
+
+    await React.act(async () => {
+      root.render(React.createElement(FormView, {
+        leaf,
+        id: invWithEmail.id,
+        base: '#/accounting/invoices',
+        params: new URLSearchParams('view=form'),
+      }));
+    });
+
+    const sendBtn2 = allFind(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.trim() === 'Send');
+    assert.ok(sendBtn2);
+
+    await React.act(async () => {
+      props(sendBtn2).onClick();
+    });
+
+    const dialog2 = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+    assert.ok(dialog2);
+
+    // Toggle download checkbox so both email and download are true
+    const downloadCheckbox = find(dialog2, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox' && props(n)?.id === 'w-download');
+    assert.ok(downloadCheckbox, 'Download checkbox must exist');
+    await React.act(async () => {
+      props(downloadCheckbox).onChange({ target: { checked: true } });
+    });
+
+    // Reset location.hash
+    globalThis.location.hash = '#/accounting/invoices';
+
+    // Submit wizard with email failure
+    await React.act(async () => {
+      const liveDialog = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+      await props(liveDialog).onSubmit({ preventDefault() {} });
+    });
+
+    // Should NOT navigate to download route
+    assert.equal(globalThis.location.hash, '#/accounting/invoices', 'Must not navigate to download route on email failure');
+    // Invoice must NOT be marked sent
+    assert.equal(read(getDb(), 'account.move', invWithEmail.id).is_move_sent, false, 'Failed email must not mark invoice sent');
+    // Error must be displayed on FormView
+    const errorEl = find(host, (n) => n.className?.includes('alert'));
+    assert.ok(errorEl, 'FormView must show error on email failure');
+    assert.ok(errorEl.textContent.includes('SMTP delivery failed'), 'Error text must mention failure');
+
+    // 3. Now let live email SUCCEED
+    failEmail = false;
+    await React.act(async () => {
+      props(sendBtn2).onClick();
+    });
+    const dialog3 = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+    assert.ok(dialog3);
+    const dl3 = find(dialog3, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox' && props(n)?.id === 'w-download');
+    assert.ok(dl3, 'Download checkbox must exist for dialog3');
+    await React.act(async () => {
+      props(dl3).onChange({ target: { checked: true } });
+    });
+    await React.act(async () => {
+      const liveDialog3 = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+      await props(liveDialog3).onSubmit({ preventDefault() {} });
+    });
+
+    // Upon success: invoice marked sent and navigated to print
+    assert.equal(read(getDb(), 'account.move', invWithEmail.id).is_move_sent, true, 'Succeeded email must mark invoice sent');
+    assert.equal(globalThis.location.hash, `#/print/account.move/${invWithEmail.id}`, 'Must navigate to download route after email succeeds');
+  } finally {
+    globalThis.fetch = () => Promise.reject(new Error('offline'));
+    await React.act(async () => root.unmount());
+    globalThis.fetch = origFetch;
+    globalThis.location = origLoc;
+    globalThis.alert = origAlert;
+    globalThis.setInterval = origSetInterval;
+    globalThis.localStorage = prevStorage;
+    await initStore();
+  }
 });

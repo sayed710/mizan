@@ -42,7 +42,7 @@ import {
   unlinkJournalMethodLines,
 } from './paymentmethod.js';
 
-export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines };
+export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -2092,12 +2092,13 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       continue;
     }
 
-    const hasPriceIncludeTax = taxIds.some((id) => read(db, 'account.tax', id)?.price_include);
     let grossDocAmount = docAmount;
-    if (hasPriceIncludeTax && existingForBase.length) {
+    if (existingForBase.length) {
       const existingPriceInclDoc = existingForBase.reduce((sum, el) => {
-        const tRec = read(db, 'account.tax', el.tax_id);
-        if (!tRec?.price_include) return sum;
+        const isIncl = el.tax_include !== undefined
+          ? Boolean(el.tax_include)
+          : Boolean(read(db, 'account.tax', el.tax_id)?.price_include);
+        if (!isIncl) return sum;
         const amt = isForeign
           ? Math.abs(Number(el.amount_currency) || 0)
           : (Number(el.debit) || Number(el.credit) || 0);
@@ -2128,7 +2129,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         price_unit: grossDocAmount,
         discount: 0,
         tax_ids: groupTaxIds,
-        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id)),
+        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id, companyId)),
       };
 
       const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
@@ -2191,18 +2192,20 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       : (baseSide === 'credit' ? 'sale' : 'purchase');
 
     const roundedUntaxedDoc = roundCurrency(totalUntaxedDoc, docCurrency);
-    const untaxedCompany = hasPriceInclude
+    // The base is rewritten only when a tax is included in price now, or when included tax amounts were added back to it.
+    const rewriteBase = hasPriceInclude || grossDocAmount !== docAmount;
+    const untaxedCompany = rewriteBase
       ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
       : baseAmount;
 
     const updatedBase = {
       ...baseLine,
-      debit: baseSide === 'debit' ? (hasPriceInclude ? untaxedCompany : baseLine.debit) : 0,
-      credit: baseSide === 'credit' ? (hasPriceInclude ? untaxedCompany : baseLine.credit) : 0,
+      debit: baseSide === 'debit' ? (rewriteBase ? untaxedCompany : baseLine.debit) : 0,
+      credit: baseSide === 'credit' ? (rewriteBase ? untaxedCompany : baseLine.credit) : 0,
       tax_tag_ids: baseTags,
       tax_grid_base: baseTags.length > 0,
       tax_side: baseReportingSide,
-      ...(isForeign && hasPriceInclude ? {
+      ...(isForeign && rewriteBase ? {
         amount_currency: baseSide === 'debit' ? roundedUntaxedDoc : -roundedUntaxedDoc,
       } : {}),
     };
@@ -2266,6 +2269,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         debit: effectiveSide === 'debit' ? absTaxAmount : 0,
         credit: effectiveSide === 'credit' ? absTaxAmount : 0,
         tax_id: g.t.tax_id,
+        tax_include: Boolean(g.t.tax_include),
         tax_name: g.t.name || g.t.tax_name || taxLabel(g.t),
         tax_repartition_line_id: g.row.id ?? null,
         tax_base: taxBase,
@@ -2290,6 +2294,26 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
   }
 
   return resultLines;
+}
+
+/** Recompute tax lines on all draft manual entries of a company (e.g. after default sales price inclusion changes). */
+function refreshDraftEntryTaxes(db, companyId) {
+  if (!db?.records?.['account.move']) return db;
+  const targetCompany = companyId ?? db.settings?.current_company_id ?? 1;
+  const draftMoves = (db.records['account.move'] ?? []).filter((m) =>
+    m.move_type === 'entry' &&
+    m.state === 'draft' &&
+    (m.company_id ?? 1) === targetCompany &&
+    Array.isArray(m.line_ids) &&
+    m.line_ids.some((l) => (l.tax_ids?.length || l.tax_id != null))
+  );
+  if (!draftMoves.length) return db;
+  let next = db;
+  for (const m of draftMoves) {
+    const refreshedLines = computeEntryTaxLines(m.line_ids, m, next);
+    next = write(next, 'account.move', m.id, { line_ids: refreshedLines });
+  }
+  return next;
 }
 
 /** A journal item tied to one tax (tax_id or repartition line): its tags come from that tax, so base-line tag updates must skip it. */
@@ -2372,6 +2396,7 @@ const lineItem = {
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Tax', hidden: true },
+    tax_include: { type: 'boolean', label: 'Included in Price', hidden: true },
     tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', widget: 'many2many_tags', hidden: true },
     tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
     tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },
@@ -4002,10 +4027,16 @@ export const accountingModels = {
               ],
             };
           },
-          run: (db, r, values = {}) => ({
-            db: write(db, 'account.move', r.id, { is_move_sent: true }),
-            ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
-          }),
+          run: (db, r, values = {}) => {
+            if (!values?.email && !values?.download) {
+              throw new Error('Select at least one channel: Email or Download');
+            }
+            const markSent = !values.live && Boolean(values.download);
+            return {
+              db: markSent ? write(db, 'account.move', r.id, { is_move_sent: true }) : db,
+              ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
+            };
+          },
         },
         {
           label: 'Credit Note',
@@ -4061,6 +4092,7 @@ export const accountingModels = {
             const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
             const nextDb = write(cancelledDb, 'account.move', r.id, {
               state: 'draft',
+              is_move_sent: false,
               ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
               ...(isInvoice(r) ? { line_ids: [] } : {})
             });
