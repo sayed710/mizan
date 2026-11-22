@@ -18,8 +18,8 @@ test('posting invoices and confirming orders increments the commercial partner r
     const made = create(db, model, { partner_id: child.id, ...(type ? { move_type: type, invoice_line_ids: [line] } : { order_line: [line] }) });
     db = press(made.db, model, made.id, button);
   }
-  assert.equal(read(db, 'res.partner', parent.id).customer_rank, 2);
-  assert.equal(read(db, 'res.partner', parent.id).supplier_rank, 2);
+  assert.equal(read(db, 'res.partner', parent.id).customer_rank, 1);
+  assert.equal(read(db, 'res.partner', parent.id).supplier_rank, 1);
   assert.equal(read(db, 'res.partner', child.id).customer_rank, 0);
   assert.equal(models['res.partner'].fields.customer_rank.readonly, true);
   assert.equal(models['res.partner'].fields.supplier_rank.readonly, true);

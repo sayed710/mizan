@@ -1999,7 +1999,8 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
-MIGRATIONS.push({ version: 67, name: 'partner-ranks', up: (db) => {
+/** Customer and vendor ranks counted from posted invoices and confirmed orders, per commercial partner. */
+export function migratePartnerRanks(db) {
   const partners = db.records['res.partner'] ?? [];
   const partnerById = new Map(partners.map((p) => [p.id, p]));
   const commercialIdCache = new Map();
@@ -2046,11 +2047,12 @@ MIGRATIONS.push({ version: 67, name: 'partner-ranks', up: (db) => {
 
   const updatedPartners = partners.map((p) => ({
     ...p,
-    customer_rank: customerCounts.get(p.id) ?? 0,
-    supplier_rank: supplierCounts.get(p.id) ?? 0,
+    customer_rank: Math.max(Number(p.customer_rank) || 0, customerCounts.get(p.id) ?? 0),
+    supplier_rank: Math.max(Number(p.supplier_rank) || 0, supplierCounts.get(p.id) ?? 0),
   }));
   return { ...db, records: { ...db.records, 'res.partner': updatedPartners } };
-} });
+}
+MIGRATIONS.push({ version: 67, name: 'partner-ranks', up: migratePartnerRanks });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
