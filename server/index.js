@@ -806,7 +806,7 @@ async function api(req, res, path) {
           : await sendDocument(SMTP, snapshot, user, body);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
       if (!out.db) return send(res, out.status, out.body);
-      const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed));
+      const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed), out.reconcile);
       commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {

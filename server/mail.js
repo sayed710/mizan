@@ -6,7 +6,7 @@ import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
 import { addressLines, documentCompany, documentTaxBreakdown } from '../src/models/company.js';
 import { subtotal, today } from '../src/models/common.js';
-import { followUpEmail, followUpLetter, logManualFollowUp } from '../src/models/finance.js';
+import { followUpEmail, followUpLetter, logManualFollowUp, partnerFollowUp } from '../src/models/finance.js';
 import { formatCurrency } from '../src/money.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
@@ -142,7 +142,7 @@ export async function sendFollowUp(cfg, db, user, { partnerId, companyId, at = t
   if (!partner?.email?.trim()) throw new Error('A customer email address is required to send an email reminder');
   const company = Number(companyId);
   const letter = followUpLetter(db, partner.id, company, at);
-  const next = logManualFollowUp(db, partner.id, at, { companyId: company, channel: 'email' });
+  const next = logManualFollowUp(db, partner.id, at, { companyId: company, channel: 'email', ignoreNextActionDate: true });
   const amount = (n, currency) => `${formatCurrency(n, currency, '')} ${currency.name}`;
   const rows = letter.invoices.map((m) => [m.name, m.invoice_date ?? '', m.invoice_date_due ?? '', amount(m.amount_residual, m.followup_currency), m.overdue ? 'Overdue' : '']);
   const totals = (list) => list.map(({ amount: value, currency }) => amount(value, currency)).join(', ') || '0';
@@ -152,7 +152,69 @@ export async function sendFollowUp(cfg, db, user, { partnerId, companyId, at = t
   const html = `<p style="white-space:pre-line">${escapeHtml(base.text)}</p><table border="1"><thead><tr>${headers.map((v) => `<th>${escapeHtml(v)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`).join('')}</tbody></table><p>Total Due: ${escapeHtml(totals(letter.due))}<br>Total Overdue: ${escapeHtml(totals(letter.overdue))}</p>`;
   const validated = applyDiff(db, diffDb(db, next), writeOptions);
   await deliver(cfg, { ...base, text, html });
-  return { status: 200, body: { ok: true }, db: validated };
+  return {
+    status: 200,
+    body: { ok: true },
+    db: validated,
+    reconcile: (current, snapshot, sent, opts) => reconcileFollowUp(current, snapshot, sent, opts, partner.id, company),
+  };
+}
+
+/**
+ * Reconcile follow-up bookkeeping into fresh db on concurrent send conflict.
+ */
+export function reconcileFollowUp(current, snapshot, sent, opts, partnerId, companyId) {
+  const snapshotMsgs = snapshot.messages ?? [];
+  const sentMsgs = sent.messages ?? [];
+  const newMessages = sentMsgs.slice(snapshotMsgs.length);
+
+  const snapshotActs = new Set((snapshot.records?.['mail.activity'] ?? []).map((a) => a.id));
+  const newActivities = (sent.records?.['mail.activity'] ?? []).filter((a) => !snapshotActs.has(a.id));
+
+  const freshPartner = read(current, 'res.partner', partnerId);
+  const sentPartner = read(sent, 'res.partner', partnerId);
+  const sentLine = sentPartner ? partnerFollowUp(sentPartner, companyId) : null;
+
+  if (!freshPartner) {
+    const notesOnly = { ...current, messages: [...(current.messages ?? []), ...newMessages] };
+    const saved = applyDiff(current, diffDb(current, notesOnly), opts);
+    return {
+      db: saved,
+      notice: 'The email was sent, but the contact was deleted meanwhile, so partner follow-up progression could not be recorded.',
+    };
+  }
+
+  const existingLines = (freshPartner.followup_lines ?? []).filter((l) => l.company_id !== companyId);
+  const updatedLines = sentLine ? [...existingLines, sentLine] : existingLines;
+  const updatedPartner = {
+    ...freshPartner,
+    followup_lines: updatedLines,
+  };
+
+  const reconciled = {
+    ...current,
+    records: {
+      ...current.records,
+      'res.partner': (current.records?.['res.partner'] ?? []).map((p) => (p.id === partnerId ? updatedPartner : p)),
+      ...(newActivities.length ? {
+        'mail.activity': [...(current.records?.['mail.activity'] ?? []), ...newActivities],
+      } : {}),
+    },
+    messages: [...(current.messages ?? []), ...newMessages],
+  };
+
+  try {
+    const diff = diffDb(current, reconciled);
+    const saved = applyDiff(current, diff, opts);
+    return { db: saved };
+  } catch (err) {
+    const notesOnly = { ...current, messages: [...(current.messages ?? []), ...newMessages] };
+    const fallback = applyDiff(current, diffDb(current, notesOnly), opts);
+    return {
+      db: fallback,
+      notice: `The email was sent, but concurrent edits prevented recording follow-up progression: ${err.message}`,
+    };
+  }
 }
 
 /**
@@ -160,11 +222,14 @@ export async function sendFollowUp(cfg, db, user, { partnerId, companyId, at = t
  * turn the send into a failure: on a conflict only the "sent" note is recorded and the newer state is kept.
  * @returns {{db: object, notice?: string}}
  */
-export function recordSent(current, snapshot, sent, opts) {
+export function recordSent(current, snapshot, sent, opts, reconcile = null) {
   try {
     return { db: applyDiff(current, diffDb(snapshot, sent), opts) };
   } catch (e) {
     if (!(e instanceof ConflictError)) throw e;
+    if (typeof reconcile === 'function') {
+      return reconcile(current, snapshot, sent, opts, e);
+    }
     const notesOnly = { ...snapshot, messages: sent.messages };
     return { db: applyDiff(current, diffDb(snapshot, notesOnly), opts), notice: 'The email was sent, but the document changed meanwhile, so its status was left as it is.' };
   }

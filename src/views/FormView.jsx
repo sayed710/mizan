@@ -6,7 +6,7 @@ import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { invoiceTaxTotals } from '../models/ledger.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
-import { myEmployeeId } from '../access.js';
+import { appOpen, myEmployeeId } from '../access.js';
 import { dateLocale, t } from '../i18n.js';
 import { Avatar, display, FieldInput, isLabelable, money, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
@@ -154,7 +154,7 @@ function SmartButtons({ db, model, rec, smart }) {
   return (
     <div className="smart-buttons">
       {smart.map((s) => {
-        if (s.when && !s.when(rec, db)) return null;
+        if ((s.app && !appOpen(db, getUser(), s.app)) || (s.when && !s.when(rec, db))) return null;
         if (s.valueField || s.value) {
           const field = s.valueField && model ? models[model]?.fields?.[s.valueField] : null;
           const value = s.value ? s.value(db, rec) : rec[s.valueField];
@@ -574,7 +574,7 @@ export function FormView({ leaf, id, base, params }) {
   const resolve = (v) => (typeof v === 'function' ? v(current, db, { leaf, isNew }) : v);
   const statusKey = resolve(def.form.statusbarFor ?? def.form.statusbar);
   const statusField = statusKey && def.fields[statusKey];
-  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())) && (!b.visible || b.visible(current, getDb())));
+  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.app || appOpen(getDb(), getUser(), b.app)) && (!b.when || b.when(current, getDb(), getUser())) && (!b.visible || b.visible(current, getDb(), getUser())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
   const tabs = resolve(def.form.tabs)?.filter((tb) => !tb.when || tb.when(current, db));
