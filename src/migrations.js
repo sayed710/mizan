@@ -1904,6 +1904,46 @@ export function migrateDeferralCreditAdjustments(db) {
 MIGRATIONS.push({ version: 62, name: 'canonical-deferral-credit-adjustments', up: migrateDeferralCreditAdjustments });
 MIGRATIONS.push({ version: 63, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
+export function migrateFollowUpNextActionDate(db) {
+  if (!db?.records?.['res.partner']) return db;
+  const currentCompanyId = db.settings?.current_company_id ?? 1;
+  let changed = false;
+  const partners = db.records['res.partner'].map((p) => {
+    let partnerChanged = false;
+    let nextPartner = p;
+
+    if (!nextPartner.followup_reminder_type) {
+      nextPartner = { ...nextPartner, followup_reminder_type: 'automatic' };
+      partnerChanged = true;
+    }
+
+    if ('followup_next_action_date' in nextPartner) {
+      partnerChanged = true;
+      const { followup_next_action_date, ...rest } = nextPartner;
+      if (followup_next_action_date != null) {
+        const lines = [...(nextPartner.followup_lines ?? [])];
+        const idx = lines.findIndex((l) => l.company_id === currentCompanyId);
+        if (idx >= 0) {
+          if (lines[idx].followup_next_action_date == null) {
+            lines[idx] = { ...lines[idx], followup_next_action_date };
+          }
+        } else {
+          lines.push({ company_id: currentCompanyId, followup_next_action_date });
+        }
+        nextPartner = { ...rest, followup_lines: lines };
+      } else {
+        nextPartner = rest;
+      }
+    }
+
+    if (partnerChanged) changed = true;
+    return nextPartner;
+  });
+  if (!changed) return db;
+  return { ...db, records: { ...db.records, 'res.partner': partners } };
+}
+MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

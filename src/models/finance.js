@@ -2085,6 +2085,12 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
     const detail = `${levelName}: ${summaryAmount} ${dueWord} — ${invoices}. ${level?.message ?? ''}`.trim();
     const channelText = channel ? `sent by ${channel}` : 'processed';
     const noteBody = `Payment reminder ${channelText}${level ? ` (${levelName})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
+    for (const invoice of part.invoices.filter((move) => Number(move.amount_residual) > 0 && (part.upcoming ? Boolean(move.upcoming) : !move.upcoming))) {
+      nextDb = postNote(nextDb, 'account.move', invoice.id, `Payment reminder ${channelText}${level ? ` (${levelName})` : ''}.`, null, {
+        ...(channel ? { delivery_channel: channel } : {}),
+        delivery_state: 'sent',
+      });
+    }
     nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part), {
       ...(channel ? { delivery_channel: channel } : {}),
       delivery_state: 'sent',
@@ -2110,7 +2116,9 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
         followup_delivery_outcome: 'sent',
         ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
       });
-    nextDb = write(nextDb, 'res.partner', partnerId, { followup_lines: updatedPartner.followup_lines });
+    nextDb = write(nextDb, 'res.partner', partnerId, {
+      followup_lines: updatedPartner.followup_lines,
+    });
   }
 
   return nextDb;
@@ -2136,6 +2144,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
   let nextDb = db;
 
   for (const partner of partners.values()) {
+    if (partner.followup_reminder_type === 'manual') continue;
     const lines = partner.followup_lines ?? [];
     for (const line of lines) {
       const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_activity_level != null || line.followup_delivery_state != null || line.followup_delivery_outcome != null;
@@ -2162,7 +2171,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
     const companyId = f.invoices[0].company_id ?? 1;
     const level = followUpLevel(nextDb, f, at);
     const partner = partners.get(f.partner_id);
-    if (!level || !partner) return nextDb;
+    if (!level || !partner || partner.followup_reminder_type === 'manual') return nextDb;
 
     const currentPartner = read(nextDb, 'res.partner', partner.id) ?? partner;
     const progress = partnerFollowUp(currentPartner, companyId);
