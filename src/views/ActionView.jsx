@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
-import { display, SimulatedNote } from '../ui.jsx';
+import { display, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { toCsv } from '../csv.js';
 import { commit, getDb, useDb } from '../store.js';
 import { importAccept, importModelFile } from './importModelFile.js';
@@ -26,6 +26,7 @@ export function parseRel(db, model, raw) {
   const [field, rawIds] = raw.split(':');
   const parts = (rawIds ?? '').split(',').filter(Boolean).map(Number);
   const id = parts[0] ?? 0;
+  if (field === 'id') return { field, id, ids: parts, label: 'Selected records' };
   if (model === 'account.move' && field === 'payment_id') {
     const payment = read(db, 'account.payment', id);
     return { field, fieldLabel: 'Payment', id, label: payment?.name ?? `#${id}` };
@@ -129,8 +130,7 @@ export function ActionView({ leaf, base, params }) {
   const pager = paged && (
     <span className="pager" role="group" aria-label={t('Pager')}>
       <span aria-live="polite">{win.label} / {win.total}</span>
-      <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={win.prev == null} onClick={() => goTo(win.prev)}>‹</button>
-      <button type="button" className="btn sm" aria-label={t('Next page')} disabled={win.next == null} onClick={() => goTo(win.next)}>›</button>
+      <PagerButtons prevLabel={t('Previous page')} nextLabel={t('Next page')} prevDisabled={win.prev == null} nextDisabled={win.next == null} onPrev={() => goTo(win.prev)} onNext={() => goTo(win.next)} />
     </span>
   );
   const listActions = leaf?.listActions ?? def.listActions ?? [];

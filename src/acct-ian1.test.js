@@ -305,3 +305,20 @@ test('IAN-2: account.invoice.report offers Move Type filter group and filters al
     globalThis.localStorage = prevStorage;
   }
 });
+
+test('IAN-3: account.invoice.report exact groupBys array matches Odoo 20 search view ordering including country_id, journal_id, and fiscal_position_id', () => {
+  const def = models['account.invoice.report'];
+  assert.deepEqual(def.groupBys, [
+    'invoice_user_id',
+    'partner_id',
+    'country_id',
+    'product_id',
+    'product_categ_id',
+    'journal_id',
+    'fiscal_position_id',
+    'state',
+    'company_id',
+    'invoice_date',
+  ]);
+});
+
