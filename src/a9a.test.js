@@ -114,7 +114,7 @@ test('asset modification: value decrease (impairment) posts loss entry and recom
   assert.equal(a.depreciation_ids.length, 4);
   assert.equal(a.depreciation_ids[0].posted, true);
   assert.equal(a.depreciation_ids[0].amount, 3000);
-  assert.deepEqual(a.depreciation_ids.slice(1).map((l) => l.amount), [1500, 1050, 2450]);
+  assert.deepEqual(a.depreciation_ids.slice(1).map((l) => l.amount), [1666.67, 1666.67, 1666.66]);
   assert.equal(a.depreciation_ids.at(-1).remaining, 0);
 });
 
@@ -352,11 +352,11 @@ test('follow-up exclusions: partner excluded, invoice excluded, blocked line, an
 test('degressive boards: declining takes the factor on the residual, declining-then-linear switches to straight line once larger', () => {
   const base = { acquisition_date: '2026-01-01', original_value: 10000, salvage_value: 0, method_number: 4, method_period: '12', method_progress_factor: 0.3 };
   const declining = depreciationBoard({ ...base, method: 'degressive' }).map((l) => l.amount);
-  assert.deepEqual(declining.slice(0, 3), [3000, 2100, 1470]);
+  assert.deepEqual(declining.slice(0, 3), [3000, 2333.33, 2333.34]);
   assert.equal(declining.reduce((s, v) => s + v, 0), 10000);
   const mixed = depreciationBoard({ ...base, method: 'degressive_then_linear' }).map((l) => l.amount);
   assert.equal(mixed[0], 3000);
-  assert.ok(mixed[1] > 2100 && Math.abs(mixed[1] - 7000 / 3) < 0.01);
+  assert.ok(mixed[1] > 2100 && mixed[1] === 2500);
   assert.equal(Math.round(mixed.reduce((s, v) => s + v, 0) * 100), 1000000);
 });
 

@@ -39,18 +39,18 @@ export function creditWarning(db, partnerId, amount, document = {}) {
  * or (when no reference is set) the same amount and bill date.
  */
 export function duplicateBillWarning(db, bill) {
-  if (!bill || bill.move_type !== 'in_invoice' || bill.state === 'cancel' || !bill.partner_id || !db) return '';
+  if (!bill || !['in_invoice', 'in_refund'].includes(bill.move_type) || bill.state === 'cancel' || !bill.partner_id || !db) return '';
   const companyId = bill.company_id ?? 1;
   const ref = String(bill.ref ?? '').trim();
   const docCurr = documentCurrency(db, bill);
   const billTotal = roundCurrency(total(bill, db), docCurr);
-  const candidates = (db.records?.['account.move'] ?? []).filter((m) =>
+  const candidates = search(db, 'account.move').filter((m) =>
     m.id !== bill.id
     && m.active !== false
-    && m.move_type === 'in_invoice'
+    && m.move_type === bill.move_type
     && m.state !== 'cancel'
     && (m.company_id ?? 1) === companyId
-    && m.partner_id === bill.partner_id
+    && sameCommercialPartner(db, m.partner_id, bill.partner_id)
   );
   const dups = ref
     ? candidates.filter((m) => String(m.ref ?? '').trim().toLowerCase() === ref.toLowerCase())
@@ -243,13 +243,15 @@ export function accountDeleteGuard(db, account, pending = db) {
 }
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active', 'is_storno', 'reversed_entry_id'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active', 'is_storno'];
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(db, before, after) {
   if (before && changedFields(before, after, ['tax_closing_lines'])) return 'Tax closing line links cannot be changed';
   if (before?.state === 'posted' && after.state === 'posted') {
     if (changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    if (before.reversed_entry_id && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
+    if ((before.is_storno || after.is_storno) && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
   }
   if (before?.state === 'posted' && after.state !== 'posted') {
     // A sync may collapse the two reset steps; the return retains its link to the cancelled closing.
@@ -674,7 +676,7 @@ export function paymentInvariant(db, after) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const currencyId = invoice ? invoice.currency_id : after.currency_id;
+  const currencyId = after.currency_id ?? invoice?.currency_id;
   const expected = currencyId
     ? toCompany(db, currencyId, after.amount, after.date, invoice?.company_id ?? after.company_id)
     : companyRound(Number(after.amount));

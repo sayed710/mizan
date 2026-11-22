@@ -170,7 +170,8 @@ test('purchase approval creates exactly one linked draft RFQ with mapped prices 
   assert.equal(search(done, 'purchase.order').length, initialCount + 1);
   assert.equal(po.state, 'draft');
   assert.equal(po.partner_id, 2);
-  assert.deepEqual(po.order_line, [{ product_id: 1, qty: 2, price_unit: 95, tax: 14 }]);
+  assert.ok(po.order_line.every((line) => line.id != null && line.purchase_line_key && line.purchase_method));
+  assert.deepEqual(po.order_line.map(({ id, purchase_line_key, purchase_method, ...line }) => line), [{ product_id: 1, qty: 2, price_unit: 95, tax: 14 }]);
   assert.throws(() => approve(done, stale, 1), /pending approver/);
 });
 

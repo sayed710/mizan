@@ -2,7 +2,7 @@
 import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, stornoLine, valueOnlyCurrencyFields } from './ledger.js';
-import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payMove, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
+import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payWithDiscount, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -421,12 +421,14 @@ export function postPayment(db, p) {
     }
   }
   const date = currentPayment.date ?? today();
+  if (currentPayment.currency_id) {
+    const curr = read(db, 'res.currency', currentPayment.currency_id);
+    if (!curr || curr.active === false) throw new Error('The payment currency must be active');
+  }
   if (currentPayment.invoice_id) {
     const invoice = read(db, 'account.move', currentPayment.invoice_id);
-    if (currentPayment.currency_id && invoice && currentPayment.currency_id !== documentCurrency(db, invoice)?.id) {
-      throw new Error('The payment currency must match the invoice currency');
-    }
-    if (invoice && invoiceAfterPayment(invoice, date)) throw new Error(`The payment date cannot be before the invoice date of ${invoice.name}`);
+    if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice)) throw new Error('Only posted invoices and bills can be paid');
+    if (invoiceAfterPayment(invoice, date)) throw new Error(`The payment date cannot be before the invoice date of ${invoice.name}`);
   }
   const resolvedJournal = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
   const resolvedJournalRec = read(db, 'account.journal', resolvedJournal.id);
@@ -435,7 +437,18 @@ export function postPayment(db, p) {
     const lineErr = paymentMethodLineError(db, { ...currentPayment, journal_id: resolvedJournal.id });
     if (lineErr) throw new Error(lineErr);
   }
-  if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
+  if (currentPayment.invoice_id) {
+    const invoice = read(db, 'account.move', currentPayment.invoice_id);
+    return payWithDiscount(db, invoice.id, Number(currentPayment.amount), date, {
+      paymentId: currentPayment.id,
+      journalId: resolvedJournal.id,
+      memo: currentPayment.memo,
+      currencyId: currentPayment.currency_id ?? invoice.currency_id ?? companyCurrencyRecord(db, invoice.company_id)?.id,
+      ...(currentPayment.check_number != null ? { checkNumber: currentPayment.check_number } : {}),
+      ...(currentPayment.partner_bank_id ? { partnerBankId: currentPayment.partner_bank_id } : {}),
+      ...(currentPayment.payment_method_line_id ? { paymentMethodLineId: currentPayment.payment_method_line_id } : {}),
+    });
+  }
   const via = resolvedJournal;
   const journalRecord = resolvedJournalRec;
   const explicitName = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : null;
@@ -594,7 +607,7 @@ export function applyPaymentCredit(db, paymentIdOrRec, invoiceIdOrRec, date = to
   const invoice = typeof invoiceIdOrRec === 'object' && invoiceIdOrRec !== null ? invoiceIdOrRec : read(db, 'account.move', invoiceIdOrRec);
   if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice)) throw new Error('A posted invoice or bill is required');
   if (!(residual(invoice, db) > 0)) throw new Error('The invoice is already paid');
-  if (shouldBePaid(db, invoice) === 'exception') {
+  if (['exception', 'no'].includes(shouldBePaid(db, invoice))) {
     throw new Error('Resolve or approve the three-way matching exception before registering payment');
   }
 
@@ -1687,6 +1700,10 @@ export const payModels = {
       ], (p) => p.state === 'posted')(db, before, after, ctx);
       if (lockErr) return lockErr;
 
+      if (after.currency_id) {
+        const curr = read(db, 'res.currency', after.currency_id);
+        if (!curr || curr.active === false) return 'The payment currency must be active';
+      }
       return paymentMethodGuard(db, before, after);
     },
     protectDelete: (db, payment, staged, ctx) => {
@@ -1695,11 +1712,9 @@ export const payModels = {
         ? 'Issued checks cannot be deleted'
         : datedLockDelete((p) => p.state === 'posted')(db, payment, staged, ctx);
     },
-    invariant: (db, after, before, stored) => (
-      after.is_internal_transfer
-        ? internalTransferInvariant(db, after)
-        : paymentInvariant(db, after, before, stored)
-    ),
+    invariant: (db, after, before, stored) => after.is_internal_transfer
+      ? internalTransferInvariant(db, after)
+      : paymentInvariant(db, after, before, stored),
     fields: {
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       payment_type: { type: 'selection', label: 'Payment Type', tracking: true, widget: 'radio', options: [['outbound', 'Send'], ['inbound', 'Receive']] },
@@ -1719,8 +1734,8 @@ export const payModels = {
       amount: { type: 'monetary', label: 'Amount', tracking: true },
       amount_signed: { type: 'monetary', label: 'Amount in Currency', compute: paymentSignedAmount },
       amount_company_currency_signed: { type: 'monetary', label: 'Amount', currency: 'company', compute: (r, db) => paymentCompanySignedAmount(r, db) },
-      // A payment of an invoice is made in that invoice's currency (payMove books it in invoice units).
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', tracking: true, readonly: (r) => Boolean(r?.invoice_id) },
+      // A payment of an invoice can be made in any active currency.
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', tracking: true, domain: (c) => c.active !== false },
       activities: { type: 'char', label: 'Activities', compute: (r, db) => openActivitiesText(db, 'account.payment', r.id) },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal', tracking: true },
       payment_method_line_id: {
@@ -1754,7 +1769,7 @@ export const payModels = {
           && (!r?.partner_id || m.partner_id === r.partner_id)
           && Boolean(SETTLES[r?.partner_type]?.[r?.payment_type]?.includes(m.move_type))
           && !invoiceAfterPayment(m, r?.date ?? today())
-          && shouldBePaid(db, m) !== 'exception',
+          && !['exception', 'no'].includes(shouldBePaid(db, m)),
       },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },
@@ -1863,7 +1878,7 @@ export const payModels = {
                   && sameCommercialPartner(db, m.partner_id, r.partner_id)
                   && SETTLES[r.partner_type]?.[r.payment_type]?.includes(m.move_type)
                   && residual(m, db) > 0
-                  && shouldBePaid(db, m) !== 'exception'
+                  && !['exception', 'no'].includes(shouldBePaid(db, m))
                   && (!r.partner_bank_id || !m.partner_bank_id || r.partner_bank_id === m.partner_bank_id),
               },
               { name: 'date', type: 'date', label: 'Application Date', default: today(), required: true },

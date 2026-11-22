@@ -11,7 +11,12 @@ import { applyDiff, diffDb } from './sync.js';
 
 const admin = { isAdmin: true };
 const sync = (a, b) => applyDiff(a, diffDb(a, b), admin);
-const credit = models['account.move'].form.buttons.find((b) => b.label === 'Credit Note');
+const credit = {
+  run: (db, r, ...args) => (
+    models['account.move'].form.buttons.find((b) => b.label === (r?.move_type === 'in_invoice' ? 'Refund' : 'Credit Note'))
+    ?? models['account.move'].form.buttons.find((b) => b.label === 'Credit Note')
+  ).run(db, r, ...args),
+};
 function invoice(storno, type = 'out_invoice') {
   let db = write(seed(), 'res.company', 1, { account_storno: storno });
   const created = create(db, 'account.move', { company_id: 1, move_type: type, partner_id: type === 'out_invoice' ? 2 : 4, invoice_date: '2026-04-01', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
