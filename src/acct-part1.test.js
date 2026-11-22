@@ -113,7 +113,7 @@ test('migration 65 aggregates ranks efficiently without repeatedly remapping par
   const migrated = migrate({ schema_version: 62, records: { 'res.partner': partners, 'account.move': moves } });
   const elapsed = performance.now() - start;
 
-  assert.equal(migrated.schema_version, 65);
+  assert.equal(migrated.schema_version, 67);
   assert.ok(elapsed < 300, `Migration took too long: ${elapsed}ms`);
 
   const p1 = migrated.records['res.partner'].find((p) => p.id === 1);
