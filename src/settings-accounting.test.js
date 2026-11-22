@@ -60,11 +60,11 @@ test('Accounting Settings renders Odoo block order with descriptions, currency l
     const blocks = collect(accountingSection, (n) => props(n)?.['data-block']);
     assert.deepEqual(
       blocks.map((b) => props(b)['data-block']),
-      ['taxes', 'currencies', 'customer_payments', 'vendor_bills', 'fiscal_periods', 'deferred_revenues', 'deferred_expenses'],
+      ['taxes', 'currencies', 'customer_payments', 'vendor_bills', 'quick_encoding', 'fiscal_periods', 'deferred_revenues', 'deferred_expenses'],
     );
     assert.deepEqual(
       blocks.map((b) => find(b, (n) => n.tagName === 'H3')?.textContent),
-      ['Taxes', 'Currencies', 'Customer Payments', 'Vendor Bills', 'Fiscal Periods', 'Deferred Revenues', 'Deferred Expenses'],
+      ['Taxes', 'Currencies', 'Customer Payments', 'Vendor Bills', 'Quick encoding', 'Fiscal Periods', 'Deferred Revenues', 'Deferred Expenses'],
     );
 
     const rows = collect(accountingSection, (n) => props(n)?.['data-setting']);
@@ -211,7 +211,7 @@ test('Settings omits skipped Odoo features and omits any setting whose res.compa
       'Fiscal Localization', 'Verify VAT Numbers', 'Cash Basis', 'Customer Invoices',
       'Snail Mail', 'Default Incoterm', 'Sale Credit Limit', 'Units & Packagings',
       'Invoice Online Payment', 'Batch Payments', 'Vendor Payments',
-      'Digitization', 'Accounting Firms Mode', 'Quick encoding',
+      'Digitization', 'Accounting Firms Mode',
     ]) {
       assert.equal(labels.includes(omitted), false, `Skipped Odoo setting "${omitted}" is not rendered`);
     }

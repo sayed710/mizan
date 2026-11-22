@@ -7,12 +7,12 @@ import { applyPaymentCredit, paymentDocuments, reconcileReversalLines, registerP
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
+import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, resolveLineTaxes, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxRowsFactor, taxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
-import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, isCurrencyZero, roundCurrency, round as round2 } from '../money.js';
 import { hasMultiCurrency } from './money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
@@ -1876,7 +1876,12 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 
 const invoiceLineField = {
   ...invoiceLineBase,
-  newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
+  newLine: (move, db) => {
+    const baseLine = (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db);
+    const mismatch = move && db ? quickEditMismatch(db, move) : null;
+    if (!mismatch) return baseLine;
+    return { ...baseLine, price_unit: quickEditLinePriceUnit(db, move, baseLine, mismatch.remaining, mismatch.docCurr) };
+  },
   onchange: (line, key, db, move, context = {}) => {
     const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: resolveDocumentJournal(db, move)?.id } : move);
     const base = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
@@ -2443,6 +2448,72 @@ function unbalancedEntryWarning(db, r) {
   const hasAmounts = lines.some((l) => (Number(l.debit) || 0) !== 0 || (Number(l.credit) || 0) !== 0);
   if (!hasAmounts || (!badLineSign(lines) && isBalanced(lines, own))) return '';
   return t('Journal entry is not balanced: total debit must equal total credit.');
+}
+
+/** Whether Quick Encoding applies to `r` under its company's `quick_edit_mode` (draft covered invoices/bills only). */
+export function isQuickEditEnabled(r, db) {
+  if (!r || !isInvoice(r) || (r.state && r.state !== 'draft') || !db) return false;
+  const companyId = r.company_id ?? currentCompany(db);
+  const mode = read(db, 'res.company', companyId)?.quick_edit_mode;
+  if (mode === 'out_invoices') return ['out_invoice', 'out_refund'].includes(r.move_type);
+  if (mode === 'in_invoices') return ['in_invoice', 'in_refund'].includes(r.move_type);
+  if (mode === 'out_and_in_invoices') return true;
+  return false;
+}
+
+/** Compute quick-edit remaining amount and document currency when quick encoding is active with a non-zero target. */
+function quickEditMismatch(db, r) {
+  if (!isQuickEditEnabled(r, db)) return null;
+  const target = Number(r.quick_edit_total_amount);
+  if (r.quick_edit_total_amount == null || r.quick_edit_total_amount === '' || !Number.isFinite(target) || target === 0) return null;
+  const docCurr = documentCurrency(db, r);
+  const currentTotal = total(r, db);
+  const expected = roundCurrency(target, docCurr);
+  const actual = roundCurrency(currentTotal, docCurr);
+  const remaining = roundCurrency(expected - actual, docCurr);
+  if (isCurrencyZero(remaining, docCurr)) return null;
+  return { docCurr, expected, actual, remaining };
+}
+
+/** Convert a tax-included remaining amount to the line's `price_unit` via `computeLineTaxes`. */
+function quickEditLinePriceUnit(db, move, line, remaining, docCurr) {
+  const specs = resolveLineTaxes(line);
+  if (!specs.length || specs.every((t) => t.tax_include)) return roundCurrency(remaining, docCurr);
+  const side = isRefund(move) ? 'refund' : 'invoice';
+  const roundingMethod = companyRoundingMethod(db, move?.company_id);
+  const forcedBreakdown = Array.isArray(line.tax_breakdown) && line.tax_breakdown.length
+    ? line.tax_breakdown.map((t) => ({ ...t, tax_include: true }))
+    : line.tax_breakdown;
+  const probe = {
+    ...line,
+    qty: 1,
+    price_unit: remaining,
+    discount: 0,
+    tax_include: true,
+    ...(forcedBreakdown ? { tax_breakdown: forcedBreakdown } : {}),
+  };
+  const computed = computeLineTaxes(probe, { currency: docCurr, roundingMethod, side });
+  const includedTax = specs.some((t) => t.tax_include)
+    ? computed.taxes.filter((t) => t.tax_include).reduce((s, t) => s + t.amount * taxRowsFactor(t, side), 0)
+    : 0;
+  const rawPrice = computed.untaxed + includedTax;
+  const rounded = roundCurrency(rawPrice, docCurr);
+  if (roundingMethod === 'round_per_line') return rounded;
+  const expectedTotal = roundCurrency((Number(total(move, db)) || 0) + remaining, docCurr);
+  const totalWith = (price) => total({ ...move, invoice_line_ids: [...(move.invoice_line_ids ?? []), { ...line, qty: 1, discount: 0, price_unit: price }] }, db);
+  if (totalWith(rounded) === expectedTotal) return rounded;
+  const precise = Math.round(rawPrice * 1e6) / 1e6;
+  return totalWith(precise) === expectedTotal ? precise : rounded;
+}
+
+/** Non-blocking form warning when Quick Encoding target differs from the computed invoice total. */
+function quickEditWarning(db, r) {
+  const mismatch = quickEditMismatch(db, r);
+  if (!mismatch) return '';
+  return t('The entered total ({entered}) does not match the computed total ({computed}).', {
+    entered: formatCurrency(mismatch.expected, mismatch.docCurr),
+    computed: formatCurrency(mismatch.actual, mismatch.docCurr),
+  });
 }
 
 /** Whether a move can be reset back to draft under Mizan's settlement, hash, bank, and lock rules. */
@@ -3527,6 +3598,12 @@ export const accountingModels = {
       },
       auto_post_until: { type: 'date', label: 'Repeat Until', copy: false },
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
+      quick_edit_total_amount: {
+        type: 'monetary',
+        label: 'Total (Tax inc.)',
+        copy: false,
+        hideWhen: (r, db) => !isQuickEditEnabled(r, db),
+      },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
@@ -3851,10 +3928,17 @@ export const accountingModels = {
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
-      warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
+      warning: (r, db) => {
+        const base = r.move_type === 'out_invoice'
+          ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r)
+          : r.move_type === 'in_invoice'
+            ? duplicateBillWarning(db, r)
+            : unbalancedEntryWarning(db, r);
+        return [base, quickEditWarning(db, r)].filter(Boolean).join(' · ') || '';
+      },
       groups: (r) => (isInvoice(r)
         ? [
-          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? [{ field: 'ref', label: 'Bill Reference' }] : [])],
+          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? [{ field: 'ref', label: 'Bill Reference' }] : []), 'quick_edit_total_amount'],
           [
             { field: 'invoice_date', label: isPurchase(r) ? 'Bill Date' : 'Invoice Date' },
             { label: 'Due Date', fields: ['invoice_date_due', 'invoice_payment_term_id'], join: 'or' },
