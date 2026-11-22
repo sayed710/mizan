@@ -127,7 +127,7 @@ export const crmModels = {
       property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
       user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson', hidden: true },
       followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible' },
-      followup_reminder_type: { type: 'selection', label: 'Reminders', options: [['automatic', 'Automatic'], ['manual', 'Manual']] },
+      followup_reminder_type: { type: 'selection', label: 'Reminders', options: [['automatic', 'Automatic'], ['manual', 'Manual']], default: 'automatic' },
       followup_next_action_date: {
         type: 'date',
         label: 'Next Reminder',

@@ -2,7 +2,10 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { register } from 'node:module';
 import { crmModels } from './models/crm.js';
+
+register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 import { financeModels, runFollowUps, followUps, logManualFollowUp, partnerFollowUp } from './models/finance.js';
 import { create, messagesOf, read, write } from './orm.js';
 import { seed } from './seed.js';
@@ -182,18 +185,133 @@ test('migration moves stored partner-level followup_next_action_date to the curr
   const f = fixture();
   const legacyDb = {
     ...f.db,
-    schema_version: 61,
+    schema_version: 62,
     records: {
       ...f.db.records,
       'res.partner': f.db.records['res.partner'].map((p) => p.id === f.partner ? { ...p, followup_next_action_date: '2026-02-10' } : p),
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 62);
+  assert.equal(migrated.schema_version, 63);
   const rawPartner = migrated.records['res.partner'].find((p) => p.id === f.partner);
   assert.equal('followup_next_action_date' in rawPartner, false);
   const compLine = partnerFollowUp(rawPartner, 1);
   assert.equal(compLine?.followup_next_action_date, '2026-02-10');
   const readPartner = read(migrated, 'res.partner', f.partner);
   assert.equal(readPartner.followup_next_action_date, '2026-02-10');
+});
+
+test('migration retains existing company next reminder date when partner has a conflicting legacy date', () => {
+  const f = fixture();
+  const legacyDb = {
+    ...f.db,
+    schema_version: 62,
+    records: {
+      ...f.db.records,
+      'res.partner': f.db.records['res.partner'].map((p) => p.id === f.partner ? {
+        ...p,
+        followup_next_action_date: '2026-02-10',
+        followup_lines: [{ company_id: 1, followup_next_action_date: '2026-03-01' }],
+      } : p),
+    },
+  };
+  const migrated = migrate(legacyDb);
+  assert.equal(migrated.schema_version, 63);
+  const rawPartner = migrated.records['res.partner'].find((p) => p.id === f.partner);
+  assert.equal('followup_next_action_date' in rawPartner, false);
+  const compLine = partnerFollowUp(rawPartner, 1);
+  assert.equal(compLine?.followup_next_action_date, '2026-03-01');
+  const readPartner = read(migrated, 'res.partner', f.partner);
+  assert.equal(readPartner.followup_next_action_date, '2026-03-01');
+});
+
+test('migration backfills automatic reminder type for partners where absent and preserves explicit manual', () => {
+  const base = seed();
+  const legacyDb = {
+    ...base,
+    schema_version: 62,
+    records: {
+      ...base.records,
+      'res.partner': [
+        { id: 901, name: 'Legacy partner without reminder type' },
+        { id: 902, name: 'Explicit manual partner', followup_reminder_type: 'manual' },
+        { id: 903, name: 'Explicit automatic partner', followup_reminder_type: 'automatic' },
+      ],
+    },
+  };
+  const migrated = migrate(legacyDb);
+  assert.equal(migrated.schema_version, 63);
+  const p1 = migrated.records['res.partner'].find((p) => p.id === 901);
+  const p2 = migrated.records['res.partner'].find((p) => p.id === 902);
+  const p3 = migrated.records['res.partner'].find((p) => p.id === 903);
+  assert.equal(p1.followup_reminder_type, 'automatic');
+  assert.equal(p2.followup_reminder_type, 'manual');
+  assert.equal(p3.followup_reminder_type, 'automatic');
+});
+
+test('manual-mode customer without email renders Confirm Sent and logs phone or letter follow-up', async () => {
+  const { setupDom, find } = await import('./test-support/dom.js');
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit, getDb } = await import('./store.js');
+  await initStore();
+  const base = getDb();
+  const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
+  const textOf = (node) => (node?.nodeType === 3 ? node.nodeValue : (node?.childNodes ?? []).map(textOf).join(''));
+
+  const due = (days) => new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const pPhone = { id: 8001, name: 'Manual Customer Phone', phone: '+1234567890', email: '', followup_reminder_type: 'manual', followup_lines: [] };
+  const pLetter = { id: 8002, name: 'Manual Customer Letter', phone: '', email: '', followup_reminder_type: 'manual', followup_lines: [] };
+  const inv1 = { id: 8101, name: 'INV-PHONE', company_id: 1, partner_id: pPhone.id, state: 'posted', move_type: 'out_invoice', invoice_date_due: due(10), amount_residual: 100, invoice_line_ids: [{ qty: 1, price_unit: 100 }] };
+  const inv2 = { id: 8102, name: 'INV-LETTER', company_id: 1, partner_id: pLetter.id, state: 'posted', move_type: 'out_invoice', invoice_date_due: due(10), amount_residual: 100, invoice_line_ids: [{ qty: 1, price_unit: 100 }] };
+
+  const db = {
+    ...base,
+    settings: { ...base.settings, current_company_id: 1, allowed_company_ids: [1] },
+    records: {
+      ...base.records,
+      'res.partner': [pPhone, pLetter],
+      'account.move': [inv1, inv2],
+      'account.followup.level': [{ id: 1, name: 'First Reminder', delay: 0, send_email: true }],
+    },
+  };
+  await React.act(async () => commit(db));
+
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'followups' } })));
+    const mailLink = find(host, (n) => n.tagName === 'A' && props(n)?.href?.startsWith('mailto:'));
+    assert.equal(mailLink, null, 'no mail link rendered without email');
+
+    const buttons = [];
+    const collectButtons = (node) => {
+      if (node.tagName === 'BUTTON' && textOf(node).trim() === 'Confirm Sent') buttons.push(node);
+      for (const child of node.childNodes ?? []) collectButtons(child);
+    };
+    collectButtons(host);
+    assert.equal(buttons.length, 2, 'Confirm Sent rendered for both manual customers without email');
+
+    // Click first button (phone customer)
+    await React.act(async () => props(buttons[0]).onClick());
+    let saved = getDb();
+    let prog1 = partnerFollowUp(read(saved, 'res.partner', pPhone.id), 1);
+    assert.equal(prog1?.followup_channel, 'phone');
+    assert.equal(prog1?.followup_delivery_state, 'sent');
+    assert.ok(messagesOf(saved, 'res.partner', pPhone.id).some((m) => /sent by phone/i.test(m.body)));
+
+    // Click second button (letter customer)
+    await React.act(async () => props(buttons[1]).onClick());
+    saved = getDb();
+    let prog2 = partnerFollowUp(read(saved, 'res.partner', pLetter.id), 1);
+    assert.equal(prog2?.followup_channel, 'letter');
+    assert.equal(prog2?.followup_delivery_state, 'sent');
+    assert.ok(messagesOf(saved, 'res.partner', pLetter.id).some((m) => /sent by letter/i.test(m.body)));
+  } finally {
+    await React.act(async () => root.unmount());
+  }
 });
