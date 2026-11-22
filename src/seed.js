@@ -164,7 +164,6 @@ export function seed() {
       amount,
       amount_type: 'percent',
       tax_exigibility: 'on_invoice',
-      price_include: false,
       active: true,
       tax_group_id: vatGroupId,
       invoice_repartition_line_ids: [

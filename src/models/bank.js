@@ -252,7 +252,7 @@ const batchPaymentCompany = (db, batch) => {
   return (batch.company_id ?? 1) === common ? common : null;
 };
 
-export { bookedBankSuspenseAccountId, bookedStatementAmount, isPaymentMatched, statementCompanyAmount, unreconciledSuspenseTransactionsExist } from './ledger.js';
+export { bookedBankSuspenseAccountId, bookedStatementAmount, isPaymentMatched, statementCompanyAmount } from './ledger.js';
 
 /**
  * Resolve the outstanding receipts or payments account ID of a payment, or null when booked directly to liquidity.
@@ -1272,8 +1272,16 @@ function lineGuard(db, before, after, ctx = null) {
       }
     }
   }
-  const referenceAmount = bookedStatementAmount(db, after);
-  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > referenceAmount)) return 'Invalid open bank transaction amount';
+  const needsReference = Boolean(after.bank_move_id) || (
+    after.open_amount != null
+    && (!before || (after.open_amount ?? null) !== (before.open_amount ?? null)
+      || Number(after.amount) !== Number(before.amount)
+      || (after.journal_id ?? null) !== (before.journal_id ?? null)
+      || (after.date ?? null) !== (before.date ?? null))
+  );
+  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0)) return 'Invalid open bank transaction amount';
+  const referenceAmount = needsReference ? bookedStatementAmount(db, after) : null;
+  if (needsReference && after.open_amount != null && round(after.open_amount) > referenceAmount) return 'Invalid open bank transaction amount';
 
   if (after.state === 'reconciled' && !after.move_id) return 'A bank transaction can only be reconciled against a posted journal entry';
   // The server validates bank lines after the entries of the same change set (guardLast).

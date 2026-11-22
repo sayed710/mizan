@@ -3544,7 +3544,6 @@ const ar = {
   'Country group name is required': 'اسم مجموعة الدول مطلوب',
   'Bank Suspense Account': 'الحساب المعلق للبنك',
   'Configure a bank suspense account on the journal or the company': 'قم بتهيئة حساب معلق للبنك في دفتر اليومية أو الشركة',
-  'Cannot change the suspense account while bank transactions remain unreconciled': 'لا يمكن تغيير الحساب المعلق طالما توجد معاملات بنكية غير مطابقة',
   'Statement lines cannot use direct bank settlement': 'لا يمكن لبنود كشف الحساب البنكي استخدام التسوية البنكية المباشرة',
   'The currency amount sign must match the debit/credit balance': 'يجب أن تتطابق إشارة المبلغ بالعملة مع رصيد المدين/الدائن',
   'The applied amount cannot be represented in the foreign currency after rounding': 'لا يمكن تمثيل المبلغ المطبق بالعملة الأجنبية بعد التقريب',
@@ -3605,8 +3604,19 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Bring Accounts Balance Forward': 'ترحيل أرصدة الحسابات',
+  'Non Trade': 'غير تجاري',
+  'Non Trade requires a receivable or payable account': 'يتطلب الحساب غير التجاري حساباً للذمم المدينة أو الدائنة',
+  'Default Sales Price Include': 'تضمين الضريبة في سعر البيع افتراضياً',
+  'Tax Included': 'شامل الضريبة',
+  'Default price-include behaviour for taxes without an explicit override.': 'السلوك الافتراضي لتضمين الضريبة في السعر للضرائب التي ليس لها تجاوز صريح.',
+  'Select a valid default sales price include setting': 'اختر إعداداً صالحاً لتضمين الضريبة في سعر البيع',
+  'Select a valid price include override': 'اختر قيمة صالحة لتجاوز تضمين الضريبة في السعر',
   'Purchase order line must match the vendor, company, and product': 'يجب أن يطابق بند أمر الشراء المورد والشركة والمنتج',
   'Depreciation reversal must match the excess from a vendor refund': 'يجب أن يطابق عكس الإهلاك الزيادة الناتجة عن مرتجع المورد',
+  'Customer Invoices': 'فواتير العملاء',
+  'Customer Credit Notes': 'إشعارات دائنة للعملاء',
+  'Vendor Credit Notes': 'إشعارات دائنة للموردين',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -478,7 +478,7 @@ test('BANK-4: unreconciling refuses when entry is in locked period', () => {
   }, /period up to 2026-01-31 is locked/i);
 });
 
-test('Migration: version 64 gives existing unreconciled statement lines their suspense entry while leaving reconciled and journal-less lines untouched', () => {
+test('Migration: version 66 gives existing unreconciled statement lines their suspense entry while leaving reconciled and journal-less lines untouched', () => {
   const { db: baseDb, bankJournal, suspenseAccount, bankAccount } = setupBankTestDb();
 
   // Create an unreconciled line directly in records (simulating legacy data with schema_version: 61 and no bank_move_id)
@@ -530,7 +530,7 @@ test('Migration: version 64 gives existing unreconciled statement lines their su
 
   // Run migration
   const migratedDb = migrate(legacyDb, SCHEMA_VERSION);
-  assert.equal(migratedDb.schema_version, 65);
+  assert.equal(migratedDb.schema_version, 66);
 
   const migratedUnrec = read(migratedDb, LINE_MODEL, 991);
   assert.ok(migratedUnrec.bank_move_id, 'Migration gave unreconciled line a bank_move_id');
@@ -819,7 +819,7 @@ test('BANK-3 & BANK-6: bookToAccount rewrites suspense line on existing bank ent
   assert.doesNotThrow(() => applyDiff(lineRes.db, diffDb(lineRes.db, db), { isAdmin: true }));
 });
 
-test('Changing journal or company suspense account does not strand already booked statement lines, and journal/company guards reject suspense changes while open lines are booked', () => {
+test('Changing journal or company suspense account is allowed while open lines exist and does not strand already booked statement lines', () => {
   const { db: baseDb, bankJournal, suspenseAccount, bankAccount } = setupBankTestDb();
 
   // Create a second suspense account
@@ -850,13 +850,7 @@ test('Changing journal or company suspense account does not strand already booke
   });
   db = line2Res.db;
 
-  // Guard rejects changing journal suspense_account_id while open booked lines exist on that journal
-  assert.throws(
-    () => write(db, 'account.journal', bankJournal.id, { suspense_account_id: newSuspense.id }),
-    /Cannot change the suspense account while bank transactions remain unreconciled/i,
-  );
-
-  // If a journal uses the company fallback (suspense_account_id: null), company guard also rejects changing account_journal_suspense_account_id
+  // Changing company suspense account while fallback journal has open lines succeeds (Odoo 20)
   const fallbackJournalDb = {
     ...db,
     records: {
@@ -864,25 +858,30 @@ test('Changing journal or company suspense account does not strand already booke
       'account.journal': db.records['account.journal'].map((j) => (j.id === bankJournal.id ? { ...j, suspense_account_id: null } : j)),
     },
   };
-  assert.throws(
-    () => write(fallbackJournalDb, 'res.company', 1, { account_journal_suspense_account_id: newSuspense.id }),
-    /Cannot change the suspense account while bank transactions remain unreconciled/i,
-  );
+  const companyChangedDb = write(fallbackJournalDb, 'res.company', 1, { account_journal_suspense_account_id: newSuspense.id });
+  assert.equal(read(companyChangedDb, 'res.company', 1).account_journal_suspense_account_id, newSuspense.id);
+  assert.doesNotThrow(() => applyDiff(fallbackJournalDb, diffDb(fallbackJournalDb, companyChangedDb), { isAdmin: true }));
 
-  // Even if suspense config differs from the historical suspense on the booked move (e.g. legacy or after config change),
-  // booked lines resolve their suspense from the booked bank entry so writing, matching, and deleting still succeed.
-  const shiftedConfigDb = {
-    ...db,
-    records: {
-      ...db.records,
-      'account.journal': db.records['account.journal'].map((j) => (j.id === bankJournal.id ? { ...j, suspense_account_id: newSuspense.id } : j)),
-    },
-  };
+  // Changing journal suspense_account_id while open booked lines exist also succeeds (Odoo 20)
+  const shiftedConfigDb = write(db, 'account.journal', bankJournal.id, { suspense_account_id: newSuspense.id });
+  assert.equal(read(shiftedConfigDb, 'account.journal', bankJournal.id).suspense_account_id, newSuspense.id);
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, shiftedConfigDb), { isAdmin: true }));
+
+  // New lines created after the change book to the new suspense account
+  const newLineRes = create(shiftedConfigDb, LINE_MODEL, {
+    journal_id: bankJournal.id,
+    amount: 40,
+    date: '2026-06-06',
+    payment_ref: 'Line after suspense change',
+    company_id: 1,
+  });
+  const newMove = read(newLineRes.db, MOVE_MODEL, read(newLineRes.db, LINE_MODEL, newLineRes.id).bank_move_id);
+  assert.ok(newMove.line_ids.some((l) => l.account_id === newSuspense.id && l.credit === 40), 'New line uses updated suspense account');
 
   // 1. Editing partner_id on line 1 succeeds and passes diffDb + applyDiff
-  const edited = write(shiftedConfigDb, LINE_MODEL, line1Res.id, { partner_id: 3 });
+  const edited = write(newLineRes.db, LINE_MODEL, line1Res.id, { partner_id: 3 });
   assert.equal(read(edited, LINE_MODEL, line1Res.id).partner_id, 3);
-  assert.doesNotThrow(() => applyDiff(shiftedConfigDb, diffDb(shiftedConfigDb, edited), { isAdmin: true }));
+  assert.doesNotThrow(() => applyDiff(newLineRes.db, diffDb(newLineRes.db, edited), { isAdmin: true }));
 
   // 2. Reconciling line 1 with an invoice replaces the historical suspense line cleanly without leaving an unbalanced old suspense line
   const invRes = create(edited, MOVE_MODEL, {
@@ -903,12 +902,9 @@ test('Changing journal or company suspense account does not strand already booke
   const deletedDb = unlink(matchDb, LINE_MODEL, [line2Res.id]);
   assert.equal(read(deletedDb, LINE_MODEL, line2Res.id), undefined);
   assert.doesNotThrow(() => applyDiff(matchDb, diffDb(matchDb, deletedDb), { isAdmin: true }));
-
-  // 4. Once all lines on the journal are reconciled or deleted, changing the journal suspense account is allowed
-  assert.doesNotThrow(() => write(deletedDb, 'account.journal', bankJournal.id, { suspense_account_id: suspenseAccount.id }));
 });
 
-test('Migration: version 64 tolerates to_check statement lines whose journal has no default_account_id', () => {
+test('Migration: version 66 tolerates to_check statement lines whose journal has no default_account_id', () => {
   const { db: baseDb } = setupBankTestDb();
   const incompleteJournal = {
     id: 850,
@@ -945,6 +941,95 @@ test('Migration: version 64 tolerates to_check statement lines whose journal has
   assert.equal(migratedLine.bank_move_id, null);
   assert.equal(migratedLine.company_id, 1);
   assert.equal(migratedLine.open_amount, 120);
+});
+
+test('Migration: foreign-currency unconfigured statement line without a rate is preserved with inferred company', () => {
+  const base = seed();
+  const eur = search(base, 'res.currency').find((c) => c.name === 'EUR');
+  const baseCurrId = base.settings.base_currency_id;
+  const eurNoRate = write(base, 'res.currency', eur.id, { rate_ids: [] });
+  const gbp = create(eurNoRate, 'res.currency', { name: 'GBP', rate_ids: [{ date: '2026-01-01', rate: 0.5 }] });
+  const company = createCompanyWithDefaultInvoiceJournals(gbp.db, { name: 'No-Rate Co', currency_id: baseCurrId });
+  const unconfiguredJournal = {
+    id: 851,
+    name: 'Unconfigured EUR Bank',
+    code: 'UEUR',
+    type: 'bank',
+    default_account_id: null,
+    suspense_account_id: null,
+    currency_id: eur.id,
+    company_id: company.id,
+  };
+  const unconfiguredRatedJournal = {
+    id: 852,
+    name: 'Unconfigured GBP Bank',
+    code: 'UGBP',
+    type: 'bank',
+    default_account_id: null,
+    suspense_account_id: null,
+    currency_id: gbp.id,
+    company_id: company.id,
+  };
+  const lineNoOpen = {
+    id: 996,
+    journal_id: 851,
+    amount: 100,
+    date: '2026-02-01',
+    payment_ref: 'Foreign line without rate or open_amount',
+    company_id: null,
+    state: 'to_check',
+    bank_move_id: null,
+  };
+  const lineWithOpen = {
+    id: 997,
+    journal_id: 851,
+    amount: 200,
+    date: '2026-02-01',
+    payment_ref: 'Foreign line without rate with open_amount',
+    company_id: null,
+    state: 'to_check',
+    bank_move_id: null,
+    open_amount: 42,
+  };
+  const lineWithRate = {
+    id: 998,
+    journal_id: 852,
+    amount: 50,
+    date: '2026-02-01',
+    payment_ref: 'Foreign line with rate but no bank account',
+    company_id: null,
+    state: 'to_check',
+    bank_move_id: null,
+  };
+  const legacyDb = {
+    ...company.db,
+    schema_version: 61,
+    records: {
+      ...company.db.records,
+      'account.journal': [...(company.db.records['account.journal'] ?? []), unconfiguredJournal, unconfiguredRatedJournal],
+      [LINE_MODEL]: [...(company.db.records[LINE_MODEL] ?? []), lineNoOpen, lineWithOpen, lineWithRate],
+    },
+  };
+
+  const migratedDb = migrate(legacyDb, SCHEMA_VERSION);
+  assert.equal(migratedDb.schema_version, SCHEMA_VERSION);
+
+  const migratedNoOpen = read(migratedDb, LINE_MODEL, 996);
+  assert.equal(migratedNoOpen.bank_move_id, null);
+  assert.equal(migratedNoOpen.company_id, company.id);
+  assert.equal(migratedNoOpen.open_amount, undefined);
+
+  const migratedWithOpen = read(migratedDb, LINE_MODEL, 997);
+  assert.equal(migratedWithOpen.bank_move_id, null);
+  assert.equal(migratedWithOpen.company_id, company.id);
+  assert.equal(migratedWithOpen.open_amount, 42);
+
+  const migratedWithRate = read(migratedDb, LINE_MODEL, 998);
+  assert.equal(migratedWithRate.bank_move_id, null);
+  assert.equal(migratedWithRate.company_id, company.id);
+  assert.equal(migratedWithRate.open_amount, 100);
+
+  assert.doesNotThrow(() => applyDiff(legacyDb, diffDb(legacyDb, migratedDb), { isAdmin: true }));
 });
 
 test('Unreconciling a line matched to a direct payment unlinks without attempting to reverse the payment entry', () => {

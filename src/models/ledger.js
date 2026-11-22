@@ -2,7 +2,7 @@
 import { roundingAccount } from './configured-account.js';
 import { create, read, search, write } from '../orm.js';
 import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
-import { companyCurrency, rateAt, toCompany } from './currency.js';
+import { companyCurrency, conversionRate, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
@@ -928,6 +928,21 @@ export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.a
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
 
+/** Convert a statement amount to the company currency, returning null if currencies or an exchange rate are unavailable. */
+export function findStatementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+  const company = line.company_id ?? 1;
+  const companyCurrency = findCompanyCurrencyRecord(db, company);
+  if (!companyCurrency) return null;
+  const journalCurrencyId = line.journal_id ? read(db, 'account.journal', line.journal_id)?.currency_id : null;
+  const lineCurrencyId = journalCurrencyId ?? companyCurrency.id;
+  if (lineCurrencyId === companyCurrency.id) return roundCurrency(amount, companyCurrency);
+  const lineCurrency = read(db, 'res.currency', lineCurrencyId);
+  const baseId = db?.settings?.base_currency_id;
+  if (!lineCurrency || !baseId || !read(db, 'res.currency', baseId)) return null;
+  const rate = conversionRate(db, companyCurrency.id, lineCurrency.id, line.date ?? today(), company);
+  return rate != null ? roundCurrency(amount / rate, companyCurrency) : null;
+}
+
 /** IDs of active payments linked to a bank statement line (allocations, batch, multi-select, or single). */
 export function statementPaymentIds(db, line) {
   if (!line) return [];
@@ -971,22 +986,6 @@ export function bookedBankSuspenseAccountId(db, line, move = null) {
   });
   if (candidate) return candidate.account_id;
   return configured ?? nonLiquidity[0]?.account_id ?? null;
-}
-
-/** Whether any statement line booked to a suspense account remains unreconciled (to_check with a bank_move_id). */
-export function unreconciledSuspenseTransactionsExist(db, { journalId = null, companyId = null } = {}) {
-  const lines = db.records['account.bank.statement.line'] ?? [];
-  return lines.some((line) => {
-    if (line.state !== 'to_check' || !line.bank_move_id) return false;
-    const company = line.company_id ?? 1;
-    if (journalId != null && line.journal_id !== journalId) return false;
-    if (companyId != null) {
-      if (company !== companyId) return false;
-      const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
-      if (journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id) return false;
-    }
-    return true;
-  });
 }
 
 /** Whether a statement line's bank_move_id was booked through its journal's suspense account (not a direct-payment bank entry). */

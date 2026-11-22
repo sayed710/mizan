@@ -14,7 +14,7 @@ import { migrateOrderpoints } from './models/orderpoint.js';
 import { normalizeHorizontalGroupVals } from './models/configurableReports.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today, validDate } from './models/common.js';
-import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
+import { CHART, findStatementCompanyAmount, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
@@ -1784,10 +1784,12 @@ function migrateStatementLinesBankSuspense(db) {
       const company = line.company_id ?? journal?.company_id ?? 1;
       const normalizedLine = { ...line, company_id: company };
       if (!journal?.default_account_id) {
-        const openAmount = line.open_amount ?? statementCompanyAmount(currentDb, normalizedLine);
         const updates = {};
         if (line.company_id == null) updates.company_id = company;
-        if (line.open_amount == null) updates.open_amount = openAmount;
+        if (line.open_amount == null) {
+          const openAmount = findStatementCompanyAmount(currentDb, normalizedLine);
+          if (openAmount != null) updates.open_amount = openAmount;
+        }
         if (Object.keys(updates).length > 0) {
           currentDb = write(currentDb, 'account.bank.statement.line', line.id, updates);
         }
@@ -1968,7 +1970,53 @@ MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (d
   });
   return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
 } });
-MIGRATIONS.push({ version: 65, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
+
+export function migrateTaxPriceIncludeOverride(db) {
+  const companies = db?.records?.['res.company'];
+  let companiesChanged = false;
+  const nextCompanies = Array.isArray(companies) ? companies.map((c) => {
+    if (!c || c.account_price_include != null) return c;
+    companiesChanged = true;
+    return { ...c, account_price_include: 'tax_excluded' };
+  }) : companies;
+
+  const taxes = db?.records?.['account.tax'];
+  let taxesChanged = false;
+  const isTruthyLegacy = (v) => {
+    if (v === true || v === 1 || v === '1') return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      return s === 'true' || s === 'yes' || s === 't' || s === '1';
+    }
+    return Boolean(v);
+  };
+  const nextTaxes = Array.isArray(taxes) ? taxes.map((t) => {
+    if (!t || typeof t !== 'object') return t;
+    const hasLegacy = 'price_include' in t;
+    if (t.price_include_override != null) {
+      if (!hasLegacy) return t;
+      taxesChanged = true;
+      const { price_include: _legacy, ...rest } = t;
+      return rest;
+    }
+    if (!hasLegacy) return t;
+    taxesChanged = true;
+    const { price_include, ...rest } = t;
+    return isTruthyLegacy(price_include) ? { ...rest, price_include_override: 'tax_included' } : rest;
+  }) : taxes;
+
+  if (!companiesChanged && !taxesChanged) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(companiesChanged ? { 'res.company': nextCompanies } : {}),
+      ...(taxesChanged ? { 'account.tax': nextTaxes } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
+MIGRATIONS.push({ version: 66, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
