@@ -1938,6 +1938,52 @@ MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (d
   return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
 } });
 
+export function migrateTaxPriceIncludeOverride(db) {
+  const companies = db?.records?.['res.company'];
+  let companiesChanged = false;
+  const nextCompanies = Array.isArray(companies) ? companies.map((c) => {
+    if (!c || c.account_price_include != null) return c;
+    companiesChanged = true;
+    return { ...c, account_price_include: 'tax_excluded' };
+  }) : companies;
+
+  const taxes = db?.records?.['account.tax'];
+  let taxesChanged = false;
+  const isTruthyLegacy = (v) => {
+    if (v === true || v === 1 || v === '1') return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      return s === 'true' || s === 'yes' || s === 't' || s === '1';
+    }
+    return Boolean(v);
+  };
+  const nextTaxes = Array.isArray(taxes) ? taxes.map((t) => {
+    if (!t || typeof t !== 'object') return t;
+    const hasLegacy = 'price_include' in t;
+    if (t.price_include_override != null) {
+      if (!hasLegacy) return t;
+      taxesChanged = true;
+      const { price_include: _legacy, ...rest } = t;
+      return rest;
+    }
+    if (!hasLegacy) return t;
+    taxesChanged = true;
+    const { price_include, ...rest } = t;
+    return isTruthyLegacy(price_include) ? { ...rest, price_include_override: 'tax_included' } : rest;
+  }) : taxes;
+
+  if (!companiesChanged && !taxesChanged) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(companiesChanged ? { 'res.company': nextCompanies } : {}),
+      ...(taxesChanged ? { 'account.tax': nextTaxes } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

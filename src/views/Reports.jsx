@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
 import { today, validDate } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
-import { deferredReport } from '../models/reports.js';
+import { deferredReport, trialOpeningItems } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { filterByAnalytic, journalItems } from '../models/ledger.js';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
@@ -134,7 +134,8 @@ function Comparison({ data, report, money: fmtMoney = money }) {
 function Ledger({ db, period, analyticAccountIds, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
   const items = filterByAnalytic(journalItems(db, { ...period, includeClosing: false }), analyticAccountIds);
-  const opening = period.from ? filterByAnalytic(journalItems(db, { to: period.from, ...(period.reviewMode ? { reviewMode: period.reviewMode } : {}) }), analyticAccountIds).filter((l) => l.date < period.from) : [];
+  // Same opening as the Trial Balance: accounts that do not carry forward restart at the fiscal-year start.
+  const opening = period.from ? trialOpeningItems(db, filterByAnalytic(journalItems(db, { to: period.from, ...(period.reviewMode ? { reviewMode: period.reviewMode } : {}) }), analyticAccountIds).filter((l) => l.date < period.from), period.from) : [];
   const accounts = [...new Set([...items, ...opening].map((l) => l.account_id))]
     .map((id) => read(db, 'account.account', id)).filter(Boolean).sort((a, b) => a.code.localeCompare(b.code));
   const [open, setOpen] = useState(() => new Set());
