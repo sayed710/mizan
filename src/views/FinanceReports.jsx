@@ -35,19 +35,21 @@ function FiscalCategoryRows({ rows, money: fmtMoney = money }) {
   const row = rows.find(Boolean);
   const name = row.category ? row.category.name : t('Uncategorized');
   const accounts = new Map(rows.flatMap((group) => (group?.accounts ?? []).map((line) => [line.account.id, line.account])));
+  const accountsByPeriod = rows.map((group) => new Map((group?.accounts ?? []).map((line) => [line.account.id, line])));
   const cells = (values) => values.flatMap((value, index) => ['debit', 'credit', 'balance'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>));
   return <>
     <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} {name}</button></td>{cells(rows)}</tr>
-    {open && [...accounts.values()].map((account) => <tr key={account.id} className="rep-detail"><td><a href={`#/open/account.account/${account.id}`}>{account.code} {account.name}</a></td>{cells(rows.map((group) => group?.accounts.find((line) => line.account.id === account.id)))}</tr>)}
+    {open && [...accounts.values()].map((account) => <tr key={account.id} className="rep-detail"><td><a href={`#/open/account.account/${account.id}`}>{account.code} {account.name}</a></td>{cells(accountsByPeriod.map((byAccount) => byAccount.get(account.id)))}</tr>)}
   </>;
 }
 
 export function FiscalReport({ db, period, periods, analyticAccountIds, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
   const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period.reviewMode, company_id: period.company_id, analyticAccountIds }));
+  const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   const groups = new Map(reports.flatMap((report) => report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   return <tbody>
-    {[...groups.keys()].map((id) => <FiscalCategoryRows key={id} rows={reports.map((report) => report.rows.find((row) => (row.category?.id ?? 'uncategorized') === id))} money={fmtMoney} />)}
+    {[...groups.keys()].map((id) => <FiscalCategoryRows key={id} rows={rowsByReport.map((byCategory) => byCategory.get(id))} money={fmtMoney} />)}
     <tr className="rep-total strong"><td>{t('Total')}</td>{reports.flatMap((report, index) => ['debit', 'credit', 'balance'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(report.totals[key])}</td>))}</tr>
   </tbody>;
 }

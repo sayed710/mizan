@@ -302,13 +302,19 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
     const specs = periods.map((p) => ({ ...p, ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}), tax_return_template: activeVariant }));
     const reports = specs.map((spec) => activeVariant === 'generic' ? genericTaxRows(taxesByTax(db, spec)) : taxReturnBoxes(db, spec).boxes);
     const rowKey = (row) => activeVariant === 'generic' ? taxItemKey({ ...row, tax_name: row.name }) : row.code;
+    const rowsByReport = reports.map((rows) => new Map(rows.map((row) => [rowKey(row), row])));
     const keys = new Map(reports.flatMap((rows) => rows.map((row) => [rowKey(row), row])));
     const gridReports = activeVariant === 'generic' ? specs.map((spec) => taxesByGrid(db, spec)) : [];
+    const gridsByReport = gridReports.map((rows) => new Map(rows.map((row) => [row.id, row])));
     const grids = new Map(gridReports.flatMap((rows) => rows.map((row) => [row.id, row])));
     const totals = specs.map((spec) => taxReport(db, spec));
+    const renderRows = (rows) => rows.map((row) => <tr key={rowKey(row)} className="rep-detail">{activeVariant !== 'generic' && <td>{row.code}</td>}<td>{t(row.label ?? row.name)}</td>{rowsByReport.flatMap((byKey, index) => { const value = byKey.get(rowKey(row)); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>);
+    const section = (title) => <tr className="rep-section"><td>{t(title)}</td>{periods.flatMap((_, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} />])}</tr>;
+    const mergedRows = [...keys.values()];
     return <tbody>
-      {[...keys.values()].map((row) => <tr key={rowKey(row)} className="rep-detail">{activeVariant !== 'generic' && <td>{row.code}</td>}<td>{t(row.label ?? row.name)}</td>{reports.flatMap((rows, index) => { const value = rows.find((item) => rowKey(item) === rowKey(row)); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>)}
-      {[...grids.values()].map((row) => <tr key={`grid-${row.id}`} className="rep-detail"><td>{row.name}</td>{gridReports.flatMap((rows, index) => { const value = rows.find((item) => item.id === row.id); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>)}
+      {activeVariant === 'generic' ? <>{section('Sales')}{renderRows(mergedRows.filter((row) => row.side === 'sale'))}{section('Purchases')}{renderRows(mergedRows.filter((row) => row.side === 'purchase'))}</> : renderRows(mergedRows)}
+      {grids.size > 0 && section('Tax Grids')}
+      {[...grids.values()].map((row) => <tr key={`grid-${row.id}`} className="rep-detail"><td>{row.name}</td>{gridsByReport.flatMap((byId, index) => { const value = byId.get(row.id); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>)}
       {activeVariant === 'generic' && ['output', 'input', 'payable'].map((key) => <tr key={key} className={`rep-total ${key === 'payable' ? 'strong' : ''}`}><td>{t(key === 'output' ? 'Output Tax' : key === 'input' ? 'Input Tax' : 'Tax Payable')}</td>{totals.flatMap((total, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} className="num">{fmtMoney(total[key])}</td>])}</tr>)}
     </tbody>;
   }
@@ -760,9 +766,10 @@ function ReportPage({ leaf }) {
   const deferredKind = leaf.report === 'deferredRevenue' ? 'revenue' : 'expense';
   const [generationError, setGenerationError] = useState('');
   const [companyId, setCompanyId] = useState('all');
+  const allowAllCompanies = !isDeferred && !['customerStatement', 'valuation'].includes(leaf.report);
   const { companyDb, availableCompanies, companies, selectedCompany } = useMemo(
-    () => reportCompanyScope(sourceDb, companyId, { allowAll: leaf.report !== 'customerStatement' && !isDeferred }),
-    [sourceDb, companyId, leaf.report, isDeferred],
+    () => reportCompanyScope(sourceDb, companyId, { allowAll: allowAllCompanies }),
+    [sourceDb, companyId, allowAllCompanies],
   );
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [asOf, setAsOf] = useState(today());
@@ -960,7 +967,7 @@ function ReportPage({ leaf }) {
         </select>
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
-        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement' && !isDeferred} />
+        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={allowAllCompanies} />
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">

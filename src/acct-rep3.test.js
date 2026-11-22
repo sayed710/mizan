@@ -84,3 +84,53 @@ test('fiscal comparison preserves values from each period', async () => {
   assert.notEqual(expected[0], expected[1]);
   for (const value of expected) assert.ok(total.includes(`>${value}</td>`));
 });
+
+test('valuation selects the current company and excludes other company stock', async () => {
+  const { create } = await import('./orm.js');
+  let db = seed();
+  const branch = createCompany(db, { name: 'Stock branch', currency_id: read(db, 'res.company', 1).currency_id });
+  db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
+  const product = create(db, 'product', { name: 'Scoped valuation widget', type: 'goods', cost: 10, qty_available: 0 });
+  db = product.db;
+  db.records['stock.valuation.layer'] = [
+    { id: 9001, product_id: product.id, company_id: 1, date: '2020-01-01', quantity: 2, value: 20 },
+    { id: 9002, product_id: product.id, company_id: branch.id, date: '2020-01-01', quantity: 7, value: 700 },
+  ];
+  const html = await page('valuation', db);
+  assert.ok(html.includes('Stock branch'));
+  assert.ok(!html.includes('All Companies'));
+  const row = html.split('Scoped valuation widget')[1].split('</tr>')[0];
+  assert.match(row, />2<\/td>/);
+  assert.ok(!row.includes('700'));
+});
+
+test('generic tax comparison keeps same-name taxes in sections and pads headers', async () => {
+  const { create } = await import('./orm.js');
+  const { postMove } = await import('./models/accounting.js');
+  const { taxSnapshot } = await import('./models/taxes.js');
+  const { React, render } = await setup();
+  const { Tax } = await import('./views/Reports.jsx');
+  let db = seed();
+  for (const [side, type, date] of [['sale', 'out_invoice', '2025-01-10'], ['purchase', 'in_invoice', '2026-01-10']]) {
+    const tax = create(db, 'account.tax', { name: 'Shared comparison tax', amount: 10, type_tax_use: side });
+    const move = create(tax.db, 'account.move', { move_type: type, partner_id: 1, invoice_date: date, invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
+    db = postMove(move.db, move.id);
+  }
+  const html = render(React.createElement('table', null, React.createElement(Tax, { db, period: periods[0], periods, variant: 'generic', money: String })));
+  const sales = html.indexOf('>Sales</td>');
+  const purchase = html.indexOf('>Purchases</td>');
+  assert.ok(sales >= 0 && purchase > sales);
+  assert.ok(html.slice(sales, purchase).includes('Shared comparison tax'));
+  assert.ok(html.slice(purchase).includes('Shared comparison tax'));
+  assert.equal((html.slice(sales, html.indexOf('</tr>', sales)).match(/<td/g) ?? []).length, 4);
+});
+
+test('comparison renderers index period rows before rendering cells', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const fiscal = await readFile(new URL('./views/FinanceReports.jsx', import.meta.url), 'utf8');
+  const reports = await readFile(new URL('./views/Reports.jsx', import.meta.url), 'utf8');
+  assert.match(fiscal, /accountsByPeriod\.map\(\(byAccount\) => byAccount\.get\(account\.id\)\)/);
+  assert.match(fiscal, /rowsByReport\.map\(\(byCategory\) => byCategory\.get\(id\)\)/);
+  assert.match(reports, /byKey\.get\(rowKey\(row\)\)/);
+  assert.match(reports, /byId\.get\(row\.id\)/);
+});
