@@ -3280,6 +3280,7 @@ const ar = {
   'Invalid calendar date in QIF file': 'تاريخ غير موجود في التقويم داخل ملف QIF',
   'A percentage of price tax included must be below 100%': 'يجب أن تكون نسبة الضريبة المضمّنة في السعر أقل من 100%',
   'Include Unposted Entries': 'تضمين القيود غير المرحّلة',
+  'Include Draft Assets': 'تضمين الأصول المسودة',
   'Select partner, analytic account, journal, or company': 'اختر شريكاً أو حساباً تحليلياً أو يوميةً أو شركةً',
   'Rule IDs must match the selected grouping field': 'يجب أن تطابق معرّفات القاعدة حقل التجميع المحدد',
   'All companies in a tax unit must have the same country': 'يجب أن تنتمي جميع الشركات في الوحدة الضريبية إلى نفس البلد',
