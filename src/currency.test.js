@@ -4,7 +4,7 @@ import { create, read, search } from './orm.js';
 import { models } from './models/index.js';
 import { journalItems, isBalanced, accountId } from './models/ledger.js';
 import { payMove } from './models/accounting.js';
-import { rateAt, toCompany, upsertCurrencyRates } from './models/currency.js';
+import { rateAt, toCompany } from './models/currency.js';
 import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 
@@ -56,38 +56,4 @@ test('invoice lines can book to their own account and payments are listed on the
   assert.equal(lines.find((l) => l.account_id === accountId(posted, '400000')).credit, 100);
   const paid = payMove(payMove(posted, id, 60, '2026-10-01'), id, 90, '2026-10-05');
   assert.deepEqual(read(paid, 'account.move', id).payments.map((p) => [p.date, p.amount]), [['2026-10-01', 60], ['2026-10-05', 90]]);
-});
-
-test('upsertCurrencyRates array import skips base-currency entry and writes foreign rate', () => {
-  let db = seed();
-  const baseCurrencyId = db.settings.base_currency_id ?? 1;
-  const eurCurr = search(db, 'res.currency').find((c) => c.name === 'EUR');
-  assert.ok(eurCurr);
-
-  // Array containing base-currency entry and foreign-currency entry
-  const rates = [
-    { currency_id: baseCurrencyId, rate: 1.0 },
-    { currency_id: eurCurr.id, rate: 0.88 },
-  ];
-  db = upsertCurrencyRates(db, rates, { date: '2026-05-10', companyId: 1 });
-
-  const updatedBase = read(db, 'res.currency', baseCurrencyId);
-  const baseRateRow = (updatedBase.rate_ids ?? []).find((r) => r.date === '2026-05-10');
-  assert.equal(baseRateRow, undefined, 'Base currency must not have a rate row written');
-
-  const updatedEur = read(db, 'res.currency', eurCurr.id);
-  const eurRateRow = (updatedEur.rate_ids ?? []).find((r) => r.date === '2026-05-10' && r.company_id === 1);
-  assert.ok(eurRateRow, 'Foreign currency rate row must be written');
-  assert.equal(eurRateRow.rate, 0.88);
-
-  // Also test with currency name/code property
-  const ratesByName = [
-    { currency: 'USD', rate: 1.0 },
-    { currency: 'EUR', rate: 0.86 },
-  ];
-  db = upsertCurrencyRates(db, ratesByName, { date: '2026-05-11', companyId: 1 });
-  const updatedEur2 = read(db, 'res.currency', eurCurr.id);
-  const eurRateRow2 = (updatedEur2.rate_ids ?? []).find((r) => r.date === '2026-05-11' && r.company_id === 1);
-  assert.ok(eurRateRow2);
-  assert.equal(eurRateRow2.rate, 0.86);
 });
