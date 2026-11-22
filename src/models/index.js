@@ -321,6 +321,8 @@ const allApps = [
           { key: 'fiscal-report', label: 'Fiscal Report', type: 'report', report: 'fiscal' },
         ] },
                 { label: 'Management', children: [
+          { key: 'deferred-revenue-report', label: 'Deferred Revenue', type: 'report', report: 'deferredRevenue' },
+          { key: 'deferred-expense-report', label: 'Deferred Expense', type: 'report', report: 'deferredExpense' },
           { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.invoice.report', view: 'pivot' },
           { key: 'unrealized-currencies', label: 'Unrealized Currencies', type: 'report', report: 'unrealizedCurrencies' },
           { key: 'loans-analysis', label: 'Loans Analysis', type: 'report', report: 'loansAnalysis' },
