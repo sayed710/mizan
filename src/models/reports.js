@@ -40,7 +40,7 @@ const cashFlowSelectedSources = (sources, analyticAccountIds) => !analyticAccoun
 const itemsBefore = (db, from, company_id, analyticAccountIds, reviewMode = 'posted') => (from ? filterByAnalytic(journalItems(db, { company_id, reviewMode }), analyticAccountIds).filter((l) => l.date < from) : []);
 
 /** Accounts without include_initial_balance restart at their company's fiscal-year start; earlier results open on its earnings account (Odoo's undistributed profits), so the opening column stays balanced. */
-function trialOpeningItems(db, items, from) {
+export function trialOpeningItems(db, items, from) {
   return items.map((line) => {
     if (includeInitialBalance(read(db, 'account.account', line.account_id)) || line.date >= fiscalYearStart(db, from, line.company_id)) return line;
     const earnings = configuredEarningsAccount(db, line.company_id);
