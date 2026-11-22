@@ -11,18 +11,20 @@ register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const types = { out_invoice: 'Invoice', out_refund: 'Credit Note', in_invoice: 'Bill', in_refund: 'Refund' };
 const textOf = (node) => node.nodeType === 3 ? node.nodeValue : (node.childNodes ?? []).map(textOf).join('');
 
-test('invoice print action is available without changing draft or cancelled moves', () => {
-  const button = models['account.move'].form.buttons.find((b) => b.label === 'Print');
+test('invoice gear-menu Print works in every state while the header Print stays posted-only, as in Odoo', () => {
+  const menu = models['account.move'].menuActions.find((a) => a.label === 'Print');
+  const header = models['account.move'].form.buttons.find((b) => b.label === 'Print');
   for (const move_type of Object.keys(types)) {
     for (const state of ['draft', 'cancel', 'posted']) {
       const move = { id: 42, move_type, state, name: '/' };
       const db = { records: { 'account.move': [move] } };
-      assert.equal(button.when(move), true, `${state} ${move_type}`);
-      assert.deepEqual(button.run(db, move), { db, go: '#/print/account.move/42' });
+      assert.equal(menu.when(move), true, `${state} ${move_type}`);
+      assert.equal(header.when(move), state === 'posted', `header ${state} ${move_type}`);
+      assert.deepEqual(menu.run(db, move), { db, go: '#/print/account.move/42' });
       assert.deepEqual(move, { id: 42, move_type, state, name: '/' });
     }
   }
-  assert.equal(button.when({ move_type: 'entry', state: 'draft' }), false);
+  assert.equal(menu.when({ move_type: 'entry', state: 'draft' }), false);
 });
 
 test('printed invoice titles reflect draft and cancelled state and preserve posted titles', async () => {

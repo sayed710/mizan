@@ -312,7 +312,7 @@ function Activities({ db, model, id, name }) {
   );
 }
 
-function ActionsMenu({ model, rec, backHash, base, query }) {
+function ActionsMenu({ model, rec, backHash, base, query, onAction }) {
   const [open, setOpen] = useState(false);
   const run = (fn) => { setOpen(false); fn(); };
   const duplicate = () => {
@@ -326,6 +326,9 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
       <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
       {open && (
         <div className="nav-dropdown" role="menu">
+          {(models[model].menuActions ?? []).filter((a) => a.when?.(rec) ?? true).map((a) => (
+            <button key={a.label} type="button" role="menuitem" onClick={() => run(() => onAction(a))}>{t(a.label)}</button>
+          ))}
           <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>
           <button type="button" role="menuitem" onClick={() => run(() => commit(write(getDb(), model, rec.id, { active: archived })))}>{t(archived ? 'Unarchive' : 'Archive')}</button>
           <button type="button" role="menuitem" className="danger" onClick={() => run(() => {
@@ -596,7 +599,7 @@ export function FormView({ leaf, id, base, params }) {
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : displayTitle}</span>
           </nav>
-          {!isNew && <ActionsMenu model={model} rec={rec} backHash={backHash} base={base} query={query} />}
+          {!isNew && <ActionsMenu model={model} rec={rec} backHash={backHash} base={base} query={query} onAction={runButton} />}
           {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && current.move_type === 'out_invoice')) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
           {dirty && (
             <span className="dirty">
