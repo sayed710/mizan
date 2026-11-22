@@ -1,7 +1,9 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
+import { today } from './common.js';
 import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
@@ -550,7 +552,11 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 
 /** Apply the first configured partner mapping before evaluating reconciliation rules. */
 export function mapStatementPartner(db, line) {
-  if (line.partner_id) return db;
+  if (!line || line.partner_id || line.state === 'reconciled') return db;
+  if (line.bank_move_id || line.move_id) {
+    const lock = recordLockDate(db, line);
+    if (lock && String(line.date ?? today()) <= lock) return db;
+  }
   const lineCompany = line.company_id ?? 1;
   for (const rule of activeRules(db)) {
     if (rule.company_id && rule.company_id !== lineCompany) continue;
@@ -578,18 +584,18 @@ export function mapStatementPartner(db, line) {
 export function autoReconcile(db) {
   const rules = activeRules(db).filter(isAutoRule);
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
-    acc = mapStatementPartner(acc, read(acc, 'account.bank.statement.line', l.id));
-    const line = read(acc, 'account.bank.statement.line', l.id);
+    const mappedDb = mapStatementPartner(acc, read(acc, 'account.bank.statement.line', l.id));
+    const line = read(mappedDb, 'account.bank.statement.line', l.id);
     for (const rule of rules) {
       if (!ruleMatches(rule, line) || (line.allocations ?? []).some((a) => a.reconcile_model_id === rule.id)) continue;
       try {
-        const next = applyRule(acc, rule, line);
-        if (next !== acc) return next;
+        const next = applyRule(mappedDb, rule, line);
+        if (next !== mappedDb) return next;
       } catch {
-        return acc;
+        return mappedDb;
       }
     }
-    return acc;
+    return mappedDb;
   }, db);
 }
 
@@ -611,14 +617,13 @@ function guardReconcileModel(db, _before, rule) {
       return 'Invalid regular expression in label parameter';
     }
   }
-  const modelCompany = rule.company_id ?? 1;
   for (const mapping of rule.partner_mapping_line_ids ?? []) {
     for (const pattern of [mapping.payment_ref_regex, mapping.narration_regex]) {
       if (pattern && !compileRegex(pattern)) return 'Invalid regular expression in partner mapping';
     }
     if (mapping.partner_id) {
       const partner = read(db, 'res.partner', mapping.partner_id);
-      if (!partner || partner.active === false || (partner.company_id && partner.company_id !== modelCompany)) {
+      if (!partner || partner.active === false || (rule.company_id && partner.company_id && partner.company_id !== rule.company_id)) {
         return 'Partner in partner mapping must belong to the model company';
       }
     }
@@ -766,7 +771,7 @@ export const reconcileModels = {
             type: 'many2one',
             relation: 'res.partner',
             label: 'Partner',
-            domain: (p, r) => p.active !== false && (!p.company_id || p.company_id === (r?.company_id ?? 1)),
+            domain: (p, r) => p.active !== false && (!r?.company_id || !p.company_id || p.company_id === r.company_id),
           },
         },
         newLine: () => ({ payment_ref_regex: '', narration_regex: '', partner_id: null }),
