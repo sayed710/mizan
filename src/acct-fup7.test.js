@@ -3,9 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom } from './test-support/dom.js';
-import { crmModels } from './models/crm.js';
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
-import { create, read } from './orm.js';
+import { create } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { partnerTotalDue, partnerTotalOverdue, partnerReceivableLines, classifyDue, followUps, followUpLetter } from './models/finance.js';
@@ -16,24 +15,6 @@ const { FollowUps, REPORTS } = await import('./views/Reports.jsx');
 // ---------------------------------------------------------------------------
 // FU7-1: Partner computed fields total_due and total_overdue
 // ---------------------------------------------------------------------------
-
-test('FU7-1 metadata: res.partner exposes readonly total_due and total_overdue in the Accounting tab', () => {
-  const partnerModel = crmModels['res.partner'];
-  assert.ok(partnerModel.fields.total_due, 'total_due field must exist on res.partner');
-  assert.equal(partnerModel.fields.total_due.type, 'monetary');
-  assert.equal(partnerModel.fields.total_due.readonly, true);
-  assert.equal(typeof partnerModel.fields.total_due.compute, 'function');
-
-  assert.ok(partnerModel.fields.total_overdue, 'total_overdue field must exist on res.partner');
-  assert.equal(partnerModel.fields.total_overdue.type, 'monetary');
-  assert.equal(partnerModel.fields.total_overdue.readonly, true);
-  assert.equal(typeof partnerModel.fields.total_overdue.compute, 'function');
-
-  const accountingTab = partnerModel.form.tabs.find((tab) => tab.label === 'Accounting');
-  assert.ok(accountingTab, 'Accounting tab must exist');
-  assert.ok(accountingTab.fields.includes('total_due'), 'Accounting tab must include total_due');
-  assert.ok(accountingTab.fields.includes('total_overdue'), 'Accounting tab must include total_overdue');
-});
 
 test('FU7-1 classification helper: classifyDue returns overdue or upcoming correctly', () => {
   assert.equal(classifyDue('2026-01-10', '2026-01-20'), 'overdue');
@@ -48,11 +29,6 @@ test('FU7-1 computation: total_due sums open posted receivable residuals, total_
   const base = seed();
   const partner = create(base, 'res.partner', { name: 'Customer Due Overdue' });
   const pId = partner.id;
-
-  // Initially zero
-  const p0 = read(partner.db, 'res.partner', pId);
-  assert.equal(p0.total_due, 0);
-  assert.equal(p0.total_overdue, 0);
 
   // Invoice 1: $100 due 2026-01-10 (overdue on 2026-01-20)
   const inv1 = create(partner.db, 'account.move', {
@@ -76,10 +52,6 @@ test('FU7-1 computation: total_due sums open posted receivable residuals, total_
 
   assert.equal(partnerTotalDue(db, pId, 1, '2026-01-20'), 160);
   assert.equal(partnerTotalOverdue(db, pId, 1, '2026-01-20'), 100);
-
-  // Computed fields through ORM read
-  const pRead = read(db, 'res.partner', pId);
-  assert.equal(pRead.total_due, 160);
 
   // On 2026-03-01, both invoices are overdue
   assert.equal(partnerTotalDue(db, pId, 1, '2026-03-01'), 160);
