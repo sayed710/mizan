@@ -966,7 +966,7 @@ function ReportPage({ leaf }) {
         </select>
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
-        <CompanySelect companies={['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies : companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement' && !isDeferred} />
+        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement' && !isDeferred} />
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">
