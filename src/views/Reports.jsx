@@ -603,21 +603,22 @@ function AuditRows({ db, rows }) {
 }
 
 /** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
-function Valuation({ db, period, money: fmtMoney = money }) {
-  const report = valuationReport(db, { at: period.to || today() });
-  const rows = Object.entries(report).filter(([, v]) => v.qty)
+function Valuation({ db, period, companyId, money: fmtMoney = money }) {
+  const report = valuationReport(db, { at: period.to || today(), companyId: Number(companyId) });
+  const unavailable = Object.values(report).some((v) => v.qty === null);
+  const rows = Object.entries(report).filter(([, v]) => v.qty !== 0)
     .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
   return (
     <tbody>
       {rows.map(({ p, value }) => (
         <tr key={p.id} className="rep-detail">
           <td><a href={`#/open/product/${p.id}`}>{p.default_code ? `[${p.default_code}] ` : ''}{p.name}</a></td>
-          <td className="num">{p.qty_available}</td>
-          <td className="num">{fmtMoney(p.cost)}</td>
-          <td className="num">{fmtMoney(value)}</td>
+          <td className="num">{p.qty_available ?? t('Historical valuation unavailable')}</td>
+          <td className="num">{p.cost == null ? '-' : fmtMoney(p.cost)}</td>
+          <td className="num">{value == null ? '-' : fmtMoney(value)}</td>
         </tr>
       ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td className="num">{fmtMoney(rows.reduce((s, r) => s + r.value, 0))}</td></tr>
+      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td className="num">{unavailable ? t('Historical valuation unavailable') : fmtMoney(rows.reduce((s, r) => s + r.value, 0))}</td></tr>
     </tbody>
   );
 }
@@ -746,7 +747,7 @@ function ReportPage({ leaf }) {
   const [generationError, setGenerationError] = useState('');
   const [companyId, setCompanyId] = useState('all');
   const { companyDb, availableCompanies, companies, selectedCompany } = useMemo(
-    () => reportCompanyScope(sourceDb, companyId, { allowAll: leaf.report !== 'customerStatement' && !isDeferred }),
+    () => reportCompanyScope(sourceDb, companyId, { allowAll: !['customerStatement', 'valuation'].includes(leaf.report) && !isDeferred }),
     [sourceDb, companyId, leaf.report, isDeferred],
   );
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
@@ -765,7 +766,7 @@ function ReportPage({ leaf }) {
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
     const allLedgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
     const activeLedger = LEDGER_REPORTS.includes(leaf.report) ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
-    const journals = (activeLedger ? search(companyDb, 'account.journal').filter((j) => (activeLedger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal'))
+    const journals = (activeLedger ? search(companyDb, 'account.journal').filter((j) => (activeLedger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal', { includeArchived: leaf.report === 'inalterability' }))
       .filter((j) => selectedCompany === 'all' || !j.company_id || j.company_id === Number(selectedCompany));
     const chosenIds = LEDGER_REPORTS.includes(leaf.report)
       ? journalIds.filter((jId) => journals.some((j) => j.id === jId))
@@ -945,7 +946,7 @@ function ReportPage({ leaf }) {
         </select>
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
-        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement' && !isDeferred} />
+        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={!['customerStatement', 'valuation'].includes(leaf.report) && !isDeferred} />
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">
@@ -1032,7 +1033,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && leaf.report === 'trial' ? periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`)) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
+          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={leaf.report === 'valuation' ? companyDb : db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
         </table>
       </div>
     </ReportPrintView>

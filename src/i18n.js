@@ -1321,6 +1321,7 @@ const ar = {
   'As of': 'كما في',
   'Principal Repaid': 'أصل القرض المسدد',
   'Interest Paid': 'الفوائد المدفوعة',
+  'Historical valuation unavailable': 'التقييم التاريخي غير متاح',
   'Historical entry links unavailable': 'روابط القيود التاريخية غير متوفرة',
   'Invoices To Be Issued': 'فواتير مطلوب إصدارها',
   'Invoiced Not Delivered': 'مفوتر ولم يتم تسليمه',

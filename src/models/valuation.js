@@ -333,11 +333,13 @@ export function revalue(db, productId, newUnitCost, { date = today() } = {}) {
 }
 
 /** Per-product layer totals at a date, including implicit legacy opening stock until first valued. */
-export function valuationReport(db, { at = today() } = {}) {
+export function valuationReport(db, { at = today(), companyId = companyOf(db) } = {}) {
   return Object.fromEntries(search(db, 'product').filter((p) => p.type === 'goods').map((p) => {
-    const all = layers(db, p.id);
+    const all = layers(db, p.id, companyId);
     const ls = all.filter((l) => l.date <= at);
-    const qty = all.length ? quantity(ls) : stockQuantity(db, p);
+    const legacyQty = all.length ? 0 : stockQuantity(db, p, companyId);
+    if (!all.length && at < today()) return [p.id, { qty: null, value: null, unitCost: null }];
+    const qty = all.length ? quantity(ls) : legacyQty;
     const value = all.length ? valueOf(ls) : round(qty * (Number(p.cost) || 0));
     return [p.id, { qty, value, unitCost: qty ? value / qty : 0 }];
   }));
