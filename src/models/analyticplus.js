@@ -390,10 +390,13 @@ const transition = (label, from, state) => ({
   },
 });
 
+const rawPlans = (db) => db?.records?.['account.analytic.plan'] ?? [];
+const rawPlan = (db, id) => rawPlans(db).find((p) => p.id === id);
+
 /** Return a plan's id together with all descendant subplan ids. */
 export function planSubtreeIds(db, rootId) {
   if (!rootId) return [];
-  const plans = search(db, 'account.analytic.plan');
+  const plans = rawPlans(db);
   const out = [rootId];
   const seen = new Set(out);
   for (let i = 0; i < out.length; i += 1) {
@@ -408,6 +411,65 @@ export function planSubtreeIds(db, rootId) {
   return out;
 }
 
+/** Complete hierarchical name for a plan (e.g. "Parent / Child"). */
+export function completePlanName(db, plan) {
+  if (!plan?.name) return '';
+  if (!plan.parent_id || !db) return plan.name;
+  const names = [plan.name];
+  const seen = new Set([plan.id]);
+  let curId = plan.parent_id;
+  while (curId) {
+    if (seen.has(curId)) break;
+    seen.add(curId);
+    const parent = rawPlan(db, curId);
+    if (!parent?.name) break;
+    names.unshift(parent.name);
+    curId = parent.parent_id;
+  }
+  return names.join(' / ');
+}
+
+/** Return the id of the topmost ancestor plan in the hierarchy. */
+export function rootPlanId(db, plan) {
+  if (!plan?.id) return null;
+  if (!plan.parent_id || !db) return plan.id;
+  const seen = new Set([plan.id]);
+  let cur = plan;
+  while (cur?.parent_id) {
+    if (seen.has(cur.parent_id)) break;
+    seen.add(cur.parent_id);
+    const parent = rawPlan(db, cur.parent_id);
+    if (!parent) break;
+    cur = parent;
+  }
+  return cur?.id ?? plan.id;
+}
+
+/** Return the topmost ancestor plan record in the hierarchy. */
+export function rootPlan(db, plan) {
+  const id = rootPlanId(db, plan);
+  return id ? read(db, 'account.analytic.plan', id) : null;
+}
+
+/** Whether a plan is a root plan (has no parent plan). */
+export const isRootPlan = (plan) => !plan?.parent_id;
+
+/** All root plans in sequence order. */
+export function rootAnalyticPlans(db) {
+  if (!db) return [];
+  return (search(db, 'account.analytic.plan', { includeArchived: true }) ?? [])
+    .filter(isRootPlan)
+    .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id);
+}
+
+/** Total number of analytic accounts under a plan and its subplans. */
+export function planAccountCount(db, plan) {
+  if (!db || !plan?.id) return 0;
+  const planIds = new Set(planSubtreeIds(db, plan.id));
+  const accounts = db.records?.['account.analytic.account'] ?? [];
+  return accounts.filter((a) => a.active !== false && planIds.has(a.plan_id)).length;
+}
+
 /** Validate that a plan does not reference itself as an ancestor. */
 export function planHierarchyError(db, plan) {
   if (!plan?.parent_id || !plan.id) return null;
@@ -416,7 +478,7 @@ export function planHierarchyError(db, plan) {
   while (cur) {
     if (seen.has(cur)) return 'A plan cannot be its own ancestor';
     seen.add(cur);
-    cur = read(db, 'account.analytic.plan', cur)?.parent_id ?? null;
+    cur = rawPlan(db, cur)?.parent_id ?? null;
   }
   return null;
 }
@@ -454,6 +516,23 @@ export const analyticPlusModels = {
         hideWhen: (r) => Boolean(r?.parent_id),
       },
       color: { type: 'integer', label: 'Color' },
+      description: { type: 'text', label: 'Description' },
+      complete_name: {
+        type: 'char', label: 'Complete Name', readonly: true,
+        compute: (r, db) => completePlanName(db, r),
+      },
+      children_ids: {
+        type: 'one2many', relation: 'account.analytic.plan', label: 'Subplans', readonly: true,
+        compute: (r, db) => (db ? rawPlans(db).filter((p) => p.parent_id === r?.id).map((p) => p.id) : (r?.children_ids ?? [])),
+      },
+      root_plan_id: {
+        type: 'many2one', relation: 'account.analytic.plan', label: 'Root Plan', readonly: true,
+        compute: (r, db) => rootPlanId(db, r),
+      },
+      account_count: {
+        type: 'integer', label: 'Analytic Accounts', readonly: true,
+        compute: (r, db) => planAccountCount(db, r),
+      },
       applicability_ids: {
         type: 'one2many',
         label: 'Applicability',
@@ -467,7 +546,7 @@ export const analyticPlusModels = {
         newLine: () => ({ business_domain: null, account_prefix: '', product_categ_id: null, applicability: 'mandatory', company_id: null }),
       },
     },
-    defaults: () => ({ default_applicability: 'optional', color: 0, applicability_ids: [] }),
+    defaults: () => ({ default_applicability: 'optional', color: 0, description: '', applicability_ids: [] }),
     createDefaults: (db) => ({ sequence: nextSequence(db, 'account.analytic.plan') }),
     guard: (db, _before, after) => planHierarchyError(db, after),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
@@ -481,7 +560,7 @@ export const analyticPlusModels = {
         { label: 'Subplans', model: 'account.analytic.plan', field: 'parent_id', target: 'accounting/analytic-plans' },
         { label: 'Analytic Accounts', model: 'account.analytic.account', field: 'plan_id', ids: (db, rec) => planSubtreeIds(db, rec.id), target: 'accounting/analytic' },
       ],
-      groups: [['parent_id', 'default_applicability', 'color']],
+      groups: [['parent_id', 'default_applicability', 'color', 'description']],
       tabs: [{ label: 'Applicability', when: (r) => !r?.parent_id, fields: ['applicability_ids'] }],
       chatter: true,
     },

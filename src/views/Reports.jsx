@@ -8,7 +8,7 @@ import { filterByAnalytic, journalItems } from '../models/ledger.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
-import { budgetReport } from '../models/analyticplus.js';
+import { budgetReport, rootPlanId } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -565,19 +565,61 @@ function Budget({ db, period }) {
   );
 }
 
-function Analytic({ db, period, money: moneyProp }) {
+function Analytic({ db, period, money: moneyProp, rootPlans: rootPlansProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
   const actual = analyticActuals(db, period);
   const lines = analyticActualLines(db, period);
+  const rootPlans = rootPlansProp ?? (search(db, 'account.analytic.plan', { includeArchived: true }) ?? [])
+    .filter((p) => !p.parent_id)
+    .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id);
+  const hasRootPlans = rootPlans.length > 0;
+
   return (
     <tbody>
-      {search(db, 'account.analytic.account', { includeArchived: true }).filter((a) => a.active !== false || actual.has(a.id)).map((a) => <Fragment key={a.id}>
-        <Total label={a.name} value={actual.get(a.id) ?? 0} money={fmtMoney} />
-        {lines.filter((line) => line.account_id === a.id).map((line) => <tr key={line.id} className="rep-detail">
-          <td><a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>{line.move_id && <>{' · '}<a href={`#/open/account.move/${line.move_id}`}>{read(db, 'account.move', line.move_id)?.name ?? line.move_id}</a></>}</td>
-          <td className="num">{fmtMoney(analyticReportAmount(db, line))}</td>
-        </tr>)}
-      </Fragment>)}
+      {search(db, 'account.analytic.account', { includeArchived: true }).filter((a) => a.active !== false || actual.has(a.id)).map((a) => {
+        const rootId = a.plan_id ? rootPlanId(db, read(db, 'account.analytic.plan', a.plan_id)) : null;
+        const accountLines = lines.filter((line) => line.account_id === a.id);
+        return (
+          <Fragment key={a.id}>
+            <tr className="rep-total">
+              <td>{a.name}</td>
+              {hasRootPlans ? (
+                rootPlans.map((rp) => (
+                  <td key={rp.id} className="num">
+                    {rootId === rp.id ? fmtMoney(actual.get(a.id) ?? 0) : ''}
+                  </td>
+                ))
+              ) : (
+                <td className="num">{fmtMoney(actual.get(a.id) ?? 0)}</td>
+              )}
+            </tr>
+            {accountLines.map((line) => (
+              <tr key={line.id} className="rep-detail">
+                <td>
+                  <a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>
+                  {line.move_id && (
+                    <>
+                      {' · '}
+                      <a href={`#/open/account.move/${line.move_id}`}>
+                        {read(db, 'account.move', line.move_id)?.name ?? line.move_id}
+                      </a>
+                    </>
+                  )}
+                </td>
+                {hasRootPlans ? (
+                  rootPlans.map((rp) => (
+                    <td key={rp.id} className="num">
+                      {rootId === rp.id ? fmtMoney(analyticReportAmount(db, line)) : ''}
+                    </td>
+                  ))
+                ) : (
+                  <td className="num">{fmtMoney(analyticReportAmount(db, line))}</td>
+                )}
+              </tr>
+            ))}
+          </Fragment>
+        );
+      })}
     </tbody>
   );
 }
@@ -822,7 +864,13 @@ function ReportPage({ leaf }) {
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
-  const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : isDeferred ? cols.map((col) => col === 'Current' ? periodName : col) : cols;
+  const rootPlans = useMemo(() => {
+    if (leaf.report !== 'analytic') return [];
+    return (search(db, 'account.analytic.plan', { includeArchived: true }) ?? [])
+      .filter((p) => !p.parent_id)
+      .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id);
+  }, [db, leaf.report]);
+  const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : isDeferred ? cols.map((col) => col === 'Current' ? periodName : col) : leaf.report === 'analytic' && rootPlans.length > 0 ? rootPlans.map((p) => p.name) : cols;
   const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
   const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial'].includes(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
@@ -1025,7 +1073,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && leaf.report === 'trial' ? periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`)) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} agedData={agedData} money={fmtMoney} />}
+          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} agedData={agedData} rootPlans={rootPlans} money={fmtMoney} />}
         </table>
       </div>
     </ReportPrintView>
