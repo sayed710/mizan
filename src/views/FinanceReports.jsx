@@ -31,8 +31,8 @@ function FiscalCategoryRows({ row }) {
   </>;
 }
 
-export function FiscalReport({ db, period, analyticAccountIds }) {
-  const { rows, totals } = fiscalReport(db, { ...period, analyticAccountIds });
+export function FiscalReport({ db, period, companyId, analyticAccountIds }) {
+  const { rows, totals } = fiscalReport(db, { ...period, company_id: companyId && companyId !== 'all' ? Number(companyId) : null, analyticAccountIds });
   return <tbody>
     {rows.map((row) => <FiscalCategoryRows key={row.category?.id ?? 'uncategorized'} row={row} />)}
     <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.debit)}{num(totals.credit)}{num(totals.balance)}</tr>

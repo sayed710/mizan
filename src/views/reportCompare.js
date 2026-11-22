@@ -1,5 +1,7 @@
+import { taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { genericTaxRows, taxReturnBoxes } from '../models/taxExport.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { cashFlow, executiveSummary, reportReviewMode } from '../models/reports.js';
+import { cashFlow, executiveSummary, fiscalReport, reportReviewMode } from '../models/reports.js';
 import { round } from '../money.js';
 import { groupBuckets, targetCompanyIds } from '../models/configurableReports.js';
 import { shiftMonth, validDate } from '../models/common.js';
@@ -227,4 +229,28 @@ export function executiveColumns(db, periods, { analyticAccountIds, company_id, 
   return columns(periods, periods.map((p) => executiveSummary(db, {
     ...p, company_id, analyticAccountIds, ...modeFilter,
   })), EXECUTIVE_SECTIONS, EXECUTIVE_TOTALS);
+}
+
+/** Align tax and fiscal report rows by their stable identities across periods. */
+export function detailReportColumns(db, report, periods, { company_id = null, analyticAccountIds, includeUnposted, variant = 'generic' } = {}) {
+  const snapshots = periods.map((period) => {
+    const options = { ...period, company_id };
+    if (report === 'fiscal') {
+      const result = fiscalReport(db, { ...options, analyticAccountIds, includeUnposted });
+      return [...result.rows.flatMap((row) => [
+        { id: `category:${row.category?.id ?? 'none'}`, label: row.category?.name ?? 'Uncategorized', values: [row.debit, row.credit, row.balance], kind: 'section' },
+        ...row.accounts.map((line) => ({ id: `account:${line.account.id}`, label: `${line.account.code} ${line.account.name}`, accountId: line.account.id, values: [line.debit, line.credit, line.balance], kind: 'detail' })),
+      ]), { id: 'total', label: 'Total', values: [result.totals.debit, result.totals.credit, result.totals.balance], kind: 'total' }];
+    }
+    const boxes = taxReturnBoxes(db, { ...options, tax_return_template: variant }).boxes;
+    if (variant !== 'generic') return boxes.map((box) => ({ id: `box:${box.code}`, label: box.label, code: box.code, values: [box.base, box.tax], kind: box.kind }));
+    const taxRows = genericTaxRows(taxesByTax(db, options));
+    const details = taxRows.map((row) => ({ id: `tax:${taxItemKey({ ...row, tax_name: row.name })}`, label: row.name, code: row.code, side: row.side, values: [row.base, row.tax], kind: 'detail' }));
+    const grids = taxesByGrid(db, options).map((row) => ({ id: `grid:${row.id}`, label: row.name, values: [row.base, row.tax], kind: 'grid' }));
+    const totals = boxes.filter((box) => box.kind === 'total').map((box) => ({ id: `total:${box.code}`, label: box.label, code: box.code, values: [box.base, box.tax], kind: 'total' }));
+    return [...details, ...grids, ...totals];
+  });
+  const identities = new Map();
+  for (const rows of snapshots) for (const row of rows) if (!identities.has(row.id)) identities.set(row.id, row);
+  return { periods, rows: [...identities.values()].map((row) => ({ ...row, columns: snapshots.map((rows) => rows.find((item) => item.id === row.id) ?? null) })) };
 }
