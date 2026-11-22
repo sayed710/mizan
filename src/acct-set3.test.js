@@ -546,3 +546,9 @@ test('Findings 4 & 5: CSV imports with Included in Price column resolve boolean-
   assert.equal(tNo.price_include_override, 'tax_excluded');
   assert.equal(tZero.price_include_override, 'tax_excluded');
 });
+
+test('CSV import rejects unknown Included in Price text instead of storing it', () => {
+  const db = seed();
+  const rows = [['Tax Name', 'Amount', 'Type Tax Use', 'Included in Price'], ['CSV Tax Maybe', '14', 'sale', 'maybe']];
+  assert.throws(() => importCsvRows(db, 'account.tax', models['account.tax'].defaults(), rows), /Select a valid price include override/);
+});

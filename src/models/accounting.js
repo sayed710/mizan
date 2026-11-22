@@ -2120,6 +2120,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
     const allBaseTags = new Set();
     const rawSplits = [];
     let totalUntaxedDoc = grossDocAmount;
+    let hasPriceInclude = false;
 
     for (const [side, groupTaxIds] of taxesBySide) {
       const expanded = expandTaxIds(db, groupTaxIds, move.fiscal_position_id);
@@ -2134,6 +2135,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
 
       if (computed.untaxed < grossDocAmount) {
+        hasPriceInclude = true;
         totalUntaxedDoc -= (grossDocAmount - computed.untaxed);
       }
 
@@ -2190,18 +2192,20 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       : (baseSide === 'credit' ? 'sale' : 'purchase');
 
     const roundedUntaxedDoc = roundCurrency(totalUntaxedDoc, docCurrency);
-    const untaxedCompany = isForeign
-      ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId)
-      : roundCurrency(roundedUntaxedDoc, companyCurrencyRec);
+    // The base is rewritten only when a tax is included in price now, or when included tax amounts were added back to it.
+    const rewriteBase = hasPriceInclude || grossDocAmount !== docAmount;
+    const untaxedCompany = rewriteBase
+      ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
+      : baseAmount;
 
     const updatedBase = {
       ...baseLine,
-      debit: baseSide === 'debit' ? untaxedCompany : 0,
-      credit: baseSide === 'credit' ? untaxedCompany : 0,
+      debit: baseSide === 'debit' ? (rewriteBase ? untaxedCompany : baseLine.debit) : 0,
+      credit: baseSide === 'credit' ? (rewriteBase ? untaxedCompany : baseLine.credit) : 0,
       tax_tag_ids: baseTags,
       tax_grid_base: baseTags.length > 0,
       tax_side: baseReportingSide,
-      ...(isForeign ? {
+      ...(isForeign && rewriteBase ? {
         amount_currency: baseSide === 'debit' ? roundedUntaxedDoc : -roundedUntaxedDoc,
       } : {}),
     };

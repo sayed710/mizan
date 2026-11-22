@@ -113,8 +113,8 @@ export function normalizePriceIncludeOverride(overrideVal, legacyVal) {
     if (overrideVal === false || overrideVal === 'tax_excluded') return 'tax_excluded';
     if (typeof overrideVal === 'string') {
       const s = overrideVal.trim().toLowerCase();
-      if (['true', 'yes', '1', 'tax_included'].includes(s)) return 'tax_included';
-      if (['false', 'no', '0', 'tax_excluded'].includes(s)) return 'tax_excluded';
+      if (['true', 'yes', '1', 'tax_included', 'tax included'].includes(s)) return 'tax_included';
+      if (['false', 'no', '0', 'tax_excluded', 'tax excluded'].includes(s)) return 'tax_excluded';
     }
     return overrideVal;
   }
@@ -828,6 +828,8 @@ export const taxModels = {
         label: 'Included in Price',
         tracking: true,
         options: [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']],
+        // Older exports wrote this column as a boolean; option values and labels import as usual.
+        parseImport: (raw) => normalizePriceIncludeOverride(raw),
       },
       price_include: {
         type: 'boolean',

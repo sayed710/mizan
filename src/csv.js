@@ -65,7 +65,9 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
       const field = fields[key];
       if (!key || fieldReadonly(field, vals, next)) return;
       const raw = (row[index] ?? '').trim();
-      if (field.type === 'many2one') {
+      // A field may parse its own import text (e.g. legacy boolean exports of a now-selection field).
+      if (field.parseImport) vals[key] = field.parseImport(raw);
+      else if (field.type === 'many2one') {
         if (!raw) {
           vals[key] = null;
           return;
@@ -79,10 +81,7 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
       else if (['monetary', 'float', 'integer', 'priority'].includes(field.type)) vals[key] = raw === '' ? null : Number(raw);
       else if (field.type === 'boolean') vals[key] = /^(1|true|yes|نعم)$/i.test(raw);
       else if (field.type === 'tags') vals[key] = raw ? raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean) : [];
-      else if (field.type === 'selection') {
-        const match = field.options.find((option) => option[0] === raw || option[1].toLowerCase() === raw.toLowerCase());
-        vals[key] = match ? match[0] : (raw || undefined);
-      }
+      else if (field.type === 'selection') vals[key] = field.options.find((option) => option[0] === raw || option[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
       else vals[key] = raw;
     });
     next = create(next, model, vals).db;
