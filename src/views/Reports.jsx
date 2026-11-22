@@ -399,9 +399,14 @@ const Aged = (kind) => function AgedBody({ db, period, companyId }) {
 };
 
 function FollowUpActions({ db, reminder, companyId }) {
-  const email = read(db, 'res.partner', reminder.partner_id)?.email?.trim();
+  const partner = read(db, 'res.partner', reminder.partner_id);
+  const email = partner?.email?.trim();
   const channel = levelChannel(followUpLevel(db, reminder));
-  const manualChannel = ['sms', 'phone', 'letter'].includes(channel) ? channel : 'email';
+  const isManual = partner?.followup_reminder_type === 'manual';
+  const fallbackChannel = partner?.phone?.trim() ? 'phone' : 'letter';
+  const manualChannel = ['sms', 'phone', 'letter'].includes(channel)
+    ? channel
+    : (isManual && !email ? fallbackChannel : 'email');
   const options = { scope: db, reminder, companyId };
   return <>
     {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}
