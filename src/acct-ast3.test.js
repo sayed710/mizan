@@ -38,8 +38,8 @@ test('activation transfers book value into a linked running asset', async () => 
   let db = seed();
   const accounts = assetAccounts(db);
   const asset = create(db, 'account.asset', { ...accounts, name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'no_depreciation', depreciation_ids: [] });
-  db = activateDepreciation(asset.db, read(asset.db, 'account.asset', asset.id), { date: '2026-01-02', accountId: accounts.account_asset_id, method: 'linear', methodNumber: 5 });
-  const child = db.records['account.asset'].find((a) => a.parent_id === asset.id);
+  db = activateDepreciation(asset.db, read(asset.db, 'account.asset', asset.id), { date: '2026-01-02', newAccountAssetId: accounts.account_asset_id, methodNumber: 5 });
+  const child = db.records['account.asset'].find((a) => a.origin_asset_id === asset.id);
   assert.equal(child.state, 'open');
   assert.equal(child.original_value, 100);
   assert.equal(read(db, 'account.asset', asset.id).state, 'close');
@@ -63,6 +63,33 @@ test('selected posted journal item creates an asset draft with source values', a
   assert.equal(asset.state, 'draft');
 });
 
+test('source-linked drafts reject mismatched values and non-fixed source accounts through replay', async () => {
+  const { canCreateAssetFromJournalItem, createAssetsFromJournalItems, confirmAsset } = await import('./models/assets.js');
+  const { postEntry, journalItems } = await import('./models/ledger.js');
+  const { assetAccounts } = await import('./test-support/asset-accounts.js');
+  const { applyDiff, diffDb } = await import('./sync.js');
+  const { read, write } = await import('./orm.js');
+  const base = seed();
+  const fixed = assetAccounts(base).account_asset_id;
+  const expense = base.records['account.account'].find((a) => a.account_type === 'expense' && (a.company_id ?? 1) === 1).id;
+  const entry = postEntry(base, { journal: 'MISC', date: '2026-01-01', company: 1, lines: [{ account: fixed, debit: 100 }, { account: expense, debit: 30 }, { account: fixed, credit: 130 }] });
+  const items = journalItems(entry.db).filter((line) => line.move_id === entry.id);
+  const fixedLine = items.find((line) => line.debit === 100);
+  const expenseLine = items.find((line) => line.debit === 30);
+  assert.equal(canCreateAssetFromJournalItem(entry.db, expenseLine), false);
+  assert.throws(() => createAssetsFromJournalItems(entry.db, [{ move_id: entry.id, line_identity: expenseLine.line_identity }]), /fixed asset account/i);
+  let created = createAssetsFromJournalItems(entry.db, [{ move_id: entry.id, line_identity: fixedLine.line_identity }]);
+  const asset = created.records['account.asset'].find((record) => record.source_move_id === entry.id);
+  created = write(created, 'account.asset', asset.id, { method: 'no_depreciation' });
+  for (const vals of [{ original_value: 101 }, { account_asset_id: expense }, { acquisition_date: '2026-01-02' }]) {
+    assert.throws(() => write(created, 'account.asset', asset.id, vals), /source journal item/i);
+    const forged = structuredClone(created);
+    Object.assign(forged.records['account.asset'].find((record) => record.id === asset.id), vals);
+    assert.throws(() => applyDiff(created, diffDb(created, forged), { isAdmin: true }), /source journal item/i);
+    assert.throws(() => confirmAsset(forged, read(forged, 'account.asset', asset.id)), /source journal item/i);
+  }
+});
+
 test('activation and its source links survive server replay and resist forged transfers', async () => {
   const { activateDepreciation } = await import('./models/assets.js');
   const { assetAccounts } = await import('./test-support/asset-accounts.js');
@@ -70,7 +97,7 @@ test('activation and its source links survive server replay and resist forged tr
   const { applyDiff, diffDb } = await import('./sync.js');
   const base = seed();
   const a = create(base, 'account.asset', { ...assetAccounts(base), name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'no_depreciation', depreciation_ids: [] });
-  const next = activateDepreciation(a.db, read(a.db, 'account.asset', a.id), { date: '2026-01-02', accountId: assetAccounts(base).account_asset_id, method: 'linear', methodNumber: 5 });
+  const next = activateDepreciation(a.db, read(a.db, 'account.asset', a.id), { date: '2026-01-02', newAccountAssetId: assetAccounts(base).account_asset_id, methodNumber: 5 });
   const applied = applyDiff(a.db, diffDb(a.db, next), { isAdmin: true });
   assert.equal(read(applied, 'account.asset', a.id).state, 'close');
   const forged = structuredClone(next);
@@ -211,22 +238,22 @@ test('Finding 2: activateDepreciation preserves salvage value on child and valid
     already_depreciated: 300,
     acquisition_date: '2026-01-01',
     state: 'open',
-    method: 'no_depreciation',
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
     depreciation_ids: [],
   });
   const next = activateDepreciation(parent.db, read(parent.db, 'account.asset', parent.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    method: 'linear',
-    methodNumber: 5,
+    newAccountAssetId: accounts.account_asset_id,
   });
-  const child = next.records['account.asset'].find((a) => a.parent_id === parent.id);
+  const child = next.records['account.asset'].find((a) => a.origin_asset_id === parent.id);
   assert.equal(child.original_value, 700);
   assert.equal(child.salvage_value, 200);
   assert.equal(child.depreciation_ids.reduce((s, l) => s + l.amount, 0), 500);
   assert.equal(child.depreciation_ids.at(-1).remaining, 200);
   const synced = applyDiff(parent.db, diffDb(parent.db, next), { isAdmin: true });
-  assert.equal(synced.records['account.asset'].find((a) => a.parent_id === parent.id).salvage_value, 200);
+  assert.equal(synced.records['account.asset'].find((a) => a.origin_asset_id === parent.id).salvage_value, 200);
 
   // When already depreciated right down to salvage value (book === salvage), activation must reject
   const depleted = create(base, 'account.asset', {
@@ -242,9 +269,7 @@ test('Finding 2: activateDepreciation preserves salvage value on child and valid
   });
   assert.throws(() => activateDepreciation(depleted.db, read(depleted.db, 'account.asset', depleted.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    method: 'linear',
-    methodNumber: 2,
+    newAccountAssetId: accounts.account_asset_id,
   }), /not depreciable value must be lower/i);
 });
 
@@ -271,9 +296,7 @@ test('Finding 3: activateDepreciation rejects activation date earlier than exist
   });
   assert.throws(() => activateDepreciation(modified, read(modified, 'account.asset', a.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    method: 'linear',
-    methodNumber: 4,
+    newAccountAssetId: accounts.account_asset_id,
   }), /precede an existing revaluation/i);
 });
 
@@ -428,11 +451,9 @@ test('Finding 6: depreciationReport treats activation as an internal transfer wi
   db = postDepreciation(db, read(db, 'account.asset', parent.id), '2026-01-31');
   db = activateDepreciation(db, read(db, 'account.asset', parent.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    method: 'linear',
-    methodNumber: 5,
+    newAccountAssetId: accounts.account_asset_id,
   });
-  const child = db.records['account.asset'].find((a) => a.parent_id === parent.id);
+  const child = db.records['account.asset'].find((a) => a.origin_asset_id === parent.id);
   db = postDepreciation(db, child, '2026-12-31');
   const report = depreciationReport(db, { from: '2026-01-01', to: '2026-12-31' }, 1);
   const pRow = report.rows.find((r) => r.a.id === parent.id);
@@ -442,13 +463,13 @@ test('Finding 6: depreciationReport treats activation as an internal transfer wi
   assert.equal(pRow.inPeriod, 50);
   assert.equal(pRow.book, 0);
   assert.equal(cRow.original, 50);
-  assert.equal(cRow.inPeriod, 10);
-  assert.equal(cRow.accumulated, 10);
-  assert.equal(cRow.book, 40);
+  assert.equal(cRow.inPeriod, 50);
+  assert.equal(cRow.accumulated, 50);
+  assert.equal(cRow.book, 0);
   assert.equal(report.totals.original, 50);
-  assert.equal(report.totals.inPeriod, 60);
-  assert.equal(report.totals.accumulated, 10);
-  assert.equal(report.totals.book, 40);
+  assert.equal(report.totals.inPeriod, 100);
+  assert.equal(report.totals.accumulated, 50);
+  assert.equal(report.totals.book, 0);
 });
 
 test('Finding 7: activating no_depreciation asset with prior depreciation requires source depreciation account', async () => {
@@ -470,11 +491,7 @@ test('Finding 7: activating no_depreciation asset with prior depreciation requir
   });
   assert.throws(() => activateDepreciation(missingDepAcc.db, read(missingDepAcc.db, 'account.asset', missingDepAcc.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    depreciationAccountId: accounts.account_depreciation_id,
-    expenseAccountId: accounts.account_depreciation_expense_id,
-    method: 'linear',
-    methodNumber: 4,
+    newAccountAssetId: accounts.account_asset_id,
   }), /Configure the depreciation account on asset Imported CIP/);
 
   const withDepAcc = create(base, 'account.asset', {
@@ -490,11 +507,9 @@ test('Finding 7: activating no_depreciation asset with prior depreciation requir
   });
   const activated = activateDepreciation(withDepAcc.db, read(withDepAcc.db, 'account.asset', withDepAcc.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    method: 'linear',
-    methodNumber: 4,
+    newAccountAssetId: accounts.account_asset_id,
   });
-  assert.equal(activated.records['account.asset'].find((a) => a.parent_id === withDepAcc.id).original_value, 80);
+  assert.equal(activated.records['account.asset'].find((a) => a.origin_asset_id === withDepAcc.id).original_value, 80);
 });
 
 test('Finding 8: activateDepreciation and wizard domain reject non-fixed-asset destination accounts', async () => {
@@ -510,27 +525,22 @@ test('Finding 8: activateDepreciation and wizard domain reject non-fixed-asset d
   const a = create(base, 'account.asset', { ...accounts, name: 'CIP', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'no_depreciation', depreciation_ids: [] });
   assert.throws(() => activateDepreciation(a.db, read(a.db, 'account.asset', a.id), {
     date: '2026-02-01',
-    accountId: expenseAcc.id,
-    method: 'linear',
-    methodNumber: 5,
+    newAccountAssetId: expenseAcc.id,
   }), /Select a valid fixed asset account/);
 
   const wizard = assetModels['account.asset'].form.buttons.find((b) => b.label === 'Modify Depreciation').wizard(a.db, read(a.db, 'account.asset', a.id));
-  const field = wizard.fields.find((f) => f.name === 'asset_account_id');
+  const field = wizard.fields.find((f) => f.name === 'new_account_asset_id');
   assert.equal(field.domain(expenseAcc), false);
   assert.equal(field.domain(fixedAcc), true);
 
   // Server guard rejects forged non-asset child
   const validNext = activateDepreciation(a.db, read(a.db, 'account.asset', a.id), {
     date: '2026-02-01',
-    accountId: fixedAcc.id,
-    method: 'linear',
-    methodNumber: 5,
+    newAccountAssetId: fixedAcc.id,
   });
   const forged = structuredClone(validNext);
-  forged.records['account.asset'].find((r) => r.parent_id === a.id).account_asset_id = expenseAcc.id;
-  forged.records['account.move'].find((m) => m.id === read(validNext, 'account.asset', a.id).activation_opening_move_id).line_ids[1].account_id = expenseAcc.id;
-  assert.throws(() => applyDiff(a.db, diffDb(a.db, forged), { isAdmin: true }), /activation parent/i);
+  forged.records['account.asset'].find((r) => r.origin_asset_id === a.id).account_asset_id = expenseAcc.id;
+  assert.throws(() => applyDiff(a.db, diffDb(a.db, forged), { isAdmin: true }), /invalid asset transfer/i);
 });
 
 test('Finding 9: activation parent cannot acquire a second non-cancelled child', async () => {
@@ -543,19 +553,17 @@ test('Finding 9: activation parent cannot acquire a second non-cancelled child',
   const parent = create(base, 'account.asset', { ...accounts, name: 'Single Parent', original_value: 100, acquisition_date: '2026-01-01', state: 'open', method: 'no_depreciation', depreciation_ids: [] });
   const activated = activateDepreciation(parent.db, read(parent.db, 'account.asset', parent.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    method: 'linear',
-    methodNumber: 5,
+    newAccountAssetId: accounts.account_asset_id,
   });
   assert.throws(() => create(activated, 'account.asset', {
     ...accounts,
     name: 'Second Child',
-    parent_id: parent.id,
+    origin_asset_id: parent.id,
     original_value: 100,
     acquisition_date: '2026-02-01',
   }), /already has a child asset/i);
   const second = structuredClone(activated);
-  const child1 = second.records['account.asset'].find((a) => a.parent_id === parent.id);
+  const child1 = second.records['account.asset'].find((a) => a.origin_asset_id === parent.id);
   second.records['account.asset'].push({ ...child1, id: child1.id + 1, name: 'Forged Second Child' });
   second.seq['account.asset'] = child1.id + 1;
   assert.throws(() => applyDiff(activated, diffDb(activated, second), { isAdmin: true }), /already has a child asset/i);
@@ -582,9 +590,7 @@ test('Finding 11: activateDepreciation preserves earlier cancelled_depreciation_
   });
   const next = activateDepreciation(a.db, read(a.db, 'account.asset', a.id), {
     date: '2026-02-01',
-    accountId: accounts.account_asset_id,
-    method: 'linear',
-    methodNumber: 4,
+    newAccountAssetId: accounts.account_asset_id,
   });
   const closed = read(next, 'account.asset', a.id);
   assert.equal(closed.cancelled_depreciation_ids.length, 3);
