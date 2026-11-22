@@ -3605,6 +3605,9 @@ const ar = {
   'Non Trade requires a receivable or payable account': 'يتطلب الحساب غير التجاري حساباً للذمم المدينة أو الدائنة',
   'Purchase order line must match the vendor, company, and product': 'يجب أن يطابق بند أمر الشراء المورد والشركة والمنتج',
   'Depreciation reversal must match the excess from a vendor refund': 'يجب أن يطابق عكس الإهلاك الزيادة الناتجة عن مرتجع المورد',
+  'Customer Invoices': 'فواتير العملاء',
+  'Customer Credit Notes': 'إشعارات دائنة للعملاء',
+  'Vendor Credit Notes': 'إشعارات دائنة للموردين',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
