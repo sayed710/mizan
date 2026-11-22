@@ -100,6 +100,7 @@ import { glReconcileModels } from './glReconcile.js';
 import { paymentMethodModels } from './paymentmethod.js';
 import { lockExceptionModels } from './lockexception.js';
 import { countryGroupModels } from './countrygroup.js';
+import { countryModels } from './country.js';
 
 // Generic entry menus search like Journal Entries, not like invoices.
 const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys', 'groupByLabels'].filter((k) => k in journalEntriesView).map((k) => [k, journalEntriesView[k]]));
@@ -108,6 +109,7 @@ export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
 export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
+MODEL_MODULES.countryModels = countryModels;
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,

@@ -324,14 +324,16 @@ test('fiscal positions opens in list view with Odoo 20 columns, search, Archived
   // Domestic predicate uses record country vs company country, never inferring from record name
   assert.equal(isDomesticRecord(search(db, 'account.fiscal.position').find((f) => f.name === 'Domestic'), db), false, 'unset company country does not match');
   db = write(db, 'res.company', 1, { country: 'Egypt' });
-  const fpForeign = create(db, 'account.fiscal.position', { name: 'GCC', country: 'UAE', active: true });
+  const egypt = search(db, 'res.country').find((c) => c.code === 'EG');
+  const uae = search(db, 'res.country').find((c) => c.code === 'AE');
+  const fpForeign = create(db, 'account.fiscal.position', { name: 'GCC', country_id: uae.id, active: true });
   db = fpForeign.db;
-  const fpArchived = create(db, 'account.fiscal.position', { name: 'Old Regime', country: 'Egypt', active: false });
+  const fpArchived = create(db, 'account.fiscal.position', { name: 'Old Regime', country_id: egypt.id, active: false });
   db = fpArchived.db;
 
-  const branch = createCompany(db, { name: 'UAE Branch', country: 'UAE' });
+  const branch = createCompany(db, { name: 'UAE Branch', country: 'United Arab Emirates' });
   db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
-  const fpBranchDomestic = create(db, 'account.fiscal.position', { name: 'UAE Domestic', country: 'UAE', company_id: branch.id });
+  const fpBranchDomestic = create(db, 'account.fiscal.position', { name: 'UAE Domestic', country_id: uae.id, company_id: branch.id });
   db = fpBranchDomestic.db;
 
   // Domestic predicate checks record's company_id (fallback current company)

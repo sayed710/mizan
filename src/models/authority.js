@@ -223,6 +223,8 @@ function employeeRule(db, before, r, ctx) {
 
 /** Server-side authorization rules per model: (db, stored, after, { isAdmin, login, name }) => error or null. */
 export const authorityRules = {
+  'res.country': (_db, _before, _after, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
+  'res.country.state': (_db, _before, _after, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
   'hr.leave': leaveAuthorization,
   'hr.leave.allocation': leaveRule,
   'hr.expense.sheet': sheetRule,
@@ -234,6 +236,8 @@ export const authorityRules = {
 
 /** Rules for deleting a stored record: (db, stored, { isAdmin, login, name }) => error or null. */
 export const authorityDeleteRules = {
+  'res.country': (_db, _stored, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
+  'res.country.state': (_db, _stored, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
   'hr.leave': leaveDeleteRule,
   'hr.leave.allocation': leaveDeleteRule,
   'approval.request': (_db, stored, ctx) => deciding(ctx) && requestStatus(stored) !== 'new' ? 'Submitted or decided approval requests cannot be deleted' : null,

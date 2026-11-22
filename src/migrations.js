@@ -1,4 +1,5 @@
 import { purchaseLineId } from './models/purchase-links.js';
+import { countryIdFor, ensureCountries, stateIdFor } from './models/country.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -1999,6 +2000,23 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+
+export function migrateCountries(db) {
+  const next = ensureCountries(db);
+  const records = { ...next.records };
+  for (const model of ['account.tax.group', 'account.tax', 'account.account.tag', 'account.fiscal.position']) {
+    if (!Array.isArray(records[model])) continue;
+    records[model] = records[model].map((record) => {
+      const { country, ...rest } = record;
+      const countryId = record.country_id ?? countryIdFor(next, country);
+      const result = { ...rest, country_id: countryId };
+      if (model === 'account.fiscal.position') result.state_ids = (record.state_ids ?? []).map((s) => stateIdFor(next, s, countryId)).filter((s) => s != null);
+      return result;
+    });
+  }
+  return { ...next, records };
+}
+MIGRATIONS.push({ version: 67, name: 'country-records', up: migrateCountries });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
