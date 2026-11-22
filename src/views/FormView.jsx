@@ -585,6 +585,14 @@ export function FormView({ leaf, id, base, params }) {
       commit(res.db);
       noteUnsent(finalId);
       if (res.message) alert(res.message);
+      if (res.download) {
+        const url = URL.createObjectURL(new Blob([res.download.content], { type: 'application/xml' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = res.download.name;
+        link.click();
+        URL.revokeObjectURL(url);
+      }
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
