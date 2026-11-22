@@ -7,7 +7,7 @@ import { foreignBalanceReport, revalueForeignBalances } from '../models/closing.
 import { commit, getDb, useDb } from '../store.js';
 import { display, money } from '../ui.jsx';
 import { t } from '../i18n.js';
-import { ReportPrintView } from './ReportPrintView.jsx';
+import { ReportPrintView } from './FinancialReportPrint.jsx';
 
 const RATE_FIELD = { type: 'float', digits: [6, 6] };
 
