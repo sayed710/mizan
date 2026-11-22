@@ -2117,7 +2117,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
     if (channel === 'email' && partner.email?.trim() && deliver) {
-      const message = { to: partner.email.trim(), subject: levelName, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
+      const message = followUpEmail(nextDb, f, level, partner);
       // Validate the bookkeeping before attempting an irreversible delivery.
       const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
       /** Interpret mail-transport outcome strictly per the single delivery contract. */
@@ -2182,6 +2182,30 @@ const currencyOf = (db, move) => {
 /** Reminder text for one customer's overdue invoices, each amount with its currency. */
 export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${formatCurrency(amount, currency, '')} ${currency.name}`).join(', ');
 export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${formatCurrency(m.amount_residual, documentCurrency(db, m), '')} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
+
+/** Current open invoices and per-currency balances for a customer letter. */
+export function followUpLetter(db, partnerId, companyId, at = today()) {
+  const reminder = followUps(db, at, { companyId, ignoreNextActionDate: true }).flatMap(followUpCompanies).find((f) => f.partner_id === partnerId && f.company_id === companyId);
+  if (!reminder) throw new Error('This customer has no overdue invoices');
+  const level = followUpLevel(db, reminder, at);
+  if (!level) throw new Error('No follow-up level applies to this customer');
+  const invoices = search(db, 'account.move').filter((m) => m.partner_id === partnerId && (m.company_id ?? 1) === companyId && m.state === 'posted' && m.move_type === 'out_invoice' && m.active !== false && Number(m.amount_residual) > 0 && (!m.invoice_date || m.invoice_date <= at)).map((m) => {
+    const currency = documentCurrency(db, m);
+    const dues = openInstallments(db, m, 'receivable', at);
+    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const late = dues.filter((d) => d.date && d.date < at).reduce((sum, d) => sum + d.amount, 0);
+    const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), currency);
+    return { ...m, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount };
+  });
+  const due = followUpSummary(invoices).totals;
+  const overdue = followUpSummary(invoices.filter((m) => m.overdue).map((m) => ({ ...m, amount_residual: m.overdueAmount }))).totals;
+  return { reminder, level, invoices, due, overdue };
+}
+
+/** The automatic and manual email share the same subject and introductory text. */
+export function followUpEmail(db, reminder, level, partner) {
+  return { to: partner.email.trim(), subject: followUpLevelName(level), text: `${level.message ?? ''}\n${followUpText(db, reminder)}`.trim() };
+}
 
 const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
   const allowed = new Set(search(scope, 'account.move').map((move) => move.id));

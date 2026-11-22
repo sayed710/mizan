@@ -3567,6 +3567,15 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Send Follow-up': 'إرسال متابعة',
+  'Follow-up Letter': 'خطاب متابعة',
+  'Select Email or Print.': 'اختر البريد الإلكتروني أو الطباعة.',
+  'The print window was blocked.': 'تم حظر نافذة الطباعة.',
+  'Email requires the server.': 'يتطلب إرسال البريد الإلكتروني الاتصال بالخادم.',
+  'Total Due': 'إجمالي المستحق',
+  'Total Overdue': 'إجمالي المتأخر',
+  'Action failed': 'فشل الإجراء',
+  'No follow-up level applies to this customer': 'لا ينطبق أي مستوى متابعة على هذا العميل',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

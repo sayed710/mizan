@@ -5,7 +5,9 @@ import { ConflictError, applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
 import { addressLines, documentCompany, documentTaxBreakdown } from '../src/models/company.js';
-import { subtotal } from '../src/models/common.js';
+import { subtotal, today } from '../src/models/common.js';
+import { followUpEmail, followUpLetter, logManualFollowUp } from '../src/models/finance.js';
+import { formatCurrency } from '../src/money.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
@@ -132,6 +134,25 @@ export async function sendDocument(cfg, db, user, { model, id }) {
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
   return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
+}
+
+/** Send a follow-up and persist its existing manual reminder transition after delivery. */
+export async function sendFollowUp(cfg, db, user, { partnerId, companyId, at = today() }, deliver = sendMail, writeOptions = { author: user.name, isAdmin: user.isAdmin }) {
+  const partner = read(db, 'res.partner', Number(partnerId));
+  if (!partner?.email?.trim()) throw new Error('A customer email address is required to send an email reminder');
+  const company = Number(companyId);
+  const letter = followUpLetter(db, partner.id, company, at);
+  const next = logManualFollowUp(db, partner.id, at, { companyId: company, channel: 'email' });
+  const amount = (n, currency) => `${formatCurrency(n, currency, '')} ${currency.name}`;
+  const rows = letter.invoices.map((m) => [m.name, m.invoice_date ?? '', m.invoice_date_due ?? '', amount(m.amount_residual, m.followup_currency), m.overdue ? 'Overdue' : '']);
+  const totals = (list) => list.map(({ amount: value, currency }) => amount(value, currency)).join(', ') || '0';
+  const headers = ['Invoice', 'Invoice Date', 'Due Date', 'Residual', 'Overdue'];
+  const base = followUpEmail(db, letter.reminder, letter.level, partner);
+  const text = `${base.text}\n\n${headers.join(' | ')}\n${rows.map((row) => row.join(' | ')).join('\n')}\nTotal Due: ${totals(letter.due)}\nTotal Overdue: ${totals(letter.overdue)}`;
+  const html = `<p style="white-space:pre-line">${escapeHtml(base.text)}</p><table border="1"><thead><tr>${headers.map((v) => `<th>${escapeHtml(v)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`).join('')}</tbody></table><p>Total Due: ${escapeHtml(totals(letter.due))}<br>Total Overdue: ${escapeHtml(totals(letter.overdue))}</p>`;
+  const validated = applyDiff(db, diffDb(db, next), writeOptions);
+  await deliver(cfg, { ...base, text, html });
+  return { status: 200, body: { ok: true }, db: validated };
 }
 
 /**

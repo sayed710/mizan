@@ -221,7 +221,7 @@ export const crmModels = {
         { label: 'Sales', model: 'sale.order', field: 'partner_id', target: 'sales/quotations' },
         { label: 'Invoiced', model: 'account.move', field: 'partner_id', target: 'accounting/invoices', sum: 'amount_total' },
       ],
-      buttons: [{ label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
+      buttons: [{ label: 'Send Follow-up', run: (db, r) => ({ db, go: `#/followup/send/${r.id}?company=${db.settings?.current_company_id ?? 1}` }) }, { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
       groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'zip', 'country', 'pricelist_id', 'credit_limit', 'tag_ids']],
       tabs: [
         {
