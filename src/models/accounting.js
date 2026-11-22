@@ -3826,7 +3826,7 @@ export const accountingModels = {
           run: debitNote,
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
-        { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+        { label: 'Print', when: (r) => ['draft', 'posted', 'cancel'].includes(r.state) && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
         {
           label: 'Reset to Draft',
           when: (r, db) => canResetMove(r, db),
