@@ -247,8 +247,8 @@ const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'cu
 
 const bankStatementMoveIds = new WeakMap();
 const bankRewriteToken = Symbol('bank reconciliation');
-export function writeBankStatementMove(db, id, lineIds) {
-  return write(db, 'account.move', id, { line_ids: lineIds }, { bankRewriteToken });
+export function writeBankStatementMove(db, id, lineIds, partnerId = undefined) {
+  return write(db, 'account.move', id, { line_ids: lineIds, ...(partnerId !== undefined ? { partner_id: partnerId } : {}) }, { bankRewriteToken });
 }
 function isBankStatementMove(db, moveId) {
   const lines = db.records?.['account.bank.statement.line'];
@@ -262,7 +262,12 @@ function isBankStatementMove(db, moveId) {
 }
 
 function bankStatementMoveRewriteError(db, before, after, ctx) {
-  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids'))) {
+  const previousStatement = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const statement = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const partnerChanged = previousStatement && statement && (previousStatement.partner_id ?? null) !== (statement.partner_id ?? null)
+    && (after.partner_id ?? null) === (statement.partner_id ?? null)
+    && (after.line_ids ?? []).every((line) => (line.partner_id ?? null) === (statement.partner_id ?? null));
+  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
     return 'Posted entries cannot be edited; reset them to draft first';
   }
   if (changedFields(before, after, ['line_ids'])) {
@@ -271,7 +276,8 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
       const previous = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
       const next = previous && (db.records['account.bank.statement.line'] ?? []).find((line) => line.id === previous.id);
       if (!previous || !next || next.bank_move_id !== before.id
-        || (JSON.stringify(previous.allocations ?? []) === JSON.stringify(next.allocations ?? []) && previous.state === next.state)) {
+        || (JSON.stringify(previous.allocations ?? []) === JSON.stringify(next.allocations ?? []) && previous.state === next.state
+          && !(partnerChanged && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids)))) {
         return 'Posted entries cannot be edited; reset them to draft first';
       }
     }

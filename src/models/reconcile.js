@@ -3,7 +3,7 @@ import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { bookedBankSuspenseAccountId, ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { writeBankStatementMove } from './finance.js';
-import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { bookBankMovement, candidates, reconcileWith, setStatementLinePartner, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
@@ -505,7 +505,7 @@ export function applyRule(db, rule, line) {
   const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_id);
   if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
     if (new Set(mappings.map((l) => l.partner_id)).size !== 1 || !read(db, 'res.partner', mappings[0].partner_id)) throw new Error('Select one valid partner for the mapping');
-    return write(db, 'account.bank.statement.line', line.id, { partner_id: mappings[0].partner_id });
+    return setStatementLinePartner(db, line, mappings[0].partner_id);
   }
   if (isMatchingRule(rule)) {
     const companyCurrency = companyCurrencyRecord(db, line.company_id);
@@ -584,7 +584,7 @@ export function mapStatementPartner(db, line) {
       if (mapping.narration_regex && !regexMatches(mapping.narration_regex, line.narration)) continue;
       const partner = read(db, 'res.partner', mapping.partner_id);
       if (partner && partner.active !== false && (!partner.company_id || partner.company_id === lineCompany)) {
-        return write(db, 'account.bank.statement.line', line.id, { partner_id: mapping.partner_id });
+        return setStatementLinePartner(db, line, mapping.partner_id);
       }
     }
   }

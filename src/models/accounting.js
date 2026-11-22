@@ -3490,6 +3490,7 @@ export const accountingModels = {
     },
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
     onchange: (r, key, db, context = {}) => {
+      if (key === 'partner_id' && r.move_type === 'entry') return {};
       if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
         const partnerChange = key === 'partner_id';
         const partner = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;

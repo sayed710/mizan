@@ -848,7 +848,10 @@ export function setStatementLinePartner(db, line, partnerId) {
       throw new Error('Partner belongs to another company');
     }
   }
-  return write(db, 'account.bank.statement.line', lineId, { partner_id: pid });
+  let current = write(db, 'account.bank.statement.line', lineId, { partner_id: pid });
+  const move = target.bank_move_id && read(current, 'account.move', target.bank_move_id);
+  if (move) current = writeBankStatementMove(current, move.id, (move.line_ids ?? []).map((item) => ({ ...item, partner_id: pid })), pid);
+  return current;
 }
 
 /** Validate the booked bank entry and payment allocations against the statement line amount and journal. */
