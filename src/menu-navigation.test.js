@@ -256,12 +256,12 @@ test('Review sales menus show individual quantity discrepancies only for selecte
   await initStore();
   const company = createCompany(seed(), { name: 'Hidden company' });
   let db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1] });
-  const first = create(db, 'sale.order', { name: 'VISIBLE-ORDER', partner_id: 1, company_id: 1, order_line: [
+  const first = create(db, 'sale.order', { name: 'VISIBLE-ORDER', state: 'sale', partner_id: 1, company_id: 1, order_line: [
     { name: 'Delivered line', qty: 8, qty_delivered: 5, qty_invoiced: 2, price_unit: 1 },
     { name: 'Invoiced line', qty: 8, qty_delivered: 1, qty_invoiced: 4, price_unit: 1 },
     { name: 'Equal line', qty: 2, qty_delivered: 2, qty_invoiced: 2, price_unit: 1 },
   ] });
-  const hidden = create(first.db, 'sale.order', { name: 'HIDDEN-ORDER', partner_id: 1, company_id: company.id, order_line: [{ name: 'Hidden line', qty: 3, qty_delivered: 3, qty_invoiced: 0, price_unit: 1 }] });
+  const hidden = create(first.db, 'sale.order', { name: 'HIDDEN-ORDER', state: 'sale', partner_id: 1, company_id: company.id, order_line: [{ name: 'Hidden line', qty: 3, qty_delivered: 3, qty_invoiced: 0, price_unit: 1 }] });
   await commit(hidden.db);
   location.hash = '#/accounting/invoices-to-be-issued';
   const { App } = await import('./App.jsx');
