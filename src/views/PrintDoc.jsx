@@ -39,7 +39,7 @@ function PaymentQr({ db, company, settings, move }) {
 
 // Document layouts per model: which fields form the header block and which one2many holds the lines.
 const LAYOUTS = {
-  'account.move': { title: (r) => t(models['account.move'].form.subtitle(r)), lines: 'invoice_line_ids', info: ['invoice_date', 'invoice_date_due', 'ref', 'invoice_origin', 'payment_reference', 'incoterm_id', 'incoterm_location'], totals: ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] },
+  'account.move': { title: (r) => t(({ draft: { out_invoice: 'Draft Invoice', out_refund: 'Draft Credit Note', in_invoice: 'Draft Bill', in_refund: 'Draft Refund' }, cancel: { out_invoice: 'Cancelled Invoice', out_refund: 'Cancelled Credit Note', in_invoice: 'Cancelled Bill', in_refund: 'Cancelled Refund' } })[r.state]?.[r.move_type] ?? models['account.move'].form.subtitle(r)), lines: 'invoice_line_ids', info: ['invoice_date', 'invoice_date_due', 'ref', 'invoice_origin', 'payment_reference', 'incoterm_id', 'incoterm_location'], totals: (r) => (r.state === 'posted' ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_untaxed', 'amount_tax', 'amount_total']) },
   'sale.order': { title: (r) => t(r.state === 'sale' ? 'Sales Order' : 'Quotation'), lines: 'order_line', info: ['date_order', 'validity_date', 'user'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'purchase.order': { title: (r) => t(r.state === 'purchase' ? 'Purchase Order' : 'Request for Quotation'), lines: 'order_line', info: ['date_order', 'date_planned'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
@@ -350,7 +350,7 @@ export function PrintDoc({ model, id }) {
             </address>
           )}
         </header>
-        <h1>{layout.title(rec)} {rec.name && rec.name !== '/' ? rec.name : ''}</h1>
+        <h1>{layout.title(rec)} {rec.name && rec.name !== '/' && !(model === 'account.move' && rec.state === 'draft' && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(rec.move_type)) ? rec.name : ''}</h1>
         <dl className="paper-info">
           {layout.info.filter((f) => rec[f]).map((f) => (
             <div key={f}><dt>{t(def.fields[f].label)}</dt><dd>{def.fields[f].type === 'date' ? formatDate(rec[f]) : display(db, def.fields[f], rec[f], rec)}</dd></div>
@@ -383,9 +383,10 @@ export function PrintDoc({ model, id }) {
         )}
         <dl className="totals paper-totals">
           {(() => {
+            const totalsFields = typeof layout.totals === 'function' ? layout.totals(rec) : layout.totals;
             const taxTotals = model === 'account.move' ? invoiceTaxTotals(db, rec) : null;
             if (!taxTotals) {
-              return layout.totals.map((f) => (
+              return totalsFields.map((f) => (
                 <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
               ));
             }
@@ -402,7 +403,7 @@ export function PrintDoc({ model, id }) {
                 ))}
                 {!hasTaxGroups && <div><dt>{t(def.fields.amount_tax.label)}</dt><dd>{display(db, def.fields.amount_tax, rec.amount_tax, rec)}</dd></div>}
                 {taxTotals.rounding_amount !== 0 && <div><dt>{t('Cash Rounding')}</dt><dd>{display(db, { type: 'monetary' }, taxTotals.rounding_amount, rec)}</dd></div>}
-                {layout.totals.filter((f) => !['amount_untaxed', 'amount_tax'].includes(f)).map((f) => (
+                {totalsFields.filter((f) => !['amount_untaxed', 'amount_tax'].includes(f)).map((f) => (
                   <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
                 ))}
               </>
@@ -416,8 +417,8 @@ export function PrintDoc({ model, id }) {
           if (!term?.display_on_invoice) return note;
           const currency = documentCurrency(db, rec);
           const rows = rec.state === 'posted'
-            ? invoiceInstallments(db, rec, term)
-            : !termScheduleError(term, rec.amount_total, currency) && !dueTermLinesError(term)
+            ? (invoiceInstallments(db, rec, term) ?? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency))
+            : rec.state === 'draft' && !termScheduleError(term, rec.amount_total, currency) && !dueTermLinesError(term)
               ? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency)
               : null;
           if (!rows?.length) return note;
