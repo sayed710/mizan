@@ -44,8 +44,9 @@ export function creditWarning(db, partnerId, amount, document = {}) {
   const company = read(db, 'res.company', companyId);
   const commercialId = commercialPartnerId(db, partnerId);
   const commercial = (commercialId ? read(db, 'res.partner', commercialId) : null) ?? p;
-  const limit = commercial.use_partner_credit_limit
-    ? (Number(commercial.credit_limit) || 0)
+  const target = commercial.use_partner_credit_limit ? commercial : (p.use_partner_credit_limit ? p : commercial);
+  const limit = target.use_partner_credit_limit
+    ? (Number(target.credit_limit) || 0)
     : (Number(company.account_default_credit_limit) || 0);
   if (!(limit > 0)) return '';
   const compCurrency = companyCurrencyRecord(db, companyId);
@@ -696,7 +697,7 @@ export function paymentInvariant(db, after) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const currencyId = invoice ? invoice.currency_id : after.currency_id;
+  const currencyId = after.currency_id ?? invoice?.currency_id;
   const expected = currencyId
     ? toCompany(db, currencyId, after.amount, after.date, invoice?.company_id ?? after.company_id)
     : companyRound(Number(after.amount));

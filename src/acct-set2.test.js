@@ -391,3 +391,140 @@ test('i18n: new Sales Credit Limit strings have Modern Standard Arabic translati
     assert.ok(i18nSrc.includes(`'${key}'`), `i18n includes "${key}"`);
   }
 });
+
+test('regression Qodo Finding 1: child legacy credit limits consolidate onto commercial parents during migration', () => {
+  const base = seed();
+  const legacyDb = {
+    ...base,
+    schema_version: 63,
+    records: {
+      ...base.records,
+      'res.partner': [
+        // Commercial parent 100 with no limit, child 101 with legacy limit 400
+        { id: 100, name: 'Parent Enterprise', is_company: true },
+        { id: 101, name: 'Child Retail Branch', parent_id: 100, credit_limit: 400 },
+        // Commercial parent 200 with existing limit 1200 and child 201 with lower limit 500
+        { id: 200, name: 'Parent Established', is_company: true, credit_limit: 1200 },
+        { id: 201, name: 'Child Branch A', parent_id: 200, credit_limit: 500 },
+        // Commercial parent 300 with no limit and two children with different limits 300 and 700
+        { id: 300, name: 'Parent Multi-Branch', is_company: true },
+        { id: 301, name: 'Child Multi A', parent_id: 300, credit_limit: 300 },
+        { id: 302, name: 'Child Multi B', parent_id: 300, credit_limit: 700 },
+      ],
+      'account.move': [
+        {
+          id: 50,
+          move_type: 'out_invoice',
+          state: 'draft',
+          partner_id: 101,
+          company_id: 1,
+          currency_id: 1,
+          invoice_date: today(),
+          invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 500, tax: 0 }],
+        },
+      ],
+    },
+  };
+
+  const migrated = migrate(legacyDb);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(read(migrated, 'res.company', 1).account_use_credit_limit, true);
+
+  // Parent 100 consolidates child's 400 limit and enables override flag
+  const p100 = read(migrated, 'res.partner', 100);
+  assert.equal(p100.use_partner_credit_limit, true);
+  assert.equal(p100.credit_limit, 400);
+
+  // Child 101 also has override flag enabled and synchronized limit
+  const p101 = read(migrated, 'res.partner', 101);
+  assert.equal(p101.use_partner_credit_limit, true);
+  assert.equal(p101.credit_limit, 400);
+
+  // Draft invoice on child triggers warning naming commercial parent
+  const inv = read(migrated, 'account.move', 50);
+  const warn = models['account.move'].form.warning(inv, migrated);
+  assert.equal(
+    warn,
+    'Parent Enterprise has reached its credit limit of: $400.00. Total amount due (including this document): $500.00',
+  );
+
+  // Parent 200 with existing limit 1200 preserved over child's 500
+  const p200 = read(migrated, 'res.partner', 200);
+  assert.equal(p200.use_partner_credit_limit, true);
+  assert.equal(p200.credit_limit, 1200);
+
+  // Parent 300 takes maximum of multiple children (Math.max(300, 700) = 700)
+  const p300 = read(migrated, 'res.partner', 300);
+  assert.equal(p300.use_partner_credit_limit, true);
+  assert.equal(p300.credit_limit, 700);
+});
+
+test('regression Qodo Finding 2: fresh and upgraded databases agree on credit limits being off by default', () => {
+  const fresh = seed();
+  assert.equal(read(fresh, 'res.company', 1).account_use_credit_limit, undefined);
+  assert.equal(read(fresh, 'res.partner', 1).credit_limit, undefined);
+  assert.equal(read(fresh, 'res.partner', 1).use_partner_credit_limit, undefined);
+
+  // Upgrading an older seed database that had legacy partner 1 credit_limit: 100000
+  const olderSeedDb = {
+    ...fresh,
+    schema_version: 63,
+    records: {
+      ...fresh.records,
+      'res.partner': fresh.records['res.partner'].map((p) => (p.id === 1 ? { ...p, credit_limit: 100000 } : p)),
+    },
+  };
+  const upgraded = migrate(olderSeedDb);
+  assert.equal(read(upgraded, 'res.company', 1).account_use_credit_limit, undefined);
+  assert.equal(read(upgraded, 'res.partner', 1).credit_limit, undefined);
+  assert.equal(read(upgraded, 'res.partner', 1).use_partner_credit_limit, undefined);
+});
+
+test('regression Qodo Finding 3: new contacts do not save company default limit, onchange updates to current company default', async () => {
+  const { saveFormRecord } = await import('./views/formSave.js');
+  let db = seed();
+  db = write(db, 'res.company', 1, {
+    account_use_credit_limit: true,
+    account_default_credit_limit: 1500,
+  });
+
+  const partnerLeaf = menusFor('contacts').find((m) => m.model === 'res.partner');
+
+  // Form prepare supplies 1500 for display on new contact form
+  const prepared = models['res.partner'].form.prepare({ name: 'Fresh Contact' }, db);
+  assert.equal(prepared.credit_limit, 1500);
+
+  // Saving the new contact removes the injected credit_limit when use_partner_credit_limit is false
+  const saved = saveFormRecord(db, 'res.partner', null, { ...prepared, name: 'Fresh Contact' });
+  const created = read(saved.db, 'res.partner', saved.id);
+  assert.equal(created.use_partner_credit_limit, undefined);
+  assert.equal(created.credit_limit, undefined);
+
+  // Company default limit changes to 2500
+  let dbUpdated = write(saved.db, 'res.company', 1, { account_default_credit_limit: 2500 });
+
+  // When Partner Limit is enabled, onchange uses the current company default (2500, not 1500)
+  const onchangeRes = models['res.partner'].onchange({ ...created, use_partner_credit_limit: true }, 'use_partner_credit_limit', dbUpdated);
+  assert.equal(onchangeRes.credit_limit, 2500);
+
+  // Disabling Partner Limit clears credit_limit
+  const onchangeOff = models['res.partner'].onchange({ ...created, use_partner_credit_limit: false }, 'use_partner_credit_limit', dbUpdated);
+  assert.equal(onchangeOff.credit_limit, null);
+
+  // Verify form view mounts with updated default and toggle reflects 2500
+  const ctx = await mountForm({ leaf: partnerLeaf, id: created.id, db: dbUpdated, base: '#/contacts/contacts' });
+  try {
+    const roSpan = find(ctx.host, (n) => n.tagName === 'SPAN' && hasClass(n, 'readonly') && n.textContent.includes('2,500'));
+    assert.ok(roSpan, 'displays updated company default 2,500 in readonly span');
+
+    const toggle = ctx.control('f-use_partner_credit_limit');
+    assert.ok(toggle);
+    await ctx.React.act(async () => props(toggle).onChange({ target: { checked: true } }));
+
+    const limitInput = ctx.control('f-credit_limit');
+    assert.ok(limitInput);
+    assert.equal(props(limitInput).value, 2500);
+  } finally {
+    await ctx.done();
+  }
+});

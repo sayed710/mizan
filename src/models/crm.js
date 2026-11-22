@@ -183,7 +183,7 @@ export const crmModels = {
     onchange: (r, key, db) => {
       if (key === 'use_partner_credit_limit') {
         const comp = db ? read(db, 'res.company', db.settings?.current_company_id ?? 1) : null;
-        return { credit_limit: r.use_partner_credit_limit ? (r.credit_limit ?? comp?.account_default_credit_limit ?? 0) : null };
+        return { credit_limit: r.use_partner_credit_limit ? (comp?.account_default_credit_limit ?? 0) : null };
       }
       if (key === 'followup_next_action_date') {
         const cId = db?.settings?.current_company_id ?? 1;
@@ -196,25 +196,34 @@ export const crmModels = {
       return {};
     },
     prepareWrite: (db, vals, before) => {
-      if (vals && 'followup_next_action_date' in vals) {
+      let nextVals = vals;
+      if (nextVals?.use_partner_credit_limit === false && nextVals.credit_limit !== null) {
+        nextVals = { ...nextVals, credit_limit: null };
+      }
+      if (nextVals && 'followup_next_action_date' in nextVals) {
         const cId = db?.settings?.current_company_id ?? 1;
-        const base = { ...before, ...vals };
+        const base = { ...before, ...nextVals };
         const nextPartner = updatePartnerFollowUp(base, cId, {
           followup_next_action_date: vals.followup_next_action_date || null,
         });
-        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+        return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
-      return null;
+      return nextVals !== vals ? { db, vals: nextVals } : null;
     },
     prepareCreate: (db, vals) => {
-      if (vals && 'followup_next_action_date' in vals) {
-        const cId = db?.settings?.current_company_id ?? 1;
-        const nextPartner = updatePartnerFollowUp(vals, cId, {
-          followup_next_action_date: vals.followup_next_action_date || null,
-        });
-        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+      let nextVals = vals;
+      if (nextVals && !nextVals.use_partner_credit_limit && 'credit_limit' in nextVals) {
+        const { credit_limit: _cl, ...rest } = nextVals;
+        nextVals = rest;
       }
-      return null;
+      if (nextVals && 'followup_next_action_date' in nextVals) {
+        const cId = db?.settings?.current_company_id ?? 1;
+        const nextPartner = updatePartnerFollowUp(nextVals, cId, {
+          followup_next_action_date: nextVals.followup_next_action_date || null,
+        });
+        return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
+      }
+      return nextVals !== vals ? { db, vals: nextVals } : null;
     },
     guard: (db, before, after) => {
       if (after?.credit_limit != null && after?.credit_limit !== '') {

@@ -524,7 +524,6 @@ export function seed() {
   const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan: 'project' });
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
   add('account.budget', { name: `Budget ${today().slice(0, 4)}`, company_id: mainCompanyId, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
-  set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
   add('account.followup.level', { display_delay: 15, reminder_timing: 'after', delay: 15, send_email: true, send_sms: false, create_activity: false, activity_default_responsible_type: 'followup', channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
