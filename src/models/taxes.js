@@ -91,8 +91,22 @@ export const defaultTaxRepartitionLines = (accountId = null, tagIds = [], baseTa
   };
 };
 
+/** Effective price-included flag of a tax: explicit override when set, else its company's account_price_include. */
+export function taxPriceInclude(db, tax, companyId = null) {
+  if (!tax) return false;
+  if (tax.price_include_override === 'tax_included') return true;
+  if (tax.price_include_override === 'tax_excluded') return false;
+  if (db) {
+    const compId = tax.company_id ?? companyId ?? db.settings?.current_company_id ?? 1;
+    const company = read(db, 'res.company', compId);
+    if (company?.account_price_include) return company.account_price_include === 'tax_included';
+    return false;
+  }
+  return Boolean(tax.price_include);
+}
+
 /** What an order/invoice line keeps of its tax, so totals never need the db. */
-export const taxSnapshot = (tax, db = null, fpId = null) => {
+export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
   if (!tax) return { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_name: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [] };
   const invRepart = (tax.invoice_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
   const refRepart = (tax.refund_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
@@ -101,7 +115,7 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
     tax_id: tax.id,
     tax: Number(tax.amount) || 0,
     tax_type: tax.amount_type || 'percent',
-    tax_include: !!tax.price_include,
+    tax_include: taxPriceInclude(db, tax, companyId),
     tax_cash_basis: tax.tax_exigibility === 'on_payment',
     tax_name: tax.name,
     invoice_repartition_line_ids: invRepart,
@@ -116,7 +130,7 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
     const children = db
       ? expandTaxIds(db, [tax.id], fpId)
       : Array.isArray(tax.children_taxes) ? tax.children_taxes : [];
-    return { ...base, tax_breakdown: children.map((c) => taxSnapshot(c)) };
+    return { ...base, tax_breakdown: children.map((c) => taxSnapshot(c, db, null, companyId)) };
   }
   return base;
 };
@@ -341,13 +355,13 @@ export function mapTaxIds(db, sourceIds, fpId, companyId = null) {
   const remapped = single && (mapped.length !== 1 || mapped[0] !== own);
   const source = remapped ? { tax_source_id: own } : {};
   if (mapped.length <= 1) {
-    return { ...taxSnapshot(read(db, 'account.tax', mapped[0]), db, remapped ? null : fpId), ...source };
+    return { ...taxSnapshot(read(db, 'account.tax', mapped[0]), db, remapped ? null : fpId, companyId), ...source };
   }
   const expanded = expandTaxIds(db, mapped);
   return {
-    ...taxSnapshot(read(db, 'account.tax', mapped[0]), db),
+    ...taxSnapshot(read(db, 'account.tax', mapped[0]), db, null, companyId),
     tax_ids: mapped,
-    tax_breakdown: expanded.map((t) => taxSnapshot(t)),
+    tax_breakdown: expanded.map((t) => taxSnapshot(t, db, null, companyId)),
     ...source,
   };
 }
@@ -736,6 +750,9 @@ export const taxModels = {
         ...(after.refund_repartition_line_ids ?? []).flatMap((l) => l.tag_ids ?? []),
       ];
       if (allTags.some((id) => read(db, 'account.account.tag', id)?.applicability !== 'taxes')) return 'Select only tax tags';
+      if (after.price_include_override != null && after.price_include_override !== '' && !['tax_included', 'tax_excluded'].includes(after.price_include_override)) {
+        return 'Select a valid price include override';
+      }
       if (after.amount_type === 'division' && !(Number(after.amount) < 100)) return 'A percentage of price tax included must be below 100%';
       if (after.amount_type === 'group') {
         const children = after.children_tax_ids ?? [];
@@ -780,7 +797,18 @@ export const taxModels = {
         newLine: () => ({ fiscal_position_id: null, original_tax_ids: [] }),
       },
       invoice_label: { type: 'char', label: 'Label on Invoices' },
-      price_include: { type: 'boolean', label: 'Included in Price', tracking: true },
+      price_include_override: {
+        type: 'selection',
+        label: 'Included in Price',
+        tracking: true,
+        options: [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']],
+      },
+      price_include: {
+        type: 'boolean',
+        label: 'Included in Price',
+        hidden: true,
+        compute: (r, db) => taxPriceInclude(db, r),
+      },
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', tracking: true, options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
@@ -807,37 +835,53 @@ export const taxModels = {
       fiscal_position_mapping_ids: [],
       type_tax_use: 'sale',
       tax_exigibility: 'on_invoice',
-      price_include: false,
+      price_include_override: null,
       include_base_amount: false,
       is_base_affected: true,
       analytic: false,
       active: true,
       ...defaultTaxRepartitionLines(null, []),
     }),
-    prepareCreate: (db, vals) => ({
-      db,
-      vals: {
-        ...vals,
-        ...(Array.isArray(vals.invoice_repartition_line_ids)
-          ? { invoice_repartition_line_ids: vals.invoice_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
-          : {}),
-        ...(Array.isArray(vals.refund_repartition_line_ids)
-          ? { refund_repartition_line_ids: vals.refund_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
-          : {}),
-      },
-    }),
-    prepareWrite: (db, vals) => ({
-      db,
-      vals: {
-        ...vals,
-        ...(Array.isArray(vals.invoice_repartition_line_ids)
-          ? { invoice_repartition_line_ids: vals.invoice_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
-          : {}),
-        ...(Array.isArray(vals.refund_repartition_line_ids)
-          ? { refund_repartition_line_ids: vals.refund_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
-          : {}),
-      },
-    }),
+    prepareCreate: (db, vals) => {
+      const nextVals = { ...vals };
+      if (nextVals.price_include_override === '') nextVals.price_include_override = null;
+      if (nextVals.price_include_override === undefined && 'price_include' in nextVals) {
+        if (nextVals.price_include === true) nextVals.price_include_override = 'tax_included';
+        delete nextVals.price_include;
+      }
+      return {
+        db,
+        vals: {
+          ...nextVals,
+          ...(Array.isArray(nextVals.invoice_repartition_line_ids)
+            ? { invoice_repartition_line_ids: nextVals.invoice_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
+            : {}),
+          ...(Array.isArray(nextVals.refund_repartition_line_ids)
+            ? { refund_repartition_line_ids: nextVals.refund_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
+            : {}),
+        },
+      };
+    },
+    prepareWrite: (db, vals) => {
+      const nextVals = { ...vals };
+      if (nextVals.price_include_override === '') nextVals.price_include_override = null;
+      if (nextVals.price_include_override === undefined && 'price_include' in nextVals) {
+        nextVals.price_include_override = nextVals.price_include === true ? 'tax_included' : 'tax_excluded';
+        delete nextVals.price_include;
+      }
+      return {
+        db,
+        vals: {
+          ...nextVals,
+          ...(Array.isArray(nextVals.invoice_repartition_line_ids)
+            ? { invoice_repartition_line_ids: nextVals.invoice_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
+            : {}),
+          ...(Array.isArray(nextVals.refund_repartition_line_ids)
+            ? { refund_repartition_line_ids: nextVals.refund_repartition_line_ids.map((l) => withRepartitionUseInTaxClosing(db, l)) }
+            : {}),
+        },
+      };
+    },
     createDefaults: (db, vals) => {
       const invLines = vals.invoice_repartition_line_ids;
       const refLines = vals.refund_repartition_line_ids;
@@ -882,7 +926,7 @@ export const taxModels = {
           label: 'Advanced Options',
           groups: [
             ['invoice_label', 'tax_group_id'],
-            ['price_include', 'include_base_amount', 'is_base_affected', 'active', 'tax_exigibility', 'cash_basis_transition_account_id'],
+            ['price_include_override', 'include_base_amount', 'is_base_affected', 'active', 'tax_exigibility', 'cash_basis_transition_account_id'],
           ],
         },
       ],

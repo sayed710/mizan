@@ -7,7 +7,7 @@ import { applyPaymentCredit, paymentDocuments, reconcileReversalLines, registerP
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
+import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxPriceInclude, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
@@ -2049,12 +2049,12 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       continue;
     }
 
-    const hasPriceIncludeTax = taxIds.some((id) => read(db, 'account.tax', id)?.price_include);
+    const hasPriceIncludeTax = taxIds.some((id) => taxPriceInclude(db, read(db, 'account.tax', id), companyId));
     let grossDocAmount = docAmount;
     if (hasPriceIncludeTax && existingForBase.length) {
       const existingPriceInclDoc = existingForBase.reduce((sum, el) => {
         const tRec = read(db, 'account.tax', el.tax_id);
-        if (!tRec?.price_include) return sum;
+        if (!taxPriceInclude(db, tRec, companyId)) return sum;
         const amt = isForeign
           ? Math.abs(Number(el.amount_currency) || 0)
           : (Number(el.debit) || Number(el.credit) || 0);
@@ -2085,7 +2085,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         price_unit: grossDocAmount,
         discount: 0,
         tax_ids: groupTaxIds,
-        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id)),
+        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id, companyId)),
       };
 
       const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });

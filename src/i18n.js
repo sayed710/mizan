@@ -3567,6 +3567,11 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Default Sales Price Include': 'تضمين الضريبة في سعر البيع افتراضياً',
+  'Tax Included': 'شامل الضريبة',
+  'Default price-include behaviour for taxes without an explicit override.': 'السلوك الافتراضي لتضمين الضريبة في السعر للضرائب التي ليس لها تجاوز صريح.',
+  'Select a valid default sales price include setting': 'اختر إعداداً صالحاً لتضمين الضريبة في سعر البيع',
+  'Select a valid price include override': 'اختر قيمة صالحة لتجاوز تضمين الضريبة في السعر',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
