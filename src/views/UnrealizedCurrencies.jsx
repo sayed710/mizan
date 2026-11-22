@@ -7,22 +7,40 @@ import { foreignBalanceReport, revalueForeignBalances } from '../models/closing.
 import { commit, getDb, useDb } from '../store.js';
 import { display, money } from '../ui.jsx';
 import { t } from '../i18n.js';
+import { downloadCsv, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
+import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 
 const RATE_FIELD = { type: 'float', digits: [6, 6] };
 
 export function UnrealizedCurrencies() {
-  const db = useDb();
+  const sourceDb = useDb();
+  const [companyId, setCompanyId] = useState('all');
+  const { companyDb: db, availableCompanies, companies, selectedCompany } = reportCompanyScope(sourceDb, companyId);
   const [date, setDate] = useState(today());
   const [isPrinting, setIsPrinting] = useState(false);
   const tableRef = useRef(null);
   let rows = [];
   let error = '';
-  try { rows = foreignBalanceReport(db, date); } catch (e) { error = e.message; }
+  try {
+    rows = foreignBalanceReport(db, date, { companyId: selectedCompany === 'all' ? null : Number(selectedCompany) });
+  } catch (e) {
+    error = e.message;
+  }
   const revalue = () => {
-    try { commit(revalueForeignBalances(getDb(), date, { companyScoped: true })); }
-    catch (e) { alert(e.message); }
+    try {
+      commit(revalueForeignBalances(getDb(), date, {
+        companyScoped: true,
+        ...(selectedCompany !== 'all' ? { companyId: Number(selectedCompany) } : {}),
+      }));
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+  const exportCsv = () => {
+    if (!tableRef.current) return;
+    downloadCsv('unrealized_currencies.csv', tableToRows(tableRef.current));
   };
   const exportXlsx = () => {
     if (!tableRef.current) return;
@@ -33,13 +51,17 @@ export function UnrealizedCurrencies() {
     <div className="control-panel">
       <h1 className="cp-title">{t('Unrealized Currencies')}</h1>
       <label>{t('Date')} <input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+      {availableCompanies.length > 1 && <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} />}
       <button type="button" className="btn sm" disabled={!!error} onClick={revalue}>{t('Revalue Foreign Currency')}</button>
       <span className="spacer" />
       <button type="button" className="btn sm" disabled={!!error} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+      <button type="button" className="btn sm" disabled={!!error} onClick={exportCsv}>{t('Download CSV')}</button>
       <button type="button" className="btn sm" disabled={!!error} onClick={exportXlsx}>{t('Export XLSX')}</button>
     </div>
   );
-  const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  const allowedIds = selectedCompany === 'all'
+    ? (db.settings?.allowed_company_ids ?? [currentCompany(db)])
+    : [Number(selectedCompany)];
   const printCompanies = isPrinting
     ? allowedIds.map((cId) => documentCompany(db, { company_id: cId })).filter(Boolean)
     : null;

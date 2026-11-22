@@ -288,9 +288,9 @@ export function foreignBalanceReport(db, date, { companyId = null, companyScoped
   const source = companyId
     ? { ...db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).filter((move) => (move.company_id ?? 1) === companyId) } }
     : scoped;
-  const invoices = unrealizedExchange(source, date);
+  const invoices = unrealizedExchange(source, date).filter((m) => !companyId || (m.company_id ?? 1) === companyId);
   const settled = documentSettlementLines(source, date);
-  const manual = foreignJournalPositions(source, date, { excludedLines: settled });
+  const manual = foreignJournalPositions(source, date, { excludedLines: settled, companyId });
   return [...invoices, ...manual];
 }
 
