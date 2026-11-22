@@ -1,12 +1,27 @@
 // Payment QR codes printed on customer invoices: ZATCA (Saudi e-invoicing TLV) or EPC/SEPA credit transfer.
 import qrcode from 'qrcode-generator';
 import { read } from '../orm.js';
-import { partnerBankBic } from './partnerbank.js';
+import { partnerBankBic, sanitizeAccountNumber } from './partnerbank.js';
 
 qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
 
 const bytes = (s) => new TextEncoder().encode(String(s));
 const base64 = (arr) => btoa(String.fromCharCode(...arr));
+const IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/;
+
+const resolveCompanyPartnerId = (db, company, move) => {
+  if (company?.partner_id != null) return company.partner_id;
+  const companyId = company?.id ?? move?.company_id ?? null;
+  return companyId && db ? (read(db, 'res.company', companyId)?.partner_id ?? null) : null;
+};
+
+const isCompanyBankAccount = (db, company, move, bankAccount) => {
+  if (!bankAccount || bankAccount.active === false) return false;
+  const companyId = company?.id ?? move?.company_id ?? null;
+  if (companyId && bankAccount.company_id && bankAccount.company_id !== companyId) return false;
+  const ownerPartnerId = resolveCompanyPartnerId(db, company, move);
+  return Boolean(ownerPartnerId && bankAccount.partner_id === ownerPartnerId);
+};
 
 /** ZATCA phase-1 payload: base64 of tag-length-value fields (seller, VAT number, timestamp, total, VAT). */
 export function zatcaPayload({ seller, vat, timestamp, total, tax }) {
@@ -17,8 +32,8 @@ export function zatcaPayload({ seller, vat, timestamp, total, tax }) {
 
 /** EPC069-12 (SEPA credit transfer) text; amounts in EUR only, as the standard requires. */
 export function epcPayload({ name, iban, bic = '', amount, reference }) {
-  const cleanIban = String(iban ?? '').replace(/\s+/g, '').toUpperCase();
-  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(cleanIban)) throw new Error('Set a valid IBAN for payment QR codes');
+  const cleanIban = sanitizeAccountNumber(iban);
+  if (!IBAN_RE.test(cleanIban)) throw new Error('Set a valid IBAN for payment QR codes');
   return ['BCD', '002', '1', 'SCT', bic, String(name).slice(0, 70), cleanIban, `EUR${Number(amount).toFixed(2)}`, '', '', String(reference ?? '').slice(0, 140)].join('\n');
 }
 
@@ -30,20 +45,21 @@ export function invoiceQrPayload(settings, company, move, invoiceCurrency = move
   }
   // EPC is euro-only and needs at least 0.01 to pay.
   if (invoiceCurrency !== 'EUR' || !(move.amount_residual >= 0.01)) return null;
-  const IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/;
   const bankAccount = db && move?.partner_bank_id ? read(db, 'res.partner.bank', move.partner_bank_id) : null;
-  const bankAccountIban = bankAccount ? String(bankAccount.account_number ?? '').replace(/\s+/g, '').toUpperCase() : '';
-  const isBankAccountIban = Boolean(bankAccount && IBAN_RE.test(bankAccountIban));
+  const companyOwnedBank = isCompanyBankAccount(db, company, move, bankAccount);
+  const bankAccountIban = companyOwnedBank ? sanitizeAccountNumber(bankAccount.account_number) : '';
+  const isBankAccountIban = Boolean(companyOwnedBank && IBAN_RE.test(bankAccountIban));
   const iban = isBankAccountIban ? bankAccountIban : (settings?.company_iban ?? '');
 
   let bic = '';
   if (isBankAccountIban) {
     bic = partnerBankBic(db, bankAccount);
   } else {
-    const cleanCompanyIban = String(iban).replace(/\s+/g, '').toUpperCase();
+    const cleanCompanyIban = sanitizeAccountNumber(iban);
     if (cleanCompanyIban && db) {
       const match = (db.records?.['res.partner.bank'] ?? []).find(
-        (b) => String(b.account_number ?? '').replace(/\s+/g, '').toUpperCase() === cleanCompanyIban
+        (b) => isCompanyBankAccount(db, company, move, b)
+          && (b.sanitized_account_number === cleanCompanyIban || sanitizeAccountNumber(b.account_number) === cleanCompanyIban)
       );
       if (match) bic = partnerBankBic(db, match);
     }

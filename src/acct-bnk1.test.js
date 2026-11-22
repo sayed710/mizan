@@ -9,7 +9,9 @@ import { menusFor, models, viewsOf } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { partnerBankBic, partnerBankName, validatePartnerBankLines } from './models/partnerbank.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany } from './models/qr.js';
+import { createCompany } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
+import { handleApi } from '../server/api.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -242,32 +244,43 @@ test('BK-2: res.partner.bank links to res.bank via bank_id, uses bank as BIC/nam
     /active bank/i,
   );
 
-  // SEPA / EPC QR code path uses partnerBankBic (from res.bank when bank_id is set, else bank_bic)
+  // SEPA / EPC QR code path uses partnerBankBic (from res.bank when bank_id is set, else bank_bic) on company-owned accounts
   const company = { ...read(bankOnlyDb, 'res.company', 1), invoice_qr: 'epc', company_iban: 'FR7630006000011234567890189', currency: 'EUR' };
-  const qrSettings = invoiceQrSettingsForCompany(bankOnlyDb, company);
+  const companyLinked = create(bankOnlyDb, 'res.partner.bank', {
+    partner_id: company.partner_id,
+    account_number: 'FR7630006000011234567890189',
+    bank_id: dirBank.id,
+  });
+  const companyUnlinked = create(companyLinked.db, 'res.partner.bank', {
+    partner_id: company.partner_id,
+    account_number: 'DE89370400440532013000',
+    bank_bic: 'COBADEFF',
+  });
+  const qrDb = companyUnlinked.db;
+  const qrSettings = invoiceQrSettingsForCompany(qrDb, company);
   const moveWithBank = {
     move_type: 'out_invoice',
     state: 'posted',
     name: 'INV/2026/100',
     amount_residual: 50,
-    partner_bank_id: linked.id,
+    partner_bank_id: companyLinked.id,
   };
-  const payloadWithBank = invoiceQrPayload(qrSettings, company, moveWithBank, 'EUR', bankOnlyDb);
+  const payloadWithBank = invoiceQrPayload(qrSettings, company, moveWithBank, 'EUR', qrDb);
   assert.equal(payloadWithBank.split('\n')[4], 'DEUTDEFF', 'EPC QR line 5 uses BIC from res.bank');
 
-  const moveUnlinked = { ...moveWithBank, partner_bank_id: unlinked.id };
-  const payloadUnlinked = invoiceQrPayload(qrSettings, company, moveUnlinked, 'EUR', bankOnlyDb);
+  const moveUnlinked = { ...moveWithBank, partner_bank_id: companyUnlinked.id };
+  const payloadUnlinked = invoiceQrPayload(qrSettings, company, moveUnlinked, 'EUR', qrDb);
   assert.equal(payloadUnlinked.split('\n')[4], 'COBADEFF', 'EPC QR line 5 uses bank_bic when bank_id is unset');
 
   // PrintDoc renders EPC QR using move.partner_bank_id BIC
   const { PrintDoc } = await import('./views/PrintDoc.jsx');
-  const eur = search(bankOnlyDb, 'res.currency').find((c) => c.name === 'EUR');
-  const incomeAccount = search(bankOnlyDb, 'account.account').find((a) => a.account_type === 'income');
-  const printDbBase = write(bankOnlyDb, 'res.company', 1, { invoice_qr: 'epc', company_iban: 'FR7630006000011234567890189', currency_id: eur.id });
+  const eur = search(qrDb, 'res.currency').find((c) => c.name === 'EUR');
+  const incomeAccount = search(qrDb, 'account.account').find((a) => a.account_type === 'income');
+  const printDbBase = write(qrDb, 'res.company', 1, { invoice_qr: 'epc', company_iban: 'FR7630006000011234567890189', currency_id: eur.id });
   const invRes = create(printDbBase, 'account.move', {
     move_type: 'out_invoice',
     partner_id: partner.id,
-    partner_bank_id: linked.id,
+    partner_bank_id: companyLinked.id,
     currency_id: eur.id,
     invoice_date: '2026-05-01',
     invoice_line_ids: [{ name: 'Service', account_id: incomeAccount.id, qty: 1, price_unit: 50, tax: 0 }],
@@ -524,7 +537,7 @@ test('Qodo review: Finding 4 - partner embedded bank lines schema includes bank_
 
 test('Qodo review: Finding 5 - invoice EPC QR pairs BIC with matching IBAN, leaving BIC empty or from matching account when invoice bank and company IBAN differ', () => {
   let db = seed();
-  const partner = search(db, 'res.partner')[0];
+  const companyPartnerId = read(db, 'res.company', 1).partner_id;
   const bankA = create(db, 'res.bank', { name: 'Bank A', bic: 'AAAAFR22' });
   db = bankA.db;
   const bankB = create(db, 'res.bank', { name: 'Bank B', bic: 'BBBBDE33' });
@@ -532,7 +545,7 @@ test('Qodo review: Finding 5 - invoice EPC QR pairs BIC with matching IBAN, leav
 
   // Account A (matches company IBAN)
   const accA = create(db, 'res.partner.bank', {
-    partner_id: partner.id,
+    partner_id: companyPartnerId,
     account_number: 'FR7630006000011234567890189',
     bank_id: bankA.id,
   });
@@ -540,7 +553,7 @@ test('Qodo review: Finding 5 - invoice EPC QR pairs BIC with matching IBAN, leav
 
   // Account B (different IBAN and BIC)
   const accB = create(db, 'res.partner.bank', {
-    partner_id: partner.id,
+    partner_id: companyPartnerId,
     account_number: 'DE89370400440532013000',
     bank_id: bankB.id,
   });
@@ -565,7 +578,7 @@ test('Qodo review: Finding 5 - invoice EPC QR pairs BIC with matching IBAN, leav
 
   // When invoice bank account is not a valid IBAN, retain company IBAN and pair only with an account matching company IBAN
   const accNonIban = create(db, 'res.partner.bank', {
-    partner_id: partner.id,
+    partner_id: companyPartnerId,
     account_number: '123456789',
     bank_bic: 'NONIBIC1',
   });
@@ -660,4 +673,139 @@ test('Qodo review: Finding 7 - server diff rejects res.partner.bank with bank_na
   const renamedAcc = read(renamedDb, 'res.partner.bank', acc.id);
   assert.equal(renamedAcc.bank_name, 'Renamed Bank');
   assert.equal(renamedAcc.bank_bic, 'RENMUS33');
+});
+
+test('Qodo review (PR #223): Finding 1 - customer invoice partner_bank_id selector excludes customer accounts and EPC QR never encodes customer IBAN/BIC', async () => {
+  let db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const incomeAccount = search(db, 'account.account').find((a) => a.account_type === 'income');
+  db = write(db, 'res.company', 1, {
+    invoice_qr: 'epc',
+    company_iban: 'FR7630006000011234567890189',
+    currency_id: eur.id,
+  });
+
+  const company = read(db, 'res.company', 1);
+  const customer = search(db, 'res.partner').find((p) => p.id !== company.partner_id);
+
+  // Company-owned bank account matching company IBAN + a customer-owned bank account with a different IBAN/BIC
+  const companyBank = create(db, 'res.bank', { name: 'Company Bank', bic: 'COMPFRPP' });
+  db = companyBank.db;
+  const companyAcc = create(db, 'res.partner.bank', {
+    partner_id: company.partner_id,
+    account_number: 'FR7630006000011234567890189',
+    bank_id: companyBank.id,
+  });
+  db = companyAcc.db;
+
+  const customerBank = create(db, 'res.bank', { name: 'Customer Bank', bic: 'CUSTDEFF' });
+  db = customerBank.db;
+  const customerAcc = create(db, 'res.partner.bank', {
+    partner_id: customer.id,
+    account_number: 'DE89370400440532013000',
+    bank_id: customerBank.id,
+  });
+  db = customerAcc.db;
+
+  // Customer invoice selector domain accepts company's bank account and rejects customer's bank account
+  const domain = models['account.move'].fields.partner_bank_id.domain;
+  const draftOutInv = { move_type: 'out_invoice', partner_id: customer.id, company_id: 1 };
+  assert.equal(domain(read(db, 'res.partner.bank', companyAcc.id), draftOutInv, db), true, 'out_invoice domain accepts company bank account');
+  assert.equal(domain(read(db, 'res.partner.bank', customerAcc.id), draftOutInv, db), false, 'out_invoice domain rejects customer bank account');
+
+  // Vendor bill selector still accepts the vendor's bank account (Odoo 20 outbound bank_partner_id)
+  const draftInInv = { move_type: 'in_invoice', partner_id: customer.id, company_id: 1 };
+  assert.equal(domain(read(db, 'res.partner.bank', customerAcc.id), draftInInv, db), true, 'in_invoice domain accepts vendor bank account');
+  assert.equal(domain(read(db, 'res.partner.bank', companyAcc.id), draftInInv, db), false, 'in_invoice domain rejects unrelated company bank account');
+
+  // Posted customer invoice that somehow has the customer's bank account selected must NOT encode customer IBAN/BIC
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: customer.id,
+    partner_bank_id: customerAcc.id,
+    currency_id: eur.id,
+    invoice_date: '2026-05-01',
+    invoice_line_ids: [{ name: 'Service', account_id: incomeAccount.id, qty: 1, price_unit: 120, tax: 0 }],
+  });
+  const postedDb = postMove(inv.db, inv.id);
+  const postedInv = read(postedDb, 'account.move', inv.id);
+  const qrSettings = invoiceQrSettingsForCompany(postedDb, read(postedDb, 'res.company', 1));
+  const payload = invoiceQrPayload(qrSettings, read(postedDb, 'res.company', 1), postedInv, 'EUR', postedDb);
+  const lines = payload.split('\n');
+  assert.equal(lines[6], 'FR7630006000011234567890189', 'EPC QR falls back to configured company IBAN');
+  assert.equal(lines[4], 'COMPFRPP', 'EPC QR pairs BIC from company-owned account matching company IBAN');
+  assert.notEqual(lines[6], 'DE89370400440532013000', 'EPC QR must never encode customer IBAN');
+  assert.notEqual(lines[4], 'CUSTDEFF', 'EPC QR must never encode customer BIC');
+
+  // Even when a customer account happens to share company_iban and no company account exists for it, do not leak customer BIC
+  const dbNoCompAcc = write(postedDb, 'res.partner.bank', companyAcc.id, { active: false });
+  const custMatchingIbanAcc = create(dbNoCompAcc, 'res.partner.bank', {
+    partner_id: customer.id,
+    account_number: 'GB29NWBK60161331926819',
+    bank_bic: 'LEAKGB2L',
+  });
+  const coGb = { ...read(custMatchingIbanAcc.db, 'res.company', 1), invoice_qr: 'epc', company_iban: 'GB29NWBK60161331926819' };
+  const payloadNoLeak = invoiceQrPayload(invoiceQrSettingsForCompany(custMatchingIbanAcc.db, coGb), coGb, postedInv, 'EUR', custMatchingIbanAcc.db);
+  assert.equal(payloadNoLeak.split('\n')[4], '', 'Fallback BIC lookup must ignore non-company accounts');
+});
+
+test('Qodo review (PR #223): Finding 2 - company-limited user API PATCH on shared res.bank succeeds and syncs linked accounts in other companies', () => {
+  let db = seed();
+  const branch = createCompany(db, { name: 'Branch Co', currency_id: db.records['res.company'][0].currency_id });
+  db = branch.db;
+  const partner = search(db, 'res.partner')[0];
+  const sharedBank = create(db, 'res.bank', { name: 'Shared Directory Bank', bic: 'SHRDUS33' });
+  db = sharedBank.db;
+
+  const accCo1 = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'ACC-CO1',
+    bank_id: sharedBank.id,
+    company_id: 1,
+  });
+  db = accCo1.db;
+  const accCo2 = create(db, 'res.partner.bank', {
+    partner_id: partner.id,
+    account_number: 'ACC-CO2',
+    bank_id: sharedBank.id,
+    company_id: branch.id,
+  });
+  db = accCo2.db;
+
+  // Company-1-only user edits shared res.bank via REST API PATCH
+  const res = handleApi({
+    method: 'PATCH',
+    path: `/api/v1/res.bank/${sharedBank.id}`,
+    query: new URLSearchParams(),
+    body: { name: 'Updated Shared Bank', bic: 'UPDTUS33' },
+    db,
+    user: { name: 'Company 1 Clerk', login: 'clerk1', isAdmin: false },
+    companies: new Set([1]),
+    company: 1,
+  });
+
+  assert.equal(res.status, 200, `Expected 200 on shared bank PATCH, got ${res.status}: ${JSON.stringify(res.body)}`);
+  assert.equal(res.body.name, 'Updated Shared Bank');
+  assert.equal(res.body.bic, 'UPDTUS33');
+
+  // Linked partner bank accounts in BOTH Company 1 and Company 2 must be synchronized
+  const savedAcc1 = read(res.db, 'res.partner.bank', accCo1.id);
+  const savedAcc2 = read(res.db, 'res.partner.bank', accCo2.id);
+  assert.equal(savedAcc1.bank_name, 'Updated Shared Bank');
+  assert.equal(savedAcc1.bank_bic, 'UPDTUS33');
+  assert.equal(savedAcc2.bank_name, 'Updated Shared Bank');
+  assert.equal(savedAcc2.bank_bic, 'UPDTUS33');
+
+  // Validation still rejects invalid BIC on API PATCH
+  const badRes = handleApi({
+    method: 'PATCH',
+    path: `/api/v1/res.bank/${sharedBank.id}`,
+    query: new URLSearchParams(),
+    body: { bic: 'INVALID' },
+    db: res.db,
+    user: { name: 'Company 1 Clerk', login: 'clerk1', isAdmin: false },
+    companies: new Set([1]),
+    company: 1,
+  });
+  assert.equal(badRes.status, 400);
 });

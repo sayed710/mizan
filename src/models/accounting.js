@@ -42,7 +42,10 @@ import {
   unlinkJournalMethodLines,
 } from './paymentmethod.js';
 
-export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines };
+export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
+
+export const includeInitialBalance = (account) => !['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'off_balance'].includes(account?.account_type);
+const canBeNonTrade = (account) => ['asset_receivable', 'liability_payable'].includes(account?.account_type);
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -2092,12 +2095,13 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       continue;
     }
 
-    const hasPriceIncludeTax = taxIds.some((id) => read(db, 'account.tax', id)?.price_include);
     let grossDocAmount = docAmount;
-    if (hasPriceIncludeTax && existingForBase.length) {
+    if (existingForBase.length) {
       const existingPriceInclDoc = existingForBase.reduce((sum, el) => {
-        const tRec = read(db, 'account.tax', el.tax_id);
-        if (!tRec?.price_include) return sum;
+        const isIncl = el.tax_include !== undefined
+          ? Boolean(el.tax_include)
+          : Boolean(read(db, 'account.tax', el.tax_id)?.price_include);
+        if (!isIncl) return sum;
         const amt = isForeign
           ? Math.abs(Number(el.amount_currency) || 0)
           : (Number(el.debit) || Number(el.credit) || 0);
@@ -2128,7 +2132,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         price_unit: grossDocAmount,
         discount: 0,
         tax_ids: groupTaxIds,
-        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id)),
+        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id, companyId)),
       };
 
       const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
@@ -2191,18 +2195,20 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       : (baseSide === 'credit' ? 'sale' : 'purchase');
 
     const roundedUntaxedDoc = roundCurrency(totalUntaxedDoc, docCurrency);
-    const untaxedCompany = hasPriceInclude
+    // The base is rewritten only when a tax is included in price now, or when included tax amounts were added back to it.
+    const rewriteBase = hasPriceInclude || grossDocAmount !== docAmount;
+    const untaxedCompany = rewriteBase
       ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
       : baseAmount;
 
     const updatedBase = {
       ...baseLine,
-      debit: baseSide === 'debit' ? (hasPriceInclude ? untaxedCompany : baseLine.debit) : 0,
-      credit: baseSide === 'credit' ? (hasPriceInclude ? untaxedCompany : baseLine.credit) : 0,
+      debit: baseSide === 'debit' ? (rewriteBase ? untaxedCompany : baseLine.debit) : 0,
+      credit: baseSide === 'credit' ? (rewriteBase ? untaxedCompany : baseLine.credit) : 0,
       tax_tag_ids: baseTags,
       tax_grid_base: baseTags.length > 0,
       tax_side: baseReportingSide,
-      ...(isForeign && hasPriceInclude ? {
+      ...(isForeign && rewriteBase ? {
         amount_currency: baseSide === 'debit' ? roundedUntaxedDoc : -roundedUntaxedDoc,
       } : {}),
     };
@@ -2266,6 +2272,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         debit: effectiveSide === 'debit' ? absTaxAmount : 0,
         credit: effectiveSide === 'credit' ? absTaxAmount : 0,
         tax_id: g.t.tax_id,
+        tax_include: Boolean(g.t.tax_include),
         tax_name: g.t.name || g.t.tax_name || taxLabel(g.t),
         tax_repartition_line_id: g.row.id ?? null,
         tax_base: taxBase,
@@ -2290,6 +2297,26 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
   }
 
   return resultLines;
+}
+
+/** Recompute tax lines on all draft manual entries of a company (e.g. after default sales price inclusion changes). */
+function refreshDraftEntryTaxes(db, companyId) {
+  if (!db?.records?.['account.move']) return db;
+  const targetCompany = companyId ?? db.settings?.current_company_id ?? 1;
+  const draftMoves = (db.records['account.move'] ?? []).filter((m) =>
+    m.move_type === 'entry' &&
+    m.state === 'draft' &&
+    (m.company_id ?? 1) === targetCompany &&
+    Array.isArray(m.line_ids) &&
+    m.line_ids.some((l) => (l.tax_ids?.length || l.tax_id != null))
+  );
+  if (!draftMoves.length) return db;
+  let next = db;
+  for (const m of draftMoves) {
+    const refreshedLines = computeEntryTaxLines(m.line_ids, m, next);
+    next = write(next, 'account.move', m.id, { line_ids: refreshedLines });
+  }
+  return next;
 }
 
 /** A journal item tied to one tax (tax_id or repartition line): its tags come from that tax, so base-line tag updates must skip it. */
@@ -2372,6 +2399,7 @@ const lineItem = {
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Tax', hidden: true },
+    tax_include: { type: 'boolean', label: 'Included in Price', hidden: true },
     tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', widget: 'many2many_tags', hidden: true },
     tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
     tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },
@@ -2782,6 +2810,9 @@ export const accountingModels = {
       name: { type: 'char', label: 'Account Name', required: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES, tracking: true },
+      include_initial_balance: { type: 'boolean', label: 'Bring Accounts Balance Forward', readonly: true, compute: includeInitialBalance },
+      non_trade: { type: 'boolean', label: 'Non Trade', hideWhen: (r) => !canBeNonTrade(r) },
+      note: { type: 'text', label: 'Internal Notes' },
       currency_id: {
         type: 'many2one',
         relation: 'res.currency',
@@ -2832,6 +2863,7 @@ export const accountingModels = {
     },
     defaults: () => ({ account_type: 'expense', active: true, tax_ids: [] }),
     guard: (db, before, after) => {
+      if (after.non_trade && !canBeNonTrade(after)) return 'Non Trade requires a receivable or payable account';
       const useError = accountTypeGuard(db, before, after);
       if (useError) return useError;
       const codeError = accountCodeGuard(db, before, after);
@@ -2887,6 +2919,7 @@ export const accountingModels = {
     list: ['code', 'name', 'account_type', 'opening_debit', 'opening_credit', 'reconcile', 'currency_id'],
     listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') }, opening_debit: { optional: 'hide' }, opening_credit: { optional: 'hide' } },
     editableList: ['reconcile', 'opening_debit', 'opening_credit'],
+    onchange: (r, key) => key === 'account_type' && !canBeNonTrade(r) ? { non_trade: false } : {},
     prepareWrite: (db, vals, before) => {
       const hasOpeningDebit = vals && 'opening_debit' in vals;
       const hasOpeningCredit = vals && 'opening_credit' in vals;
@@ -2908,9 +2941,9 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
+            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'non_trade', 'active'],
             ['is_deferred', 'deferred_account_id', 'create_asset', 'asset_model_id'],
-            ['description'],
+            ['description', 'note'],
           ],
         },
       ],
@@ -3555,7 +3588,21 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
+      partner_bank_id: {
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        domain: (b, r, db) => {
+          if (b.active === false) return false;
+          const companyId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+          if (b.company_id && b.company_id !== companyId) return false;
+          if (isInbound(r)) {
+            const companyPartnerId = db ? read(db, 'res.company', companyId)?.partner_id : null;
+            return Boolean(b.partner_id && companyPartnerId && b.partner_id === companyPartnerId);
+          }
+          return !b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id);
+        },
+      },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
