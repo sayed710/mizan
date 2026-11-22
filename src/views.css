@@ -248,7 +248,9 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 30px rgb(16 24 40 / 14%);
   padding: 6px; display: flex; flex-direction: column;
 }
-.nav-dropdown a { display: inline-block; color: var(--text); padding: 7px 10px; border-radius: 6px; } /* inline-block keeps Arabic letters of adjacent items from joining across items */
+.nav-dropdown a { color: var(--text); padding: 7px 10px; border-radius: 6px; }
+/* Grouped items sit side by side as inline links; inline-block gives each its own text run so Arabic letters never join across items. */
+.nav-submenu-group > a { display: inline-block; }
 .nav-dropdown a:hover, .nav-dropdown a.active { background: var(--brand-soft); color: var(--brand); }
 
 .search-wrap { position: relative; flex: 1 1 360px; max-width: 560px; }

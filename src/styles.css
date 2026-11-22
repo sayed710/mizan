@@ -123,8 +123,7 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .switcher { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .switcher a { padding: 6px 9px; color: var(--muted); display: grid; place-items: center; }
 .switcher a.active { background: var(--brand-soft); color: var(--brand); }
-.pager { display: flex; align-items: center; gap: 4px; color: var(--muted); }
-.pager { gap: 8px; font-variant-numeric: tabular-nums; }
+.pager { display: flex; align-items: center; gap: 8px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .pager-buttons { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .pager-btn { display: grid; place-items: center; width: 32px; height: 30px; padding: 0; border: 0; background: none; color: var(--text); cursor: pointer; }
 .pager-btn + .pager-btn { border-inline-start: 1px solid var(--border); }
