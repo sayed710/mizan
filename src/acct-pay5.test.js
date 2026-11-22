@@ -1113,3 +1113,81 @@ test('bank journal exposes sepa_pain_version defaulting to pain.001.001.09 and S
   assert.match(rep03.download.content, /pain\.001\.001\.03/);
   assert.match(rep03.download.content, /<BIC>COBADEFFXXX<\/BIC>/);
 });
+
+test('direct ORM writes converting journal type normalize sepa_pain_version in the write path and preserve guards', async () => {
+  const { seed } = await import('./seed.js');
+  const { create, read, unlink, write } = await import('./orm.js');
+  const { models } = await import('./models/index.js');
+  const { DEFAULT_SEPA_PAIN_VERSION } = await import('./models/sepa.js');
+
+  const journalModel = models['account.journal'];
+  assert.equal(typeof journalModel.prepareWrite, 'function', 'account.journal defines prepareWrite in the write path');
+
+  const db = await addJournalMethods(seed());
+  const seededBank = db.records['account.journal'].find((j) => j.type === 'bank');
+  const seededCash = db.records['account.journal'].find((j) => j.type === 'cash');
+  const seededMisc = db.records['account.journal'].find((j) => j.type === 'general');
+
+  // prepareWrite hook normalizes values directly
+  const prepBank = journalModel.prepareWrite(db, { type: 'bank' }, seededCash);
+  assert.equal(prepBank.vals.sepa_pain_version, DEFAULT_SEPA_PAIN_VERSION, 'prepareWrite assigns default version when changing to bank');
+
+  const prepCash = journalModel.prepareWrite(db, { type: 'cash' }, seededBank);
+  assert.equal(prepCash.vals.sepa_pain_version, null, 'prepareWrite clears version when changing to non-bank');
+
+  const prepExplicitNonBank = journalModel.prepareWrite(db, { type: 'cash', sepa_pain_version: 'pain.001.001.09' }, seededBank);
+  assert.equal(prepExplicitNonBank.vals.sepa_pain_version, 'pain.001.001.09', 'prepareWrite preserves explicitly supplied version on non-bank for guard check');
+
+  // 1. Direct ORM write converting cash/general to bank without explicit version gets saved default
+  const dbToBank = write(db, 'account.journal', seededCash.id, { type: 'bank' });
+  const convertedBank = read(dbToBank, 'account.journal', seededCash.id);
+  assert.equal(convertedBank.type, 'bank');
+  assert.equal(convertedBank.sepa_pain_version, 'pain.001.001.09', 'converting cash journal to bank saves default sepa_pain_version');
+
+  const dbMiscToBank = write(db, 'account.journal', seededMisc.id, { type: 'bank', suspense_account_id: seededBank.suspense_account_id });
+  const convertedMiscBank = read(dbMiscToBank, 'account.journal', seededMisc.id);
+  assert.equal(convertedMiscBank.type, 'bank');
+  assert.equal(convertedMiscBank.sepa_pain_version, 'pain.001.001.09', 'converting general journal to bank saves default sepa_pain_version');
+
+  // Direct ORM write converting to bank with explicit version preserves explicit version
+  const dbCustomBank = write(db, 'account.journal', seededCash.id, { type: 'bank', sepa_pain_version: 'pain.001.001.03' });
+  assert.equal(read(dbCustomBank, 'account.journal', seededCash.id).sepa_pain_version, 'pain.001.001.03', 'explicitly supplied version is saved');
+
+  // 2. Direct ORM write converting bank to non-bank clears sepa_pain_version before guard validation
+  const standaloneBank = create(db, 'account.journal', {
+    name: 'Standalone Bank',
+    code: 'STB1',
+    type: 'bank',
+    company_id: 1,
+    suspense_account_id: seededBank.suspense_account_id,
+  });
+  const dbToCash = write(standaloneBank.db, 'account.journal', standaloneBank.id, { type: 'cash' });
+  const convertedCash = read(dbToCash, 'account.journal', standaloneBank.id);
+  assert.equal(convertedCash.type, 'cash');
+  assert.equal(convertedCash.sepa_pain_version, null, 'converting bank journal to cash clears sepa_pain_version');
+
+  const unlinkedDb = unlink(
+    standaloneBank.db,
+    'account.payment.method.line',
+    standaloneBank.db.records['account.payment.method.line'].filter((l) => l.journal_id === standaloneBank.id).map((l) => l.id),
+  );
+  const dbToGeneral = write(unlinkedDb, 'account.journal', standaloneBank.id, {
+    type: 'general',
+    suspense_account_id: null,
+  });
+  const convertedGeneral = read(dbToGeneral, 'account.journal', standaloneBank.id);
+  assert.equal(convertedGeneral.type, 'general');
+  assert.equal(convertedGeneral.sepa_pain_version, null, 'converting bank journal to general clears sepa_pain_version');
+
+  // 3. Guard against explicitly setting sepa_pain_version on non-bank is preserved
+  assert.throws(
+    () => write(standaloneBank.db, 'account.journal', standaloneBank.id, { type: 'cash', sepa_pain_version: 'pain.001.001.09' }),
+    /SEPA Pain Version is only valid for bank journals/i,
+    'rejects explicitly supplying sepa_pain_version when changing bank to cash',
+  );
+  assert.throws(
+    () => write(db, 'account.journal', seededCash.id, { sepa_pain_version: 'pain.001.001.09' }),
+    /SEPA Pain Version is only valid for bank journals/i,
+    'rejects setting sepa_pain_version directly on a cash journal',
+  );
+});

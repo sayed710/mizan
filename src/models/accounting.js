@@ -3090,6 +3090,19 @@ export const accountingModels = {
       }
       return { db, vals: nextVals };
     },
+    prepareWrite: (db, vals, before) => {
+      let nextVals = { ...vals };
+      if (nextVals.type !== undefined) {
+        if (nextVals.type === 'bank') {
+          if (nextVals.sepa_pain_version === undefined && (before?.type !== 'bank' || !before?.sepa_pain_version)) {
+            nextVals.sepa_pain_version = DEFAULT_SEPA_PAIN_VERSION;
+          }
+        } else if (nextVals.sepa_pain_version === undefined) {
+          nextVals.sepa_pain_version = null;
+        }
+      }
+      return { db, vals: nextVals };
+    },
     createDefaults: (db, vals = {}) => ({
       ...(isLiquidityJournal(vals) && vals.company_id === undefined ? { company_id: currentCompany(db) } : {}),
       ...(vals.payment_sequence === undefined ? { payment_sequence: isLiquidityJournal(vals) } : {}),
