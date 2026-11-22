@@ -5,7 +5,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
 import { ACTIVITY_TYPES } from './mail.js';
 import { currentActor, employeeFor } from './actor.js';
-import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, statementCompanyAmount } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
@@ -245,11 +245,37 @@ export function accountDeleteGuard(db, account, pending = db) {
 /** What a posted entry keeps until it is reset to draft. */
 const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active'];
 
+const bankStatementMoveIds = new WeakMap();
+const bankRewriteToken = Symbol('bank reconciliation');
+export function writeBankStatementMove(db, id, lineIds) {
+  return write(db, 'account.move', id, { line_ids: lineIds }, { bankRewriteToken });
+}
 function isBankStatementMove(db, moveId) {
-  return (db.records?.['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === moveId);
+  const lines = db.records?.['account.bank.statement.line'];
+  if (!lines) return false;
+  let ids = bankStatementMoveIds.get(lines);
+  if (!ids) {
+    ids = new Set(lines.map((line) => line.bank_move_id).filter(Boolean));
+    bankStatementMoveIds.set(lines, ids);
+  }
+  return ids.has(moveId);
 }
 
 function bankStatementMoveRewriteError(db, before, after, ctx) {
+  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids'))) {
+    return 'Posted entries cannot be edited; reset them to draft first';
+  }
+  if (changedFields(before, after, ['line_ids'])) {
+    if ((db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id)) return 'Posted entries cannot be edited; reset them to draft first';
+    if (ctx?.bankRewriteToken !== bankRewriteToken) {
+      const previous = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+      const next = previous && (db.records['account.bank.statement.line'] ?? []).find((line) => line.id === previous.id);
+      if (!previous || !next || next.bank_move_id !== before.id
+        || (JSON.stringify(previous.allocations ?? []) === JSON.stringify(next.allocations ?? []) && previous.state === next.state)) {
+        return 'Posted entries cannot be edited; reset them to draft first';
+      }
+    }
+  }
   if (before.date !== after.date
     || (before.invoice_date ?? '') !== (after.invoice_date ?? '')
     || before.journal_id !== after.journal_id
@@ -278,14 +304,27 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
   if (beforeLiq.length === 0) {
     return 'The bank liquidity line cannot be changed';
   }
-  for (const b of beforeLiq) {
+  const statementLine = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const sign = statementLine?.amount > 0 ? 1 : -1;
+  const originalLiquidity = beforeLiq.filter((line) => sign * (Number(line.debit || 0) - Number(line.credit || 0)) > 0);
+  if (originalLiquidity.length !== 1) return 'The bank liquidity line cannot be changed';
+  const previousLine = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const releasing = ctx?.bankRewriteToken === bankRewriteToken || (previousLine && statementLine?.state === 'to_check'
+    && !(statementLine.allocations ?? []).length && (previousLine.state === 'reconciled' || (previousLine.allocations ?? []).length));
+  const suspenseId = journal?.suspense_account_id || read(db, 'res.company', after.company_id ?? 1)?.account_journal_suspense_account_id;
+  const restoredAmount = statementLine && statementCompanyAmount(db, statementLine);
+  const restored = releasing && afterLiq.length === 1 && (after.line_ids ?? []).length === 2
+    && (after.line_ids ?? []).some((line) => line.account_id === suspenseId
+      && sign * (Number(line.debit || 0) - Number(line.credit || 0)) === -restoredAmount)
+    && sign * (Number(afterLiq[0].debit || 0) - Number(afterLiq[0].credit || 0)) === restoredAmount;
+  for (const b of originalLiquidity) {
     const match = afterLiq.find((a) =>
       Number(b.debit || 0) === Number(a.debit || 0)
       && Number(b.credit || 0) === Number(a.credit || 0)
       && (b.currency_id ?? null) === (a.currency_id ?? null)
       && Number(b.amount_currency || 0) === Number(a.amount_currency || 0)
     );
-    if (!match) {
+    if (!match && !restored) {
       return 'The bank liquidity line cannot be changed';
     }
   }

@@ -1,7 +1,6 @@
 // MOD-008: a record the form shows as locked (form.lockedWhen) stays locked on the server, not only in the form.
 // For non-admin users, the editable fields of a locked record cannot change; workflow fields (status, links and
 // amounts that buttons set, which the form shows read-only or not at all) still can.
-import { bankStatementRewriteAllowed } from './finance.js';
 
 const groupFields = (items = []) => items.flatMap((item) => {
   if (typeof item === 'string') return [item];
@@ -67,7 +66,7 @@ export function withLocks(models) {
         if (ctx?.isAdmin !== false || !before || !locked(before, db)) return null;
         const maintained = (name === 'sign.request' && before.state !== 'sent') || (name === 'hr.expense.sheet' && before.state === r.state) ? [] : MAINTAINED[name] ?? [];
         const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f)
-          && !(name === 'account.move' && f === 'line_ids' && bankStatementRewriteAllowed(db, before, r, ctx)));
+          && !(name === 'account.move' && f === 'line_ids' && ctx?.verifiedBankRewrite));
         const changed = fields.filter((f) => !same(model.fields[f], before[f], r[f]));
         if (name === 'sign.request' && before.state !== 'sent') {
           for (const f of ['signature', 'sign_date', 'signer_ids', 'field_values']) {

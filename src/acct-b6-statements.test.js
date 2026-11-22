@@ -183,7 +183,7 @@ test('BANK-19: guards enforce company and journal matching, line unlinking on de
     /Cannot delete a statement with reconciled lines/
   );
 
-  // Unreconciled statement deletion unlinks its lines via ORM
+  // A statement with a booked unreconciled line cannot be deleted.
   const stmtUnrec = create(db, 'account.bank.statement', {
     name: 'STMT/UNREC',
     journal_id: bankJournal.id,
@@ -202,9 +202,7 @@ test('BANK-19: guards enforce company and journal matching, line unlinking on de
     state: 'to_check',
   });
   unrecDb = unrecLine.db;
-  const unlinkedDb = unlink(unrecDb, 'account.bank.statement', [stmtUnrec.id]);
-  const preservedLine = read(unlinkedDb, 'account.bank.statement.line', unrecLine.id);
-  assert.equal(preservedLine.statement_id, null, 'Deleting statement unlinks its lines via ORM');
+  assert.throws(() => unlink(unrecDb, 'account.bank.statement', [stmtUnrec.id]), /booked lines/i);
 });
 
 test('BANK-19: statement import (statements.js) creates one statement per imported file with balances', () => {

@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
-import { create, read, search, write } from './orm.js';
+import { create, read, search, unlink, write } from './orm.js';
 import { postMove, payMove } from './models/accounting.js';
 import { postPayment } from './models/pay.js';
 import { reconcileWith, matchPayment, unreconcile, bookToAccount } from './models/bank.js';
 import { importStatement } from './models/statements.js';
 import { applyDiff, diffDb } from './sync.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { applyRule } from './models/reconcile.js';
 
 const LINE_MODEL = 'account.bank.statement.line';
 const MOVE_MODEL = 'account.move';
@@ -38,6 +40,56 @@ function setupBankTestDb() {
   const bankJournal = read(db, 'account.journal', bankJournalRes.id);
   return { db, bankJournal, suspenseAccount, bankAccount, outstandingAccount };
 }
+
+test('an unallocated statement line cannot link an unrelated posted entry', () => {
+  const { db, bankJournal } = setupBankTestDb();
+  const first = create(db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'First', amount: 100 });
+  const moveId = read(first.db, LINE_MODEL, first.id).bank_move_id;
+  assert.throws(() => create(first.db, LINE_MODEL, {
+    journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'Forged', amount: 50, bank_move_id: moveId, open_amount: 50,
+  }), /bank entry cannot be supplied/i);
+  assert.throws(() => create(first.db, LINE_MODEL, {
+    journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'Duplicate', amount: 100, bank_move_id: moveId, open_amount: 100,
+  }), /bank entry cannot be supplied/i);
+  const forged = { ...first.db, records: { ...first.db.records, [LINE_MODEL]: [...first.db.records[LINE_MODEL], {
+    ...read(first.db, LINE_MODEL, first.id), id: 999999, bank_move_id: moveId, state: 'reconciled', move_id: moveId,
+    open_amount: 0, allocations: [{ payment_move_id: moveId, amount: 100 }],
+  }] } };
+  assert.throws(() => applyDiff(first.db, diffDb(first.db, forged), { isAdmin: true }), /bank entry|already linked/i);
+});
+
+test('untouched booked transactions can be corrected and deleted with reversal entries', () => {
+  const { db, bankJournal } = setupBankTestDb();
+  const created = create(db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'Mistyped', amount: 100 });
+  const oldId = read(created.db, LINE_MODEL, created.id).bank_move_id;
+  const corrected = write(created.db, LINE_MODEL, created.id, { amount: 75, payment_ref: 'Corrected' });
+  const line = read(corrected, LINE_MODEL, created.id);
+  assert.notEqual(line.bank_move_id, oldId);
+  assert.ok(search(corrected, MOVE_MODEL).some((move) => move.reversed_entry_id === oldId));
+  assert.doesNotThrow(() => applyDiff(created.db, diffDb(created.db, corrected), { isAdmin: true }));
+  const deleted = unlink(corrected, LINE_MODEL, [created.id]);
+  assert.ok(search(deleted, MOVE_MODEL).some((move) => move.reversed_entry_id === line.bank_move_id));
+  assert.doesNotThrow(() => applyDiff(corrected, diffDb(corrected, deleted), { isAdmin: true }));
+});
+
+test('migration books a company-less legacy line using its journal company currency', () => {
+  const base = seed();
+  const eur = search(base, 'res.currency').find((currency) => currency.name === 'EUR');
+  const usd = search(base, 'res.currency').find((currency) => currency.name === 'USD');
+  const withRate = write(base, 'res.currency', eur.id, { rate_ids: [{ date: '2026-01-01', rate: 0.5 }] });
+  const company = createCompanyWithDefaultInvoiceJournals(withRate, { name: 'Migration company', currency_id: eur.id });
+  const journal = search(company.db, 'account.journal').find((item) => item.company_id === company.id && item.type === 'bank');
+  const db = write(company.db, 'account.journal', journal.id, { currency_id: usd.id });
+  const line = { id: 90001, journal_id: journal.id, date: '2026-01-02', payment_ref: 'Legacy foreign', amount: 100, state: 'to_check' };
+  const legacy = { ...db, schema_version: 61, records: { ...db.records, [LINE_MODEL]: [...db.records[LINE_MODEL], line] } };
+  const migrated = migrate(legacy);
+  const result = read(migrated, LINE_MODEL, line.id);
+  assert.equal(result.company_id, company.id);
+  assert.equal(result.open_amount, 50);
+  const move = read(migrated, MOVE_MODEL, result.bank_move_id);
+  assert.equal(move.company_id, company.id);
+  assert.equal(move.line_ids.find((item) => item.account_id === journal.default_account_id).debit, 50);
+});
 
 test('BANK-2: importing statement lines immediately posts an entry in the bank journal (bank vs suspense) and GL bank balance equals statement', () => {
   const { db: baseDb, bankJournal, suspenseAccount, bankAccount } = setupBankTestDb();
@@ -374,7 +426,8 @@ test('BANK-4: unreconciling a line matched to existing payment keeps the payment
   // Match payment
   const lineWithPay = write(db, LINE_MODEL, lineRes.id, { payment_id: payment.id });
   const matched = matchPayment(lineWithPay, read(lineWithPay, LINE_MODEL, lineRes.id));
-  db = matched.db;
+  db = applyDiff(lineWithPay, diffDb(lineWithPay, matched.db), { isAdmin: true });
+  const matchedDb = db;
   const matchedLine = read(db, LINE_MODEL, lineRes.id);
   assert.equal(matchedLine.state, 'reconciled');
 
@@ -390,7 +443,7 @@ test('BANK-4: unreconciling a line matched to existing payment keeps the payment
   const afterPayment = read(db, 'account.payment', payment.id);
   assert.equal(afterPayment.state, 'posted', 'Existing payment must remain posted');
 
-  assert.doesNotThrow(() => applyDiff(lineRes.db, diffDb(lineRes.db, db), { isAdmin: true }));
+  assert.doesNotThrow(() => applyDiff(matchedDb, diffDb(matchedDb, db), { isAdmin: true }));
 });
 
 test('BANK-4: unreconciling refuses when entry is in locked period', () => {
@@ -530,7 +583,7 @@ test('BANK-3: directBank shortcut for statement lines is refused in payMove', ()
   }, /direct bank/i);
 });
 
-test('moveGuard: statement bank entry permits suspense rewrite, refuses bank line edit or unbalanced rewrite via diffDb + applyDiff', () => {
+test('moveGuard: general statement entry rewrites are rejected via diffDb + applyDiff', () => {
   const { db: baseDb, bankJournal, bankAccount } = setupBankTestDb();
 
   const otherAccountRes = create(baseDb, 'account.account', {
@@ -553,7 +606,7 @@ test('moveGuard: statement bank entry permits suspense rewrite, refuses bank lin
   const line = read(db, LINE_MODEL, lineRes.id);
   const bankMove = read(db, MOVE_MODEL, line.bank_move_id);
 
-  // 1. Allowed suspense rewrite: replacing suspense line with otherAccount line (balanced, bank line unchanged)
+  // A balanced counterpart substitution without reconciliation is rejected.
   const validRewrittenMove = {
     ...bankMove,
     line_ids: [
@@ -568,7 +621,7 @@ test('moveGuard: statement bank entry permits suspense rewrite, refuses bank lin
       [MOVE_MODEL]: db.records[MOVE_MODEL].map((m) => (m.id === bankMove.id ? validRewrittenMove : m)),
     },
   };
-  assert.doesNotThrow(() => applyDiff(db, diffDb(db, validDb), { isAdmin: true }));
+  assert.throws(() => applyDiff(db, diffDb(db, validDb), { isAdmin: true }), /Posted entries cannot be edited/i);
 
   // 2. Refused rewrite: changing the bank liquidity line (e.g. debit 150 instead of 100)
   const invalidBankLineMove = {
@@ -587,7 +640,7 @@ test('moveGuard: statement bank entry permits suspense rewrite, refuses bank lin
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, invalidBankDb), { isAdmin: true }),
-    /The bank liquidity line cannot be changed/i
+    /Posted entries cannot be edited/i
   );
 
   // 3. Refused rewrite: unbalanced rewrite
@@ -607,8 +660,60 @@ test('moveGuard: statement bank entry permits suspense rewrite, refuses bank lin
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, unbalancedDb), { isAdmin: true }),
-    /A posted entry needs balanced journal items/i
+    /Posted entries cannot be edited/i
   );
+});
+
+test('a forged counterpart cannot accompany a reconciliation allocation', () => {
+  const { db, bankJournal } = setupBankTestDb();
+  const first = create(db, 'account.account', { name: 'Selected expense', code: '799810', account_type: 'expense', company_id: 1 });
+  const second = create(first.db, 'account.account', { name: 'Other expense', code: '799811', account_type: 'expense', company_id: 1 });
+  const line = create(second.db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-06-01', payment_ref: 'Expense', amount: -100, counterpart_account_id: first.id });
+  const matched = bookToAccount(line.db, read(line.db, LINE_MODEL, line.id)).db;
+  const moveId = read(matched, LINE_MODEL, line.id).bank_move_id;
+  const forged = { ...matched, records: { ...matched.records, [MOVE_MODEL]: matched.records[MOVE_MODEL].map((move) => move.id === moveId
+    ? { ...move, line_ids: move.line_ids.map((item) => item.account_id === first.id ? { ...item, account_id: second.id } : item) } : move) } };
+  assert.throws(() => applyDiff(line.db, diffDb(line.db, forged), { isAdmin: true }), /counterpart|match|reconcil/i);
+  const splitForged = { ...matched, records: { ...matched.records, [MOVE_MODEL]: matched.records[MOVE_MODEL].map((move) => move.id === moveId
+    ? { ...move, line_ids: move.line_ids.flatMap((item) => item.account_id === first.id
+      ? [{ ...item, debit: 1 }, { ...item, account_id: second.id, debit: 99 }] : [item]) } : move) } };
+  assert.throws(() => applyDiff(line.db, diffDb(line.db, splitForged), { isAdmin: true }), /counterpart|match|reconcil/i);
+  const taxId = search(line.db, 'account.tax')[0].id;
+  const forgedTax = { ...matched, records: { ...matched.records, [MOVE_MODEL]: matched.records[MOVE_MODEL].map((move) => move.id === moveId
+    ? { ...move, line_ids: move.line_ids.flatMap((item) => item.account_id === first.id
+      ? [{ ...item, debit: 1 }, { ...item, account_id: second.id, debit: 99, tax_id: taxId }] : [item]) } : move) } };
+  assert.throws(() => applyDiff(line.db, diffDb(line.db, forgedTax), { isAdmin: true }), /counterpart|match|reconcil|tax/i);
+});
+
+test('a rule allocation cannot authorize substituted journal items', () => {
+  const { db, bankJournal } = setupBankTestDb();
+  const first = create(db, 'account.account', { name: 'Rule expense', code: '799812', account_type: 'expense', company_id: 1 });
+  const second = create(first.db, 'account.account', { name: 'Unrelated expense', code: '799813', account_type: 'expense', company_id: 1 });
+  const rule = create(second.db, 'account.reconcile.model', { name: 'Expense rule', rule_type: 'writeoff_button', line_ids: [{ account_id: first.id, amount_type: 'percentage', amount: 100 }] });
+  const line = create(rule.db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-06-01', payment_ref: 'Rule', amount: -100 });
+  const matched = applyRule(line.db, read(line.db, 'account.reconcile.model', rule.id), read(line.db, LINE_MODEL, line.id));
+  assert.doesNotThrow(() => applyDiff(line.db, diffDb(line.db, matched), { isAdmin: true }));
+  const moveId = read(matched, LINE_MODEL, line.id).bank_move_id;
+  const forged = { ...matched, records: { ...matched.records, [MOVE_MODEL]: matched.records[MOVE_MODEL].map((move) => move.id === moveId
+    ? { ...move, line_ids: move.line_ids.map((item) => item.account_id === first.id ? { ...item, account_id: second.id } : item) } : move) } };
+  assert.throws(() => applyDiff(line.db, diffDb(line.db, forged), { isAdmin: true }), /reconciliation model/i);
+});
+
+test('rule matching retains an account created while resolving suspense', () => {
+  const { db, bankJournal, suspenseAccount } = setupBankTestDb();
+  const expense = create(db, 'account.account', { name: 'Rule expense', code: '799814', account_type: 'expense', company_id: 1 });
+  const rule = create(expense.db, 'account.reconcile.model', { name: 'Full rule', rule_type: 'writeoff_button', line_ids: [{ account_id: expense.id, amount_type: 'percentage', amount: 100 }] });
+  const line = create(rule.db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-06-01', payment_ref: 'Legacy rule', amount: -100 });
+  const moveId = read(line.db, LINE_MODEL, line.id).bank_move_id;
+  const futureId = (line.db.seq['account.account'] ?? 0) + 1;
+  const legacy = { ...line.db, records: { ...line.db.records,
+    'res.company': line.db.records['res.company'].map((company) => company.id === 1 ? { ...company, account_journal_suspense_account_id: null } : company),
+    'account.journal': line.db.records['account.journal'].map((journal) => journal.id === bankJournal.id ? { ...journal, suspense_account_id: null } : journal),
+    [MOVE_MODEL]: line.db.records[MOVE_MODEL].map((move) => move.id === moveId ? { ...move, line_ids: move.line_ids.map((item) => item.account_id === suspenseAccount.id ? { ...item, account_id: futureId } : item) } : move),
+  } };
+  const matched = applyRule(legacy, read(legacy, 'account.reconcile.model', rule.id), read(legacy, LINE_MODEL, line.id));
+  assert.ok(read(matched, 'account.account', futureId));
+  assert.equal(read(matched, LINE_MODEL, line.id).state, 'reconciled');
 });
 
 test('BANK-3 & BANK-6: multi-invoice reconcileWith rewrites suspense line on existing bank entry', () => {
@@ -661,6 +766,10 @@ test('BANK-3 & BANK-6: multi-invoice reconcileWith rewrites suspense line on exi
   assert.equal(bankLine.debit, 200);
 
   assert.doesNotThrow(() => applyDiff(lineRes.db, diffDb(lineRes.db, db), { isAdmin: true }));
+  const expense = search(db, 'account.account').find((account) => account.account_type === 'expense' && (account.company_id ?? 1) === 1);
+  const forged = { ...db, records: { ...db.records, [MOVE_MODEL]: db.records[MOVE_MODEL].map((item) => item.id === move.id
+    ? { ...item, line_ids: [...item.line_ids, { account_id: expense.id, debit: 1, credit: 0 }, { account_id: expense.id, debit: 0, credit: 1 }] } : item) } };
+  assert.throws(() => applyDiff(lineRes.db, diffDb(lineRes.db, forged), { isAdmin: true }), /counterpart|match|reconcil/i);
 });
 
 test('BANK-3 & BANK-6: bookToAccount rewrites suspense line on existing bank entry', () => {

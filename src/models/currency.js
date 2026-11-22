@@ -122,8 +122,10 @@ export function upsertCurrencyRate(db, currencyId, { date = today(), rate, compa
 export function upsertCurrencyRates(db, rates, { date = today(), companyId = null } = {}) {
   let nextDb = db;
   if (Array.isArray(rates)) {
+    const baseId = baseCurrency(nextDb)?.id;
     for (const item of rates) {
       const cId = item.currency_id ?? item.currencyId ?? item.currency;
+      if (baseId != null && String(cId) === String(baseId)) continue;
       nextDb = upsertCurrencyRate(nextDb, cId, {
         date: item.date ?? date,
         rate: item.rate,

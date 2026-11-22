@@ -1,6 +1,7 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
 import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
+import { writeBankStatementMove } from './finance.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
@@ -434,15 +435,17 @@ function writeOff(db, rule, line) {
       current = bookedBank.db;
       bankMoveId = bookedBank.bankMoveId;
     }
+    const suspense = ensureBankSuspense(current, company, line.journal_id);
+    current = suspense.db;
+    const suspenseId = suspense.id;
     const bankMove = read(current, 'account.move', bankMoveId);
-    const { id: suspenseId } = ensureBankSuspense(current, company, line.journal_id);
     const bankLines = (bankMove?.line_ids ?? []).filter((l) => l.account_id !== suspenseId);
     const externalAllocated = (line.allocations ?? []).filter((a) => a.payment_move_id && a.payment_move_id !== bankMoveId).reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
     const suspLine = externalAllocated > 0 ? (incoming
       ? { account_id: suspenseId, debit: 0, credit: externalAllocated, ...(foreign ? { currency_id: journalCurrency, amount_currency: -roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }
       : { account_id: suspenseId, debit: externalAllocated, credit: 0, ...(foreign ? { currency_id: journalCurrency, amount_currency: roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }) : null;
     const newLines = [...bankLines, ...items, ...(suspLine ? [suspLine] : [])];
-    current = write(current, 'account.move', bankMoveId, { line_ids: newLines });
+    current = writeBankStatementMove(current, bankMoveId, newLines);
     if (items.some((l) => l.analytic_distribution)) {
       current = postAnalytic(removeAnalytic(current, bankMoveId), bankMoveId);
     }

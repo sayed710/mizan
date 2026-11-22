@@ -874,6 +874,9 @@ export function ensureBankSuspense(db, company, journalId) {
   const compId = company ?? 1;
   const journal = journalId ? read(db, 'account.journal', journalId) : null;
   if (journal?.company_id && journal.company_id !== compId) throw new Error('The bank journal belongs to another company or does not exist');
+  if (journal?.suspense_account_id && journal.suspense_account_id === journal.default_account_id) {
+    throw new Error('Configure a bank suspense account on the journal or the company');
+  }
 
   if (journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id) {
     const account = read(db, 'account.account', journal.suspense_account_id);
@@ -888,17 +891,7 @@ export function ensureBankSuspense(db, company, journalId) {
   const compAccount = compSuspenseId ? read(db, 'account.account', compSuspenseId) : null;
   const hasValidCompAccount = compAccount && compAccount.active !== false && (!compAccount.company_id || compAccount.company_id === compId) && compAccount.id !== journal?.default_account_id;
 
-  if (journal) {
-    if (journal.suspense_account_id === journal.default_account_id && hasValidCompAccount) {
-      return { db, id: compAccount.id };
-    }
-    if (journal.suspense_account_id === journal.default_account_id) {
-      // Both journal suspense and default account point to same account, and company has no separate suspense
-      // Fall through to auto-create a dedicated suspense account
-    } else if (hasValidCompAccount) {
-      throw new Error(`Configure the suspense account on journal ${journal.name || journal.code}`);
-    }
-  } else if (hasValidCompAccount) {
+  if (hasValidCompAccount) {
     return { db, id: compAccount.id };
   }
 
@@ -957,7 +950,10 @@ export function isBookedToSuspense(db, line) {
   if (!line?.bank_move_id) return false;
   const company = line.company_id ?? 1;
   const journalId = line.journal_id ?? paymentJournal(db, null, company).id;
-  const suspenseId = read(db, 'account.journal', journalId)?.suspense_account_id;
+  const journal = read(db, 'account.journal', journalId);
+  const suspenseId = journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
+    ? journal.suspense_account_id
+    : read(db, 'res.company', line.company_id ?? journal?.company_id ?? 1)?.account_journal_suspense_account_id;
   if (!suspenseId) return false;
   const bankEntry = read(db, 'account.move', line.bank_move_id);
   return (bankEntry?.line_ids ?? []).some((l) => l.account_id === suspenseId);
@@ -969,6 +965,12 @@ export function bookedStatementAmount(db, line) {
   const company = line.company_id ?? 1;
   const account = paymentJournal(db, line.journal_id, company).accountId;
   const sign = line.amount > 0 ? 1 : -1;
+  const bankEntry = read(db, 'account.move', line.bank_move_id);
+  const liquidityLines = (bankEntry?.line_ids ?? []).filter((item) => item.account_id === account);
+  const signedLiquidity = liquidityLines.map((item) => sign * ((Number(item.debit) || 0) - (Number(item.credit) || 0)));
+  if (signedLiquidity.some((amount) => amount < 0)) {
+    return roundCurrency(signedLiquidity.filter((amount) => amount > 0).reduce((sum, amount) => sum + amount, 0), companyCurrencyRecord(db, company));
+  }
   const directMoves = !isBookedToSuspense(db, line) && line.state === 'reconciled' && (line.allocations ?? []).every((a) => !a.invoice_id && !a.reconcile_model_id)
     ? statementPaymentIds(db, line)
         .map((id) => read(db, 'account.payment', id))
@@ -1042,7 +1044,10 @@ function reconcileIndex(db) {
       }
     }
     if (statement.open_amount === 0) {
-      const suspense = read(db, 'account.journal', statement.journal_id)?.suspense_account_id;
+      const journal = read(db, 'account.journal', statement.journal_id);
+      const suspense = journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
+        ? journal.suspense_account_id
+        : read(db, 'res.company', statement.company_id ?? journal?.company_id ?? 1)?.account_journal_suspense_account_id;
       for (const moveId of new Set([statement.bank_move_id, ...(statement.allocations ?? []).map((a) => a.payment_move_id)].filter(Boolean))) push(settledSuspense, moveId, suspense);
     }
   }

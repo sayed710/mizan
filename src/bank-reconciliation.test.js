@@ -31,12 +31,14 @@ test('bank reconciliation enforces company for entries, payment entries, journal
     assert.throws(() => write(line.db, LINE, line.id, { state: 'reconciled', ...vals }), /another company/);
     assert.throws(() => applyDiff(line.db, diffDb(line.db, forged(vals)), { isAdmin: true }), /another company/);
   }
-  const done = write(line.db, LINE, line.id, { state: 'reconciled', move_id: own.id });
+  const selected = write(line.db, LINE, line.id, { counterpart_account_id: search(line.db, 'account.account').find((a) => a.code === '450000').id });
+  const done = run(selected, line.id, 'Book to Account');
   assert.equal(read(done, LINE, line.id).state, 'reconciled');
   assert.throws(() => write(done, LINE, line.id, { company_id: branch.id }), /cannot be changed/);
 
   const liquidity = create(line.db, 'account.account', { name: 'Foreign Bank Liquidity', code: '999803', account_type: 'asset_cash', company_id: branch.id });
-  const journal = create(liquidity.db, 'account.journal', { name: 'Foreign Bank', code: 'FB', type: 'bank', company_id: branch.id, default_account_id: liquidity.id, suspense_account_id: liquidity.id });
+  const suspense = create(liquidity.db, 'account.account', { name: 'Foreign Suspense', code: '999804', account_type: 'asset_current', company_id: branch.id });
+  const journal = create(suspense.db, 'account.journal', { name: 'Foreign Bank', code: 'FB', type: 'bank', company_id: branch.id, default_account_id: liquidity.id, suspense_account_id: suspense.id });
   assert.throws(() => addLine(journal.db, { company_id: 1, amount: 10, journal_id: journal.id }), /bank journal belongs to another company/);
   const branchLine = addLine(journal.db, { company_id: branch.id, amount: -10, journal_id: journal.id, counterpart_account_id: search(journal.db, 'account.account').find((a) => a.code === '600000' && !a.company_id).id });
   const booked = run(branchLine.db, branchLine.id, 'Book to Account');

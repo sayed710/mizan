@@ -3387,6 +3387,7 @@ const ar = {
   'A closed statement cannot be modified': 'لا يمكن تعديل كشف حساب مغلق',
   'A closed statement cannot be deleted': 'لا يمكن حذف كشف حساب مغلق',
   'Cannot delete a statement with reconciled lines': 'لا يمكن حذف كشف حساب به بنود مطابقة',
+  'Cannot delete a statement with booked lines': 'لا يمكن حذف كشف حساب به بنود مرحّلة',
   'Cannot add lines to a closed statement': 'لا يمكن إضافة بنود إلى كشف حساب مغلق',
   'Cannot remove lines from a closed statement': 'لا يمكن إزالة بنود من كشف حساب مغلق',
   'Cannot change lines linked to a closed statement': 'لا يمكن تعديل بنود مرتبطة بكشف حساب مغلق',

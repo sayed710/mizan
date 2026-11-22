@@ -973,11 +973,11 @@ test('Qodo #5: bank statement guard honors user-specific lock exception for matc
     date: '2026-02-15',
     payment_ref: 'Bank Wire',
     amount: 100,
-    state: 'reconciled',
-    move_id: bankMove.id,
-    bank_move_id: bankMove.id,
+    counterpart_account_id: search(db, 'account.account').find((a) => a.code === '450000').id,
   });
-  db = write(line.db, 'res.company', 1, { lock_date: '2026-03-31' });
+  const { bookToAccount } = await import('./models/bank.js');
+  const booked = bookToAccount(line.db, read(line.db, 'account.bank.statement.line', line.id)).db;
+  db = write(booked, 'res.company', 1, { lock_date: '2026-03-31' });
   db = createLockException(db, {
     company_id: 1,
     user_id: 2,

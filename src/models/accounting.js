@@ -2943,7 +2943,6 @@ export const accountingModels = {
       },
       suspense_account_id: {
         type: 'many2one', relation: 'account.account', label: 'Suspense Account',
-        required: (r) => isLiquidityJournal(r),
         help: 'Bank statements transactions will be posted on the suspense account until the final reconciliation allowing finding the right account.',
       },
       non_deductible_account_id: {

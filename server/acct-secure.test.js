@@ -881,6 +881,7 @@ test('API model discovery reports conditional requirements as conditional', asyn
   const { seed } = await import('../src/seed.js');
   const res = handleApi({ method: 'GET', path: '/api/v1/models', query: new URLSearchParams(), body: null, db: seed(), user: { name: 'Admin', isAdmin: true } });
   const journal = res.body.find((m) => m.model === 'account.journal');
-  assert.equal(journal.fields.suspense_account_id.required, 'conditional');
+  assert.equal(journal.fields.default_account_id.required, 'conditional');
+  assert.equal(journal.fields.suspense_account_id.required, false);
   assert.equal(journal.fields.name.required, true);
 });

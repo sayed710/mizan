@@ -170,6 +170,7 @@ export const bankStatementModels = {
       if (lines.some((l) => l.state === 'reconciled' || (l.allocations ?? []).length > 0)) {
         throw new Error('Cannot delete a statement with reconciled lines');
       }
+      if (lines.some((l) => l.bank_move_id)) throw new Error('Cannot delete a statement with booked lines');
       let currentDb = db;
       for (const l of lines) {
         currentDb = write(currentDb, 'account.bank.statement.line', l.id, { statement_id: null });
