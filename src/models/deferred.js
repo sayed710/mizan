@@ -8,7 +8,7 @@ import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency }
 import { t } from '../i18n.js';
 
 // Decoupled from accounting.js to avoid a circular module import between accounting and deferred.
-let deferredPostMoveHook = null;
+var deferredPostMoveHook = null;
 export function registerDeferredPostMoveHook(fn) {
   deferredPostMoveHook = fn;
 }
@@ -175,7 +175,7 @@ function groupedBoardLines(schedule, date, method, currency) {
 
 function adjustedRecognitionOutstanding(line, currency) {
   const amount = roundCurrency(Math.abs(Number(line.amount) || 0), currency);
-  const adjusted = roundCurrency(Math.abs(Number(line.credit_adjusted_amount) || 0), currency);
+  const adjusted = roundCurrency(lineCreditAdjustmentAmount(null, null, line), currency);
   if (adjusted > amount) throw new Error('Deferred recognition credit adjustments exceed the posted amount');
   return roundCurrency(amount - adjusted, currency);
 }
@@ -217,7 +217,7 @@ function datedBoard(amount, start, end, method = 'day', currency = null, periodi
 }
 
 /** Cumulative recognition for one board period through an inclusive cut-off date. */
-function recognitionTargetThroughDate(schedule, index, date, method, currency) {
+export function recognitionTargetThroughDate(schedule, index, date, method, currency) {
   const normMethod = normalizeDeferredComputationMethod(method);
   const line = schedule.board[index];
   const start = index === 0 ? (schedule.start_date ?? line.date) : addDays(schedule.board[index - 1].date, 1);
@@ -229,6 +229,78 @@ function recognitionTargetThroughDate(schedule, index, date, method, currency) {
   const periodDays = Math.floor((Date.parse(end) - Date.parse(start)) / DAY) + 1;
   if (periodDays <= 0) throw new Error(`Invalid deferred service period on ${schedule.name}`);
   return roundCurrency((Number(line.amount) || 0) * elapsedDays / periodDays, currency);
+}
+
+/** Reconstruct a deferral schedule as of a cutoff date using saved credit adjustment snapshots. */
+export function scheduleAsOf(db, schedule, cutoffDate) {
+  if (!cutoffDate || !schedule || !Array.isArray(schedule.board)) return schedule;
+  const creditAdjustments = schedule.credit_adjustments;
+  if (!Array.isArray(creditAdjustments) || !creditAdjustments.length) {
+    const lineAdjs = schedule.board.flatMap((l) => l.credit_adjustments ?? []);
+    if (!lineAdjs.length) return schedule;
+    const futureAdjs = lineAdjs.filter((adj) => adj.date > cutoffDate);
+    if (!futureAdjs.length) return schedule;
+    let state = schedule.state;
+    if (state === 'cancel') {
+      state = 'running';
+    }
+    return { ...schedule, state };
+  }
+
+  const resolved = [];
+  for (const entry of creditAdjustments) {
+    let noteDate = entry.date;
+    if (!noteDate && entry.note_id) {
+      const note = read(db, 'account.move', entry.note_id);
+      noteDate = note?.date ?? note?.invoice_date;
+    }
+    if (noteDate) {
+      resolved.push({ ...entry, noteDate });
+    }
+  }
+
+  const futureSnapshots = resolved
+    .filter((e) => e.noteDate > cutoffDate)
+    .sort((a, b) => a.noteDate.localeCompare(b.noteDate));
+
+  if (!futureSnapshots.length) {
+    return schedule;
+  }
+
+  const earliest = futureSnapshots[0];
+  const state = earliest.state_before ?? schedule.state;
+  const boardBefore = Array.isArray(earliest.board_before) ? earliest.board_before : schedule.board;
+
+  const board = boardBefore.map((baseLine, index) => {
+    const currentLine = schedule.board.find((l) => l.date === baseLine.date) ?? schedule.board[index];
+    const currentAdjs = (currentLine?.credit_adjustments ?? []).filter((adj) => adj?.date && adj.date <= cutoffDate);
+    const baseAdjs = (baseLine.credit_adjustments ?? []).filter((adj) => adj?.date && adj.date <= cutoffDate);
+    const combined = [...baseAdjs];
+    const seenMoveIds = new Set(baseAdjs.map((a) => a.move_id));
+    for (const adj of currentAdjs) {
+      if (!seenMoveIds.has(adj.move_id)) {
+        combined.push(adj);
+        seenMoveIds.add(adj.move_id);
+      }
+    }
+    return {
+      ...baseLine,
+      ...(combined.length > 0 ? { credit_adjustments: combined } : {}),
+    };
+  });
+
+  return { ...schedule, state, board };
+}
+
+/** Cumulative credit adjustments posted on a board line on or before cutoffDate. */
+export function lineCreditAdjustmentAmount(db, schedule, line, cutoffDate) {
+  if (!line || !Array.isArray(line.credit_adjustments)) return 0;
+  return line.credit_adjustments.reduce((sum, adj) => {
+    if (!cutoffDate || adj.date <= cutoffDate) {
+      return sum + (Number(adj.amount) || 0);
+    }
+    return sum;
+  }, 0);
 }
 
 const isRefund = (move) => ['out_refund', 'in_refund'].includes(move.move_type);
@@ -667,7 +739,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
           : postRecognitionCorrection(next, schedule, recognitionMove, outstanding, date, note, true);
         next = stepDb;
         if (reversalId) {
-          reversalByDate.set(line.date, reversalId);
+          reversalByDate.set(line.date, { id: reversalId, amount: outstanding, date });
           adjustmentMoveIds.push(reversalId);
         }
       }
@@ -688,8 +760,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
           const correction = postRecognitionCorrection(next, schedule, recognitionMove, adjustmentAmount, date, note, true);
           next = correction.db;
           if (correction.id) adjustmentMoveIds.push(correction.id);
-          line.credit_adjusted_amount = roundCurrency((Number(line.credit_adjusted_amount) || 0) + adjustmentAmount, currency);
-          line.credit_adjustment_move_ids = [...(line.credit_adjustment_move_ids ?? []), correction.id];
+          line.credit_adjustments = [...(line.credit_adjustments ?? []), { move_id: correction.id, amount: adjustmentAmount, date }];
         }
       }
     }
@@ -711,8 +782,13 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
     }
 
     const updatedBoard = board.map((line) => {
-      let updatedLine = reversalByDate.has(line.date)
-        ? { ...line, reversal_move_id: reversalByDate.get(line.date), credit_adjusted_amount: roundCurrency(Math.abs(Number(line.amount) || 0), currency) }
+      const rev = reversalByDate.get(line.date);
+      let updatedLine = rev
+        ? {
+            ...line,
+            reversal_move_id: rev.id,
+            credit_adjustments: [...(line.credit_adjustments ?? []), { move_id: rev.id, amount: rev.amount, date: rev.date }],
+          }
         : line;
       if (updatedLine.reversal_move_id && reversed.has(updatedLine.reversal_move_id)) {
         updatedLine = { ...updatedLine, reversal_move_id: null };
@@ -783,6 +859,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       ...(schedule.credit_adjustments ?? []),
       {
         note_id: note.id,
+        date: noteDate,
         board_before,
         state_before,
         move_ids: adjustmentMoveIds,
@@ -1605,6 +1682,7 @@ export const deferredModels = {
           reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
           credit_adjusted_amount: { type: 'monetary', readonly: true, hidden: true },
           credit_adjustment_move_ids: { type: 'json', readonly: true, hidden: true },
+          credit_adjustments: { type: 'json', readonly: true, hidden: true },
         },
         newLine: () => ({ date: today(), amount: 0, posted: false, move_id: null }),
       },
