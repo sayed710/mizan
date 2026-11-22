@@ -299,7 +299,7 @@ function invoiceFrom(db, order, moveType, originField, options = {}) {
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
     invoice_origin: order.name,
     fiscal_position_id: order.fiscal_position_id ?? null,
-    incoterm_id: order.incoterm_id ?? null,
+    ...(order.incoterm_id ? { incoterm_id: order.incoterm_id } : {}),
     incoterm_location: order.incoterm_location ?? null,
     ...(order.currency_id ? { currency_id: order.currency_id } : {}),
     [originField]: order.id,

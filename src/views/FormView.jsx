@@ -8,7 +8,7 @@ import { invoiceTaxTotals } from '../models/ledger.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { myEmployeeId } from '../access.js';
 import { dateLocale, t } from '../i18n.js';
-import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
+import { Avatar, display, FieldInput, isLabelable, money, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
 import { companyCurrencyRecord } from '../money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
@@ -409,6 +409,11 @@ export function FormView({ leaf, id, base, params }) {
   const [tab, setTab] = useState(0);
   const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params, parseRel(db, model, params.get('rel'))) : null));
   const stageExplicit = useRef(!isNew || Object.hasOwn(restored?.values ?? {}, 'stage_id') || Object.hasOwn(leaf.defaults ?? {}, 'stage_id') || params.has('default_stage_id'));
+  const editedFields = useRef(new Set([
+    ...(restored ? Object.keys(restored.values ?? {}) : []),
+    ...Object.keys(leaf.defaults ?? {}),
+    ...[...params].filter(([k]) => k.startsWith('default_') && def.fields[k.slice(8)]).map(([k]) => k.slice(8)),
+  ]));
   const revRef = useRef(0);
 
   const view = params.get('view') ?? '';
@@ -426,7 +431,8 @@ export function FormView({ leaf, id, base, params }) {
   const dirty = Object.keys(changes).length > 0;
   const set = (k) => (v) => {
     if (k === 'stage_id') stageExplicit.current = true;
-    setChanges((c) => changeFormValue(model, isNew ? initial : rec, c, k, v, getDb(), stageExplicit.current));
+    editedFields.current.add(k);
+    setChanges((c) => changeFormValue(model, isNew ? initial : rec, c, k, v, getDb(), stageExplicit.current, editedFields.current));
     setError(null);
   };
   const fail = (e) => setError(e instanceof Error ? t(e.message) : t('Could not save'));
@@ -609,8 +615,7 @@ export function FormView({ leaf, id, base, params }) {
           {idx >= 0 && (
             <div className="pager">
               <span>{idx + 1} / {ids.length}</span>
-              <button type="button" className="btn sm" aria-label={t('Previous record')} onClick={() => pageTo(-1)}>‹</button>
-              <button type="button" className="btn sm" aria-label={t('Next record')} onClick={() => pageTo(1)}>›</button>
+              <PagerButtons prevLabel={t('Previous record')} nextLabel={t('Next record')} onPrev={() => pageTo(-1)} onNext={() => pageTo(1)} />
             </div>
           )}
         </div>

@@ -3550,6 +3550,10 @@ const ar = {
   'Report Footer': 'تذييل التقرير',
   'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Reminders': 'التذكيرات',
+  'Next Reminder': 'التذكير التالي',
+  'Last Reminder Date': 'تاريخ آخر تذكير',
+  'Reminder Level': 'مستوى التذكير',
   'Not Started': 'لم يبدأ',
   'Before': 'قبل',
   'Current': 'الحالي',
@@ -3568,6 +3572,7 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Terms printed on new customer invoices and credit notes.': 'الشروط المطبوعة على فواتير العملاء والإشعارات الدائنة الجديدة.',
   'Trade term set on new customer invoices.': 'شرط التجارة المعيّن على فواتير العملاء الجديدة.',
+  'Select an active incoterm': 'اختر شرط تجارة نشطاً',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

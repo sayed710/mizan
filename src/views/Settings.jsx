@@ -483,7 +483,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
           <select id="incoterm_id" disabled={readOnly || !company} value={company?.incoterm_id ?? ''}
             onChange={(e) => onWriteCompany({ incoterm_id: e.target.value ? Number(e.target.value) : null })}>
             <option value="">{t('None')}</option>
-            {(db.records['account.incoterm'] ?? []).filter((item) => item.active !== false).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            {(db.records['account.incoterm'] ?? []).filter((item) => item.active !== false || item.id === company?.incoterm_id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </SettingRow>
       </div>
