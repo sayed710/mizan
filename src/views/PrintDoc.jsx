@@ -279,8 +279,12 @@ export function PrintDoc({ model, id }) {
   const db = useDb();
   const def = models[model];
   const layout = LAYOUTS[model];
-  const rec = read(db, model, Number(id));
-  const recId = rec?.id;
+  const rawIds = String(id || '').split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
+  const rec = read(db, model, rawIds[0] ?? Number(id));
+  const multiPayments = model === 'account.payment' && rawIds.length > 1
+    ? rawIds.map((pid) => read(db, 'account.payment', pid)).filter((p) => p && p.state === 'posted' && p.payment_type === 'outbound' && p.check_number != null)
+    : null;
+  const recId = multiPayments?.length ? multiPayments[0].id : rec?.id;
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
     if (!recId || isDraftInboundBatch) return undefined;
@@ -300,9 +304,19 @@ export function PrintDoc({ model, id }) {
     }
     return <Checks db={db} batch={rec} />;
   }
-  if (rec && model === 'account.payment' && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
-    const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
-    return <Checks db={db} batch={batch} />;
+  if (model === 'account.payment') {
+    if (multiPayments?.length) {
+      const batch = {
+        company_id: multiPayments[0].company_id,
+        date: multiPayments[0].date,
+        lines: multiPayments.map((p) => ({ move_id: p.invoice_id, payment_id: p.id, amount: p.amount })),
+      };
+      return <Checks db={db} batch={batch} />;
+    }
+    if (rec && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
+      const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
+      return <Checks db={db} batch={batch} />;
+    }
   }
   if (rec && model === 'audit.report') {
     const company = documentCompany(db, rec);

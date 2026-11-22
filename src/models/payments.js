@@ -6,7 +6,7 @@ import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, f
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { defaultPaymentJournalId, isLiquidityJournal, paymentJournal } from './ledger.js';
 import { journalMethodLines } from './paymentmethod.js';
-import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks, nextCheckNumber } from './pay.js';
+import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks, nextCheckNumber, postPayments, printPaymentsChecks, validatePaymentsListAction, printChecksListAction } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
 import { buildSepaXml, DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
@@ -825,7 +825,17 @@ const attachListAction = (target, action) => {
     target.listActions = [...current, action];
   }
 };
+attachListAction(customerPaymentView, validatePaymentsListAction);
+attachListAction(customerPaymentView, printChecksListAction);
 attachListAction(customerPaymentView, createBatchPaymentListAction);
+
+attachListAction(vendorPaymentView, validatePaymentsListAction);
+attachListAction(vendorPaymentView, printChecksListAction);
 attachListAction(vendorPaymentView, createBatchPaymentListAction);
+
+attachListAction(payModels?.['account.payment'], validatePaymentsListAction);
+attachListAction(payModels?.['account.payment'], printChecksListAction);
 attachListAction(payModels?.['account.payment'], createBatchPaymentListAction);
+
+export { postPayments, printPaymentsChecks, validatePaymentsListAction, printChecksListAction };
 

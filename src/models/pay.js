@@ -1485,6 +1485,94 @@ export function reprintCheck(db, payment, replacementNumber = null) {
   return issueCheckNumber(db, payment, { number: replacementNumber, isReprint: true });
 }
 
+/** Validate draft payments in bulk. */
+export function postPayments(db, ids) {
+  if (!ids?.length) throw new Error('Select at least one payment');
+  const uniqueIds = [...new Set(ids)];
+  const payments = uniqueIds.map((id) => read(db, 'account.payment', id)).filter(Boolean);
+  if (payments.length !== uniqueIds.length) throw new Error('Payment not found');
+  if (payments.some((p) => p.state !== 'draft')) throw new Error('Only draft payments can be confirmed');
+  const drafts = payments;
+  let next = db;
+  for (const draft of drafts) {
+    next = postPayment(next, read(next, 'account.payment', draft.id));
+  }
+  return next;
+}
+
+/** Validate the selection consistently before opening or running the wizard. */
+function checkPrintSelection(db, ids) {
+  if (!ids?.length) throw new Error('Select at least one payment');
+  const uniqueIds = [...new Set(ids)];
+  const payments = uniqueIds.map((id) => read(db, 'account.payment', id)).filter(Boolean);
+  if (payments.length !== uniqueIds.length) throw new Error('Payment not found');
+  if (new Set(payments.map((p) => p.journal_id)).size > 1) throw new Error('Selected payments must belong to the same journal');
+  if (payments.some((p) => p.payment_type !== 'outbound')) throw new Error('Only posted outbound payments can be printed');
+  if (payments.some((p) => !paymentPaysByCheck(db, p))) throw new Error('Payment does not pay by check');
+  return payments;
+}
+
+/** Post and print a selection using the existing check issuance logic. */
+export function printPaymentsChecks(db, ids, values = {}) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('Invalid wizard values');
+  const payments = checkPrintSelection(db, ids);
+  let next = db;
+  for (const payment of payments) {
+    if (payment.state === 'draft') next = postPayment(next, read(next, 'account.payment', payment.id));
+  }
+  const journal = read(next, 'account.journal', payments[0].journal_id);
+  if (!journal || journal.type !== 'bank') throw new Error('Checks require a bank journal');
+  let start = values.next_check_number ?? null;
+  for (const selected of payments) {
+    const payment = read(next, 'account.payment', selected.id);
+    if (payment.state !== 'posted') throw new Error('Only posted outbound payments can be printed');
+    const voided = (payment.voided_check_numbers ?? []).some((v) => v.check_number === payment.check_number);
+    if (payment.check_number == null || voided || (journal.check_manual_sequencing && payment.check_printed === false)) {
+      const number = journal.check_manual_sequencing
+        ? (values[`check_number_${payment.id}`] ?? (voided ? null : payment.check_number)) : start;
+      next = printCheck(next, payment, number);
+      start = null;
+    }
+  }
+  return { db: next, go: `#/print/account.payment/${payments.map((p) => p.id).join(',')}` };
+}
+
+export const validatePaymentsListAction = {
+  label: 'Validate',
+  requiresSelection: true,
+  run: (db, ids) => postPayments(db, ids),
+};
+
+export const printChecksListAction = {
+  label: 'Print Checks',
+  requiresSelection: true,
+  wizard: (db, ids) => {
+    const payments = checkPrintSelection(db, ids);
+    const journal = payments[0]?.journal_id ? read(db, 'account.journal', payments[0].journal_id) : null;
+    if (journal?.check_manual_sequencing) {
+      const missing = payments.filter((p) => p.check_number == null || (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number));
+      if (!missing.length) return null;
+      return {
+        title: 'Print Checks',
+        fields: missing.map((p) => ({
+          name: `check_number_${p.id}`,
+          type: 'integer',
+          label: 'Check Number',
+          required: true,
+        })),
+      };
+    }
+    const nextNum = db && journal ? nextCheckNumber(db, journal.id) : 1;
+    return {
+      title: 'Print Checks',
+      fields: [
+        { name: 'next_check_number', type: 'integer', label: 'Next Check Number', default: nextNum, required: true },
+      ],
+    };
+  },
+  run: (db, ids, values = {}) => printPaymentsChecks(db, ids, values),
+};
+
 const STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
 const DISPLAY_STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['reconciled', 'Reconciled'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
 
