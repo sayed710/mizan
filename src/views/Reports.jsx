@@ -622,9 +622,8 @@ function Valuation({ db, money: fmtMoney = money }) {
 }
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
-function Depreciation({ db, period, companyId, money: moneyProp }) {
+function Depreciation({ db, period, companyId, groupBy = '', money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const [groupBy, setGroupBy] = useState('');
   const { rows, totals, groups } = depreciationReport(db, period, companyId, groupBy);
   const renderRow = ({ a, original, inPeriod, accumulated, book }) => <tr key={a.id} className="rep-detail">
     <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td><td>{a.acquisition_date}</td>
@@ -632,7 +631,6 @@ function Depreciation({ db, period, companyId, money: moneyProp }) {
   </tr>;
   const totalRow = (label, values) => <tr className="rep-total strong"><td>{label}</td><td />{['original', 'inPeriod', 'accumulated', 'book'].map((key) => <td key={key} className="num">{fmtMoney(values[key])}</td>)}</tr>;
   return <tbody>
-    <tr><td colSpan={6}><label>{t('Group By')} <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)}><option value="">{t('None')}</option><option value="asset_group_id">{t('Asset Group')}</option></select></label></td></tr>
     {groupBy ? groups.map((group) => <Fragment key={group.id ?? 'none'}><tr className="rep-section"><td colSpan={6}>{group.name || t('Undefined')}</td></tr>{group.rows.map(renderRow)}{totalRow(t('Subtotal'), group.totals)}</Fragment>) : rows.map(renderRow)}
     {totalRow(t('Total'), totals)}
   </tbody>;
@@ -756,6 +754,7 @@ function ReportPage({ leaf }) {
   const [partnerFilterIds, setPartnerFilterIds] = useState([]);
   const [unreconciledOnly, setUnreconciledOnly] = useState(false);
   const [auditSort, setAuditSort] = useState('date');
+  const [depreciationGroupBy, setDepreciationGroupBy] = useState('');
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
     const allLedgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
     const activeLedger = LEDGER_REPORTS.includes(leaf.report) ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
@@ -932,6 +931,12 @@ function ReportPage({ leaf }) {
           <option value="number">{t('Journal Entry Number')}</option>
         </select>
       </label>}
+      {leaf.report === 'depreciation' && <label className="inline-select">{t('Group By')}
+        <select aria-label={t('Group By')} value={depreciationGroupBy} onChange={(e) => setDepreciationGroupBy(e.target.value)}>
+          <option value="">{t('None')}</option>
+          <option value="asset_group_id">{t('Asset Group')}</option>
+        </select>
+      </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
         <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement' && !isDeferred} />
       )}
@@ -1020,7 +1025,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && leaf.report === 'trial' ? periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`)) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} agedData={agedData} money={fmtMoney} />}
+          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} groupBy={depreciationGroupBy} agedData={agedData} money={fmtMoney} />}
         </table>
       </div>
     </ReportPrintView>

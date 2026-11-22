@@ -42,7 +42,7 @@ import {
   unlinkJournalMethodLines,
 } from './paymentmethod.js';
 
-export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines };
+export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -348,6 +348,8 @@ export function paymentGuard(db, before, after, ctx) {
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
   if (leavesPosted && before.move_type === 'in_invoice' && (db.records['account.asset'] ?? []).some((asset) => asset.bill_id === before.id
     && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the bill\'s running or depreciated assets before resetting it';
+  if (leavesPosted && (db.records['account.asset'] ?? []).some((asset) => asset.source_move_id === before.id
+    && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the entry\'s running or depreciated assets before resetting it';
   // A posted credit may have enabled an advance; resetting it must not undo that protection.
   if (leavesPosted && before.move_type === 'out_refund' && before.sale_id) {
     const order = read(db, 'sale.order', before.sale_id);
@@ -2097,12 +2099,13 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       continue;
     }
 
-    const hasPriceIncludeTax = taxIds.some((id) => read(db, 'account.tax', id)?.price_include);
     let grossDocAmount = docAmount;
-    if (hasPriceIncludeTax && existingForBase.length) {
+    if (existingForBase.length) {
       const existingPriceInclDoc = existingForBase.reduce((sum, el) => {
-        const tRec = read(db, 'account.tax', el.tax_id);
-        if (!tRec?.price_include) return sum;
+        const isIncl = el.tax_include !== undefined
+          ? Boolean(el.tax_include)
+          : Boolean(read(db, 'account.tax', el.tax_id)?.price_include);
+        if (!isIncl) return sum;
         const amt = isForeign
           ? Math.abs(Number(el.amount_currency) || 0)
           : (Number(el.debit) || Number(el.credit) || 0);
@@ -2133,7 +2136,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         price_unit: grossDocAmount,
         discount: 0,
         tax_ids: groupTaxIds,
-        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id)),
+        tax_breakdown: expanded.map((t) => taxSnapshot(t, db, move.fiscal_position_id, companyId)),
       };
 
       const computed = computeLineTaxes(lineObj, { currency: docCurrency, roundingMethod, side });
@@ -2196,18 +2199,20 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
       : (baseSide === 'credit' ? 'sale' : 'purchase');
 
     const roundedUntaxedDoc = roundCurrency(totalUntaxedDoc, docCurrency);
-    const untaxedCompany = hasPriceInclude
+    // The base is rewritten only when a tax is included in price now, or when included tax amounts were added back to it.
+    const rewriteBase = hasPriceInclude || grossDocAmount !== docAmount;
+    const untaxedCompany = rewriteBase
       ? (isForeign ? toCompany(db, baseLine.currency_id, roundedUntaxedDoc, entryDate, companyId) : roundCurrency(roundedUntaxedDoc, companyCurrencyRec))
       : baseAmount;
 
     const updatedBase = {
       ...baseLine,
-      debit: baseSide === 'debit' ? (hasPriceInclude ? untaxedCompany : baseLine.debit) : 0,
-      credit: baseSide === 'credit' ? (hasPriceInclude ? untaxedCompany : baseLine.credit) : 0,
+      debit: baseSide === 'debit' ? (rewriteBase ? untaxedCompany : baseLine.debit) : 0,
+      credit: baseSide === 'credit' ? (rewriteBase ? untaxedCompany : baseLine.credit) : 0,
       tax_tag_ids: baseTags,
       tax_grid_base: baseTags.length > 0,
       tax_side: baseReportingSide,
-      ...(isForeign && hasPriceInclude ? {
+      ...(isForeign && rewriteBase ? {
         amount_currency: baseSide === 'debit' ? roundedUntaxedDoc : -roundedUntaxedDoc,
       } : {}),
     };
@@ -2271,6 +2276,7 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
         debit: effectiveSide === 'debit' ? absTaxAmount : 0,
         credit: effectiveSide === 'credit' ? absTaxAmount : 0,
         tax_id: g.t.tax_id,
+        tax_include: Boolean(g.t.tax_include),
         tax_name: g.t.name || g.t.tax_name || taxLabel(g.t),
         tax_repartition_line_id: g.row.id ?? null,
         tax_base: taxBase,
@@ -2295,6 +2301,26 @@ function computeEntryTaxLines(lines = [], move = {}, db = null) {
   }
 
   return resultLines;
+}
+
+/** Recompute tax lines on all draft manual entries of a company (e.g. after default sales price inclusion changes). */
+function refreshDraftEntryTaxes(db, companyId) {
+  if (!db?.records?.['account.move']) return db;
+  const targetCompany = companyId ?? db.settings?.current_company_id ?? 1;
+  const draftMoves = (db.records['account.move'] ?? []).filter((m) =>
+    m.move_type === 'entry' &&
+    m.state === 'draft' &&
+    (m.company_id ?? 1) === targetCompany &&
+    Array.isArray(m.line_ids) &&
+    m.line_ids.some((l) => (l.tax_ids?.length || l.tax_id != null))
+  );
+  if (!draftMoves.length) return db;
+  let next = db;
+  for (const m of draftMoves) {
+    const refreshedLines = computeEntryTaxLines(m.line_ids, m, next);
+    next = write(next, 'account.move', m.id, { line_ids: refreshedLines });
+  }
+  return next;
 }
 
 /** A journal item tied to one tax (tax_id or repartition line): its tags come from that tax, so base-line tag updates must skip it. */
@@ -2377,6 +2403,7 @@ const lineItem = {
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Tax', hidden: true },
+    tax_include: { type: 'boolean', label: 'Included in Price', hidden: true },
     tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', widget: 'many2many_tags', hidden: true },
     tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
     tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },
@@ -3375,7 +3402,15 @@ export const accountingModels = {
       }
       return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
-    invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
+    invariant: (db, after, before, stored, ctx) => {
+      const err = secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
+      if (err) return err;
+      if (before?.state === 'posted' && after.state !== 'posted'
+        && (db.records['account.asset'] ?? []).some((a) => a.source_move_id === after.id && a.state !== 'cancel')) {
+        return "Handle the entry's draft assets before resetting it";
+      }
+      return null;
+    },
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
@@ -3389,11 +3424,20 @@ export const accountingModels = {
       if (before.state === 'posted' && after.state !== 'posted') {
         db = reverseInvoiceDeferrals(db, before);
         db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry, attemptAutoPostMove);
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === before.id && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
+        }
       }
       if (after.state === 'cancel' && before?.state !== 'cancel') {
-        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === (before?.id ?? after.id) && a.state === 'draft').map((a) => a.id);
+        const moveId = before?.id ?? after.id;
+        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === moveId && a.state === 'draft').map((a) => a.id);
         if (draftAssets.length) {
           db = unlink(db, 'account.asset', draftAssets);
+        }
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === moveId && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
         }
       }
       if (before?.state !== after.state) {

@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react';
-import { createAssetsFromJournalItems } from '../models/assets.js';
+import { canCreateAssetFromJournalItem, createAssetsFromJournalItems } from '../models/assets.js';
 import { companyViewDb } from '../companyView.js';
 import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, matchedMoveIds } from '../models/ledger.js';
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
@@ -276,6 +276,7 @@ export function JournalItems({ leaf = {} } = {}) {
         to_check: move?.to_check === true,
         status: stateField.options.find(([value]) => value === line.move_state)?.[1] ?? '',
         balance: (Number(line.debit) || 0) - (Number(line.credit) || 0),
+        can_create_asset: canCreateAssetFromJournalItem(db, line, move),
       };
     });
   const activeGroups = ITEM_FILTER_GROUPS
@@ -313,7 +314,9 @@ export function JournalItems({ leaf = {} } = {}) {
   const totalBalance = roundCurrency(totalDebit - totalCredit, sumCurrency);
   const totalResidual = sumField(rows, 'amount_residual');
   const todayDate = today();
-  const selectableRows = rows.filter((line) => line.move_state === 'posted');
+  const enrichedByKey = new Map(enriched.map((line) => [keyOf(line), line]));
+  const selectedHasIneligibleAsset = selected.some((item) => !enrichedByKey.get(keyOf(item))?.can_create_asset);
+  const selectableRows = rows.filter((line) => line.move_state === 'posted' && (action !== 'Create Asset' || line.can_create_asset));
   const visibleKeys = new Set(selectableRows.map(keyOf));
   const selectedKeys = new Set(selected.map(keyOf));
   const allSelected = selectableRows.length > 0 && selectableRows.every((line) => selectedKeys.has(keyOf(line)));
@@ -368,7 +371,11 @@ export function JournalItems({ leaf = {} } = {}) {
     </div>
     {mode !== 'draft' && <div className="control-panel">
       <span>{t('{n} selected', { n: selected.length })}</span>
-      {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off', 'Create Asset'].map((btn) => <button type="button" className="btn" key={btn} disabled={!selected.length || busy} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>)}
+      {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off', 'Create Asset'].map((btn) => {
+        const disabled = !selected.length || busy || (btn === 'Create Asset' && selectedHasIneligibleAsset);
+        const btnTitle = btn === 'Create Asset' && selected.length && selectedHasIneligibleAsset ? t('Select only posted debit journal items without an existing asset') : undefined;
+        return <button type="button" className="btn" key={btn} disabled={disabled} title={btnTitle} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>;
+      })}
     </div>}
     {action && <form onSubmit={run} className="control-panel" aria-label={t(action)}>
       <h2>{t(action)}</h2>
@@ -387,7 +394,7 @@ export function JournalItems({ leaf = {} } = {}) {
       <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
         {group && <tr className="group-row"><th /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th /></tr>}
         {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
-          <td><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={line.move_state !== 'posted' || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
+          <td><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={line.move_state !== 'posted' || busy || (action === 'Create Asset' && !line.can_create_asset)} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
           {visibleCols.map((col) => <td key={col.key} className={cellClassName(col, line, todayDate)}>{renderCell(line, col)}</td>)}
           <td className="o2m-cols-td" />
         </tr>)}
