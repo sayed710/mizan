@@ -134,7 +134,7 @@ test('sales and purchases menus configure exact Odoo 20 column order, optional s
   const ctx = await mountMoveList(billsLeaf, multiDb);
   try {
     assert.deepEqual(headerLabels(ctx.host), [
-      'Number', 'Vendor', 'Bill Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status',
+      'Number', 'Vendor', 'Bill Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status', 'Should Be Paid',
     ]);
     const colsTh = find(ctx.host, (n) => n.tagName === 'TH' && hasClass(n, 'o2m-cols-th'));
     const colToggle = find(colsTh, (n) => n.tagName === 'BUTTON');
@@ -153,11 +153,11 @@ test('sales and purchases menus configure exact Odoo 20 column order, optional s
     }
     // Refunds keeps its own optional column storage, and remounting Bills reads Bills' persisted optional state in exact Odoo 20 column order.
     await ctx.render(refundsLeaf);
-    assert.equal(headerLabels(ctx.host).length, 8);
+    assert.equal(headerLabels(ctx.host).length, 9);
     await ctx.render(billsLeaf);
     assert.deepEqual(headerLabels(ctx.host), [
       'Number', 'Vendor', 'Journal', 'Bill Date', 'Due Date', 'Payment Reference', 'Company',
-      'Tax Excluded', 'Tax', 'Total', 'Amount Due', 'Bill Currency', 'Status',
+      'Tax Excluded', 'Tax', 'Total', 'Amount Due', 'Bill Currency', 'Status', 'Should Be Paid',
     ]);
   } finally {
     await ctx.done();
