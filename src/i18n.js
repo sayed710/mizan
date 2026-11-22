@@ -3576,6 +3576,11 @@ const ar = {
   'By Duration': 'حسب المدة',
   'By Rate': 'حسب المعدل',
   'Depreciation Rate': 'معدل الإهلاك',
+  'Base Currency Rate': 'سعر العملة الأساسية',
+  'Base Rate Date': 'تاريخ سعر الأساس',
+  'Units of this currency per 1 unit of the base currency.': 'وحدات هذه العملة لكل وحدة واحدة من العملة الأساسية.',
+  'The base currency rate is fixed at 1.': 'سعر العملة الأساسية ثابت عند 1.',
+  'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };
