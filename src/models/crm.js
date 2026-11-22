@@ -4,6 +4,31 @@ import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank
 import { updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 
+export function partnerCategoryCompleteName(db, r) {
+  if (!r?.name) return '';
+  const names = [r.name];
+  const seen = new Set(r.id ? [r.id] : []);
+  const find = (key) => (db?.records?.['res.partner.category'] ?? []).find((c) => c.id === key);
+  for (let c = find(r.parent_id); c && !seen.has(c.id); c = find(c.parent_id)) {
+    seen.add(c.id);
+    names.unshift(c.name);
+  }
+  return names.join(' / ');
+}
+
+export function guardPartnerCategory(db, before, r) {
+  let id = r.parent_id;
+  const targetId = before?.id ?? r.id;
+  const seen = new Set(targetId ? [targetId] : []);
+  const find = (key) => (db?.records?.['res.partner.category'] ?? []).find((c) => c.id === key);
+  while (id) {
+    if (seen.has(id)) return 'Category hierarchy cannot contain a cycle';
+    seen.add(id);
+    id = find(id)?.parent_id;
+  }
+  return null;
+}
+
 export function isRotting(db, model, r) {
   if (!r) return false;
   const stageModel = model === 'crm.lead' ? 'crm.stage' : model === 'project.task' ? 'project.task.type' : null;
@@ -108,6 +133,54 @@ export const crmModels = {
     },
   },
 
+  'res.partner.category': {
+    label: 'Contact Tags',
+    fields: {
+      name: { type: 'char', label: 'Tag Name', required: true },
+      color: { type: 'integer', label: 'Color' },
+      parent_id: { type: 'many2one', relation: 'res.partner.category', label: 'Parent Category' },
+      complete_name: {
+        type: 'char',
+        label: 'Complete Name',
+        compute: (r, db) => partnerCategoryCompleteName(db, r),
+      },
+      display_name: {
+        type: 'char',
+        label: 'Complete Name',
+        compute: (r, db) => partnerCategoryCompleteName(db, r),
+      },
+      active: { type: 'boolean', label: 'Active' },
+      partner_ids: {
+        type: 'many2many',
+        relation: 'res.partner',
+        label: 'Partners',
+        readonly: true,
+        compute: (r, db) => (db?.records?.['res.partner'] ?? []).filter((p) => {
+          const tags = p.tag_ids ?? [];
+          return tags.some((t) => t === r?.id || (typeof t === 'object' && t !== null && t.id === r?.id));
+        }).map((p) => p.id),
+      },
+      child_ids: {
+        type: 'one2many',
+        relation: 'res.partner.category',
+        label: 'Child Tags',
+        readonly: true,
+        compute: (r, db) => (db?.records?.['res.partner.category'] ?? []).filter((c) => c.parent_id === r?.id).map((c) => c.id),
+      },
+    },
+    defaults: () => ({ active: true, color: 0 }),
+    guard: guardPartnerCategory,
+    searchFields: ['name', 'complete_name'],
+    list: ['display_name', 'color'],
+    listLabels: { display_name: 'Tag Name' },
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'parent_id', 'color', 'active'],
+      ],
+    },
+  },
+
   'res.partner': {
     label: 'Contacts',
     fields: {
@@ -157,7 +230,7 @@ export const crmModels = {
           no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
-      tag_ids: { type: 'tags', label: 'Tags' },
+      tag_ids: { type: 'many2many', relation: 'res.partner.category', label: 'Tags' },
       bank_ids: {
         type: 'one2many',
         relation: 'res.partner.bank',

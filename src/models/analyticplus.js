@@ -564,7 +564,8 @@ export const analyticPlusModels = {
         help: 'Select a partner for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this partner, it will automatically take this as an analytic account)',
       },
       partner_category_id: {
-        type: 'char',
+        type: 'many2one',
+        relation: 'res.partner.category',
         label: 'Partner Category',
         help: 'Select a partner category for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this partner category, it will automatically take this as an analytic account)',
       },
