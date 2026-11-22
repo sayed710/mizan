@@ -629,3 +629,119 @@ test('QE finding 2 regression: discounted invoice with mixed early-payment disco
   assert.equal(total(savedC, dbLineC), 112.60);
   assert.equal(models['account.move'].form.warning(savedC, dbLineC), '');
 });
+
+test('QE regression: negative remaining on existing discounted invoice with mixed discount scales price and handles zero denominator', () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { quick_edit_mode: 'out_and_in_invoices' });
+  const saleTax14 = (db.records?.['account.tax'] ?? []).find((t) => t.id === 1 || t.name === 'VAT 14%')
+    ?? create(db, 'account.tax', { name: 'VAT 14%', amount: 14, type_tax_use: 'sale', amount_type: 'percent', ...defaultTaxRepartitionLines(null, [], null, db) });
+  db = write(db, 'res.company', 1, { account_sale_tax_id: saleTax14.id });
+
+  const term = create(db, 'account.payment.term', {
+    name: '10% Early Mixed Lower',
+    early_discount: true,
+    discount_percentage: 10,
+    discount_percent: 10,
+    discount_days: 10,
+    discount_tax_computation: 'mixed',
+    line_ids: [{ value: 100, value_type: 'percent', nb_days: 30, delay_type: 'days_after' }],
+  });
+  db = term.db;
+
+  const lineDef = models['account.move'].fields.invoice_line_ids;
+
+  // Existing discounted invoice (200 + 14% * 0.9 = 225.20), target lowered to 112.60 -> remaining -112.60 -> price_unit -100
+  const invA = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_payment_term_id: term.id,
+    invoice_line_ids: [],
+  });
+  const baseLineA = { ...lineDef.newLine(read(invA.db, 'account.move', invA.id), invA.db), name: 'Existing', qty: 1, price_unit: 200 };
+  const dbA = write(invA.db, 'account.move', invA.id, { invoice_line_ids: [baseLineA], quick_edit_total_amount: 112.60 });
+  const moveA = read(dbA, 'account.move', invA.id);
+  assert.equal(total(moveA, dbA), 225.20);
+  const lineA = lineDef.newLine(moveA, dbA);
+  assert.equal(lineA.price_unit, -100);
+  const dbLineA = write(dbA, 'account.move', invA.id, { invoice_line_ids: [...moveA.invoice_line_ids, lineA] });
+  const savedA = read(dbLineA, 'account.move', invA.id);
+  assert.equal(total(savedA, dbLineA), 112.60);
+  assert.equal(models['account.move'].form.warning(savedA, dbLineA), '');
+
+  // Same in round_globally with lower target 114 (remaining -111.20)
+  const dbGlob = write(db, 'res.company', 1, { tax_calculation_rounding_method: 'round_globally' });
+  const invB = create(dbGlob, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_payment_term_id: term.id,
+    invoice_line_ids: [],
+  });
+  const baseLineB = { ...lineDef.newLine(read(invB.db, 'account.move', invB.id), invB.db), name: 'Existing', qty: 1, price_unit: 200 };
+  const dbB = write(invB.db, 'account.move', invB.id, { invoice_line_ids: [baseLineB], quick_edit_total_amount: 114 });
+  const moveB = read(dbB, 'account.move', invB.id);
+  const lineB = lineDef.newLine(moveB, dbB);
+  assert.notEqual(lineB.price_unit, -97.54);
+  const dbLineB = write(dbB, 'account.move', invB.id, { invoice_line_ids: [...moveB.invoice_line_ids, lineB] });
+  const savedB = read(dbLineB, 'account.move', invB.id);
+  assert.equal(total(savedB, dbLineB), 114);
+  assert.equal(models['account.move'].form.warning(savedB, dbLineB), '');
+
+  // Tax-included 14% tax with existing line 228 (total 225.20), target lowered to 112.60 -> price_unit -114
+  const inclTax = create(db, 'account.tax', {
+    name: 'VAT 14% Incl Mixed Lower',
+    amount: 14,
+    type_tax_use: 'sale',
+    amount_type: 'percent',
+    price_include: true,
+    ...defaultTaxRepartitionLines(null, [], null, db),
+  });
+  const dbIncl = write(inclTax.db, 'res.company', 1, { account_sale_tax_id: inclTax.id });
+  const invC = create(dbIncl, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_payment_term_id: term.id,
+    invoice_line_ids: [],
+  });
+  const baseLineC = { ...lineDef.newLine(read(invC.db, 'account.move', invC.id), invC.db), name: 'Existing', qty: 1, price_unit: 228 };
+  const dbC = write(invC.db, 'account.move', invC.id, { invoice_line_ids: [baseLineC], quick_edit_total_amount: 112.60 });
+  const moveC = read(dbC, 'account.move', invC.id);
+  assert.equal(total(moveC, dbC), 225.20);
+  const lineC = lineDef.newLine(moveC, dbC);
+  assert.equal(lineC.price_unit, -114);
+  const dbLineC = write(dbC, 'account.move', invC.id, { invoice_line_ids: [...moveC.invoice_line_ids, lineC] });
+  const savedC = read(dbLineC, 'account.move', invC.id);
+  assert.equal(total(savedC, dbLineC), 112.60);
+  assert.equal(models['account.move'].form.warning(savedC, dbLineC), '');
+
+  // Safe zero-denominator case: effectiveTotal === 0 (e.g. -200% tax with 50% mixed discount) never produces NaN/Infinity
+  const negTax = create(db, 'account.tax', {
+    name: 'Neg 200%',
+    amount: -200,
+    type_tax_use: 'sale',
+    amount_type: 'percent',
+    ...defaultTaxRepartitionLines(null, [], null, db),
+  });
+  const halfTerm = create(negTax.db, 'account.payment.term', {
+    name: '50% Early Mixed',
+    early_discount: true,
+    discount_percentage: 50,
+    discount_percent: 50,
+    discount_days: 10,
+    discount_tax_computation: 'mixed',
+    line_ids: [{ value: 100, value_type: 'percent', nb_days: 30, delay_type: 'days_after' }],
+  });
+  const zeroDenomDb = write(halfTerm.db, 'res.company', 1, { account_sale_tax_id: negTax.id });
+  const invZero = create(zeroDenomDb, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_payment_term_id: halfTerm.id,
+    quick_edit_total_amount: 100,
+    invoice_line_ids: [],
+  });
+  const lineZero = lineDef.newLine(read(invZero.db, 'account.move', invZero.id), invZero.db);
+  assert.ok(Number.isFinite(lineZero.price_unit));
+});
