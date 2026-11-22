@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove, residual } from './models/accounting.js';
-import { reconcileWith } from './models/bank.js';
+import { bankModels, reconcileWith } from './models/bank.js';
 import { applyRule } from './models/reconcile.js';
 import { taxSnapshot } from './models/taxes.js';
 
@@ -569,3 +569,20 @@ test('TERM-2: Server guards and sync replay cleanly through diffDb + applyDiff',
 });
 
 
+
+test('TERM-2: automatic matching uses the remaining statement amount for a discount', () => {
+  let { db, bankJournal } = setupTestDb();
+  const term = create(db, 'account.payment.term', { name: '2%', early_discount: true, discount_percent: 2, discount_days: 10, discount_tax_computation: 'excluded' });
+  db = term.db;
+  const first = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: '2026-01-01', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 0 }] });
+  db = postMove(first.db, first.id);
+  const second = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: '2026-01-01', invoice_payment_term_id: term.id, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(second.db, second.id);
+  const line = create(db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2026-01-05', payment_ref: 'SPLIT', amount: 148, partner_id: 1 });
+  db = reconcileWith(line.db, read(line.db, 'account.bank.statement.line', line.id), first.id);
+  db = write(db, 'account.bank.statement.line', line.id, { move_id: null });
+  const button = bankModels['account.bank.statement.line'].form.buttons.find((item) => item.label === 'Reconcile');
+  db = button.run(db, read(db, 'account.bank.statement.line', line.id)).db;
+  assert.equal(residual(read(db, 'account.move', second.id), db), 0);
+  assert.equal(read(db, 'account.move', second.id).payments.find((payment) => payment.discount)?.amount, 2);
+});

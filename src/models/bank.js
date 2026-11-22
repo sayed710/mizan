@@ -571,7 +571,8 @@ function autoReconcile(db, line) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   const target = round(line.open_amount ?? statementCompanyAmount(db, line));
   const journalCurrency = line?.journal_id ? (read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, line.company_id)?.id) : null;
-  const lineAmount = Math.abs(Number(line?.amount) || 0);
+  const total = bookedStatementAmount(db, line);
+  const lineAmount = total ? roundCurrency(Math.abs(line.amount) * target / total, read(db, 'res.currency', journalCurrency)) : Math.abs(Number(line?.amount) || 0);
   const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === target
     || Boolean(earlyDiscountForAmount(db, m, lineAmount, line.date ?? today(), journalCurrency)));
   if (!line.partner_id) {
