@@ -3567,6 +3567,16 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Automatically post future digitized bills from this vendor?': 'هل تريد ترحيل الفواتير المرقمنة المستقبلية لهذا المورد تلقائيًا؟',
+  'Auto-post bills': 'الترحيل التلقائي لفواتير الموردين',
+  'Automatically post eligible digitized vendor bills.': 'ترحيل فواتير الموردين المرقمنة المؤهلة تلقائيًا.',
+  'Always': 'دائمًا',
+  'Ask after 3 validations without edits': 'اسأل بعد ثلاث عمليات اعتماد دون تعديلات',
+
+  'Digitized Document': 'مستند مرقمن',
+  'Digitized Unedited': 'مرقمن دون تعديل',
+  'Digitized Vendor': 'المورد المرقمن',
+  'Digitized Sequence': 'تسلسل الرقمنة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

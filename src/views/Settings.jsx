@@ -267,7 +267,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
   const showCurrencies = hasField('currency_id') || !company;
   const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
-  const showVendorBills = hasField('three_way_matching');
+  const showVendorBills = hasField('three_way_matching') || hasField('autopost_bills');
   const showFiscalPeriods = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail'].some(hasField);
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
   const periodicityOptions = fields.tax_periodicity?.options ?? [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']];
@@ -496,6 +496,12 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
       {showVendorBills && (
         <div className="settings-block" data-block="vendor_bills">
           <h3>{t('Vendor Bills')}</h3>
+          {hasField('autopost_bills') && (
+            <SettingRow id="autopost_bills" label="Auto-post bills" description="Automatically post eligible digitized vendor bills.">
+              <input id="autopost_bills" type="checkbox" checked={!!company?.autopost_bills} disabled={readOnly || !company}
+                onChange={(e) => onWriteCompany({ autopost_bills: e.target.checked })} />
+            </SettingRow>
+          )}
           {hasField('three_way_matching') && (
             <SettingRow id="three_way_matching" label="Three-Way Matching" description="Verify that vendor bill quantities match the purchase order and receipt before marking bills ready to pay.">
               <input id="three_way_matching" type="checkbox" checked={!!company?.three_way_matching} disabled={readOnly || !company}

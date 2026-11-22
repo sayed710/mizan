@@ -31,7 +31,7 @@ import { recordSent, sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
-import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
+import { aiDraft, finishDigitizedBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
@@ -44,7 +44,7 @@ const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
 const ACTIONS = {
   '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u, _store, view) => aiDraft(view, u, b) },
-  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, _store, view) => digitizeBill(view, b) },
+  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, store) => finishDigitizedBill(store, b) },
   // Sending also logs a WhatsApp message, so the store may write that model on top of the user's own.
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, extra: ['whatsapp.message'], run: (b, u, store) => sendWhatsApp(ENV, store, u, b) },
   '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b, u, store) => sendSmsCampaign(ENV, store, b) },

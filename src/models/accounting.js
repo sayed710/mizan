@@ -651,6 +651,25 @@ export function postedInvoiceLines(db, move, name = move.name) {
   return { line_ids, resolvedLines, journalRecord, journal };
 }
 
+const digitizedFields = ['partner_id', 'ref', 'invoice_date', 'invoice_date_due', 'invoice_line_ids'];
+const digitizedChanged = (before, after) => digitizedFields.some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null));
+const digitizedPostingChanged = (before, after) => {
+  const fields = ['partner_id', 'ref', 'invoice_date'];
+  if (fields.some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return true;
+  if (before.invoice_date_due && before.invoice_date_due !== after.invoice_date_due && !before.invoice_payment_term_id) return true;
+  const projection = (line) => Object.fromEntries(['product_id', 'name', 'qty', 'price_unit', 'discount', 'tax'].map((key) => [key, line[key] ?? null]));
+  return JSON.stringify((before.invoice_line_ids ?? []).map(projection)) !== JSON.stringify((after.invoice_line_ids ?? []).map(projection));
+};
+const nextDigitizedSequence = (db, vendorId, companyId, excludeId = null) => 1 + Math.max(0, ...(db.records['account.move'] ?? []).filter((m) => m.id !== excludeId && m.digitized_vendor_id === vendorId && (m.company_id ?? 1) === companyId).map((m) => Number(m.digitized_sequence) || 0));
+
+/** Whether this draft qualifies for the vendor auto-post suggestion. */
+export function suggestBillAutopost(db, bill) {
+  if (bill?.state !== 'draft' || bill.move_type !== 'in_invoice' || !bill.digitized_document || !bill.partner_id || bill.partner_id !== bill.digitized_vendor_id) return false;
+  if (!read(db, 'res.company', bill.company_id ?? 1)?.autopost_bills || (read(db, 'res.partner', bill.partner_id)?.autopost_bills ?? 'ask') !== 'ask') return false;
+  const events = (db.records['account.move'] ?? []).filter((m) => m.id !== bill.id && m.digitized_vendor_id === bill.partner_id && (m.company_id ?? 1) === (bill.company_id ?? 1) && m.digitized_sequence && (m.state === 'posted' || !m.digitized_unedited)).sort((a, b) => b.digitized_sequence - a.digitized_sequence);
+  return events.length >= 3 && events.slice(0, 3).every((m) => m.state === 'posted' && m.digitized_unedited);
+}
+
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id, { autoPost = false } = {}) {
   let r = read(db, 'account.move', id);
@@ -794,7 +813,8 @@ export function postMove(db, id, { autoPost = false } = {}) {
         return ref ? { payment_reference: ref } : {};
       })()
     : {};
-  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  const digitizedOrder = r.move_type === 'in_invoice' && r.digitized_document && !r.digitized_sequence ? { digitized_sequence: nextDigitizedSequence(db, r.digitized_vendor_id, r.company_id ?? 1) } : {};
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...digitizedOrder, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -3210,6 +3230,10 @@ export const accountingModels = {
     },
     prepareWrite: (db, vals, before) => {
       let nextVals = { ...vals };
+      if (before.state === 'draft' && before.digitized_unedited && (nextVals.state ?? before.state) === 'draft' && digitizedChanged(before, { ...before, ...nextVals })) {
+        nextVals.digitized_unedited = false;
+        nextVals.digitized_sequence = nextDigitizedSequence(db, before.digitized_vendor_id, before.company_id ?? 1);
+      }
       const moveType = nextVals.move_type ?? before.move_type;
       const state = nextVals.state ?? before.state;
       if (moveType === 'entry' && state === 'draft') {
@@ -3223,6 +3247,8 @@ export const accountingModels = {
       return { db, vals: nextVals };
     },
     guard: (db, before, after, ctx) => {
+      if (before?.state === 'draft' && before.digitized_unedited && after.state === 'draft' && digitizedChanged(before, after) && (after.digitized_unedited || after.digitized_sequence !== nextDigitizedSequence(db, before.digitized_vendor_id, before.company_id ?? 1, before.id))) return 'Edited digitized bill must be marked as changed';
+      if (before?.state === 'draft' && before.digitized_unedited && after.state === 'posted' && after.digitized_unedited && digitizedPostingChanged(before, after)) return 'Edited digitized bill must be marked as changed';
       const roundingTarget = (m) => ({ id: m.invoice_cash_rounding_id, companyId: m.company_id ?? 1, currencyId: m.currency_id ?? findCompanyCurrencyRecord(db, m.company_id ?? 1)?.id });
       const roundingErr = cashRoundingError(db, roundingTarget(after), before && roundingTarget(before));
       if (roundingErr) return roundingErr;
@@ -3481,6 +3507,10 @@ export const accountingModels = {
           unavailable: 'muted',
         },
       },
+      digitized_document: { type: 'boolean', label: 'Digitized Document', hidden: true },
+      digitized_unedited: { type: 'boolean', label: 'Digitized Unedited', hidden: true },
+      digitized_vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Digitized Vendor', hidden: true },
+      digitized_sequence: { type: 'integer', label: 'Digitized Sequence', hidden: true },
       should_be_paid: { type: 'selection', label: 'Should Be Paid', compute: (r, db) => shouldBePaid(db, r), options: [['yes', 'Yes'], ['exception', 'Exception']] },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
       fx_payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment Entry', readonly: true },
@@ -3626,6 +3656,8 @@ export const accountingModels = {
         },
       ],
       buttons: [
+        { label: 'Always', when: (r, db) => suggestBillAutopost(db, r), run: (db, r) => ({ db: write(db, 'res.partner', r.partner_id, { autopost_bills: 'always' }) }) },
+        { label: 'Never', when: (r, db) => suggestBillAutopost(db, r), run: (db, r) => ({ db: write(db, 'res.partner', r.partner_id, { autopost_bills: 'never' }) }) },
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', visible: (r) => isInvoice(r), run: (db, r) => ({ db: postMove(db, r.id) }) },
         { label: 'Post', primary: true, when: (r) => r.move_type === 'entry' && r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
         {
@@ -3851,6 +3883,7 @@ export const accountingModels = {
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
+      banner: (r, db) => suggestBillAutopost(db, r) ? 'Automatically post future digitized bills from this vendor?' : null,
       warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
       groups: (r) => (isInvoice(r)
         ? [
