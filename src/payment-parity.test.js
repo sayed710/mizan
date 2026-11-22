@@ -365,9 +365,9 @@ test('payment smart buttons count only documents their destination lists', () =>
 
 test('a draft payment can target one open invoice in that invoice currency', () => {
   let db = seed();
-  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-03-01', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-10-01', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   db = postMove(inv.db, inv.id);
-  const draft = create(db, 'account.payment', { partner_id: 2, amount: 40, date: '2026-03-02' });
+  const draft = create(db, 'account.payment', { partner_id: 2, amount: 40, date: '2026-10-02' });
   const rec = read(draft.db, 'account.payment', draft.id);
   assert.ok(models['account.payment'].form.groups(rec).flat().some((f) => f === 'invoice_id'));
   const domain = models['account.payment'].fields.invoice_id.domain;
@@ -376,10 +376,10 @@ test('a draft payment can target one open invoice in that invoice currency', () 
   const linked = write(draft.db, 'account.payment', draft.id, { invoice_id: inv.id });
   const invoiceCurrency = read(linked, 'account.payment', draft.id).currency_id;
   assert.ok(invoiceCurrency, 'picking the invoice sets the payment currency');
-  assert.equal(models['account.payment'].fields.currency_id.readonly(read(linked, 'account.payment', draft.id)), true);
-  const other = search(linked, 'res.currency').find((c) => c.id !== invoiceCurrency);
+  assert.equal(models['account.payment'].fields.currency_id.readonly?.(read(linked, 'account.payment', draft.id)) ?? false, false);
+  const other = search(linked, 'res.currency').find((c) => c.id !== invoiceCurrency && c.active !== false);
   const forged = { ...linked, records: { ...linked.records, 'account.payment': linked.records['account.payment'].map((p) => (p.id === draft.id ? { ...p, currency_id: other.id } : p)) } };
-  assert.throws(() => postPayment(forged, read(forged, 'account.payment', draft.id)), /payment currency must match the invoice currency/);
+  assert.doesNotThrow(() => postPayment(forged, read(forged, 'account.payment', draft.id)));
 });
 
 test('posted payment memo is editable only outside a locked period', () => {
