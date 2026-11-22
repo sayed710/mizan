@@ -160,20 +160,16 @@ export function validStornoMove(db, move) {
 
   if (['out_refund', 'in_refund'].includes(move.move_type)) {
     if (!Array.isArray(move.invoice_line_ids) || !move.invoice_line_ids.length) return false;
-    let expectedLines;
-    try {
-      const docCurr = documentCurrency(db, source);
-      const docTotal = roundCurrency(moveTotal(move, db), docCurr);
-      const srcTotal = roundCurrency(moveTotal(source, db), docCurr);
-      const otherCredited = (db.records?.['account.move'] ?? [])
-        .filter((m) => m.id !== move.id && m.state === 'posted' && m.reversed_entry_id === source.id)
-        .reduce((sum, m) => sum + moveTotal(m, db), 0);
-      if (!(docTotal > 0) || roundCurrency(otherCredited + docTotal, docCurr) > srcTotal) return false;
-      const journal = resolveDocumentJournal(db, move, { required: true });
-      expectedLines = invoiceLines(db, { ...move, journal_id: journal.id });
-    } catch {
-      return false;
-    }
+    const journal = move.journal_id ? read(db, 'account.journal', move.journal_id) : null;
+    if (!journal) return false;
+    const docCurr = documentCurrency(db, source);
+    const docTotal = roundCurrency(moveTotal(move, db), docCurr);
+    const srcTotal = roundCurrency(moveTotal(source, db), docCurr);
+    const otherCredited = (db.records?.['account.move'] ?? [])
+      .filter((m) => m.id !== move.id && m.state === 'posted' && m.reversed_entry_id === source.id)
+      .reduce((sum, m) => sum + moveTotal(m, db), 0);
+    if (!(docTotal > 0) || roundCurrency(otherCredited + docTotal, docCurr) > srcTotal) return false;
+    const expectedLines = invoiceLines(db, { ...move, journal_id: journal.id });
     if (!expectedLines.length || lines.length !== expectedLines.length) return false;
     const remaining = [...expectedLines];
     for (const line of lines) {
