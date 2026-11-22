@@ -246,12 +246,14 @@ export function generateSepaFile(db, batch, createdAt = new Date().toISOString()
   if (isReplacement) {
     const nextSeq = (batch.replacement_sequence ?? 0) + 1;
     id = options.id ?? options.identifier ?? batch.replacement_identifier ?? formatReplacementIdentifier(batch.name, batch.replacement_sequence || nextSeq);
-    const candidateDate = options.executionDate ?? options.date ?? batch.replacement_date;
-    if (candidateDate) {
-      if (!validDate(candidateDate) || candidateDate < today()) {
+    const explicitDate = options.executionDate ?? options.date;
+    if (explicitDate != null) {
+      if (!validDate(explicitDate) || explicitDate < today()) {
         throw new Error('The replacement execution date must be a valid current or future date');
       }
-      date = candidateDate;
+      date = explicitDate;
+    } else if (batch.replacement_date && validDate(batch.replacement_date) && batch.replacement_date >= today()) {
+      date = batch.replacement_date;
     } else if (batch.date && batch.date < today()) {
       date = today();
     }
@@ -289,11 +291,64 @@ function sepaBatchGuard(db, before, after) {
     if (before.sepa_file !== after.sepa_file) return 'The SEPA file cannot be changed after validation';
     if (['state', 'name', 'batch_type', 'journal_id', 'company_id', 'date'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return 'A validated SEPA batch cannot be changed';
     if (!validBatchLinesTransition(before.lines, after.lines)) return 'A validated SEPA batch cannot be changed';
-    if (after.replacement_date && (!validDate(after.replacement_date) || after.replacement_date < today())) {
-      return 'The replacement execution date must be a valid current or future date';
+
+    if (after.replacement_date !== before.replacement_date) {
+      if (!((after.lines ?? []).some((l) => l.cancelled))) return 'A validated SEPA batch cannot be changed';
+      if (after.replacement_date && (!validDate(after.replacement_date) || after.replacement_date < today())) {
+        return 'The replacement execution date must be a valid current or future date';
+      }
+    }
+
+    const replacementChanged =
+      before.replacement_sequence !== after.replacement_sequence ||
+      before.replacement_identifier !== after.replacement_identifier ||
+      before.replacement_sepa_file !== after.replacement_sepa_file;
+
+    if (replacementChanged) {
+      const hasCancelled = (after.lines ?? []).some((line) => line.cancelled);
+      const hasActive = (after.lines ?? []).some((line) => !line.cancelled);
+      if (!hasCancelled || !hasActive) return 'A validated SEPA batch cannot be changed';
+
+      const expectedSeq = (before.replacement_sequence ?? 0) + 1;
+      if (after.replacement_sequence !== expectedSeq) return 'A validated SEPA batch cannot be changed';
+
+      const expectedId = formatReplacementIdentifier(after.name, expectedSeq);
+      if (after.replacement_identifier !== expectedId) return 'A validated SEPA batch cannot be changed';
+
+      if (!after.replacement_date || !validDate(after.replacement_date) || after.replacement_date < today()) {
+        return 'The replacement execution date must be a valid current or future date';
+      }
+
+      if (!after.replacement_sepa_file || typeof after.replacement_sepa_file !== 'string') {
+        return 'The SEPA file does not match the batch';
+      }
+      const timestamp = after.replacement_sepa_file.match(/<CreDtTm>([^<]+)<\/CreDtTm>/)?.[1];
+      if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return 'The SEPA file does not match the batch';
+
+      try {
+        const expectedFile = generateSepaFile(db, {
+          ...after,
+          replacement_identifier: expectedId,
+          replacement_date: after.replacement_date,
+        }, timestamp, {
+          replacement: true,
+          id: expectedId,
+          executionDate: after.replacement_date,
+        });
+        if (expectedFile.content !== after.replacement_sepa_file) {
+          return 'The SEPA file does not match the batch';
+        }
+      } catch (error) {
+        return error.message;
+      }
     }
   }
-  if (after.state !== 'posted' || before?.state === 'posted') return null;
+  if (after.state !== 'posted' || before?.state === 'posted') {
+    if (!before?.sepa_file && (after.replacement_sepa_file || after.replacement_identifier || after.replacement_sequence)) {
+      return 'Only SEPA batches can have a SEPA file';
+    }
+    return null;
+  }
   const sepa = (after.lines ?? []).some((line) => paymentMethodCode(db, read(db, 'account.payment', line.payment_id)) === 'sepa_ct');
   if (!sepa) return after.sepa_file ? 'Only SEPA batches can have a SEPA file' : null;
   if (!after.sepa_file) return 'A validated SEPA batch requires a SEPA file';
@@ -459,14 +514,20 @@ export const paymentModels = {
           when: (r) => r.state === 'posted' && Boolean(r.sepa_file) && (r.lines ?? []).some((l) => l.cancelled) && (r.lines ?? []).some((l) => !l.cancelled),
           run: (db, r, options = {}) => {
             const nextSeq = (r.replacement_sequence ?? 0) + 1;
-            const replacementIdentifier = options.id ?? options.identifier ?? formatReplacementIdentifier(r.name, nextSeq);
-            let executionDate = options.executionDate ?? options.date ?? r.replacement_date;
-            if (executionDate) {
-              if (!validDate(executionDate) || executionDate < today()) {
+            const replacementIdentifier = formatReplacementIdentifier(r.name, nextSeq);
+            const explicitDate = options.executionDate ?? options.date;
+            if (explicitDate != null) {
+              if (!validDate(explicitDate) || explicitDate < today()) {
                 throw new Error('The replacement execution date must be a valid current or future date');
               }
-            } else {
-              executionDate = r.date && r.date >= today() ? r.date : today();
+            }
+            let executionDate = explicitDate;
+            if (!executionDate) {
+              if (r.replacement_date && validDate(r.replacement_date) && r.replacement_date >= today()) {
+                executionDate = r.replacement_date;
+              } else {
+                executionDate = r.date && validDate(r.date) && r.date >= today() ? r.date : today();
+              }
             }
             const file = generateSepaFile(db, {
               ...r,

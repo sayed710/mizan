@@ -141,10 +141,10 @@ test('validating SEPA payments stores a stable file and rejects invalid account 
   assert.throws(() => applyDiff(result, diffDb(result, forged), { isAdmin: true }), /SEPA file cannot be changed/);
 });
 
-test('migration 62 seeds electronic and SEPA methods on databases already at version 61', async () => {
+test('migration 63 seeds electronic and SEPA methods on databases already at version 62', async () => {
   const { migrate, SCHEMA_VERSION } = await import('./migrations.js');
   const { search } = await import('./orm.js');
-  assert.equal(SCHEMA_VERSION, 62);
+  assert.equal(SCHEMA_VERSION, 63);
   const v61Db = {
     schema_version: 61,
     records: {
@@ -159,7 +159,7 @@ test('migration 62 seeds electronic and SEPA methods on databases already at ver
     seq: { 'account.payment.method': 3 },
   };
   const upgraded = migrate(v61Db);
-  assert.equal(upgraded.schema_version, 62);
+  assert.equal(upgraded.schema_version, 63);
   const methods = search(upgraded, 'account.payment.method');
   assert.equal(methods.length, 5);
   assert.ok(methods.some((m) => m.code === 'electronic' && m.payment_type === 'inbound'));
@@ -655,6 +655,270 @@ test('cancellation well after original execution date produces an eligible curre
   const pastDate = addDays(today(), -5);
   assert.throws(
     () => replaceBtn.run(reversedDb, afterCancel, { executionDate: pastDate }),
+    /valid current or future date/i,
+  );
+});
+
+test('synchronized edits to replacement bank files and metadata are rejected unless validly generated', async () => {
+  const { seed } = await import('./seed.js');
+  const { read } = await import('./orm.js');
+  const { postBatch, paymentModels, formatReplacementIdentifier } = await import('./models/payments.js');
+  const { reversePayment } = await import('./models/pay.js');
+  const { diffDb, applyDiff } = await import('./sync.js');
+  const { today } = await import('./models/common.js');
+  let db = await addJournalMethods(seed());
+  const bank = db.records['account.journal'].find((j) => j.type === 'bank');
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const sepa = db.records['account.payment.method'].find((m) => m.code === 'sepa_ct');
+  const method = db.records['account.payment.method.line'].find((l) => l.journal_id === bank.id && l.payment_method_id === sepa.id);
+  const partner1 = db.records['res.partner'][0];
+  const partner2 = db.records['res.partner'][1];
+
+  const batch = {
+    id: 500,
+    name: 'BATCH-FORGE-TEST',
+    state: 'draft',
+    batch_type: 'outbound',
+    date: today(),
+    company_id: 1,
+    journal_id: bank.id,
+    lines: [
+      { payment_id: 501, amount: 20 },
+      { payment_id: 502, amount: 30 },
+    ],
+  };
+
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, currency_id: eur.id } : c)),
+      'account.journal': db.records['account.journal'].map((j) => (j.id === bank.id ? { ...j, bank_account_id: 500, currency_id: eur.id } : j)),
+      'res.partner.bank': [
+        ...(db.records['res.partner.bank'] ?? []),
+        { id: 500, account_number: 'DE89370400440532013000', bank_bic: 'COBADEFFXXX' },
+        { id: 501, account_number: 'FR7630006000011234567890189', partner_id: partner1.id, allow_out_payment: true },
+        { id: 502, account_number: 'IT60X0542811101000000123456', partner_id: partner2.id, allow_out_payment: true },
+      ],
+      'account.move': [
+        ...db.records['account.move'],
+        { id: 501, name: 'ENTRY/501', state: 'posted', move_type: 'entry', date: today(), line_ids: [{ id: 5011, account_id: bank.default_account_id ?? 1, debit: 0, credit: 20 }, { id: 5012, account_id: 2, debit: 20, credit: 0 }], company_id: 1 },
+        { id: 502, name: 'ENTRY/502', state: 'posted', move_type: 'entry', date: today(), line_ids: [{ id: 5021, account_id: bank.default_account_id ?? 1, debit: 0, credit: 30 }, { id: 5022, account_id: 2, debit: 30, credit: 0 }], company_id: 1 },
+      ],
+      'account.payment': [
+        ...(db.records['account.payment'] ?? []),
+        { id: 501, name: 'PAY/501', state: 'posted', move_id: 501, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner1.id, partner_bank_id: 501, payment_method_line_id: method.id, amount: 20, currency_id: eur.id, memo: 'Bill 1', date: today() },
+        { id: 502, name: 'PAY/502', state: 'posted', move_id: 502, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner2.id, partner_bank_id: 502, payment_method_line_id: method.id, amount: 30, currency_id: eur.id, memo: 'Bill 2', date: today() },
+      ],
+      'account.batch.payment': [batch],
+    },
+    seq: { ...db.seq, 'account.batch.payment': 500, 'account.payment': 502, 'account.move': 502, 'res.partner.bank': 502 },
+  };
+
+  const postedDb = postBatch(db, batch);
+  const postedBatch = read(postedDb, 'account.batch.payment', 500);
+
+  // 1. Direct replacement edits before cancellation are rejected
+  const forgedOnUncancelled = {
+    ...postedDb,
+    records: {
+      ...postedDb.records,
+      'account.batch.payment': [{ ...postedBatch, replacement_sequence: 1, replacement_identifier: 'FORGED-1', replacement_sepa_file: '<fake/>' }],
+    },
+  };
+  assert.throws(() => applyDiff(postedDb, diffDb(postedDb, forgedOnUncancelled), { isAdmin: true }), /validated SEPA batch cannot be changed/);
+
+  // Cancel payment 501
+  const reversedDb = reversePayment(postedDb, read(postedDb, 'account.payment', 501), today());
+  const batchAfterCancel = read(reversedDb, 'account.batch.payment', 500);
+
+  // 2. Direct edit forging replacement XML is rejected
+  const forgedXml = {
+    ...reversedDb,
+    records: {
+      ...reversedDb.records,
+      'account.batch.payment': [{
+        ...batchAfterCancel,
+        replacement_sequence: 1,
+        replacement_identifier: formatReplacementIdentifier(batchAfterCancel.name, 1),
+        replacement_date: today(),
+        replacement_sepa_file: '<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03"><CreDtTm>2026-11-22T00:00:00.000Z</CreDtTm><tampered/></Document>',
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(reversedDb, diffDb(reversedDb, forgedXml), { isAdmin: true }), /SEPA file does not match/);
+
+  // 3. Direct edit jumping sequence is rejected
+  const forgedSeq = {
+    ...reversedDb,
+    records: {
+      ...reversedDb.records,
+      'account.batch.payment': [{
+        ...batchAfterCancel,
+        replacement_sequence: 5,
+        replacement_identifier: formatReplacementIdentifier(batchAfterCancel.name, 5),
+        replacement_date: today(),
+        replacement_sepa_file: '<Document/>',
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(reversedDb, diffDb(reversedDb, forgedSeq), { isAdmin: true }), /validated SEPA batch cannot be changed/);
+
+  // 4. Direct edit forging identifier is rejected
+  const forgedId = {
+    ...reversedDb,
+    records: {
+      ...reversedDb.records,
+      'account.batch.payment': [{
+        ...batchAfterCancel,
+        replacement_sequence: 1,
+        replacement_identifier: 'MALICIOUS_IDENTIFIER',
+        replacement_date: today(),
+        replacement_sepa_file: '<Document/>',
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(reversedDb, diffDb(reversedDb, forgedId), { isAdmin: true }), /validated SEPA batch cannot be changed/);
+
+  // 5. Legitimate replacement button generates and persists properly
+  const replaceBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate Replacement SEPA file');
+  const legitimate = replaceBtn.run(reversedDb, batchAfterCancel);
+  assert.ok(legitimate.download);
+  const legitimateBatch = read(legitimate.db, 'account.batch.payment', 500);
+  assert.equal(legitimateBatch.replacement_sequence, 1);
+  assert.equal(legitimateBatch.replacement_identifier, formatReplacementIdentifier(batch.name, 1));
+  assert.equal(legitimateBatch.replacement_sepa_file, legitimate.download.content);
+
+  // 6. Direct edit tampering with already generated replacement file is rejected
+  const tamperedReplacement = {
+    ...legitimate.db,
+    records: {
+      ...legitimate.db.records,
+      'account.batch.payment': [{ ...legitimateBatch, replacement_sepa_file: 'tampered-xml' }],
+    },
+  };
+  assert.throws(() => applyDiff(legitimate.db, diffDb(legitimate.db, tamperedReplacement), { isAdmin: true }), /validated SEPA batch cannot be changed/);
+});
+
+test('past replacement execution date does not block subsequent payment reversals and defaults to today on next replacement', async () => {
+  const { seed } = await import('./seed.js');
+  const { read } = await import('./orm.js');
+  const { postBatch, paymentModels, formatReplacementIdentifier } = await import('./models/payments.js');
+  const { buildSepaXml } = await import('./models/sepa.js');
+  const { reversePayment } = await import('./models/pay.js');
+  const { addDays, today } = await import('./models/common.js');
+  let db = await addJournalMethods(seed());
+  const bank = db.records['account.journal'].find((j) => j.type === 'bank');
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const sepa = db.records['account.payment.method'].find((m) => m.code === 'sepa_ct');
+  const method = db.records['account.payment.method.line'].find((l) => l.journal_id === bank.id && l.payment_method_id === sepa.id);
+  const partner1 = db.records['res.partner'][0];
+  const partner2 = db.records['res.partner'][1];
+  const partner3 = db.records['res.partner'][2];
+
+  const pastDate = addDays(today(), -5);
+
+  const batch = {
+    id: 600,
+    name: 'BATCH-EXPIRED-DATE',
+    state: 'draft',
+    batch_type: 'outbound',
+    date: pastDate,
+    company_id: 1,
+    journal_id: bank.id,
+    lines: [
+      { payment_id: 601, amount: 10 },
+      { payment_id: 602, amount: 20 },
+      { payment_id: 603, amount: 30 },
+    ],
+  };
+
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, currency_id: eur.id } : c)),
+      'account.journal': db.records['account.journal'].map((j) => (j.id === bank.id ? { ...j, bank_account_id: 600, currency_id: eur.id } : j)),
+      'res.partner.bank': [
+        ...(db.records['res.partner.bank'] ?? []),
+        { id: 600, account_number: 'DE89370400440532013000', bank_bic: 'COBADEFFXXX' },
+        { id: 601, account_number: 'FR7630006000011234567890189', partner_id: partner1.id, allow_out_payment: true },
+        { id: 602, account_number: 'IT60X0542811101000000123456', partner_id: partner2.id, allow_out_payment: true },
+        { id: 603, account_number: 'ES9121000418450200051332', partner_id: partner3.id, allow_out_payment: true },
+      ],
+      'account.move': [
+        ...db.records['account.move'],
+        { id: 601, name: 'ENTRY/601', state: 'posted', move_type: 'entry', date: pastDate, line_ids: [{ id: 6011, account_id: bank.default_account_id ?? 1, debit: 0, credit: 10 }, { id: 6012, account_id: 2, debit: 10, credit: 0 }], company_id: 1 },
+        { id: 602, name: 'ENTRY/602', state: 'posted', move_type: 'entry', date: pastDate, line_ids: [{ id: 6021, account_id: bank.default_account_id ?? 1, debit: 0, credit: 20 }, { id: 6022, account_id: 2, debit: 20, credit: 0 }], company_id: 1 },
+        { id: 603, name: 'ENTRY/603', state: 'posted', move_type: 'entry', date: pastDate, line_ids: [{ id: 6031, account_id: bank.default_account_id ?? 1, debit: 0, credit: 30 }, { id: 6032, account_id: 2, debit: 30, credit: 0 }], company_id: 1 },
+      ],
+      'account.payment': [
+        ...(db.records['account.payment'] ?? []),
+        { id: 601, name: 'PAY/601', state: 'posted', move_id: 601, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner1.id, partner_bank_id: 601, payment_method_line_id: method.id, amount: 10, currency_id: eur.id, memo: 'Bill 1', date: pastDate },
+        { id: 602, name: 'PAY/602', state: 'posted', move_id: 602, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner2.id, partner_bank_id: 602, payment_method_line_id: method.id, amount: 20, currency_id: eur.id, memo: 'Bill 2', date: pastDate },
+        { id: 603, name: 'PAY/603', state: 'posted', move_id: 603, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner3.id, partner_bank_id: 603, payment_method_line_id: method.id, amount: 30, currency_id: eur.id, memo: 'Bill 3', date: pastDate },
+      ],
+      'account.batch.payment': [batch],
+    },
+    seq: { ...db.seq, 'account.batch.payment': 600, 'account.payment': 603, 'account.move': 603, 'res.partner.bank': 603 },
+  };
+
+  const postedDb = postBatch(db, batch);
+
+  // Cancel 601 in the past
+  const reversedDb1 = reversePayment(postedDb, read(postedDb, 'account.payment', 601), pastDate);
+  const batchCancel1 = read(reversedDb1, 'account.batch.payment', 600);
+
+  // Set an expired replacement date (simulating a replacement created on a previous day)
+  const replaceBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate Replacement SEPA file');
+  const pastTimestamp = '2026-11-17T10:00:00.000Z';
+  const file1 = buildSepaXml({
+    id: formatReplacementIdentifier(batch.name, 1),
+    createdAt: pastTimestamp,
+    date: pastDate,
+    debtor: { name: 'Company', iban: 'DE89370400440532013000', bic: 'COBADEFFXXX' },
+    payments: [
+      { id: '602', amount: 20, name: partner2.name, iban: 'IT60X0542811101000000123456', memo: 'Bill 2' },
+      { id: '603', amount: 30, name: partner3.name, iban: 'ES9121000418450200051332', memo: 'Bill 3' },
+    ],
+  });
+
+  // Manually put the batch into the historical state (as if it was generated in the past)
+  const dbWithHistoricalReplacement = {
+    ...reversedDb1,
+    records: {
+      ...reversedDb1.records,
+      'account.batch.payment': [{
+        ...batchCancel1,
+        replacement_identifier: formatReplacementIdentifier(batch.name, 1),
+        replacement_sequence: 1,
+        replacement_date: pastDate,
+        replacement_sepa_file: file1,
+      }],
+    },
+  };
+
+  // Reversing payment 602 today must NOT be blocked by the expired replacement_date
+  const reversedDb2 = reversePayment(dbWithHistoricalReplacement, read(dbWithHistoricalReplacement, 'account.payment', 602), today());
+  const batchCancel2 = read(reversedDb2, 'account.batch.payment', 600);
+  assert.equal(batchCancel2.lines[0].cancelled, true);
+  assert.equal(batchCancel2.lines[1].cancelled, true);
+  assert.equal(batchCancel2.lines[2].cancelled, false);
+  assert.equal(batchCancel2.replacement_date, pastDate, 'Unrelated write leaves historical replacement_date intact');
+
+  // Generating a second replacement defaults the expired stored replacement_date to today
+  const replacement2 = replaceBtn.run(reversedDb2, batchCancel2);
+  assert.ok(replacement2.download);
+  assert.match(replacement2.download.content, new RegExp(`<ReqdExctnDt>${today()}</ReqdExctnDt>`));
+
+  const persistedBatch2 = read(replacement2.db, 'account.batch.payment', 600);
+  assert.equal(persistedBatch2.replacement_sequence, 2);
+  assert.equal(persistedBatch2.replacement_date, today());
+  assert.equal(persistedBatch2.replacement_identifier, formatReplacementIdentifier(batch.name, 2));
+
+  // Explicitly requesting an expired date still throws
+  assert.throws(
+    () => replaceBtn.run(reversedDb2, batchCancel2, { executionDate: pastDate }),
     /valid current or future date/i,
   );
 });
