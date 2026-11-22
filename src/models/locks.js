@@ -49,6 +49,7 @@ const MAINTAINED = {
   'mailing.mailing': ['ab_testing_winner_selection'], // the A/B winner is chosen after sending
   'account.move': ['ref', 'to_check'], // the reference and the review flag stay editable on posted entries
   'account.payment': ['memo'], // memo stays editable on posted payments
+  'account.batch.payment': ['replacement_date', 'replacement_identifier', 'replacement_sequence', 'replacement_sepa_file'],
   'account.bank.statement.line': ['move_id', 'payment_id'], // validated unreconciliation clears the matched links
 };
 
