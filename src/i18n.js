@@ -260,6 +260,7 @@ const ar = {
   'Enter a valid budget date': 'أدخل تاريخاً صالحاً للموازنة',
   'Configure a unique purchase order line link for each line': 'حدّد رابطاً فريداً ببند أمر الشراء لكل بند',
   'Purchase order and posted bill must belong to the same company': 'يجب أن يتبع أمر الشراء وفاتورة المورد المرحّلة الشركة نفسها',
+  'Unable to resolve purchase order line for vendor bill': 'تعذّر تحديد بند أمر الشراء لفاتورة المورد',
   'Link each posted bill line to its purchase order line before reporting budget commitments': 'اربط كل بند في فاتورة المورد المرحّلة ببند أمر الشراء قبل عرض التزامات الموازنة',
   'Configure units of measure on the purchase order and bill lines': 'حدّد وحدات القياس في بنود أمر الشراء وفاتورة المورد',
   'Budget not found': 'الموازنة غير موجودة',
@@ -3551,6 +3552,12 @@ const ar = {
   'Report Footer': 'تذييل التقرير',
   'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Purchase Order Line': 'بند أمر الشراء',
+  yes: 'نعم', no: 'لا', exception: 'استثناء',
+  'Credit Method': 'طريقة الإشعار الدائن',
+  'Partial Refund': 'استرداد جزئي',
+  'Full Refund': 'استرداد كامل',
+  'Full Refund and New Draft Invoice': 'استرداد كامل ومسودة فاتورة جديدة',
   'Computation': 'طريقة الحساب',
   'No Prorata': 'دون احتساب نسبي',
   'Constant Periods': 'فترات ثابتة',
@@ -3593,6 +3600,8 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Purchase order line must match the vendor, company, and product': 'يجب أن يطابق بند أمر الشراء المورد والشركة والمنتج',
+  'Depreciation reversal must match the excess from a vendor refund': 'يجب أن يطابق عكس الإهلاك الزيادة الناتجة عن مرتجع المورد',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

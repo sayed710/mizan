@@ -1,11 +1,12 @@
 // Fixed assets: depreciation boards and their posting.
 import { read, search, write } from '../orm.js';
-import { addDays, today } from './common.js';
+import { addDays, subtotal, today } from './common.js';
 import { journalId, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
 import { configuredAccount } from './configured-account.js';
 import { currentCompany } from './company.js';
+import { toCompany } from './currency.js';
 import { t } from '../i18n.js';
 
 /** Depreciation settings of an asset without a model. */
@@ -99,6 +100,8 @@ export function validateAssetIntegrity(db, before, asset, vals) {
   const company = asset.company_id ?? 1;
 
   // Q4: Disposal field rules and move verification
+  if (before?.disposal_date && (before.refund_disposal_move_id ?? null) !== (asset.refund_disposal_move_id ?? null)) return 'Disposal fields cannot be modified once set';
+  if (asset.refund_disposal_move_id && !asset.disposal_date) return 'Disposal date is required when disposing of an asset';
   const hasDisposal = asset.disposal_date != null && asset.disposal_date !== '';
   const hasSale = asset.sale_value != null && asset.sale_value !== '';
   const hasDisposalMove = asset.disposal_move_id != null;
@@ -142,8 +145,20 @@ export function validateAssetIntegrity(db, before, asset, vals) {
     const fixedCredit = (dispMove.line_ids ?? []).find(
       (l) => l.account_id === asset.account_asset_id && cents(l.credit) === origCents && (cents(l.debit) || 0) === 0,
     );
-    if (!fixedCredit) {
-      return 'Disposal move must credit the fixed asset account by the asset original value';
+    if (!fixedCredit || asset.refund_disposal_move_id) {
+      const refund = read(db, 'account.move', asset.refund_disposal_move_id);
+      const bill = read(db, 'account.move', asset.bill_id);
+      const source = bill?.invoice_line_ids?.[asset.bill_line];
+      const refundAmount = (refund?.invoice_line_ids ?? []).filter((line) => source?.line_id && line.source_line_id === source.line_id)
+        .reduce((sum, line) => sum + cents(toCompany(db, refund.currency_id, Math.abs(subtotal(line, db)), refund.invoice_date ?? refund.date, company)), 0);
+      const fixedRefund = (refund?.line_ids ?? []).some((line) => line.account_id === asset.account_asset_id && cents(line.credit) >= origCents);
+      const accumulated = postedCents(asset) + cents(asset.already_depreciated);
+      const depDebit = (dispMove.line_ids ?? []).some((line) => line.account_id === asset.account_depreciation_id && cents(line.debit) === accumulated);
+      const gainId = read(db, 'res.company', company)?.gain_account_id;
+      const gainCredit = (dispMove.line_ids ?? []).some((line) => line.account_id === gainId && cents(line.credit) === accumulated);
+      if (!refund || refund.state !== 'posted' || refund.move_type !== 'in_refund' || refund.reversed_entry_id !== asset.bill_id || (refund.company_id ?? 1) !== company || refundAmount < origCents || !fixedRefund || !depDebit || !gainCredit) {
+        return 'Disposal move must credit the fixed asset account by the asset original value';
+      }
     }
     const moveUsedElsewhere = (db.records['account.asset'] ?? []).some(
       (a) => (a.id !== asset.id && a.disposal_move_id === asset.disposal_move_id)
@@ -324,11 +339,17 @@ export function validateAssetIntegrity(db, before, asset, vals) {
       return 'Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account';
     }
     const lineCents = cents(ap.amount);
+    if (lineCents < 0) {
+      const additions = (asset.revaluation_ids ?? []).slice((before?.revaluation_ids ?? []).length);
+      const refund = additions.map((entry) => read(db, 'account.move', entry.move_id)).find((entry) => entry?.state === 'posted' && entry.move_type === 'in_refund' && entry.reversed_entry_id === asset.bill_id);
+      const excess = Math.max(0, postedCents(before ?? {}) + cents(before?.already_depreciated) - cents(asset.original_value));
+      if (!refund || -lineCents !== excess) return 'Depreciation reversal must match the excess from a vendor refund';
+    }
     const expLine = (move.line_ids ?? []).find(
-      (ml) => ml.account_id === asset.account_depreciation_expense_id && cents(ml.debit) === lineCents && (cents(ml.credit) || 0) === 0,
+      (ml) => ml.account_id === asset.account_depreciation_expense_id && (lineCents < 0 ? cents(ml.credit) === -lineCents && !cents(ml.debit) : cents(ml.debit) === lineCents && !cents(ml.credit)),
     );
     const depLine = (move.line_ids ?? []).find(
-      (ml) => ml.account_id === asset.account_depreciation_id && cents(ml.credit) === lineCents && (cents(ml.debit) || 0) === 0,
+      (ml) => ml.account_id === asset.account_depreciation_id && (lineCents < 0 ? cents(ml.debit) === -lineCents && !cents(ml.credit) : cents(ml.credit) === lineCents && !cents(ml.debit)),
     );
     if (!expLine || !depLine) {
       return 'Depreciation move must be a posted entry debiting depreciation expense and crediting depreciation account';
@@ -730,11 +751,130 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   });
 }
 
+function cancelRefundedAsset(db, asset) {
+  const unposted = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
+  return write(db, 'account.asset', asset.id, {
+    state: 'cancel', depreciation_ids: [],
+    cancelled_depreciation_ids: [...(asset.cancelled_depreciation_ids ?? []), ...unposted.map((l) => ({ ...l, cancelled: true }))],
+  });
+}
+
+function disposeRefundedAsset(db, asset, refundMove) {
+  const date = refundMove.invoice_date ?? refundMove.date ?? today();
+  if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
+  validate(db, asset);
+  // A paused board does not accrue during its pause. Running boards catch up as normal.
+  const depreciated = asset.state === 'open' ? postDepreciation(db, asset, date) : db;
+  const current = read(depreciated, 'account.asset', asset.id);
+  const accumulated = postedCents(current) + cents(current.already_depreciated);
+  if (!accumulated) return cancelRefundedAsset(depreciated, current);
+  const company = current.company_id ?? 1;
+  const companyRecord = read(depreciated, 'res.company', company);
+  const gain = configuredAccount(depreciated, companyRecord?.gain_account_id, company, 'gain', current.name || 'the asset');
+  const journal = current.journal_id ?? journalId(depreciated, 'MISC', company) ?? 'MISC';
+  // The refund already credited the gross asset account; clear only accumulated depreciation.
+  const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${current.name} refund disposal`, company, lines: [
+    { account: current.account_depreciation_id, debit: accumulated / 100 },
+    { account: gain, credit: accumulated / 100, analytic_distribution: current.analytic_distribution },
+  ] });
+  return write(postAnalytic(booked, id), 'account.asset', current.id, {
+    depreciation_ids: (current.depreciation_ids ?? []).filter((line) => line.posted),
+    cancelled_depreciation_ids: [...(current.cancelled_depreciation_ids ?? []), ...(current.depreciation_ids ?? []).filter((line) => !line.posted).map((line) => ({ ...line, cancelled: true }))],
+    state: 'close', disposal_date: date, sale_value: 0, disposal_move_id: id, refund_disposal_move_id: refundMove.id,
+  });
+}
+
+function reduceRefundedAsset(db, asset, refundMove, refundAmount) {
+  const newOriginal = (cents(asset.original_value) - cents(refundAmount)) / 100;
+  if (asset.state === 'draft') {
+    db = write(db, 'account.asset', asset.id, {
+      original_value: newOriginal,
+      depreciation_ids: asset.depreciation_ids?.length
+        ? depreciationBoard({ ...asset, original_value: newOriginal }).map((l) => ({ ...l, posted: false, move_id: null }))
+        : [],
+    });
+  } else {
+    const postedLines = (asset.depreciation_ids ?? []).filter((l) => l.posted);
+    const postedAmount = postedCents(asset) + cents(asset.already_depreciated);
+    const unpostedLines = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
+    const currentSalvage = cents(asset.salvage_value || 0);
+
+    if (cents(newOriginal) <= postedAmount + currentSalvage) {
+      const excess = Math.max(0, postedAmount - cents(newOriginal));
+      let adjustment = null;
+      if (excess) {
+        const company = asset.company_id ?? 1;
+        const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
+        const expense = configuredAccount(db, asset.account_depreciation_expense_id, company, 'depreciation expense', asset.name || 'the asset');
+        const date = refundMove.invoice_date ?? refundMove.date ?? today();
+        if (postedLines.some((line) => line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
+        const booked = postEntry(db, { journal, date, ref: `${asset.name} refund depreciation adjustment`, company, lines: [
+          { account: asset.account_depreciation_id, debit: excess / 100 },
+          { account: expense, credit: excess / 100, analytic_distribution: asset.analytic_distribution },
+        ] });
+        db = postAnalytic(booked.db, booked.id);
+        adjustment = { date, amount: -excess / 100, posted: true, move_id: booked.id };
+      }
+      db = write(db, 'account.asset', asset.id, {
+        original_value: newOriginal,
+        salvage_value: Math.max(0, Math.min(currentSalvage, cents(newOriginal) - postedAmount + excess)) / 100,
+        revaluation_ids: [...(asset.revaluation_ids ?? []), { date: refundMove.date || refundMove.invoice_date || today(), amount: -refundAmount, move_id: refundMove.id }],
+        state: 'close',
+        depreciation_ids: adjustment ? [...postedLines, adjustment] : postedLines,
+        cancelled_depreciation_ids: [
+          ...(asset.cancelled_depreciation_ids ?? []),
+          ...unpostedLines.map((l) => ({ ...l, cancelled: true })),
+        ],
+      });
+    } else {
+      const remainingPeriods = unpostedLines.length;
+      const lastDate = postedLines.length ? postedLines.at(-1).date : null;
+      const newUnpostedLines = remainingPeriods > 0
+        ? depreciationBoard(
+            { ...asset, original_value: newOriginal, salvage_value: currentSalvage / 100 },
+            {
+              periods: remainingPeriods,
+              dates: unpostedLines.map((l) => l.date),
+              startDate: lastDate,
+              remainingBase: cents(newOriginal) - currentSalvage - postedAmount,
+              initialCumulated: postedAmount,
+            },
+          ).map((l) => ({ ...l, posted: false, move_id: null }))
+        : [];
+      db = write(db, 'account.asset', asset.id, {
+        original_value: newOriginal,
+        revaluation_ids: [...(asset.revaluation_ids ?? []), { date: refundMove.date || refundMove.invoice_date || today(), amount: -refundAmount, move_id: refundMove.id }],
+        depreciation_ids: [...postedLines, ...newUnpostedLines],
+      });
+    }
+  }
+  return db;
+}
+
+/** Adjust assets only when the refund identifies their original bill line. */
+export function adjustAssetsForCreditNote(db, refundMove, originalBillMove = (refundMove?.reversed_entry_id ? read(db, 'account.move', refundMove.reversed_entry_id) : null)) {
+  if (!refundMove || refundMove.move_type !== 'in_refund' || !refundMove.reversed_entry_id || !originalBillMove) return db;
+  const billLines = originalBillMove.invoice_line_ids ?? [];
+  const assets = search(db, 'account.asset').filter((a) => a.bill_id === originalBillMove.id && a.state !== 'cancel' && !(a.state === 'close' && a.disposal_date));
+  let nextDb = db;
+  for (const asset of assets) {
+    const billLine = billLines[asset.bill_line];
+    if (billLine?.line_id == null) continue;
+    const lines = (refundMove.invoice_line_ids ?? []).filter((l) => l.source_line_id != null && String(l.source_line_id) === String(billLine.line_id));
+    const amount = lines.reduce((sum, l) => sum + toCompany(nextDb, refundMove.currency_id, Math.abs(subtotal(l, nextDb)), refundMove.invoice_date ?? refundMove.date, refundMove.company_id ?? 1), 0);
+    if (!(amount > 0)) continue;
+    if (amount < Number(asset.original_value)) nextDb = reduceRefundedAsset(nextDb, asset, refundMove, amount);
+    else if (asset.state === 'draft' || (!(asset.depreciation_ids ?? []).some((l) => l.posted) && !cents(asset.already_depreciated))) nextDb = cancelRefundedAsset(nextDb, asset);
+    else nextDb = disposeRefundedAsset(nextDb, asset, refundMove);
+  }
+  return nextDb;
+}
+
 export const assetModels = {
   'account.asset': {
     label: 'Assets',
     guardLast: true,
-    actions: { dispose: disposeAsset, modify: modifyAsset },
+    actions: { dispose: disposeAsset, modify: modifyAsset, adjustForCreditNote: adjustAssetsForCreditNote },
     fields: {
       name: { type: 'char', label: 'Asset Name', required: true },
       acquisition_date: { type: 'date', label: 'Acquisition Date', readonly: readonlyWhenNotDraft },
@@ -800,6 +940,7 @@ export const assetModels = {
       sale_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Sale Invoice', readonly: true },
       sale_invoice_line: { type: 'integer', label: 'Sale Invoice Line', readonly: true },
       disposal_move_id: { type: 'many2one', relation: 'account.move', label: 'Disposal Entry', readonly: true },
+      refund_disposal_move_id: { type: 'many2one', relation: 'account.move', label: 'Refund', readonly: true, hidden: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: readonlyWhenNotDraft },
       account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account (Override)', readonly: readonlyWhenNotDraft },
     },
