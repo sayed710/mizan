@@ -273,15 +273,22 @@ export function validateAssetIntegrity(db, before, asset, vals) {
     const salvageChanged = cents(asset.salvage_value) !== cents(before.salvage_value);
     const methodNumChanged = asset.method_number !== before.method_number;
     if (origChanged || salvageChanged || methodNumChanged) {
-      const boardCents = afterLines.filter((l) => !l.cancelled).reduce((s, l) => s + cents(l.amount), 0);
-      const expectedCents = cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
-      if (boardCents !== expectedCents) {
-        return 'Depreciation board is inconsistent with asset values';
-      }
-      if (methodNumChanged) {
-        const nonCancelledCount = afterLines.filter((l) => !l.cancelled).length;
-        if (nonCancelledCount !== Number(asset.method_number) && nonCancelledCount !== Number(asset.method_number) + 1) {
-          return 'Depreciation board is inconsistent with asset duration';
+      if (asset.method === 'no_depreciation') {
+        if (afterLines.length > 0) {
+          return 'Depreciation board is inconsistent with asset values';
+        }
+      } else {
+        const boardCents = afterLines.filter((l) => !l.cancelled).reduce((s, l) => s + cents(l.amount), 0);
+        const expectedCents = cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
+        if (boardCents !== expectedCents) {
+          return 'Depreciation board is inconsistent with asset values';
+        }
+        if (methodNumChanged) {
+          const nonCancelledCount = afterLines.filter((l) => !l.cancelled).length;
+          const expectedCount = Math.ceil(Number(asset.method_number));
+          if (nonCancelledCount !== expectedCount && nonCancelledCount !== expectedCount + 1) {
+            return 'Depreciation board is inconsistent with asset duration';
+          }
         }
       }
     }
@@ -360,9 +367,30 @@ function periodEnd(y, m, yearly, i) {
   return monthEnd(y + Math.floor((m - 1 + i) / 12), ((m - 1 + i) % 12) + 1);
 }
 
+export function assetProrataComputation(asset) {
+  return asset?.prorata_computation_type ?? (asset?.prorata ? 'daily_computation' : 'none');
+}
+
+export function addMonthsClamped(dateStr, months) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const targetY = y + Math.floor((m - 1 + months) / 12);
+  const targetM = ((m - 1 + months) % 12) + 1;
+  const maxDay = Number(monthEnd(targetY, targetM).slice(-2));
+  return `${targetY}-${pad2(targetM)}-${pad2(Math.min(d, maxDay))}`;
+}
+
+export function syncMethodRateAndDuration(r, key) {
+  if ((key === 'method_number' || key === 'method_mode') && r.method_mode !== 'rate') {
+    return { method_rate: Number(r.method_number) > 0 ? 1 / Number(r.method_number) : 0 };
+  }
+  if ((key === 'method_rate' || key === 'method_mode') && r.method_mode === 'rate') {
+    return { method_number: Number(r.method_rate) > 0 ? 1 / Number(r.method_rate) : 0 };
+  }
+  return {};
+}
+
 /** Share of the first period still ahead on the acquisition date (1 when prorata is off). */
-function firstFraction(asset, y, m, yearly) {
-  const computation = asset.prorata_computation_type ?? (asset.prorata ? 'daily_computation' : 'none');
+function firstFraction(asset, y, m, yearly, computation = assetProrataComputation(asset)) {
   if (computation === 'none') return 1;
   const date = asset.prorata_date || asset.acquisition_date;
   if (computation === 'constant_periods') {
@@ -380,12 +408,13 @@ function firstFraction(asset, y, m, yearly) {
 /** Depreciation lines dated at period ends; the last line absorbs rounding so the total equals the base. */
 export function depreciationBoard(asset, { periods: overridePeriods = null, dates = null, startDate = null, remainingBase = null, initialCumulated = null } = {}) {
   if (asset.method === 'no_depreciation') return [];
-  const n = overridePeriods != null ? Number(overridePeriods) : asset.method === 'linear' && asset.method_mode === 'rate' ? (String(asset.method_period) === '12' ? 1 : 12) / Number(asset.method_rate) : Number(asset.method_number);
+  const n = overridePeriods != null ? Number(overridePeriods) : asset.method === 'linear' && asset.method_mode === 'rate' ? 1 / Number(asset.method_rate) : Number(asset.method_number);
   const yearly = String(asset.method_period) === '12';
   const anchor = dates?.length ? dates.at(-1) : startDate;
   const [y, m] = (anchor || asset.prorata_date || asset.acquisition_date || today()).split('-').map(Number);
   const base = remainingBase != null ? remainingBase : cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
-  const frac = overridePeriods != null ? 1 : firstFraction(asset, y, m, yearly);
+  const computation = assetProrataComputation(asset);
+  const frac = overridePeriods != null ? 1 : firstFraction(asset, y, m, yearly, computation);
   const periods = Math.ceil(n + (frac < 1 ? 1 - frac : 0));
   const rate = (Number(asset.method_progress_factor) || 0) / (yearly ? 1 : 12);
   const method = asset.method || 'linear';
@@ -394,9 +423,8 @@ export function depreciationBoard(asset, { periods: overridePeriods = null, date
   const dailyStart = asset.prorata_date || asset.acquisition_date;
   let dailyLength = 0;
   if (overridePeriods == null && asset.prorata_computation_type === 'daily_computation' && method === 'linear') {
-    const end = new Date(`${dailyStart}T00:00:00Z`);
-    end.setUTCMonth(end.getUTCMonth() + Math.round(n * (yearly ? 12 : 1)));
-    dailyLength = dayNumber(end.toISOString().slice(0, 10)) - dayNumber(dailyStart);
+    const end = addMonthsClamped(dailyStart, Math.round(n * (yearly ? 12 : 1)));
+    dailyLength = dayNumber(end) - dayNumber(dailyStart);
   }
   return Array.from({ length: periods }, (_, i) => {
     const elapsed = i === 0 ? 0 : frac + i - 1;
@@ -418,7 +446,7 @@ export function depreciationBoard(asset, { periods: overridePeriods = null, date
 function validate(db, asset) {
   if (!(Number(asset.original_value) > 0)) throw new Error('The original value must be positive');
   if (asset.method === 'linear' && asset.method_mode === 'rate' && !(Number(asset.method_rate) > 0 && Number(asset.method_rate) <= 1)) throw new Error('Rate must be greater than zero and at most one');
-  if (!Number.isFinite(Number(asset.method_number)) || Number(asset.method_number) <= 0) throw new Error('The duration must be positive');
+  if (asset.method !== 'no_depreciation' && (!Number.isFinite(Number(asset.method_number)) || Number(asset.method_number) <= 0)) throw new Error('The duration must be positive');
   if (!(Number(asset.salvage_value || 0) < Number(asset.original_value))) throw new Error('The not depreciable value must be lower than the original value');
   if (!Number.isFinite(Number(asset.already_depreciated ?? 0)) || Number(asset.already_depreciated ?? 0) < 0 || cents(asset.already_depreciated) > cents(asset.original_value) - cents(asset.salvage_value)) throw new Error('Depreciated at import must be between zero and the depreciable value');
   if (!asset.acquisition_date) throw new Error('Set an acquisition date');
@@ -499,7 +527,7 @@ export function hasDueDepreciation(asset, upTo = today()) {
 /** Post each unposted board line dated on or before `upTo`; the asset closes once all are posted. */
 export function postDepreciation(db, asset, upTo = today()) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
-  if (asset.state !== 'open') return db;
+  if (asset.state !== 'open' || asset.method === 'no_depreciation') return db;
   validate(db, asset);
   const unposted = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
   if (unposted.length === 0) {
@@ -609,7 +637,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
 
   if (Number(valueChange) < 0 && !accountId && !asset.account_depreciation_expense_id) throw new Error(`Configure the loss or expense account on asset ${asset.name}`);
   validate(db, asset);
-  let nextDb = postDepreciation(db, asset, date);
+  let nextDb = asset.method === 'no_depreciation' ? db : postDepreciation(db, asset, date);
   asset = read(nextDb, 'account.asset', asset.id) ?? asset;
   if ((asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before modifying the asset');
 
@@ -658,10 +686,10 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
 
   const unpostedLines = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
   const remainingPeriods = methodNumber != null ? Number(methodNumber) : unpostedLines.length;
-  if (remainingPeriods < 1 && newOriginal > postedAmount + currentSalvage) throw new Error('Remaining duration must be at least 1 period');
+  if (asset.method !== 'no_depreciation' && remainingPeriods < 1 && newOriginal > postedAmount + currentSalvage) throw new Error('Remaining duration must be at least 1 period');
 
   const lastDate = postedLines.length ? postedLines.at(-1).date : null;
-  const newUnpostedLines = remainingPeriods > 0
+  const newUnpostedLines = asset.method !== 'no_depreciation' && remainingPeriods > 0
     ? depreciationBoard(
         { ...asset, original_value: newOriginal / 100, salvage_value: currentSalvage / 100 },
         {
@@ -679,7 +707,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
     original_value: newOriginal / 100,
     revaluation_ids: delta ? [...(asset.revaluation_ids ?? []), { date, amount: delta / 100, move_id: adjustmentMoveId }] : (asset.revaluation_ids ?? []),
     salvage_value: currentSalvage / 100,
-    ...(methodNumber != null ? { method_number: postedLines.length + remainingPeriods } : {}),
+    ...(asset.method !== 'no_depreciation' && methodNumber != null ? { method_number: postedLines.length + remainingPeriods } : {}),
     depreciation_ids: updatedDepreciationIds,
     state: updatedDepreciationIds.length && updatedDepreciationIds.every((l) => l.posted) ? 'close' : asset.state,
   });
@@ -772,7 +800,7 @@ export const assetModels = {
       const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'method_mode', 'method_rate', 'prorata', 'prorata_computation_type', 'prorata_date', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
       if (modelJournal) modelDefaults.journal_id = modelJournal;
       const defaultJournal = !vals?.journal_id && !modelDefaults.journal_id ? (journalId(db, 'MISC', company) ?? null) : null;
-      const computation = vals?.prorata_computation_type ?? (vals?.prorata !== undefined ? (vals.prorata ? 'daily_computation' : 'none') : modelDefaults.prorata_computation_type ?? (modelDefaults.prorata ? 'daily_computation' : 'none'));
+      const computation = assetProrataComputation(vals ?? modelDefaults);
       const acquisition = vals?.acquisition_date || today();
       const period = vals?.method_period ?? modelDefaults.method_period ?? '12';
       const defaultDate = computation === 'none' ? `${acquisition.slice(0, period === '12' ? 4 : 7)}${period === '12' ? '-01-01' : '-01'}` : acquisition;
@@ -786,9 +814,12 @@ export const assetModels = {
     },
     onchange: (r, key, db) => {
       if (['acquisition_date', 'prorata_computation_type', 'method_period'].includes(key) && r.acquisition_date) {
-        const computation = r.prorata_computation_type ?? (r.prorata ? 'daily_computation' : 'none');
+        const computation = assetProrataComputation(r);
         const yearly = String(r.method_period) === '12';
         return { prorata_date: computation === 'none' ? `${r.acquisition_date.slice(0, yearly ? 4 : 7)}${yearly ? '-01-01' : '-01'}` : r.acquisition_date };
+      }
+      if (['method_number', 'method_rate', 'method_mode'].includes(key) && (!r.state || r.state === 'draft')) {
+        return syncMethodRateAndDuration(r, key);
       }
       if (key === 'company_id') {
         const company = r.company_id ?? 1;
@@ -808,7 +839,7 @@ export const assetModels = {
             method_progress_factor: model.method_progress_factor ?? r.method_progress_factor,
             method_mode: model.method_mode ?? r.method_mode,
             method_rate: model.method_rate ?? r.method_rate,
-            prorata_computation_type: model.prorata_computation_type ?? (model.prorata ? 'daily_computation' : 'none'),
+            prorata_computation_type: assetProrataComputation(model),
             prorata_date: model.prorata_date ?? r.prorata_date,
             prorata: model.prorata !== undefined ? model.prorata : r.prorata,
             account_asset_id: model.account_asset_id ?? r.account_asset_id,
@@ -847,7 +878,7 @@ export const assetModels = {
             { name: 'date', type: 'date', label: 'Modification Date', required: true, default: today() },
             { name: 'value_change', type: 'monetary', label: 'Value Change' },
             { name: 'account_id', type: 'many2one', relation: 'account.account', label: 'Counterpart Account' },
-            { name: 'method_number', type: 'integer', label: 'Remaining Duration' },
+            { name: 'method_number', type: 'float', label: 'Remaining Duration' },
             { name: 'salvage_value', type: 'monetary', label: 'Not Depreciable Value' },
           ] }),
           run: (db, r, values = {}) => ({

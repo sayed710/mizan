@@ -1,12 +1,13 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { depreciationBoard, assetModels, confirmAsset } from './models/assets.js';
+import { depreciationBoard, assetModels, confirmAsset, modifyAsset, postDepreciation } from './models/assets.js';
 import { accountingModels } from './models/accounting.js';
-import { create, read } from './orm.js';
+import { create, read, search } from './orm.js';
 import { seed } from './seed.js';
 import { diffDb, applyDiff } from './sync.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
+import { postMove } from './models/accounting.js';
 
 const base = { acquisition_date: '2026-03-15', prorata_date: '2026-03-15', original_value: 12000, method: 'linear', method_number: 5, method_period: '12', prorata_computation_type: 'constant_periods' };
 const lines = (asset) => depreciationBoard(asset).map(({ date, amount, remaining }) => [date, amount, remaining]);
@@ -46,4 +47,137 @@ test('confirmed asset settings are guarded through a plain diff', () => {
     const forged = { ...opened, records: { ...opened.records, 'account.asset': opened.records['account.asset'].map((r) => r.id === asset.id ? { ...r, ...change } : r) } };
     assert.throws(() => applyDiff(opened, diffDb(opened, forged), { isAdmin: true }), /core asset fields/i);
   }
+});
+
+test('Finding 1 regression: monthly rate mode uses consistent conversion factor and synchronizes onchange', () => {
+  const model = accountingModels['account.asset.model'];
+  assert.deepEqual(model.onchange({ method_period: '1', method_mode: 'duration', method_number: 4 }, 'method_number'), { method_rate: 0.25 });
+  assert.deepEqual(model.onchange({ method_period: '1', method_mode: 'rate', method_rate: 0.25 }, 'method_rate'), { method_number: 4 });
+  assert.deepEqual(model.onchange({ method_period: '1', method_mode: 'rate', method_rate: 0.25 }, 'method_mode'), { method_number: 4 });
+
+  const assetModel = assetModels['account.asset'];
+  assert.deepEqual(assetModel.onchange({ method_mode: 'duration', method_number: 4 }, 'method_number'), { method_rate: 0.25 });
+  assert.deepEqual(assetModel.onchange({ method_mode: 'rate', method_rate: 0.25 }, 'method_rate'), { method_number: 4 });
+
+  const board = depreciationBoard({
+    ...base,
+    method_period: '1',
+    method_mode: 'rate',
+    method_rate: 0.25,
+    prorata_computation_type: 'none',
+    prorata_date: '2026-03-01',
+  });
+  assert.equal(board.length, 4);
+  assert.equal(board.at(-1).remaining, 0);
+});
+
+test('Finding 2 regression: modifyAsset allows fractional remaining durations', () => {
+  const db = seed();
+  const made = create(db, 'account.asset', { ...assetAccounts(db), name: 'Laptop', ...base, method_number: 5 });
+  const opened = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  const asset = read(opened, 'account.asset', made.id);
+
+  const modifiedDb = modifyAsset(opened, asset, { methodNumber: 1.5, date: '2026-03-15' });
+  const modified = read(modifiedDb, 'account.asset', asset.id);
+  assert.equal(modified.method_number, 1.5);
+  assert.equal(modified.depreciation_ids.length, 2);
+  assert.equal(modified.depreciation_ids.at(-1).remaining, 0);
+
+  const wizard = assetModels['account.asset'].form.buttons.find((b) => b.label === 'Modify Depreciation').wizard();
+  assert.equal(wizard.fields.find((f) => f.name === 'method_number').type, 'float');
+});
+
+test('Finding 4 regression: month-end daily asset clamps anniversary to target month end', () => {
+  const asset = {
+    original_value: 1000,
+    salvage_value: 0,
+    acquisition_date: '2026-01-31',
+    prorata_date: '2026-01-31',
+    method: 'linear',
+    method_number: 1,
+    method_period: '1',
+    prorata_computation_type: 'daily_computation',
+  };
+  const board = depreciationBoard(asset);
+  assert.equal(board.at(-1).date, '2026-02-28');
+  assert.equal(board.at(-1).remaining, 0);
+  assert.equal(board.reduce((s, l) => s + l.amount, 0), 1000);
+});
+
+test('Finding 5 regression: no_depreciation asset can be modified and retains empty board without closing', () => {
+  let db = seed();
+  const made = create(db, 'account.asset', { ...assetAccounts(db), name: 'Land', ...base, method: 'no_depreciation', method_number: 5 });
+  db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  let asset = read(db, 'account.asset', made.id);
+  assert.equal(asset.state, 'open');
+  assert.deepEqual(asset.depreciation_ids, []);
+
+  db = postDepreciation(db, asset);
+  asset = read(db, 'account.asset', asset.id);
+  assert.equal(asset.state, 'open');
+
+  const counterpartId = assetAccounts(db).account_asset_id;
+  db = modifyAsset(db, asset, { value_change: 3000, accountId: counterpartId, date: '2026-04-01' });
+  asset = read(db, 'account.asset', asset.id);
+  assert.equal(asset.original_value, 15000);
+  assert.equal(asset.state, 'open');
+  assert.deepEqual(asset.depreciation_ids, []);
+  assert.equal(asset.revaluation_ids.length, 1);
+  assert.equal(asset.revaluation_ids[0].amount, 3000);
+});
+
+test('Finding 6 regression: account.asset.model validates rate range and positive duration; vendor bill posting validates asset', () => {
+  let db = seed();
+  const accounts = assetAccounts(db);
+
+  for (const badRate of [0, -0.1, 1.5]) {
+    assert.throws(
+      () => create(db, 'account.asset.model', {
+        name: `Bad Rate ${badRate}`, method: 'linear', method_mode: 'rate', method_rate: badRate, method_number: 5,
+        account_asset_id: accounts.account_asset_id,
+        account_depreciation_id: accounts.account_depreciation_id,
+        account_depreciation_expense_id: accounts.account_depreciation_expense_id,
+      }),
+      /Rate must be greater than zero and at most one/i,
+    );
+  }
+
+  assert.throws(
+    () => create(db, 'account.asset.model', {
+      name: 'Bad Duration', method: 'linear', method_number: 0,
+      account_asset_id: accounts.account_asset_id,
+      account_depreciation_id: accounts.account_depreciation_id,
+      account_depreciation_expense_id: accounts.account_depreciation_expense_id,
+    }),
+    /The duration must be positive/i,
+  );
+
+  const goodModel = create(db, 'account.asset.model', {
+    name: 'Good Rate Model', method: 'linear', method_mode: 'rate', method_rate: 0.25, method_number: 4,
+    account_asset_id: accounts.account_asset_id,
+    account_depreciation_id: accounts.account_depreciation_id,
+    account_depreciation_expense_id: accounts.account_depreciation_expense_id,
+  });
+  db = goodModel.db;
+  const forged = { ...db, records: { ...db.records, 'account.asset.model': db.records['account.asset.model'].map((r) => r.id === goodModel.id ? { ...r, method_rate: 0 } : r) } };
+  assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: true }), /Rate must be greater than zero and at most one/i);
+
+  const fixedAccount = create(db, 'account.account', {
+    code: '159999', name: 'Auto Validated Fixed Asset', account_type: 'asset_fixed',
+    create_asset: 'validate', asset_model_id: goodModel.id,
+  });
+  db = fixedAccount.db;
+
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01',
+    invoice_line_ids: [{ name: 'Server', product_id: 1, qty: 1, price_unit: 4000, tax: 0, account_id: fixedAccount.id }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  const created = search(db, 'account.asset').find((a) => a.bill_id === bill.id);
+  assert.ok(created);
+  assert.equal(created.state, 'open');
+  assert.equal(created.method_mode, 'rate');
+  assert.equal(created.method_rate, 0.25);
+  assert.equal(created.depreciation_ids.length > 0, true);
 });

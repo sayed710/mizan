@@ -3547,6 +3547,7 @@ const ar = {
   'Void the check before resetting the payment to draft': 'أبطل الشيك قبل إعادة تعيين الدفعة إلى مسودة',
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
+  'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
   'Computation': 'طريقة الحساب',
   'No Prorata': 'دون احتساب نسبي',
@@ -3556,6 +3557,8 @@ const ar = {
   'No Depreciation': 'دون إهلاك',
   'Rate must be greater than zero and at most one': 'يجب أن يكون المعدل أكبر من الصفر وعلى الأكثر واحداً',
   'The duration must be positive': 'يجب أن تكون المدة موجبة',
+  'Tax Closing Lines': 'بنود الإقفال الضريبي',
+  'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

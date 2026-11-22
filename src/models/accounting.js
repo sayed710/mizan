@@ -20,7 +20,7 @@ import { t } from '../i18n.js';
 import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, deferralLinksMove, registerDeferredPostMoveHook, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, syncDeferralOnMoveStateChange, validateInvoiceDeferralCredit } from './deferred.js';
 import { isEligibleRecipientBank, resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
-import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard, confirmAsset } from './assets.js';
+import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard, confirmAsset, syncMethodRateAndDuration } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
@@ -727,7 +727,23 @@ export function postMove(db, id, { autoPost = false } = {}) {
         posted = reconcileReversalLines(posted, source.id, id, r.date ?? entryDate);
       }
     }
-    const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id, scheduled: r.reverse_date > today() }).db : posted;
+    let reversed = posted;
+    let revMove = null;
+    if (r.auto_reverse) {
+      const revResult = reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, {
+        journal_id: r.reverse_journal_id ?? r.journal_id,
+        scheduled: r.reverse_date > today(),
+      });
+      reversed = revResult.db;
+      revMove = read(reversed, 'account.move', revResult.id);
+    }
+    if (journalRecord.restrict_mode_hash_table) reversed = secureEntries(reversed, { throughMoveId: id });
+    if (revMove && revMove.state === 'posted') {
+      const revJournal = read(reversed, 'account.journal', revMove.journal_id);
+      if (revJournal?.restrict_mode_hash_table) {
+        reversed = secureEntries(reversed, { throughMoveId: revMove.id });
+      }
+    }
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
   if (!r.partner_id) throw new Error('Partner is required');
@@ -785,6 +801,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
   }
   if (matchWarnings.length) posted = postNote(posted, 'account.move', id, `Purchase price mismatch: ${matchWarnings.map((line) => `${read(db, 'product', line.product_id)?.name ?? 'Unknown product'}, difference ${line.priceDifference}`).join('; ')}`);
   posted = write(posted, 'account.journal', journal, { [sequence.numberField]: sequence.nextNumber + 1 });
+  if (journalRecord.restrict_mode_hash_table) posted = secureEntries(posted, { throughMoveId: id });
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   if (isRefund(r) && r.reversed_entry_id) {
     const adjusted = adjustInvoiceDeferralsForCreditNote(deferred, read(deferred, 'account.move', id), reverseEntry);
@@ -3362,6 +3379,7 @@ export const accountingModels = {
       return {};
     },
     fields: {
+      tax_closing_lines: { type: 'json', label: 'Tax Closing Lines', readonly: true, hidden: true },
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.name && r.name !== '/' ? r.name : t('Draft (* {id})', { id: r.id })) },
       move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
@@ -4119,6 +4137,12 @@ Object.assign(accountingModels, {
         && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.create_asset === 'validate')) {
         return 'Validated asset creation needs a depreciation model with depreciation accounts';
       }
+      if (after.method === 'linear' && after.method_mode === 'rate' && !(Number(after.method_rate) > 0 && Number(after.method_rate) <= 1)) {
+        return 'Rate must be greater than zero and at most one';
+      }
+      if (after.method !== 'no_depreciation' && (!Number.isFinite(Number(after.method_number)) || Number(after.method_number) <= 0)) {
+        return 'The duration must be positive';
+      }
       return assetAccountGuard(db, before, after, ctx);
     },
     fields: {
@@ -4159,11 +4183,7 @@ Object.assign(accountingModels, {
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
     },
     defaults: () => ({ method: 'linear', method_mode: 'duration', method_number: 5, method_rate: 0.2, method_period: '12', method_progress_factor: 0.3, prorata: false }),
-    onchange: (r, key) => {
-      if ((key === 'method_number' || key === 'method_mode') && r.method_mode !== 'rate' && Number(r.method_number) > 0) return { method_rate: 1 / Number(r.method_number) };
-      if ((key === 'method_rate' || key === 'method_mode') && r.method_mode === 'rate' && Number(r.method_rate) > 0) return { method_number: 1 / Number(r.method_rate) };
-      return {};
-    },
+    onchange: (r, key) => syncMethodRateAndDuration(r, key),
     list: ['name', 'method', 'method_number', 'method_period', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
     form: {
       title: 'name',

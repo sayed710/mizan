@@ -586,13 +586,13 @@ function returnGuard(db, before, after) {
   const transitions = { new: ['reviewed'], reviewed: ['new', 'submitted'], submitted: ['new', 'paid'], paid: [] };
   const directPay = before && ['new', 'reviewed'].includes(before.state) && after.state === 'paid'
     && read(db, 'account.return.type', after.type_id)?.states_workflow === 'generic_state_only_pay'
-    && taxClosingMatchesReturn(db, after);
+    && taxClosingMatchesReturn(db, after, true);
   if (!before && ['submitted', 'paid'].includes(after.state)) return 'Tax return transition is not allowed';
   if (before && before.state !== after.state && !transitions[before.state]?.includes(after.state) && !directPay) {
     return 'Tax return transition is not allowed';
   }
   if ((before?.state === 'reviewed' && after.state === 'submitted') || directPay) {
-    if (!taxClosingMatchesReturn(db, after) || after.date_lock !== after.date_to || !after.date_submission) {
+    if (!taxClosingMatchesReturn(db, after, true) || after.date_lock !== after.date_to || !after.date_submission) {
       return 'Tax return submission requires a posted linked closing move with matching amounts';
     }
   }

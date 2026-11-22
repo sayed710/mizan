@@ -1104,7 +1104,7 @@ test('Regression: Secured entries, hash chain, edit/delete rejection, tamper det
   });
   db = postMove(inv3.db, inv3.id);
 
-  // Secure through 2026-02-10 (secures inv1 and inv2, leaves inv3 unhashed)
+  // All three entries were secured when posted.
   db = secureEntries(db, { companyId, hashDate: '2026-02-10' });
 
   const sInv1 = read(db, 'account.move', inv1.id);
@@ -1115,12 +1115,12 @@ test('Regression: Secured entries, hash chain, edit/delete rejection, tamper det
   assert.equal(sInv1.secure_sequence_number, 1);
   assert.ok(sInv2.inalterable_hash, 'Inv 2 must have inalterable hash');
   assert.equal(sInv2.secure_sequence_number, 2);
-  assert.ok(!sInv3.inalterable_hash, 'Inv 3 must not be secured yet');
+  assert.ok(sInv3.inalterable_hash, 'Inv 3 is secured on posting');
 
   // Verify hash chain
-  const expectedHash1 = computeMoveHash(sInv1, '', 2);
+  const expectedHash1 = computeMoveHash(sInv1, '', 3);
   assert.equal(sInv1.inalterable_hash, expectedHash1);
-  const expectedHash2 = computeMoveHash(sInv2, sInv1.inalterable_hash, 2);
+  const expectedHash2 = computeMoveHash(sInv2, sInv1.inalterable_hash, 3);
   assert.equal(sInv2.inalterable_hash, expectedHash2);
 
   // Inalterability report
@@ -1128,7 +1128,7 @@ test('Regression: Secured entries, hash chain, edit/delete rejection, tamper det
   assert.equal(report.length, 1);
   assert.equal(report[0].status, 'ok', 'Status must be OK');
   assert.equal(report[0].first_move, sInv1.name);
-  assert.equal(report[0].last_move, sInv2.name);
+  assert.equal(report[0].last_move, sInv3.name);
 
   // Rejecting edits of secured entries
   assert.throws(

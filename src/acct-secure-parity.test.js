@@ -71,7 +71,6 @@ test('secure entries: hash chain computation, wizard analysis, sequence ordering
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
   assert.ok(saleJournal, 'sale journal exists');
   db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
-  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
 
   // Post 2 invoices
   const customer = search(db, 'res.partner')[0];
@@ -92,6 +91,8 @@ test('secure entries: hash chain computation, wizard analysis, sequence ordering
     invoice_line_ids: [{ product_id: product.id, qty: 2, price_unit: 100 }],
   });
   db = postMove(inv2.db, inv2.id);
+
+  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
 
   // Create a draft invoice before hash date to test wizard warnings
   const draftInv = create(db, 'account.move', {
@@ -448,7 +449,6 @@ test('wizard-to-posting regression: confirmation is blocked while drafts exist o
   // 1. Enable restrict_mode_hash_table on sales journal
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
   db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
-  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
 
   const customer = search(db, 'res.partner')[0];
   const product = search(db, 'product')[0];
@@ -462,6 +462,8 @@ test('wizard-to-posting regression: confirmation is blocked while drafts exist o
     invoice_line_ids: [{ product_id: product.id, qty: 1, price_unit: 100 }],
   });
   db = postMove(inv.db, inv.id);
+
+  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
 
   // Create a draft invoice dated 2026-02-05 (before the secured date)
   const draftInv = create(db, 'account.move', {
@@ -515,14 +517,14 @@ test('wizard-to-posting regression: confirmation is blocked while drafts exist o
   assert.equal(unblockedWiz.not_hashable_unlocked_move_ids.length, 0);
   assert.equal(confirmBtn.when?.(unblockedWiz, db), true, 'confirmation is now unblocked');
 
-  // Confirming secures both entries safely
+  // Posting the draft secures both entries; the empty wizard leaves the hard lock unchanged.
   const result = confirmBtn.run(db, unblockedWiz);
   assert.ok(result.db, 'securing succeeded');
   const m1 = read(result.db, 'account.move', draftInv.id);
   const m2 = read(result.db, 'account.move', inv.id);
   assert.ok(m1.inalterable_hash, 'draft (now posted) is secured');
   assert.ok(m2.inalterable_hash, 'original entry is secured');
-  assert.equal(read(result.db, 'res.company', companyId).hard_lock_date, '2026-02-10');
+  assert.equal(read(result.db, 'res.company', companyId).hard_lock_date ?? null, null);
 });
 
 test('wizard-to-posting regression with the draft in an unrestricted journal', async () => {
@@ -533,7 +535,6 @@ test('wizard-to-posting regression with the draft in an unrestricted journal', a
   // 1. Enable restrict_mode_hash_table on sales journal
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
   db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
-  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
 
   const generalJournal = search(db, 'account.journal').find((j) => j.type === 'general' && !j.restrict_mode_hash_table);
   assert.ok(generalJournal, 'unrestricted general journal exists');
@@ -551,6 +552,8 @@ test('wizard-to-posting regression with the draft in an unrestricted journal', a
     invoice_line_ids: [{ product_id: product.id, qty: 1, price_unit: 100 }],
   });
   db = postMove(inv.db, inv.id);
+
+  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
 
   // Create a draft entry in UNRESTRICTED general journal dated 2026-02-05 (on or before proposed lock date 2026-02-10)
   const draftEarly = create(db, 'account.move', {
