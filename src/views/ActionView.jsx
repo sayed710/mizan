@@ -198,6 +198,7 @@ export function ActionView({ leaf, base, params }) {
           if (res) commit(res.db ?? res);
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
+      {(leaf.key === 'draft-entries' || leaf.key === 'to-check') && <button type="button" className="btn sm" onClick={() => globalThis.print()}>{t('Print')}</button>}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
       <button type="button" className="btn sm" onClick={exportXlsx}>⬇ {t('Export XLSX')}</button>
       {statementImport && !defaults.journal_id && <label className="import-journal-picker">
