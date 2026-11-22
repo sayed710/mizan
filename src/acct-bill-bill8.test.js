@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { create, read, search } from './orm.js';
 import { models } from './models/index.js';
+import { actionRecords } from './companyView.js';
+import { appOpen } from './access.js';
 import { postMove } from './models/accounting.js';
 
 test('BILL-8: Assets smart button computes correct count, visibility, and target on vendor bills', () => {
@@ -74,6 +76,7 @@ test('BILL-8: Assets smart button computes correct count, visibility, and target
   const refundRec = read(db, 'account.move', refund.id);
   assert.equal(assetsBtn.when(refundRec, db), true, 'Assets button visible on vendor refund linking to bill');
   assert.equal(assetsBtn.value(db, refundRec), 2, 'Assets count on refund matches original bill assets');
+  assert.equal(assetsBtn.target(refundRec, db), `accounting/assets?view=list&rel=id:${asset1.id},${asset2.id}`);
 });
 
 test('BILL-8: Deferrals / Deferred Expenses smart button is visible on vendor bills with deferred expenses', () => {
@@ -136,6 +139,11 @@ test('BILL-8: Deferrals / Deferred Expenses smart button is visible on vendor bi
 
   assert.equal(deferralBtn.value(db, billRec), 2, 'Deferrals count is 2 when 2 schedules exist');
   assert.equal(deferralBtn.target(billRec, db), `accounting/deferred-expenses?view=list&rel=move_id:${bill.id}`, 'Multiple deferrals navigate to deferred-expenses list');
+
+  const refund = create(db, 'account.move', { move_type: 'in_refund', partner_id: 2, reversed_entry_id: bill.id });
+  db = refund.db;
+  assert.equal(deferralBtn.value(db, read(db, 'account.move', refund.id)), 2);
+  assert.equal(deferralBtn.target(read(db, 'account.move', refund.id), db), `accounting/deferred-expenses?view=list&rel=id:${def1.id},${def2.id}`);
 
   // On journal entry, target is accounting/deferrals
   const entryMove = create(db, 'account.move', { move_type: 'entry', date: '2026-04-01' });
@@ -235,7 +243,7 @@ test('BILL-8: Purchase Orders smart button computes count, visibility, and targe
   const billMultiPoRec = read(db, 'account.move', billMultiPo.id);
   assert.equal(poBtn.when(billMultiPoRec, db), true, 'Purchase Orders button visible on multi-PO bill');
   assert.equal(poBtn.value(db, billMultiPoRec), 2, 'PO count is 2 for multi-PO bill');
-  assert.equal(poBtn.target(billMultiPoRec, db), 'purchase/rfq?view=list', 'Multi-PO links to purchase orders list');
+  assert.equal(poBtn.target(billMultiPoRec, db), `purchase/rfq?view=list&rel=id:${po1.id},${po2.id}`, 'Multi-PO links to purchase orders list');
 
   // Customer invoice should NOT show Purchase Orders button
   const custInv = create(db, 'account.move', {
@@ -268,4 +276,16 @@ test('BILL-8: Arabic translations exist for all vendor bill smart buttons', asyn
   assert.equal(tAr('Deferred Expenses'), 'المصروفات المؤجلة');
   assert.equal(tAr('Purchase Orders'), 'أوامر الشراء');
   assert.equal(tAr('Deferrals'), 'التأجيلات');
+});
+
+
+test('smart button ID filters select exactly counted records and respect purchase access', () => {
+  const db = seed();
+  const leaf = { model: 'purchase.order' };
+  const orders = search(db, 'purchase.order');
+  if (orders.length >= 2) assert.deepEqual(actionRecords(db, leaf, { field: 'id', ids: [orders[0].id] }).map((o) => o.id), [orders[0].id]);
+  const button = models['account.move'].form.smart.find((s) => s.label === 'Purchase Orders');
+  assert.equal(button.app, 'purchase');
+  assert.equal(appOpen(db, { apps: ['accounting'] }, button.app), false);
+  assert.equal(appOpen(db, { apps: ['purchase'] }, button.app), true);
 });

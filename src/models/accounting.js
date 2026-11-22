@@ -1,3 +1,4 @@
+import { purchaseLineId } from './purchase-links.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
@@ -1890,9 +1891,8 @@ const invoiceLineField = {
     if (base.purchase_line_id != null && updated.purchase_line_id == null) {
       updated = { ...updated, purchase_line_id: base.purchase_line_id };
     }
-    if (moveWithJournal?.purchase_id) {
-      const po = read(db, 'purchase.order', moveWithJournal.purchase_id);
-      const poLines = po?.order_line ?? [];
+    if (db && key === 'purchase_line_id') {
+      const poLines = search(db, 'purchase.order').filter((po) => (po.company_id ?? 1) === (moveWithJournal.company_id ?? 1) && (!moveWithJournal.partner_id || sameCommercialPartner(db, po.partner_id, moveWithJournal.partner_id))).flatMap((po) => po.order_line ?? []);
       const pid = updated.purchase_line_id ?? line.purchase_line_id;
       if (key === 'purchase_line_id' && pid != null) {
         const poLine = poLines.find((p) => p.id === pid);
@@ -1971,7 +1971,7 @@ const invoiceLineField = {
     ...invoiceLineExtraBase,
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
     sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
-    purchase_line_id: { type: 'many2one', relation: 'purchase.order.line', label: 'Purchase Order Line', optional: 'hide' },
+    purchase_line_id: { type: 'many2one', relation: 'purchase.order.line', label: 'Purchase Order Line', optional: 'hide', domain: (line, row, db) => { const po = db && read(db, 'purchase.order', line.purchase_id); return Boolean(po && (po.company_id ?? 1) === (row?.company_id ?? 1) && (!row?.parent_partner_id || sameCommercialPartner(db, po.partner_id, row.parent_partner_id))); } },
 
     down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true },
     rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true },
@@ -2482,7 +2482,7 @@ const movePurchaseOrders = (db, r) => {
   for (const m of movesToCheck) {
     if (m.purchase_id) poIds.add(m.purchase_id);
     const lines = m.invoice_line_ids ?? [];
-    const pkeys = new Set(lines.map((l) => l.purchase_line_id).filter((id) => id != null));
+    const pkeys = new Set(lines.map((l) => purchaseLineId(db, l, m.purchase_id)).filter((id) => id != null));
     if (pkeys.size > 0) {
       for (const po of poRecords) {
         if (poIds.has(po.id)) continue;
@@ -3304,6 +3304,16 @@ export const accountingModels = {
       return { db, vals: nextVals };
     },
     guard: (db, before, after, ctx) => {
+      if (['in_invoice', 'in_refund'].includes(after.move_type)) {
+        const previous = before?.invoice_line_ids ?? [];
+        for (const [index, line] of (after.invoice_line_ids ?? []).entries()) {
+          if (!line.purchase_line_id || (previous[index]?.purchase_line_id === line.purchase_line_id && previous[index]?.product_id === line.product_id && before?.partner_id === after.partner_id && before?.company_id === after.company_id)) continue;
+          const orders = (db.records['purchase.order'] ?? []).filter((po) => (po.order_line ?? []).some((pol) => pol.id === line.purchase_line_id));
+          const po = orders[0];
+          const source = po?.order_line.find((pol) => pol.id === line.purchase_line_id);
+          if (orders.length !== 1 || (po.company_id ?? 1) !== (after.company_id ?? 1) || (after.partner_id && !sameCommercialPartner(db, po.partner_id, after.partner_id)) || (line.product_id && source.product_id !== line.product_id)) return 'Purchase order line must match the vendor, company, and product';
+        }
+      }
       const roundingTarget = (m) => ({ id: m.invoice_cash_rounding_id, companyId: m.company_id ?? 1, currencyId: m.currency_id ?? findCompanyCurrencyRecord(db, m.company_id ?? 1)?.id });
       const roundingErr = cashRoundingError(db, roundingTarget(after), before && roundingTarget(before));
       if (roundingErr) return roundingErr;
@@ -3358,6 +3368,7 @@ export const accountingModels = {
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
+    onCreate: (db, after) => ['in_invoice', 'in_refund'].includes(after.move_type) ? syncInvoicedQty(db, after) : db,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
     onWrite: (db, after, before, vals) => {
       if (['out_invoice', 'out_refund'].includes(before.move_type) && ['posted', 'draft'].includes(before.state) && (after.state === 'draft' || after.state === 'cancel') && after.state !== before.state) {
@@ -3387,13 +3398,11 @@ export const accountingModels = {
         const partner = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
         const term = partner ? (isPurchase(r) ? partner.property_supplier_payment_term_id : partner.property_payment_term_id) : null;
         const fiscal = (partnerChange || key === 'company_id') ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id, r.company_id ?? 1) } : {};
-        const isEligibleVendorBank = (b) => b.partner_id === r.partner_id && b.allow_out_payment !== false && b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1));
+        const isEligibleVendorBank = (b) => b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1)) && sameCommercialPartner(db, b.partner_id, r.partner_id);
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
-        const partnerBank = partnerChange && isPurchase(r)
-          ? (selectedBank && isEligibleVendorBank(selectedBank)
-              ? selectedBank.id
-              : (selectedBank ? null : (search(db, 'res.partner.bank').find(isEligibleVendorBank)?.id ?? null)))
-          : null;
+        const eligibleBanks = partnerChange && isPurchase(r) ? search(db, 'res.partner.bank').filter(isEligibleVendorBank).sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment))) : [];
+        const partnerBank = selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
+          ? selectedBank.id : (eligibleBanks[0]?.id ?? null);
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
         const nextContext = { ...r, ...fiscal, journal_id: journal };
         // The state before this change: the form's previous values, else the stored record.
@@ -3461,7 +3470,8 @@ export const accountingModels = {
         const po = read(db, 'purchase.order', r.purchase_id);
         if (!po) return {};
         const eligible = billableLines(db, po.id);
-        const journal = resolveDocumentJournal(db, { ...r, partner_id: po.partner_id, company_id: po.company_id ?? r.company_id ?? 1, move_type: r.move_type ?? 'in_invoice' });
+        const companyChanged = (po.company_id ?? 1) !== (r.company_id ?? 1);
+        const journal = resolveDocumentJournal(db, { ...r, ...(companyChanged ? { id: null, journal_id: null } : {}), partner_id: po.partner_id, company_id: po.company_id ?? 1, move_type: r.move_type ?? 'in_invoice' });
         const unbilledLines = (po.order_line ?? []).map((l, i) => {
           const toBill = eligible[i]?.toBill ?? Math.max(0, (Number(l.qty) || 0) - (Number(l.qty_invoiced) || 0));
           const { qty_delivered, qty_invoiced, purchase_method, purchase_line_key, id, ...lineData } = l;
@@ -3480,10 +3490,12 @@ export const accountingModels = {
         const dueInfo = termDue(db, { ...r, partner_id: po.partner_id, invoice_payment_term_id: po.payment_term_id ?? null }, { clear: true });
         return {
           partner_id: po.partner_id ?? null,
+          company_id: po.company_id ?? 1,
+          ...(companyChanged ? { journal_id: journal?.id ?? null } : {}),
           currency_id: po.currency_id ?? null,
           invoice_payment_term_id: po.payment_term_id ?? null,
           invoice_origin: po.name ?? r.invoice_origin,
-          invoice_line_ids: unbilledLines,
+          invoice_line_ids: [...(r.invoice_line_ids ?? []), ...unbilledLines.filter((line) => !(r.invoice_line_ids ?? []).some((existing) => existing.purchase_line_id === line.purchase_line_id))],
           ...dueInfo,
         };
       }
@@ -3510,7 +3522,7 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, _db) => (!b.partner_id || b.partner_id === r?.partner_id) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && (isPurchase(r) ? b.allow_out_payment !== false : true) },
+      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
@@ -3732,7 +3744,7 @@ export const accountingModels = {
           target: (r, db) => {
             const list = moveDeferrals(db, r);
             const targetBase = ['in_invoice', 'in_refund'].includes(r?.move_type) ? 'accounting/deferred-expenses' : 'accounting/deferrals';
-            return list.length === 1 ? `${targetBase}/${list[0].id}` : `${targetBase}?view=list&rel=move_id:${r.id}`;
+            return list.length === 1 ? `${targetBase}/${list[0].id}` : `${targetBase}?view=list&rel=${r.reversed_entry_id ? `id:${list.map((item) => item.id).join(',')}` : `move_id:${r.id}`}`;
           },
         },
         {
@@ -3753,16 +3765,16 @@ export const accountingModels = {
           value: (db, r) => moveAssets(db, r).length,
           target: (r, db) => {
             const list = moveAssets(db, r);
-            return list.length === 1 ? `accounting/assets/${list[0].id}` : `accounting/assets?view=list&rel=bill_id:${r.id}`;
+            return list.length === 1 ? `accounting/assets/${list[0].id}` : `accounting/assets?view=list&rel=${r.reversed_entry_id ? `id:${list.map((item) => item.id).join(',')}` : `bill_id:${r.id}`}`;
           },
         },
         {
-          label: 'Purchase Orders',
+          label: 'Purchase Orders', app: 'purchase',
           when: (r, db) => ['in_invoice', 'in_refund'].includes(r?.move_type) && movePurchaseOrders(db, r).length > 0,
           value: (db, r) => movePurchaseOrders(db, r).length,
           target: (r, db) => {
             const list = movePurchaseOrders(db, r);
-            return list.length === 1 ? (list[0].state === 'purchase' ? `purchase/po/${list[0].id}` : `purchase/rfq/${list[0].id}`) : 'purchase/rfq?view=list';
+            return list.length === 1 ? (list[0].state === 'purchase' ? `purchase/po/${list[0].id}` : `purchase/rfq/${list[0].id}`) : `purchase/rfq?view=list&rel=id:${list.map((po) => po.id).join(',')}`;
           },
         },
       ],

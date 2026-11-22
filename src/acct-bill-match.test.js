@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
+import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
-import { billControlModels, shouldBePaid } from './models/billcontrol.js';
+import { billControlModels, shouldBePaid, matchBill } from './models/billcontrol.js';
 
 const run = (db, model, id, label) => (billControlModels[model] ?? models[model]).form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -317,4 +318,59 @@ test('BILL-2: commitment tracking works with purchase_line_id mapped on manual b
 
   assert.equal(lineData.purchase_line_id, poLine.id);
   assert.equal(lineData.purchase_line_key, undefined);
+});
+
+
+test('price review catches cheaper bills and ignores unrelated lines', () => {
+  let db = seed();
+  const company = search(db, 'res.company')[0];
+  db = write(db, 'res.company', company.id, { three_way_matching: true });
+  const vendor = search(db, 'res.partner')[0];
+  const product = create(db, 'product', { name: 'Received goods', type: 'goods', purchase_method: 'receive' });
+  const po = create(product.db, 'purchase.order', { company_id: company.id, partner_id: vendor.id, state: 'purchase', order_line: [{ product_id: product.id, qty: 1, qty_delivered: 1, price_unit: 100 }] });
+  const lines = [{ display_type: 'product', product_id: product.id, qty: 1, price_unit: 90 }, { display_type: 'line_section', name: 'Section' }, { name: 'Freight', qty: 1, price_unit: 20 }];
+  const bill = create(po.db, 'account.move', { company_id: company.id, partner_id: vendor.id, move_type: 'in_invoice', purchase_id: po.id, invoice_line_ids: lines });
+  assert.equal(shouldBePaid(bill.db, read(bill.db, 'account.move', bill.id)), 'exception');
+  assert.equal(matchBill(bill.db, bill.id)[0].status, 'price_differs');
+  const updated = write(bill.db, 'account.move', bill.id, { invoice_line_ids: [{ ...lines[0], price_unit: 100 }, ...lines.slice(1)] });
+  assert.equal(shouldBePaid(updated, read(updated, 'account.move', bill.id)), 'yes');
+});
+
+
+test('purchase autocomplete preserves existing bill lines and avoids duplicating linked lines', () => {
+  const db = seed();
+  const vendor = search(db, 'res.partner')[0];
+  const product = search(db, 'product')[0];
+  const po = create(db, 'purchase.order', { partner_id: vendor.id, state: 'purchase', order_line: [{ product_id: product.id, qty: 1, qty_delivered: 1, price_unit: 10 }] });
+  const first = models['account.move'].onchange({ move_type: 'in_invoice', purchase_id: po.id, invoice_line_ids: [{ name: 'Freight', qty: 1, price_unit: 5 }] }, 'purchase_id', po.db);
+  assert.equal(first.invoice_line_ids[0].name, 'Freight');
+  assert.equal(first.invoice_line_ids.length, 2);
+  const second = models['account.move'].onchange({ move_type: 'in_invoice', purchase_id: po.id, invoice_line_ids: first.invoice_line_ids }, 'purchase_id', po.db);
+  assert.equal(second.invoice_line_ids.length, 2);
+});
+
+
+test('multi-order bill lines sync to their own orders and invalid links fail direct and diff writes', () => {
+  let db = seed();
+  const vendor = search(db, 'res.partner')[0];
+  const product = search(db, 'product')[0];
+  const po1 = create(db, 'purchase.order', { partner_id: vendor.id, state: 'purchase', order_line: [{ id: 70001, product_id: product.id, qty: 5, price_unit: 10 }] });
+  const po2 = create(po1.db, 'purchase.order', { partner_id: vendor.id, state: 'purchase', order_line: [{ id: 70002, product_id: product.id, qty: 5, price_unit: 10 }] });
+  const bill = create(po2.db, 'account.move', { move_type: 'in_invoice', partner_id: vendor.id, purchase_id: po1.id, invoice_line_ids: [{ product_id: product.id, purchase_line_id: 70002, qty: 2, price_unit: 10 }] });
+  db = bill.db;
+  assert.equal(read(db, 'purchase.order', po2.id).order_line[0].qty_invoiced, 2);
+  assert.equal(read(db, 'purchase.order', po1.id).order_line[0].qty_invoiced, 0);
+  const badLines = [{ product_id: product.id, purchase_line_id: 999999, qty: 2, price_unit: 10 }];
+  assert.throws(() => write(db, 'account.move', bill.id, { invoice_line_ids: badLines }), /Purchase order line must match/);
+  const forged = structuredClone(db);
+  forged.records['account.move'].find((m) => m.id === bill.id).invoice_line_ids = badLines;
+  assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: false }), /Purchase order line must match/);
+});
+
+test('purchase autocomplete adopts the selected order company as Odoo does', () => {
+  const db = seed();
+  const vendor = search(db, 'res.partner')[0];
+  const po = create(db, 'purchase.order', { partner_id: vendor.id, company_id: 2, order_line: [] });
+  const result = models['account.move'].onchange({ move_type: 'in_invoice', company_id: 1, purchase_id: po.id }, 'purchase_id', po.db);
+  assert.equal(result.company_id, 2);
 });

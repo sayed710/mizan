@@ -1,3 +1,4 @@
+import { purchaseLineId } from './models/purchase-links.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -1778,16 +1779,13 @@ MIGRATIONS.push({ version: 62, name: 'vendor-bill-line-purchase-line-id', up: (d
   let nextId = Math.max(0, ...orders.flatMap((po) => (po.order_line ?? []).map((line) => Number(line.id) || 0)));
   const nextOrders = orders.map((po) => ({ ...po, order_line: (po.order_line ?? []).map((line) => line.id == null ? { ...line, id: ++nextId } : line) }));
   const nextMoves = (db.records?.['account.move'] ?? []).map((move) => {
-    if (!['in_invoice', 'in_refund'].includes(move.move_type) || !Array.isArray(move.invoice_line_ids)) return move;
+    if (move.inalterable_hash || !['in_invoice', 'in_refund'].includes(move.move_type) || !Array.isArray(move.invoice_line_ids)) return move;
     return { ...move, invoice_line_ids: move.invoice_line_ids.map((line) => {
       if (!line.purchase_line_key) return line;
-      const candidates = nextOrders.filter((po) => !move.purchase_id || po.id === move.purchase_id)
-        .flatMap((po) => po.order_line.filter((pol) => pol.purchase_line_key === line.purchase_line_key));
-      if (candidates.length !== 1) {
-        throw new Error('Unable to resolve purchase order line for vendor bill');
-      }
+      const id = purchaseLineId({ records: { 'purchase.order': nextOrders } }, line, move.purchase_id);
+      if (id == null) return line;
       const { purchase_line_key, ...rest } = line;
-      return { ...rest, purchase_line_id: candidates[0].id };
+      return { ...rest, purchase_line_id: id };
     }) };
   });
   return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };

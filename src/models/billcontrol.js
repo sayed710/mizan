@@ -1,3 +1,4 @@
+import { purchaseLineId } from './purchase-links.js';
 import { create, read, search, write } from '../orm.js';
 import { addDays, subtotal, today } from './common.js';
 import { dueDate } from './terms.js';
@@ -81,9 +82,9 @@ function matches(db, bill) {
   const po = orderFor(db, bill);
   if (!po) throw new Error('Link the vendor bill to a purchase order');
   const used = new Map();
-  const prior = previousBills(db, bill, po).flatMap((m) => m.invoice_line_ids ?? []);
+  const prior = previousBills(db, bill, po).flatMap((m) => (m.invoice_line_ids ?? []).map((line) => ({ ...line, purchase_line_id: purchaseLineId(db, line, po.id) })));
   const curr = documentCurrency(db, bill);
-  return (bill.invoice_line_ids ?? []).map((l) => {
+  return (bill.invoice_line_ids ?? []).map((line) => ({ ...line, purchase_line_id: purchaseLineId(db, line, po.id) })).filter((l) => l.product_id && !['line_section', 'line_note', 'line_subsection'].includes(l.display_type) && (po.order_line ?? []).some((p) => p.product_id === l.product_id && (!l.purchase_line_id || p.id === l.purchase_line_id))).map((l) => {
     const source = (po.order_line ?? []).filter((p) => p.product_id === l.product_id
       && (!l.purchase_line_id || p.id === l.purchase_line_id));
     const billedQty = number(l.qty);
@@ -101,7 +102,7 @@ function matches(db, bill) {
     }
     const priceDifference = roundCurrency(subtotal(l, db) - expected, curr);
     used.set(key, (used.get(key) ?? 0) + billedQty);
-    const hasPriceDiff = roundCurrency(priceDifference, curr) > 0;
+    const hasPriceDiff = roundCurrency(Math.abs(priceDifference), curr) > 0;
     return { product_id: l.product_id, billedQty, receivedQty, orderedQty, priceDifference,
       status: offset + billedQty > receivedQty + 1e-8 ? 'qty_exceeds_received' : hasPriceDiff ? 'price_differs' : 'ok' };
   });
@@ -131,7 +132,7 @@ export function shouldBePaid(db, bill) {
     return 'no';
   }
   const curr = documentCurrency(db, bill);
-  if (rows.some((l) => (l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') || roundCurrency(l.priceDifference, curr) > 0)) {
+  if (rows.some((l) => (l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') || roundCurrency(Math.abs(l.priceDifference), curr) > 0)) {
     return 'exception';
   }
   return 'yes';

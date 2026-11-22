@@ -139,7 +139,7 @@ test('BILL-6: onchange partner_id on vendor bill defaults partner_bank_id from v
   assert.equal(result.partner_bank_id, bank.id, 'should default to the vendor primary bank account');
 });
 
-test('BILL-6: onchange partner_id on vendor bill excludes bank accounts where allow_out_payment is false', () => {
+test('BILL-6: onchange partner_id on vendor bill falls back to an untrusted bank', () => {
   let db = seed();
   const vendor = search(db, 'res.partner')[0];
 
@@ -156,7 +156,7 @@ test('BILL-6: onchange partner_id on vendor bill excludes bank accounts where al
   const result = onchange(r, 'partner_id', db);
 
   assert.ok('partner_bank_id' in result, 'partner_bank_id should be returned');
-  assert.equal(result.partner_bank_id, null, 'should not default to a bank account where allow_out_payment is false');
+  assert.equal(result.partner_bank_id, bank.id, 'an untrusted bank remains available as Odoo fallback');
 });
 
 test('BILL-6: onchange partner_id on customer invoice does not set partner_bank_id', () => {
@@ -182,7 +182,7 @@ test('BILL-6: partner_bank_id field has domain filtering for purchase bills', ()
 
   // A bank that does not allow out payment on a purchase bill
   const noOutBank = { id: 2, partner_id: 2, company_id: null, allow_out_payment: false, active: true };
-  assert.ok(!field.domain(noOutBank, r, null), 'bank without allow_out_payment fails domain on purchase bill');
+  assert.ok(field.domain(noOutBank, r, null), 'untrusted bank is selectable, with payment trust checked at payment');
 
   // A bank belonging to a different partner fails domain
   const wrongPartnerBank = { id: 3, partner_id: 99, company_id: null, allow_out_payment: true };
@@ -302,4 +302,19 @@ test('BILL-12: Refund button is visible for posted vendor bill', () => {
   });
   assert.ok(btn, 'Refund button should exist for posted vendor bill');
   assert.ok(btn.when(r), 'Refund button should be visible for posted vendor bill');
+});
+
+
+
+test('vendor bank selection prefers trusted commercial-family accounts', () => {
+  let db = seed();
+  const parent = create(db, 'res.partner', { name: 'Commercial vendor', is_company: true });
+  const child = create(parent.db, 'res.partner', { name: 'Vendor contact', parent_id: parent.id });
+  const untrusted = create(child.db, 'res.partner.bank', { partner_id: parent.id, account_number: 'UNTRUSTED', allow_out_payment: false });
+  const trusted = create(untrusted.db, 'res.partner.bank', { partner_id: parent.id, account_number: 'TRUSTED', allow_out_payment: true });
+  db = trusted.db;
+  const bill = { move_type: 'in_invoice', partner_id: child.id, company_id: 1 };
+  assert.equal(onchange(bill, 'partner_id', db).partner_bank_id, trusted.id);
+  assert.equal(onchange({ ...bill, partner_bank_id: untrusted.id }, 'partner_id', db).partner_bank_id, trusted.id);
+  assert.equal(models['account.move'].fields.partner_bank_id.domain(read(db, 'res.partner.bank', trusted.id), bill, db), true);
 });

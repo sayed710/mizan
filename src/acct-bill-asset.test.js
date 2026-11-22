@@ -1,10 +1,11 @@
 import './models/index.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { adjustAssetsForCreditNote, postDepreciation } from './models/assets.js';
+import { applyDiff, diffDb } from './sync.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
 
 test('BILL-3: Posting a vendor refund reverses draft assets linked to the refunded bill', () => {
@@ -199,6 +200,8 @@ test('BILL-3: Posting a vendor refund disposes or cancels asset with posted depr
   db = postMove(refund.db, refund.id);
 
   const assetAfter = read(db, 'account.asset', asset.id);
+  const assetBalance = search(db, 'account.move').filter((m) => m.state === 'posted').flatMap((m) => m.line_ids ?? []).filter((l) => l.account_id === validAccount.id).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  assert.equal(assetBalance, 0, 'refund credits gross asset exactly once');
   // It should be closed/disposed or cancelled, but critically must STOP further depreciations
   assert.ok(['close', 'cancel'].includes(assetAfter.state), `Asset state should be close or cancel, got ${assetAfter.state}`);
 
@@ -355,4 +358,48 @@ test('BILL-3: Selective refund on multi-line bill only affects matching refunded
   assert.equal(assetAAfter.state, 'cancel', 'Refunded Asset A should be cancelled');
   assert.equal(assetBAfter.state, 'open', 'Unrefunded Asset B must remain open');
   assert.equal(assetBAfter.original_value, 3000, 'Asset B value must be unchanged');
+});
+
+
+test('partial refund beyond book value reverses excess depreciation and replays as a diff', () => {
+  let db = seed();
+  const accounts = assetAccounts(db);
+  const model = create(db, 'account.asset.model', { name: 'Two years', method: 'linear', method_number: 2, method_period: '12', account_depreciation_id: accounts.account_depreciation_id, account_depreciation_expense_id: accounts.account_depreciation_expense_id });
+  const acc = create(model.db, 'account.account', { name: 'Refundable equipment', code: '158888', account_type: 'asset_fixed', asset_model_id: model.id, create_asset: 'validate' });
+  const bill = create(acc.db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ line_id: 'refund-partial', name: 'Equipment', qty: 1, price_unit: 1000, tax: 0, account_id: acc.id }] });
+  db = postMove(bill.db, bill.id);
+  let asset = search(db, 'account.asset').find((a) => a.bill_id === bill.id);
+  db = postDepreciation(db, asset, '2026-12-31');
+  asset = read(db, 'account.asset', asset.id);
+  const refund = create(db, 'account.move', { move_type: 'in_refund', partner_id: 2, invoice_date: '2027-01-01', reversed_entry_id: bill.id, invoice_line_ids: [{ source_line_id: 'refund-partial', name: 'Refund', qty: 1, price_unit: 800, tax: 0, account_id: acc.id }] });
+  const posted = postMove(refund.db, refund.id);
+  const updated = read(posted, 'account.asset', asset.id);
+  assert.equal(updated.original_value, 200);
+  assert.equal(updated.depreciation_ids.filter((l) => l.posted).reduce((sum, l) => sum + l.amount, 0), 200);
+  assert.equal(modelsAssetBookValue(updated, posted), 0);
+  const replayed = applyDiff(refund.db, diffDb(refund.db, posted), { isAdmin: false });
+  assert.equal(read(replayed, 'account.asset', asset.id).original_value, 200);
+});
+
+const modelsAssetBookValue = (asset) => asset.original_value - (asset.already_depreciated || 0) - asset.depreciation_ids.filter((l) => l.posted).reduce((sum, l) => sum + l.amount, 0);
+
+test('full refund of a paused asset cancels due board lines without another asset credit', () => {
+  let db = seed();
+  const accounts = assetAccounts(db);
+  const model = create(db, 'account.asset.model', { name: 'Three years', method: 'linear', method_number: 3, method_period: '12', account_depreciation_id: accounts.account_depreciation_id, account_depreciation_expense_id: accounts.account_depreciation_expense_id });
+  const acc = create(model.db, 'account.account', { name: 'Paused equipment', code: '159999', account_type: 'asset_fixed', asset_model_id: model.id, create_asset: 'validate' });
+  const bill = create(acc.db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ line_id: 'refund-paused', name: 'Equipment', qty: 1, price_unit: 900, tax: 0, account_id: acc.id }] });
+  db = postMove(bill.db, bill.id);
+  let asset = search(db, 'account.asset').find((a) => a.bill_id === bill.id);
+  db = postDepreciation(db, asset, '2026-12-31');
+  db = write(db, 'account.asset', asset.id, { state: 'paused', pause_date: '2027-01-01' });
+  const refund = create(db, 'account.move', { move_type: 'in_refund', partner_id: 2, invoice_date: '2028-12-31', reversed_entry_id: bill.id, invoice_line_ids: [{ source_line_id: 'refund-paused', name: 'Refund', qty: 1, price_unit: 900, tax: 0, account_id: acc.id }] });
+  const posted = postMove(refund.db, refund.id);
+  asset = read(posted, 'account.asset', asset.id);
+  assert.equal(asset.state, 'close');
+  assert.equal(asset.depreciation_ids.filter((l) => l.posted).length, 1);
+  const balance = search(posted, 'account.move').filter((m) => m.state === 'posted').flatMap((m) => m.line_ids ?? []).filter((l) => l.account_id === acc.id).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  assert.equal(balance, 0);
+  const replayed = applyDiff(refund.db, diffDb(refund.db, posted), { isAdmin: false });
+  assert.equal(read(replayed, 'account.asset', asset.id).state, 'close');
 });
