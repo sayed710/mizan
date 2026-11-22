@@ -2,10 +2,9 @@
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { bookedBankSuspenseAccountId, ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
-import { writeBankStatementMove } from './finance.js';
+import { recordLockDate, writeBankStatementMove } from './finance.js';
 import { bookBankMovement, candidates, reconcileWith, setStatementLinePartner, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { earlyDiscountForAmount } from './accounting.js';
-import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
