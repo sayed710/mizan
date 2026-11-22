@@ -8,6 +8,7 @@ import { formatCurrency } from '../money.js';
 import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 import { ReportFoldAll } from './FinancialReportPrint.jsx';
 import { reportMoney } from './reportCompany.jsx';
+import { statementUrl } from '../statementNavigation.js';
 
 const num = (v, fmtMoney = money) => <td className="num">{fmtMoney(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
@@ -49,12 +50,12 @@ export function FiscalReport({ db, period, analyticAccountIds, money: moneyProp 
 }
 
 /** One partner: a clickable summary row that unfolds its entries with the running balance. */
-function PartnerRows({ db, p, money: fmtMoney = money }) {
+function PartnerRows({ db, p, period, companyId, kind, money: fmtMoney = money }) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')}</td>
+        <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')} {kind === 'receivable' && p.partner_id && <a href={statementUrl([p.partner_id], { companyId, ...period })} onClick={(e) => e.stopPropagation()}>{t('Customer Statement')}</a>}</td>
         <td /><td /><td />
         {num(p.initial, fmtMoney)}{num(p.debit, fmtMoney)}{num(p.credit, fmtMoney)}{num(p.end, fmtMoney)}<td />
       </tr>
@@ -79,25 +80,25 @@ export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, 
   const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, kind);
   return (
     <tbody>
-      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} money={fmtMoney} />)}
+      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} period={period} companyId={company_id ?? currentCompany(db)} kind={kind} money={fmtMoney} />)}
       <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td />{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{fmtMoney(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
 };
 
-export function CustomerStatement({ db, period, companyId, money: moneyProp }) {
-  const [partnerId, setPartnerId] = useState('');
-  const partners = search(db, 'res.partner').sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+export function CustomerStatement({ db, period, companyId, initialPartnerId, fixedPartner = false, money: moneyProp }) {
+  const [partnerId, setPartnerId] = useState(initialPartnerId ?? '');
+  const partners = search(db, 'res.partner', { includeArchived: true }).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
   const selected = partners.some((p) => p.id === Number(partnerId)) ? Number(partnerId) : null;
   const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : (period?.company_id ?? currentCompany(db));
   const fmtMoney = moneyProp ?? reportMoney(db, currentCo);
   const statementDb = (db.settings?.current_company_id ?? 1) === currentCo ? db : { ...db, settings: { ...db.settings, current_company_id: currentCo } };
   const statement = selected ? customerStatement(statementDb, selected, { ...period, company_id: currentCo }) : null;
   return <tbody>
-    <tr><td colSpan={4}><label>{t('Customer')} <select aria-label={t('Customer')} value={selected ?? ''} onChange={(e) => setPartnerId(e.target.value)}>
+    <tr><td colSpan={4}>{fixedPartner ? <b>{partners.find((p) => p.id === selected)?.name}</b> : <label>{t('Customer')} <select aria-label={t('Customer')} value={selected ?? ''} onChange={(e) => setPartnerId(e.target.value)}>
       <option value="">{t('Select a customer')}</option>
       {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-    </select></label></td></tr>
+    </select></label>}</td></tr>
     {statement && <>
       <tr className="rep-section"><td>{t('Opening Balance')}</td><td /><td />{num(statement.opening, fmtMoney)}</tr>
       {statement.lines.map((line, i) => <tr key={i} className="rep-detail"><td>{line.date} · {line.move_name}{line.ref ? ` · ${line.ref}` : ''}</td>{num(line.debit, fmtMoney)}{num(line.credit, fmtMoney)}{num(line.balance, fmtMoney)}</tr>)}

@@ -5,9 +5,10 @@ import { ConflictError, applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
 import { addressLines, documentCompany, documentTaxBreakdown } from '../src/models/company.js';
-import { subtotal, today } from '../src/models/common.js';
+import { subtotal, today, validDate } from '../src/models/common.js';
+import { customerStatement } from '../src/models/reports.js';
 import { followUpEmail, followUpLetter, logManualFollowUp, partnerFollowUp } from '../src/models/finance.js';
-import { formatCurrency } from '../src/money.js';
+import { findCompanyCurrencyRecord, formatCurrency } from '../src/money.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
@@ -134,6 +135,34 @@ export async function sendDocument(cfg, db, user, { model, id }) {
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
   return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
+}
+
+/** Deliver one company-scoped customer statement using the accounting report calculation. */
+export async function sendCustomerStatement(cfg, db, { partnerId, companyId, from, to, reviewMode }, deliver = sendMail) {
+  const company = Number(companyId);
+  if (!Number.isSafeInteger(company) || !read(db, 'res.company', company)
+    || !(db.settings?.allowed_company_ids ?? [db.settings?.current_company_id ?? 1]).includes(company)) {
+    throw new Error('Configure the document company before emailing.');
+  }
+  if ((from && !validDate(from)) || !validDate(to) || (from && from > to)) throw new Error('Invalid statement period');
+  const partner = read(db, 'res.partner', Number(partnerId));
+  if (!partner) throw new Error('Record not found');
+  if (!partner.email?.trim()) throw new Error('The customer has no email address');
+  const currency = findCompanyCurrencyRecord(db, company);
+  if (!currency) throw new Error('Configure the document or company currency before emailing.');
+  const docCompany = documentCompany(db, { company_id: company });
+  if (!docCompany) throw new Error('Configure the document company before emailing.');
+  const report = customerStatement(db, partner.id, { from, to, company_id: company, reviewMode: reviewMode === 'all' ? 'all' : 'posted' });
+  const amount = (value) => formatCurrency(value, currency);
+  const rows = report.lines.map((line) => [line.date, line.move_name, line.ref ?? '', amount(line.debit), amount(line.credit), amount(line.balance)]);
+  const headings = ['Date', 'Journal Entry', 'Reference', 'Debit', 'Credit', 'Balance'];
+  const header = [docCompany.name, partner.name, 'Customer Statement', `${from || ''} – ${to}`];
+  const opening = `Opening Balance: ${amount(report.opening)}`;
+  const closing = `Closing Balance: ${amount(report.closing)}`;
+  const text = [...header, opening, headings.join(' | '), ...rows.map((row) => row.join(' | ')), closing].join('\n');
+  const html = `<h1>${escapeHtml(docCompany.name)}</h1><h2>${escapeHtml(partner.name)} – Customer Statement</h2><p>${escapeHtml(header[3])}</p><p>${escapeHtml(opening)}</p><table border="1"><thead><tr>${headings.map((value) => `<th>${escapeHtml(value)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</tbody></table><p>${escapeHtml(closing)}</p>`;
+  await deliver(cfg, { to: partner.email.trim(), subject: `${docCompany.name} – Customer Statement`, text, html });
+  return { status: 200, body: { ok: true } };
 }
 
 /** Send a follow-up and persist its existing manual reminder transition after delivery. */

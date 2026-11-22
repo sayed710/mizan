@@ -27,7 +27,7 @@ import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, 
 import { smtpConfig } from './smtp.js';
 import { createMailTransport } from './mailTransport.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
-import { recordSent, sendDocument, sendFollowUp, sendMailing } from './mail.js';
+import { recordSent, sendDocument, sendFollowUp, sendMailing, sendCustomerStatement } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
@@ -788,20 +788,22 @@ async function api(req, res, path) {
       return send(res, 400, { error: e.message });
     }
   }
-  if ((path === '/api/mail/document' || path === '/api/mail/mailing' || path === '/api/mail/followup') && req.method === 'POST') {
+  if ((path === '/api/mail/document' || path === '/api/mail/mailing' || path === '/api/mail/followup' || path === '/api/mail/statement') && req.method === 'POST') {
     if (!SMTP) return send(res, 400, { error: 'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)' });
     const body = await readJson(req);
-    const model = path.endsWith('mailing') ? 'mailing.mailing' : path.endsWith('followup') ? 'res.partner' : String(body.model ?? '');
-    if (path.endsWith('followup') && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
+    const model = path.endsWith('mailing') ? 'mailing.mailing' : (path.endsWith('followup') || path.endsWith('statement')) ? 'res.partner' : String(body.model ?? '');
+    if ((path.endsWith('followup') || path.endsWith('statement')) && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
       const baseUrl = baseUrlOf(req);
-      const snapshot = scopeFor(user);
+      const snapshot = path.endsWith('statement') ? visibleDb(user, { models: false }) : scopeFor(user);
       const at = epoch;
       const out = path.endsWith('mailing')
         ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), user.login, () => scopeFor(user)), body, baseUrl)
-        : path.endsWith('followup')
+        : path.endsWith('statement')
+          ? await sendCustomerStatement(SMTP, snapshot, body)
+          : path.endsWith('followup')
           ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
