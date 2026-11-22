@@ -1,7 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
-import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal } from './common.js';
+import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
@@ -631,10 +631,11 @@ export function invoiceLines(db, move) {
     });
   }
 
-  const schedule = term ? installments(term, totalDoc, move.invoice_date ?? today(), docCurrency) : [{ date: move.invoice_date_due, amount: totalDoc }];
+  const baseDate = validDate(move.invoice_date) ? move.invoice_date : today();
+  const schedule = term ? installments(term, totalDoc, baseDate, docCurrency) : [{ date: move.invoice_date_due, amount: totalDoc }];
   let allocated = 0;
   let cumDoc = 0;
-  const discountDate = term?.early_discount && (move.invoice_date || today()) ? addDays(move.invoice_date ?? today(), Number(term.discount_days) || 0) : null;
+  const discountDate = term?.early_discount ? addDays(baseDate, Number(term.discount_days) || 0) : null;
   const discountPercent = term?.early_discount ? Number(term.discount_percent) || 0 : 0;
   const counterparts = schedule.map((item, index) => {
     cumDoc = docRound(cumDoc + item.amount);
@@ -642,7 +643,7 @@ export function invoiceLines(db, move) {
     const amount = companyRound(targetCompany - allocated);
     allocated = companyRound(allocated + amount);
     const discountDoc = term?.early_discount && index === 0
-      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(discountTaxComputation(term)) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, move.invoice_date ?? today(), move.invoice_date ?? today(), docCurrency))
+      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(discountTaxComputation(term)) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, baseDate, baseDate, docCurrency))
       : 0;
     const discountCompany = discountDoc ? companyRound(discountDoc / rate) : 0;
     return {

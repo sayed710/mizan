@@ -3547,6 +3547,7 @@ const ar = {
   'Void the check before resetting the payment to draft': 'أبطل الشيك قبل إعادة تعيين الدفعة إلى مسودة',
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
+  'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
   'Electronic': 'إلكتروني',
   'SEPA Credit Transfer': 'التحويل الائتماني الأوروبي',
@@ -3579,6 +3580,9 @@ const ar = {
   'Remittance information cannot exceed 140 characters': 'لا يمكن أن تتجاوز معلومات التحويل 140 حرفًا',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'SEPA File Eligible': 'ملف التحويل الأوروبي صالح',
+  'Generate Replacement SEPA file': 'إنشاء ملف تحويل أوروبي بديل',
+  'The original SEPA file is ineligible for download because one or more transfers were cancelled': 'ملف التحويل الأوروبي الأصلي غير صالح للتنزيل بسبب إلغاء تحويل أو أكثر',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

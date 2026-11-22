@@ -169,7 +169,7 @@ test('migration 62 seeds electronic and SEPA methods on databases already at ver
 test('reversing a payment from a posted SEPA batch cancels the line and leaves file intact', async () => {
   const { seed } = await import('./seed.js');
   const { read } = await import('./orm.js');
-  const { postBatch } = await import('./models/payments.js');
+  const { postBatch, paymentModels } = await import('./models/payments.js');
   const { reversePayment } = await import('./models/pay.js');
   let db = await addJournalMethods(seed());
   const bank = db.records['account.journal'].find((j) => j.type === 'bank');
@@ -211,6 +211,87 @@ test('reversing a payment from a posted SEPA batch cancels the line and leaves f
   // Modifying amounts on lines after post is still rejected
   const tamperedAmount = { ...afterBatch, lines: [{ ...afterBatch.lines[0], amount: 999 }] };
   assert.throws(() => applyDiff(postedDb, { upserts: { 'account.batch.payment': [tamperedAmount] }, deletes: {} }, { isAdmin: true }), /validated SEPA batch cannot be changed/);
+
+  // Original file is preserved for audit, but marked ineligible for download when transfer is cancelled
+  assert.equal(read(reversedDb, 'account.batch.payment', 200).sepa_file_eligible, false);
+  const downloadBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate SEPA file');
+  const replaceBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate Replacement SEPA file');
+  assert.equal(downloadBtn.when(postedBatch), true);
+  assert.equal(downloadBtn.when(afterBatch), false, 'Original file is ineligible for download');
+  assert.throws(() => downloadBtn.run(reversedDb, afterBatch), /ineligible for download/);
+  assert.equal(replaceBtn.when(afterBatch), false, 'No remaining transfers to generate');
+});
+
+test('a partially reversed SEPA batch marks original file ineligible and generates replacement without reversed transfer', async () => {
+  const { seed } = await import('./seed.js');
+  const { read } = await import('./orm.js');
+  const { postBatch, paymentModels } = await import('./models/payments.js');
+  const { reversePayment } = await import('./models/pay.js');
+  let db = await addJournalMethods(seed());
+  const bank = db.records['account.journal'].find((j) => j.type === 'bank');
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const sepa = db.records['account.payment.method'].find((m) => m.code === 'sepa_ct');
+  const method = db.records['account.payment.method.line'].find((l) => l.journal_id === bank.id && l.payment_method_id === sepa.id);
+  const partner1 = db.records['res.partner'][0];
+  const partner2 = db.records['res.partner'][1];
+  const batch = { id: 250, name: 'BATCH-MULTI', state: 'draft', batch_type: 'outbound', date: '2026-11-21', company_id: 1, journal_id: bank.id, lines: [{ payment_id: 251, amount: 30 }, { payment_id: 252, amount: 45 }] };
+  db = { ...db, records: { ...db.records,
+    'res.company': db.records['res.company'].map((c) => c.id === 1 ? { ...c, currency_id: eur.id } : c),
+    'account.journal': db.records['account.journal'].map((j) => j.id === bank.id ? { ...j, bank_account_id: 250, currency_id: eur.id } : j),
+    'res.partner.bank': [
+      ...(db.records['res.partner.bank'] ?? []),
+      { id: 250, account_number: 'DE89370400440532013000', bank_bic: 'COBADEFFXXX' },
+      { id: 251, account_number: 'FR7630006000011234567890189', partner_id: partner1.id, allow_out_payment: true },
+      { id: 252, account_number: 'IT60X0542811101000000123456', partner_id: partner2.id, allow_out_payment: true },
+    ],
+    'account.move': [
+      ...db.records['account.move'],
+      { id: 251, name: 'ENTRY/251', state: 'posted', move_type: 'entry', date: '2026-11-21', line_ids: [{ id: 2511, account_id: bank.default_account_id ?? 1, debit: 0, credit: 30 }, { id: 2512, account_id: 2, debit: 30, credit: 0 }], company_id: 1 },
+      { id: 252, name: 'ENTRY/252', state: 'posted', move_type: 'entry', date: '2026-11-21', line_ids: [{ id: 2521, account_id: bank.default_account_id ?? 1, debit: 0, credit: 45 }, { id: 2522, account_id: 2, debit: 45, credit: 0 }], company_id: 1 },
+    ],
+    'account.payment': [
+      ...(db.records['account.payment'] ?? []),
+      { id: 251, name: 'PAY/251', state: 'posted', move_id: 251, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner1.id, partner_bank_id: 251, payment_method_line_id: method.id, amount: 30, currency_id: eur.id, memo: 'Bill 1', date: '2026-11-21' },
+      { id: 252, name: 'PAY/252', state: 'posted', move_id: 252, company_id: 1, journal_id: bank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner2.id, partner_bank_id: 252, payment_method_line_id: method.id, amount: 45, currency_id: eur.id, memo: 'Bill 2', date: '2026-11-21' },
+    ],
+    'account.batch.payment': [batch],
+  }, seq: { ...db.seq, 'account.batch.payment': 250, 'account.payment': 252, 'account.move': 252, 'res.partner.bank': 252 } };
+
+  const postedDb = postBatch(db, batch);
+  const postedBatch = read(postedDb, 'account.batch.payment', 250);
+  assert.equal(postedBatch.state, 'posted');
+  assert.match(postedBatch.sepa_file, /<EndToEndId>251<\/EndToEndId>/);
+  assert.match(postedBatch.sepa_file, /<EndToEndId>252<\/EndToEndId>/);
+  assert.equal(read(postedDb, 'account.batch.payment', 250).sepa_file_eligible, true);
+
+  const downloadBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate SEPA file');
+  const replaceBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate Replacement SEPA file');
+  assert.equal(downloadBtn.when(postedBatch), true);
+  assert.equal(replaceBtn.when(postedBatch), false);
+
+  // Reverse payment 251
+  const payment1 = read(postedDb, 'account.payment', 251);
+  const reversedDb = reversePayment(postedDb, payment1, '2026-11-22');
+  const afterBatch = read(reversedDb, 'account.batch.payment', 250);
+
+  // Line 251 cancelled, line 252 remains active
+  assert.equal(afterBatch.lines[0].cancelled, true);
+  assert.equal(afterBatch.lines[1].cancelled, false);
+
+  // Audit record intact, but ineligible for direct download
+  assert.equal(afterBatch.sepa_file, postedBatch.sepa_file, 'Original SEPA file is preserved');
+  assert.equal(afterBatch.sepa_file_eligible, false, 'Marked ineligible for download');
+  assert.equal(downloadBtn.when(afterBatch), false);
+  assert.throws(() => downloadBtn.run(reversedDb, afterBatch), /ineligible for download/);
+
+  // Replacement generation provides remaining active transfers
+  assert.equal(replaceBtn.when(afterBatch), true);
+  const replacement = replaceBtn.run(reversedDb, afterBatch);
+  assert.ok(replacement.download);
+  assert.match(replacement.download.content, /<EndToEndId>252<\/EndToEndId>/);
+  assert.ok(!replacement.download.content.includes('<EndToEndId>251</EndToEndId>'), 'Reversed transfer omitted from active bank file');
+  assert.match(replacement.download.content, /<NbOfTxs>1<\/NbOfTxs>/);
+  assert.match(replacement.download.content, /<CtrlSum>45\.00<\/CtrlSum>/);
 });
 
 test('existing and invoice-linked payments reject missing, inactive, mismatched, or outbound-disabled banks', async () => {
@@ -338,4 +419,36 @@ test('buildSepaXml validates EPC SEPA length limits with field-specific errors',
     () => buildSepaXml({ ...baseInput, payments: [{ ...baseInput.payments[0], memo: 'M'.repeat(141) }] }),
     /Remittance information cannot exceed 140 characters/,
   );
+});
+
+test('EPC409-09 non-EEA countries AL, MD, ME, MK, RS are valid SEPA debtor and recipient countries', async () => {
+  const { isSepaCountry, buildSepaXml, isValidIban } = await import('./models/sepa.js');
+  const validIbans = {
+    AL: 'AL14111111111111111111111111',
+    MD: 'MD3311111111111111111111',
+    ME: 'ME79111111111111111111',
+    MK: 'MK96111111111111111',
+    RS: 'RS89111111111111111111',
+  };
+  for (const [code, iban] of Object.entries(validIbans)) {
+    assert.equal(isSepaCountry(code), true, `${code} is a SEPA country`);
+    assert.equal(isSepaCountry(code.toLowerCase()), true, `${code} case-insensitive check`);
+    assert.equal(isValidIban(iban), true, `${iban} is valid`);
+
+    // Recipient path
+    const xmlRecipient = buildSepaXml({
+      id: `BATCH-${code}-R`, createdAt: '2026-11-21T12:00:00', date: '2026-11-21',
+      debtor: { name: 'German Debtor', iban: 'DE89370400440532013000', bic: 'COBADEFFXXX' },
+      payments: [{ id: `P-${code}`, amount: 50, name: `Supplier ${code}`, iban, memo: `Inv-${code}` }],
+    });
+    assert.match(xmlRecipient, new RegExp(iban));
+
+    // Debtor path
+    const xmlDebtor = buildSepaXml({
+      id: `BATCH-${code}-D`, createdAt: '2026-11-21T12:00:00', date: '2026-11-21',
+      debtor: { name: `Debtor ${code}`, iban, bic: `${code}BADEFFXXX` },
+      payments: [{ id: 'P-DE', amount: 50, name: 'German Creditor', iban: 'DE89370400440532013000', memo: 'Payment' }],
+    });
+    assert.match(xmlDebtor, new RegExp(iban));
+  }
 });

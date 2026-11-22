@@ -329,6 +329,12 @@ export const paymentModels = {
     fields: {
       name: { type: 'char', label: 'Reference', required: true },
       sepa_file: { type: 'text', label: 'SEPA file', readonly: true },
+      sepa_file_eligible: {
+        type: 'boolean',
+        label: 'SEPA File Eligible',
+        readonly: true,
+        compute: (r) => Boolean(r.sepa_file) && !(r.lines ?? []).some((l) => l.cancelled),
+      },
       batch_type: { type: 'selection', label: 'Batch Type', required: true, options: [['inbound', 'Inbound'], ['outbound', 'Outbound']] },
       date: { type: 'date', label: 'Date' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
@@ -407,7 +413,17 @@ export const paymentModels = {
       buttons: [
         { label: 'Add Open Invoices', when: (r) => r.state === 'draft', run: (db, r) => ({ db: fillOpenInvoices(db, r) }) },
         { label: 'Validate', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postBatch(db, r) }) },
-        { label: 'Generate SEPA file', when: (r) => r.state === 'posted' && Boolean(r.sepa_file), run: (db, r) => ({ db, download: { name: `sepa-${r.id}.xml`, content: r.sepa_file } }) },
+        {
+          label: 'Generate SEPA file',
+          unavailable: 'The original SEPA file is ineligible for download because one or more transfers were cancelled',
+          when: (r) => r.state === 'posted' && Boolean(r.sepa_file) && !(r.lines ?? []).some((l) => l.cancelled),
+          run: (db, r) => ({ db, download: { name: `sepa-${r.id}.xml`, content: r.sepa_file } }),
+        },
+        {
+          label: 'Generate Replacement SEPA file',
+          when: (r) => r.state === 'posted' && Boolean(r.sepa_file) && (r.lines ?? []).some((l) => l.cancelled) && (r.lines ?? []).some((l) => !l.cancelled),
+          run: (db, r) => ({ db, download: generateSepaFile(db, r) }),
+        },
         { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound' && !r.sepa_file, run: (db, r) => ({ db: printBatchChecks(db, r), go: '#/print/account.batch.payment/' + r.id }) },
         { label: 'Print Deposit Slip', when: (r) => r.state === 'posted' && r.batch_type === 'inbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],

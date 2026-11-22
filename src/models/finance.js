@@ -71,7 +71,7 @@ export function duplicateBillWarning(db, bill) {
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
 /** Hashed fields that can never change once an entry receives an inalterability hash. */
-const HASHED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
+const HASHED_FIELDS = ['ref', 'name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
 export const moveDate = (m) => m?.date ?? m?.invoice_date ?? today();
