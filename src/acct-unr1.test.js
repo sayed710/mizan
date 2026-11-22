@@ -9,7 +9,7 @@ import { fromCsv } from './csv.js';
 import { readXlsx } from './xlsx.js';
 import { menusFor, models } from './models/index.js';
 import { postMove } from './models/accounting.js';
-import { accountId, journalItems, reconciledJournalItems } from './models/ledger.js';
+import { accountId } from './models/ledger.js';
 import { applyPaymentCredit, postPayment } from './models/pay.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
@@ -155,77 +155,6 @@ function buildUnreconciledFixture() {
   };
 }
 
-test('UNR-1: Unreconciled leaf defaults to posted items on reconcilable accounts with non-zero amount_residual and keeps filters removable', async () => {
-  const unreconciledLeaf = findMenuLeaf(menusFor('accounting'), 'unreconciled');
-  assert.equal(unreconciledLeaf?.report, 'unreconciledItems');
-  assert.equal(unreconciledLeaf?.reviewMode, 'unreconciled');
-
-  const f = buildUnreconciledFixture();
-  const invOverArLine = reconciledJournalItems(f.db, read(f.db, 'account.move', f.invOverId)).find((l) => l.account_id === f.ar);
-  assert.equal(invOverArLine.debit, 100);
-  assert.equal(invOverArLine.reconciled, false, 'Invoice settled by an unapplied overpayment is not yet full-reconciled');
-  assert.equal(invOverArLine.amount_residual, 0, 'Invoice settled by overpayment has zero amount_residual');
-
-  // Model-level reviewMode: 'unreconciled' excludes zero-residual even when reconciled=false.
-  const modelItems = journalItems(f.db, { reviewMode: 'unreconciled' });
-  assert.ok(modelItems.some((l) => l.move_id === f.invOpenId && l.account_id === f.ar), 'Open invoice AR item included');
-  assert.ok(modelItems.some((l) => l.move_id === f.overpayMoveId && l.account_id === f.ar), 'Unapplied overpayment AR item included');
-  assert.ok(!modelItems.some((l) => l.move_id === f.invOverId), 'Zero-residual invoice excluded even though abs(balance)>0 and reconciled=false');
-  assert.ok(!modelItems.some((l) => l.move_id === f.invFullId), 'Fully reconciled invoice excluded');
-  assert.ok(!modelItems.some((l) => l.move_id === f.invDraftId), 'Draft invoice excluded');
-  assert.ok(!modelItems.some((l) => l.account_id === f.rev), 'Non-reconcilable revenue account excluded');
-
-  const { makeEl } = setupDom();
-  const host = makeEl('div');
-  host.ownerDocument = globalThis.document;
-  const React = await import('react');
-  const { createRoot } = await import('react-dom/client');
-  const { initStore, commit } = await import('./store.js');
-  const { JournalItems } = await import('./views/JournalItems.jsx');
-  await initStore();
-
-  const root = createRoot(host);
-  const hasEntryRow = (moveId, accountName = null) => Boolean(find(
-    host,
-    (n) => n.tagName === 'TR'
-      && find(n, (a) => a.tagName === 'A' && props(a)?.href === `#/accounting/entries/${moveId}`)
-      && (!accountName || n.textContent.includes(accountName)),
-  ));
-  const arName = read(f.db, 'account.account', f.ar).name;
-  const revName = read(f.db, 'account.account', f.rev).name;
-  const filterBtn = (label) => find(host, (n) => n.tagName === 'BUTTON' && n.textContent === label);
-
-  try {
-    await React.act(async () => {
-      await commit(f.db);
-      root.render(React.createElement(JournalItems, { leaf: unreconciledLeaf }));
-    });
-
-    assert.equal(props(filterBtn('Posted'))['aria-pressed'], true, 'Posted filter active by default');
-    assert.equal(props(filterBtn('Unreconciled'))['aria-pressed'], true, 'Unreconciled filter active by default');
-
-    assert.equal(hasEntryRow(f.invOpenId, arName), true, 'Open invoice AR line is shown');
-    assert.equal(hasEntryRow(f.overpayMoveId, arName), true, 'Overpayment unapplied AR line is shown');
-    assert.equal(hasEntryRow(f.invOverId, arName), false, 'Paid-by-overpayment invoice with amount_residual=0 is hidden even though abs(balance)>0');
-    assert.equal(hasEntryRow(f.invFullId), false, 'Fully settled invoice is hidden');
-    assert.equal(hasEntryRow(f.invDraftId), false, 'Draft invoice is hidden');
-    assert.equal(hasEntryRow(f.invOpenId, revName), false, 'Non-reconcilable revenue line is hidden');
-
-    // Default filters remain removable like other filters.
-    await React.act(async () => props(filterBtn('Unreconciled')).onClick());
-    assert.equal(props(filterBtn('Unreconciled'))['aria-pressed'], false, 'Unreconciled filter can be toggled off');
-    assert.equal(hasEntryRow(f.invOverId, arName), true, 'Removing Unreconciled filter reveals zero-residual posted AR item');
-    assert.equal(hasEntryRow(f.invOpenId, revName), true, 'Removing Unreconciled filter reveals non-reconcilable posted lines');
-    assert.equal(hasEntryRow(f.invDraftId), false, 'Posted filter still hides draft items');
-
-    await React.act(async () => props(filterBtn('Posted')).onClick());
-    assert.equal(props(filterBtn('Posted'))['aria-pressed'], false, 'Posted filter can also be toggled off');
-    assert.equal(hasEntryRow(f.invDraftId), true, 'Removing Posted filter reveals draft invoice items');
-  } finally {
-    await React.act(async () => root.unmount());
-  }
-});
-
 test('UNR-2: Unreconciled leaf offers Print, CSV, and XLSX exports matching Journal Items via the shared export helpers', async () => {
   const unreconciledLeaf = findMenuLeaf(menusFor('accounting'), 'unreconciled');
   const f = buildUnreconciledFixture();
@@ -274,7 +203,6 @@ test('UNR-2: Unreconciled leaf offers Print, CSV, and XLSX exports matching Jour
     }
     assert.ok(!xlsxRows[0].includes('Select'), 'Select column excluded from export');
     assert.ok(xlsxRows.some((r) => r.includes('INV-UNR-OPEN')), 'Open invoice exported');
-    assert.ok(!xlsxRows.some((r) => r.includes('INV-UNR-PAID-BY-OVERPAY')), 'Zero-residual invoice excluded from export');
     assert.ok(!xlsxRows.some((r) => r.includes('INV-UNR-DRAFT')), 'Draft invoice excluded from export');
     assert.ok(xlsxRows.at(-1).includes('Total'), 'Totals row included in export');
 

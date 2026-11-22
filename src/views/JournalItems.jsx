@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
-import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, isUnreconciledJournalItem, journalItems, matchedMoveIds } from '../models/ledger.js';
+import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, matchedMoveIds } from '../models/ledger.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
 import { RateNote } from './RateNote.jsx';
@@ -76,7 +76,7 @@ const ITEM_FILTER_GROUPS = [
     { id: 'not_secured', label: 'Not Secured', fn: (line) => line.move_state === 'posted' && !line.inalterable_hash },
   ],
   [
-    { id: 'unreconciled', label: 'Unreconciled', fn: (line) => isUnreconciledJournalItem(line, line._account) },
+    { id: 'unreconciled', label: 'Unreconciled', fn: (line) => isReconcilableAccount(line._account) && line.reconciled !== true && Math.abs(line.balance) > 1e-9 },
     { id: 'with_residual', label: 'With residual', fn: (line) => isReconcilableAccount(line._account) && Math.abs(line.amount_residual ?? 0) > 1e-9 },
   ],
   [

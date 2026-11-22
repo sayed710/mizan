@@ -22,8 +22,6 @@ export const isIncomeOrExpenseAccount = (account) => ['income', 'income_other', 
 export const analyticEligibleAccount = isIncomeOrExpenseAccount;
 /** Whether journal items on `account` participate in reconciliation (AR, AP, or `reconcile` flag). */
 export const isReconcilableAccount = (account) => Boolean(account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type));
-/** Whether a journal item on `account` is unreconciled and still has a non-zero residual amount. */
-export const isUnreconciledJournalItem = (line, account) => isReconcilableAccount(account) && line?.reconciled !== true && Math.abs(line?.amount_residual ?? 0) > 1e-9;
 let analyticPostingHooks = null;
 
 export function registerAnalyticPostingHooks(hooks) {
@@ -1514,7 +1512,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       }));
     });
   if (reviewMode !== 'unreconciled') return rows;
-  return rows.filter((line) => isUnreconciledJournalItem(line, read(db, 'account.account', line.account_id)));
+  return rows.filter((line) => isReconcilableAccount(read(db, 'account.account', line.account_id)) && line.reconciled !== true);
 }
 
 /** Balance per account (debit − credit) over the given items. */
