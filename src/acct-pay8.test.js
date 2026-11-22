@@ -355,7 +355,10 @@ test('PAY8-2: Checks view bulk Print prints selected checks and navigates to pri
   });
 });
 
-test('PAY8-2: Checks view bulk Void voids selected checks and diff-verifies guards', async () => {
+test('PAY8-2: Checks view bulk Void voids selected checks and diff-verifies guards', async (t) => {
+  const previousConfirm = globalThis.confirm;
+  globalThis.confirm = () => true;
+  t.after(() => { globalThis.confirm = previousConfirm; });
   const { makeEl } = setupDom();
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
@@ -432,6 +435,82 @@ test('PAY8-2: Checks view bulk Void voids selected checks and diff-verifies guar
   const synced = applyDiff(db, diffDb(db, updatedDb), { isAdmin: true });
   assert.ok((read(synced, 'account.payment', pay1.id).voided_check_numbers ?? []).some((v) => v.check_number === 201));
   assert.ok((read(synced, 'account.payment', pay2.id).voided_check_numbers ?? []).some((v) => v.check_number === 202));
+
+  await React.act(async () => {
+    root.unmount();
+  });
+});
+
+test('PAY8-2: declining bulk Void leaves checks unchanged', async (t) => {
+  const previousConfirm = globalThis.confirm;
+  globalThis.confirm = () => false;
+  t.after(() => { globalThis.confirm = previousConfirm; });
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit, getDb } = await import('./store.js');
+  const { Checks } = await import('./views/Checks.jsx');
+  await initStore();
+
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const checkLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing'
+  );
+  const partner = search(db, 'res.partner')[0];
+
+  const pay1 = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 110,
+    journal_id: bank.id,
+    payment_method_line_id: checkLine.id,
+    date: today(),
+    state: 'draft',
+  });
+  db = postPayment(pay1.db, read(pay1.db, 'account.payment', pay1.id));
+  db = issueCheckNumber(db, read(db, 'account.payment', pay1.id), { number: 201 });
+
+  const pay2 = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: partner.id,
+    amount: 220,
+    journal_id: bank.id,
+    payment_method_line_id: checkLine.id,
+    date: today(),
+    state: 'draft',
+  });
+  db = postPayment(pay2.db, read(pay2.db, 'account.payment', pay2.id));
+  db = issueCheckNumber(db, read(db, 'account.payment', pay2.id), { number: 202 });
+
+  commit(db);
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  await React.act(async () => {
+    root.render(React.createElement(Checks));
+  });
+
+  // Select all rows
+  const thCheck = find(host, (n) => n.tagName === 'TH' && n.className === 'check');
+  const selectAll = find(thCheck, (n) => n.tagName === 'INPUT');
+  await React.act(async () => {
+    props(selectAll)?.onChange?.({ target: { checked: true } });
+  });
+
+  const beforeVoid = getDb();
+
+  // Click bulk Void button
+  const voidBtn = find(host, (n) => n.tagName === 'BUTTON' && (n.textContent.includes('Void') || n.title?.includes('Void')));
+  assert.ok(voidBtn, 'Bulk Void button must exist');
+  await React.act(async () => {
+    props(voidBtn)?.onClick?.();
+  });
+
+  assert.equal(getDb(), beforeVoid, 'Declining confirmation leaves the database unchanged');
 
   await React.act(async () => {
     root.unmount();

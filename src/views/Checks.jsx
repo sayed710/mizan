@@ -160,6 +160,7 @@ export function Checks() {
       return;
     }
 
+    if (!confirm(t('Void selected checks?'))) return;
     try {
       let nextDb = db;
       const seen = new Set();
@@ -206,7 +207,7 @@ export function Checks() {
 
     const onVoid = () => {
       const p = read(db, 'account.payment', row.paymentId);
-      if (p) {
+      if (p && confirm(t('Void this check?'))) {
         try {
           commit(voidCheck(db, p));
         } catch (e) {

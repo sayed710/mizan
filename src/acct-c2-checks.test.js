@@ -648,7 +648,10 @@ test('Bug 5: Deleting a voided check payment is blocked by protectDelete so chec
 const textOf = (node) => (node.nodeType === 3 ? node.nodeValue : (node.childNodes ?? []).map(textOf).join(''));
 const props = (node) => Object.entries(node ?? {}).find(([k]) => k.startsWith('__reactProps$'))?.[1];
 
-test('Round 2 Bug 1: Register buttons handle errors with feedback and route manual To Print rows to payment form', async () => {
+test('Round 2 Bug 1: Register buttons handle errors with feedback and route manual To Print rows to payment form', async (t) => {
+  const previousConfirm = globalThis.confirm;
+  globalThis.confirm = () => true;
+  t.after(() => { globalThis.confirm = previousConfirm; });
   const { makeEl } = setupDom();
   globalThis.location = { hash: '#/accounting/checks' };
   const React = await import('react');

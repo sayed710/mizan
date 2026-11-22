@@ -1371,12 +1371,17 @@ export function printCheck(db, payment, requestedNumber = null) {
   return issueCheckNumber(db, payment, { number: requestedNumber, isReprint: false });
 }
 
+const checkVoidError = (db, p) => {
+  if (!p || p.state !== 'posted' || p.payment_type !== 'outbound' || p.check_number == null) return 'Only issued checks can be voided';
+  if (isPaymentMatched(db, p)) return 'A check reconciled with a statement cannot be voided';
+  return null;
+};
+
 /** Void an issued check: records it in voided_check_numbers (number kept, visible in register). */
 export function voidCheck(db, payment) {
-  const p = typeof payment === 'object' && payment !== null ? payment : read(db, 'account.payment', payment);
-  if (!p || p.state !== 'posted' || p.payment_type !== 'outbound' || p.check_number == null) {
-    throw new Error('Only issued checks can be voided');
-  }
+  const p = read(db, 'account.payment', typeof payment === 'object' && payment !== null ? payment.id : payment);
+  const error = checkVoidError(db, p);
+  if (error) throw new Error(error);
   const isAlreadyVoided = (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
   if (isAlreadyVoided) {
     throw new Error('Check is already voided');
@@ -1795,6 +1800,10 @@ export const payModels = {
       if (after.check_number != null && (!before || before.check_number !== after.check_number) && isCheckNumberUsedOnJournal(db, after.journal_id, after.check_number, after.id)) {
         return 'Check number must be unique per journal';
       }
+      if (before && (after.voided_check_numbers ?? []).length > (before.voided_check_numbers ?? []).length) {
+        const voidError = checkVoidError(db, before);
+        if (voidError) return voidError;
+      }
       if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
       if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && after.state === 'cancel'))) {
         const resetError = resetToDraftError(db, before, ctx);
@@ -2066,6 +2075,7 @@ export const payModels = {
           label: 'Void Check',
           when: (r) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null
             && !(r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number),
+          wizard: () => ({ title: 'Void Check', fields: [], confirmLabel: 'Void' }),
           run: (db, r) => ({ db: voidCheck(db, r) }),
         },
         {
@@ -2073,7 +2083,8 @@ export const payModels = {
           when: (r, db) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null && r.check_printed !== false
             && !(r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number)
             && !(db && r.journal_id && read(db, 'account.journal', r.journal_id)?.check_manual_sequencing),
-          run: (db, r) => ({ db: reprintCheck(db, r), go: `#/print/account.payment/${r.id}` }),
+          wizard: (db, r) => ({ title: 'Reprint Check', fields: [{ name: 'next_check_number', type: 'integer', label: 'Next Check Number', default: nextCheckNumber(db, r.journal_id), required: true }] }),
+          run: (db, r, values = {}) => ({ db: reprintCheck(db, r, values.next_check_number ?? null), go: `#/print/account.payment/${r.id}` }),
         },
         {
           label: 'Reprint Check',
