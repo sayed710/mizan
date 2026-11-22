@@ -3547,11 +3547,20 @@ const ar = {
   'Void the check before resetting the payment to draft': 'أبطل الشيك قبل إعادة تعيين الدفعة إلى مسودة',
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
+  'Report Footer': 'تذييل التقرير',
+  'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
   'Reminders': 'التذكيرات',
   'Next Reminder': 'التذكير التالي',
   'Last Reminder Date': 'تاريخ آخر تذكير',
   'Reminder Level': 'مستوى التذكير',
+  'Base Currency Rate': 'سعر العملة الأساسية',
+  'Base Rate Date': 'تاريخ سعر الأساس',
+  'Units of this currency per 1 unit of the base currency.': 'وحدات هذه العملة لكل وحدة واحدة من العملة الأساسية.',
+  'The base currency rate is fixed at 1.': 'سعر العملة الأساسية ثابت عند 1.',
+  'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
+  'Tax Closing Lines': 'بنود الإقفال الضريبي',
+  'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

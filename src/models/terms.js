@@ -1,5 +1,6 @@
 import { addDays, isoDate, today, validDate } from './common.js';
-import { currencyUnits, roundCurrency } from '../money.js';
+import { currencyUnits, documentCurrency, roundCurrency } from '../money.js';
+import { companyCurrency } from './currency.js';
 import { t } from '../i18n.js';
 import { read } from '../orm.js';
 
@@ -10,25 +11,59 @@ export function invoiceTermNote(db, move) {
   return term.note?.trim() || `${t('Payment Terms')}: ${term.name}`;
 }
 
+/** Derive the displayed installment schedule for an invoice document. */
+export function invoiceInstallments(db, move, term = null) {
+  const termRecord = term ?? (move?.invoice_payment_term_id ? read(db, 'account.payment.term', move.invoice_payment_term_id) : null);
+  if (!termRecord?.display_on_invoice) return null;
+
+  if (move?.state === 'posted') {
+    const accountType = ['out_invoice', 'out_refund'].includes(move.move_type)
+      ? 'asset_receivable'
+      : ['in_invoice', 'in_refund'].includes(move.move_type)
+        ? 'liability_payable'
+        : null;
+    if (!accountType) return null;
+    const items = (move.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
+    if (!items.length) return null;
+    const own = companyCurrency(db, move.company_id);
+    const foreign = !!move.currency_id && move.currency_id !== own;
+    return items
+      .map((l) => ({
+        date: l.date_maturity ?? move.invoice_date_due ?? (validDate(move.invoice_date) ? move.invoice_date : today()),
+        amount: foreign && l.amount_currency != null
+          ? Math.abs(Number(l.amount_currency) || 0)
+          : Math.abs((Number(l.debit) || 0) - (Number(l.credit) || 0)),
+      }))
+      .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')));
+  }
+
+  const currency = documentCurrency(db, move);
+  const baseDate = validDate(move?.invoice_date) ? move.invoice_date : today();
+  const error = termScheduleError(termRecord, move?.amount_total, currency) ?? dueTermLinesError(termRecord);
+  if (error) return null;
+  return installments(termRecord, move?.amount_total, baseDate, currency);
+}
+
 const money = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
 function lineDate(line, invoiceDate) {
+  const base = validDate(invoiceDate) ? invoiceDate : today();
   const days = Number(line.nb_days) || 0;
   if (line.delay_type === 'days_end_of_month') {
-    const [year, month] = invoiceDate.split('-').map(Number);
+    const [year, month] = base.split('-').map(Number);
     return addDays(isoDate(new Date(year, month, 0)), days);
   }
   if (line.delay_type === 'days_after_end_of_next_month') {
-    const [year, month] = invoiceDate.split('-').map(Number);
+    const [year, month] = base.split('-').map(Number);
     return addDays(isoDate(new Date(year, month + 1, 0)), days);
   }
   if (line.delay_type === 'days_end_of_month_on_the') {
-    const [y, m] = addDays(invoiceDate, days).split('-').map(Number);
+    const [y, m] = addDays(base, days).split('-').map(Number);
     const nextEnd = new Date(y, m + 1, 0);
     nextEnd.setDate(Math.min(Math.max(1, Math.trunc(Number(line.days_next_month) || 1)), nextEnd.getDate()));
     return isoDate(nextEnd);
   }
-  return addDays(invoiceDate, days);
+  return addDays(base, days);
 }
 
 /** Return an error message when transient preview inputs (`example_amount`, `example_date`) are invalid, or null. */
@@ -71,12 +106,14 @@ export function termScheduleError(term, total, currency = null) {
   const balanceIndex = lines.findIndex((line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance'));
   if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) return 'The balance due term must be the last one';
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
-  if (!hasFixed || balanceIndex >= 0) {
-    const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
-    // Without a balance line the terms must add up to the total; rounding may shift half a unit per line.
-    if (balanceIndex >= 0 ? requestedTotal > totalCents + lines.length / 2 : Math.abs(requestedTotal - totalCents) > lines.length / 2) {
+  const hasPercent = lines.some((line) => line.value_type === 'percent');
+  const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
+  if (balanceIndex >= 0 || (hasFixed && hasPercent)) {
+    if (requestedTotal > totalCents + lines.length / 2) {
       return 'Payment terms must allocate 100% of the total';
     }
+  } else if (Math.abs(requestedTotal - totalCents) > lines.length / 2) {
+    return 'Payment terms must allocate 100% of the total';
   }
   return null;
 }
@@ -86,13 +123,19 @@ export function installments(term, total, invoiceDate, currency = null) {
   const error = termScheduleError(term, total, currency);
   if (error) throw new Error(error);
 
-  const lines = term.line_ids ?? [];
+  const baseDate = validDate(invoiceDate) ? invoiceDate : today();
+  const lines = [...(term.line_ids ?? [])].sort((a, b) => lineDate(a, baseDate).localeCompare(lineDate(b, baseDate)));
   const step = Number(currency?.rounding ?? 0.01);
   const signedTotal = currencyUnits(total, currency);
   const sign = Math.sign(signedTotal);
   const totalCents = Math.abs(signedTotal);
   const fixed = lines.map((line) => (line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0));
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
+
+  const isBalanceLine = (line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance');
+  const hasBalance = lines.some(isBalanceLine);
+  const lastPercentIndex = lines.findLastIndex((line) => line.value_type === 'percent');
+  const isResidualLine = (line, index) => (hasBalance ? isBalanceLine(line) : index === lastPercentIndex);
 
   let remaining = totalCents;
   const amounts = lines.map((line, index) => {
@@ -101,26 +144,34 @@ export function installments(term, total, invoiceDate, currency = null) {
       ? fixed[index]
       : Math.max(0, Math.round(totalCents * (Number(line.value) || 0) / 100));
     // Reserve later fixed terms and never let rounded percentages overspend the total.
-    const amount = index === lines.length - 1 ? remaining : Math.min(requested, remaining - fixedRemaining);
+    const isResidual = isResidualLine(line, index);
+    const laterRequested = isResidual ? lines.slice(index + 1).reduce((sum, later) => sum + (later.value_type === 'fixed'
+      ? Math.max(0, currencyUnits(later.value, currency))
+      : Math.max(0, Math.round(totalCents * (Number(later.value) || 0) / 100))), 0) : 0;
+    const amount = isResidual
+      ? Math.max(0, remaining - laterRequested)
+      : Math.min(requested, remaining - fixedRemaining);
     remaining -= amount;
     return sign * amount;
   });
 
   return lines.map((line, index) => ({
-    date: lineDate(line, invoiceDate),
+    date: lineDate(line, baseDate),
     amount: Number((amounts[index] * step).toPrecision(15)),
   }));
 }
 
 /** Due date of the final installment (dates do not depend on the amount). */
 export function dueDate(term, invoiceDate) {
-  const dates = (term.line_ids ?? []).map((line) => lineDate(line, invoiceDate));
-  return dates.length ? dates.reduce((latest, date) => date > latest ? date : latest) : invoiceDate;
+  const baseDate = validDate(invoiceDate) ? invoiceDate : today();
+  const dates = (term.line_ids ?? []).map((line) => lineDate(line, baseDate));
+  return dates.length ? dates.reduce((latest, date) => date > latest ? date : latest) : baseDate;
 }
 
 /** Return the early-payment discount when payment falls within its configured window. */
 export function earlyDiscount(term, total, invoiceDate, paymentDate, currency = null) {
-  const discountDate = addDays(invoiceDate, Number(term.discount_days) || 0);
+  const baseDate = validDate(invoiceDate) ? invoiceDate : today();
+  const discountDate = addDays(baseDate, Number(term.discount_days) || 0);
   if (!term.early_discount || !paymentDate || paymentDate > discountDate) return 0;
   return roundCurrency(roundCurrency(total, currency) * (Number(term.discount_percent) || 0) / 100, currency);
 }
@@ -186,7 +237,7 @@ export const termModels = {
           ['mixed', 'Always (upon invoice)'],
         ],
       },
-      display_on_invoice: { type: 'boolean', label: 'Display terms on invoice' },
+      display_on_invoice: { type: 'boolean', label: 'Show installment dates' },
       example_amount: { type: 'float', label: 'Example Amount', editable: true, compute: (r) => (r && Object.hasOwn(r, 'example_amount') ? r.example_amount : 1000) },
       example_date: { type: 'date', label: 'Example Date', editable: true, compute: (r) => (r && Object.hasOwn(r, 'example_date') ? r.example_date : today()) },
       line_ids: {
