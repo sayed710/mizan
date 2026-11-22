@@ -465,7 +465,7 @@ function spawnRecurringMove(db, move) {
     ...(nextDue ? { invoice_date_due: nextDue } : {}),
     ...(move.auto_reverse ? { reverse_date: recurringReversalDate(read(db, 'account.move', origin), nextDate) } : {}),
     auto_post_origin_id: origin,
-    invoice_line_ids: isInvoice(move) ? copyInvoiceLines(raw.invoice_line_ids, { months, preserveSourceLineId: Boolean(move.reversed_entry_id) }) : [],
+    invoice_line_ids: isInvoice(move) ? copyInvoiceLines(raw.invoice_line_ids, { months }) : [],
     line_ids: !isInvoice(move) ? (raw.line_ids ?? []).map((l) => ({
       ...l,
       ...(l.date_maturity ? { date_maturity: shiftMonth(l.date_maturity, months) } : {}),
@@ -598,7 +598,6 @@ function storeInvoiceLineIds(db, move) {
 /** Copy invoice lines as new records, optionally linking each one to its source line. */
 function copyInvoiceLines(lines, {
   sourceCredit = false,
-  preserveSourceLineId = false,
   months = null,
   stripOrderLinks = false,
 } = {}) {
@@ -625,7 +624,6 @@ function copyInvoiceLines(lines, {
       ...copy,
       line_id: newInvoiceLineId(),
       ...(sourceCredit ? { source_line_id: String(sourceLineId) } : {}),
-      ...(!sourceCredit && preserveSourceLineId && line.source_line_id ? { source_line_id: line.source_line_id } : {}),
       ...(months != null && line.deferred_start_date ? { deferred_start_date: shiftMonth(line.deferred_start_date, months) } : {}),
       ...(months != null && line.deferred_end_date ? { deferred_end_date: shiftMonth(line.deferred_end_date, months) } : {}),
     };
