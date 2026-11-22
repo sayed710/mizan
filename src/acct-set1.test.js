@@ -169,3 +169,45 @@ test('company guard rejects nonexistent or archived incoterm IDs', () => {
     /Select an active incoterm/
   );
 });
+
+test('archived incoterm allows unrelated company edits but rejects new assignment', () => {
+  const { db, incoterm1 } = setup();
+  assert.equal(read(db, 'res.company', 1).incoterm_id, incoterm1);
+
+  // Archive company 1's currently selected default incoterm
+  const archivedDb = write(db, 'account.incoterm', incoterm1, { active: false });
+  assert.equal(read(archivedDb, 'account.incoterm', incoterm1).active, false);
+
+  // Updating an unrelated company field must succeed via write and diffDb/applyDiff
+  const updatedDb = write(archivedDb, 'res.company', 1, { name: 'Renamed Company 1' });
+  assert.equal(read(updatedDb, 'res.company', 1).name, 'Renamed Company 1');
+  assert.equal(read(updatedDb, 'res.company', 1).incoterm_id, incoterm1);
+
+  const diffDbApplied = applyDiff(archivedDb, diffDb(archivedDb, updatedDb), { isAdmin: true });
+  assert.equal(read(diffDbApplied, 'res.company', 1).name, 'Renamed Company 1');
+
+  // But assigning an archived incoterm as a new or changed default is still rejected
+  const anotherArchived = create(archivedDb, 'account.incoterm', { code: 'ARC2', name: 'Archived Incoterm 2', active: false });
+  assert.throws(
+    () => write(anotherArchived.db, 'res.company', 1, { incoterm_id: anotherArchived.id }),
+    /Select an active incoterm/
+  );
+  const diffBad = {
+    ...anotherArchived.db,
+    records: {
+      ...anotherArchived.db.records,
+      'res.company': anotherArchived.db.records['res.company'].map((c) => (c.id === 1 ? { ...c, incoterm_id: anotherArchived.id } : c)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(anotherArchived.db, diffDb(anotherArchived.db, diffBad), { isAdmin: true }),
+    /Select an active incoterm/
+  );
+
+  // Assigning archived incoterm to a company with no prior incoterm is also rejected
+  const noIncotermCompany = create(archivedDb, 'res.company', { name: 'Third company', currency_id: read(archivedDb, 'res.company', 1).currency_id });
+  assert.throws(
+    () => write(noIncotermCompany.db, 'res.company', noIncotermCompany.id, { incoterm_id: incoterm1 }),
+    /Select an active incoterm/
+  );
+});
