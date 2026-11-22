@@ -3605,7 +3605,7 @@ export const accountingModels = {
         },
         {
           label: 'Deferrals',
-          when: (r, db) => r.move_type === 'entry' && moveDeferrals(db, r).length > 0,
+          when: (r, db) => moveDeferrals(db, r).length > 0,
           value: (db, r) => moveDeferrals(db, r).length,
           target: (r, db) => {
             const list = moveDeferrals(db, r);
