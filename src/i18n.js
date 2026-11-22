@@ -3579,6 +3579,10 @@ const ar = {
   'Payment reference cannot exceed 35 characters': 'لا يمكن أن يتجاوز مرجع الدفعة 35 حرفًا',
   'Creditor name cannot exceed 70 characters': 'لا يمكن أن يتجاوز اسم الدائن 70 حرفًا',
   'Remittance information cannot exceed 140 characters': 'لا يمكن أن تتجاوز معلومات التحويل 140 حرفًا',
+  'Reminders': 'التذكيرات',
+  'Next Reminder': 'التذكير التالي',
+  'Last Reminder Date': 'تاريخ آخر تذكير',
+  'Reminder Level': 'مستوى التذكير',
   'Not Started': 'لم يبدأ',
   'Before': 'قبل',
   'Current': 'الحالي',
@@ -3601,6 +3605,10 @@ const ar = {
   'Replacement Sequence': 'تسلسل الاستبدال',
   'Replacement SEPA File': 'ملف التحويل الأوروبي البديل',
   'Payment information identifier cannot exceed 35 characters': 'لا يمكن أن يتجاوز معرف معلومات الدفع 35 حرفًا',
+  'SEPA Pain Version': 'إصدار ملف التحويل الأوروبي (pain)',
+  'Unsupported SEPA pain version': 'إصدار ملف التحويل الأوروبي غير مدعوم',
+  'Select a valid SEPA Pain Version': 'اختر إصدارًا صالحًا لملف التحويل الأوروبي',
+  'SEPA Pain Version is only valid for bank journals': 'إصدار ملف التحويل الأوروبي صالح لدفاتر اليومية البنكية فقط',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

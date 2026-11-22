@@ -8,7 +8,7 @@ import { isLiquidityJournal, paymentJournal } from './ledger.js';
 import { paymentPaysByCheck, printBatchChecks } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
-import { buildSepaXml } from './sepa.js';
+import { buildSepaXml, DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
@@ -270,7 +270,17 @@ export function generateSepaFile(db, batch, createdAt = new Date().toISOString()
     const recipient = read(db, 'res.partner.bank', payment.partner_bank_id);
     return { id: String(payment.id), amount: payment.amount, name: read(db, 'res.partner', payment.partner_id)?.name, iban: recipient?.account_number, memo: payment.memo };
   });
-  return { name: `sepa-${batch.id}.xml`, content: buildSepaXml({ id, createdAt, date, debtor: { name: company?.name, iban: bank?.account_number, bic: bank?.bank_bic }, payments }) };
+  return {
+    name: `sepa-${batch.id}.xml`,
+    content: buildSepaXml({
+      id,
+      createdAt,
+      date,
+      painVersion: journal?.sepa_pain_version || DEFAULT_SEPA_PAIN_VERSION,
+      debtor: { name: company?.name, iban: bank?.account_number, bic: bank?.bank_bic },
+      payments,
+    }),
+  };
 }
 
 function validBatchLinesTransition(beforeLines = [], afterLines = []) {

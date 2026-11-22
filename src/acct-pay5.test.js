@@ -43,7 +43,9 @@ test('SEPA XML validates IBANs and reports transaction totals', async () => {
     { id: 'P2', amount: 2.1, name: 'Second', iban: 'DE89370400440532013000', memo: 'Invoice' },
   ] };
   const xml = buildSepaXml(input);
-  assert.match(xml, /pain\.001\.001\.03/);
+  assert.match(xml, /pain\.001\.001\.09/);
+  assert.match(xml, /<BICFI>COBADEFFXXX<\/BICFI>/);
+  assert.match(xml, /<ReqdExctnDt><Dt>2026-11-21<\/Dt><\/ReqdExctnDt>/);
   assert.match(xml, /<NbOfTxs>2<\/NbOfTxs>/);
   assert.match(xml, /<CtrlSum>12\.35<\/CtrlSum>/);
   assert.equal((xml.match(/<CdtTrfTxInf>/g) ?? []).length, 2);
@@ -141,29 +143,36 @@ test('validating SEPA payments stores a stable file and rejects invalid account 
   assert.throws(() => applyDiff(result, diffDb(result, forged), { isAdmin: true }), /SEPA file cannot be changed/);
 });
 
-test('migration 63 seeds electronic and SEPA methods on databases already at version 62', async () => {
+test('migration 64 seeds electronic and SEPA methods on databases already at version 63', async () => {
   const { migrate, SCHEMA_VERSION } = await import('./migrations.js');
   const { search } = await import('./orm.js');
-  assert.equal(SCHEMA_VERSION, 63);
-  const v61Db = {
-    schema_version: 61,
+  assert.equal(SCHEMA_VERSION, 64);
+  const v63Db = {
+    schema_version: 63,
     records: {
       'account.payment.method': [
         { id: 1, code: 'manual', payment_type: 'inbound', name: 'Manual' },
         { id: 2, code: 'manual', payment_type: 'outbound', name: 'Manual' },
         { id: 3, code: 'check_printing', payment_type: 'outbound', name: 'Checks' },
       ],
-      'account.journal': [],
+      'account.journal': [
+        { id: 1, name: 'Legacy Bank', code: 'BNK1', type: 'bank' },
+        { id: 2, name: 'Explicit Legacy Bank', code: 'BNK2', type: 'bank', sepa_pain_version: 'pain.001.001.03' },
+        { id: 3, name: 'Cash', code: 'CSH1', type: 'cash' },
+      ],
       'account.payment.method.line': [],
     },
     seq: { 'account.payment.method': 3 },
   };
-  const upgraded = migrate(v61Db);
-  assert.equal(upgraded.schema_version, 63);
+  const upgraded = migrate(v63Db);
+  assert.equal(upgraded.schema_version, 64);
   const methods = search(upgraded, 'account.payment.method');
   assert.equal(methods.length, 5);
   assert.ok(methods.some((m) => m.code === 'electronic' && m.payment_type === 'inbound'));
   assert.ok(methods.some((m) => m.code === 'sepa_ct' && m.payment_type === 'outbound'));
+  assert.equal(upgraded.records['account.journal'].find((j) => j.id === 1).sepa_pain_version, 'pain.001.001.09');
+  assert.equal(upgraded.records['account.journal'].find((j) => j.id === 2).sepa_pain_version, 'pain.001.001.03');
+  assert.equal(upgraded.records['account.journal'].find((j) => j.id === 3).sepa_pain_version, undefined);
 });
 
 test('reversing a payment from a posted SEPA batch cancels the line and leaves file intact', async () => {
@@ -627,7 +636,7 @@ test('cancellation well after original execution date produces an eligible curre
   const postedDb = postBatch(db, batch);
   const postedBatch = read(postedDb, 'account.batch.payment', 400);
   assert.equal(postedBatch.date, historicalDate);
-  assert.match(postedBatch.sepa_file, new RegExp(`<ReqdExctnDt>${historicalDate}</ReqdExctnDt>`));
+  assert.match(postedBatch.sepa_file, new RegExp(`<ReqdExctnDt><Dt>${historicalDate}</Dt></ReqdExctnDt>`));
 
   // Cancellation occurs well after the original execution date (today)
   const reversedDb = reversePayment(postedDb, read(postedDb, 'account.payment', 401), today());
@@ -637,19 +646,19 @@ test('cancellation well after original execution date produces an eligible curre
 
   // 1. Without supplying a date, an eligible current/future date (today) is chosen automatically
   const autoReplacement = replaceBtn.run(reversedDb, afterCancel);
-  assert.match(autoReplacement.download.content, new RegExp(`<ReqdExctnDt>${today()}</ReqdExctnDt>`));
-  assert.ok(!autoReplacement.download.content.includes(`<ReqdExctnDt>${historicalDate}</ReqdExctnDt>`), 'Old execution date is not retained');
+  assert.match(autoReplacement.download.content, new RegExp(`<ReqdExctnDt><Dt>${today()}</Dt></ReqdExctnDt>`));
+  assert.ok(!autoReplacement.download.content.includes(`<Dt>${historicalDate}</Dt>`), 'Old execution date is not retained');
 
   // The original batch record's date and original file remain unchanged for audit
   const persistedAuto = read(autoReplacement.db, 'account.batch.payment', 400);
   assert.equal(persistedAuto.date, historicalDate, 'Posted batch date must not be changed');
   assert.equal(persistedAuto.sepa_file, postedBatch.sepa_file, 'Original stored file must not be changed');
-  assert.match(persistedAuto.sepa_file, new RegExp(`<ReqdExctnDt>${historicalDate}</ReqdExctnDt>`));
+  assert.match(persistedAuto.sepa_file, new RegExp(`<ReqdExctnDt><Dt>${historicalDate}</Dt></ReqdExctnDt>`));
 
   // 2. Supplying a valid future date uses that date
   const futureDate = addDays(today(), 5);
   const explicitReplacement = replaceBtn.run(reversedDb, afterCancel, { executionDate: futureDate });
-  assert.match(explicitReplacement.download.content, new RegExp(`<ReqdExctnDt>${futureDate}</ReqdExctnDt>`));
+  assert.match(explicitReplacement.download.content, new RegExp(`<ReqdExctnDt><Dt>${futureDate}</Dt></ReqdExctnDt>`));
 
   // 3. Supplying an invalid past execution date throws
   const pastDate = addDays(today(), -5);
@@ -909,7 +918,7 @@ test('past replacement execution date does not block subsequent payment reversal
   // Generating a second replacement defaults the expired stored replacement_date to today
   const replacement2 = replaceBtn.run(reversedDb2, batchCancel2);
   assert.ok(replacement2.download);
-  assert.match(replacement2.download.content, new RegExp(`<ReqdExctnDt>${today()}</ReqdExctnDt>`));
+  assert.match(replacement2.download.content, new RegExp(`<ReqdExctnDt><Dt>${today()}</Dt></ReqdExctnDt>`));
 
   const persistedBatch2 = read(replacement2.db, 'account.batch.payment', 600);
   assert.equal(persistedBatch2.replacement_sequence, 2);
@@ -921,4 +930,186 @@ test('past replacement execution date does not block subsequent payment reversal
     () => replaceBtn.run(reversedDb2, batchCancel2, { executionDate: pastDate }),
     /valid current or future date/i,
   );
+});
+
+test('bank journal exposes sepa_pain_version defaulting to pain.001.001.09 and SEPA XML supports .09 and .03 variants', async () => {
+  const { seed } = await import('./seed.js');
+  const { create, read, write } = await import('./orm.js');
+  const { models } = await import('./models/index.js');
+  const { buildSepaXml } = await import('./models/sepa.js');
+  const { postBatch, paymentModels } = await import('./models/payments.js');
+  const { reversePayment } = await import('./models/pay.js');
+  const { diffDb, applyDiff } = await import('./sync.js');
+  const { today } = await import('./models/common.js');
+
+  const journalModel = models['account.journal'];
+  const painField = journalModel.fields.sepa_pain_version;
+  assert.equal(painField?.type, 'selection', 'sepa_pain_version is a selection field');
+  const optionKeys = painField.options.map(([k]) => k);
+  assert.ok(optionKeys.includes('pain.001.001.03'), 'offers pain.001.001.03');
+  assert.ok(optionKeys.includes('pain.001.001.09'), 'offers pain.001.001.09');
+
+  let db = await addJournalMethods(seed());
+  const seededBank = db.records['account.journal'].find((j) => j.type === 'bank');
+  assert.equal(seededBank.sepa_pain_version, 'pain.001.001.09', 'seeded bank journal defaults to pain.001.001.09');
+
+  const createdBank = create(db, 'account.journal', {
+    name: 'Euro Bank',
+    code: 'EUR1',
+    type: 'bank',
+    company_id: 1,
+    suspense_account_id: seededBank.suspense_account_id,
+  });
+  assert.equal(read(createdBank.db, 'account.journal', createdBank.id).sepa_pain_version, 'pain.001.001.09', 'new bank journal defaults to pain.001.001.09');
+  assert.equal(
+    journalModel.onchange({ type: 'bank' }, 'type', db).sepa_pain_version,
+    'pain.001.001.09',
+    'changing journal type to bank defaults sepa_pain_version to pain.001.001.09',
+  );
+
+  const outTab = journalModel.form.tabs(seededBank).find((tab) => tab.label === 'Outgoing Payments');
+  const outTabFields = [...(outTab.fields ?? []), ...(outTab.groups ?? []).flatMap((g) => Array.isArray(g) ? g : g.fields ?? [])];
+  assert.ok(outTabFields.includes('sepa_pain_version'), 'Outgoing Payments tab displays sepa_pain_version');
+
+  // Guard rejects invalid pain version via diffDb + applyDiff and via ORM write/create
+  const forgedVersionDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.journal': db.records['account.journal'].map((j) => (j.id === seededBank.id ? { ...j, sepa_pain_version: 'pain.001.001.99' } : j)),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedVersionDb), { isAdmin: true }), /sepa_pain_version|SEPA Pain Version/i);
+  assert.throws(() => write(db, 'account.journal', seededBank.id, { sepa_pain_version: 'pain.001.001.99' }), /Select a valid SEPA Pain Version/);
+  const forgedNonBankDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.journal': db.records['account.journal'].map((j) => (j.type === 'cash' ? { ...j, sepa_pain_version: 'pain.001.001.09' } : j)),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedNonBankDb), { isAdmin: true }), /only valid for bank journals/i);
+
+  // One canonical builder produces both .09 and .03 from the same batch data
+  const sample = {
+    id: 'BATCH-VAR',
+    createdAt: '2026-11-22T08:00:00.000Z',
+    date: '2026-11-22',
+    debtor: { name: 'Debtor Ltd', iban: 'DE89370400440532013000', bic: 'COBADEFFXXX' },
+    payments: [{ id: 'P1', amount: 42.5, name: 'Creditor GmbH', iban: 'FR7630006000011234567890189', memo: 'Inv 1' }],
+  };
+  const xml09 = buildSepaXml({ ...sample, painVersion: 'pain.001.001.09' });
+  assert.match(xml09, /xmlns="urn:iso:std:iso:20022:tech:xsd:pain\.001\.001\.09"/);
+  assert.match(xml09, /<DbtrAgt><FinInstnId><BICFI>COBADEFFXXX<\/BICFI><\/FinInstnId><\/DbtrAgt>/);
+  assert.ok(!xml09.includes('<BIC>'), '.09 uses BICFI, not BIC');
+  assert.match(xml09, /<ReqdExctnDt><Dt>2026-11-22<\/Dt><\/ReqdExctnDt>/);
+
+  const xml03 = buildSepaXml({ ...sample, painVersion: 'pain.001.001.03' });
+  assert.match(xml03, /xmlns="urn:iso:std:iso:20022:tech:xsd:pain\.001\.001\.03"/);
+  assert.match(xml03, /<DbtrAgt><FinInstnId><BIC>COBADEFFXXX<\/BIC><\/FinInstnId><\/DbtrAgt>/);
+  assert.ok(!xml03.includes('<BICFI>'), '.03 uses BIC, not BICFI');
+  assert.match(xml03, /<ReqdExctnDt>2026-11-22<\/ReqdExctnDt>/);
+  assert.ok(!xml03.includes('<Dt>'), '.03 places date directly inside ReqdExctnDt');
+
+  assert.throws(() => buildSepaXml({ ...sample, painVersion: 'pain.001.001.99' }), /Unsupported SEPA pain version/);
+
+  // Generated XML follows journal's sepa_pain_version (both .09 default and .03) and guard verifies version match
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const sepa = db.records['account.payment.method'].find((m) => m.code === 'sepa_ct');
+  const method = db.records['account.payment.method.line'].find((l) => l.journal_id === seededBank.id && l.payment_method_id === sepa.id);
+  const partner1 = db.records['res.partner'][0];
+  const partner2 = db.records['res.partner'][1];
+  const execDate = today();
+
+  const makeScenario = (painVersion, baseId) => {
+    const batch = {
+      id: baseId,
+      name: `BATCH-${baseId}`,
+      state: 'draft',
+      batch_type: 'outbound',
+      date: execDate,
+      company_id: 1,
+      journal_id: seededBank.id,
+      lines: [
+        { payment_id: baseId + 1, amount: 15 },
+        { payment_id: baseId + 2, amount: 25 },
+      ],
+    };
+    let sdb = {
+      ...db,
+      records: {
+        ...db.records,
+        'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, currency_id: eur.id } : c)),
+        'res.partner.bank': [
+          ...(db.records['res.partner.bank'] ?? []),
+          { id: baseId, account_number: 'DE89370400440532013000', bank_bic: 'COBADEFFXXX', company_id: 1, partner_id: db.records['res.company'][0].partner_id },
+          { id: baseId + 1, account_number: 'FR7630006000011234567890189', partner_id: partner1.id, allow_out_payment: true },
+          { id: baseId + 2, account_number: 'IT60X0542811101000000123456', partner_id: partner2.id, allow_out_payment: true },
+        ],
+        'account.move': [
+          ...db.records['account.move'],
+          { id: baseId + 1, name: `ENTRY/${baseId + 1}`, state: 'posted', move_type: 'entry', date: execDate, line_ids: [{ id: baseId * 10 + 1, account_id: seededBank.default_account_id ?? 1, debit: 0, credit: 15 }, { id: baseId * 10 + 2, account_id: 2, debit: 15, credit: 0 }], company_id: 1 },
+          { id: baseId + 2, name: `ENTRY/${baseId + 2}`, state: 'posted', move_type: 'entry', date: execDate, line_ids: [{ id: baseId * 10 + 3, account_id: seededBank.default_account_id ?? 1, debit: 0, credit: 25 }, { id: baseId * 10 + 4, account_id: 2, debit: 25, credit: 0 }], company_id: 1 },
+        ],
+        'account.payment': [
+          ...(db.records['account.payment'] ?? []),
+          { id: baseId + 1, name: `PAY/${baseId + 1}`, state: 'posted', move_id: baseId + 1, company_id: 1, journal_id: seededBank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner1.id, partner_bank_id: baseId + 1, payment_method_line_id: method.id, amount: 15, currency_id: eur.id, memo: 'Bill A', date: execDate },
+          { id: baseId + 2, name: `PAY/${baseId + 2}`, state: 'posted', move_id: baseId + 2, company_id: 1, journal_id: seededBank.id, payment_type: 'outbound', partner_type: 'supplier', partner_id: partner2.id, partner_bank_id: baseId + 2, payment_method_line_id: method.id, amount: 25, currency_id: eur.id, memo: 'Bill B', date: execDate },
+        ],
+        'account.batch.payment': [batch],
+      },
+      seq: { ...db.seq, 'account.batch.payment': baseId, 'account.payment': baseId + 2, 'account.move': baseId + 2, 'res.partner.bank': baseId + 2 },
+    };
+    sdb = write(sdb, 'account.journal', seededBank.id, { sepa_pain_version: painVersion, bank_account_id: baseId, currency_id: eur.id });
+    return { sdb, batch };
+  };
+
+  // Scenario A: pain.001.001.09
+  const { sdb: db09, batch: b09 } = makeScenario('pain.001.001.09', 700);
+  const posted09 = postBatch(db09, b09);
+  const rec09 = read(posted09, 'account.batch.payment', 700);
+  assert.match(rec09.sepa_file, /pain\.001\.001\.09/);
+  assert.match(rec09.sepa_file, /<BICFI>COBADEFFXXX<\/BICFI>/);
+  assert.match(rec09.sepa_file, new RegExp(`<ReqdExctnDt><Dt>${execDate}</Dt></ReqdExctnDt>`));
+  assert.doesNotThrow(() => applyDiff(db09, diffDb(db09, posted09), { isAdmin: true }));
+
+  // Forging a .03 XML when journal is .09 is rejected by sync guard
+  const createdAt09 = rec09.sepa_file.match(/<CreDtTm>([^<]+)<\/CreDtTm>/)[1];
+  const wrongVersionXml = buildSepaXml({
+    id: rec09.name,
+    createdAt: createdAt09,
+    date: execDate,
+    painVersion: 'pain.001.001.03',
+    debtor: { name: db09.records['res.company'][0].name, iban: 'DE89370400440532013000', bic: 'COBADEFFXXX' },
+    payments: [
+      { id: '701', amount: 15, name: partner1.name, iban: 'FR7630006000011234567890189', memo: 'Bill A' },
+      { id: '702', amount: 25, name: partner2.name, iban: 'IT60X0542811101000000123456', memo: 'Bill B' },
+    ],
+  });
+  const forgedWrongVersion = {
+    ...posted09,
+    records: { ...posted09.records, 'account.batch.payment': [{ ...rec09, sepa_file: wrongVersionXml }] },
+  };
+  assert.throws(() => applyDiff(db09, diffDb(db09, forgedWrongVersion), { isAdmin: true }), /SEPA file does not match/);
+
+  // Replacement preserves .09
+  const rev09 = reversePayment(posted09, read(posted09, 'account.payment', 701), execDate);
+  const replaceBtn = paymentModels['account.batch.payment'].form.buttons.find((b) => b.label === 'Generate Replacement SEPA file');
+  const rep09 = replaceBtn.run(rev09, read(rev09, 'account.batch.payment', 700));
+  assert.match(rep09.download.content, /pain\.001\.001\.09/);
+  assert.match(rep09.download.content, /<BICFI>COBADEFFXXX<\/BICFI>/);
+
+  // Scenario B: pain.001.001.03
+  const { sdb: db03, batch: b03 } = makeScenario('pain.001.001.03', 800);
+  const posted03 = postBatch(db03, b03);
+  const rec03 = read(posted03, 'account.batch.payment', 800);
+  assert.match(rec03.sepa_file, /pain\.001\.001\.03/);
+  assert.match(rec03.sepa_file, /<BIC>COBADEFFXXX<\/BIC>/);
+  assert.match(rec03.sepa_file, new RegExp(`<ReqdExctnDt>${execDate}</ReqdExctnDt>`));
+  assert.doesNotThrow(() => applyDiff(db03, diffDb(db03, posted03), { isAdmin: true }));
+
+  const rev03 = reversePayment(posted03, read(posted03, 'account.payment', 801), execDate);
+  const rep03 = replaceBtn.run(rev03, read(rev03, 'account.batch.payment', 800));
+  assert.match(rep03.download.content, /pain\.001\.001\.03/);
+  assert.match(rep03.download.content, /<BIC>COBADEFFXXX<\/BIC>/);
 });

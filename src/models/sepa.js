@@ -26,8 +26,34 @@ export function isValidIban(value) {
 const escapeXml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c]);
 const normalizedIban = (value) => String(value ?? '').replace(/\s/g, '').toUpperCase();
 
-/** Build a pain.001.001.03 document from already resolved payment data. */
-export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, debtor, payments }) {
+export const DEFAULT_SEPA_PAIN_VERSION = 'pain.001.001.09';
+
+export const SEPA_PAIN_VERSIONS = [
+  ['pain.001.001.03', 'pain.001.001.03'],
+  ['pain.001.001.09', 'pain.001.001.09'],
+];
+
+const PAIN_VARIANTS = {
+  'pain.001.001.03': {
+    namespace: 'urn:iso:std:iso:20022:tech:xsd:pain.001.001.03',
+    bicTag: 'BIC',
+    formatExecutionDate: (date) => `<ReqdExctnDt>${escapeXml(date)}</ReqdExctnDt>`,
+  },
+  'pain.001.001.09': {
+    namespace: 'urn:iso:std:iso:20022:tech:xsd:pain.001.001.09',
+    bicTag: 'BICFI',
+    formatExecutionDate: (date) => `<ReqdExctnDt><Dt>${escapeXml(date)}</Dt></ReqdExctnDt>`,
+  },
+};
+
+export function isValidSepaPainVersion(version) {
+  return typeof version === 'string' && Object.hasOwn(PAIN_VARIANTS, version);
+}
+
+/** Build a pain.001.001.03 or pain.001.001.09 document from already resolved payment data. */
+export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, painVersion = DEFAULT_SEPA_PAIN_VERSION, debtor, payments }) {
+  const variant = isValidSepaPainVersion(painVersion) ? PAIN_VARIANTS[painVersion] : null;
+  if (!variant) throw new Error('Unsupported SEPA pain version');
   const effectiveId = id ?? msgId;
   const effectiveMsgId = msgId ?? effectiveId;
   const effectivePmtInfId = pmtInfId ?? effectiveId;
@@ -58,5 +84,5 @@ export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, debtor, pay
   }).join('');
   const sum = (total / 100).toFixed(2);
   const count = payments.length;
-  return `<?xml version="1.0" encoding="UTF-8"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03"><CstmrCdtTrfInitn><GrpHdr><MsgId>${escapeXml(effectiveMsgId)}</MsgId><CreDtTm>${escapeXml(createdAt)}</CreDtTm><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><InitgPty><Nm>${escapeXml(debtor.name)}</Nm></InitgPty></GrpHdr><PmtInf><PmtInfId>${escapeXml(effectivePmtInfId)}</PmtInfId><PmtMtd>TRF</PmtMtd><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf><ReqdExctnDt>${escapeXml(date)}</ReqdExctnDt><Dbtr><Nm>${escapeXml(debtor.name)}</Nm></Dbtr><DbtrAcct><Id><IBAN>${normalizedIban(debtor.iban)}</IBAN></Id></DbtrAcct><DbtrAgt><FinInstnId><BIC>${escapeXml(debtor.bic)}</BIC></FinInstnId></DbtrAgt><ChrgBr>SLEV</ChrgBr>${transactions}</PmtInf></CstmrCdtTrfInitn></Document>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Document xmlns="${variant.namespace}"><CstmrCdtTrfInitn><GrpHdr><MsgId>${escapeXml(effectiveMsgId)}</MsgId><CreDtTm>${escapeXml(createdAt)}</CreDtTm><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><InitgPty><Nm>${escapeXml(debtor.name)}</Nm></InitgPty></GrpHdr><PmtInf><PmtInfId>${escapeXml(effectivePmtInfId)}</PmtInfId><PmtMtd>TRF</PmtMtd><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf>${variant.formatExecutionDate(date)}<Dbtr><Nm>${escapeXml(debtor.name)}</Nm></Dbtr><DbtrAcct><Id><IBAN>${normalizedIban(debtor.iban)}</IBAN></Id></DbtrAcct><DbtrAgt><FinInstnId><${variant.bicTag}>${escapeXml(debtor.bic)}</${variant.bicTag}></FinInstnId></DbtrAgt><ChrgBr>SLEV</ChrgBr>${transactions}</PmtInf></CstmrCdtTrfInitn></Document>`;
 }
