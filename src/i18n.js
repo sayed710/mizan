@@ -770,6 +770,7 @@ const ar = {
   'Select either an invoice or an existing payment on each batch line': 'اختر في كل بند من الدفعة المجمّعة فاتورة أو دفعة موجودة',
   'Select an existing posted payment': 'اختر دفعة مرحّلة موجودة',
   'Payment direction and partner type must match the batch': 'يجب أن يطابق اتجاه الدفعة ونوع الشريك الدفعة المجمّعة',
+  'Payment direction must match the batch': 'يجب أن يطابق اتجاه الدفعة الدفعة المجمّعة',
   'Payment journal must match the batch journal': 'يجب أن يطابق دفتر يومية الدفعة دفتر الدفعة المجمّعة',
   'Payment is already matched': 'الدفعة مطابَقة بالفعل',
   'Payment is already in a batch': 'الدفعة موجودة بالفعل في دفعة مجمّعة',
@@ -3547,6 +3548,7 @@ const ar = {
   'Void the check before resetting the payment to draft': 'أبطل الشيك قبل إعادة تعيين الدفعة إلى مسودة',
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
+  'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
   'Create Batch Payment': 'إنشاء دفعة مجمعة',
   'Select at least one payment': 'اختر دفعة واحدة على الأقل',
@@ -3560,6 +3562,10 @@ const ar = {
   'Internal transfers cannot be added to a batch': 'لا يمكن إضافة التحويلات الداخلية إلى الدفعة المجمعة',
   'Selected payments must belong to the same company': 'يجب أن تنتمي المدفوعات المحددة إلى نفس الشركة',
   'The payment currency must be active': 'يجب أن تكون عملة الدفعة نشطة',
+  'Checks require a bank journal': 'تتطلب الشيكات دفتر يومية بنكي',
+  'Inbound batches require a bank or cash journal': 'تتطلب الدفعات المجمعة الواردة دفتر يومية بنكي أو نقدي',
+  'Tax Closing Lines': 'بنود الإقفال الضريبي',
+  'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

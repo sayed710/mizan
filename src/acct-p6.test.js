@@ -326,3 +326,234 @@ test('FX-9: account.payment settles invoice in another active currency with exch
   assert.equal(read(syncedEur, 'account.payment', eurPay.id).state, 'posted');
   assert.deepEqual(read(syncedEur, 'account.move', postedEurPay.move_id).line_ids, wizardEurEntry.line_ids);
 });
+
+test('Regression PR #208: createBatchPayment supports non-check payouts and refund payments, enforces same payment method, and strictly declares payment_method_id', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const cash = search(db, 'account.journal').find((j) => j.type === 'cash');
+  const action = models['account.payment'].listActions.find((a) => a.label === 'Create Batch Payment');
+  assert.ok(action, 'Create Batch Payment action exists');
+
+  const checkMethod = search(db, 'account.payment.method').find((m) => m.code === 'check_printing' && m.payment_type === 'outbound');
+  const manualOutMethod = search(db, 'account.payment.method').find((m) => m.code === 'manual' && m.payment_type === 'outbound');
+  const outCheckLine = search(db, 'account.payment.method.line').find((l) => l.journal_id === bank.id && l.payment_method_id === checkMethod.id);
+  const outManualLine = search(db, 'account.payment.method.line').find((l) => l.journal_id === bank.id && l.payment_method_id === manualOutMethod.id);
+
+  // Finding 1: Outbound batches can be manual (non-check) payments
+  // a) Outbound payment with manual method creates batch and posts cleanly
+  const nonCheckPay = createPayment(db, {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 2,
+    journal_id: bank.id,
+    payment_method_line_id: outManualLine?.id,
+    amount: 100,
+  });
+  db = postPayment(nonCheckPay.db, read(nonCheckPay.db, 'account.payment', nonCheckPay.id));
+  const manualRes = action.run(db, [nonCheckPay.id]);
+  assert.ok(manualRes.id, 'manual batch created');
+  const manualBatch = read(manualRes.db, 'account.batch.payment', manualRes.id);
+  assert.equal(manualBatch.payment_method_id, manualOutMethod.id);
+  const postedManualDb = postBatch(manualRes.db, manualBatch);
+  assert.equal(read(postedManualDb, 'account.batch.payment', manualRes.id).state, 'posted');
+
+  // Print Checks button is hidden for manual batches
+  const printChecksBtn = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Print Checks');
+  assert.equal(printChecksBtn.when(read(postedManualDb, 'account.batch.payment', manualRes.id), postedManualDb), false);
+
+  // Enforce all selected payments use the same payment method
+  const checkPayForMix = createPayment(db, {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 2,
+    journal_id: bank.id,
+    payment_method_line_id: outCheckLine.id,
+    amount: 50,
+  });
+  db = postPayment(checkPayForMix.db, read(checkPayForMix.db, 'account.payment', checkPayForMix.id));
+  assert.throws(() => action.run(db, [nonCheckPay.id, checkPayForMix.id]), /Selected payments must use the same payment method/);
+
+  // b) Outbound check payment on a cash journal rejected
+  const cashCheckLine = create(db, 'account.payment.method.line', {
+    name: 'Checks',
+    journal_id: cash.id,
+    payment_method_id: checkMethod.id,
+    payment_type: 'outbound',
+  });
+  db = cashCheckLine.db;
+  const cashCheckPay = createPayment(db, {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 2,
+    journal_id: cash.id,
+    payment_method_line_id: cashCheckLine.id,
+    state: 'posted',
+  });
+  db = cashCheckPay.db;
+  assert.throws(() => action.run(db, [cashCheckPay.id]), /Checks require a bank journal/);
+
+  // c) Outbound check payment on bank journal without check method line rejected
+  const bank2 = create(db, 'account.journal', {
+    name: 'Bank 2',
+    code: 'BNK2',
+    type: 'bank',
+    suspense_account_id: bank.suspense_account_id,
+    default_account_id: bank.default_account_id,
+  });
+  db = bank2.db;
+  const bank2CheckLine = search(db, 'account.payment.method.line').find((l) => l.journal_id === bank2.id && l.payment_method_id === checkMethod.id);
+  const noCheckLinePay = createPayment(db, {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 2,
+    journal_id: bank2.id,
+    state: 'posted',
+    payment_method_line_id: bank2CheckLine?.id,
+  });
+  db = noCheckLinePay.db;
+  // Reassign bank2's check line to bank so the line still exists (paymentPaysByCheck remains true),
+  // but bank2 itself has no check method line.
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment.method.line': db.records['account.payment.method.line'].map((l) => (l.journal_id === bank2.id && l.payment_method_id === checkMethod.id ? { ...l, journal_id: bank.id } : l)),
+    },
+  };
+  assert.throws(() => action.run(db, [noCheckLinePay.id]), /The batch journal has no check payment method/);
+
+  // Finding 2: Mixed-currency batches cannot be posted
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const inMethodLine = search(db, 'account.payment.method.line').find((l) => l.journal_id === bank.id && l.payment_type === 'inbound');
+
+  const payUsd = createPayment(db, {
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: 3,
+    journal_id: bank.id,
+    payment_method_line_id: inMethodLine.id,
+    currency_id: usd.id,
+    state: 'posted',
+  });
+  db = payUsd.db;
+  const payEur = createPayment(db, {
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: 3,
+    journal_id: bank.id,
+    payment_method_line_id: inMethodLine.id,
+    currency_id: eur.id,
+    state: 'posted',
+  });
+  db = payEur.db;
+  // Mixed currencies rejected
+  assert.throws(() => action.run(db, [payUsd.id, payEur.id]), /Batch invoices must use the same currency/);
+
+  // Fixed journal currency mismatch rejected
+  const fixedBankDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.journal': db.records['account.journal'].map((j) => (j.id === bank.id ? { ...j, currency_id: usd.id } : j)),
+    },
+  };
+  const payEurOnFixedBank = createPayment(fixedBankDb, {
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: 3,
+    journal_id: bank.id,
+    payment_method_line_id: inMethodLine.id,
+    currency_id: eur.id,
+    state: 'posted',
+  });
+  assert.throws(() => action.run(payEurOnFixedBank.db, [payEurOnFixedBank.id]), /Batch currency must match the journal currency/);
+
+  // Finding 3: Refund payments can sit in batches and post cleanly
+  // Outbound batch holding a vendor payment and a customer refund posts
+  const billForBatch = postedInvoice(db, { moveType: 'in_invoice', partnerId: 2, amount: 80 });
+  db = billForBatch.db;
+  const vendorPay = createPayment(db, {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 2,
+    journal_id: bank.id,
+    payment_method_line_id: outCheckLine.id,
+    amount: 80,
+    invoice_id: billForBatch.id,
+  });
+  db = postPayment(vendorPay.db, read(vendorPay.db, 'account.payment', vendorPay.id));
+
+  const custRefund = createPayment(db, {
+    payment_type: 'outbound',
+    partner_type: 'customer',
+    partner_id: 3,
+    journal_id: bank.id,
+    payment_method_line_id: outCheckLine.id,
+    amount: 45,
+  });
+  db = postPayment(custRefund.db, read(custRefund.db, 'account.payment', custRefund.id));
+
+  const refundBatchRes = action.run(db, [vendorPay.id, custRefund.id]);
+  assert.ok(refundBatchRes.id, 'batch created with vendor payment and customer refund');
+  const refundBatch = read(refundBatchRes.db, 'account.batch.payment', refundBatchRes.id);
+  assert.equal(refundBatch.lines.length, 2);
+  assert.equal(refundBatch.batch_type, 'outbound');
+  assert.equal(refundBatch.payment_method_id, checkMethod.id);
+
+  const postedRefundDb = postBatch(refundBatchRes.db, refundBatch);
+  const postedRefundBatch = read(postedRefundDb, 'account.batch.payment', refundBatchRes.id);
+  assert.equal(postedRefundBatch.state, 'posted');
+  assert.equal(printChecksBtn.when(postedRefundBatch, postedRefundDb), true);
+
+  // Inbound batch holding a customer payment and a vendor refund also batches and posts
+  const custPayIn = createPayment(db, {
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: 3,
+    journal_id: bank.id,
+    payment_method_line_id: inMethodLine.id,
+    amount: 50,
+  });
+  db = postPayment(custPayIn.db, read(custPayIn.db, 'account.payment', custPayIn.id));
+  const vendRefundIn = createPayment(db, {
+    payment_type: 'inbound',
+    partner_type: 'supplier',
+    partner_id: 2,
+    journal_id: bank.id,
+    payment_method_line_id: inMethodLine.id,
+    amount: 30,
+  });
+  db = postPayment(vendRefundIn.db, read(vendRefundIn.db, 'account.payment', vendRefundIn.id));
+  const inBatchRes = action.run(db, [custPayIn.id, vendRefundIn.id]);
+  assert.ok(inBatchRes.id);
+  const postedInDb = postBatch(inBatchRes.db, read(inBatchRes.db, 'account.batch.payment', inBatchRes.id));
+  assert.equal(read(postedInDb, 'account.batch.payment', inBatchRes.id).state, 'posted');
+
+  // Finding 4: Strict-field mode and diffDb+applyDiff replay for payment_method_id
+  const origStrict = process.env.MIZAN_STRICT_FIELDS;
+  try {
+    process.env.MIZAN_STRICT_FIELDS = '1';
+    const validPay1 = createPayment(db, {
+      payment_type: 'inbound',
+      partner_type: 'customer',
+      partner_id: 3,
+      journal_id: bank.id,
+      payment_method_line_id: inMethodLine.id,
+      state: 'posted',
+    });
+    db = validPay1.db;
+    const res = action.run(db, [validPay1.id]);
+    assert.ok(res.id, 'batch created under strict fields');
+    const createdBatch = read(res.db, 'account.batch.payment', res.id);
+    assert.equal(createdBatch.payment_method_id, inMethodLine.payment_method_id);
+
+    // Diff/applyDiff server sync preserves payment_method_id
+    const synced = applyDiff(db, diffDb(db, res.db), { isAdmin: true });
+    const syncedBatch = read(synced, 'account.batch.payment', res.id);
+    assert.equal(syncedBatch.payment_method_id, inMethodLine.payment_method_id, 'payment_method_id must persist across sync');
+  } finally {
+    if (origStrict === undefined) delete process.env.MIZAN_STRICT_FIELDS;
+    else process.env.MIZAN_STRICT_FIELDS = origStrict;
+  }
+});
