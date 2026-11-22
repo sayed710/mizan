@@ -764,7 +764,7 @@ function ReportPage({ leaf }) {
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
     const allLedgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
     const activeLedger = LEDGER_REPORTS.includes(leaf.report) ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
-    const journals = (activeLedger ? search(companyDb, 'account.journal').filter((j) => (activeLedger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal'))
+    const journals = (activeLedger ? search(companyDb, 'account.journal').filter((j) => j.journal_group_id === activeLedger.id) : search(companyDb, 'account.journal'))
       .filter((j) => selectedCompany === 'all' || !j.company_id || j.company_id === Number(selectedCompany));
     const chosenIds = LEDGER_REPORTS.includes(leaf.report)
       ? journalIds.filter((jId) => journals.some((j) => j.id === jId))
@@ -772,7 +772,7 @@ function ReportPage({ leaf }) {
     const targetIds = chosenIds.length
       ? chosenIds
       : activeLedger
-        ? (activeLedger.journal_ids ?? [])
+        ? journals.map((j) => j.id)
         : null;
     return { ledgers: allLedgers, ledger: activeLedger, availableJournals: journals, selectedJournalIds: chosenIds, targetJournalIds: targetIds };
   }, [companyDb, leaf.report, ledgerId, selectedCompany, journalIds]);

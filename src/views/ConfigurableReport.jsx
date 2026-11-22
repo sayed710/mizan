@@ -43,7 +43,7 @@ function scopedLedgers(db, companyIds) {
 /** Filter journals to the selected company scope and optional active ledger. */
 function scopedJournals(db, companyIds, ledger) {
   return search(db, 'account.journal').filter(
-    (j) => (!j.company_id || companyIds.includes(j.company_id)) && (!ledger || (ledger.journal_ids ?? []).includes(j.id)),
+    (j) => (!j.company_id || companyIds.includes(j.company_id)) && (!ledger || j.journal_group_id === ledger.id),
   );
 }
 
@@ -85,7 +85,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const availableJournals = statementKind ? scopedJournals(companyDb, companyIds, ledger) : [];
   const selectedJournalIds = statementKind ? journalIds.filter((jId) => availableJournals.some((j) => j.id === jId)) : [];
   const targetJournalIds = statementKind && (selectedJournalIds.length || ledger)
-    ? (selectedJournalIds.length ? selectedJournalIds : (ledger.journal_ids ?? []))
+    ? (selectedJournalIds.length ? selectedJournalIds : availableJournals.map((journal) => journal.id))
     : null;
   const onCompanyChange = (nextCompany) => {
     setCompanyId(nextCompany);

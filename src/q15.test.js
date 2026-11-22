@@ -4,7 +4,7 @@ import { openStorage } from '../server/storage.js';
 import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import { postMove } from './models/accounting.js';
 import { revalueForeignBalances } from './models/closing.js';
@@ -31,7 +31,7 @@ test('Qodo 2: migration 34 sets default_general_journal_id for legacy companies 
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 66);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
   const updatedCompany = read(migrated, 'res.company', company.id);
   assert.equal(updatedCompany.default_general_journal_id, journal.id);
   // A company with one general journal gets no upgrade note
@@ -72,7 +72,7 @@ test('Qodo 2: migration 34 leaves companies with zero or several general journal
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 66);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
 
   // Both should remain unset
   assert.equal(read(migrated, 'res.company', compA.id).default_general_journal_id ?? null, null);

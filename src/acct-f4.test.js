@@ -14,7 +14,7 @@ import { findStatementReport } from './models/statementReports.js';
 import { cashFlow, executiveSummary, reportReviewMode, trialBalance } from './models/reports.js';
 import { applyDiff, diffDb } from './sync.js';
 import { balanceAnalyticColumns, cashflowColumns, periodsFor, pnlAnalyticColumns } from './views/reportCompare.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
@@ -635,7 +635,7 @@ test('Qodo 3: Legacy horizontal-group rule migration and normalization moves ids
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 66);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
   const upgradedGroup = migrated.records['account.report.horizontal.group'].find((g) => g.id === 991);
   assert.deepEqual(upgradedGroup.rule_ids[0].partner_ids, [1, 2]);
   assert.equal(upgradedGroup.rule_ids[0].ids, '');

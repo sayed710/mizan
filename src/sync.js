@@ -240,7 +240,7 @@ function rebaseConcurrentInvoiceSequence(db, diff) {
   for (const move of posted) {
     const journal = byId(db.records['account.journal']).get(move.journal_id);
     if (!journal) continue;
-    const sequence = journalInvoiceSequence(journal, move);
+    const sequence = journalInvoiceSequence(journal, move, db);
     const key = `${journal.id}:${sequence.numberField}`;
     if (!groups.has(key)) groups.set(key, { journal, sequence, moves: [] });
     groups.get(key).moves.push(move);
@@ -262,7 +262,7 @@ function rebaseConcurrentInvoiceSequence(db, diff) {
       throw new ConflictError('Post one invoice or refund per journal sequence update, then reload and continue');
     }
 
-    const currentSequence = journalInvoiceSequence(journal, moves[0]);
+    const currentSequence = journalInvoiceSequence(journal, moves[0], db);
     const incoming = nextDiff.upserts['account.move'].find((record) => record.id === moves[0].id);
     const previousName = incoming.name;
     incoming.name = currentSequence.name;

@@ -1,4 +1,5 @@
 import { purchaseLineId } from './purchase-links.js';
+import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
@@ -180,7 +181,7 @@ function journalSequenceGuard(db, before, after) {
 }
 
 /** Resolve the sequence prefix and next number field to use for posting an invoice or credit note. */
-export function journalInvoiceSequence(journal, move) {
+export function journalInvoiceSequence(journal, move, db = null) {
   const refund = isRefund(move) && Boolean(journal.refund_sequence);
   const prefixField = refund ? 'refund_sequence_prefix' : 'invoice_sequence_prefix';
   const numberField = refund ? 'refund_sequence_next_number' : 'invoice_sequence_next_number';
@@ -194,7 +195,7 @@ export function journalInvoiceSequence(journal, move) {
   }
   const year = (move.invoice_date ?? move.date ?? today()).slice(0, 4);
   return {
-    name: `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
+    name: db ? journalSequenceName(db, journal, move.invoice_date ?? move.date ?? today(), `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`, (candidate) => isInvoice(candidate) && (isRefund(candidate) && Boolean(journal.refund_sequence)) === refund) : `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
     numberField,
     nextNumber,
   };
@@ -726,7 +727,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
     if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
   if (!journalRecord.code?.trim()) throw new Error('Set a short code on the journal');
     const year = (r.invoice_date ?? r.date ?? today()).slice(0, 4);
-    const name = enteredName ?? nextName(db, 'account.move', `${journalRecord.code}/${year}/`);
+    const name = enteredName ?? journalSequenceName(db, journalRecord, r.invoice_date ?? r.date ?? today(), nextName(db, 'account.move', `${journalRecord.code}/${year}/`), (candidate) => candidate.move_type === 'entry');
     if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
     if ((r.line_ids ?? []).some((line) => {
       const account = read(db, 'account.account', line.account_id);
@@ -812,7 +813,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   const matchWarnings = checkBillMatch(db, r);
-  const sequence = journalInvoiceSequence(journalRecord, r);
+  const sequence = journalInvoiceSequence(journalRecord, r, db);
   const name = enteredName ?? sequence.name;
   if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
@@ -3005,6 +3006,21 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after, _ctx, vals) => {
       const companyId = after.company_id ?? 1;
+      if (isLiquidityJournal(after) && after.default_account_id && ((!before && after.currency_id) || (before && (before.currency_id ?? null) !== (after.currency_id ?? null)))) {
+        const account = read(db, 'account.account', after.default_account_id);
+        if (account && (account.currency_id ?? null) !== (after.currency_id ?? null)) return 'The journal and its default account must use the same currency';
+      }
+      if (after.sequence_override_regex) {
+        try { journalSequenceRegex(after.sequence_override_regex); } catch (error) { return error.message; }
+      }
+      if (after.currency_id) {
+        const currency = read(db, 'res.currency', after.currency_id);
+        if (!currency || currency.active === false) return 'The journal currency must be active';
+      }
+      if (after.journal_group_id) {
+        const group = read(db, 'account.journal.group', after.journal_group_id);
+        if (!group || (group.company_id && group.company_id !== companyId)) return 'The ledger must belong to the journal company';
+      }
       if (before?.id) {
         const companies = db.records['res.company'] ?? [];
         for (const [field, label] of [
@@ -3073,6 +3089,9 @@ export const accountingModels = {
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', domain: (currency) => currency.active !== false },
+      journal_group_id: { type: 'many2one', relation: 'account.journal.group', label: 'Ledger' },
+      sequence_override_regex: { type: 'text', label: 'Sequence Override Regex', hidden: true },
       refund_sequence: {
         type: 'boolean', label: 'Dedicated Credit Note Sequence',
         help: 'Check this box if you don\'t want to share the same sequence for invoices and credit notes made from this journal',
@@ -3228,6 +3247,9 @@ export const accountingModels = {
     }),
     prepareCreate: (db, vals) => {
       let nextVals = { ...vals };
+      if (isLiquidityJournal(vals) && vals.default_account_id && vals.currency_id) {
+        db = write(db, 'account.account', vals.default_account_id, { currency_id: vals.currency_id });
+      }
       for (const [field] of METHOD_LINE_FIELDS) {
         if (Array.isArray(nextVals[field]) && nextVals[field].some((l) => l?.id != null && l.id !== '')) {
           delete nextVals[field];
@@ -3237,6 +3259,9 @@ export const accountingModels = {
     },
     prepareWrite: (db, vals, before) => {
       let nextVals = { ...vals };
+      if ('currency_id' in vals && isLiquidityJournal({ ...before, ...vals }) && (vals.default_account_id ?? before?.default_account_id)) {
+        db = write(db, 'account.account', vals.default_account_id ?? before.default_account_id, { currency_id: vals.currency_id ?? null });
+      }
       if (nextVals.type !== undefined) {
         if (nextVals.type === 'bank') {
           if (nextVals.sepa_pain_version === undefined && (before?.type !== 'bank' || !before?.sepa_pain_version)) {
@@ -3317,7 +3342,7 @@ export const accountingModels = {
         },
       ],
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['type', 'code']],
+      groups: [['type', 'code', 'currency_id', 'journal_group_id']],
       tabs: (j) => {
         const liquidity = isLiquidityJournal(j);
         const invoiced = ['sale', 'purchase'].includes(j.type);
@@ -3488,6 +3513,10 @@ export const accountingModels = {
     },
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
     onchange: (r, key, db, context = {}) => {
+      if (key === 'journal_id') {
+        const currency = read(db, 'account.journal', r.journal_id)?.currency_id;
+        if (currency) return { currency_id: currency };
+      }
       if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
         const partnerChange = key === 'partner_id';
         const partner = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
@@ -3792,6 +3821,7 @@ export const accountingModels = {
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
       const companyId = vals.company_id ?? currentCompany(db);
+      const journalCurrency = read(db, 'account.journal', vals.journal_id)?.currency_id;
       if (moveType !== 'entry') {
         const salesperson = vals.invoice_user_id == null ? currentUserId(db) : null;
         const defaultJournal = vals.journal_id == null && !vals.invoice_line_ids?.length && !vals.line_ids?.length
@@ -3799,6 +3829,7 @@ export const accountingModels = {
           : null;
         return {
           ...invoiceCompanyDefaults(db, { ...vals, move_type: moveType, company_id: companyId }),
+          ...(vals.currency_id == null && journalCurrency ? { currency_id: journalCurrency } : {}),
           ...(salesperson ? { invoice_user_id: salesperson } : {}),
           ...(defaultJournal ? { journal_id: defaultJournal } : {}),
         };
@@ -3806,6 +3837,7 @@ export const accountingModels = {
       const date = vals.date ?? vals.invoice_date ?? today();
       const defaultJournal = vals.journal_id == null ? resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId })?.id ?? null : null;
       return {
+        ...(vals.currency_id == null && journalCurrency ? { currency_id: journalCurrency } : {}),
         ...(vals.date == null ? { date } : {}),
         ...(vals.invoice_date == null ? { invoice_date: date } : {}),
         ...(defaultJournal ? { journal_id: defaultJournal } : {}),

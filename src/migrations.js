@@ -2000,6 +2000,27 @@ export function migrateTaxPriceIncludeOverride(db) {
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
 
+export function migrateJournalGroups(db) {
+  const groups = db.records['account.journal.group'] ?? [];
+  const memberships = new Map();
+  for (const group of groups) {
+    for (const id of group.journal_ids ?? []) {
+      if (!(db.records['account.journal'] ?? []).some((journal) => journal.id === id)) throw new Error(`Ledger references missing journal ${id}`);
+      if (memberships.has(id) && memberships.get(id) !== group.id) throw new Error(`Journal ${id} belongs to multiple ledger groups`);
+      memberships.set(id, group.id);
+    }
+  }
+  const journals = (db.records['account.journal'] ?? []).map((journal) => {
+    const groupId = memberships.get(journal.id);
+    if (groupId == null) return journal;
+    if (journal.journal_group_id && journal.journal_group_id !== groupId) throw new Error(`Journal ${journal.id} belongs to multiple ledger groups`);
+    return { ...journal, journal_group_id: groupId };
+  });
+  const cleanGroups = groups.map(({ journal_ids: _old, ...group }) => group);
+  return { ...db, records: { ...db.records, 'account.journal': journals, 'account.journal.group': cleanGroups } };
+}
+MIGRATIONS.push({ version: 67, name: 'journal-ledger-direction', up: migrateJournalGroups });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

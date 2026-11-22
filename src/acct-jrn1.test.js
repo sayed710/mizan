@@ -1,0 +1,56 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { seed } from './seed.js';
+import { create, read, search, write } from './orm.js';
+import { diffDb, applyDiff } from './sync.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { journalSequenceName } from './models/journal-sequence.js';
+import { postEntry } from './models/ledger.js';
+import './models/index.js';
+
+test('JRN-1 journal currency and sequence behavior survive synchronization', () => {
+  let db = seed();
+  const currency = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const journal = create(db, 'account.journal', { name: 'Euro Bank', code: 'EURB', type: 'general', company_id: 1, currency_id: currency.id });
+  db = journal.db;
+  const payment = create(db, 'account.payment', { state: 'draft', company_id: 1, journal_id: journal.id, currency_id: currency.id, amount: 10 });
+  db = payment.db;
+  const bad = { ...db, records: { ...db.records, 'account.payment': db.records['account.payment'].map((p) => p.id === payment.id ? { ...p, currency_id: read(db, 'res.company', 1).currency_id } : p) } };
+  assert.equal(read(applyDiff(db, diffDb(db, bad), { isAdmin: true }), 'account.payment', payment.id).currency_id, read(db, 'res.company', 1).currency_id);
+  const account = create(db, 'account.account', { name: 'Foreign bank', code: '199998', account_type: 'asset_cash', company_id: 1 });
+  db = account.db;
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const fixed = create(db, 'account.journal', { name: 'Fixed bank', code: 'FIX', type: 'bank', company_id: 1, default_account_id: account.id, suspense_account_id: bank.suspense_account_id, currency_id: currency.id });
+  const fixedSynced = applyDiff(db, diffDb(db, fixed.db), { isAdmin: true });
+  assert.equal(read(fixedSynced, 'account.account', account.id).currency_id, currency.id);
+  const forged = { ...fixed.db, records: { ...fixed.db.records, 'account.account': fixed.db.records['account.account'].map((a) => a.id === account.id ? { ...a, currency_id: null } : a) } };
+  assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: true }), /same currency/);
+  const regex = String.raw`^(?P<prefix1>.*?)(?P<year>\d{4})/(?P<seq>\d+)(?P<suffix>\D*)$`;
+  const configured = write(db, 'account.journal', journal.id, { sequence_override_regex: regex });
+  const synced = applyDiff(db, diffDb(db, configured), { isAdmin: true });
+  const previous = { ...synced, records: { ...synced.records, 'account.move': [...synced.records['account.move'], { id: 9999, journal_id: journal.id, move_type: 'entry', state: 'posted', name: 'TEST/2026/0042' }] } };
+  assert.equal(journalSequenceName(previous, read(previous, 'account.journal', journal.id), '2026-03-01', 'TEST/2026/00001'), 'TEST/2026/0043');
+  assert.equal(journalSequenceName(previous, read(previous, 'account.journal', journal.id), '2027-03-01', 'TEST/2027/00001'), 'TEST/2027/0001');
+  const accounts = search(previous, 'account.account').filter((account) => account.active !== false && (!account.company_id || account.company_id === 1));
+  const posted = postEntry(previous, { journal_id: journal.id, company: 1, date: '2026-03-01', lines: [{ account_id: accounts[0].id, debit: 1 }, { account_id: accounts[1].id, credit: 1 }] });
+  assert.equal(read(posted.db, 'account.move', posted.id).name, 'TEST/2026/0043');
+  assert.equal(read(posted.db, 'account.move', posted.id).currency_id, currency.id);
+  const invalidRegex = { ...synced, records: { ...synced.records, 'account.journal': synced.records['account.journal'].map((j) => j.id === journal.id ? { ...j, sequence_override_regex: 'broken' } : j) } };
+  assert.throws(() => applyDiff(synced, diffDb(synced, invalidRegex), { isAdmin: true }), /seq group/);
+});
+
+test('JRN-2 migrates ledger membership to the journal', () => {
+  const db = seed();
+  const journal = search(db, 'account.journal')[0];
+  const old = { ...db, schema_version: SCHEMA_VERSION - 1, records: { ...db.records, 'account.journal.group': [{ id: 1, name: 'IFRS', company_id: 1, journal_ids: [journal.id] }] } };
+  const migrated = migrate(old);
+  assert.equal(read(migrated, 'account.journal', journal.id).journal_group_id, 1);
+  assert.deepEqual(read(migrated, 'account.journal.group', 1).included_journal_ids, [journal.id]);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  const unrelated = search(migrated, 'account.journal').find((j) => j.id !== journal.id);
+  const changed = write(migrated, 'account.journal', unrelated.id, { journal_group_id: 1 });
+  const applied = applyDiff(migrated, diffDb(migrated, changed), { isAdmin: true });
+  assert.ok(read(applied, 'account.journal.group', 1).included_journal_ids.includes(unrelated.id));
+  const invalid = { ...applied, records: { ...applied.records, 'account.journal': applied.records['account.journal'].map((j) => j.id === unrelated.id ? { ...j, journal_group_id: 999999 } : j) } };
+  assert.throws(() => applyDiff(applied, diffDb(applied, invalid), { isAdmin: true }));
+});

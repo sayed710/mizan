@@ -146,7 +146,7 @@ test('validating SEPA payments stores a stable file and rejects invalid account 
 test('migration 64 seeds electronic and SEPA methods on databases already at version 63', async () => {
   const { migrate, SCHEMA_VERSION } = await import('./migrations.js');
   const { search } = await import('./orm.js');
-  assert.equal(SCHEMA_VERSION, 66);
+  assert.ok(SCHEMA_VERSION >= 66);
   const v63Db = {
     schema_version: 63,
     records: {
@@ -165,7 +165,7 @@ test('migration 64 seeds electronic and SEPA methods on databases already at ver
     seq: { 'account.payment.method': 3 },
   };
   const upgraded = migrate(v63Db);
-  assert.equal(upgraded.schema_version, 66);
+  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
   const methods = search(upgraded, 'account.payment.method');
   assert.equal(methods.length, 5);
   assert.ok(methods.some((m) => m.code === 'electronic' && m.payment_type === 'inbound'));
