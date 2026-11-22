@@ -3607,6 +3607,8 @@ const ar = {
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
   'Purchase order line must match the vendor, company, and product': 'يجب أن يطابق بند أمر الشراء المورد والشركة والمنتج',
   'Depreciation reversal must match the excess from a vendor refund': 'يجب أن يطابق عكس الإهلاك الزيادة الناتجة عن مرتجع المورد',
+  'The computed ending balance does not match the entered ending balance.': 'الرصيد الختامي المحسوب لا يطابق الرصيد الختامي المُدخل.',
+  'The file belongs to another bank account than this statement': 'ينتمي الملف إلى حساب بنكي آخر غير حساب هذا الكشف',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

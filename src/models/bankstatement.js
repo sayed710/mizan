@@ -1,9 +1,10 @@
 // Bank statements (account.bank.statement) tracking opening, ending, and computed balances across statement lines.
-import { create, read, search, write } from '../orm.js';
+import { create, read, search, unlink, write } from '../orm.js';
 import { isLiquidityJournal } from './ledger.js';
 import { bookToAccount } from './bank.js';
 import { today } from './common.js';
 import { roundCurrency } from '../money.js';
+import { resolveStatementCompany } from './statements.js';
 
 const statementLinesCache = new WeakMap();
 
@@ -39,18 +40,18 @@ export function roundStatementAmount(db, statement, amount) {
 
 /** Computed ending balance: balance_start + sum of its lines' amounts. */
 export function computeBalanceEnd(r, db) {
-  const lines = linesByStatement(db).get(r.id) ?? [];
+  const lines = Array.isArray(r?.line_ids) ? r.line_ids : (linesByStatement(db).get(r?.id) ?? []);
   const linesSum = lines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
-  const total = (Number(r.balance_start) || 0) + linesSum;
+  const total = (Number(r?.balance_start) || 0) + linesSum;
   return roundStatementAmount(db, r, total);
 }
 
 /** Computed completeness: has lines and balance_end equals balance_end_real at the journal currency rounding. */
 export function computeIsComplete(r, db) {
-  const lines = linesByStatement(db).get(r.id) ?? [];
+  const lines = Array.isArray(r?.line_ids) ? r.line_ids : (linesByStatement(db).get(r?.id) ?? []);
   if (!lines.length) return false;
   const balanceEnd = computeBalanceEnd(r, db);
-  const balanceEndReal = roundStatementAmount(db, r, r.balance_end_real);
+  const balanceEndReal = roundStatementAmount(db, r, r?.balance_end_real);
   return balanceEnd === balanceEndReal;
 }
 
@@ -70,6 +71,79 @@ export function computeIsValid(r, db) {
   } finally {
     inComputeIsValid = false;
   }
+}
+
+/** Previous statement's ending balance of the same journal, by date then id; 0 when none. */
+export function previousStatementEndingBalance(db, journalId, statementDate = null, excludeId = null) {
+  if (!db || !journalId) return 0;
+  const rawStatements = search(db, 'account.bank.statement')
+    .filter((s) => s.journal_id === journalId && (excludeId ? s.id !== excludeId : true) && (statementDate ? String(s.date ?? '') <= String(statementDate) : true))
+    .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id);
+  const prev = rawStatements.at(-1);
+  return prev ? Number(prev.balance_end_real) || 0 : 0;
+}
+
+/** Strip in-memory line_ids field from stored account.bank.statement record so virtual field is not persisted. */
+export function stripStatementLineIds(db, statementId) {
+  if (!db?.records?.['account.bank.statement']) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.bank.statement': (db.records['account.bank.statement'] ?? []).map((r) => {
+        if (r.id !== statementId || !Object.hasOwn(r, 'line_ids')) return r;
+        const { line_ids: _omitted, ...rest } = r;
+        return rest;
+      }),
+    },
+  };
+}
+
+/** Synchronize inline account.bank.statement.line rows after statement create or write. */
+export function syncStatementLines(db, statement, lineVals) {
+  let next = stripStatementLineIds(db, statement.id);
+  if (!Array.isArray(lineVals)) return next;
+  const existing = (linesByStatement(next).get(statement.id) ?? []);
+  const existingById = new Map(existing.map((l) => [l.id, l]));
+  const keepIds = new Set(lineVals.map((l) => l.id).filter(Boolean));
+  const removeIds = existing.filter((l) => !keepIds.has(l.id)).map((l) => l.id);
+
+  if (removeIds.length) {
+    next = unlink(next, 'account.bank.statement.line', removeIds);
+  }
+
+  const journal = statement.journal_id ? read(next, 'account.journal', statement.journal_id) : null;
+  const companyId = resolveStatementCompany(next, statement, journal);
+  const editableFields = ['date', 'payment_ref', 'partner_id', 'amount', 'ref'];
+  for (const row of lineVals) {
+    if (row.id && existingById.has(row.id)) {
+      const current = existingById.get(row.id);
+      const changes = {};
+      for (const f of editableFields) {
+        if (Object.hasOwn(row, f) && row[f] !== current[f]) {
+          changes[f] = row[f];
+        }
+      }
+      if (Object.keys(changes).length) {
+        next = write(next, 'account.bank.statement.line', row.id, changes);
+      }
+    } else {
+      const newLinePayload = {
+        date: row.date || statement.date || today(),
+        payment_ref: row.payment_ref || '/',
+        partner_id: row.partner_id ?? null,
+        amount: Number(row.amount) || 0,
+        ref: row.ref ?? '',
+        statement_id: statement.id,
+        journal_id: statement.journal_id,
+        company_id: companyId,
+        state: 'to_check',
+      };
+      const res = create(next, 'account.bank.statement.line', newLinePayload);
+      next = res.db;
+    }
+  }
+  return next;
 }
 
 function statementGuard(db, before, after) {
@@ -188,13 +262,34 @@ export const bankStatementModels = {
       line_ids: {
         type: 'one2many',
         relation: 'account.bank.statement.line',
-        label: 'Statement Lines',
-        readonly: true,
+        label: 'Transactions',
+        editable: true,
+        readonly: (r) => r?.state === 'closed',
         fields: {
-          date: { type: 'date', label: 'Date' },
-          payment_ref: { type: 'char', label: 'Label' },
-          partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
-          amount: { type: 'monetary', label: 'Amount' },
+          id: { type: 'integer', label: 'ID', hidden: true },
+          date: { type: 'date', label: 'Date', required: true, readonly: (l) => l?.state === 'reconciled' },
+          payment_ref: { type: 'char', label: 'Label', required: true, readonly: (l) => l?.state === 'reconciled' },
+          partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', readonly: (l) => l?.state === 'reconciled' },
+          amount: { type: 'monetary', label: 'Amount', required: true, readonly: (l) => l?.state === 'reconciled' },
+          ref: { type: 'char', label: 'Reference', readonly: (l) => l?.state === 'reconciled' },
+          journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal', hidden: true },
+          company_id: { type: 'many2one', relation: 'res.company', label: 'Company', hidden: true },
+          statement_id: { type: 'many2one', relation: 'account.bank.statement', label: 'Statement', hidden: true },
+          state: { type: 'selection', label: 'Status', hidden: true },
+          bank_move_id: { type: 'many2one', relation: 'account.move', label: 'Bank Entry', hidden: true },
+        },
+        newLine: (r, db) => {
+          const journal = r?.journal_id && db ? read(db, 'account.journal', r.journal_id) : null;
+          const companyId = db ? resolveStatementCompany(db, r, journal) : (r?.company_id ?? null);
+          return {
+            date: r?.date || today(),
+            payment_ref: '',
+            partner_id: null,
+            amount: 0,
+            ref: '',
+            journal_id: r?.journal_id ?? null,
+            ...(companyId != null ? { company_id: companyId } : {}),
+          };
         },
         compute: (r, db) => linesByStatement(db).get(r.id) ?? [],
       },
@@ -202,27 +297,58 @@ export const bankStatementModels = {
       is_valid: { type: 'boolean', label: 'Valid', readonly: true, compute: computeIsValid },
       state: { type: 'selection', label: 'Status', options: [['open', 'Open'], ['closed', 'Closed']], default: 'open' },
     },
-    defaults: () => ({ date: today(), balance_start: 0, balance_end_real: 0, state: 'open' }),
-    createDefaults: (db, vals) => ({ company_id: read(db, 'account.journal', vals.journal_id)?.company_id ?? vals.company_id ?? 1 }),
+    defaults: () => ({ date: today(), balance_end_real: 0, state: 'open' }),
+    createDefaults: (db, vals) => {
+      const journal = vals?.journal_id ? read(db, 'account.journal', vals.journal_id) : null;
+      const company_id = resolveStatementCompany(db, vals, journal);
+      const prevBalance = previousStatementEndingBalance(db, vals?.journal_id, vals?.date, vals?.id);
+      return {
+        company_id,
+        balance_start: prevBalance,
+      };
+    },
     onchange: (r, key, db) => {
       if (key === 'journal_id') {
         const journal = read(db, 'account.journal', r.journal_id);
-        return { company_id: journal?.company_id ?? 1 };
+        const company_id = journal?.company_id ?? resolveStatementCompany(db, r, journal);
+        const prevBalance = previousStatementEndingBalance(db, r.journal_id, r.date, r.id);
+        return {
+          company_id,
+          balance_start: prevBalance,
+        };
       }
       return {};
     },
+    onCreate: (db, after, _before, vals) => syncStatementLines(db, after, vals?.line_ids),
+    onWrite: (db, after, _before, vals) => syncStatementLines(db, after, vals?.line_ids),
     sort: (a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')) || b.id - a.id,
     list: ['name', 'date', 'journal_id', 'balance_start', 'balance_end', 'balance_end_real', 'state'],
     form: {
       title: 'name',
       statusbar: 'state',
+      lockedWhen: (r) => r.state === 'closed',
+      ribbon: (r) => (r?.is_complete ? 'Complete' : null),
+      warning: (r, db) => (!computeIsComplete(r, db) ? 'The computed ending balance does not match the entered ending balance.' : null),
       groups: [['name', 'journal_id', 'date'], ['balance_start', 'balance_end_real', 'balance_end']],
+      tabs: [{ label: 'Transactions', fields: ['line_ids'] }],
       buttons: [
         {
           label: 'Close',
           primary: true,
           when: (s) => s.state !== 'closed',
           run: (db, s) => ({ db: closeStatement(db, s.id) }),
+        },
+        {
+          label: 'Import',
+          when: (s) => s.state !== 'closed',
+          importFile: {
+            model: 'account.bank.statement.line',
+            defaults: (s) => ({
+              statement_id: s.id,
+              ...(s.journal_id ? { journal_id: s.journal_id } : {}),
+              ...(s.company_id != null ? { company_id: s.company_id } : {}),
+            }),
+          },
         },
       ],
     },

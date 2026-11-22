@@ -6,7 +6,7 @@ import { rateAt, toCompany } from './currency.js';
 import { appendDocumentSettlement, residual, settleWriteoff } from './accounting.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { applyRule, counterpartTaxLines, sameCommercialPartner, suggestRule } from './reconcile.js';
-import { importStatement } from './statements.js';
+import { importStatement, resolveStatementCompany } from './statements.js';
 import { roundStatementAmount } from './bankstatement.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate, writeBankStatementMove } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
@@ -1463,23 +1463,28 @@ export const bankModels = {
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
     prepareCreate: (db, vals) => {
-      if (vals.bank_move_id) throw new Error(suppliedBankMoveError);
-      if (!vals.journal_id || !Number(vals.amount)) return { db, vals };
-      const compId = vals.company_id ?? read(db, 'account.journal', vals.journal_id)?.company_id ?? 1;
-      const normalized = { ...vals, company_id: compId };
+      const stmt = vals?.statement_id ? read(db, 'account.bank.statement', vals.statement_id) : null;
+      const journalId = vals.journal_id ?? stmt?.journal_id;
+      const journal = journalId ? read(db, 'account.journal', journalId) : null;
+      const compId = vals.company_id ?? resolveStatementCompany(db, stmt, journal);
+      const effectiveVals = stmt && (vals.journal_id == null || vals.company_id == null)
+        ? { ...vals, journal_id: journalId, company_id: compId }
+        : vals;
+      if (effectiveVals.bank_move_id) throw new Error(suppliedBankMoveError);
+      if (!effectiveVals.journal_id || !Number(effectiveVals.amount)) return { db, vals: effectiveVals };
+      const normalized = { ...effectiveVals, company_id: compId };
       const amount = statementCompanyAmount(db, normalized);
-      if (vals.state === 'reconciled') {
-        return { db, vals: { ...vals, open_amount: 0 } };
+      if (effectiveVals.state === 'reconciled') {
+        return { db, vals: { ...effectiveVals, open_amount: 0 } };
       }
-      const journal = read(db, 'account.journal', vals.journal_id);
       if (!journal?.default_account_id) {
-        return { db, vals: { ...vals, open_amount: amount } };
+        return { db, vals: { ...effectiveVals, open_amount: amount } };
       }
-      const booked = bookBankMovement(db, normalized, compId, { date: vals.date, openAmount: amount });
+      const booked = bookBankMovement(db, normalized, compId, { date: effectiveVals.date, openAmount: amount });
       return {
         db: booked.db,
         vals: {
-          ...vals,
+          ...effectiveVals,
           company_id: compId,
           bank_move_id: booked.bankMoveId,
           open_amount: amount,
@@ -1500,8 +1505,30 @@ export const bankModels = {
       return { db, vals };
     },
     defaults: () => ({ sequence: 10, date: today(), state: 'to_check' }),
-    createDefaults: (db, vals) => ({ currency_id: read(db, 'account.journal', vals.journal_id)?.currency_id ?? companyCurrencyRecord(db, vals.company_id)?.id ?? null }),
+    createDefaults: (db, vals) => {
+      const stmt = vals?.statement_id ? read(db, 'account.bank.statement', vals.statement_id) : null;
+      const journalId = vals?.journal_id ?? stmt?.journal_id;
+      const journal = journalId ? read(db, 'account.journal', journalId) : null;
+      const companyId = vals?.company_id ?? resolveStatementCompany(db, stmt, journal);
+      const currencyId = journal?.currency_id ?? companyCurrencyRecord(db, companyId)?.id ?? null;
+      return {
+        ...(stmt ? { journal_id: journalId, company_id: companyId } : {}),
+        currency_id: currencyId,
+      };
+    },
     onchange: (r, key, db) => {
+      if (key === 'statement_id') {
+        const stmt = r?.statement_id ? read(db, 'account.bank.statement', r.statement_id) : null;
+        if (!stmt) return {};
+        const journal = stmt.journal_id ? read(db, 'account.journal', stmt.journal_id) : null;
+        const companyId = resolveStatementCompany(db, stmt, journal);
+        const currencyId = journal?.currency_id ?? companyCurrencyRecord(db, companyId)?.id ?? null;
+        return {
+          journal_id: stmt.journal_id,
+          company_id: companyId,
+          currency_id: currencyId,
+        };
+      }
       if (key !== 'journal_id') return {};
       const journal = read(db, 'account.journal', r.journal_id);
       return { currency_id: journal?.currency_id ?? companyCurrencyRecord(db, journal?.company_id ?? r.company_id)?.id ?? null };

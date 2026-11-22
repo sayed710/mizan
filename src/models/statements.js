@@ -5,6 +5,10 @@ import { sanitizeAccountNumber } from './partnerbank.js';
 import { today } from './common.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
 
+/** Resolve the company for a statement or line: statement's company, else journal's company, else active company. */
+export const resolveStatementCompany = (db, statement = null, journal = null) =>
+  statement?.company_id ?? journal?.company_id ?? db?.settings?.current_company_id ?? 1;
+
 const isValidCalendarDate = (y, m, d) => {
   if (!Number.isSafeInteger(y) || y < 1000 || y > 9999) return false;
   if (!Number.isSafeInteger(m) || m < 1 || m > 12) return false;
@@ -438,6 +442,10 @@ function findJournalForAccount(db, acctNumber, companyId = 1) {
 
 /** Parse a statement file by its name/content and create the new lines and statement record; returns { db, count }. */
 export function importStatement(db, fileName, text, defaults = {}) {
+  const existingStmt = defaults.statement_id ? read(db, 'account.bank.statement', defaults.statement_id) : null;
+  if (defaults.statement_id && !existingStmt) throw new Error('The bank statement does not exist');
+  if (existingStmt?.state === 'closed') throw new Error('Cannot add lines to a closed statement');
+
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
   const qif = /\.qif$/i.test(fileName) || /^\s*!Type:(?:Bank|Cash|CCard|Invst|Oth A|Oth L)/im.test(text);
 
@@ -479,17 +487,22 @@ export function importStatement(db, fileName, text, defaults = {}) {
       blockAcctNumber = ofxTag(blockText, 'ACCTID');
     }
 
-    const targetJournal = defaults.journal_id ? read(currentDb, 'account.journal', defaults.journal_id) : null;
-    const companyId = defaults.company_id ?? targetJournal?.company_id ?? 1;
+    const baseJournalId = existingStmt ? existingStmt.journal_id : defaults.journal_id;
+    const targetJournal = baseJournalId ? read(currentDb, 'account.journal', baseJournalId) : null;
+    const companyId = existingStmt?.company_id ?? defaults.company_id ?? resolveStatementCompany(currentDb, null, targetJournal);
     const matchedJournal = findJournalForAccount(currentDb, blockAcctNumber, companyId);
-    const finalJournal = matchedJournal ?? targetJournal;
-    const targetJournalId = finalJournal?.id ?? defaults.journal_id;
+    if (existingStmt && matchedJournal && matchedJournal.id !== existingStmt.journal_id) {
+      throw new Error('The file belongs to another bank account than this statement');
+    }
+    const finalJournal = existingStmt ? targetJournal : (matchedJournal ?? targetJournal);
+    const targetJournalId = finalJournal?.id ?? baseJournalId;
     if (!targetJournalId) throw new Error('Bank Journal is required');
 
     const blockDefaults = {
       ...defaults,
       journal_id: targetJournalId,
-      company_id: defaults.company_id ?? finalJournal?.company_id ?? companyId,
+      company_id: existingStmt?.company_id ?? defaults.company_id ?? resolveStatementCompany(currentDb, null, finalJournal),
+      ...(existingStmt ? { statement_id: existingStmt.id } : {}),
     };
 
     const dbBeforeBlock = currentDb;
@@ -499,6 +512,11 @@ export function importStatement(db, fileName, text, defaults = {}) {
     }
     totalCount += count;
     currentDb = linesDb;
+
+    if (existingStmt) {
+      createdStatementIds.push(existingStmt.id);
+      continue;
+    }
 
     const fileBalances = isCamt
       ? parseCamtBalances(blockText)
@@ -568,7 +586,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
       return l.length > 0;
     });
     if (!hasAnyTransactions) throw new Error('No transactions found in this file');
-    return { db, count: 0 };
+    return { db, count: 0, statement_id: defaults.statement_id ?? null };
   }
 
   return {

@@ -12,6 +12,7 @@ import { Avatar, display, FieldInput, isLabelable, money, PagerButtons, Simulate
 import { currencyCode } from '../models/money.js';
 import { companyCurrencyRecord } from '../money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
+import { importAccept, importModelFile } from './importModelFile.js';
 import { viewRecords } from '../companyView.js';
 import { duplicateValues } from '../duplicate.js';
 import { saveFormRecord } from './formSave.js';
@@ -520,6 +521,23 @@ export function FormView({ leaf, id, base, params }) {
       return;
     }
     if (b.upload) { fail(new Error(t('This needs the server with AI enabled'))); return; }
+    if (b.importFile) {
+      const savedId = save();
+      if (savedId == null) return;
+      const targetModel = b.importFile.model ?? model;
+      const savedRec = read(getDb(), model, savedId);
+      const defaults = typeof b.importFile.defaults === 'function'
+        ? b.importFile.defaults(savedRec, getDb())
+        : (b.importFile.defaults ?? {});
+      const accept = b.importFile.accept ?? importAccept(targetModel);
+      const input = Object.assign(document.createElement('input'), { type: 'file', accept });
+      input.onchange = () => {
+        const f = input.files?.[0];
+        if (f) importModelFile(targetModel, defaults, f);
+      };
+      input.click();
+      return;
+    }
     if (!b.run) {
       const id = save(b.vals);
       if (id != null) noteUnsent(id);
