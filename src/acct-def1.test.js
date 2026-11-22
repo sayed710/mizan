@@ -2,10 +2,12 @@ import { test } from 'node:test';
 import { register } from 'node:module';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
+import { create, read, write } from './orm.js';
+import { accountId } from './models/ledger.js';
 import { models } from './registry.js';
 import { menusFor } from './models/index.js';
 import * as reports from './models/reports.js';
-import { deferredSettings, lineCreditAdjustmentAmount, scheduleAsOf } from './models/deferred.js';
+import { deferredSettings, lineCreditAdjustmentAmount, scheduleAsOf, revertInvoiceDeferralCreditAdjustment } from './models/deferred.js';
 import { migrateDeferralCreditAdjustments } from './migrations.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
@@ -284,8 +286,11 @@ test('scheduleAsOf reads only line.credit_adjustments', () => {
 });
 
 test('migration converts legacy credit_adjustment_move_ids and reversal_move_id to canonical record', () => {
+  const base = seed();
   const db = {
+    ...base,
     records: {
+      ...base.records,
       'account.move': [
         { id: 901, state: 'posted', date: '2026-02-10', line_ids: [{ account_id: 10, debit: 35, credit: 0 }] },
         { id: 902, state: 'posted', invoice_date: '2026-03-12', line_ids: [{ account_id: 10, debit: 0, credit: 50 }] },
@@ -294,6 +299,7 @@ test('migration converts legacy credit_adjustment_move_ids and reversal_move_id 
         {
           id: 1,
           recognition_account_id: 10,
+          credit_adjustments: [{ note_id: 800, move_ids: [902] }],
           board: [
             {
               date: '2026-01-31',
@@ -394,4 +400,322 @@ test('migration throws when amount or date cannot be determined rather than gues
     },
   };
   assert.throws(() => migrateDeferralCreditAdjustments(dbNoMove), /Cannot determine move and date/);
+});
+
+test('ordinary invoice-reset reversals are preserved and do not revive cancelled schedules after migration and repost', () => {
+  let db = write(seed(), 'res.company', 1, {
+    deferred_revenue_account_id: accountId(seed(), '212000'),
+    deferred_amount_computation_method: 'full_months',
+  });
+  const resetBtn = models['account.move'].form.buttons.find((b) => b.label === 'Reset to Draft');
+  const confirmBtn = models['account.move'].form.buttons.find((b) => b.label === 'Confirm');
+
+  // Create an invoice with deferral spanning past and future relative to today() so only first period posts on confirm
+  const invRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-10-01',
+    invoice_line_ids: [
+      {
+        name: 'Quarterly Subscription',
+        qty: 1,
+        price_unit: 300,
+        tax: 0,
+        account_id: accountId(db, '400000'),
+        deferred_start_date: '2026-10-01',
+        deferred_end_date: '2026-12-31',
+      },
+    ],
+  });
+  let curDb = confirmBtn.run(invRes.db, read(invRes.db, 'account.move', invRes.id)).db;
+  const sched1 = (curDb.records['account.deferral'] ?? []).find((s) => s.source_move_id === invRes.id);
+  assert.ok(sched1);
+  assert.equal(sched1.state, 'running');
+  assert.equal(sched1.board[0].posted, true);
+  assert.equal(sched1.board[1].posted, false);
+
+  // Reset invoice to draft (triggers reverseInvoiceDeferrals)
+  curDb = resetBtn.run(curDb, read(curDb, 'account.move', invRes.id)).db;
+
+  const cancelledSched = read(curDb, 'account.deferral', sched1.id);
+  assert.equal(cancelledSched.state, 'cancel');
+  assert.ok(cancelledSched.board[0].reversal_move_id);
+
+  // Run migration
+  const migrated = migrateDeferralCreditAdjustments(curDb);
+  const migratedSched = read(migrated, 'account.deferral', sched1.id);
+  assert.ok(migratedSched.board[0].reversal_move_id);
+  assert.equal(migratedSched.board[0].credit_adjustments, undefined);
+
+  // scheduleAsOf on cancelledSched does not reopen it
+  const asOf = scheduleAsOf(migrated, migratedSched, '2026-10-31');
+  assert.equal(asOf.state, 'cancel');
+
+  // Repost invoice
+  curDb = confirmBtn.run(migrated, read(migrated, 'account.move', invRes.id)).db;
+
+  // Oct deferredReport does not double-count the old cancelled schedule
+  const octReport = reports.deferredReport(curDb, { from: '2026-10-01', to: '2026-10-31', company_id: 1 }, 'revenue');
+  assert.equal(octReport.length, 1);
+  assert.equal(octReport[0].total, 300);
+});
+
+test('past-period report retains full credited schedule when no lines were recognized', () => {
+  const db = seed();
+  db.records['account.move'] = [
+    { id: 901, state: 'posted', date: '2026-01-01', company_id: 1 },
+    { id: 999, state: 'posted', date: '2026-02-15', move_type: 'out_refund', company_id: 1 },
+  ];
+  const boardBefore = [
+    { date: '2026-01-31', amount: 100, posted: false },
+    { date: '2026-02-28', amount: 100, posted: false },
+    { date: '2026-03-31', amount: 100, posted: false },
+  ];
+  db.records['account.deferral'] = [
+    {
+      id: 1,
+      kind: 'revenue',
+      state: 'cancel',
+      company_id: 1,
+      source_move_id: 901,
+      recognition_account_id: 10,
+      start_date: '2026-01-01',
+      end_date: '2026-03-31',
+      amount: 300,
+      board: [
+        { date: '2026-01-31', amount: 0, posted: false, cancelled: true },
+        { date: '2026-02-28', amount: 0, posted: false, cancelled: true },
+        { date: '2026-03-31', amount: 0, posted: false, cancelled: true },
+      ],
+      credit_adjustments: [
+        {
+          note_id: 999,
+          date: '2026-02-15',
+          state_before: 'running',
+          board_before: boardBefore,
+          move_ids: [],
+        },
+      ],
+    },
+  ];
+
+  // Report for Jan 2026 (before credit note on Feb 15) must retain the schedule from board_before
+  const jan = reports.deferredReport(db, { from: '2026-01-01', to: '2026-01-31', company_id: 1 }, 'revenue');
+  assert.equal(jan.length, 1);
+  assert.equal(jan[0].total, 300);
+  assert.equal(jan[0].within_year, 200);
+  assert.equal(jan[0].recognized, 100);
+
+  // Report for Feb 2026 (credit note has taken effect): schedule is cancelled and omitted
+  const feb = reports.deferredReport(db, { from: '2026-02-01', to: '2026-02-28', company_id: 1 }, 'revenue');
+  assert.equal(feb.length, 0);
+});
+
+test('past-period report uses unrescaled board amounts when partial credit occurs later', () => {
+  const db = seed();
+  db.records['account.move'] = [
+    { id: 901, state: 'posted', date: '2026-01-01', company_id: 1 },
+    { id: 999, state: 'posted', date: '2026-02-15', move_type: 'out_refund', company_id: 1 },
+  ];
+  const boardBefore = [
+    { date: '2026-01-31', amount: 100, posted: true },
+    { date: '2026-02-28', amount: 100, posted: false },
+    { date: '2026-03-31', amount: 100, posted: false },
+  ];
+  // Partial credit note on Feb 15 rescaled unrecognized lines from 100 to 50
+  db.records['account.deferral'] = [
+    {
+      id: 1,
+      kind: 'revenue',
+      state: 'running',
+      company_id: 1,
+      source_move_id: 901,
+      recognition_account_id: 10,
+      start_date: '2026-01-01',
+      end_date: '2026-03-31',
+      amount: 200,
+      board: [
+        { date: '2026-01-31', amount: 100, posted: true },
+        { date: '2026-02-28', amount: 50, posted: false },
+        { date: '2026-03-31', amount: 50, posted: false },
+      ],
+      credit_adjustments: [
+        {
+          note_id: 999,
+          date: '2026-02-15',
+          state_before: 'running',
+          board_before: boardBefore,
+          move_ids: [],
+        },
+      ],
+    },
+  ];
+
+  // Report for Jan 2026 (before credit note on Feb 15) must use unrescaled board amounts (total 300, within_year 200)
+  const jan = reports.deferredReport(db, { from: '2026-01-01', to: '2026-01-31', company_id: 1 }, 'revenue');
+  assert.equal(jan.length, 1);
+  assert.equal(jan[0].total, 300);
+  assert.equal(jan[0].recognized, 100);
+  assert.equal(jan[0].within_year, 200);
+
+  // Report for Feb 2026 reflects the rescaled board
+  const feb = reports.deferredReport(db, { from: '2026-02-01', to: '2026-02-28', company_id: 1 }, 'revenue');
+  assert.equal(feb.length, 1);
+  assert.equal(feb[0].total, 200);
+  assert.equal(feb[0].recognized, 150);
+  assert.equal(feb[0].within_year, 50);
+});
+
+test('fully recognized schedule with credit-note correction dated after to maintains non-negative within_year and balanced total', () => {
+  const db = seed();
+  db.records['account.move'] = [
+    { id: 901, state: 'posted', date: '2026-01-01', company_id: 1 },
+    { id: 902, state: 'posted', date: '2027-03-15', company_id: 1, line_ids: [{ account_id: 10, debit: 50, credit: 0 }] },
+  ];
+  // Schedule running throughout 2026, fully recognized by 2026-12-31
+  const board = Array.from({ length: 12 }, (_, i) => {
+    const month = String(i + 1).padStart(2, '0');
+    const day = [1, 3, 5, 7, 8, 10, 12].includes(i + 1) ? '31' : (i + 1 === 2 ? '28' : '30');
+    const date = `2026-${month}-${day}`;
+    return {
+      date,
+      amount: 100,
+      posted: true,
+      ...(i === 11 ? { credit_adjustments: [{ move_id: 902, amount: 50, date: '2027-03-15' }] } : {}),
+    };
+  });
+  db.records['account.deferral'] = [
+    {
+      id: 1,
+      kind: 'revenue',
+      state: 'done',
+      company_id: 1,
+      source_move_id: 901,
+      recognition_account_id: 10,
+      start_date: '2026-01-01',
+      end_date: '2026-12-31',
+      amount: 1200,
+      board,
+    },
+  ];
+
+  // Report ending at 2026-12-31: credit note is dated in 2027 (after to)
+  const rep = reports.deferredReport(db, { from: '2026-01-01', to: '2026-12-31', company_id: 1 }, 'revenue');
+  assert.equal(rep.length, 1);
+  assert.equal(rep[0].total, 1200);
+  assert.equal(rep[0].recognized, 1200);
+  assert.ok(rep[0].within_year >= 0, `within_year must be >= 0, got ${rep[0].within_year}`);
+  assert.equal(rep[0].within_year, 0);
+  assert.equal(rep[0].after_year, 0);
+  assert.equal(rep[0].total, rep[0].recognized + rep[0].within_year + rep[0].after_year);
+});
+
+test('migration converts board_before copies and resetting later credit note preserves earlier credit reduction', () => {
+  const reverseService = (db, move, { date, reason }) => {
+    const revMove = {
+      id: 990,
+      name: `REV-${move.name ?? move.id}`,
+      state: 'posted',
+      date,
+      ref: reason,
+      line_ids: (move.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit })),
+    };
+    return {
+      db: { ...db, records: { ...db.records, 'account.move': [...(db.records['account.move'] ?? []), revMove] } },
+      id: revMove.id,
+    };
+  };
+
+  const base = write(seed(), 'res.company', 1, {
+    generate_deferred_revenue_entries_method: 'manual',
+  });
+  const defAcc = accountId(base, '212000');
+  const recAcc = accountId(base, '400000');
+  const db = {
+    ...base,
+    records: {
+      ...base.records,
+      'account.move': [
+        { id: 101, state: 'posted', date: '2026-01-31', company_id: 1, move_type: 'entry', deferred_entry_type: 'revenue', line_ids: [{ account_id: defAcc, debit: 100, credit: 0 }, { account_id: recAcc, debit: 0, credit: 100 }] },
+        { id: 901, state: 'posted', date: '2026-01-15', move_type: 'entry', deferred_entry_type: 'revenue', line_ids: [{ account_id: recAcc, debit: 30, credit: 0 }, { account_id: defAcc, debit: 0, credit: 30 }] },
+        { id: 902, state: 'posted', date: '2026-02-15', move_type: 'entry', deferred_entry_type: 'revenue', line_ids: [{ account_id: recAcc, debit: 20, credit: 0 }, { account_id: defAcc, debit: 0, credit: 20 }] },
+        { id: 801, state: 'posted', move_type: 'out_refund', date: '2026-01-15', name: 'CN-001' },
+        { id: 802, state: 'draft', move_type: 'out_refund', date: '2026-02-15', name: 'CN-002' },
+      ],
+      'account.deferral': [
+        {
+          id: 1,
+          name: 'Subscription Deferral',
+          kind: 'revenue',
+          state: 'running',
+          recognition_account_id: recAcc,
+          deferred_account_id: defAcc,
+          company_id: 1,
+          start_date: '2026-01-01',
+          end_date: '2026-03-31',
+          amount: 300,
+          board: [
+            {
+              date: '2026-01-31',
+              amount: 100,
+              posted: true,
+              move_id: 101,
+              credit_adjusted_amount: 50,
+              credit_adjustment_move_ids: [901, 902],
+            },
+            { date: '2026-02-28', amount: 100, posted: false },
+            { date: '2026-03-31', amount: 100, posted: false },
+          ],
+          credit_adjustments: [
+            {
+              note_id: 801,
+              move_ids: [901],
+              board_before: [
+                { date: '2026-01-31', amount: 100, posted: true, move_id: 101 },
+                { date: '2026-02-28', amount: 100, posted: false },
+                { date: '2026-03-31', amount: 100, posted: false },
+              ],
+            },
+            {
+              note_id: 802,
+              move_ids: [902],
+              board_before: [
+                {
+                  date: '2026-01-31',
+                  amount: 100,
+                  posted: true,
+                  move_id: 101,
+                  credit_adjusted_amount: 30,
+                  credit_adjustment_move_ids: [901],
+                },
+                { date: '2026-02-28', amount: 100, posted: false },
+                { date: '2026-03-31', amount: 100, posted: false },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  // 1. Run migration
+  const migrated = migrateDeferralCreditAdjustments(db);
+  const migratedSched = migrated.records['account.deferral'][0];
+
+  // Verify board_before on credit_adjustments[1] was converted to canonical format
+  const restoredLineBefore = migratedSched.credit_adjustments[1].board_before[0];
+  assert.deepEqual(restoredLineBefore.credit_adjustments, [{ move_id: 901, amount: 30, date: '2026-01-15' }]);
+  assert.equal(restoredLineBefore.credit_adjusted_amount, undefined);
+
+  // 2. Reset the later note (note 802)
+  const note802 = migrated.records['account.move'].find((m) => m.id === 802);
+  const revertedDb = revertInvoiceDeferralCreditAdjustment(migrated, note802, reverseService);
+  const revertedSched = revertedDb.records['account.deferral'][0];
+
+  // 3. Verify the restored live board still counts Note 1's credit adjustment
+  const line0 = revertedSched.board[0];
+  const adjAmount = lineCreditAdjustmentAmount(revertedDb, revertedSched, line0, '2026-03-31');
+  assert.equal(adjAmount, 30, 'Remaining amount must still reflect note 1 correction of 30');
+  const remaining = Math.max(0, (Number(line0.amount) || 0) - adjAmount);
+  assert.equal(remaining, 70, '100 - 30 = 70 remaining');
 });

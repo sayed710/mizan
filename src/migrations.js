@@ -1775,9 +1775,16 @@ MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (
 MIGRATIONS.push({ version: 61, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
 
 function convertLegacyBoardLineCreditAdjustments(line, deferral, movesById) {
+  const creditMoveIds = new Set(
+    (deferral?.credit_adjustments ?? []).flatMap((adj) => [
+      ...(Array.isArray(adj?.move_ids) ? adj.move_ids : []),
+      ...(adj?.move_id != null ? [adj.move_id] : []),
+    ])
+  );
+  const isCreditReversal = Boolean(line.reversal_move_id && creditMoveIds.has(line.reversal_move_id));
   const moveIds = [
     ...(Array.isArray(line.credit_adjustment_move_ids) ? line.credit_adjustment_move_ids : []),
-    ...(line.reversal_move_id ? [line.reversal_move_id] : []),
+    ...(isCreditReversal ? [line.reversal_move_id] : []),
   ];
   const uniqueMoveIds = [...new Set(moveIds.filter((id) => id != null))];
   if (!uniqueMoveIds.length) {
@@ -1798,7 +1805,7 @@ function convertLegacyBoardLineCreditAdjustments(line, deferral, movesById) {
       .reduce((sum, l) => sum + Math.max(Number(l.debit) || 0, Number(l.credit) || 0), 0);
     const amount = moveAmt > 0 ? moveAmt
       : uniqueMoveIds.length === 1 && Number(line.credit_adjusted_amount) > 0 ? Number(line.credit_adjusted_amount)
-      : uniqueMoveIds.length === 1 && line.reversal_move_id === mid && Number(line.amount) > 0 ? Math.abs(Number(line.amount))
+      : uniqueMoveIds.length === 1 && isCreditReversal && line.reversal_move_id === mid && Number(line.amount) > 0 ? Math.abs(Number(line.amount))
       : 0;
     if (!(amount > 0)) throw new Error(`Cannot determine amount for credit adjustment move ${mid} on deferral ${deferral.id}`);
     return { move_id: mid, amount, date };
@@ -1812,26 +1819,60 @@ export function migrateDeferralCreditAdjustments(db) {
   if (!Array.isArray(deferrals) || !deferrals.length) return db;
   const movesById = new Map((db?.records?.['account.move'] ?? []).map((m) => [m.id, m]));
   let changed = false;
-  const nextDeferrals = deferrals.map((d) => {
-    if (!Array.isArray(d?.board) || !d.board.length) return d;
-    let boardChanged = false;
-    const nextBoard = d.board.map((line) => {
-      if (!line || typeof line !== 'object') return line;
-      if (Array.isArray(line.credit_adjustments) && line.credit_adjustments.length > 0) {
-        for (const adj of line.credit_adjustments) {
-          if (!adj?.date || !(Number(adj.amount) > 0) || adj.move_id == null) {
-            throw new Error(`Invalid credit adjustment on deferral ${d.id}`);
-          }
+
+  const convertLine = (line, d) => {
+    if (!line || typeof line !== 'object') return line;
+    if (Array.isArray(line.credit_adjustments) && line.credit_adjustments.length > 0) {
+      for (const adj of line.credit_adjustments) {
+        if (!adj?.date || !(Number(adj.amount) > 0) || adj.move_id == null) {
+          throw new Error(`Invalid credit adjustment on deferral ${d.id}`);
         }
-        return line;
       }
-      const converted = convertLegacyBoardLineCreditAdjustments(line, d, movesById);
-      if (converted !== line) boardChanged = true;
-      return converted;
-    });
-    if (boardChanged) {
+      return line;
+    }
+    return convertLegacyBoardLineCreditAdjustments(line, d, movesById);
+  };
+
+  const nextDeferrals = deferrals.map((d) => {
+    let schedChanged = false;
+    let nextBoard = d.board;
+    if (Array.isArray(d?.board) && d.board.length) {
+      let boardChanged = false;
+      nextBoard = d.board.map((line) => {
+        const converted = convertLine(line, d);
+        if (converted !== line) boardChanged = true;
+        return converted;
+      });
+      if (boardChanged) schedChanged = true;
+    }
+
+    let nextCreditAdjustments = d.credit_adjustments;
+    if (Array.isArray(d?.credit_adjustments) && d.credit_adjustments.length) {
+      let caChanged = false;
+      nextCreditAdjustments = d.credit_adjustments.map((entry) => {
+        if (!entry || typeof entry !== 'object' || !Array.isArray(entry.board_before)) return entry;
+        let bbChanged = false;
+        const nextBoardBefore = entry.board_before.map((line) => {
+          const converted = convertLine(line, d);
+          if (converted !== line) bbChanged = true;
+          return converted;
+        });
+        if (bbChanged) {
+          caChanged = true;
+          return { ...entry, board_before: nextBoardBefore };
+        }
+        return entry;
+      });
+      if (caChanged) schedChanged = true;
+    }
+
+    if (schedChanged) {
       changed = true;
-      return { ...d, board: nextBoard };
+      return {
+        ...d,
+        ...(nextBoard !== d.board ? { board: nextBoard } : {}),
+        ...(nextCreditAdjustments !== d.credit_adjustments ? { credit_adjustments: nextCreditAdjustments } : {}),
+      };
     }
     return d;
   });

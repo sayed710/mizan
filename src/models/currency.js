@@ -122,9 +122,16 @@ export function upsertCurrencyRate(db, currencyId, { date = today(), rate, compa
 export function upsertCurrencyRates(db, rates, { date = today(), companyId = null } = {}) {
   let nextDb = db;
   if (Array.isArray(rates)) {
+    const currencies = nextDb.records['res.currency'] ?? [];
+    const base = findBaseCurrency(nextDb) ?? (nextDb.settings?.base_currency_id ? (currencies.find((c) => c.id === nextDb.settings.base_currency_id) ?? null) : null);
+    const baseId = base?.id;
+    const baseName = base?.name;
     for (const item of rates) {
       const cId = item.currency_id ?? item.currencyId ?? item.currency;
-      nextDb = upsertCurrencyRate(nextDb, cId, {
+      const target = currencies.find((c) => c.id === cId || c.name === cId) ?? (typeof cId === 'object' && cId ? cId : null);
+      const targetId = target?.id ?? cId;
+      if (baseId && (cId === baseId || cId === baseName || targetId === baseId || target?.name === baseName)) continue;
+      nextDb = upsertCurrencyRate(nextDb, targetId, {
         date: item.date ?? date,
         rate: item.rate,
         companyId: item.company_id ?? item.companyId ?? companyId,

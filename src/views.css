@@ -193,6 +193,7 @@
 .list.report tr.rep-section { cursor: pointer; font-weight: 600; }
 .list.report tr.rep-section:hover { background: #f7f8fc; }
 .list.report tr.rep-detail td { color: var(--muted); padding-inline-start: 34px; font-size: 13px; }
+@media screen { .report-folded-row { display: none; } }
 .list.report tr.rep-total td { font-weight: 700; border-top: 2px solid var(--border); }
 .list.report tr.rep-total.strong td { font-size: 16px; background: var(--brand-soft); }
 .tax-drill-toggle { background: none; border: 0; padding: 0; font: inherit; color: var(--brand); cursor: pointer; text-decoration: underline; }

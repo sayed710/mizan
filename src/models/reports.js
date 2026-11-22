@@ -169,7 +169,7 @@ export function accountCashFlowActivity(db, account) {
     const explicit = tags.find((tag) => ['operating', 'investing', 'financing'].includes(tag?.cash_flow_activity));
     if (explicit) return explicit.cash_flow_activity;
   }
-  return 'unclassified';
+  return ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'asset_receivable', 'liability_payable'].includes(account.account_type) ? 'operating' : 'unclassified';
 }
 
 /**
@@ -379,7 +379,7 @@ export function deferredReport(db, { from, to, company_id } = {}, kind) {
     const through = (date) => date ? schedule.board.reduce((sum, line, index) => {
       if (line.cancelled) return sum;
       const target = recognitionTargetThroughDate(schedule, index, date, method, currency);
-      const credited = lineCreditAdjustmentAmount(db, schedule, line, date);
+      const credited = lineCreditAdjustmentAmount(db, schedule, line, to && date > to ? to : date);
       return sum + Math.max(0, target - credited);
     }, 0) : 0;
     const before = through(previous);

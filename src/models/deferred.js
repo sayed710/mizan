@@ -8,7 +8,7 @@ import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency }
 import { t } from '../i18n.js';
 
 // Decoupled from accounting.js to avoid a circular module import between accounting and deferred.
-let deferredPostMoveHook = null;
+var deferredPostMoveHook = null;
 export function registerDeferredPostMoveHook(fn) {
   deferredPostMoveHook = fn;
 }
@@ -233,16 +233,63 @@ export function recognitionTargetThroughDate(schedule, index, date, method, curr
 
 /** Reconstruct a deferral schedule as of a cutoff date using saved credit adjustment snapshots. */
 export function scheduleAsOf(db, schedule, cutoffDate) {
-  if (!cutoffDate || !Array.isArray(schedule?.board)) return schedule;
-  const lineAdjs = schedule.board.flatMap((l) => l.credit_adjustments ?? []);
-  if (!lineAdjs.length) return schedule;
-  const futureAdjs = lineAdjs.filter((adj) => adj.date > cutoffDate);
-  if (!futureAdjs.length) return schedule;
-  let state = schedule.state;
-  if (state === 'cancel') {
-    state = 'running';
+  if (!cutoffDate || !schedule || !Array.isArray(schedule.board)) return schedule;
+  const creditAdjustments = schedule.credit_adjustments;
+  if (!Array.isArray(creditAdjustments) || !creditAdjustments.length) {
+    const lineAdjs = schedule.board.flatMap((l) => l.credit_adjustments ?? []);
+    if (!lineAdjs.length) return schedule;
+    const futureAdjs = lineAdjs.filter((adj) => adj.date > cutoffDate);
+    if (!futureAdjs.length) return schedule;
+    let state = schedule.state;
+    if (state === 'cancel') {
+      state = 'running';
+    }
+    return { ...schedule, state };
   }
-  return { ...schedule, state };
+
+  const resolved = [];
+  for (const entry of creditAdjustments) {
+    let noteDate = entry.date;
+    if (!noteDate && entry.note_id) {
+      const note = read(db, 'account.move', entry.note_id);
+      noteDate = note?.date ?? note?.invoice_date;
+    }
+    if (noteDate) {
+      resolved.push({ ...entry, noteDate });
+    }
+  }
+
+  const futureSnapshots = resolved
+    .filter((e) => e.noteDate > cutoffDate)
+    .sort((a, b) => a.noteDate.localeCompare(b.noteDate));
+
+  if (!futureSnapshots.length) {
+    return schedule;
+  }
+
+  const earliest = futureSnapshots[0];
+  const state = earliest.state_before ?? schedule.state;
+  const boardBefore = Array.isArray(earliest.board_before) ? earliest.board_before : schedule.board;
+
+  const board = boardBefore.map((baseLine, index) => {
+    const currentLine = schedule.board.find((l) => l.date === baseLine.date) ?? schedule.board[index];
+    const currentAdjs = (currentLine?.credit_adjustments ?? []).filter((adj) => adj?.date && adj.date <= cutoffDate);
+    const baseAdjs = (baseLine.credit_adjustments ?? []).filter((adj) => adj?.date && adj.date <= cutoffDate);
+    const combined = [...baseAdjs];
+    const seenMoveIds = new Set(baseAdjs.map((a) => a.move_id));
+    for (const adj of currentAdjs) {
+      if (!seenMoveIds.has(adj.move_id)) {
+        combined.push(adj);
+        seenMoveIds.add(adj.move_id);
+      }
+    }
+    return {
+      ...baseLine,
+      ...(combined.length > 0 ? { credit_adjustments: combined } : {}),
+    };
+  });
+
+  return { ...schedule, state, board };
 }
 
 /** Cumulative credit adjustments posted on a board line on or before cutoffDate. */
@@ -812,6 +859,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       ...(schedule.credit_adjustments ?? []),
       {
         note_id: note.id,
+        date: noteDate,
         board_before,
         state_before,
         move_ids: adjustmentMoveIds,
