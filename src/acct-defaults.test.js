@@ -13,6 +13,11 @@ const PARTNER_ACCOUNTING_FIELDS = [
   'property_supplier_payment_term_id',
   'property_account_receivable_id',
   'property_account_payable_id',
+  'followup_responsible_id',
+  'followup_reminder_type',
+  'followup_next_action_date',
+  'last_reminder',
+  'followup_line_id',
 ];
 
 test('partner form exposes every accounting default in an Accounting tab', () => {

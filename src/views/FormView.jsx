@@ -6,9 +6,9 @@ import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { invoiceTaxTotals } from '../models/ledger.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
-import { myEmployeeId } from '../access.js';
+import { appOpen, myEmployeeId } from '../access.js';
 import { dateLocale, t } from '../i18n.js';
-import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
+import { Avatar, display, FieldInput, isLabelable, money, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
 import { companyCurrencyRecord } from '../money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
@@ -154,7 +154,7 @@ function SmartButtons({ db, model, rec, smart }) {
   return (
     <div className="smart-buttons">
       {smart.map((s) => {
-        if (s.when && !s.when(rec, db)) return null;
+        if ((s.app && !appOpen(db, getUser(), s.app)) || (s.when && !s.when(rec, db))) return null;
         if (s.valueField || s.value) {
           const field = s.valueField && model ? models[model]?.fields?.[s.valueField] : null;
           const value = s.value ? s.value(db, rec) : rec[s.valueField];
@@ -609,8 +609,7 @@ export function FormView({ leaf, id, base, params }) {
           {idx >= 0 && (
             <div className="pager">
               <span>{idx + 1} / {ids.length}</span>
-              <button type="button" className="btn sm" aria-label={t('Previous record')} onClick={() => pageTo(-1)}>‹</button>
-              <button type="button" className="btn sm" aria-label={t('Next record')} onClick={() => pageTo(1)}>›</button>
+              <PagerButtons prevLabel={t('Previous record')} nextLabel={t('Next record')} onPrev={() => pageTo(-1)} onNext={() => pageTo(1)} />
             </div>
           )}
         </div>

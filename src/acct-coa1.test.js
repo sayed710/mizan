@@ -9,8 +9,8 @@ import { trialBalance } from './models/reports.js';
 test('COA-1 computes carry-forward and applies it at the fiscal boundary', () => {
   const field = models['account.account'].fields.include_initial_balance;
   assert.equal(field.readonly, true);
-  for (const type of ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'off_balance']) assert.equal(field.compute({ account_type: type }), false);
-  for (const type of ['asset_cash', 'expense_other', 'equity']) assert.equal(field.compute({ account_type: type }), true);
+  for (const type of ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'off_balance']) assert.equal(field.compute({ account_type: type }), false);
+  for (const type of ['asset_cash', 'equity']) assert.equal(field.compute({ account_type: type }), true);
   const db = seed();
   const income = create(db, 'account.account', { code: '987650', name: 'Test income', account_type: 'income' });
   const account = read(income.db, 'account.account', income.id);
@@ -19,6 +19,21 @@ test('COA-1 computes carry-forward and applies it at the fiscal boundary', () =>
     { id: 99991, state: 'posted', move_type: 'entry', date: '2026-01-10', company_id: 1, line_ids: [{ account_id: income.id, debit: 0, credit: 7 }] },
   ] } };
   assert.equal(trialBalance(next, { from: '2026-02-01', to: '2026-02-28', company_id: 1 }).rows.find((r) => r.account.id === account.id).initial, -7);
+});
+
+test('COA-1 prior-year other expenses open on earnings rather than the expense account', () => {
+  const db = seed();
+  const loss = create(db, 'account.account', { code: '690999', name: 'Prior exchange loss', account_type: 'expense_other' });
+  const earningsId = read(loss.db, 'res.company', 1).current_year_earnings_account_id;
+  const cash = search(loss.db, 'account.account').find((a) => a.account_type === 'asset_cash');
+  const next = { ...loss.db, records: { ...loss.db.records, 'account.move': [
+    { id: 99993, state: 'posted', move_type: 'entry', date: '2025-11-15', company_id: 1, line_ids: [{ account_id: loss.id, debit: 45, credit: 0 }, { account_id: cash.id, debit: 0, credit: 45 }] },
+    { id: 99994, state: 'posted', move_type: 'entry', date: '2026-01-15', company_id: 1, line_ids: [{ account_id: loss.id, debit: 12, credit: 0 }, { account_id: cash.id, debit: 0, credit: 12 }] },
+  ] } };
+  const trial = trialBalance(next, { from: '2026-02-01', to: '2026-02-28', company_id: 1 });
+  assert.equal(trial.rows.find((r) => r.account.id === loss.id).initial, 12);
+  assert.equal(trial.rows.find((r) => r.account.id === earningsId).initial, 45);
+  assert.equal(trial.totals.initial, 0);
 });
 
 test('COA-1 prior-year results open on the earnings account and keep the opening column balanced', () => {

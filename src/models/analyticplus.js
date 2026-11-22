@@ -1,3 +1,4 @@
+import { purchaseLineId } from './purchase-links.js';
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
 import { create, nextSequence, read, search, unlink, write } from '../orm.js';
 import { dayOf, subtotal, today } from './common.js';
@@ -284,22 +285,24 @@ const budgetCompanyError = (db, budget, selectedCompanyId = null) => {
 /** Posted bills consume commitments only through explicit order-line links, never product or reference guesses. */
 function postedPurchaseQuantities(db, order) {
   const billed = new Map();
-  const keyedLines = (order.order_line ?? []).filter((line) => line.purchase_line_key);
-  const byKey = new Map(keyedLines.map((line) => [line.purchase_line_key, line]));
+  const keyedLines = (order.order_line ?? []).filter((line) => line.id != null);
+  const byKey = new Map(keyedLines.map((line) => [line.id, line]));
   if (byKey.size !== keyedLines.length) throw new Error('Configure a unique purchase order line link for each line');
-  for (const move of search(db, 'account.move').filter((move) => move.purchase_id === order.id && move.state === 'posted' && ['in_invoice', 'in_refund'].includes(move.move_type))) {
+  for (const move of search(db, 'account.move').filter((move) => move.state === 'posted' && ['in_invoice', 'in_refund'].includes(move.move_type) && (move.purchase_id === order.id || (move.invoice_line_ids ?? []).some((line) => byKey.has(purchaseLineId(db, line, null)))))) {
     if ((move.company_id ?? 1) !== (order.company_id ?? 1)) throw new Error('Purchase order and posted bill must belong to the same company');
     for (const line of move.invoice_line_ids ?? []) {
       if (isSectionOrNote(line)) continue;
-      if (!line.purchase_line_key) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
-      const source = byKey.get(line.purchase_line_key);
+      const linkKey = purchaseLineId(db, line, order.id);
+      const source = byKey.get(linkKey);
+      if (!source && linkKey && purchaseLineId(db, line, null) !== null && (db.records['purchase.order'] ?? []).some((po) => po.id !== order.id && (po.order_line ?? []).some((pol) => pol.id === linkKey))) continue;
+      if (!source && move.purchase_id !== order.id) continue;
       if (!source || source.product_id !== line.product_id) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
       let qty = Number(line.qty) || 0;
       if (line.uom_id !== source.uom_id) {
         if (!line.uom_id || !source.uom_id) throw new Error('Configure units of measure on the purchase order and bill lines');
         qty = convert(db, qty, line.uom_id, source.uom_id, { round: false });
       }
-      billed.set(line.purchase_line_key, (billed.get(line.purchase_line_key) ?? 0) + qty * (move.move_type === 'in_refund' ? -1 : 1));
+      billed.set(linkKey, (billed.get(linkKey) ?? 0) + qty * (move.move_type === 'in_refund' ? -1 : 1));
     }
   }
   return billed;
@@ -312,7 +315,7 @@ function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
     const billed = postedPurchaseQuantities(db, order);
     return (order.order_line ?? []).flatMap((line) => {
       if (isSectionOrNote(line)) return [];
-      const qty = Math.max(0, (Number(line.qty) || 0) - (billed.get(line.purchase_line_key) ?? 0));
+      const qty = Math.max(0, (Number(line.qty) || 0) - (billed.get(line.id) ?? 0));
       if (!qty) return [];
       const distribution = distributionOfLine(line, db, { ...order, move_type: 'in_invoice' });
       if (budgetLine.analytic_account_id && !normalizeDistribution(distribution, db)[budgetLine.analytic_account_id]) return [];
