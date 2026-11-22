@@ -983,6 +983,14 @@ export const Icon = ({ name, size = 18 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS[ALIAS[name]] ?? ICONS.grid}</svg>
 );
 
+/** Previous/next pager buttons as one joined group; the chevrons follow the text direction. */
+export const PagerButtons = ({ prevLabel, nextLabel, onPrev, onNext, prevDisabled = false, nextDisabled = false }) => (
+  <span className="pager-buttons">
+    <button type="button" className="pager-btn pager-prev" aria-label={prevLabel} disabled={prevDisabled} onClick={onPrev}><span className="pager-chevron" /></button>
+    <button type="button" className="pager-btn pager-next" aria-label={nextLabel} disabled={nextDisabled} onClick={onNext}><span className="pager-chevron" /></button>
+  </span>
+);
+
 /** One button per other interface language, each labelled in its own language. */
 export const LanguageSwitch = ({ className, role }) => LANGUAGES.filter(([code]) => code !== lang).map(([code, label]) => (
   <button key={code} type="button" role={role} className={className} lang={code} onClick={() => setLang(code)}>{label}</button>
