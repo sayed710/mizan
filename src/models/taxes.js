@@ -808,7 +808,7 @@ export const taxModels = {
       },
       amount: { type: 'float', label: 'Amount', tracking: true },
       children_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Child Taxes' },
-      description: { type: 'char', label: 'Description', optional: 'show' },
+      description: { type: 'text', label: 'Description', optional: 'show' },
       type_tax_use: { type: 'selection', label: 'Tax Type', tracking: true, options: TAX_TYPES },
       tax_scope: { type: 'selection', label: 'Tax Scope', tracking: true, options: [['consu', 'Goods'], ['service', 'Services']] },
       fiscal_position_ids: { type: 'many2many', relation: 'account.fiscal.position', label: 'Fiscal Position' },
@@ -823,6 +823,7 @@ export const taxModels = {
         newLine: () => ({ fiscal_position_id: null, original_tax_ids: [] }),
       },
       invoice_label: { type: 'char', label: 'Label on Invoices' },
+      invoice_legal_notes: { type: 'text', label: 'Legal Notes' },
       price_include_override: {
         type: 'selection',
         label: 'Included in Price',
@@ -937,7 +938,7 @@ export const taxModels = {
     form: {
       title: 'name',
       groups: (r) => [
-        ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : []), 'description'],
+        ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : [])],
         // Odoo 20 configures substitutions with Fiscal Position x Replaces; per-position rows exist only on upgraded taxes.
         ['type_tax_use', 'tax_scope', 'fiscal_position_ids', 'original_tax_ids', ...(r?.fiscal_position_mapping_ids?.length ? ['fiscal_position_mapping_ids'] : [])],
       ],
@@ -952,7 +953,7 @@ export const taxModels = {
         {
           label: 'Advanced Options',
           groups: [
-            ['invoice_label', 'tax_group_id'],
+            ['invoice_label', 'description', 'invoice_legal_notes', 'tax_group_id'],
             ['price_include_override', 'include_base_amount', 'is_base_affected', 'active', 'tax_exigibility', 'cash_basis_transition_account_id'],
           ],
         },
