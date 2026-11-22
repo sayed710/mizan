@@ -923,25 +923,19 @@ export function outstandingAccount(db, journal, company, inbound, methodLine = n
 }
 
 /** Statement amounts use the journal currency; open allocations use company currency. */
-export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount)), { allowUnavailable = false } = {}) {
   const company = line.company_id ?? 1;
+  if (allowUnavailable) {
+    const own = findCompanyCurrencyRecord(db, company);
+    const currencyId = read(db, 'account.journal', line.journal_id)?.currency_id ?? own?.id;
+    if (!own || !read(db, 'res.currency', currencyId)) return null;
+    if (currencyId !== own.id) {
+      const baseId = db?.settings?.base_currency_id;
+      if (!baseId || !read(db, 'res.currency', baseId) || conversionRate(db, own.id, currencyId, line.date ?? today(), company) == null) return null;
+    }
+  }
   const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   return toCompany(db, currency, amount, line.date ?? today(), company);
-}
-
-/** Convert a statement amount to the company currency, returning null if currencies or an exchange rate are unavailable. */
-export function findStatementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
-  const company = line.company_id ?? 1;
-  const companyCurrency = findCompanyCurrencyRecord(db, company);
-  if (!companyCurrency) return null;
-  const journalCurrencyId = line.journal_id ? read(db, 'account.journal', line.journal_id)?.currency_id : null;
-  const lineCurrencyId = journalCurrencyId ?? companyCurrency.id;
-  if (lineCurrencyId === companyCurrency.id) return roundCurrency(amount, companyCurrency);
-  const lineCurrency = read(db, 'res.currency', lineCurrencyId);
-  const baseId = db?.settings?.base_currency_id;
-  if (!lineCurrency || !baseId || !read(db, 'res.currency', baseId)) return null;
-  const rate = conversionRate(db, companyCurrency.id, lineCurrency.id, line.date ?? today(), company);
-  return rate != null ? roundCurrency(amount / rate, companyCurrency) : null;
 }
 
 /** IDs of active payments linked to a bank statement line (allocations, batch, multi-select, or single). */

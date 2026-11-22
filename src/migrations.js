@@ -14,7 +14,7 @@ import { migrateOrderpoints } from './models/orderpoint.js';
 import { normalizeHorizontalGroupVals } from './models/configurableReports.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today, validDate } from './models/common.js';
-import { CHART, findStatementCompanyAmount, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
+import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
@@ -1788,7 +1788,7 @@ function migrateStatementLinesBankSuspense(db) {
         const updates = {};
         if (line.company_id == null) updates.company_id = company;
         if (line.open_amount == null) {
-          const openAmount = findStatementCompanyAmount(currentDb, normalizedLine);
+          const openAmount = statementCompanyAmount(currentDb, normalizedLine, undefined, { allowUnavailable: true });
           if (openAmount != null) updates.open_amount = openAmount;
         }
         if (Object.keys(updates).length > 0) {
