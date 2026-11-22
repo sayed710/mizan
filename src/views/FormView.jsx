@@ -629,16 +629,18 @@ export function FormView({ leaf, id, base, params }) {
         if (live) {
           try {
             const out = await serverAction(endpoint, { model, id: savedId });
-            await commit(write(getDb(), model, savedId, { is_move_sent: true }));
+            if (out?.ok === false) throw new Error(out.error ?? t('Could not save changes'));
             setWizard(null);
             setError(null);
-            if (out?.message) alert(out.message);
+            if (out?.message) alert(t(out.message));
             if (out?.go) location.hash = out.go;
             else if (res.go) location.hash = res.go;
             return;
           } catch (e) {
             setWizard(null);
-            fail(e);
+            const prefix = 'The email was sent, but its status could not be recorded: ';
+            if (e.message?.startsWith(prefix)) setError(t('The email was sent, but its status could not be recorded: {reason}', { reason: t(e.message.slice(prefix.length)) }));
+            else fail(e);
             return;
           }
         } else if (channel) {

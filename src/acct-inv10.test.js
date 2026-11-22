@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { models } from './models/index.js';
-import { create, read, search, applyFilters } from './orm.js';
+import { create, read, search, write, applyFilters } from './orm.js';
 import { seed } from './seed.js';
 import { postMove, salesInvoiceView, purchaseInvoiceView } from './models/accounting.js';
 import { duplicateValues } from './duplicate.js';
@@ -465,6 +465,7 @@ test('Findings 1 & 2 regression: FormView Send wizard handles unselected channel
     await commit(postedWithEmailDb);
 
     let failEmail = true;
+    let serverDb = getDb();
     globalThis.location = { hash: '#/accounting/invoices' };
     globalThis.fetch = async (url) => {
       if (url === '/api/session') {
@@ -474,7 +475,7 @@ test('Findings 1 & 2 regression: FormView Send wizard handles unselected channel
         });
       }
       if (url === '/api/db') {
-        return new Response(JSON.stringify(getDb()), {
+        return new Response(JSON.stringify(serverDb), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -487,12 +488,13 @@ test('Findings 1 & 2 regression: FormView Send wizard handles unselected channel
       }
       if (url === '/api/mail/document') {
         if (failEmail) {
-          return new Response(JSON.stringify({ error: 'SMTP delivery failed' }), {
+          return new Response(JSON.stringify({ error: failEmail === 'recording' ? 'The email was sent, but its status could not be recorded: access denied' : 'SMTP delivery failed' }), {
             status: 500,
             headers: { 'Content-Type': 'application/json' },
           });
         }
-        return new Response(JSON.stringify({ message: 'Email sent successfully' }), {
+        serverDb = write(serverDb, 'account.move', invWithEmail.id, { is_move_sent: true });
+        return new Response(JSON.stringify({ ok: true, message: 'Email sent successfully' }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -548,6 +550,20 @@ test('Findings 1 & 2 regression: FormView Send wizard handles unselected channel
     const errorEl = find(host, (n) => n.className?.includes('alert'));
     assert.ok(errorEl, 'FormView must show error on email failure');
     assert.ok(errorEl.textContent.includes('SMTP delivery failed'), 'Error text must mention failure');
+
+    // A delivered email whose status could not be recorded must also stop the print route.
+    failEmail = 'recording';
+    await React.act(async () => { props(sendBtn2).onClick(); });
+    const recordingDialog = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+    const recordingDownload = find(recordingDialog, (n) => n.tagName === 'INPUT' && props(n)?.id === 'w-download');
+    await React.act(async () => { props(recordingDownload).onChange({ target: { checked: true } }); });
+    await React.act(async () => {
+      const form = find(host, (n) => n.className?.includes('wizard') && n.tagName === 'FORM');
+      await props(form).onSubmit({ preventDefault() {} });
+    });
+    assert.equal(globalThis.location.hash, '#/accounting/invoices');
+    assert.equal(read(getDb(), 'account.move', invWithEmail.id).is_move_sent, false);
+    assert.match(find(host, (n) => n.className?.includes('alert')).textContent, /status could not be recorded/);
 
     // 3. Now let live email SUCCEED
     failEmail = false;

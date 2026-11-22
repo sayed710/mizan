@@ -794,6 +794,7 @@ async function api(req, res, path) {
     const model = path.endsWith('mailing') ? 'mailing.mailing' : String(body.model ?? '');
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
+    let delivered = false;
     try {
       const baseUrl = baseUrlOf(req);
       const snapshot = scopeFor(user);
@@ -801,13 +802,14 @@ async function api(req, res, path) {
       const out = path.endsWith('mailing')
         ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), user.login, () => scopeFor(user)), body, baseUrl)
         : await sendDocument(SMTP, snapshot, user, body);
+      delivered = Boolean(out.db);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
       if (!out.db) return send(res, out.status, out.body);
-      const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed));
+      const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed), body);
       commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {
-      return send(res, 502, { error: `Email could not be sent: ${e.message}` });
+      return send(res, 502, { error: delivered ? `The email was sent, but its status could not be recorded: ${e.message}` : `Email could not be sent: ${e.message}` });
     }
   }
   const sessionToken = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1] ?? '';
