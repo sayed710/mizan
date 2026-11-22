@@ -131,11 +131,12 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .pager-btn:hover:not(:disabled) { background: var(--bg); color: var(--brand); }
 .pager-btn:disabled { color: var(--muted); opacity: .45; cursor: default; }
 .pager-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
-/* The chevron glyph points down; turn it to point back (previous) and forward (next) in the reading direction. */
-.pager-prev svg { transform: rotate(90deg); }
-.pager-next svg { transform: rotate(-90deg); }
-[dir='rtl'] .pager-prev svg { transform: rotate(-90deg); }
-[dir='rtl'] .pager-next svg { transform: rotate(90deg); }
+/* A CSS chevron (two borders of a turned square), pointing back (previous) and forward (next) in the reading direction. */
+.pager-chevron { width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; border-radius: 1px; }
+.pager-prev .pager-chevron { transform: translateX(1px) rotate(135deg); }
+.pager-next .pager-chevron { transform: translateX(-1px) rotate(-45deg); }
+[dir='rtl'] .pager-prev .pager-chevron { transform: translateX(-1px) rotate(-45deg); }
+[dir='rtl'] .pager-next .pager-chevron { transform: translateX(1px) rotate(135deg); }
 
 /* Kanban */
 .kanban { display: flex; gap: 14px; padding: 0 16px 24px; overflow-x: auto; align-items: flex-start; }

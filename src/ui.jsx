@@ -986,8 +986,8 @@ export const Icon = ({ name, size = 18 }) => (
 /** Previous/next pager buttons as one joined group; the chevrons follow the text direction. */
 export const PagerButtons = ({ prevLabel, nextLabel, onPrev, onNext, prevDisabled = false, nextDisabled = false }) => (
   <span className="pager-buttons">
-    <button type="button" className="pager-btn pager-prev" aria-label={prevLabel} disabled={prevDisabled} onClick={onPrev}><Icon name="chevron" size={14} /></button>
-    <button type="button" className="pager-btn pager-next" aria-label={nextLabel} disabled={nextDisabled} onClick={onNext}><Icon name="chevron" size={14} /></button>
+    <button type="button" className="pager-btn pager-prev" aria-label={prevLabel} disabled={prevDisabled} onClick={onPrev}><span className="pager-chevron" /></button>
+    <button type="button" className="pager-btn pager-next" aria-label={nextLabel} disabled={nextDisabled} onClick={onNext}><span className="pager-chevron" /></button>
   </span>
 );
 
