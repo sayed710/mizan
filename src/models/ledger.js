@@ -2,7 +2,7 @@
 import { roundingAccount } from './configured-account.js';
 import { create, read, search, write } from '../orm.js';
 import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
-import { companyCurrency, rateAt, toCompany } from './currency.js';
+import { companyCurrency, conversionRate, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
@@ -14,6 +14,7 @@ import { models } from '../registry.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
 import { buildMatchingNumbers, entryMatchedAmounts, indexGlMatchings, lineKey } from './glMatchIndex.js';
+import { DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 /** Whether `account` belongs to the income or expense account type family. */
@@ -54,7 +55,7 @@ export const CHART = [
 export const JOURNALS = [
   { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, invoice_reference_type: 'invoice', invoice_reference_model: 'odoo', company_default: 'sales' },
   { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
-  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true, payment_sequence: true, bank_statements_source: 'undefined' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true, payment_sequence: true, bank_statements_source: 'undefined', sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION },
   { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501', payment_sequence: true },
   { code: 'MISC', name: 'Miscellaneous Operations', type: 'general', company_default: 'general' },
   { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
@@ -922,8 +923,17 @@ export function outstandingAccount(db, journal, company, inbound, methodLine = n
 }
 
 /** Statement amounts use the journal currency; open allocations use company currency. */
-export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount)), { allowUnavailable = false } = {}) {
   const company = line.company_id ?? 1;
+  if (allowUnavailable) {
+    const own = findCompanyCurrencyRecord(db, company);
+    const currencyId = read(db, 'account.journal', line.journal_id)?.currency_id ?? own?.id;
+    if (!own || !read(db, 'res.currency', currencyId)) return null;
+    if (currencyId !== own.id) {
+      const baseId = db?.settings?.base_currency_id;
+      if (!baseId || !read(db, 'res.currency', baseId) || conversionRate(db, own.id, currencyId, line.date ?? today(), company) == null) return null;
+    }
+  }
   const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
@@ -971,22 +981,6 @@ export function bookedBankSuspenseAccountId(db, line, move = null) {
   });
   if (candidate) return candidate.account_id;
   return configured ?? nonLiquidity[0]?.account_id ?? null;
-}
-
-/** Whether any statement line booked to a suspense account remains unreconciled (to_check with a bank_move_id). */
-export function unreconciledSuspenseTransactionsExist(db, { journalId = null, companyId = null } = {}) {
-  const lines = db.records['account.bank.statement.line'] ?? [];
-  return lines.some((line) => {
-    if (line.state !== 'to_check' || !line.bank_move_id) return false;
-    const company = line.company_id ?? 1;
-    if (journalId != null && line.journal_id !== journalId) return false;
-    if (companyId != null) {
-      if (company !== companyId) return false;
-      const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
-      if (journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id) return false;
-    }
-    return true;
-  });
 }
 
 /** Whether a statement line's bank_move_id was booked through its journal's suspense account (not a direct-payment bank entry). */

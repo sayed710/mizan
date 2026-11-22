@@ -303,9 +303,9 @@ test('signed delay derivation, display name, groupLabel, and migration 47', asyn
       ],
     },
   };
-  assert.equal(SCHEMA_VERSION, 65);
+
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 65);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
   const mLevels = search(migrated, 'account.followup.level');
   assert.deepEqual(mLevels.map((l) => ({
     id: l.id,

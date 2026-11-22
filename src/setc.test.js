@@ -191,8 +191,8 @@ test('migration 27 copies global three_way_matching and audit_trail to all compa
   assert.equal(read(legacyDb, 'res.company', compBId).audit_trail ?? null, null);
 
   const migrated = migrate(legacyDb);
-  assert.equal(SCHEMA_VERSION, 65);
-  assert.equal(migrated.schema_version, 65);
+
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
 
   // Keys deleted from settings
   assert.equal('three_way_matching' in migrated.settings, false);

@@ -23,7 +23,8 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
-import { migratePaymentMethods } from './models/paymentmethod.js';
+import { ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
+import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 import { bookBankMovement, statementCompanyAmount } from './models/bank.js';
 
@@ -1784,10 +1785,12 @@ function migrateStatementLinesBankSuspense(db) {
       const company = line.company_id ?? journal?.company_id ?? 1;
       const normalizedLine = { ...line, company_id: company };
       if (!journal?.default_account_id) {
-        const openAmount = line.open_amount ?? statementCompanyAmount(currentDb, normalizedLine);
         const updates = {};
         if (line.company_id == null) updates.company_id = company;
-        if (line.open_amount == null) updates.open_amount = openAmount;
+        if (line.open_amount == null) {
+          const openAmount = statementCompanyAmount(currentDb, normalizedLine, undefined, { allowUnavailable: true });
+          if (openAmount != null) updates.open_amount = openAmount;
+        }
         if (Object.keys(updates).length > 0) {
           currentDb = write(currentDb, 'account.bank.statement.line', line.id, updates);
         }
@@ -1951,6 +1954,20 @@ export function migrateFollowUpNextActionDate(db) {
   if (!changed) return db;
   return { ...db, records: { ...db.records, 'res.partner': partners } };
 }
+export function migrateElectronicAndSepa(db) {
+  const next = ensurePaymentMethods(db);
+  const journals = next?.records?.['account.journal'];
+  if (!Array.isArray(journals)) return next;
+  let changed = false;
+  const updated = journals.map((j) => {
+    if (j.type === 'bank' && !j.sepa_pain_version) {
+      changed = true;
+      return { ...j, sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION };
+    }
+    return j;
+  });
+  return changed ? { ...next, records: { ...next.records, 'account.journal': updated } } : next;
+}
 MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
 MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (db) => {
   const orders = db.records?.['purchase.order'] ?? [];
@@ -1968,7 +1985,54 @@ MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (d
   });
   return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
 } });
-MIGRATIONS.push({ version: 65, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
+
+export function migrateTaxPriceIncludeOverride(db) {
+  const companies = db?.records?.['res.company'];
+  let companiesChanged = false;
+  const nextCompanies = Array.isArray(companies) ? companies.map((c) => {
+    if (!c || c.account_price_include != null) return c;
+    companiesChanged = true;
+    return { ...c, account_price_include: 'tax_excluded' };
+  }) : companies;
+
+  const taxes = db?.records?.['account.tax'];
+  let taxesChanged = false;
+  const isTruthyLegacy = (v) => {
+    if (v === true || v === 1 || v === '1') return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      return s === 'true' || s === 'yes' || s === 't' || s === '1';
+    }
+    return Boolean(v);
+  };
+  const nextTaxes = Array.isArray(taxes) ? taxes.map((t) => {
+    if (!t || typeof t !== 'object') return t;
+    const hasLegacy = 'price_include' in t;
+    if (t.price_include_override != null) {
+      if (!hasLegacy) return t;
+      taxesChanged = true;
+      const { price_include: _legacy, ...rest } = t;
+      return rest;
+    }
+    if (!hasLegacy) return t;
+    taxesChanged = true;
+    const { price_include, ...rest } = t;
+    return isTruthyLegacy(price_include) ? { ...rest, price_include_override: 'tax_included' } : rest;
+  }) : taxes;
+
+  if (!companiesChanged && !taxesChanged) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(companiesChanged ? { 'res.company': nextCompanies } : {}),
+      ...(taxesChanged ? { 'account.tax': nextTaxes } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
+MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+MIGRATIONS.push({ version: 67, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
