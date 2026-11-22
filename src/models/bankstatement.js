@@ -1,11 +1,20 @@
 // Bank statements (account.bank.statement) tracking opening, ending, and computed balances across statement lines.
-import { create, read, search, write } from '../orm.js';
+import { create, read, search, unlink, write } from '../orm.js';
 import { isLiquidityJournal } from './ledger.js';
 import { bookToAccount } from './bank.js';
 import { today } from './common.js';
-import { roundCurrency } from '../money.js';
+import { currentCompany } from './company.js';
+import { t } from '../i18n.js';
+import { findCompanyCurrencyRecord, formatCurrency, roundCurrency } from '../money.js';
 
 const statementLinesCache = new WeakMap();
+
+/** Canonical display and running-balance order of bank statement lines: date, then sequence, then id. */
+export const statementLineOrder = (a, b) =>
+  String(a.date ?? '').localeCompare(String(b.date ?? '')) || (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0);
+
+/** Whether a statement line is reconciled or booked to a bank/settlement entry. */
+export const isStatementLineLocked = (line) => Boolean(line && (line.state === 'reconciled' || line.bank_move_id));
 
 export function linesByStatement(db) {
   if (!db) return new Map();
@@ -26,45 +35,68 @@ export function linesByStatement(db) {
   return map;
 }
 
+/** Whether `statementOrId` currently owns any reconciled or booked line in `db`. */
+export function statementHasReconciledLines(db, statementOrId) {
+  const statementId = typeof statementOrId === 'object' ? statementOrId?.id : statementOrId;
+  if (!db || !statementId) return false;
+  // Archived lines still count: archiving must not unlock the statement.
+  return (db.records?.['account.bank.statement.line'] ?? []).some((l) => l.statement_id === statementId && isStatementLineLocked(l));
+}
+
+/** Currency record of `statement` from its journal, falling back to company currency. */
+export function statementCurrency(db, statement) {
+  if (!db) return null;
+  const journal = statement?.journal_id ? read(db, 'account.journal', statement.journal_id) : null;
+  const companyId = statement?.company_id ?? journal?.company_id ?? currentCompany(db);
+  const currencyId = journal?.currency_id ?? read(db, 'res.company', companyId)?.currency_id;
+  return (currencyId ? read(db, 'res.currency', currencyId) : null) ?? findCompanyCurrencyRecord(db, companyId);
+}
+
 export function roundStatementAmount(db, statement, amount) {
   if (amount == null) return 0;
   const num = Number(amount) || 0;
   if (!db || !statement?.journal_id) return num;
-  const journal = read(db, 'account.journal', statement.journal_id);
-  const companyId = statement.company_id ?? journal?.company_id ?? 1;
-  const currencyId = journal?.currency_id ?? read(db, 'res.company', companyId)?.currency_id;
-  const currency = currencyId ? read(db, 'res.currency', currencyId) : null;
+  const currency = statementCurrency(db, statement);
   return currency ? roundCurrency(num, currency) : num;
 }
 
 /** Computed ending balance: balance_start + sum of its lines' amounts. */
 export function computeBalanceEnd(r, db) {
-  const lines = linesByStatement(db).get(r.id) ?? [];
-  const linesSum = lines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
-  const total = (Number(r.balance_start) || 0) + linesSum;
+  const lines = Array.isArray(r?.line_ids) ? r.line_ids : (linesByStatement(db).get(r?.id) ?? []);
+  const linesSum = lines.reduce((acc, l) => acc + (Number(l?.amount) || 0), 0);
+  const total = (Number(r?.balance_start) || 0) + linesSum;
   return roundStatementAmount(db, r, total);
 }
 
 /** Computed completeness: has lines and balance_end equals balance_end_real at the journal currency rounding. */
 export function computeIsComplete(r, db) {
-  const lines = linesByStatement(db).get(r.id) ?? [];
+  const lines = Array.isArray(r?.line_ids) ? r.line_ids : (linesByStatement(db).get(r?.id) ?? []);
   if (!lines.length) return false;
   const balanceEnd = computeBalanceEnd(r, db);
-  const balanceEndReal = roundStatementAmount(db, r, r.balance_end_real);
+  const balanceEndReal = roundStatementAmount(db, r, r?.balance_end_real);
   return balanceEnd === balanceEndReal;
 }
 
 let inComputeIsValid = false;
 /** Computed validity: balance_start equals previous statement's balance_end_real in same journal, by date then id; true for first statement. */
 export function computeIsValid(r, db) {
-  if (!db || !r.journal_id || inComputeIsValid) return true;
+  if (!db || !r?.journal_id || inComputeIsValid) return true;
   inComputeIsValid = true;
   try {
     const rawStatements = search(db, 'account.bank.statement')
       .filter((s) => s.journal_id === r.journal_id)
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id);
-    const idx = rawStatements.findIndex((s) => s.id === r.id);
-    const prev = idx > 0 ? rawStatements[idx - 1] : null;
+    let prev = null;
+    if (r.id) {
+      const withoutSelf = rawStatements.filter((s) => s.id !== r.id);
+      const combined = [...withoutSelf, r].sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || (a.id ?? 0) - (b.id ?? 0));
+      const idx = combined.findIndex((s) => s.id === r.id);
+      prev = idx > 0 ? combined[idx - 1] : null;
+    } else {
+      const date = String(r.date ?? '');
+      const preceding = date ? rawStatements.filter((s) => String(s.date ?? '') <= date) : rawStatements;
+      prev = preceding.at(-1) ?? null;
+    }
     if (!prev) return true;
     return roundStatementAmount(db, r, r.balance_start) === roundStatementAmount(db, prev, prev.balance_end_real);
   } finally {
@@ -72,7 +104,161 @@ export function computeIsValid(r, db) {
   }
 }
 
-function statementGuard(db, before, after) {
+/** Compute inline one2many rows for `line_ids` on `account.bank.statement`. */
+export function computeStatementLines(r, db) {
+  if (!r?.id || !db) return Array.isArray(r?.line_ids) ? r.line_ids : [];
+  return [...(linesByStatement(db).get(r.id) ?? [])]
+    .sort(statementLineOrder)
+    .map((l) => ({
+      id: l.id,
+      sequence: l.sequence ?? 10,
+      date: l.date ?? '',
+      payment_ref: l.payment_ref ?? '',
+      partner_id: l.partner_id ?? null,
+      amount: l.amount ?? 0,
+      ref: l.ref ?? '',
+      state: l.state ?? 'to_check',
+    }));
+}
+
+/** Form warning banner for invalid opening balance continuity or running balance mismatch against `balance_end_real`. */
+export function statementWarning(r, db) {
+  if (!r || !db) return null;
+  const warnings = [];
+  if (!computeIsValid(r, db)) {
+    warnings.push(t('Invalid statement: starting balance does not match the previous statement ending balance.'));
+  }
+  const balanceEnd = computeBalanceEnd(r, db);
+  const balanceEndReal = roundStatementAmount(db, r, r.balance_end_real);
+  if (balanceEnd !== balanceEndReal) {
+    const currency = statementCurrency(db, r);
+    const fmt = (n) => (currency ? formatCurrency(n, currency) : String(n));
+    warnings.push(t('Running balance ({balanceEnd}) does not match the ending balance ({balanceEndReal}).', {
+      balanceEnd: fmt(balanceEnd),
+      balanceEndReal: fmt(balanceEndReal),
+    }));
+  }
+  return warnings.length ? warnings.join(' ') : null;
+}
+
+const lineEditableKey = (l) => JSON.stringify({
+  id: l?.id ?? null,
+  date: l?.date ?? '',
+  payment_ref: l?.payment_ref ?? '',
+  partner_id: l?.partner_id || null,
+  amount: Number(l?.amount) || 0,
+  ref: l?.ref ?? '',
+  sequence: l?.sequence ?? 10,
+});
+
+function statementLinesError(db, statement, lines, before) {
+  if (!Array.isArray(lines)) return 'Invalid statement lines';
+  const existing = before?.id
+    ? (db.records?.['account.bank.statement.line'] ?? []).filter((l) => l.statement_id === before.id && l.active !== false)
+    : [];
+  const existingSnapshot = [...existing].sort(statementLineOrder).map(lineEditableKey);
+  const submittedSnapshot = lines.map((l, idx) => lineEditableKey({ ...l, sequence: l?.sequence ?? (idx + 1) * 10 }));
+  const unchanged = existingSnapshot.length === submittedSnapshot.length
+    && existingSnapshot.every((row, idx) => row === submittedSnapshot[idx]);
+
+  if (before?.state === 'closed' || statement.state === 'closed') {
+    if (!unchanged) return 'Cannot change lines linked to a closed statement';
+    return null;
+  }
+  if (before && statementHasReconciledLines(db, before.id) && !unchanged) {
+    return 'Lines of a statement with reconciled lines cannot be edited or deleted';
+  }
+
+  const company = statement.company_id ?? read(db, 'account.journal', statement.journal_id)?.company_id ?? 1;
+  const existingIds = new Set(existing.map((l) => l.id));
+  const seenIds = new Set();
+  for (const line of lines) {
+    if (!line || typeof line !== 'object' || Array.isArray(line)) return 'Invalid statement line';
+    if (line.id != null && line.id !== '' && line.id !== false) {
+      if (!Number.isInteger(line.id) || line.id < 1 || !existingIds.has(line.id)) {
+        return 'Statement line does not belong to this statement';
+      }
+      if (seenIds.has(line.id)) return 'Duplicate statement line';
+      seenIds.add(line.id);
+    }
+    if (!line.date) return 'Date is required';
+    if (typeof line.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(line.date)) return 'Invalid date';
+    if (!String(line.payment_ref ?? '').trim()) return 'Label is required';
+    if (line.amount == null || line.amount === '') return 'Amount is required';
+    const amt = Number(line.amount);
+    if (!Number.isFinite(amt)) return 'Invalid amount';
+    if (line.partner_id != null && line.partner_id !== '') {
+      const partner = read(db, 'res.partner', Number(line.partner_id));
+      if (!partner) return 'Partner does not exist';
+      if (partner.company_id && partner.company_id !== company) return 'Partner belongs to another company';
+    }
+  }
+  for (const oldLine of existing) {
+    if (!seenIds.has(oldLine.id) && isStatementLineLocked(oldLine)) {
+      return 'Lines of a statement with reconciled lines cannot be edited or deleted';
+    }
+  }
+  return null;
+}
+
+const stripStatementLineIdsField = (db, statementId) => ({
+  ...db,
+  records: {
+    ...db.records,
+    'account.bank.statement': (db.records?.['account.bank.statement'] ?? []).map((s) => {
+      if (s.id !== statementId || !Object.hasOwn(s, 'line_ids')) return s;
+      const { line_ids: _ignored, ...rest } = s;
+      return rest;
+    }),
+  },
+});
+
+/** Synchronize `account.bank.statement.line` records after creating or writing `account.bank.statement` with `line_ids`. */
+export function syncStatementLines(db, statement, submittedLines, before = null) {
+  let next = stripStatementLineIdsField(db, statement.id);
+  if (!Array.isArray(submittedLines)) return next;
+  const err = statementLinesError(next, statement, submittedLines, before);
+  if (err) throw new Error(err);
+
+  const existing = (next.records?.['account.bank.statement.line'] ?? [])
+    .filter((l) => l.statement_id === statement.id && l.active !== false);
+  const existingById = new Map(existing.map((l) => [l.id, l]));
+  const keepIds = new Set(submittedLines.map((l) => l.id).filter(Boolean));
+  const removeIds = existing.filter((l) => !keepIds.has(l.id)).map((l) => l.id);
+  if (removeIds.length) next = unlink(next, 'account.bank.statement.line', removeIds);
+
+  const journal = read(next, 'account.journal', statement.journal_id);
+  const company = statement.company_id ?? journal?.company_id ?? 1;
+  const currencyId = journal?.currency_id ?? read(next, 'res.company', company)?.currency_id ?? null;
+
+  for (const [idx, line] of submittedLines.entries()) {
+    const payload = {
+      date: line.date,
+      payment_ref: line.payment_ref,
+      partner_id: line.partner_id ? Number(line.partner_id) : null,
+      ref: line.ref ?? '',
+      amount: Number(line.amount),
+      sequence: line.sequence ?? (idx + 1) * 10,
+    };
+    if (line.id) {
+      const prev = existingById.get(line.id);
+      const changed = Object.keys(payload).some((k) => (prev?.[k] ?? null) !== (payload[k] ?? null) && String(prev?.[k] ?? '') !== String(payload[k] ?? ''));
+      if (changed) next = write(next, 'account.bank.statement.line', line.id, payload);
+    } else {
+      next = create(next, 'account.bank.statement.line', {
+        ...payload,
+        statement_id: statement.id,
+        journal_id: statement.journal_id,
+        company_id: company,
+        currency_id: currencyId,
+        state: 'to_check',
+      }).db;
+    }
+  }
+  return next;
+}
+
+function statementGuard(db, before, after, _ctx = null, vals = null) {
   if (before && before.state === 'closed') {
     if (after.state !== 'closed') return 'A closed statement cannot be reopened';
     if (
@@ -98,12 +284,26 @@ function statementGuard(db, before, after) {
     return 'Statement lines must belong to the statement journal and company';
   }
 
-  if (before && lines.some((l) => l.state === 'reconciled' || Boolean(l.bank_move_id))) {
+  if (before && lines.some(isStatementLineLocked)) {
     if (before.journal_id !== after.journal_id || (before.company_id ?? 1) !== company) {
       return 'A statement with reconciled lines cannot change its journal or company';
     }
   }
 
+  const hasSubmittedLines = vals ? Object.hasOwn(vals, 'line_ids') : (!before && Array.isArray(after?.line_ids));
+  if (hasSubmittedLines) {
+    const lineErr = statementLinesError(db, after, vals?.line_ids ?? after.line_ids, before);
+    if (lineErr) return lineErr;
+  }
+
+  return null;
+}
+
+function statementProtectDelete(db, statement, staged = db) {
+  if (statement.state === 'closed') return 'A closed statement cannot be deleted';
+  if (statementHasReconciledLines(db, statement.id) || statementHasReconciledLines(staged, statement.id)) {
+    return 'Cannot delete a statement with reconciled lines';
+  }
   return null;
 }
 
@@ -162,14 +362,13 @@ export const bankStatementModels = {
   'account.bank.statement': {
     label: 'Bank Statements',
     guard: statementGuard,
+    protectDelete: statementProtectDelete,
+    onCreate: (db, after, _before, vals) => syncStatementLines(db, after, vals?.line_ids),
+    onWrite: (db, after, before, vals) => syncStatementLines(db, after, vals?.line_ids, before),
     onUnlink: (db, statement) => {
-      if (statement.state === 'closed') {
-        throw new Error('A closed statement cannot be deleted');
-      }
+      const err = statementProtectDelete(db, statement);
+      if (err) throw new Error(err);
       const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === statement.id);
-      if (lines.some((l) => l.state === 'reconciled' || Boolean(l.bank_move_id))) {
-        throw new Error('Cannot delete a statement with reconciled lines');
-      }
       let currentDb = db;
       for (const l of lines) {
         currentDb = write(currentDb, 'account.bank.statement.line', l.id, { statement_id: null });
@@ -178,8 +377,16 @@ export const bankStatementModels = {
     },
     fields: {
       name: { type: 'char', label: 'Reference', required: true },
-      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal', required: true, domain: (j) => isLiquidityJournal(j) },
+      journal_id: {
+        type: 'many2one',
+        relation: 'account.journal',
+        label: 'Journal',
+        required: true,
+        domain: (j) => isLiquidityJournal(j),
+        readonly: (r, db) => r?.state === 'closed' || statementHasReconciledLines(db, r),
+      },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true, hidden: true, compute: (r, db) => statementCurrency(db, r)?.id ?? null },
       date: { type: 'date', label: 'Date', required: true },
       balance_start: { type: 'monetary', label: 'Starting Balance' },
       balance_end_real: { type: 'monetary', label: 'Ending Balance' },
@@ -188,14 +395,21 @@ export const bankStatementModels = {
         type: 'one2many',
         relation: 'account.bank.statement.line',
         label: 'Statement Lines',
-        readonly: true,
+        editable: true,
+        copy: false,
+        readonly: (r, db) => r?.state === 'closed' || statementHasReconciledLines(db, r),
         fields: {
-          date: { type: 'date', label: 'Date' },
-          payment_ref: { type: 'char', label: 'Label' },
+          id: { type: 'integer', label: 'ID', hidden: true },
+          sequence: { type: 'integer', label: 'Sequence', hidden: true },
+          date: { type: 'date', label: 'Date', required: true },
+          payment_ref: { type: 'char', label: 'Label', required: true },
           partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
-          amount: { type: 'monetary', label: 'Amount' },
+          amount: { type: 'monetary', label: 'Amount', required: true },
+          ref: { type: 'char', label: 'Reference' },
+          state: { type: 'selection', label: 'Status', readonly: true, hidden: true, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
         },
-        compute: (r, db) => linesByStatement(db).get(r.id) ?? [],
+        newLine: (r) => ({ date: r?.date || today(), payment_ref: '', partner_id: null, amount: 0, ref: '' }),
+        compute: computeStatementLines,
       },
       is_complete: { type: 'boolean', label: 'Complete', readonly: true, compute: computeIsComplete },
       is_valid: { type: 'boolean', label: 'Valid', readonly: true, compute: computeIsValid },
@@ -203,10 +417,20 @@ export const bankStatementModels = {
     },
     defaults: () => ({ date: today(), balance_start: 0, balance_end_real: 0, state: 'open' }),
     createDefaults: (db, vals) => ({ company_id: read(db, 'account.journal', vals.journal_id)?.company_id ?? vals.company_id ?? 1 }),
-    onchange: (r, key, db) => {
+    onchange: (r, key, db, ctx) => {
       if (key === 'journal_id') {
         const journal = read(db, 'account.journal', r.journal_id);
-        return { company_id: journal?.company_id ?? 1 };
+        const companyId = journal?.company_id ?? 1;
+        const currencyId = journal?.currency_id ?? read(db, 'res.company', companyId)?.currency_id ?? null;
+        const patch = { company_id: companyId, currency_id: currencyId };
+        if (!r.id && journal && !ctx?.editedFields?.has('balance_start')) {
+          const prev = search(db, 'account.bank.statement')
+            .filter((s) => s.journal_id === journal.id && (!r.date || String(s.date ?? '') <= String(r.date)))
+            .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id)
+            .at(-1);
+          if (prev) patch.balance_start = roundStatementAmount(db, r, prev.balance_end_real);
+        }
+        return patch;
       }
       return {};
     },
@@ -215,7 +439,10 @@ export const bankStatementModels = {
     form: {
       title: 'name',
       statusbar: 'state',
+      lockedWhen: (r) => r.state === 'closed',
+      warning: statementWarning,
       groups: [['name', 'journal_id', 'date'], ['balance_start', 'balance_end_real', 'balance_end']],
+      tabs: [{ label: 'Transactions', fields: ['line_ids'] }],
       buttons: [
         {
           label: 'Close',

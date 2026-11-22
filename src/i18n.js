@@ -3684,6 +3684,21 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  'Invalid statement: starting balance does not match the previous statement ending balance.': 'كشف حساب غير صالح: الرصيد الافتتاحي لا يطابق الرصيد النهائي لكشف الحساب السابق.',
+  'Running balance ({balanceEnd}) does not match the ending balance ({balanceEndReal}).': 'الرصيد التراكمي ({balanceEnd}) لا يطابق الرصيد النهائي ({balanceEndReal}).',
+  'Invalid statement lines': 'بنود كشف الحساب غير صالحة',
+  'Invalid statement line': 'بند كشف الحساب غير صالح',
+  'Statement line does not belong to this statement': 'بند كشف الحساب لا ينتمي إلى هذا الكشف',
+  'Duplicate statement line': 'بند كشف الحساب مكرر',
+  'Lines of a statement with reconciled lines cannot be edited or deleted': 'لا يمكن تعديل أو حذف بنود كشف حساب يحتوي على بنود مسواة',
+  'Cannot remove lines from a statement with reconciled lines': 'لا يمكن إزالة بنود من كشف حساب يحتوي على بنود مسواة',
+  'Cannot change lines of a statement with reconciled lines': 'لا يمكن تعديل بنود كشف حساب يحتوي على بنود مسواة',
+  'Cannot delete lines of a statement with reconciled lines': 'لا يمكن حذف بنود كشف حساب يحتوي على بنود مسواة',
+  'Cannot add existing lines to a statement with reconciled lines': 'لا يمكن إضافة بنود حالية إلى كشف حساب يحتوي على بنود مسواة',
+  'Label is required': 'البيان مطلوب',
+  'Amount is required': 'المبلغ مطلوب',
+  'Invalid date': 'تاريخ غير صالح',
+  'Invalid amount': 'مبلغ غير صالح',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

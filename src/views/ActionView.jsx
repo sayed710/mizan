@@ -102,8 +102,12 @@ export function ActionView({ leaf, base, params }) {
 
   const deleteSelected = () => {
     if (!confirm(t('Delete {n} record(s)?', { n: selected.size }))) return;
-    commit(unlink(getDb(), model, [...selected]));
-    setSelected(new Set());
+    try {
+      commit(unlink(getDb(), model, [...selected]));
+      setSelected(new Set());
+    } catch (e) {
+      alert(t(e.message));
+    }
   };
   const exportRows = () => {
     const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;

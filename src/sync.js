@@ -15,6 +15,7 @@ import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
 import { isProtectedAuditMessage } from './models/auditRules.js';
 import { syncJournalMethodLines, unlinkJournalMethodLines } from './models/paymentmethod.js';
+import { syncStatementLines } from './models/bankstatement.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
@@ -813,6 +814,15 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       stagedSeq = nextDb.seq;
       seen.records = records;
     }
+    if (model === 'account.bank.statement') {
+      const submitted = submittedByRecord.get(`${model}:${rec.id}`);
+      if (submitted && Object.hasOwn(submitted, 'line_ids')) {
+        const nextDb = syncStatementLines({ ...db, records, seq: stagedSeq }, rec, submitted.line_ids, before);
+        records = nextDb.records;
+        stagedSeq = nextDb.seq;
+        seen.records = records;
+      }
+    }
     if (model === 'account.move') {
       const generated = generatedMoves.has(rec.id);
       if (rec.state === 'posted' && before?.state !== 'posted') {
@@ -877,7 +887,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   if (missing) throw new Error(missing);
   // Id counters follow the records actually stored; the client's own counters (d.seq) are ignored so they cannot be poisoned.
   const seq = { ...db.seq, ...stagedSeq };
-  for (const model of new Set([...Object.keys(d.upserts ?? {}), 'account.payment.method.line'])) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
+  for (const model of new Set([...Object.keys(d.upserts ?? {}), 'account.payment.method.line', 'account.bank.statement.line'])) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
   const auditRecords = new Map();
   const kept = new Set(db.messages.filter((m) => {
