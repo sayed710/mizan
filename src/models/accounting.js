@@ -45,6 +45,37 @@ import {
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
 
+function invoiceCompanyDefaults(db, move, previous, context = {}) {
+  const company = read(db, 'res.company', move.company_id);
+  const oldCompany = previous?.company_id ? read(db, 'res.company', previous.company_id) : null;
+  const termsEligible = ['out_invoice', 'out_refund'].includes(move.move_type);
+  const result = {};
+
+  const isEdited = (field) => {
+    if (!context?.editedFields) return false;
+    if (context.editedFields instanceof Set) return context.editedFields.has(field);
+    if (Array.isArray(context.editedFields)) return context.editedFields.includes(field);
+    return Object.hasOwn(context.editedFields, field);
+  };
+
+  const oldTerms = oldCompany?.use_invoice_terms ? (oldCompany.invoice_terms ?? '') : null;
+  const termsUntouched = context?.editedFields ? !isEdited('narration') : (move.narration === undefined || (previous && oldTerms !== null && move.narration === oldTerms));
+
+  if (termsEligible && termsUntouched) {
+    if (company?.use_invoice_terms) result.narration = company.invoice_terms ?? '';
+    else if (previous) result.narration = '';
+  }
+
+  const companyIncoterm = company?.incoterm_id ? read(db, 'account.incoterm', company.incoterm_id) : null;
+  const companyIncotermId = companyIncoterm && companyIncoterm.active !== false ? companyIncoterm.id : null;
+  const incotermUntouched = context?.editedFields ? !isEdited('incoterm_id') : (move.incoterm_id === undefined || (previous && oldCompany?.incoterm_id != null && move.incoterm_id === oldCompany.incoterm_id));
+
+  if (move.move_type === 'out_invoice' && incotermUntouched) {
+    if (companyIncotermId != null) result.incoterm_id = companyIncotermId;
+    else if (previous) result.incoterm_id = null;
+  }
+  return result;
+}
 export const includeInitialBalance = (account) => !['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'off_balance'].includes(account?.account_type);
 const canBeNonTrade = (account) => ['asset_receivable', 'liability_payable'].includes(account?.account_type);
 
@@ -3501,6 +3532,7 @@ export const accountingModels = {
           : {};
         return {
           ...fiscal,
+          ...(key === 'company_id' && !r.id ? invoiceCompanyDefaults(db, r, previous, context) : {}),
           ...(partnerChange && isPurchase(r) ? { partner_bank_id: partnerBank } : {}),
           ...linesUpdate,
           ...(partnerChange ? {
@@ -3754,6 +3786,8 @@ export const accountingModels = {
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
+    // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
+    menuActions: [{ label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) }],
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
@@ -3764,6 +3798,7 @@ export const accountingModels = {
           ? resolveDocumentJournal(db, { move_type: moveType, company_id: companyId })?.id ?? null
           : null;
         return {
+          ...invoiceCompanyDefaults(db, { ...vals, move_type: moveType, company_id: companyId }),
           ...(salesperson ? { invoice_user_id: salesperson } : {}),
           ...(defaultJournal ? { journal_id: defaultJournal } : {}),
         };
