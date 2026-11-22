@@ -60,13 +60,15 @@ test('a biggest-tax rounding leaves an untaxed invoice unrounded and posts it wi
   assert.equal(posted.line_ids.some((l) => l.name === 'Cash Rounding'), false);
 });
 
-test('the company currency keeps its Rates tab when it is not the base currency', () => {
+test('the company currency hides its Rates tab even when it is not the base currency, while foreign currencies keep theirs', () => {
   const db = seed();
   const own = db.records['res.company'].find((c) => c.id === 1).currency_id;
+  const foreign = db.records['res.currency'].find((c) => c.id !== own).id;
   const tabs = models['res.currency'].form.tabs;
   assert.deepEqual(tabs(read(db, 'res.currency', own), db), []);
-  const otherBase = { ...db, settings: { ...db.settings, base_currency_id: db.records['res.currency'].find((c) => c.id !== own).id } };
-  assert.deepEqual(tabs(read(otherBase, 'res.currency', own), otherBase).map((tab) => tab.label), ['Rates']);
+  const otherBase = { ...db, settings: { ...db.settings, base_currency_id: foreign } };
+  assert.deepEqual(tabs(read(otherBase, 'res.currency', own), otherBase), []);
+  assert.deepEqual(tabs(read(otherBase, 'res.currency', foreign), otherBase).map((tab) => tab.label), ['Rates']);
 });
 
 test('the printed invoice shows the payment-term note or name unless the term is hidden from invoices', () => {

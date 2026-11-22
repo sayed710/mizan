@@ -3556,6 +3556,11 @@ const ar = {
   'Recognized': 'المعترف به',
   '<= 12 Months': 'خلال 12 شهراً أو أقل',
   '> 12 Months': 'بعد أكثر من 12 شهراً',
+  'Base Currency Rate': 'سعر العملة الأساسية',
+  'Base Rate Date': 'تاريخ سعر الأساس',
+  'Units of this currency per 1 unit of the base currency.': 'وحدات هذه العملة لكل وحدة واحدة من العملة الأساسية.',
+  'The base currency rate is fixed at 1.': 'سعر العملة الأساسية ثابت عند 1.',
+  'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };

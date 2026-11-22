@@ -86,6 +86,28 @@ export const toCompany = (db, currencyId, amount, date, companyId = null) => rou
   companyCurrencyRecord(db, companyId),
 );
 
+/** Replace or append a rate row for `(date, companyId)` without creating duplicates. */
+function upsertRateRow(rows = [], { date = today(), rate, companyId = null }) {
+  const targetCompany = companyId == null || companyId === '' ? null : Number(companyId);
+  let replaced = false;
+  const nextRows = [];
+  for (const r of rows) {
+    const isMatch = r.date === date && (r.company_id == null ? null : Number(r.company_id)) === targetCompany;
+    if (isMatch) {
+      if (!replaced) {
+        nextRows.push({ ...r, rate, date, company_id: targetCompany });
+        replaced = true;
+      }
+    } else {
+      nextRows.push(r);
+    }
+  }
+  if (!replaced) {
+    nextRows.push({ date, rate, company_id: targetCompany });
+  }
+  return nextRows;
+}
+
 /**
  * Upsert an exchange rate row on `currencyId` for (currency, date, company).
  * Applies only for active currencies, never creating duplicates.
@@ -95,24 +117,7 @@ export function upsertCurrencyRate(db, currencyId, { date = today(), rate, compa
   if (!Number.isFinite(numericRate) || numericRate <= 0) return db;
   const currency = read(db, 'res.currency', currencyId);
   if (!currency || currency.active === false) return db;
-  const rows = currency.rate_ids ?? [];
-  const targetCompany = companyId == null || companyId === '' ? null : Number(companyId);
-  let replaced = false;
-  const nextRows = [];
-  for (const r of rows) {
-    const isMatch = r.date === date && (r.company_id == null ? null : Number(r.company_id)) === targetCompany;
-    if (isMatch) {
-      if (!replaced) {
-        nextRows.push({ ...r, rate: numericRate, date, company_id: targetCompany });
-        replaced = true;
-      }
-    } else {
-      nextRows.push(r);
-    }
-  }
-  if (!replaced) {
-    nextRows.push({ date, rate: numericRate, company_id: targetCompany });
-  }
+  const nextRows = upsertRateRow(currency.rate_ids ?? [], { date, rate: numericRate, companyId });
   return write(db, 'res.currency', currency.id, { rate_ids: nextRows });
 }
 
@@ -122,16 +127,11 @@ export function upsertCurrencyRate(db, currencyId, { date = today(), rate, compa
 export function upsertCurrencyRates(db, rates, { date = today(), companyId = null } = {}) {
   let nextDb = db;
   if (Array.isArray(rates)) {
-    const currencies = nextDb.records['res.currency'] ?? [];
-    const base = findBaseCurrency(nextDb) ?? (nextDb.settings?.base_currency_id ? (currencies.find((c) => c.id === nextDb.settings.base_currency_id) ?? null) : null);
-    const baseId = base?.id;
-    const baseName = base?.name;
+    const baseId = baseCurrency(nextDb)?.id;
     for (const item of rates) {
       const cId = item.currency_id ?? item.currencyId ?? item.currency;
-      const target = currencies.find((c) => c.id === cId || c.name === cId) ?? (typeof cId === 'object' && cId ? cId : null);
-      const targetId = target?.id ?? cId;
-      if (baseId && (cId === baseId || cId === baseName || targetId === baseId || target?.name === baseName)) continue;
-      nextDb = upsertCurrencyRate(nextDb, targetId, {
+      if (baseId != null && Number(cId) === Number(baseId)) continue;
+      nextDb = upsertCurrencyRate(nextDb, cId, {
         date: item.date ?? date,
         rate: item.rate,
         companyId: item.company_id ?? item.companyId ?? companyId,
@@ -235,12 +235,34 @@ function rateRowsError(beforeRows = [], afterRows = []) {
   return null;
 }
 
+/** Base-relative rate of the rate line's effective company currency on `line.date` (1 when base/unconfigured, null if missing). */
+function companyCurrencyRate(line, db) {
+  if (!db) return 1;
+  const companyId = line?.company_id || (db.settings?.current_company_id ?? 1);
+  const own = findCompanyCurrencyRecord(db, companyId);
+  const base = findBaseCurrency(db);
+  if (!own || (base && own.id === base.id)) return 1;
+  return baseRateInfo(own, line?.date || today(), base?.id, companyId).rate;
+}
+
+/** True when `record` is the active company's currency and differs from the database base currency. */
+function isNonBaseCompanyCurrency(record, db) {
+  if (!record?.id || !db) return false;
+  const companyId = db.settings?.current_company_id ?? 1;
+  const own = findCompanyCurrencyRecord(db, companyId);
+  const base = findBaseCurrency(db);
+  return Boolean(own && base && own.id === record.id && own.id !== base.id);
+}
+
 export const currencyModels = {
   'res.currency': {
     label: 'Currencies',
     guard: (db, before, after) => {
       const rounding = Number(after.rounding ?? 0.01);
       if (!Number.isFinite(rounding) || rounding <= 0) return 'Currency rounding must be positive';
+      if (before && findBaseCurrency(db)?.id === before.id && JSON.stringify(before.rate_ids ?? []) !== JSON.stringify(after.rate_ids ?? [])) {
+        return 'The base currency rate is fixed at 1 and cannot be modified';
+      }
       const rateError = rateRowsError(before?.rate_ids, after.rate_ids);
       if (rateError) return rateError;
       if (!before || Number(before.rounding ?? 0.01) === rounding) return null;
@@ -274,9 +296,31 @@ export const currencyModels = {
         },
       },
       current_rate: { type: 'float', label: 'Current Rate', hidden: true, compute: (r, db) => currentRateInfo(r, db).rate },
+      base_rate_date: {
+        type: 'date',
+        label: 'Base Rate Date',
+        editable: true,
+        hideWhen: (r, db) => !isNonBaseCompanyCurrency(r, db),
+        compute: (r, db) => (isNonBaseCompanyCurrency(r, db) ? today() : null),
+      },
+      base_rate: {
+        type: 'float',
+        label: 'Base Currency Rate',
+        digits: [6, 6],
+        editable: true,
+        help: 'Units of this currency per 1 unit of the base currency.',
+        hideWhen: (r, db) => !isNonBaseCompanyCurrency(r, db),
+        compute: (r, db) => {
+          if (!isNonBaseCompanyCurrency(r, db)) return null;
+          const companyId = db.settings?.current_company_id ?? 1;
+          const base = findBaseCurrency(db);
+          return baseRateInfo(r, r.base_rate_date || today(), base?.id, companyId).rate;
+        },
+      },
       rate_ids: {
         type: 'one2many',
         label: 'Rates',
+        readonly: (r, db) => Boolean(r?.id && findBaseCurrency(db)?.id === r.id),
         sort: (a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')),
         fields: {
           date: { type: 'date', label: 'Date' },
@@ -285,39 +329,73 @@ export const currencyModels = {
             type: 'many2one',
             relation: 'res.currency',
             label: 'Base Currency',
-            compute: (line, db) => findCompanyCurrencyRecord(db, line.company_id ?? db?.settings?.current_company_id ?? 1)?.id ?? null,
+            compute: (line, db) => findCompanyCurrencyRecord(db, line?.company_id || (db?.settings?.current_company_id ?? 1))?.id ?? null,
           },
           company_rate: {
             type: 'float',
             label: 'Unit/Base',
             digits: [6, 6],
             editable: true,
-            compute: (line) => Number(line.rate || 0),
+            readonly: (line, db) => companyCurrencyRate(line, db) == null,
+            compute: (line, db, record) => {
+              const ownRate = companyCurrencyRate(line, db);
+              if (ownRate == null) return null;
+              const rate = record?.id && findBaseCurrency(db)?.id === record.id ? 1 : Number(line.rate || 0);
+              if (!(rate > 0)) return rate;
+              return ownRate === 1 ? rate : Number((rate / ownRate).toPrecision(12));
+            },
           },
           inverse_company_rate: {
             type: 'float',
             label: 'Base/Unit',
             digits: [6, 6],
             editable: true,
-            compute: (line) => (Number(line.rate) > 0 ? Number((1 / Number(line.rate)).toPrecision(12)) : 0),
+            readonly: (line, db) => companyCurrencyRate(line, db) == null,
+            compute: (line, db, record) => {
+              const ownRate = companyCurrencyRate(line, db);
+              if (ownRate == null) return null;
+              const rate = record?.id && findBaseCurrency(db)?.id === record.id ? 1 : Number(line.rate);
+              if (!(rate > 0)) return 0;
+              return Number((ownRate / rate).toPrecision(12));
+            },
           },
           rate: { type: 'float', label: 'Technical Rate', digits: [6, 6], optional: 'hide' },
         },
         newLine: (record, db) => ({ date: today(), rate: 1, company_id: db?.settings?.current_company_id ?? null }),
-        onchange: (line, changed) => {
+        onchange: (line, changed, db) => {
           if (changed === 'company_rate') {
             const { company_rate: v, ...rest } = line;
+            const ownRate = companyCurrencyRate(line, db);
+            if (ownRate == null) return rest;
             const num = Number(v);
-            return { ...rest, rate: Number.isFinite(num) ? num : line.rate };
+            if (!Number.isFinite(num)) return { ...rest, rate: line.rate };
+            return { ...rest, rate: ownRate === 1 ? num : Number((num * ownRate).toPrecision(12)) };
           }
           if (changed === 'inverse_company_rate') {
             const { inverse_company_rate: v, ...rest } = line;
+            const ownRate = companyCurrencyRate(line, db);
+            if (ownRate == null) return rest;
             const num = Number(v);
-            return { ...rest, rate: Number.isFinite(num) && num > 0 ? 1 / num : 0 };
+            if (!Number.isFinite(num) || num <= 0) return { ...rest, rate: 0 };
+            return { ...rest, rate: ownRate === 1 ? 1 / num : Number((ownRate / num).toPrecision(12)) };
           }
           return line;
         },
       },
+    },
+    onchange: (r, changed, db) => {
+      if (!isNonBaseCompanyCurrency(r, db)) return {};
+      const companyId = db?.settings?.current_company_id ?? 1;
+      const base = findBaseCurrency(db);
+      const date = r.base_rate_date || today();
+      if (changed === 'base_rate_date') {
+        return { base_rate: baseRateInfo(r, date, base?.id, companyId).rate };
+      }
+      if (changed === 'base_rate') {
+        const num = r.base_rate == null || r.base_rate === '' ? 0 : Number(r.base_rate);
+        return { rate_ids: upsertRateRow(r.rate_ids ?? [], { date, rate: Number.isFinite(num) ? num : 0, companyId }) };
+      }
+      return {};
     },
     defaults: () => ({ rounding: 0.01, position: 'before', active: true, rate_ids: [] }),
     views: ['list', 'kanban'],
@@ -334,15 +412,23 @@ export const currencyModels = {
       title: 'name',
       hideTitle: true,
       banner: (r, db) => (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id ? "This is your company's currency." : null),
-      groups: [
+      groups: (r, db) => [
         ['name', 'full_name', 'active'],
         ['symbol', 'currency_unit_label', 'currency_subunit_label', 'position'],
         { title: 'Price Accuracy', fields: ['rounding', 'decimal_places'] },
+        ...(isNonBaseCompanyCurrency(r, db) ? [{ title: 'Base Currency Rate', fields: ['base_rate_date', 'base_rate'] }] : []),
       ],
-      // The base currency's rate is implicitly 1 and any stored rows on it are ignored, so hide its Rates tab even when the company uses another currency.
-      tabs: (r, db) => (r?.id && (findBaseCurrency(db)?.id === r.id || (!findBaseCurrency(db) && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id))
-        ? []
-        : [{ label: 'Rates', fields: ['rate_ids'] }]),
+      // Hide the Rates tab only on the active company's own currency, matching Odoo's is_current_company_currency.
+      // Base currency rates are read-only because conversions always treat the global base currency as 1.
+      tabs: (r, db) => {
+        if (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id) return [];
+        const isBase = Boolean(r?.id && findBaseCurrency(db)?.id === r.id);
+        return [{
+          label: 'Rates',
+          fields: ['rate_ids'],
+          ...(isBase ? { readonly: true, help: 'The base currency rate is fixed at 1.' } : {}),
+        }];
+      },
       chatter: true,
     },
   },
