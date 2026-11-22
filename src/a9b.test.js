@@ -418,7 +418,7 @@ test('cash flow statement classifies accounts by tag activity, builds report sec
   const accRevenue = create(db, 'account.account', { code: '499001', name: 'Consulting Revenue', account_type: 'income', tag_ids: [tagOp.id] });
   const accAsset = create(accRevenue.db, 'account.account', { code: '159001', name: 'Special Machinery', account_type: 'asset_fixed', tag_ids: [tagInv.id] });
   const accLoan = create(accAsset.db, 'account.account', { code: '269001', name: 'Founder Loan', account_type: 'liability_current', tag_ids: [tagFin.id] });
-  const accUntagged = create(accLoan.db, 'account.account', { code: '499002', name: 'Miscellaneous Mystery', account_type: 'income_other', tag_ids: [] });
+  const accUntagged = create(accLoan.db, 'account.account', { code: '159002', name: 'Miscellaneous Mystery', account_type: 'asset_fixed', tag_ids: [] });
   db = accUntagged.db;
 
   const cash = search(db, 'account.account').find((a) => a.code === '101401');

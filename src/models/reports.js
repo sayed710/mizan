@@ -168,7 +168,7 @@ export function accountCashFlowActivity(db, account) {
     const explicit = tags.find((tag) => ['operating', 'investing', 'financing'].includes(tag?.cash_flow_activity));
     if (explicit) return explicit.cash_flow_activity;
   }
-  return 'unclassified';
+  return ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'asset_receivable', 'liability_payable'].includes(account.account_type) ? 'operating' : 'unclassified';
 }
 
 /**

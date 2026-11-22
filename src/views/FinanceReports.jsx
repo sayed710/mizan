@@ -5,6 +5,8 @@ import { currentCompany } from '../models/company.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { formatCurrency } from '../money.js';
+import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
+import { ReportFoldAll } from './FinancialReportPrint.jsx';
 
 const num = (v) => <td className="num">{money(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
@@ -96,17 +98,20 @@ export function CustomerStatement({ db, period, companyId }) {
 
 export function CashFlow({ db, period, companyId, analyticAccountIds }) {
   const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
+  const [open, setOpen] = useState(() => new Set());
   const r = cashFlow(db, currentCo ? { ...period, company_id: currentCo, analyticAccountIds } : { ...period, analyticAccountIds });
+  const keys = ['operating', 'investing', 'financing', ...((r.unclassified !== 0 || r.lines.some((l) => l.section === 'unclassified')) ? ['unclassified'] : [])];
   const section = (key, title) => (
     <>
-      <tr className="rep-section"><td>{t(title)}</td>{num(r[key])}</tr>
+      <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open.has(key)} onClick={() => setOpen((prev) => toggleReportFold(prev, key))}><span className="caret">{open.has(key) ? '▾' : '▸'}</span> {t(title)}</button></td>{num(r[key])}</tr>
       {r.lines.filter((l) => l.section === key).map((l) => (
-        <tr key={`${key}-${l.account.id}`} className="rep-detail"><td><a href={`#/open/account.account/${l.account.id}`}>{l.account.code} {l.account.name}</a></td>{num(l.amount)}</tr>
+        <tr key={`${key}-${l.account.id}`} className={open.has(key) ? "rep-detail" : "rep-detail report-folded-row"}><td><a href={`#/open/account.account/${l.account.id}`}>{l.account.code} {l.account.name}</a></td>{num(l.amount)}</tr>
       ))}
     </>
   );
   return (
     <tbody>
+      <tr className="no-export"><td colSpan={2}><ReportFoldAll keys={keys} open={open} onToggle={() => setOpen((prev) => toggleAllReportFolds(prev, keys))} /></td></tr>
       <tr className="rep-total"><td>{t('Cash at the beginning of the period')}</td>{num(r.opening)}</tr>
       {section('operating', 'Operating Activities')}
       {section('investing', 'Investing Activities')}
