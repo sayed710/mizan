@@ -63,8 +63,30 @@ export function setupDom() {
     removeEventListener: () => {},
   };
   globalThis.window = globalThis;
+  const windowListeners = new Map();
+  globalThis.addEventListener = (type, fn) => {
+    if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+    windowListeners.get(type).add(fn);
+  };
+  globalThis.removeEventListener = (type, fn) => {
+    windowListeners.get(type)?.delete(fn);
+  };
+  globalThis.dispatchEvent = (event) => {
+    for (const fn of windowListeners.get(event?.type) ?? []) fn(event);
+    return true;
+  };
+  if (!globalThis.CustomEvent) {
+    globalThis.CustomEvent = class CustomEvent extends Event {
+      constructor(type, init = {}) {
+        super(type, init);
+        this.detail = init.detail;
+      }
+    };
+  }
+  if (!globalThis.location) {
+    globalThis.location = { hash: '', replace(h) { this.hash = h; } };
+  }
   globalThis.print = () => {};
-  globalThis.dispatchEvent = () => {};
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   return { makeEl };
 }

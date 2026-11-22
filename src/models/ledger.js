@@ -14,6 +14,7 @@ import { models } from '../registry.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
 import { buildMatchingNumbers, entryMatchedAmounts, indexGlMatchings, lineKey } from './glMatchIndex.js';
+import { DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 /** Whether `account` belongs to the income or expense account type family. */
@@ -54,7 +55,7 @@ export const CHART = [
 export const JOURNALS = [
   { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, invoice_reference_type: 'invoice', invoice_reference_model: 'odoo', company_default: 'sales' },
   { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
-  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true, payment_sequence: true, bank_statements_source: 'undefined' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true, payment_sequence: true, bank_statements_source: 'undefined', sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION },
   { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501', payment_sequence: true },
   { code: 'MISC', name: 'Miscellaneous Operations', type: 'general', company_default: 'general' },
   { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
@@ -131,7 +132,7 @@ export function validStornoMove(db, move) {
     || (source.company_id ?? 1) !== (move.company_id ?? 1) || source.move_type !== expected[move.move_type]) {
     return false;
   }
-  if (move.partner_id && source.partner_id && move.partner_id !== source.partner_id) return false;
+  if ((move.partner_id ?? null) !== (source.partner_id ?? null)) return false;
   if ((move.currency_id ?? null) !== (source.currency_id ?? null)) return false;
 
   const lines = Array.isArray(move.line_ids) ? move.line_ids : [];
@@ -148,7 +149,8 @@ export function validStornoMove(db, move) {
         && (Number(s.partner_id) || null) === (Number(line.partner_id) || null)
         && Math.abs((Number(line.debit) || 0) - (-(Number(s.debit) || 0))) < 1e-6
         && Math.abs((Number(line.credit) || 0) - (-(Number(s.credit) || 0))) < 1e-6
-        && (!s.currency_id || (s.currency_id === line.currency_id && Math.abs((Number(line.amount_currency) || 0) - (-(Number(s.amount_currency) || 0))) < 1e-6))
+        && (s.currency_id ?? null) === (line.currency_id ?? null)
+        && Math.abs((Number(line.amount_currency) || 0) - (s.currency_id ? -(Number(s.amount_currency) || 0) : 0)) < 1e-6
       );
       if (idx === -1) return false;
       remaining.splice(idx, 1);
@@ -157,48 +159,34 @@ export function validStornoMove(db, move) {
   }
 
   if (['out_refund', 'in_refund'].includes(move.move_type)) {
-    const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
-    const roundingAccs = new Set();
-    if (rounding) {
-      if (rounding.profit_account_id) roundingAccs.add(rounding.profit_account_id);
-      if (rounding.loss_account_id) roundingAccs.add(rounding.loss_account_id);
-      try {
-        roundingAccs.add(roundingAccount(db, rounding, true, move.company_id));
-        roundingAccs.add(roundingAccount(db, rounding, false, move.company_id));
-      } catch {
-        // ignore fallback errors
-      }
+    if (!Array.isArray(move.invoice_line_ids) || !move.invoice_line_ids.length) return false;
+    let expectedLines;
+    try {
+      const docCurr = documentCurrency(db, source);
+      const docTotal = roundCurrency(moveTotal(move, db), docCurr);
+      const srcTotal = roundCurrency(moveTotal(source, db), docCurr);
+      const otherCredited = (db.records?.['account.move'] ?? [])
+        .filter((m) => m.id !== move.id && m.state === 'posted' && m.reversed_entry_id === source.id)
+        .reduce((sum, m) => sum + moveTotal(m, db), 0);
+      if (!(docTotal > 0) || roundCurrency(otherCredited + docTotal, docCurr) > srcTotal) return false;
+      const journal = resolveDocumentJournal(db, move, { required: true });
+      expectedLines = invoiceLines(db, { ...move, journal_id: journal.id });
+    } catch {
+      return false;
     }
-
-    const sourceDebits = new Map();
-    const sourceCredits = new Map();
-    for (const s of source.line_ids ?? []) {
-      const d = Number(s.debit) || 0;
-      const c = Number(s.credit) || 0;
-      if (d > 0) sourceDebits.set(s.account_id, (sourceDebits.get(s.account_id) ?? 0) + d);
-      if (c > 0) sourceCredits.set(s.account_id, (sourceCredits.get(s.account_id) ?? 0) + c);
-    }
-
-    const moveDebits = new Map();
-    const moveCredits = new Map();
+    if (!expectedLines.length || lines.length !== expectedLines.length) return false;
+    const remaining = [...expectedLines];
     for (const line of lines) {
-      const d = Number(line.debit) || 0;
-      const c = Number(line.credit) || 0;
-      if (d > 1e-6 && !roundingAccs.has(line.account_id)) return false;
-      if (c > 1e-6 && !roundingAccs.has(line.account_id)) return false;
-      if (d < -1e-6) moveDebits.set(line.account_id, (moveDebits.get(line.account_id) ?? 0) + Math.abs(d));
-      if (c < -1e-6) moveCredits.set(line.account_id, (moveCredits.get(line.account_id) ?? 0) + Math.abs(c));
-    }
-
-    for (const [accId, amt] of moveDebits) {
-      if (roundingAccs.has(accId)) continue;
-      const srcAmt = sourceDebits.get(accId) ?? 0;
-      if (amt > srcAmt + 1e-6) return false;
-    }
-    for (const [accId, amt] of moveCredits) {
-      if (roundingAccs.has(accId)) continue;
-      const srcAmt = sourceCredits.get(accId) ?? 0;
-      if (amt > srcAmt + 1e-6) return false;
+      const idx = remaining.findIndex((exp) =>
+        exp.account_id === line.account_id
+        && (Number(exp.partner_id) || null) === (Number(line.partner_id) || null)
+        && Math.abs((Number(line.debit) || 0) - (Number(exp.debit) || 0)) < 1e-6
+        && Math.abs((Number(line.credit) || 0) - (Number(exp.credit) || 0)) < 1e-6
+        && (exp.currency_id ?? null) === (line.currency_id ?? null)
+        && Math.abs((Number(line.amount_currency) || 0) - (Number(exp.amount_currency) || 0)) < 1e-6
+      );
+      if (idx === -1) return false;
+      remaining.splice(idx, 1);
     }
     return true;
   }

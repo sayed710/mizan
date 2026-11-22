@@ -921,6 +921,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     ...(source.cash_basis_base_grid ? { cash_basis_base_grid: true } : {}),
     partner_id: source.partner_id ?? null,
+    ...(source.currency_id ? { currency_id: source.currency_id } : {}),
     name: opts.scheduled ? '/' : nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
     line_ids: (source.line_ids ?? []).map((l) => stornoLine({

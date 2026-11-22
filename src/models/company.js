@@ -10,7 +10,7 @@ import { STOCK_CHART_ROLES } from './stock-accounts.js';
 import { returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
-import { taxUnitCompatibilityError } from './accounting.js';
+import { refreshDraftEntryTaxes, taxUnitCompatibilityError } from './accounting.js';
 import { fiscalYearStart } from './ledger.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
@@ -283,7 +283,7 @@ const CONTROL_FIELDS = [
   'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'fiscalyear_last_day', 'fiscalyear_last_month',
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
-  'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
+  'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
   'currency_exchange_journal_id',
   'deferred_revenue_journal_id', 'deferred_expense_journal_id',
   'deferred_revenue_account_id', 'deferred_expense_account_id',
@@ -291,6 +291,7 @@ const CONTROL_FIELDS = [
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
   'transfer_account_id', 'account_storno',
+  'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
 
 /**
@@ -311,6 +312,7 @@ function companyGuard(db, before, r, ctx) {
   if (r.tax_start_date != null && r.tax_start_date !== '' && !validDate(r.tax_start_date)) return 'Tax Period Start must be a valid date';
   if (r.tax_periodicity != null && r.tax_periodicity !== '' && !['monthly', 'trimester', 'semester', 'year'].includes(r.tax_periodicity)) return 'Select a valid tax periodicity';
   if (r.tax_calculation_rounding_method != null && r.tax_calculation_rounding_method !== '' && !['round_per_line', 'round_globally'].includes(r.tax_calculation_rounding_method)) return 'Select a valid tax rounding method';
+  if (r.account_price_include != null && r.account_price_include !== '' && !['tax_included', 'tax_excluded'].includes(r.account_price_include)) return 'Select a valid default sales price include setting';
   if (r.invoice_qr != null && r.invoice_qr !== '' && !['zatca', 'epc'].includes(r.invoice_qr)) return 'Select a valid payment QR format';
   const lastMonth = r.fiscalyear_last_month != null && r.fiscalyear_last_month !== '' ? Number(r.fiscalyear_last_month) : null;
   const lastDay = r.fiscalyear_last_day != null && r.fiscalyear_last_day !== '' ? Number(r.fiscalyear_last_day) : null;
@@ -353,6 +355,12 @@ function companyGuard(db, before, r, ctx) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  if (r.incoterm_id) {
+    const incoterm = record(db, 'account.incoterm', r.incoterm_id);
+    if (!incoterm) return 'Select an active incoterm';
+    const incotermChanged = !before || (before.incoterm_id ?? null) !== (r.incoterm_id ?? null);
+    if (incotermChanged && incoterm.active === false) return 'Select an active incoterm';
+  }
   const countryChanged = before && (r.country ?? '') !== (before.country ?? '');
   const currencyChanged = before && (r.currency_id ?? null) !== (before.currency_id ?? null);
   if (countryChanged || currencyChanged) {
@@ -521,11 +529,14 @@ function legacyDeferredFieldPatch(after, vals = {}) {
 }
 
 /** Sync legacy shared deferred fields and tax return types after writing `res.company`. */
-function onCompanyWrite(db, after, _before, vals) {
+function onCompanyWrite(db, after, before, vals) {
   let next = vals && (vals.tax_periodicity !== undefined || vals.tax_start_date !== undefined) ? ensureReturnTypes(db) : db;
   if (vals) {
     const patch = legacyDeferredFieldPatch(after, vals);
     if (Object.keys(patch).length) next = write(next, 'res.company', after.id, patch);
+  }
+  if (vals && vals.account_price_include !== undefined && vals.account_price_include !== before?.account_price_include) {
+    next = refreshDraftEntryTaxes(next, after.id);
   }
   return next;
 }
@@ -712,6 +723,9 @@ export const companyModels = {
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
+      use_invoice_terms: { type: 'boolean', label: 'Default Terms & Conditions' },
+      invoice_terms: { type: 'text', label: 'Terms and Conditions' },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Default Incoterm', domain: (r) => r.active !== false },
       invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       gain_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Gain Account' },
@@ -753,6 +767,7 @@ export const companyModels = {
       tax_return_template: { type: 'selection', label: 'Tax Return Template', options: TAX_RETURN_TEMPLATE_OPTIONS },
       account_sale_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Sales Tax' },
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
+      account_price_include: { type: 'selection', label: 'Default Sales Price Include', options: [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']] },
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
       account_storno: { type: 'boolean', label: 'Storno accounting', default: false },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
@@ -779,6 +794,7 @@ export const companyModels = {
       currency_interval_unit: 'manually',
       currency_next_execution_date: null,
       intercompany_rule: 'none',
+      account_price_include: 'tax_excluded',
       tax_periodicity: 'monthly',
       deferred_amount_computation_method: 'days',
       generate_deferred_revenue_entries_method: 'on_validation',

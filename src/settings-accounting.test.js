@@ -60,11 +60,11 @@ test('Accounting Settings renders Odoo block order with descriptions, currency l
     const blocks = collect(accountingSection, (n) => props(n)?.['data-block']);
     assert.deepEqual(
       blocks.map((b) => props(b)['data-block']),
-      ['taxes', 'currencies', 'customer_payments', 'vendor_bills', 'fiscal_periods', 'deferred_revenues', 'deferred_expenses', 'storno'],
+      ['taxes', 'currencies', 'customer_invoices', 'customer_payments', 'vendor_bills', 'fiscal_periods', 'deferred_revenues', 'deferred_expenses', 'storno'],
     );
     assert.deepEqual(
       blocks.map((b) => find(b, (n) => n.tagName === 'H3')?.textContent),
-      ['Taxes', 'Currencies', 'Customer Payments', 'Vendor Bills', 'Fiscal Periods', 'Deferred Revenues', 'Deferred Expenses', 'Storno Accounting'],
+      ['Taxes', 'Currencies', 'Customer Invoices', 'Customer Payments', 'Vendor Bills', 'Fiscal Periods', 'Deferred Revenues', 'Deferred Expenses', 'Storno Accounting'],
     );
 
     const rows = collect(accountingSection, (n) => props(n)?.['data-setting']);
@@ -208,8 +208,8 @@ test('Settings omits skipped Odoo features and omits any setting whose res.compa
   try {
     const labels = collect(ctx.host, (n) => ['LABEL', 'H2', 'H3'].includes(n.tagName)).map((n) => n.textContent);
     for (const omitted of [
-      'Fiscal Localization', 'Verify VAT Numbers', 'Cash Basis', 'Customer Invoices',
-      'Snail Mail', 'Default Incoterm', 'Sale Credit Limit', 'Units & Packagings',
+      'Fiscal Localization', 'Verify VAT Numbers', 'Cash Basis',
+      'Snail Mail', 'Sale Credit Limit', 'Units & Packagings',
       'Invoice Online Payment', 'Batch Payments', 'Vendor Payments',
       'Digitization', 'Accounting Firms Mode', 'Quick encoding',
     ]) {
