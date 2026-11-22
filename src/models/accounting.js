@@ -20,7 +20,7 @@ import { t } from '../i18n.js';
 import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, deferralLinksMove, registerDeferredPostMoveHook, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, syncDeferralOnMoveStateChange, validateInvoiceDeferralCredit } from './deferred.js';
 import { isEligibleRecipientBank, resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
-import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard, confirmAsset, syncMethodRateAndDuration } from './assets.js';
+import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard, assetProrataComputation, confirmAsset, defaultProrataDate, syncMethodRateAndDuration } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
@@ -965,21 +965,25 @@ function draftAssetsFromBill(db, bill) {
     if (mode === 'no') return next;
     const modelJournal = model?.journal_id && read(next, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
     const product = read(next, 'product', line.product_id);
+    const acquisitionDate = bill.invoice_date ?? today();
+    const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
+    const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
+    const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
     const values = {
-      name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
+      name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: acquisitionDate,
       partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
       account_asset_id: booked.account,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
-        method_number: model.method_number ?? 5,
-        method_period: model.method_period ?? '12',
+        method_number: modelNumber,
+        method_period: modelPeriod,
         method_progress_factor: model.method_progress_factor ?? 0.3,
-        method_mode: model.method_mode,
-        method_rate: model.method_rate,
-        prorata_computation_type: model.prorata_computation_type ?? (model.prorata ? 'daily_computation' : 'none'),
-        prorata_date: model.prorata_date,
-        prorata: Boolean(model.prorata),
+        method_mode: model.method_mode ?? 'duration',
+        method_rate: model.method_rate ?? (Number(modelNumber) > 0 ? 1 / Number(modelNumber) : 0.2),
+        prorata_computation_type: modelComputation,
+        prorata_date: model.prorata_date || defaultProrataDate(acquisitionDate, modelPeriod, modelComputation),
+        prorata: modelComputation !== 'none',
         account_depreciation_id: model.account_depreciation_id ?? null,
         account_depreciation_expense_id: model.account_depreciation_expense_id ?? null,
         journal_id: modelJournal ?? defaultJournal,
@@ -987,6 +991,7 @@ function draftAssetsFromBill(db, bill) {
       } : {
         model_id: null,
         ...ASSET_DEPRECIATION_DEFAULTS,
+        prorata_date: defaultProrataDate(acquisitionDate, modelPeriod, modelComputation),
         account_depreciation_id: null,
         account_depreciation_expense_id: null,
         journal_id: defaultJournal,

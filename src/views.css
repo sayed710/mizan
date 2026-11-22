@@ -249,6 +249,8 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
   padding: 6px; display: flex; flex-direction: column;
 }
 .nav-dropdown a { color: var(--text); padding: 7px 10px; border-radius: 6px; }
+/* Grouped items sit side by side as inline links; inline-block gives each its own text run so Arabic letters never join across items. */
+.nav-submenu-group > a { display: inline-block; }
 .nav-dropdown a:hover, .nav-dropdown a.active { background: var(--brand-soft); color: var(--brand); }
 
 .search-wrap { position: relative; flex: 1 1 360px; max-width: 560px; }

@@ -9,7 +9,16 @@ import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
 
 /** Depreciation settings of an asset without a model. */
-export const ASSET_DEPRECIATION_DEFAULTS = { method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false };
+export const ASSET_DEPRECIATION_DEFAULTS = {
+  method: 'linear',
+  method_mode: 'duration',
+  method_rate: 0.2,
+  method_number: 5,
+  method_period: '12',
+  method_progress_factor: 0.3,
+  prorata: false,
+  prorata_computation_type: 'none',
+};
 
 export const IMMUTABLE_ASSET_FIELDS = [
   'acquisition_date',
@@ -369,6 +378,14 @@ function periodEnd(y, m, yearly, i) {
 
 export function assetProrataComputation(asset) {
   return asset?.prorata_computation_type ?? (asset?.prorata ? 'daily_computation' : 'none');
+}
+
+/** Default prorata start date for an acquisition date, period length ('1' or '12'), and computation type. */
+export function defaultProrataDate(acquisitionDate, methodPeriod = '12', computation = 'none') {
+  if (!acquisitionDate) return null;
+  if (computation !== 'none') return acquisitionDate;
+  const yearly = String(methodPeriod) === '12';
+  return `${acquisitionDate.slice(0, yearly ? 4 : 7)}${yearly ? '-01-01' : '-01'}`;
 }
 
 export function addMonthsClamped(dateStr, months) {
@@ -800,23 +817,31 @@ export const assetModels = {
       const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'method_mode', 'method_rate', 'prorata', 'prorata_computation_type', 'prorata_date', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
       if (modelJournal) modelDefaults.journal_id = modelJournal;
       const defaultJournal = !vals?.journal_id && !modelDefaults.journal_id ? (journalId(db, 'MISC', company) ?? null) : null;
-      const computation = assetProrataComputation(vals ?? modelDefaults);
+      const computation = vals?.prorata_computation_type
+        ? vals.prorata_computation_type
+        : vals?.prorata !== undefined
+          ? (vals.prorata ? 'daily_computation' : 'none')
+          : assetProrataComputation(modelDefaults);
       const acquisition = vals?.acquisition_date || today();
       const period = vals?.method_period ?? modelDefaults.method_period ?? '12';
-      const defaultDate = computation === 'none' ? `${acquisition.slice(0, period === '12' ? 4 : 7)}${period === '12' ? '-01-01' : '-01'}` : acquisition;
+      const defaultDate = defaultProrataDate(acquisition, period, computation);
+      const modelDate = model && computation === assetProrataComputation(model) ? modelDefaults.prorata_date : null;
       return {
         company_id: company,
         ...(defaultJournal ? { journal_id: defaultJournal } : {}),
         ...modelDefaults,
         prorata_computation_type: computation,
-        prorata_date: vals?.prorata_date ?? modelDefaults.prorata_date ?? defaultDate,
+        prorata: vals?.prorata ?? (computation !== 'none'),
+        prorata_date: vals?.prorata_date || modelDate || defaultDate,
       };
     },
     onchange: (r, key, db) => {
       if (['acquisition_date', 'prorata_computation_type', 'method_period'].includes(key) && r.acquisition_date) {
         const computation = assetProrataComputation(r);
-        const yearly = String(r.method_period) === '12';
-        return { prorata_date: computation === 'none' ? `${r.acquisition_date.slice(0, yearly ? 4 : 7)}${yearly ? '-01-01' : '-01'}` : r.acquisition_date };
+        return {
+          prorata_date: defaultProrataDate(r.acquisition_date, r.method_period ?? '12', computation),
+          prorata: computation !== 'none',
+        };
       }
       if (['method_number', 'method_rate', 'method_mode'].includes(key) && (!r.state || r.state === 'draft')) {
         return syncMethodRateAndDuration(r, key);
@@ -832,16 +857,20 @@ export const assetModels = {
         const model = read(db, 'account.asset.model', r.model_id);
         if (model) {
           const modelJournal = model.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : undefined;
+          const computation = assetProrataComputation(model);
+          const period = model.method_period ?? r.method_period ?? '12';
+          const methodNumber = model.method_number ?? r.method_number;
+          const prorataDate = model.prorata_date || (r.acquisition_date ? defaultProrataDate(r.acquisition_date, period, computation) : r.prorata_date);
           return {
             method: model.method ?? r.method,
-            method_number: model.method_number ?? r.method_number,
-            method_period: model.method_period ?? r.method_period,
+            method_number: methodNumber,
+            method_period: period,
             method_progress_factor: model.method_progress_factor ?? r.method_progress_factor,
-            method_mode: model.method_mode ?? r.method_mode,
-            method_rate: model.method_rate ?? r.method_rate,
-            prorata_computation_type: assetProrataComputation(model),
-            prorata_date: model.prorata_date ?? r.prorata_date,
-            prorata: model.prorata !== undefined ? model.prorata : r.prorata,
+            method_mode: model.method_mode ?? (model.method_number !== undefined ? 'duration' : r.method_mode),
+            method_rate: model.method_rate ?? (Number(methodNumber) > 0 ? 1 / Number(methodNumber) : r.method_rate),
+            prorata_computation_type: computation,
+            prorata_date: prorataDate,
+            prorata: computation !== 'none',
             account_asset_id: model.account_asset_id ?? r.account_asset_id,
             account_depreciation_id: model.account_depreciation_id ?? r.account_depreciation_id,
             account_depreciation_expense_id: model.account_depreciation_expense_id ?? r.account_depreciation_expense_id,
