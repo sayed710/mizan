@@ -5,6 +5,8 @@ import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { billControlModels, shouldBePaid, matchBill, checkBillMatch } from './models/billcontrol.js';
+import { changeFormValue } from './views/formDefaults.js';
+import { saveFormRecord } from './views/formSave.js';
 
 const run = (db, model, id, label) => (billControlModels[model] ?? models[model]).form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -400,4 +402,85 @@ test('purchase autocomplete adopts the selected order company as Odoo does', () 
   const po = create(db, 'purchase.order', { partner_id: vendor.id, company_id: 2, order_line: [] });
   const result = models['account.move'].onchange({ move_type: 'in_invoice', company_id: 1, purchase_id: po.id }, 'purchase_id', po.db);
   assert.equal(result.company_id, 2);
+});
+
+test('clearing purchase_id removes PO-copied lines, purchase_line_id links, and PO smart button inference while keeping manual lines', () => {
+  let db = seed();
+  const vendor = search(db, 'res.partner')[0];
+  const product = search(db, 'product')[0];
+  const po1 = create(db, 'purchase.order', {
+    partner_id: vendor.id,
+    state: 'purchase',
+    name: 'PO-CLR-1',
+    order_line: [{ product_id: product.id, qty: 4, qty_delivered: 4, price_unit: 50 }],
+  });
+  const po2 = create(po1.db, 'purchase.order', {
+    partner_id: vendor.id,
+    state: 'purchase',
+    name: 'PO-CLR-2',
+    order_line: [{ product_id: product.id, qty: 2, qty_delivered: 2, price_unit: 30 }],
+  });
+  db = po2.db;
+  const po1Rec = read(db, 'purchase.order', po1.id);
+  const po2Rec = read(db, 'purchase.order', po2.id);
+  const poBtn = models['account.move'].form.smart.find((s) => s.label === 'Purchase Orders');
+
+  // 1. Form flow: start with a manual line, select PO1, then clear purchase_id and save
+  const base = {
+    move_type: 'in_invoice',
+    state: 'draft',
+    company_id: 1,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [{ name: 'Manual Freight', qty: 1, price_unit: 20, tax: 0 }],
+  };
+  const withPo1 = changeFormValue('account.move', base, {}, 'purchase_id', po1.id, db);
+  assert.equal(withPo1.invoice_line_ids.length, 2);
+  assert.equal(withPo1.invoice_line_ids[1].purchase_line_id, po1Rec.order_line[0].id);
+  assert.equal(withPo1.invoice_origin, po1Rec.name);
+
+  const clearedChanges = changeFormValue('account.move', base, withPo1, 'purchase_id', null, db);
+  assert.equal(clearedChanges.purchase_id, null);
+  assert.equal(clearedChanges.invoice_origin ?? null, null);
+  assert.equal(clearedChanges.invoice_line_ids.length, 1);
+  assert.equal(clearedChanges.invoice_line_ids[0].name, 'Manual Freight');
+  assert.equal(clearedChanges.invoice_line_ids[0].purchase_line_id, undefined);
+
+  const saved = saveFormRecord(db, 'account.move', null, { ...base, ...clearedChanges });
+  const savedBill = read(saved.db, 'account.move', saved.id);
+  assert.equal(savedBill.purchase_id, null);
+  assert.equal(savedBill.invoice_line_ids.length, 1);
+  assert.equal(savedBill.invoice_line_ids[0].name, 'Manual Freight');
+  assert.equal(savedBill.invoice_line_ids[0].purchase_line_id, undefined);
+  assert.equal(poBtn.when(savedBill, saved.db), false);
+  assert.equal(poBtn.value(saved.db, savedBill), 0);
+  assert.equal(read(saved.db, 'purchase.order', po1.id).order_line[0].qty_invoiced ?? 0, 0);
+
+  // 2. Switching purchase_id from PO1 to PO2 replaces PO1 lines with PO2 lines and preserves manual lines
+  const switched = changeFormValue('account.move', base, withPo1, 'purchase_id', po2.id, db);
+  assert.equal(switched.invoice_origin, po2Rec.name);
+  assert.equal(switched.invoice_line_ids.length, 2);
+  assert.equal(switched.invoice_line_ids[0].name, 'Manual Freight');
+  assert.equal(switched.invoice_line_ids[1].purchase_line_id, po2Rec.order_line[0].id);
+
+  // 3. Direct onchange call without context.previous still clears PO-copied lines and invoice_origin
+  const directCleared = models['account.move'].onchange(
+    { ...base, ...withPo1, purchase_id: null },
+    'purchase_id',
+    db,
+  );
+  assert.equal(directCleared.invoice_origin ?? null, null);
+  assert.equal(directCleared.invoice_line_ids.length, 1);
+  assert.equal(directCleared.invoice_line_ids[0].name, 'Manual Freight');
+
+  // 4. Purchase Orders smart button does not infer association from invoice_origin alone
+  const originOnly = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: vendor.id,
+    invoice_date: '2026-06-01',
+    invoice_origin: po1Rec.name,
+    invoice_line_ids: [{ name: 'Unlinked line', qty: 1, price_unit: 20, tax: 0 }],
+  });
+  const originOnlyRec = read(originOnly.db, 'account.move', originOnly.id);
+  assert.equal(poBtn.when(originOnlyRec, originOnly.db), false);
+  assert.equal(poBtn.value(originOnly.db, originOnlyRec), 0);
 });

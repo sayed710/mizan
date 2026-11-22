@@ -2469,7 +2469,7 @@ const moveAssets = (db, r) => {
   return search(db, 'account.asset').filter((a) => ids.has(a.bill_id));
 };
 
-/** Purchase orders linked to bill or refund `r` (via purchase_id, purchase_line_key, or invoice_origin). */
+/** Purchase orders linked to bill or refund `r` (via purchase_id or purchase_line_id). */
 const movePurchaseOrders = (db, r) => {
   if (!db || !r) return [];
   const poRecords = search(db, 'purchase.order');
@@ -2491,10 +2491,6 @@ const movePurchaseOrders = (db, r) => {
           poIds.add(po.id);
         }
       }
-    }
-    if (m.invoice_origin) {
-      const matchingPo = poRecords.find((po) => po.name === m.invoice_origin);
-      if (matchingPo) poIds.add(matchingPo.id);
     }
   }
   return poRecords.filter((po) => poIds.has(po.id));
@@ -3466,7 +3462,34 @@ export const accountingModels = {
       }
       if (key === 'invoice_payment_term_id') return termDue(db, r);
       if (key === 'purchase_id') {
-        if (!r.purchase_id) return {};
+        const previous = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null) ?? {};
+        const prevPoId = previous.purchase_id ?? null;
+        const clearing = !r.purchase_id;
+        const changingPo = prevPoId != null && prevPoId !== r.purchase_id;
+        const prevPo = prevPoId ? read(db, 'purchase.order', prevPoId) : null;
+        const dropOrder = prevPo;
+        const dropLineIds = new Set((dropOrder?.order_line ?? []).map((l) => l.id).filter((id) => id != null));
+        const shouldKeepLine = (line) => {
+          if (!clearing && !changingPo) return true;
+          if (dropOrder) {
+            const pid = purchaseLineId(db, line, dropOrder.id);
+            return !(pid != null && dropLineIds.has(pid));
+          }
+          if (prevPoId != null) {
+            const pid = purchaseLineId(db, line, prevPoId);
+            if (pid == null) return !line.purchase_line_key;
+            return search(db, 'purchase.order').some((order) => (order.order_line ?? []).some((pol) => pol.id === pid));
+          }
+          return line.purchase_line_id == null && !line.purchase_line_key;
+        };
+        const baseLines = (r.invoice_line_ids ?? []).filter(shouldKeepLine);
+        if (clearing) {
+          const clearOrigin = Boolean(dropOrder && r.invoice_origin === dropOrder.name);
+          return {
+            ...(Array.isArray(r.invoice_line_ids) ? { invoice_line_ids: baseLines } : {}),
+            ...(clearOrigin ? { invoice_origin: null } : {}),
+          };
+        }
         const po = read(db, 'purchase.order', r.purchase_id);
         if (!po) return {};
         const eligible = billableLines(db, po.id);
@@ -3495,7 +3518,7 @@ export const accountingModels = {
           currency_id: po.currency_id ?? null,
           invoice_payment_term_id: po.payment_term_id ?? null,
           invoice_origin: po.name ?? r.invoice_origin,
-          invoice_line_ids: [...(r.invoice_line_ids ?? []), ...unbilledLines.filter((line) => !(r.invoice_line_ids ?? []).some((existing) => existing.purchase_line_id === line.purchase_line_id))],
+          invoice_line_ids: [...baseLines, ...unbilledLines.filter((line) => !baseLines.some((existing) => existing.purchase_line_id === line.purchase_line_id))],
           ...dueInfo,
         };
       }
@@ -3739,7 +3762,7 @@ export const accountingModels = {
         },
         {
           label: (r) => (['in_invoice', 'in_refund'].includes(r?.move_type) ? 'Deferred Expenses' : 'Deferrals'),
-          when: (r, db) => (r.move_type === 'entry' || ['in_invoice', 'in_refund'].includes(r?.move_type)) && moveDeferrals(db, r).length > 0,
+          when: (r, db) => moveDeferrals(db, r).length > 0,
           value: (db, r) => moveDeferrals(db, r).length,
           target: (r, db) => {
             const list = moveDeferrals(db, r);
