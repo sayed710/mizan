@@ -42,10 +42,10 @@ test('AP-4 digitized edits clear the flag and forged diffs are rejected', () => 
   const changed = write(db, 'account.move', made.id, { ref: 'after' });
   assert.equal(read(changed, 'account.move', made.id).digitized_unedited, false);
   const forged = { ...changed, records: { ...changed.records, 'account.move': changed.records['account.move'].map((m) => m.id === made.id ? { ...m, digitized_unedited: true } : m) } };
-  assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: true }), /digitized/i);
+  assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: true }), /digitiz/i);
   const posted = postMove(db, made.id);
   const fakePost = { ...posted, records: { ...posted.records, 'account.move': posted.records['account.move'].map((m) => m.id === made.id ? { ...m, ref: 'forged' } : m) } };
-  assert.throws(() => applyDiff(db, diffDb(db, fakePost), { isAdmin: true }), /digitized/i);
+  assert.throws(() => applyDiff(db, diffDb(db, fakePost), { isAdmin: true }), /digitiz/i);
 });
 
 import { postMove, suggestBillAutopost } from './models/accounting.js';
@@ -72,7 +72,8 @@ test('AP-4 suggestion follows three unedited posted bills, resets on edit, and c
     assert.equal(suggestBillAutopost(saved, bill), false);
   }
   const edited = write(db, 'account.move', made.id, { ref: 'changed' });
-  db = applyDiff(db, diffDb(db, edited), { isAdmin: true });
+  const postedEdited = postMove(edited, made.id);
+  db = applyDiff(db, diffDb(db, postedEdited), { isAdmin: true });
   made = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true });
   db = made.db;
   bill = read(db, 'account.move', made.id);
@@ -93,7 +94,7 @@ test('AP-3 commits digitization before posting, surfaces failure, and honors ven
       const made = create(db, 'account.move', { move_type: 'in_invoice' });
       db = made.db;
       const snapshots = [];
-      const store = { get: () => db, commit: (next) => { db = applyDiff(db, diffDb(db, next), { isAdmin: true }); snapshots.push(db); } };
+      const store = { get: () => db, commit: (next) => { db = next; snapshots.push(db); } };
       globalThis.fetch = async () => new Response(JSON.stringify({ content: [{ type: 'tool_use', id: 'tool', name: 'record_bill', input: { vendor: vendor.name, reference: 'INV-7', invoice_date: '2026-10-20', lines: scenario === 'failure' ? [] : [{ description: 'Goods', quantity: 1, unit_price: 100, tax_percent: 0 }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
       const out = await finishDigitizedBill(store, { id: made.id, file: { name: 'bill.pdf', type: 'application/pdf', data: 'JVBERi0xLjQ=' } });
       assert.equal(read(snapshots[0], 'account.move', made.id).state, 'draft');
@@ -127,7 +128,7 @@ test('AP-4 latest digitization resets the unedited flag, then later edits clear 
       const vendor = read(db, 'res.partner', 7);
       const made = create(db, 'account.move', { move_type: 'in_invoice' });
       db = made.db;
-      const store = { get: () => db, commit: (next) => { db = applyDiff(db, diffDb(db, next), { isAdmin: true }); } };
+      const store = { get: () => db, commit: (next) => { db = next; } };
       let call = 0;
       globalThis.fetch = async () => new Response(JSON.stringify({ content: [{ type: 'tool_use', id: 'tool', name: 'record_bill', input: { vendor: vendor.name, reference: `OCR-${++call}`, invoice_date: '2026-10-20', lines: [{ description: 'Goods', quantity: 1, unit_price: 100, tax_percent: 0 }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
       for (const step of steps) {
@@ -145,5 +146,154 @@ test('AP-4 latest digitization resets the unedited flag, then later edits clear 
     globalThis.fetch = oldFetch;
     if (oldKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = oldKey;
+  }
+});
+
+test('Finding 1 regression: digitized drafts accept payment-term and fiscal position changes', () => {
+  let db = seed();
+  const term = create(db, 'account.payment.term', {
+    name: '30 Days Net',
+    line_ids: [{ value: 100, value_type: 'percent', nb_days: 30, delay_type: 'days_after' }],
+  });
+  db = term.db;
+  const fpos = create(db, 'account.fiscal.position', { name: 'National' });
+  db = fpos.db;
+
+  const made1 = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 7,
+    digitized_vendor_id: 7,
+    digitized_document: true,
+    digitized_unedited: true,
+    invoice_date: '2026-10-01',
+    invoice_date_due: '2026-10-01',
+    invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = made1.db;
+
+  // Setting payment term should not throw 'Edited digitized bill must be marked as changed'
+  const withTerm = write(db, 'account.move', made1.id, { invoice_payment_term_id: term.id });
+  const readTermBill = read(withTerm, 'account.move', made1.id);
+  assert.equal(readTermBill.digitized_unedited, false);
+  assert.equal(readTermBill.invoice_date_due, '2026-10-31');
+
+  // Setting fiscal position on an untouched digitized draft should also succeed
+  const made2 = create(withTerm, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 7,
+    digitized_vendor_id: 7,
+    digitized_document: true,
+    digitized_unedited: true,
+    invoice_date: '2026-10-01',
+    invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 50, tax: 0 }],
+  });
+  const withFpos = write(made2.db, 'account.move', made2.id, { fiscal_position_id: fpos.id });
+  const readFposBill = read(withFpos, 'account.move', made2.id);
+  assert.equal(readFposBill.digitized_unedited, false);
+});
+
+test('Finding 2 regression: client cannot forge digitization provenance on ordinary moves', () => {
+  let db = seed();
+  const ordinary = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 7, ref: 'standard', invoice_line_ids: [{ name: 'L', qty: 1, price_unit: 10, tax: 0 }] });
+  db = ordinary.db;
+
+  // Forging digitization provenance on an ordinary draft bill via diff
+  const forgedDraft = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) =>
+        m.id === ordinary.id ? { ...m, digitized_document: true, digitized_unedited: true, digitized_vendor_id: 7 } : m
+      ),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedDraft), { isAdmin: true }), /digitiz/i);
+
+  // Forging digitization provenance on an ordinary posted bill
+  const posted = postMove(db, ordinary.id);
+  db = posted;
+  const forgedPosted = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) =>
+        m.id === ordinary.id ? { ...m, digitized_document: true, digitized_unedited: true, digitized_vendor_id: 7 } : m
+      ),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedPosted), { isAdmin: true }), /digitiz/i);
+
+  // Forging digitization provenance on a newly created bill via diff
+  const forgedCreate = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [
+        ...(db.records['account.move'] ?? []),
+        { id: 999999, move_type: 'in_invoice', partner_id: 7, digitized_document: true, digitized_unedited: true, digitized_vendor_id: 7 },
+      ],
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedCreate), { isAdmin: true }), /digitiz/i);
+
+  // Client cannot set digitized_unedited back to true on an edited digitized bill
+  const digitized = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 7, digitized_vendor_id: 7, digitized_document: true, digitized_unedited: true });
+  const editedDigitized = write(digitized.db, 'account.move', digitized.id, { ref: 'edited' });
+  assert.equal(read(editedDigitized, 'account.move', digitized.id).digitized_unedited, false);
+  const forgedUnedited = {
+    ...editedDigitized,
+    records: {
+      ...editedDigitized.records,
+      'account.move': editedDigitized.records['account.move'].map((m) =>
+        m.id === digitized.id ? { ...m, digitized_unedited: true } : m
+      ),
+    },
+  };
+  assert.throws(() => applyDiff(editedDigitized, diffDb(editedDigitized, forgedUnedited), { isAdmin: true }), /digitiz/i);
+});
+
+test('Finding 4 regression: editing reference on posted digitized bill clears unedited flag and resets suggestion', () => {
+  let db = write(seed(), 'res.company', 1, { autopost_bills: true });
+  const vendorId = 7;
+  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, ref: 'initial-ref', invoice_line_ids: [{ name: 'G', qty: 1, price_unit: 100, tax: 0 }] });
+  const posted = postMove(bill.db, bill.id);
+  db = applyDiff(bill.db, diffDb(bill.db, posted), { isAdmin: true });
+
+  const postedBill = read(db, 'account.move', bill.id);
+  assert.equal(postedBill.state, 'posted');
+  assert.equal(postedBill.digitized_unedited, true);
+
+  // User edits reference on posted bill
+  const edited = write(db, 'account.move', bill.id, { ref: 'updated-ref' });
+  const readEdited = read(edited, 'account.move', bill.id);
+  assert.equal(readEdited.ref, 'updated-ref');
+  assert.equal(readEdited.digitized_unedited, false);
+
+  // Suggestion resets
+  const nextDraft = create(edited, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true });
+  assert.equal(suggestBillAutopost(nextDraft.db, read(nextDraft.db, 'account.move', nextDraft.id)), false);
+});
+
+test('Finding 5 regression: finishDigitizedBill tells user when bill is posted automatically', async () => {
+  const { finishDigitizedBill } = await import('../server/integrations.js');
+  const originalFetch = globalThis.fetch;
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  try {
+    let db = write(seed(), 'res.company', 1, { autopost_bills: true });
+    db = write(db, 'res.partner', 7, { autopost_bills: 'always' });
+    const vendor = read(db, 'res.partner', 7);
+    const made = create(db, 'account.move', { move_type: 'in_invoice' });
+    db = made.db;
+    const store = { get: () => db, commit: (next) => { db = next; } };
+    globalThis.fetch = async () => new Response(JSON.stringify({ content: [{ type: 'tool_use', id: 'tool', name: 'record_bill', input: { vendor: vendor.name, reference: 'AUTO-1', invoice_date: '2026-10-20', lines: [{ description: 'Goods', quantity: 1, unit_price: 100, tax_percent: 0 }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    const out = await finishDigitizedBill(store, { id: made.id, file: { name: 'bill.pdf', type: 'application/pdf', data: 'JVBERi0xLjQ=' } });
+    assert.match(out.message, /posted automatically/i);
+    const bill = read(db, 'account.move', made.id);
+    assert.equal(bill.state, 'posted');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
   }
 });

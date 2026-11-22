@@ -217,7 +217,7 @@ export async function digitizeBill(db, { id, file }) {
     product_id: null, name: String(l.description ?? '').slice(0, 500), qty: num(l.quantity), price_unit: num(l.unit_price), discount: 0, tax: num(l.tax_percent),
   }));
   const next = write(withVendor, 'account.move', bill.id, {
-    digitized_document: true, digitized_unedited: true, digitized_vendor_id: partner_id, digitized_sequence: null,
+    digitized_document: true, digitized_unedited: true, digitized_vendor_id: partner_id,
     partner_id, ref: String(data.reference ?? '').slice(0, 100), invoice_line_ids,
     invoice_date: isoOrNull(data.invoice_date) ?? bill.invoice_date, invoice_date_due: isoOrNull(data.due_date) ?? bill.invoice_date_due,
   });
@@ -233,7 +233,7 @@ export async function finishDigitizedBill(store, input) {
   // A replacement of an already digitized draft first clears the flag through the normal edit guard.
   // Once the replacement values are saved, mark that latest digitization as unedited.
   if (!bill.digitized_unedited) {
-    store.commit(write(db, 'account.move', bill.id, { digitized_unedited: true, digitized_sequence: null }));
+    store.commit(write(db, 'account.move', bill.id, { digitized_unedited: true }));
     db = store.get();
     bill = read(db, 'account.move', bill.id);
   }
@@ -241,7 +241,8 @@ export async function finishDigitizedBill(store, input) {
   const vendor = read(db, 'res.partner', bill.partner_id);
   if (company?.autopost_bills && vendor?.autopost_bills === 'always') {
     try {
-      store.commit(postMove(db, bill.id));
+      store.commit(postNote(postMove(db, bill.id), 'account.move', bill.id, 'The bill was posted automatically'));
+      return { message: `${filled.message}. The bill was posted automatically` };
     } catch (error) {
       return { message: `${filled.message}. Automatic posting failed: ${error.message}` };
     }

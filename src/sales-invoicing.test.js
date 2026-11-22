@@ -341,7 +341,7 @@ test('sales credit notes and vendor refunds restore invoiceable quantities and c
     db = run(db, model, created.id, purchase ? 'Create Bill' : 'Create Invoice').db;
     const invoice = search(db, 'account.move').find((m) => m[field] === created.id);
     db = run(db, 'account.move', invoice.id, 'Confirm').db;
-    db = run(db, 'account.move', invoice.id, 'Credit Note').db;
+    db = run(db, 'account.move', invoice.id, purchase ? 'Refund' : 'Credit Note').db;
     const credit = search(db, 'account.move').find((m) => m.reversed_entry_id === invoice.id);
     assert.equal(credit[field], created.id);
     assert.equal(read(db, model, created.id).order_line[0].qty_invoiced, 0);

@@ -650,6 +650,21 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         if (submitted.fx_payment_move_id != null || submitted.fx_invoice_id != null) throw new Error('Exchange provenance cannot be changed');
       }
       if (model === 'account.move') {
+        if (!prior) {
+          if (submitted.digitized_document != null || submitted.digitized_vendor_id != null || submitted.digitized_unedited != null) {
+            throw new Error('Digitization provenance cannot be changed');
+          }
+        } else {
+          if ((submitted.digitized_document !== undefined && submitted.digitized_document !== prior.digitized_document) ||
+              (submitted.digitized_vendor_id !== undefined && submitted.digitized_vendor_id !== prior.digitized_vendor_id)) {
+            throw new Error('Digitization provenance cannot be changed');
+          }
+          if (submitted.digitized_unedited !== undefined && submitted.digitized_unedited !== prior.digitized_unedited) {
+            if (!(prior.digitized_unedited === true && submitted.digitized_unedited === false)) {
+              throw new Error('Digitization provenance cannot be changed');
+            }
+          }
+        }
         if (prior && submitted.system_generated !== undefined && submitted.system_generated !== prior.system_generated) {
           throw new Error('System-generated status cannot be changed');
         }
