@@ -1902,7 +1902,6 @@ export function migrateDeferralCreditAdjustments(db) {
 }
 
 MIGRATIONS.push({ version: 62, name: 'canonical-deferral-credit-adjustments', up: migrateDeferralCreditAdjustments });
-MIGRATIONS.push({ version: 63, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 export function migrateFollowUpNextActionDate(db) {
   if (!db?.records?.['res.partner']) return db;
@@ -1943,6 +1942,7 @@ export function migrateFollowUpNextActionDate(db) {
   return { ...db, records: { ...db.records, 'res.partner': partners } };
 }
 MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
+MIGRATIONS.push({ version: 64, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
