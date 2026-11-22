@@ -1,8 +1,10 @@
 import { Fragment, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
-import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, matchedMoveIds } from '../models/ledger.js';
+import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, isUnreconciledJournalItem, journalItems, matchedMoveIds } from '../models/ledger.js';
+import { currentCompany, documentCompany } from '../models/company.js';
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
 import { RateNote } from './RateNote.jsx';
+import { ReportPrintView } from './FinancialReportPrint.jsx';
 import { read } from '../orm.js';
 import { models } from '../models/index.js';
 import { commit, companiesOf, getDb, useDb } from '../store.js';
@@ -12,6 +14,7 @@ import { monthFilters, parseAmount, today } from '../models/common.js';
 import { money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
+import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 
 const OPTIONAL_STORAGE_KEY = 'mizan-report-cols:journalItems';
@@ -73,7 +76,7 @@ const ITEM_FILTER_GROUPS = [
     { id: 'not_secured', label: 'Not Secured', fn: (line) => line.move_state === 'posted' && !line.inalterable_hash },
   ],
   [
-    { id: 'unreconciled', label: 'Unreconciled', fn: (line) => isReconcilableAccount(line._account) && line.reconciled !== true && Math.abs(line.balance) > 1e-9 },
+    { id: 'unreconciled', label: 'Unreconciled', fn: (line) => isUnreconciledJournalItem(line, line._account) },
     { id: 'with_residual', label: 'With residual', fn: (line) => isReconcilableAccount(line._account) && Math.abs(line.amount_residual ?? 0) > 1e-9 },
   ],
   [
@@ -198,6 +201,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const [label, setLabel] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
   const keyOf = (line) => JSON.stringify([line.move_id, line.line_identity]);
   const toggleFilter = (id) => setActiveFilters((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const run = async (event) => {
@@ -365,10 +369,10 @@ export function JournalItems({ leaf = {} } = {}) {
     }
   };
 
-  const exportXlsx = () => {
+  const buildExportData = () => {
     const displayedRows = [...groups.values()].flat();
     const baseName = mode === 'unreconciled' ? 'unreconciled' : mode === 'draft' ? 'draft_entries' : 'journal_items';
-    let exportCols = [...visibleCols];
+    const exportCols = [...visibleCols];
     const needCompanyCurrency = multiCompany || new Set(displayedRows.map((l) => l._companyCurrency?.name).filter(Boolean)).size > 1;
     if (needCompanyCurrency && !exportCols.some((c) => c.key === 'company_currency_id')) {
       const currIdx = exportCols.findIndex((c) => c.key === 'currency_id');
@@ -402,6 +406,16 @@ export function JournalItems({ leaf = {} } = {}) {
       exportRows.push(totalsRow);
     }
 
+    return { baseName, exportCols, exportRows };
+  };
+
+  const exportCsv = () => {
+    const { baseName, exportRows } = buildExportData();
+    downloadCsv(`${baseName}.csv`, exportRows);
+  };
+
+  const exportXlsx = () => {
+    const { baseName, exportCols, exportRows } = buildExportData();
     downloadXlsx(
       `${baseName}.xlsx`,
       exportRows,
@@ -412,7 +426,16 @@ export function JournalItems({ leaf = {} } = {}) {
     );
   };
 
-  return <main className="action report-page">
+  const printCompanyIds = filterCompany ? [filterCompany] : [...allowedCompanies];
+  const printCompanies = isPrinting
+    ? printCompanyIds.map((cId) => documentCompany(db, { company_id: cId })).filter(Boolean)
+    : null;
+  const printCompany = isPrinting
+    ? (printCompanies?.[0] ?? documentCompany(db, { company_id: filterCompany ?? currentCompany(db) }))
+    : null;
+  const subtitle = from && to ? `${from} → ${to}` : from ? `≥ ${from}` : to ? `≤ ${to}` : '';
+
+  const controls = <>
     <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
       {accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
       <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
@@ -422,6 +445,8 @@ export function JournalItems({ leaf = {} } = {}) {
         <option value="">{t('None')}</option>{GROUP_OPTIONS.map((opt) => <option key={opt.key} value={opt.key}>{t(opt.label)}</option>)}
       </select></label>
       <span className="spacer" />
+      <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+      <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
     </div>
     <div className="control-panel" role="group" aria-label={t('Filters')}>
@@ -447,17 +472,28 @@ export function JournalItems({ leaf = {} } = {}) {
       <button className="btn primary" disabled={busy}>{t('Confirm')}</button><button type="button" className="btn" disabled={busy} onClick={() => setAction('')}>{t('Cancel')}</button>
       {error && <p role="alert">{t(error)}</p>}
     </form>}
-    <div className="list-wrap"><table className="list report"><thead><tr><th><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
+  </>;
+
+  return <ReportPrintView
+    active={isPrinting}
+    company={printCompany}
+    companies={printCompanies}
+    title={t(title)}
+    subtitle={subtitle}
+    controls={controls}
+    onBack={() => setIsPrinting(false)}
+  >
+    <div className="list-wrap"><table className="list report"><thead><tr>{!isPrinting && <th><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>}{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}{!isPrinting && <th className="o2m-cols-th"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th>}</tr></thead>
       <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
-        {group && <tr className="group-row"><th /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th /></tr>}
+        {group && <tr className="group-row">{!isPrinting && <th />}<th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th>{!isPrinting && <th />}</tr>}
         {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
-          <td><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={line.move_state === 'draft' || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
+          {!isPrinting && <td><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={line.move_state === 'draft' || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>}
           {visibleCols.map((col) => <td key={col.key} className={cellClassName(col, line, todayDate)}>{renderCell(line, col)}</td>)}
-          <td className="o2m-cols-td" />
+          {!isPrinting && <td className="o2m-cols-td" />}
         </tr>)}
       </Fragment>)}</tbody>
       {rows.length > 0 && <tfoot><tr>
-        <td />
+        {!isPrinting && <td />}
         {visibleCols.map((col) => {
           const sumValue = col.key === 'debit' ? totalDebit : col.key === 'credit' ? totalCredit : col.key === 'balance' ? totalBalance : col.key === 'amount_residual' ? totalResidual : null;
           const tip = col.numeric && unratedLines ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedLines }) : (col.sum ? t(col.sum) : undefined);
@@ -466,8 +502,8 @@ export function JournalItems({ leaf = {} } = {}) {
             {col.key === 'debit' && <RateNote count={unratedLines} />}
           </td>;
         })}
-        <td className="o2m-cols-td" />
+        {!isPrinting && <td className="o2m-cols-td" />}
       </tr></tfoot>}
     </table></div>
-  </main>;
+  </ReportPrintView>;
 }
