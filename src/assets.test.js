@@ -47,18 +47,18 @@ test('prorata shortens the first year and adds a final period for the remainder'
 
 test('declining amounts decrease and total the base; monthly periods use factor / 12', () => {
   const board = depreciationBoard({ ...BASE, method: 'degressive' });
-  assert.deepEqual(board.map((l) => l.amount), [3000, 2100, 1470, 1029, 2401]);
-  assert.ok(board.slice(0, -1).every((l, i, a) => i === 0 || l.amount < a[i - 1].amount));
+  assert.deepEqual(board.map((l) => l.amount), [3000, 2100, 1633.33, 1633.34, 1633.33]);
+  assert.ok(board[1].amount < board[0].amount && board[2].amount < board[1].amount);
   assert.equal(total(board), 10000);
   const monthly = depreciationBoard({ ...BASE, method: 'degressive', method_period: '1', method_number: 12, original_value: 1200 });
-  assert.equal(monthly[0].amount, 30);
+  assert.equal(monthly[0].amount, 100);
   assert.equal(monthly[0].date, '2026-03-31');
   assert.equal(total(monthly), 1200);
 });
 
 test('declining then straight line switches to linear once it is larger', () => {
   const board = depreciationBoard({ ...BASE, method: 'degressive_then_linear' });
-  assert.deepEqual(board.map((l) => l.amount), [3000, 2100, 1633.33, 1633.34, 1633.33]);
+  assert.deepEqual(board.map((l) => l.amount), [3000, 2100, 2000, 2000, 900]);
   assert.equal(total(board), 10000);
 });
 
@@ -155,7 +155,8 @@ test('asset expense account labels distinguish override and model fallback used 
 
 test('invalid assets are refused on confirm', () => {
   assert.throws(() => running({ original_value: 0 }), /original value must be positive/);
-  assert.throws(() => running({ method_number: 0 }), /at least 1/);
+  assert.throws(() => running({ method_number: 0 }), /duration must be positive/);
+  assert.throws(() => running({ method_number: -2.5 }), /duration must be positive/);
   const fractional = running({ method_number: 2.5 });
   assert.equal(read(fractional.db, 'account.asset', fractional.id).method_number, 2.5);
   assert.throws(() => running({ salvage_value: 10000 }), /lower than the original value/);

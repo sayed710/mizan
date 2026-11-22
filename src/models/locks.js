@@ -69,7 +69,7 @@ export function withLocks(models) {
         const isReopeningAsset = name === 'account.asset'
           && before.state === 'close'
           && ['open', 'paused'].includes(r.state)
-          && isVerifiedReopenBoard(before, r);
+          && isVerifiedReopenBoard(before, r, db);
         const maintained = (name === 'sign.request' && before.state !== 'sent')
           || (name === 'hr.expense.sheet' && before.state === r.state)
           || (name === 'account.asset' && !isReopeningAsset)
