@@ -48,14 +48,15 @@ const docFmts = new Map();
 // number and the run does not reorder the surrounding right-to-left text.
 const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
 /** An amount whose currency is not configured: the number, marked as such, never a borrowed currency symbol. */
-function unconfiguredMoney(n) {
+export function unconfiguredMoney(n) {
   const val = Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n);
   return `${ltr(val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))} (${t('currency not configured')})`;
 }
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
 export const money = (n, code = null, currency = null) => {
   const activeCurrencyCode = activeCode || (moneyFmt ? moneyFmt.resolvedOptions().currency : null);
-  if (currency) return ltr(formatCurrency(n, currency, code || activeCurrencyCode || undefined));
+  const formatCode = code === '' ? '' : (code || currency?.name || activeCurrencyCode || undefined);
+  if (currency) return ltr(formatCurrency(n, currency, formatCode));
   if (code) {
     const fmt = docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code);
     return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
