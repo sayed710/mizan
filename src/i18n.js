@@ -3613,8 +3613,19 @@ const ar = {
   'The bill was posted automatically': 'تم ترحيل الفاتورة تلقائيًا',
   'Digitization provenance cannot be changed': 'لا يمكن تغيير مصدر الرقمنة',
   'Digitization sequence must be unique per vendor and company': 'يجب أن يكون تسلسل الرقمنة فريدًا لكل مورد وشركة',
+  'Bring Accounts Balance Forward': 'ترحيل أرصدة الحسابات',
+  'Non Trade': 'غير تجاري',
+  'Non Trade requires a receivable or payable account': 'يتطلب الحساب غير التجاري حساباً للذمم المدينة أو الدائنة',
+  'Default Sales Price Include': 'تضمين الضريبة في سعر البيع افتراضياً',
+  'Tax Included': 'شامل الضريبة',
+  'Default price-include behaviour for taxes without an explicit override.': 'السلوك الافتراضي لتضمين الضريبة في السعر للضرائب التي ليس لها تجاوز صريح.',
+  'Select a valid default sales price include setting': 'اختر إعداداً صالحاً لتضمين الضريبة في سعر البيع',
+  'Select a valid price include override': 'اختر قيمة صالحة لتجاوز تضمين الضريبة في السعر',
   'Purchase order line must match the vendor, company, and product': 'يجب أن يطابق بند أمر الشراء المورد والشركة والمنتج',
   'Depreciation reversal must match the excess from a vendor refund': 'يجب أن يطابق عكس الإهلاك الزيادة الناتجة عن مرتجع المورد',
+  'Customer Invoices': 'فواتير العملاء',
+  'Customer Credit Notes': 'إشعارات دائنة للعملاء',
+  'Vendor Credit Notes': 'إشعارات دائنة للموردين',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -10,7 +10,7 @@ import { STOCK_CHART_ROLES } from './stock-accounts.js';
 import { returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
-import { taxUnitCompatibilityError } from './accounting.js';
+import { refreshDraftEntryTaxes, taxUnitCompatibilityError } from './accounting.js';
 import { fiscalYearStart } from './ledger.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
@@ -283,7 +283,7 @@ const CONTROL_FIELDS = [
   'audit_trail', 'three_way_matching', 'autopost_bills', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'fiscalyear_last_day', 'fiscalyear_last_month',
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
-  'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
+  'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
   'currency_exchange_journal_id',
   'deferred_revenue_journal_id', 'deferred_expense_journal_id',
   'deferred_revenue_account_id', 'deferred_expense_account_id',
@@ -311,6 +311,7 @@ function companyGuard(db, before, r, ctx) {
   if (r.tax_start_date != null && r.tax_start_date !== '' && !validDate(r.tax_start_date)) return 'Tax Period Start must be a valid date';
   if (r.tax_periodicity != null && r.tax_periodicity !== '' && !['monthly', 'trimester', 'semester', 'year'].includes(r.tax_periodicity)) return 'Select a valid tax periodicity';
   if (r.tax_calculation_rounding_method != null && r.tax_calculation_rounding_method !== '' && !['round_per_line', 'round_globally'].includes(r.tax_calculation_rounding_method)) return 'Select a valid tax rounding method';
+  if (r.account_price_include != null && r.account_price_include !== '' && !['tax_included', 'tax_excluded'].includes(r.account_price_include)) return 'Select a valid default sales price include setting';
   if (r.invoice_qr != null && r.invoice_qr !== '' && !['zatca', 'epc'].includes(r.invoice_qr)) return 'Select a valid payment QR format';
   const lastMonth = r.fiscalyear_last_month != null && r.fiscalyear_last_month !== '' ? Number(r.fiscalyear_last_month) : null;
   const lastDay = r.fiscalyear_last_day != null && r.fiscalyear_last_day !== '' ? Number(r.fiscalyear_last_day) : null;
@@ -521,11 +522,14 @@ function legacyDeferredFieldPatch(after, vals = {}) {
 }
 
 /** Sync legacy shared deferred fields and tax return types after writing `res.company`. */
-function onCompanyWrite(db, after, _before, vals) {
+function onCompanyWrite(db, after, before, vals) {
   let next = vals && (vals.tax_periodicity !== undefined || vals.tax_start_date !== undefined) ? ensureReturnTypes(db) : db;
   if (vals) {
     const patch = legacyDeferredFieldPatch(after, vals);
     if (Object.keys(patch).length) next = write(next, 'res.company', after.id, patch);
+  }
+  if (vals && vals.account_price_include !== undefined && vals.account_price_include !== before?.account_price_include) {
+    next = refreshDraftEntryTaxes(next, after.id);
   }
   return next;
 }
@@ -753,6 +757,7 @@ export const companyModels = {
       tax_return_template: { type: 'selection', label: 'Tax Return Template', options: TAX_RETURN_TEMPLATE_OPTIONS },
       account_sale_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Sales Tax' },
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
+      account_price_include: { type: 'selection', label: 'Default Sales Price Include', options: [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']] },
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       autopost_bills: { type: 'boolean', label: 'Auto-post bills', default: false },
@@ -779,6 +784,7 @@ export const companyModels = {
       currency_interval_unit: 'manually',
       currency_next_execution_date: null,
       intercompany_rule: 'none',
+      account_price_include: 'tax_excluded',
       tax_periodicity: 'monthly',
       deferred_amount_computation_method: 'days',
       generate_deferred_revenue_entries_method: 'on_validation',
