@@ -1,4 +1,5 @@
 import { incrementPartnerRank } from './crm.js';
+import { purchaseLineId } from './purchase-links.js';
 import { create, getActiveCompany, read, search, setActiveCompany, write } from '../orm.js';
 import { adjustQuantity, moveValued, revalue } from './valuation.js';
 import { addShipping, applyLots, checkTrackedLine, shippingPrice } from './logistics.js';
@@ -159,23 +160,29 @@ export function cancelOrder(db, model, order) {
 }
 
 export function syncInvoicedQty(db, move) {
-  const [model, field] = move.sale_id ? ['sale.order', 'sale_id'] : move.purchase_id ? ['purchase.order', 'purchase_id'] : [];
-  const order = model && read(db, model, move[field]);
-  if (!order) return db;
-  const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
-  const lines = order.order_line.map((l) => ({ ...l, qty_invoiced: 0 }));
-  const lineKey = model === 'sale.order' ? 'sale_line_key' : 'purchase_line_key';
-  const byKey = new Map(lines.map((l, i) => [l[lineKey], i]).filter(([key]) => key));
-  const unlinked = [];
-  for (const m of moves) for (const l of m.invoice_line_ids ?? []) {
-    if (l.down_payment_key) continue;
-    const qty = (['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1) * (Number(l.qty) || 0);
-    const ix = l[lineKey] ? byKey.get(l[lineKey]) : undefined;
-    if (ix !== undefined && lines[ix].product_id === l.product_id) lines[ix].qty_invoiced += fromStock(db, lines[ix], toStock(db, l, qty));
-    else if (!l[lineKey]) unlinked.push({ ...l, qty });
+  const sale = Boolean(move.sale_id);
+  const model = sale ? 'sale.order' : 'purchase.order';
+  const field = sale ? 'sale_id' : 'purchase_id';
+  const orders = search(db, model).filter((order) => sale ? order.id === move.sale_id : order.id === move.purchase_id
+    || (move.invoice_line_ids ?? []).some((line) => (order.order_line ?? []).some((item) => item.id === purchaseLineId(db, line, move.purchase_id))));
+  let next = db;
+  for (const order of orders) {
+    const moves = search(next, 'account.move').filter((m) => m.state !== 'cancel' && (m[field] === order.id || (!sale && (m.invoice_line_ids ?? []).some((line) => (order.order_line ?? []).some((item) => item.id === purchaseLineId(next, line, m.purchase_id))))));
+    const lines = order.order_line.map((line) => ({ ...line, qty_invoiced: 0 }));
+    const byKey = new Map(lines.map((line, i) => [sale ? line.sale_line_key : line.id, i]).filter(([key]) => key));
+    const unlinked = [];
+    for (const m of moves) for (const line of m.invoice_line_ids ?? []) {
+      if (line.down_payment_key) continue;
+      const qty = (['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1) * (Number(line.qty) || 0);
+      const key = sale ? line.sale_line_key : purchaseLineId(next, line, m.purchase_id);
+      const ix = key ? byKey.get(key) : undefined;
+      if (ix !== undefined && lines[ix].product_id === line.product_id) lines[ix].qty_invoiced += fromStock(next, lines[ix], toStock(next, line, qty));
+      else if (!key && m[field] === order.id) unlinked.push({ ...line, qty });
+    }
+    next = write(next, model, order.id, { order_line: lines });
+    next = addLineQty(next, model, read(next, model, order.id), 'qty_invoiced', unlinked);
   }
-  const reset = write(db, model, order.id, { order_line: lines });
-  return addLineQty(reset, model, read(reset, model, order.id), 'qty_invoiced', unlinked);
+  return next;
 }
 
 /** Undeducted posted advances, retaining their original tax and account snapshots. */

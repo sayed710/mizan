@@ -95,12 +95,12 @@ test('customer invoice and vendor bill lists match Odoo 20 column order and labe
 
     await ctx.render(billsLeaf);
     assert.deepEqual(headerLabels(ctx.host), [
-      'Number', 'Vendor', 'Bill Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status',
+      'Number', 'Vendor', 'Bill Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status', 'Should Be Paid',
     ]);
 
     await ctx.render(refundsLeaf);
     assert.deepEqual(headerLabels(ctx.host), [
-      'Number', 'Vendor', 'Bill Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status',
+      'Number', 'Vendor', 'Bill Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status', 'Should Be Paid',
     ]);
 
     await ctx.render(miscLeaf);
@@ -238,7 +238,7 @@ test('invoice and bill list footer sums Tax Excluded, Total, and Amount Due in c
     assert.ok(billFoot, 'vendor bill list renders footer totals');
     const billCells = allFind(billFoot, (n) => n.tagName === 'TD').map((td) => td.textContent.trim());
     // Odoo 20 shows vendor bills with negative signed totals; footer sum matches the negative row amounts.
-    assert.deepEqual(billCells, ['', '', '', '', '', '-$200.00', '-$200.00', '-$200.00', '', '']);
+    assert.deepEqual(billCells, ['', '', '', '', '', '-$200.00', '-$200.00', '-$200.00', '', '', '']);
   } finally {
     await ctx.done();
   }

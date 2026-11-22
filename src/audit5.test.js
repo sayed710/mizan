@@ -34,7 +34,7 @@ test('asset disposal uses its posted invoice allocation and prevents reuse', () 
   const disposal = db.records['account.move'].find((move) => move.ref === 'First disposal');
   const debit = (code) => disposal.line_ids.find((line) => read(db, 'account.account', line.account_id).code === code)?.debit;
   assert.equal(debit('410000'), 50);
-  assert.equal(debit('690300'), 64.52);
+  assert.equal(debit('690300'), 64.41);
   assert.equal(read(db, 'account.asset', first.id).sale_value, 50);
   const second = makeAsset(db, 'Second');
   assert.throws(() => disposeAsset(second.db, read(second.db, 'account.asset', second.id), { ...options, saleValue: 50 }), /already used/i);

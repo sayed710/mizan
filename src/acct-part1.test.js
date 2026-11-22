@@ -96,7 +96,7 @@ test('creating partners from Accounting Customers and Vendors leaves assigns ran
   assert.equal(vendFilter(unrelatedRecord), false);
 });
 
-test('migration 64 aggregates ranks efficiently without repeatedly remapping partner array', () => {
+test('migration 65 aggregates ranks efficiently without repeatedly remapping partner array', () => {
   const partnerCount = 2000;
   const partners = Array.from({ length: partnerCount }, (_, i) => ({ id: i + 1, name: `Partner ${i + 1}` }));
   partners.push({ id: partnerCount + 1, name: 'Child of 1', parent_id: 1 });
@@ -113,7 +113,7 @@ test('migration 64 aggregates ranks efficiently without repeatedly remapping par
   const migrated = migrate({ schema_version: 62, records: { 'res.partner': partners, 'account.move': moves } });
   const elapsed = performance.now() - start;
 
-  assert.equal(migrated.schema_version, 64);
+  assert.equal(migrated.schema_version, 65);
   assert.ok(elapsed < 300, `Migration took too long: ${elapsed}ms`);
 
   const p1 = migrated.records['res.partner'].find((p) => p.id === 1);
