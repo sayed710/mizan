@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { read } from '../orm.js';
 import { today } from '../models/common.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -7,6 +7,7 @@ import { foreignBalanceReport, revalueForeignBalances } from '../models/closing.
 import { commit, getDb, useDb } from '../store.js';
 import { display, money } from '../ui.jsx';
 import { t } from '../i18n.js';
+import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
 
 const RATE_FIELD = { type: 'float', digits: [6, 6] };
@@ -15,12 +16,18 @@ export function UnrealizedCurrencies() {
   const db = useDb();
   const [date, setDate] = useState(today());
   const [isPrinting, setIsPrinting] = useState(false);
+  const tableRef = useRef(null);
   let rows = [];
   let error = '';
   try { rows = foreignBalanceReport(db, date); } catch (e) { error = e.message; }
   const revalue = () => {
     try { commit(revalueForeignBalances(getDb(), date, { companyScoped: true })); }
     catch (e) { alert(e.message); }
+  };
+  const exportXlsx = () => {
+    if (!tableRef.current) return;
+    const columnTypes = ['text', 'text', 'text', 'text', 'text', 'number', 'rate', 'number', 'number', 'number'];
+    downloadXlsx('unrealized_currencies.xlsx', tableRef.current, { sheetName: t('Unrealized Currencies'), columnTypes });
   };
   const controls = (
     <div className="control-panel">
@@ -29,6 +36,7 @@ export function UnrealizedCurrencies() {
       <button type="button" className="btn sm" disabled={!!error} onClick={revalue}>{t('Revalue Foreign Currency')}</button>
       <span className="spacer" />
       <button type="button" className="btn sm" disabled={!!error} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+      <button type="button" className="btn sm" disabled={!!error} onClick={exportXlsx}>{t('Export XLSX')}</button>
     </div>
   );
   const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
@@ -49,7 +57,7 @@ export function UnrealizedCurrencies() {
     >
       {error && <p role="alert">{error}</p>}
       {!error && (
-        <div className="list-wrap"><table className="list report">
+        <div className="list-wrap"><table className="list report" ref={tableRef}>
           <thead><tr>{['Company', 'Entry', 'Partner', 'Account', 'Currency', 'Foreign Balance', 'Exchange Rate', 'Booked', 'Current Value', 'Difference'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
           <tbody>{rows.map((row, i) => {
             const currency = read(db, 'res.currency', row.currency_id);
@@ -61,7 +69,7 @@ export function UnrealizedCurrencies() {
               <td>{read(db, 'account.account', row.account_id)?.name ?? row.account}</td>
               <td>{currency?.name}</td>
               <td className="num">{money(row.residual ?? row.foreign, currency?.name ?? null, currency ?? null)}</td>
-              <td className="num">{display(db, RATE_FIELD, rate)}</td>
+              <td className="num rate">{display(db, RATE_FIELD, rate)}</td>
               <td className="num">{money(row.booked)}</td>
               <td className="num">{money(row.value ?? row.booked + row.difference)}</td>
               <td className="num">{money(row.difference)}</td>
