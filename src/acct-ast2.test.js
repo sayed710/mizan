@@ -507,3 +507,164 @@ test('Qodo finding 3: reopening rejects or rebuilds pending depreciation lines w
   const fixedPredatedDb = setAssetRunning(closedPredatedDb, read(closedPredatedDb, 'account.asset', madeMid.id));
   assert.ok(read(fixedPredatedDb, 'account.asset', madeMid.id).depreciation_ids.filter((l) => !l.posted).every((l) => l.date >= '2026-06-01'));
 });
+
+test('confirmed asset method-setting changes succeed through normal write path', () => {
+  const { db, id } = running();
+  const asset = read(db, 'account.asset', id);
+
+  const rateBoard = depreciationBoard({ ...asset, method_mode: 'rate', method_rate: 0.25, method_number: 4 })
+    .map((l) => ({ ...l, posted: false, move_id: null }));
+  const rateDb = write(db, 'account.asset', id, {
+    method_mode: 'rate',
+    method_rate: 0.25,
+    method_number: 4,
+    depreciation_ids: rateBoard,
+  });
+  const rateAsset = read(rateDb, 'account.asset', id);
+  assert.equal(rateAsset.method_mode, 'rate');
+  assert.equal(rateAsset.method_rate, 0.25);
+  assert.equal(rateAsset.depreciation_ids.length, 4);
+
+  const monthlyBoard = depreciationBoard({ ...rateAsset, method_mode: 'duration', method_period: '1', method_number: 12, method_rate: 1 / 12 })
+    .map((l) => ({ ...l, posted: false, move_id: null }));
+  const monthlyDb = write(rateDb, 'account.asset', id, {
+    method_mode: 'duration',
+    method_period: '1',
+    method_number: 12,
+    method_rate: 1 / 12,
+    depreciation_ids: monthlyBoard,
+  });
+  const monthlyAsset = read(monthlyDb, 'account.asset', id);
+  assert.equal(monthlyAsset.method_period, '1');
+  assert.equal(monthlyAsset.method_number, 12);
+  assert.equal(monthlyAsset.depreciation_ids.length, 12);
+});
+
+test('rate-based asset allows gross increase from Modify wizard without editing depreciation settings', () => {
+  const base = seed();
+  const made = create(base, 'account.asset', {
+    name: 'Rate Machine',
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_mode: 'rate',
+    method_rate: 0.25,
+    method_number: 4,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(base, '151000'),
+    account_depreciation_id: accountId(base, '152000'),
+    account_depreciation_expense_id: accountId(base, '680000'),
+  });
+  const db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  const asset = read(db, 'account.asset', made.id);
+  const button = models['account.asset'].form.buttons.find((b) => b.label === 'Modify Depreciation');
+  const spec = button.wizard(db, asset);
+  assert.equal(spec.fields.find((f) => f.name === 'method_mode').default, 'rate');
+  assert.equal(spec.fields.find((f) => f.name === 'method_rate').default, 0.25);
+
+  const defaults = Object.fromEntries(spec.fields.map((f) => [f.name, f.default ?? (f.type === 'many2many' ? [] : null)]));
+  const next = button.run(db, asset, {
+    ...defaults,
+    date: '2026-02-01',
+    value_residual: 1200,
+    account_asset_id: accountId(db, '151000'),
+    account_asset_counterpart_id: accountId(db, '680000'),
+  }).db;
+
+  const children = search(next, 'account.asset').filter((a) => a.parent_id === made.id);
+  assert.equal(children.length, 1);
+  assert.equal(children[0].original_value, 200);
+  assert.equal(children[0].method_mode, 'rate');
+  assert.equal(children[0].method_rate, 0.25);
+  assert.equal(search(sync(db, next), 'account.asset').filter((a) => a.parent_id === made.id).length, 1);
+
+  assert.throws(() => button.run(db, asset, {
+    ...defaults,
+    date: '2026-02-01',
+    value_residual: 1200,
+    method_rate: 0.5,
+    account_asset_id: accountId(db, '151000'),
+    account_asset_counterpart_id: accountId(db, '680000'),
+  }), /separately from a gross increase/i);
+});
+
+test('reopening a closed daily-computation asset preserves elapsed-day depreciation across leap years', () => {
+  const base = seed();
+  const made = create(base, 'account.asset', {
+    name: 'Daily Leap Asset',
+    acquisition_date: '2026-03-15',
+    prorata_date: '2026-03-15',
+    original_value: 12000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    prorata_computation_type: 'daily_computation',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(base, '151000'),
+    account_depreciation_id: accountId(base, '152000'),
+    account_depreciation_expense_id: accountId(base, '680000'),
+  });
+  const db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  const initialAsset = read(db, 'account.asset', made.id);
+  const expectedPending = initialAsset.depreciation_ids.slice(1).map((l) => [l.date, l.amount]);
+
+  const postedDb = postDepreciation(db, initialAsset, '2026-12-31');
+  const postedOnly = read(postedDb, 'account.asset', made.id).depreciation_ids.filter((l) => l.posted);
+  const closedDb = forged(postedDb, made.id, { state: 'close', depreciation_ids: postedOnly });
+  const reopenedDb = setAssetRunning(closedDb, read(closedDb, 'account.asset', made.id));
+  const reopened = read(reopenedDb, 'account.asset', made.id);
+
+  assert.equal(reopened.state, 'open');
+  const pending = reopened.depreciation_ids.filter((l) => !l.posted);
+  assert.deepEqual(pending.map((l) => [l.date, l.amount]), expectedPending);
+  assert.equal(pending.find((l) => l.date === '2028-12-31').amount, 2405.26);
+  assert.equal(pending.reduce((s, l) => s + Math.round(l.amount * 100), 0), 1200000 - Math.round(postedOnly[0].amount * 100));
+});
+
+test('reopening a closed degressive_then_linear asset preserves original-base straight-line floor after transition', () => {
+  const base = seed();
+  const made = create(base, 'account.asset', {
+    name: 'Degressive Then Linear Asset',
+    acquisition_date: '2026-03-15',
+    prorata_date: '2026-03-15',
+    original_value: 12000,
+    salvage_value: 0,
+    method: 'degressive_then_linear',
+    method_number: 5,
+    method_period: '12',
+    method_progress_factor: 0.3,
+    prorata_computation_type: 'constant_periods',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(base, '151000'),
+    account_depreciation_id: accountId(base, '152000'),
+    account_depreciation_expense_id: accountId(base, '680000'),
+  });
+  const db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  const initialAsset = read(db, 'account.asset', made.id);
+
+  const atTransitionDb = postDepreciation(db, initialAsset, '2027-12-31');
+  const postedAtTransition = read(atTransitionDb, 'account.asset', made.id).depreciation_ids.filter((l) => l.posted);
+  assert.equal(postedAtTransition.length, 2);
+  const closedAtTransitionDb = forged(atTransitionDb, made.id, { state: 'close', depreciation_ids: postedAtTransition });
+  const reopenedAtTransition = read(setAssetRunning(closedAtTransitionDb, read(closedAtTransitionDb, 'account.asset', made.id)), 'account.asset', made.id);
+  assert.deepEqual(
+    reopenedAtTransition.depreciation_ids.filter((l) => !l.posted).map((l) => [l.date, l.amount]),
+    [['2028-12-31', 2400], ['2029-12-31', 2400], ['2030-12-31', 1594.84]],
+  );
+
+  const afterTransitionDb = postDepreciation(atTransitionDb, read(atTransitionDb, 'account.asset', made.id), '2028-12-31');
+  const postedAfterTransition = read(afterTransitionDb, 'account.asset', made.id).depreciation_ids.filter((l) => l.posted);
+  assert.equal(postedAfterTransition.length, 3);
+  const closedAfterTransitionDb = forged(afterTransitionDb, made.id, { state: 'close', depreciation_ids: postedAfterTransition });
+  const reopenedAfterTransition = read(setAssetRunning(closedAfterTransitionDb, read(closedAfterTransitionDb, 'account.asset', made.id)), 'account.asset', made.id);
+  assert.deepEqual(
+    reopenedAfterTransition.depreciation_ids.filter((l) => !l.posted).map((l) => [l.date, l.amount]),
+    [['2029-12-31', 2400], ['2030-12-31', 1594.84]],
+  );
+});
