@@ -143,6 +143,7 @@ function annualReportExportData(db, r) {
     start_date: current.start_date,
     end_date: current.end_date,
     company_id: current.company_id ?? 1,
+    section_ids: current.section_ids,
   });
   const rows = annualReportToRows(body);
   const baseName = String(current.title || 'annual_report').toLowerCase().replace(/\s+/g, '_');
@@ -161,23 +162,40 @@ export function exportAnnualReportCsv(db, r) {
   return downloadCsv(`${baseName}.csv`, rows);
 }
 
-export function renderAnnualReportHtml(db, { start_date, end_date, company_id }) {
+function defaultSections(db, company) {
+  return ['balance', 'pnl'].map((kind, index) => {
+    const report = findStatementReport(db, kind, company);
+    if (!report) throw new Error(kind === 'balance' ? 'Configure the Balance Sheet report for this company' : 'Configure the Profit and Loss report for this company');
+    return { type: 'report', report_id: report.id, note: '', sequence: (index + 1) * 10 };
+  });
+}
+
+function sectionError(db, sections, company) {
+  if (!Array.isArray(sections)) return 'Invalid report sections';
+  for (const section of sections) {
+    if (section.type === 'note') continue;
+    if (section.type !== 'report') return 'Invalid report section type';
+    const report = read(db, 'account.report', section.report_id);
+    if (!report || report.active === false || (report.company_id ?? 1) !== company) return 'Select an active report for this company';
+  }
+  return null;
+}
+
+export function renderAnnualReportHtml(db, { start_date, end_date, company_id, section_ids }) {
   const company = company_id ?? (db ? currentCompany(db) : 1);
   const from = start_date || `${today().slice(0, 4)}-01-01`;
   const to = end_date || `${today().slice(0, 4)}-12-31`;
-
-  const bsReport = findStatementReport(db, 'balance', company);
-  if (!bsReport) throw new Error('Configure the Balance Sheet report for this company');
-  const pnlReport = findStatementReport(db, 'pnl', company);
-  if (!pnlReport) throw new Error('Configure the Profit and Loss report for this company');
-
-  const bsData = configurableReport(db, bsReport, { to }, null, { companyId: company });
-  const pnlData = configurableReport(db, pnlReport, { from, to }, null, { companyId: company });
-
-  const bsHtml = renderReportTable(bsReport.name || 'Balance Sheet', bsData, 'balance-sheet-table', 'Balance');
-  const pnlHtml = renderReportTable(pnlReport.name || 'Profit and Loss', pnlData, 'pnl-table', 'Total');
-
-  return `<div class="annual-report-body">\n${bsHtml}\n\n${pnlHtml}\n</div>`;
+  const sections = section_ids ?? defaultSections(db, company);
+  const error = sectionError(db, sections, company);
+  if (error) throw new Error(error);
+  const content = [...sections].sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0)).map((section) => {
+    if (section.type === 'note') return `<table class="report-table"><tbody><tr><td>${escapeHtml(section.note ?? '').replace(/\n/g, '<br>')}</td></tr></tbody></table>`;
+    const report = read(db, 'account.report', section.report_id);
+    const data = configurableReport(db, report, { from, to }, null, { companyId: company });
+    const tableClass = report.kind === 'balance' ? 'balance-sheet-table' : report.kind === 'pnl' ? 'pnl-table' : '';
+    return renderReportTable(report.name, data, tableClass, report.kind === 'balance' ? 'Balance' : 'Total');
+  }).join('\n\n');
+  return `<div class="annual-report-body">\n${content}\n</div>`;
 }
 
 export const auditReportModels = {
@@ -199,6 +217,12 @@ export const auditReportModels = {
         ],
       },
       body: { type: 'html', label: 'Body' },
+      section_ids: { type: 'one2many', label: 'Report Sections', fields: {
+        sequence: { type: 'integer', label: 'Sequence' },
+        type: { type: 'selection', label: 'Section Type', options: [['report', 'Financial Report'], ['note', 'Note']] },
+        report_id: { type: 'many2one', relation: 'account.report', label: 'Financial Report', domain: (report, line) => report.active !== false && (report.company_id ?? 1) === (line.company_id ?? 1) },
+        note: { type: 'text', label: 'Note' },
+      }, newLine: () => ({ type: 'note', report_id: null, note: '', sequence: 10 }) },
     },
     defaults: (id, db) => ({
       title: `${t('Annual Report')} ${today().slice(0, 4)}`,
@@ -212,21 +236,27 @@ export const auditReportModels = {
       const companyId = vals?.company_id ?? (db ? currentCompany(db) : 1);
       const startDate = vals?.start_date || `${today().slice(0, 4)}-01-01`;
       const endDate = vals?.end_date || `${today().slice(0, 4)}-12-31`;
-      const body = vals?.body ?? renderAnnualReportHtml(db, { start_date: startDate, end_date: endDate, company_id: companyId });
+      const sections = vals?.section_ids ?? defaultSections(db, companyId);
+      const body = vals?.body ?? renderAnnualReportHtml(db, { start_date: startDate, end_date: endDate, company_id: companyId, section_ids: sections });
       return {
         start_date: startDate,
         end_date: endDate,
         company_id: companyId,
         status: vals?.status ?? 'draft',
         body,
+        section_ids: sections,
       };
     },
     guard: (db, before, after) => {
       if (before?.status === 'done' && after.status === 'done') {
-        const LOCKED = ['title', 'start_date', 'end_date', 'company_id', 'responsible_user_ids', 'body'];
+        const LOCKED = ['title', 'start_date', 'end_date', 'company_id', 'responsible_user_ids', 'body', 'section_ids'];
         if (LOCKED.some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]))) {
           return 'Done reports are read-only';
         }
+      }
+      if (after.section_ids != null) {
+        const error = sectionError(db, after.section_ids, after.company_id);
+        if (error) return error;
       }
       if (!['draft', 'done'].includes(after.status)) {
         return 'Invalid status for annual report';
@@ -256,7 +286,7 @@ export const auditReportModels = {
       tabs: [
         {
           label: 'Report',
-          fields: ['body'],
+          fields: ['section_ids', 'body'],
         },
       ],
       buttons: [
@@ -269,6 +299,7 @@ export const auditReportModels = {
               start_date: currentReport.start_date,
               end_date: currentReport.end_date,
               company_id: currentReport.company_id ?? 1,
+              section_ids: currentReport.section_ids,
             });
             return { db: write(db, 'audit.report', r.id, { body }) };
           },
