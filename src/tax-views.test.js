@@ -165,7 +165,7 @@ test('account.tax form shows one Tax Group, conditional Child Taxes, Definition 
     const advPanel = find(ctx.host, (n) => props(n)?.role === 'tabpanel');
     const advGroups = allFind(advPanel, (n) => hasClass(n, 'group'));
     assert.equal(advGroups.length, 2);
-    assert.deepEqual(fieldLabelsOf(advGroups[0]), ['Label on Invoices', 'Tax Group']);
+    assert.deepEqual(fieldLabelsOf(advGroups[0]), ['Label on Invoices', 'Tax Group', 'Country']);
     assert.deepEqual(fieldLabelsOf(advGroups[1]), [
       'Included in Price',
       'Affect Base of Subsequent Taxes',

@@ -24,11 +24,13 @@ export function ensureCountries(db) {
   let countrySeq = Math.max(db.seq?.['res.country'] ?? 0, 0, ...countries.map((r) => r.id));
   let stateSeq = Math.max(db.seq?.['res.country.state'] ?? 0, 0, ...states.map((r) => r.id));
   let currencySeq = Math.max(db.seq?.['res.currency'] ?? 0, 0, ...currencies.map((r) => r.id));
+  const inactiveCurrencyBase = Math.max(currencySeq, 1000);
   const currencyIds = new Map();
   for (const [externalId, name, fullName, symbol, rounding, position] of CURRENCY_DATA) {
     let currency = currencies.find((r) => r.name === name);
     if (!currency) {
-      currency = { id: ++currencySeq, name, full_name: fullName, symbol, rounding, position, active: false, rate_ids: [] };
+      currencySeq = Math.max(currencySeq, inactiveCurrencyBase) + 1;
+      currency = { id: currencySeq, name, full_name: fullName, symbol, rounding, position, active: false, rate_ids: [] };
       currencies.push(currency);
     }
     currencyIds.set(externalId, currency.id);

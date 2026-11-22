@@ -221,10 +221,14 @@ function employeeRule(db, before, r, ctx) {
   return null;
 }
 
+const countryWriteRule = (_db, before, after, ctx) => deciding(ctx) && (!before || JSON.stringify(before) !== JSON.stringify(after))
+  ? 'Only administrators can change countries and states'
+  : null;
+
 /** Server-side authorization rules per model: (db, stored, after, { isAdmin, login, name }) => error or null. */
 export const authorityRules = {
-  'res.country': (_db, _before, _after, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
-  'res.country.state': (_db, _before, _after, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
+  'res.country': countryWriteRule,
+  'res.country.state': countryWriteRule,
   'hr.leave': leaveAuthorization,
   'hr.leave.allocation': leaveRule,
   'hr.expense.sheet': sheetRule,
