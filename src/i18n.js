@@ -218,6 +218,7 @@ const ar = {
   'Add at least one invoice line': 'أضف بنداً واحداً على الأقل للفاتورة',
   'The total must be positive; use a credit note or refund instead': 'يجب أن يكون الإجمالي موجباً؛ استخدم إشعاراً دائناً أو استرداداً بدلاً من ذلك',
   'Invoice and sales order must belong to the same company': 'يجب أن تتبع الفاتورة وأمر البيع الشركة نفسها',
+  'The bill changed while digitizing; reload and try again': 'تغيرت الفاتورة أثناء قراءتها آليًا؛ أعد التحميل وحاول مرة أخرى',
   'Bill and purchase order must belong to the same company': 'يجب أن تتبع فاتورة المورد وأمر الشراء الشركة نفسها',
   'Fiscal position belongs to another company': 'الوضع الضريبي يتبع شركة أخرى',
   'Payment terms belong to another company': 'شروط الدفع تتبع شركة أخرى',
