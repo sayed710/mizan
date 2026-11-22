@@ -298,7 +298,7 @@ test('13. Dispute flag (blocked) can be toggled on posted entries in a locked pe
 
   // Lock the period covering the invoice.
   db = write(db, 'res.company', 1, { lock_date: '2026-04-30' });
-  assert.ok(read(db, 'res.company', 1).hard_lock_date >= '2026-04-30');
+  assert.ok(read(db, 'res.company', 1).lock_date >= '2026-04-30');
 
   // Toggling `blocked` on the receivable line passes securedMoveRule, lockRule, and postedMoveRule.
   const toggledLines = posted.line_ids.map((l) => (l.debit > 0 ? { ...l, blocked: true } : l));

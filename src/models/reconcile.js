@@ -542,22 +542,25 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 
 /**
  * Reconcile every 'to_check' line with the first matching auto-validated active rule (by sequence).
- * Runs unattended on the server, so regex rules (user patterns could backtrack for ages) are left to manual use,
- * and a line that fails (locked period, bad rule) is skipped rather than stopping the run. A rule that already
- * allocated part of a line left the rest for another match, so it is not applied to that line again; other
- * rules and manual matching remain available for the remainder.
+ * Lines whose regex amount pattern does not match the label are skipped by `writeOff`, and a line that fails
+ * (locked period, bad rule) is skipped rather than stopping the run. A rule that already allocated part of a
+ * line left the rest for another match, so it is not applied to that line again; other rules and manual
+ * matching remain available for the remainder.
  */
 export function autoReconcile(db) {
-  const rules = activeRules(db).filter((r) => isAutoRule(r) && !(r.line_ids ?? []).some((l) => l.amount_type === 'regex'));
+  const rules = activeRules(db).filter(isAutoRule);
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
     const line = read(acc, 'account.bank.statement.line', l.id);
-    const rule = rules.find((r) => ruleMatches(r, line) && !(line.allocations ?? []).some((a) => a.reconcile_model_id === r.id));
-    if (!rule) return acc;
-    try {
-      return applyRule(acc, rule, line);
-    } catch {
-      return acc;
+    for (const rule of rules) {
+      if (!ruleMatches(rule, line) || (line.allocations ?? []).some((a) => a.reconcile_model_id === rule.id)) continue;
+      try {
+        const next = applyRule(acc, rule, line);
+        if (next !== acc) return next;
+      } catch {
+        return acc;
+      }
     }
+    return acc;
   }, db);
 }
 

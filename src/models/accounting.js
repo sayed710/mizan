@@ -727,7 +727,23 @@ export function postMove(db, id, { autoPost = false } = {}) {
         posted = reconcileReversalLines(posted, source.id, id, r.date ?? entryDate);
       }
     }
-    const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id, scheduled: r.reverse_date > today() }).db : posted;
+    let reversed = posted;
+    let revMove = null;
+    if (r.auto_reverse) {
+      const revResult = reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, {
+        journal_id: r.reverse_journal_id ?? r.journal_id,
+        scheduled: r.reverse_date > today(),
+      });
+      reversed = revResult.db;
+      revMove = read(reversed, 'account.move', revResult.id);
+    }
+    if (journalRecord.restrict_mode_hash_table) reversed = secureEntries(reversed, { throughMoveId: id });
+    if (revMove && revMove.state === 'posted') {
+      const revJournal = read(reversed, 'account.journal', revMove.journal_id);
+      if (revJournal?.restrict_mode_hash_table) {
+        reversed = secureEntries(reversed, { throughMoveId: revMove.id });
+      }
+    }
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
   if (!r.partner_id) throw new Error('Partner is required');
@@ -787,6 +803,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
   }
   if (matchWarnings.length) posted = postNote(posted, 'account.move', id, `Purchase price mismatch: ${matchWarnings.map((line) => `${read(db, 'product', line.product_id)?.name ?? 'Unknown product'}, difference ${line.priceDifference}`).join('; ')}`);
   posted = write(posted, 'account.journal', journal, { [sequence.numberField]: sequence.nextNumber + 1 });
+  if (journalRecord.restrict_mode_hash_table) posted = secureEntries(posted, { throughMoveId: id });
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   if (isRefund(r) && r.reversed_entry_id) {
     const adjusted = adjustInvoiceDeferralsForCreditNote(deferred, read(deferred, 'account.move', id), reverseEntry);
@@ -3480,6 +3497,7 @@ export const accountingModels = {
       return {};
     },
     fields: {
+      tax_closing_lines: { type: 'json', label: 'Tax Closing Lines', readonly: true, hidden: true },
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.name && r.name !== '/' ? r.name : t('Draft (* {id})', { id: r.id })) },
       move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
@@ -3493,7 +3511,7 @@ export const accountingModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, _db) => (!b.partner_id || b.partner_id === r?.partner_id) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && (isPurchase(r) ? b.allow_out_payment !== false : true) },
-      ref: { type: 'char', label: 'Reference' },
+      ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
       invoice_date: { type: 'date', label: 'Date', tracking: true },

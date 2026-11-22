@@ -3548,6 +3548,8 @@ const ar = {
   'Void the check before resetting the payment to draft': 'أبطل الشيك قبل إعادة تعيين الدفعة إلى مسودة',
   'The replacement check number must differ from the current and voided numbers': 'يجب أن يختلف رقم الشيك البديل عن الرقم الحالي والأرقام الملغاة',
   'VOID': 'ملغى',
+  'Report Footer': 'تذييل التقرير',
+  'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
   'Purchase Order Line': 'بند أمر الشراء',
   yes: 'نعم', no: 'لا', exception: 'استثناء',
@@ -3555,6 +3557,8 @@ const ar = {
   'Partial Refund': 'استرداد جزئي',
   'Full Refund': 'استرداد كامل',
   'Full Refund and New Draft Invoice': 'استرداد كامل ومسودة فاتورة جديدة',
+  'Tax Closing Lines': 'بنود الإقفال الضريبي',
+  'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
