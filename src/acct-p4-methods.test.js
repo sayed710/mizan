@@ -17,12 +17,14 @@ test('seeded payment methods and seeded bank/cash journal method lines', () => {
   assert.ok(models['account.payment.method.line'], 'account.payment.method.line model is registered');
 
   const methods = search(db, 'account.payment.method');
-  assert.equal(methods.length, 3);
+  assert.equal(methods.length, 5);
   const summary = methods.map((m) => [m.name, m.code, m.payment_type]);
   assert.deepEqual(summary, [
     ['Manual', 'manual', 'inbound'],
     ['Manual', 'manual', 'outbound'],
     ['Checks', 'check_printing', 'outbound'],
+    ['Electronic', 'electronic', 'inbound'],
+    ['SEPA Credit Transfer', 'sepa_ct', 'outbound'],
   ]);
 
   const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
@@ -351,7 +353,7 @@ test('migration adds seeded payment methods and default lines to existing bank a
 
   const migrated = migrate(legacyDb);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(search(migrated, 'account.payment.method').length, 3);
+  assert.equal(search(migrated, 'account.payment.method').length, 5);
 
   const migratedBank = read(migrated, 'account.journal', bank.id);
   const migratedCash = read(migrated, 'account.journal', cash.id);
