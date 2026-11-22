@@ -3585,6 +3585,10 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Partner Mapping': 'تعيين الشركاء',
+  'Label Regex': 'التعبير النمطي للبيان',
+  'Notes Regex': 'التعبير النمطي للملاحظات',
+  'Invalid regular expression in partner mapping': 'تعبير نمطي غير صالح في تعيين الشريك',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

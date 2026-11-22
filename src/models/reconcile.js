@@ -540,6 +540,22 @@ export function applyRule(db, rule, line) {
 
 const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => r.active !== false).sort(bySequence);
 
+/** Apply the first configured partner mapping before evaluating reconciliation rules. */
+export function mapStatementPartner(db, line) {
+  if (line.partner_id) return db;
+  for (const rule of activeRules(db)) {
+    if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) continue;
+    if ((rule.match_journal_ids ?? []).length && !rule.match_journal_ids.includes(line.journal_id)) continue;
+    for (const mapping of rule.partner_mapping_line_ids ?? []) {
+      if (!mapping.partner_id || (!mapping.payment_ref_regex && !mapping.narration_regex)) continue;
+      if (mapping.payment_ref_regex && !compileRegex(mapping.payment_ref_regex)?.test(String(line.payment_ref ?? ''))) continue;
+      if (mapping.narration_regex && !compileRegex(mapping.narration_regex)?.test(String(line.narration ?? ''))) continue;
+      if (read(db, 'res.partner', mapping.partner_id)) return write(db, 'account.bank.statement.line', line.id, { partner_id: mapping.partner_id });
+    }
+  }
+  return db;
+}
+
 /**
  * Reconcile every 'to_check' line with the first matching auto-validated active rule (by sequence).
  * Lines whose regex amount pattern does not match the label are skipped by `writeOff`, and a line that fails
@@ -550,6 +566,7 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 export function autoReconcile(db) {
   const rules = activeRules(db).filter(isAutoRule);
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
+    acc = mapStatementPartner(acc, read(acc, 'account.bank.statement.line', l.id));
     const line = read(acc, 'account.bank.statement.line', l.id);
     for (const rule of rules) {
       if (!ruleMatches(rule, line) || (line.allocations ?? []).some((a) => a.reconcile_model_id === rule.id)) continue;
@@ -580,6 +597,11 @@ function guardReconcileModel(db, _before, rule) {
     if (isBlank(rule.match_label_param)) return 'Label parameter is required for the selected label condition';
     if (rule.match_label === 'match_regex' && !compileRegex(rule.match_label_param)) {
       return 'Invalid regular expression in label parameter';
+    }
+  }
+  for (const mapping of rule.partner_mapping_line_ids ?? []) {
+    for (const pattern of [mapping.payment_ref_regex, mapping.narration_regex]) {
+      if (pattern && !compileRegex(pattern)) return 'Invalid regular expression in partner mapping';
     }
   }
   if (rule.payment_tolerance != null && Number(rule.payment_tolerance) < 0) {
@@ -715,6 +737,7 @@ export const reconcileModels = {
           return line;
         },
       },
+      partner_mapping_line_ids: { type: 'one2many', label: 'Partner Mapping', fields: { payment_ref_regex: { type: 'char', label: 'Label Regex' }, narration_regex: { type: 'char', label: 'Notes Regex' }, partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' } }, newLine: () => ({ payment_ref_regex: '', narration_regex: '', partner_id: null }) },
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
@@ -788,9 +811,10 @@ export const reconcileModels = {
           'payment_tolerance_type',
         ]] : []),
       ],
-      tabs: (r) => (isMatchingRule(r) && !(Number(r?.payment_tolerance) > 0)
-        ? []
-        : [{ label: 'Counterpart Items', fields: ['line_ids'] }]),
+      tabs: (r) => [
+        ...(isMatchingRule(r) && !(Number(r?.payment_tolerance) > 0) ? [] : [{ label: 'Counterpart Items', fields: ['line_ids'] }]),
+        { label: 'Partner Mapping', fields: ['partner_mapping_line_ids'] },
+      ],
     },
   },
 };
