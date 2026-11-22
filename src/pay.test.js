@@ -33,7 +33,7 @@ test('a credit note refunded to the customer pays cash out against the receivabl
 
 test('the credit note button reverses a bill into a vendor refund', () => {
   const { db, id } = post(seed(), { move_type: 'in_invoice' });
-  const button = models['account.move'].form.buttons.find((b) => b.label === 'Credit Note');
+  const button = models['account.move'].form.buttons.find((b) => b.label === 'Refund');
   const { db: next, go } = button.run(db, read(db, 'account.move', id));
   assert.match(go, /refunds/);
   assert.equal(search(next, 'account.move').at(-1).move_type, 'in_refund');
