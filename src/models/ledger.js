@@ -122,6 +122,15 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   return null;
 }
 
+/** Verify storno provenance from the company and linked posted source. */
+export function validStornoMove(db, move) {
+  if (!move?.is_storno || !read(db, 'res.company', move.company_id ?? 1)?.account_storno) return false;
+  const source = read(db, 'account.move', move.reversed_entry_id);
+  const expected = { entry: 'entry', out_refund: 'out_invoice', in_refund: 'in_invoice' };
+  return Boolean(source && source.state === 'posted' && source.id !== move.id
+    && (source.company_id ?? 1) === (move.company_id ?? 1) && source.move_type === expected[move.move_type]);
+}
+
 /** Whether any line has a negative debit or credit. */
 export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);
 /** Whether any line's amount_currency sign contradicts its debit/credit balance. */
@@ -665,7 +674,8 @@ export function invoiceLines(db, move) {
     ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true, tax_side: sale ? 'sale' : 'purchase' } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, use_in_tax_closing: g.cash_basis ? false : (g.use_in_tax_closing === true), ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
-  ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
+  ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base)
+    .map((line) => stornoLine(line, move.is_storno));
 }
 
 /** Recover a bill line's share from its protected posted journal item, never current configuration. */
@@ -715,6 +725,11 @@ export function exchangeJournal(db, companyId) {
   const company = companyId ?? 1;
   const journalId = read(db, 'res.company', company)?.currency_exchange_journal_id ?? null;
   return resolveDocumentJournal(db, { move_type: 'entry', company_id: company, journal_id: journalId }, { required: true });
+}
+
+// Convert ordinary reversal columns to the equivalent negative same-side columns.
+export function stornoLine(line, enabled) {
+  return enabled ? { ...line, debit: -(Number(line.credit) || 0) || 0, credit: -(Number(line.debit) || 0) || 0 } : line;
 }
 
 /**

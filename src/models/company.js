@@ -290,7 +290,7 @@ const CONTROL_FIELDS = [
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
-  'transfer_account_id',
+  'transfer_account_id', 'account_storno',
 ];
 
 /**
@@ -754,6 +754,7 @@ export const companyModels = {
       account_sale_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Sales Tax' },
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
+      account_storno: { type: 'boolean', label: 'Storno accounting', default: false },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
       fiscalyear_last_day: { type: 'integer', label: 'Fiscal Year End Day' },

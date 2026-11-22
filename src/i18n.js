@@ -3567,6 +3567,8 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Storno accounting': 'المحاسبة بالقيد العكسي السالب',
+  'Reverse entries with negative amounts on the same side.': 'عكس القيود بمبالغ سالبة في الجانب نفسه.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

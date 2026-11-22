@@ -5,7 +5,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
 import { ACTIVITY_TYPES } from './mail.js';
 import { currentActor, employeeFor } from './actor.js';
-import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, validStornoMove } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
@@ -270,7 +270,7 @@ function postedMoveRule(db, before, after) {
       if (po && (po.company_id ?? 1) !== (after.company_id ?? 1)) return 'Bill and purchase order must belong to the same company';
     }
     const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
-    if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) return 'Debits and credits cannot be negative';
+    if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0) && !validStornoMove(db, after)) return 'Debits and credits cannot be negative';
     if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) return 'A posted entry needs balanced journal items';
     if (!after.name || after.name === '/') return 'A posted entry needs a number';
   }
