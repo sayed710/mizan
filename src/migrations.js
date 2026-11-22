@@ -1,3 +1,4 @@
+import { purchaseLineId } from './models/purchase-links.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -1920,6 +1921,22 @@ export function migrateFollowUpNextActionDate(db) {
   return { ...db, records: { ...db.records, 'res.partner': partners } };
 }
 MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
+MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (db) => {
+  const orders = db.records?.['purchase.order'] ?? [];
+  let nextId = Math.max(0, ...orders.flatMap((po) => (po.order_line ?? []).map((line) => Number(line.id) || 0)));
+  const nextOrders = orders.map((po) => ({ ...po, order_line: (po.order_line ?? []).map((line) => line.id == null ? { ...line, id: ++nextId } : line) }));
+  const nextMoves = (db.records?.['account.move'] ?? []).map((move) => {
+    if (move.inalterable_hash || !['in_invoice', 'in_refund'].includes(move.move_type) || !Array.isArray(move.invoice_line_ids)) return move;
+    return { ...move, invoice_line_ids: move.invoice_line_ids.map((line) => {
+      if (!line.purchase_line_key) return line;
+      const id = purchaseLineId({ records: { 'purchase.order': nextOrders } }, line, move.purchase_id);
+      if (id == null) return line;
+      const { purchase_line_key, ...rest } = line;
+      return { ...rest, purchase_line_id: id };
+    }) };
+  });
+  return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

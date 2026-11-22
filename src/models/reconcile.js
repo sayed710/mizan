@@ -22,8 +22,9 @@ const parseStrictNumber = (raw) => {
 // (a{1,3}){1,2}, stay allowed.
 // ponytail: shape check, not a full regex analyser (does not parse character classes or lookarounds); isolate matching in a worker if patterns ever need nested repeats or alternations.
 const NESTED_REPEAT = [
-  /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/,
+  /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+(?:,\d*)?\})/,
   /\((?:[^()\x5c]|\x5c.)*(?:[+*?|]|\{\d+,?\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\})/,
+  /\((?:[^()\x5c]|\x5c.)*[|][\s\S]*?\)+(?:[+*]|\{\d+(?:,\d*)?\})/,
 ];
 
 /** Compile a regular expression case-insensitively, returning null if invalid, empty or prone to runaway backtracking. */
@@ -36,6 +37,9 @@ function compileRegex(pattern) {
     return null;
   }
 }
+
+/** Whether a stored pattern matches the text; patterns are vetted by compileRegex (invalid or runaway ones never match). */
+const regexMatches = (pattern, text) => compileRegex(pattern)?.test(String(text ?? '')) ?? false;
 
 /** Whether the rule operates as an invoice/bill matching rule (supports legacy invoice_matching). */
 export const isMatchingRule = (rule) => rule?.rule_type === 'matching_rule' || rule?.rule_type === 'invoice_matching';
@@ -474,6 +478,10 @@ export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) throw new Error('Reconciliation model belongs to another company');
+  if (!line.partner_id) {
+    db = mapStatementPartner(db, line);
+    line = read(db, 'account.bank.statement.line', line.id) ?? line;
+  }
   if (!ruleMatches(rule, line)) throw new Error('Reconciliation model does not apply to this transaction');
   const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_id);
   if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
@@ -543,14 +551,18 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 /** Apply the first configured partner mapping before evaluating reconciliation rules. */
 export function mapStatementPartner(db, line) {
   if (line.partner_id) return db;
+  const lineCompany = line.company_id ?? 1;
   for (const rule of activeRules(db)) {
-    if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) continue;
+    if (rule.company_id && rule.company_id !== lineCompany) continue;
     if ((rule.match_journal_ids ?? []).length && !rule.match_journal_ids.includes(line.journal_id)) continue;
     for (const mapping of rule.partner_mapping_line_ids ?? []) {
       if (!mapping.partner_id || (!mapping.payment_ref_regex && !mapping.narration_regex)) continue;
-      if (mapping.payment_ref_regex && !compileRegex(mapping.payment_ref_regex)?.test(String(line.payment_ref ?? ''))) continue;
-      if (mapping.narration_regex && !compileRegex(mapping.narration_regex)?.test(String(line.narration ?? ''))) continue;
-      if (read(db, 'res.partner', mapping.partner_id)) return write(db, 'account.bank.statement.line', line.id, { partner_id: mapping.partner_id });
+      if (mapping.payment_ref_regex && !regexMatches(mapping.payment_ref_regex, line.payment_ref)) continue;
+      if (mapping.narration_regex && !regexMatches(mapping.narration_regex, line.narration)) continue;
+      const partner = read(db, 'res.partner', mapping.partner_id);
+      if (partner && partner.active !== false && (!partner.company_id || partner.company_id === lineCompany)) {
+        return write(db, 'account.bank.statement.line', line.id, { partner_id: mapping.partner_id });
+      }
     }
   }
   return db;
@@ -599,9 +611,16 @@ function guardReconcileModel(db, _before, rule) {
       return 'Invalid regular expression in label parameter';
     }
   }
+  const modelCompany = rule.company_id ?? 1;
   for (const mapping of rule.partner_mapping_line_ids ?? []) {
     for (const pattern of [mapping.payment_ref_regex, mapping.narration_regex]) {
       if (pattern && !compileRegex(pattern)) return 'Invalid regular expression in partner mapping';
+    }
+    if (mapping.partner_id) {
+      const partner = read(db, 'res.partner', mapping.partner_id);
+      if (!partner || partner.active === false || (partner.company_id && partner.company_id !== modelCompany)) {
+        return 'Partner in partner mapping must belong to the model company';
+      }
     }
   }
   if (rule.payment_tolerance != null && Number(rule.payment_tolerance) < 0) {
@@ -737,7 +756,21 @@ export const reconcileModels = {
           return line;
         },
       },
-      partner_mapping_line_ids: { type: 'one2many', label: 'Partner Mapping', fields: { payment_ref_regex: { type: 'char', label: 'Label Regex' }, narration_regex: { type: 'char', label: 'Notes Regex' }, partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' } }, newLine: () => ({ payment_ref_regex: '', narration_regex: '', partner_id: null }) },
+      partner_mapping_line_ids: {
+        type: 'one2many',
+        label: 'Partner Mapping',
+        fields: {
+          payment_ref_regex: { type: 'char', label: 'Label Regex' },
+          narration_regex: { type: 'char', label: 'Notes Regex' },
+          partner_id: {
+            type: 'many2one',
+            relation: 'res.partner',
+            label: 'Partner',
+            domain: (p, r) => p.active !== false && (!p.company_id || p.company_id === (r?.company_id ?? 1)),
+          },
+        },
+        newLine: () => ({ payment_ref_regex: '', narration_regex: '', partner_id: null }),
+      },
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
