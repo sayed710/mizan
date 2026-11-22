@@ -165,7 +165,18 @@ test('Invoice Analysis menu leaf and account.invoice.report structure match Odoo
   assert.deepEqual(def.pivot, { row: 'invoice_date', col: null, measure: 'price_subtotal' });
   assert.deepEqual(def.defaultFilters, ['posted']);
   assert.equal(def.fields.price_average.groupOperator, 'avg');
-  assert.deepEqual(def.groupBys, ['invoice_user_id', 'partner_id', 'product_id', 'product_categ_id', 'state', 'company_id', 'invoice_date']);
+  assert.deepEqual(def.groupBys, [
+    'invoice_user_id',
+    'partner_id',
+    'country_id',
+    'product_id',
+    'product_categ_id',
+    'journal_id',
+    'fiscal_position_id',
+    'state',
+    'company_id',
+    'invoice_date',
+  ]);
 
   const requiredFields = [
     'move_id', 'invoice_date', 'invoice_date_due', 'journal_id', 'company_id',
