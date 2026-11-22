@@ -4,7 +4,7 @@ import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, paymentDocuments, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
+import { applyPaymentCredit, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
@@ -35,6 +35,8 @@ import {
   defaultPaymentMethodLineId,
   isMethodLineJournal,
   journalMethodLineGuard,
+  journalMethodLines,
+  paymentMethodLineError,
   METHOD_LINE_FIELDS,
   methodLineAccountDomain,
   methodLineOnchange,
@@ -1740,6 +1742,8 @@ function registerPayment(db, r, values = {}) {
   if (!validDate(date)) throw new Error('Enter a valid payment date');
   if (!journalIdVal) throw new Error('Select a payment journal');
   const payment = paymentJournal(db, journalIdVal, r.company_id ?? 1);
+  const methodError = paymentMethodLineError(db, { journal_id: payment.id, payment_type: isInbound(r) ? 'inbound' : 'outbound', payment_method_line_id: values.payment_method_line_id });
+  if (methodError) throw new Error(methodError);
   const memo = values.memo !== undefined ? values.memo : invoicePaymentMemo(r);
 
   const isReconcile = values.payment_difference_handling === 'reconcile';
@@ -1752,6 +1756,7 @@ function registerPayment(db, r, values = {}) {
     memo,
     currencyId: payCurrencyId,
     partnerBankId: values.partner_bank_id ?? null,
+    paymentMethodLineId: values.payment_method_line_id,
     ...(values.settleAmount != null ? { settleAmount: values.settleAmount } : {}),
     ...(values.excessAmount != null ? { excessAmount: values.excessAmount } : {}),
   });
@@ -2687,27 +2692,31 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
   monthFilters('invoice_date_due', 'Due Date'),
 ];
 
+const registerMethodField = (db, journalId, direction) => ({
+  name: 'payment_method_line_id', type: 'many2one', relation: 'account.payment.method.line', label: 'Payment Method',
+  default: defaultPaymentMethodLineId(db, journalId, direction),
+  domain: (line, values) => journalMethodLines(db, values?.journal_id, direction).some((candidate) => candidate.id === line.id),
+});
+
 /** List action: pay every selected invoice or bill at once, one payment per partner group or one per document. */
 const registerPaymentsListAction = {
   label: 'Register Payment',
   requiresSelection: true,
   wizard: (db, ids) => {
     const docs = paymentDocuments(db, ids);
-    const partnerGroups = new Map();
-    for (const doc of docs) {
-      const key = JSON.stringify([doc.partner_id, invoiceCounterpartAccount(db, doc), doc.currency_id ?? companyCurrencyRecord(db, doc.company_id)?.id ?? null, doc.partner_bank_id ?? null]);
-      partnerGroups.set(key, [...(partnerGroups.get(key) ?? []), doc]);
-    }
+    const partnerGroups = paymentDocumentGroups(db, docs);
     for (const group of partnerGroups.values()) {
-      const invTotal = group.filter((d) => !isRefund(d)).reduce((sum, d) => sum + Math.max(0, residual(d, db) - discountAvailable(db, d, today())), 0);
-      const noteTotal = group.filter((d) => isRefund(d)).reduce((sum, d) => sum + residual(d, db), 0);
-      if (!(invTotal - noteTotal > 0)) throw new Error('The net payment amount must be greater than zero');
+      if (!(paymentDocumentsNetAmount(db, group, today()) > 0)) throw new Error('The net payment amount must be greater than zero');
     }
     const companyId = docs[0].company_id ?? 1;
+    const journalId = defaultPaymentJournalId(db, companyId);
+    const direction = isInbound(docs[0]) ? 'inbound' : 'outbound';
+    const singlePayment = (vals) => paymentDocumentGroups(db, docs, vals?.group_payment !== false).size === 1;
     return {
       title: 'Register Payment',
       fields: [
         ...(docs.length > 1 ? [{ name: 'group_payment', type: 'boolean', label: 'Group Payments', default: true }] : []),
+        { name: 'amount', type: 'monetary', label: 'Payment Amount', default: String(paymentDocumentsNetAmount(db, docs, today())), readonly: (vals) => !singlePayment(vals) },
         { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
         {
           name: 'journal_id',
@@ -2718,8 +2727,14 @@ const registerPaymentsListAction = {
           default: defaultPaymentJournalId(db, companyId),
           domain: (j) => (!j.company_id || j.company_id === companyId) && isLiquidityJournal(j),
         },
+        registerMethodField(db, journalId, direction),
         { name: 'memo', type: 'char', label: 'Memo', default: '' },
       ],
+      onchange: (vals, key) => {
+        if (key === 'journal_id') return { payment_method_line_id: defaultPaymentMethodLineId(db, vals.journal_id, direction) };
+        if (key === 'date') return { amount: String(paymentDocumentsNetAmount(db, docs, vals.date || today())) };
+        return {};
+      },
     };
   },
   run: (db, ids, values = {}) => registerPayments(db, ids, values),
@@ -3979,6 +3994,8 @@ export const accountingModels = {
               },
             ];
 
+            fields.push(registerMethodField(db, defaultPaymentJournalId(db, r.company_id ?? 1), isInbound(r) ? 'inbound' : 'outbound'));
+
             if (isPurchase(r) && !isInbound(r)) {
               fields.push({
                 name: 'partner_bank_id',
@@ -4031,6 +4048,7 @@ export const accountingModels = {
               title: 'Register Payment',
               fields,
               onchange: (vals, key) => {
+                if (key === 'journal_id') return { payment_method_line_id: defaultPaymentMethodLineId(db, vals.journal_id, isInbound(r) ? 'inbound' : 'outbound') };
                 if (key === 'date' || key === 'currency_id') {
                   const d = vals?.date || today();
                   const c = vals?.currency_id ?? initialCurrId;
