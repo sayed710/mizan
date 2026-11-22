@@ -4,7 +4,8 @@ import { nextName, today, validDate } from './common.js';
 import { discountAvailable, payMove, payWithDiscount } from './accounting.js';
 import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
-import { isLiquidityJournal, paymentJournal } from './ledger.js';
+import { defaultPaymentJournalId, isLiquidityJournal, paymentJournal } from './ledger.js';
+import { journalMethodLines } from './paymentmethod.js';
 import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
@@ -128,6 +129,41 @@ export function isCheckBatch(db, batch) {
   return method?.code === 'check_printing';
 }
 
+/**
+ * Resolve the active payment method line on `journal` for `batch` (when a method is explicitly chosen
+ * or defaulted for an outbound check batch), returning `{ method, line, error }`.
+ */
+export function resolveBatchMethodLine(db, batch, journal = null) {
+  if (!db || !batch) return { method: null, line: null, error: null };
+  const explicit = Boolean(batch.payment_method_id);
+  const method = explicit
+    ? read(db, 'account.payment.method', batch.payment_method_id)
+    : batchPaymentMethod(db, batch);
+  if (explicit && (!method || method.active === false)) {
+    return { method: null, line: null, error: 'Select an active payment method' };
+  }
+  if (explicit && batch.batch_type && method.payment_type !== batch.batch_type) {
+    return { method, line: null, error: 'Payment method direction must match the batch' };
+  }
+  const isCheck = batch.batch_type === 'outbound' && method?.code === 'check_printing';
+  const targetJournalId = journal?.id ?? batch.journal_id ?? null;
+  if (!method || !targetJournalId) {
+    return { method: method ?? null, line: null, error: null };
+  }
+  const line = journalMethodLines(db, targetJournalId, batch.batch_type)
+    .find((l) => l.payment_method_id === method.id) ?? null;
+  if (!line && (explicit || isCheck)) {
+    return {
+      method,
+      line: null,
+      error: isCheck
+        ? 'The batch journal has no check payment method'
+        : 'The selected payment method is not available on this journal',
+    };
+  }
+  return { method, line, error: null };
+}
+
 /** Validate the batch, pay each line, number the checks (outbound), assign the reference and post. */
 export function postBatch(db, batch) {
   if (batch.state !== 'draft') throw new Error('Only draft batches can be validated');
@@ -149,7 +185,7 @@ export function postBatch(db, batch) {
       if (payment.payment_type !== batch.batch_type) throw new Error('Payment direction must match the batch');
       if (payment.journal_id !== batch.journal_id) throw new Error('Payment journal must match the batch journal');
       if (isCheck && !paymentPaysByCheck(db, payment)) throw new Error('A check batch only holds check payments');
-      if (batch.payment_method_id && paymentMethodIdOf(db, payment) && paymentMethodIdOf(db, payment) !== batch.payment_method_id) {
+      if (batch.payment_method_id && paymentMethodIdOf(db, payment) !== batch.payment_method_id) {
         throw new Error('Selected payments must use the same payment method');
       }
       if (isPaymentMatched(db, payment)) throw new Error('Payment is already matched');
@@ -168,6 +204,10 @@ export function postBatch(db, batch) {
       throw new Error(`${move.name}: the amount must be positive and at most the amount due (${round(move.amount_residual)})`);
     }
   }
+  if (!batch.payment_method_id && paymentIds.length > 1) {
+    const methods = new Set(paymentIds.map((id) => paymentMethodIdOf(db, read(db, 'account.payment', id))));
+    if (methods.size > 1) throw new Error('Selected payments must use the same payment method');
+  }
   if (companies.size !== 1) throw new Error('Batch invoices must belong to the same company');
   const [company] = companies;
   if (paymentIds.length && batch.company_id != null && batch.company_id !== company) throw new Error('Batch and payments must belong to the same company');
@@ -182,12 +222,9 @@ export function postBatch(db, batch) {
   }
   if (journal.company_id != null && journal.company_id !== company) throw new Error('Batch journal and invoices must belong to the same company');
   paymentJournal(db, journal.id, company);
-  const checkMethod = search(db, 'account.payment.method').find((m) => m.code === 'check_printing' && m.payment_type === 'outbound');
-  const checkLine = (isCheck && checkMethod)
-    ? search(db, 'account.payment.method.line').find((l) => l.journal_id === journal.id && l.payment_method_id === checkMethod.id)
-    : null;
-  if (isCheck && !checkLine) {
-    throw new Error('The batch journal has no check payment method');
+  const { line: methodLine, error: methodError } = resolveBatchMethodLine(db, batch, journal);
+  if (methodError) {
+    throw new Error(methodError);
   }
   for (const line of lines) {
     if (line.payment_id) {
@@ -204,10 +241,6 @@ export function postBatch(db, batch) {
   }
 
   let next = db;
-  const batchMethod = batchPaymentMethod(db, batch);
-  const methodLine = (batch.batch_type === 'outbound' && batchMethod)
-    ? search(next, 'account.payment.method.line').find((l) => l.journal_id === journal.id && l.payment_method_id === batchMethod.id)
-    : checkLine;
   const linked = lines.map((line) => {
     if (line.payment_id) {
       const payment = read(next, 'account.payment', line.payment_id);
@@ -283,12 +316,47 @@ export function isBatchReconciled(db, batch) {
 export const paymentModels = {
   'account.batch.payment': {
     label: 'Batch Payments',
+    guard: (db, before, after) => {
+      if (after.state === 'posted') {
+        const transitioningToPosted = !before || before.state !== 'posted';
+        const methodFieldChanged = before && (
+          (before.payment_method_id ?? null) !== (after.payment_method_id ?? null)
+          || (before.journal_id ?? null) !== (after.journal_id ?? null)
+          || (before.batch_type ?? null) !== (after.batch_type ?? null)
+        );
+        if (transitioningToPosted || methodFieldChanged) {
+          const resolvedJournalId = after.journal_id ?? defaultPaymentJournalId(db, after.company_id ?? 1);
+          const journal = resolvedJournalId ? read(db, 'account.journal', resolvedJournalId) : null;
+          if (after.payment_method_id || journal) {
+            const { error } = resolveBatchMethodLine(db, after, journal);
+            if (error) return error;
+          }
+          if (after.payment_method_id) {
+            for (const line of after.lines ?? []) {
+              if (line?.cancelled || !line?.payment_id) continue;
+              const payment = read(db, 'account.payment', line.payment_id);
+              if (payment && paymentMethodIdOf(db, payment) !== after.payment_method_id) {
+                return 'Selected payments must use the same payment method';
+              }
+            }
+          }
+        }
+      }
+      return null;
+    },
     fields: {
       name: { type: 'char', label: 'Reference', required: true },
       batch_type: { type: 'selection', label: 'Batch Type', required: true, options: [['inbound', 'Inbound'], ['outbound', 'Outbound']] },
       date: { type: 'date', label: 'Date' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
-      payment_method_id: { type: 'many2one', relation: 'account.payment.method', label: 'Payment Method' },
+      payment_method_id: {
+        type: 'many2one',
+        relation: 'account.payment.method',
+        label: 'Payment Method',
+        domain: (m, r, db) => m.active !== false
+          && (!r?.batch_type || m.payment_type === r.batch_type)
+          && (!r?.journal_id || !db || journalMethodLines(db, r.journal_id, r.batch_type || null).some((l) => l.payment_method_id === m.id)),
+      },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', compute: (r, db) => batchCurrency(db, r).id },
       currency_warning: { type: 'char', label: 'Currency Status', readonly: true, compute: (r, db) => batchCurrency(db, r).error ?? '' },
       state: {
@@ -356,6 +424,12 @@ export const paymentModels = {
       } },
     },
     defaults: () => ({ name: 'New', date: today(), state: 'draft', lines: [] }),
+    onchange: (r, key, db) => {
+      if ((key === 'journal_id' || key === 'batch_type') && r.payment_method_id && db) {
+        if (resolveBatchMethodLine(db, r).error) return { payment_method_id: null };
+      }
+      return {};
+    },
     kanban: { title: 'name', lines: ['batch_type', 'date', 'amount_total'], badge: 'status' },
     list: ['name', 'batch_type', 'date', 'amount_total', 'status'],
     form: {
@@ -426,17 +500,12 @@ export function createBatchPayment(db, ids) {
   if (!journal || !isLiquidityJournal(journal) || (isCheck && journal.type !== 'bank')) {
     throw new Error(isCheck ? 'Checks require a bank journal' : 'Inbound batches require a bank or cash journal');
   }
-  if (isCheck) {
-    if (payments.some((p) => !paymentPaysByCheck(db, p))) {
-      throw new Error('A check batch only holds check payments');
-    }
-    const checkMethod = search(db, 'account.payment.method').find((m) => m.code === 'check_printing' && m.payment_type === 'outbound');
-    const checkLine = (journal && checkMethod)
-      ? search(db, 'account.payment.method.line').find((l) => l.journal_id === journal.id && l.payment_method_id === checkMethod.id)
-      : null;
-    if (!checkLine) {
-      throw new Error('The batch journal has no check payment method');
-    }
+  if (methodId) {
+    const { error } = resolveBatchMethodLine(db, { batch_type: first.payment_type, payment_method_id: methodId }, journal);
+    if (error) throw new Error(error);
+  }
+  if (isCheck && payments.some((p) => !paymentPaysByCheck(db, p))) {
+    throw new Error('A check batch only holds check payments');
   }
 
   const currency = batchCurrency(db, { lines: payments.map((p) => ({ payment_id: p.id })) });

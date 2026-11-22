@@ -557,3 +557,165 @@ test('Regression PR #208: createBatchPayment supports non-check payouts and refu
     else process.env.MIZAN_STRICT_FIELDS = origStrict;
   }
 });
+
+test('Regression PR #208 Qodo: postBatch requires an active matching method line on the batch journal and passes it to generated payments', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+
+  const altInMethod = create(db, 'account.payment.method', { name: 'Bank Transfer In', code: 'manual', payment_type: 'inbound' });
+  db = altInMethod.db;
+  const altOutMethod = create(db, 'account.payment.method', { name: 'Wire Transfer Out', code: 'manual', payment_type: 'outbound' });
+  db = altOutMethod.db;
+
+  // Put altInMethod only on cash (not bank), and altOutMethod only on cash (not bank)
+  const cashAltInLine = create(db, 'account.payment.method.line', {
+    name: 'Bank Transfer In',
+    journal_id: cash.id,
+    payment_method_id: altInMethod.id,
+    sequence: 20,
+  });
+  db = cashAltInLine.db;
+  const cashAltOutLine = create(db, 'account.payment.method.line', {
+    name: 'Wire Transfer Out',
+    journal_id: cash.id,
+    payment_method_id: altOutMethod.id,
+    sequence: 20,
+  });
+  db = cashAltOutLine.db;
+
+  const inv1 = postedInvoice(db, { moveType: 'out_invoice', partnerId: 3, amount: 120 });
+  db = inv1.db;
+  const bill1 = postedInvoice(db, { moveType: 'in_invoice', partnerId: 2, amount: 90 });
+  db = bill1.db;
+
+  // 1. Inbound invoice-line batch selecting a method not configured on bank MUST be rejected (not silently fall back to bank default)
+  const badInBatch = create(db, 'account.batch.payment', {
+    batch_type: 'inbound',
+    journal_id: bank.id,
+    payment_method_id: altInMethod.id,
+    lines: [{ move_id: inv1.id, amount: 120 }],
+  });
+  assert.throws(
+    () => postBatch(badInBatch.db, read(badInBatch.db, 'account.batch.payment', badInBatch.id)),
+    /not available on this journal|payment method/i,
+  );
+
+  // 2. Outbound invoice-line batch selecting a method not configured on bank MUST be rejected
+  const badOutBatch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    payment_method_id: altOutMethod.id,
+    lines: [{ move_id: bill1.id, amount: 90 }],
+  });
+  assert.throws(
+    () => postBatch(badOutBatch.db, read(badOutBatch.db, 'account.batch.payment', badOutBatch.id)),
+    /not available on this journal|payment method/i,
+  );
+
+  // 3. Inbound batch with an active non-default method line on bank passes that exact paymentMethodLineId (and its account) to payMove
+  const altAccount = create(db, 'account.account', {
+    code: '101455',
+    name: 'Alt Inbound Clearing',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: 1,
+  });
+  db = altAccount.db;
+  const bankAltInLine = create(db, 'account.payment.method.line', {
+    name: 'Bank Transfer In',
+    journal_id: bank.id,
+    payment_method_id: altInMethod.id,
+    sequence: 30,
+    payment_account_id: altAccount.id,
+  });
+  db = bankAltInLine.db;
+
+  const goodInBatch = create(db, 'account.batch.payment', {
+    batch_type: 'inbound',
+    journal_id: bank.id,
+    payment_method_id: altInMethod.id,
+    lines: [{ move_id: inv1.id, amount: 120 }],
+  });
+  const postedInDb = postBatch(goodInBatch.db, read(goodInBatch.db, 'account.batch.payment', goodInBatch.id));
+  const postedInBatch = read(postedInDb, 'account.batch.payment', goodInBatch.id);
+  const createdInPayment = read(postedInDb, 'account.payment', postedInBatch.lines[0].payment_id);
+  assert.equal(createdInPayment.payment_method_line_id, bankAltInLine.id, 'inbound batch must pass selected method line to payMove');
+  assert.equal(createdInPayment.outstanding_account_id, altAccount.id, 'generated payment must use selected method line account');
+
+  // Syncing posted inbound batch via diffDb + applyDiff succeeds
+  const syncedIn = applyDiff(goodInBatch.db, diffDb(goodInBatch.db, postedInDb), { isAdmin: true });
+  assert.equal(read(syncedIn, 'account.batch.payment', goodInBatch.id).state, 'posted');
+
+  // 4. Outbound batch with an active non-default method line on bank passes that exact line even when another method is lower sequence
+  const bankAltOutLine = create(db, 'account.payment.method.line', {
+    name: 'Wire Transfer Out',
+    journal_id: bank.id,
+    payment_method_id: altOutMethod.id,
+    sequence: 30,
+  });
+  db = bankAltOutLine.db;
+  const goodOutBatch = create(db, 'account.batch.payment', {
+    batch_type: 'outbound',
+    journal_id: bank.id,
+    payment_method_id: altOutMethod.id,
+    lines: [{ move_id: bill1.id, amount: 90 }],
+  });
+  const postedOutDb = postBatch(goodOutBatch.db, read(goodOutBatch.db, 'account.batch.payment', goodOutBatch.id));
+  const createdOutPayment = read(postedOutDb, 'account.payment', read(postedOutDb, 'account.batch.payment', goodOutBatch.id).lines[0].payment_id);
+  assert.equal(createdOutPayment.payment_method_line_id, bankAltOutLine.id, 'outbound batch must pass selected method line to payMove');
+
+  // 5. Archived method line on the batch journal is rejected
+  const archivedDb = write(db, 'account.payment.method.line', bankAltInLine.id, { active: false });
+  const inv2 = postedInvoice(archivedDb, { moveType: 'out_invoice', partnerId: 3, amount: 50 });
+  const archivedBatch = create(inv2.db, 'account.batch.payment', {
+    batch_type: 'inbound',
+    journal_id: bank.id,
+    payment_method_id: altInMethod.id,
+    lines: [{ move_id: inv2.id, amount: 50 }],
+  });
+  assert.throws(
+    () => postBatch(archivedBatch.db, read(archivedBatch.db, 'account.batch.payment', archivedBatch.id)),
+    /not available on this journal|payment method/i,
+  );
+
+  // 6. Wrong direction method (outbound method on inbound batch) is rejected
+  const wrongDirBatch = create(inv2.db, 'account.batch.payment', {
+    batch_type: 'inbound',
+    journal_id: bank.id,
+    payment_method_id: altOutMethod.id,
+    lines: [{ move_id: inv2.id, amount: 50 }],
+  });
+  assert.throws(
+    () => postBatch(wrongDirBatch.db, read(wrongDirBatch.db, 'account.batch.payment', wrongDirBatch.id)),
+    /direction|not available/i,
+  );
+
+  // 7. Forged posted batch via diffDb + applyDiff with unavailable payment_method_id is rejected by guard
+  const forged = {
+    ...badInBatch.db,
+    records: {
+      ...badInBatch.db.records,
+      'account.batch.payment': badInBatch.db.records['account.batch.payment'].map((b) => (
+        b.id === badInBatch.id ? { ...b, state: 'posted', name: 'BATCH-IN/FORGED' } : b
+      )),
+    },
+  };
+  assert.throws(
+    () => applyDiff(badInBatch.db, diffDb(badInBatch.db, forged), { isAdmin: true }),
+    /not available on this journal|payment method/i,
+  );
+
+  // 8. UI domain on account.batch.payment.payment_method_id only offers active methods on journal_id for batch_type
+  const methodDomain = models['account.batch.payment'].fields.payment_method_id.domain;
+  assert.ok(typeof methodDomain === 'function', 'payment_method_id must define a domain');
+  const allowedOnBankIn = search(db, 'account.payment.method')
+    .filter((m) => methodDomain(m, { batch_type: 'inbound', journal_id: bank.id }, db))
+    .map((m) => m.id);
+  assert.ok(allowedOnBankIn.includes(altInMethod.id));
+  assert.ok(!allowedOnBankIn.includes(altOutMethod.id));
+  const allowedOnBankInAfterArchive = search(archivedDb, 'account.payment.method')
+    .filter((m) => methodDomain(m, { batch_type: 'inbound', journal_id: bank.id }, archivedDb))
+    .map((m) => m.id);
+  assert.ok(!allowedOnBankInAfterArchive.includes(altInMethod.id));
+});
