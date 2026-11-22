@@ -1921,6 +1921,39 @@ export function migrateFollowUpNextActionDate(db) {
 }
 MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
 
+export function migrateSalesCreditLimit(db) {
+  const partners = db?.records?.['res.partner'];
+  const companies = db?.records?.['res.company'];
+  if (!Array.isArray(partners) && !Array.isArray(companies)) return db;
+  const hasPartnerLimit = (partners ?? []).some((p) => (Number(p?.credit_limit) || 0) > 0);
+  if (!hasPartnerLimit) return db;
+  let changed = false;
+  const nextPartners = (partners ?? []).map((p) => {
+    if ((Number(p?.credit_limit) || 0) > 0 && !p.use_partner_credit_limit) {
+      changed = true;
+      return { ...p, use_partner_credit_limit: true };
+    }
+    return p;
+  });
+  const nextCompanies = (companies ?? []).map((c) => {
+    if (!c.account_use_credit_limit) {
+      changed = true;
+      return { ...c, account_use_credit_limit: true };
+    }
+    return c;
+  });
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(partners ? { 'res.partner': nextPartners } : {}),
+      ...(companies ? { 'res.company': nextCompanies } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 64, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

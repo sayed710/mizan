@@ -3567,6 +3567,15 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Sales Credit Limit': 'حد ائتمان المبيعات',
+  'Default Credit Limit': 'حد الائتمان الافتراضي',
+  'Partner Limit': 'حد الشريك',
+  'Parent Contact': 'جهة الاتصال الأم',
+  'Trigger a warning when creating invoices and sales orders for partners whose total receivable exceeds the credit limit.': 'إظهار تحذير عند إنشاء فواتير أو أوامر بيع لشركاء يتجاوز إجمالي ذممهم المدينة حد الائتمان.',
+  'Default credit limit applied to partners without an individual limit.': 'حد الائتمان الافتراضي المطبَّق على الشركاء الذين ليس لديهم حد فردي.',
+  'Default Credit Limit must be non-negative': 'يجب ألا يكون حد الائتمان الافتراضي سالباً',
+  'Invalid Sales Credit Limit setting': 'إعداد حد ائتمان المبيعات غير صالح',
+  'Credit Limit must be non-negative': 'يجب ألا يكون حد الائتمان سالباً',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

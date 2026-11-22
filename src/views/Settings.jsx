@@ -254,6 +254,15 @@ export function validateCompanySettingWrite(db, company, vals) {
       return 'Enter a valid date';
     }
   }
+  if (vals.account_use_credit_limit !== undefined && typeof vals.account_use_credit_limit !== 'boolean') {
+    return 'Invalid Sales Credit Limit setting';
+  }
+  if (vals.account_default_credit_limit !== undefined && vals.account_default_credit_limit !== null) {
+    const n = Number(vals.account_default_credit_limit);
+    if (!Number.isFinite(n) || n < 0) {
+      return 'Default Credit Limit must be non-negative';
+    }
+  }
   return null;
 }
 
@@ -488,6 +497,36 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
             <SettingRow id="company_iban" label="Bank Account (IBAN)" description="Company IBAN encoded into SEPA (EPC) payment QR codes on customer invoices.">
               <input id="company_iban" disabled={readOnly || !company} value={company?.company_iban ?? ''}
                 onChange={(e) => onWriteCompany({ company_iban: e.target.value })} />
+            </SettingRow>
+          )}
+        </div>
+      )}
+
+      {(hasField('account_use_credit_limit') || hasField('account_default_credit_limit')) && (
+        <div className="settings-block" data-block="credit_limit">
+          <h3>{t('Credit Limit')}</h3>
+          {hasField('account_use_credit_limit') && (
+            <SettingRow id="account_use_credit_limit" label="Sales Credit Limit" description="Trigger a warning when creating invoices and sales orders for partners whose total receivable exceeds the credit limit.">
+              <input
+                id="account_use_credit_limit"
+                type="checkbox"
+                checked={!!company?.account_use_credit_limit}
+                disabled={readOnly || !company}
+                onChange={(e) => onWriteCompany({ account_use_credit_limit: e.target.checked })}
+              />
+            </SettingRow>
+          )}
+          {hasField('account_default_credit_limit') && !!company?.account_use_credit_limit && (
+            <SettingRow id="account_default_credit_limit" label="Default Credit Limit" description="Default credit limit applied to partners without an individual limit.">
+              <input
+                id="account_default_credit_limit"
+                type="number"
+                min="0"
+                step="any"
+                disabled={readOnly || !company}
+                value={company?.account_default_credit_limit ?? 0}
+                onChange={(e) => onWriteCompany({ account_default_credit_limit: e.target.value === '' ? 0 : Number(e.target.value) })}
+              />
             </SettingRow>
           )}
         </div>

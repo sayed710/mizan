@@ -1,7 +1,7 @@
 import { create, read, write } from '../orm.js';
 import { today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
 
 export function isRotting(db, model, r) {
   if (!r) return false;
@@ -112,6 +112,7 @@ export const crmModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       is_company: { type: 'boolean', label: 'Company' },
+      parent_id: { type: 'many2one', relation: 'res.partner', label: 'Parent Contact', hidden: true },
       email: { type: 'char', label: 'Email' },
       phone: { type: 'char', label: 'Phone' },
       city: { type: 'char', label: 'City' },
@@ -119,7 +120,13 @@ export const crmModels = {
       country: { type: 'char', label: 'Country' },
       vat: { type: 'char', label: 'Tax ID' },
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
-      credit_limit: { type: 'monetary', label: 'Credit Limit' },
+      use_partner_credit_limit: { type: 'boolean', label: 'Partner Limit', hideWhen: (_r, db) => !creditLimitEnabled(db) },
+      credit_limit: {
+        type: 'monetary',
+        label: 'Credit Limit',
+        hideWhen: (_r, db) => !creditLimitEnabled(db),
+        readonly: (r) => !r?.use_partner_credit_limit,
+      },
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       property_supplier_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Supplier Payment Terms' },
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
@@ -174,6 +181,10 @@ export const crmModels = {
     },
     defaults: () => ({ tag_ids: [], followup_reminder_type: 'automatic' }),
     onchange: (r, key, db) => {
+      if (key === 'use_partner_credit_limit') {
+        const comp = db ? read(db, 'res.company', db.settings?.current_company_id ?? 1) : null;
+        return { credit_limit: r.use_partner_credit_limit ? (r.credit_limit ?? comp?.account_default_credit_limit ?? 0) : null };
+      }
       if (key === 'followup_next_action_date') {
         const cId = db?.settings?.current_company_id ?? 1;
         return {
@@ -205,7 +216,13 @@ export const crmModels = {
       }
       return null;
     },
-    guard: (db, before, after) => validatePartnerBankLines(db, after?.id, after?.bank_ids),
+    guard: (db, before, after) => {
+      if (after?.credit_limit != null && after?.credit_limit !== '') {
+        const n = Number(after.credit_limit);
+        if (!Number.isFinite(n) || n < 0) return 'Credit Limit must be non-negative';
+      }
+      return validatePartnerBankLines(db, after?.id, after?.bank_ids);
+    },
     onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
       { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
@@ -216,6 +233,7 @@ export const crmModels = {
     list: ['name', 'email', 'phone', 'city', 'country'],
     form: {
       title: 'name',
+      prepare: (r, db) => (!r?.use_partner_credit_limit && creditLimitEnabled(db) ? { ...r, credit_limit: read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.account_default_credit_limit ?? 0 } : r),
       smart: [
         { label: 'Opportunities', model: 'crm.lead', field: 'partner_id', target: 'crm/pipeline' },
         { label: 'Sales', model: 'sale.order', field: 'partner_id', target: 'sales/quotations' },
@@ -227,6 +245,7 @@ export const crmModels = {
         {
           label: 'Accounting',
           fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
+          groups: [['use_partner_credit_limit']],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
       ],

@@ -3851,7 +3851,7 @@ export const accountingModels = {
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
-      warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
+      warning: (r, db) => (r.move_type === 'out_invoice' ? ((!r.state || r.state === 'draft') ? creditWarning(db, r.partner_id, total(r, db), r) : '') : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
       groups: (r) => (isInvoice(r)
         ? [
           [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? [{ field: 'ref', label: 'Bill Reference' }] : [])],

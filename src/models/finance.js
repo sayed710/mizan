@@ -2,7 +2,7 @@
 import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { create, postNote, read, search, write } from '../orm.js';
-import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
+import { addDays, commercialPartnerId, sameCommercialPartner, today, total, validDate } from './common.js';
 import { ACTIVITY_TYPES } from './mail.js';
 import { currentActor, employeeFor } from './actor.js';
 import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
@@ -18,20 +18,42 @@ import { effectiveCompanyLockDates } from './lockexception.js';
 
 export { applicationEffectiveDate };
 
-/** Open receivable (posted, unpaid invoices) of a partner. */
-export const receivableOf = (db, partnerId, companyId = 1) => roundCurrency((db.records['account.move'] ?? [])
-  .filter((m) => m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && m.partner_id === partnerId && (m.company_id ?? 1) === companyId)
-  .reduce((s, m) => s + toCompany(db, m.currency_id, models['account.move'].fields.amount_residual.compute(m, db), m.invoice_date ?? m.date, companyId), 0), companyCurrencyRecord(db, companyId));
+/** Whether Sales Credit Limit is enabled on the target (or current) company. */
+export const creditLimitEnabled = (db, companyId = null) => {
+  if (!db) return false;
+  const cid = companyId ?? db.settings?.current_company_id ?? 1;
+  return Boolean(read(db, 'res.company', cid)?.account_use_credit_limit);
+};
+
+/** Open receivable (posted, unpaid invoices) of a partner's commercial entity. */
+export const receivableOf = (db, partnerId, companyId = 1) => {
+  const commercialId = commercialPartnerId(db, partnerId);
+  if (!commercialId) return 0;
+  return roundCurrency((db.records['account.move'] ?? [])
+    .filter((m) => m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && sameCommercialPartner(db, m.partner_id, commercialId) && (m.company_id ?? 1) === companyId)
+    .reduce((s, m) => s + toCompany(db, m.currency_id, models['account.move'].fields.amount_residual.compute(m, db), m.invoice_date ?? m.date, companyId), 0), companyCurrencyRecord(db, companyId));
+};
 
 /** Warning for additional credit exposure (0 = no limit). */
 export function creditWarning(db, partnerId, amount, document = {}) {
-  if (document.state === 'cancel') return '';
-  const p = read(db, 'res.partner', partnerId);
-  const limit = Number(p?.credit_limit) || 0;
-  if (!limit) return;
+  if (!db || !partnerId || document.state === 'cancel') return '';
   const companyId = document.company_id ?? 1;
-  const exposure = roundCurrency(receivableOf(db, partnerId, companyId) + toCompany(db, document.currency_id, amount, document.invoice_date ?? document.date_order ?? document.date, companyId), companyCurrencyRecord(db, companyId));
-  return exposure > limit ? `${p.name} would exceed the credit limit (${exposure} > ${limit})` : '';
+  if (!creditLimitEnabled(db, companyId)) return '';
+  const p = read(db, 'res.partner', partnerId);
+  if (!p) return '';
+  const company = read(db, 'res.company', companyId);
+  const commercialId = commercialPartnerId(db, partnerId);
+  const commercial = (commercialId ? read(db, 'res.partner', commercialId) : null) ?? p;
+  const limit = commercial.use_partner_credit_limit
+    ? (Number(commercial.credit_limit) || 0)
+    : (Number(company.account_default_credit_limit) || 0);
+  if (!(limit > 0)) return '';
+  const compCurrency = companyCurrencyRecord(db, companyId);
+  const docDate = document.invoice_date ?? document.date_order ?? document.date;
+  const docCompanyAmount = toCompany(db, document.currency_id, amount, docDate, companyId);
+  const exposure = roundCurrency(receivableOf(db, commercial.id, companyId) + docCompanyAmount, compCurrency);
+  if (!(exposure > limit)) return '';
+  return `${commercial.name} has reached its credit limit of: ${formatCurrency(limit, compCurrency)}. Total amount due (including this document): ${formatCurrency(exposure, compCurrency)}`;
 }
 
 /**
