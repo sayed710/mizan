@@ -112,7 +112,7 @@ test('batch totals and fill actions keep a single invoice currency', () => {
   assert.deepEqual(new Set(currencies), new Set(['USD']));
 });
 
-test('vendor changes clear stale bank and payment term values without choosing a bank by order', () => {
+test('vendor changes choose the new vendor bank and clear stale payment terms', () => {
   let db = seed();
   const term = create(db, 'account.payment.term', { name: 'Vendor Net 60', line_ids: [{ value: 100, value_type: 'percent', nb_days: 60, delay_type: 'days_after' }] });
   db = term.db;
@@ -130,7 +130,7 @@ test('vendor changes clear stale bank and payment term values without choosing a
     invoice_line_ids: [],
   };
   const changed = models['account.move'].onchange({ ...old, partner_id: vendorB.id }, 'partner_id', db);
-  assert.equal(changed.partner_bank_id, null);
+  assert.equal(changed.partner_bank_id, bankB.id);
   assert.equal(changed.invoice_payment_term_id, null);
   assert.equal(changed.invoice_date_due, null);
   const explicit = models['account.move'].onchange({ ...old, partner_id: vendorB.id, partner_bank_id: bankB.id }, 'partner_id', db);

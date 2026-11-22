@@ -530,7 +530,7 @@ test('Migration: version 64 gives existing unreconciled statement lines their su
 
   // Run migration
   const migratedDb = migrate(legacyDb, SCHEMA_VERSION);
-  assert.equal(migratedDb.schema_version, 64);
+  assert.equal(migratedDb.schema_version, 65);
 
   const migratedUnrec = read(migratedDb, LINE_MODEL, 991);
   assert.ok(migratedUnrec.bank_move_id, 'Migration gave unreconciled line a bank_move_id');
