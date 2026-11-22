@@ -1,6 +1,6 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { installments } from './terms.js';
-import { queueSms } from './sms.js';
+import { normalizePhone, queueSms } from './sms.js';
 import { models } from '../registry.js';
 import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
@@ -1716,10 +1716,12 @@ export function levelChannels(level) {
 
 export function levelChannel(level) { return levelChannels(level)[0] ?? null; }
 
+const followUpSmsText = (db, part, level) => String(level?.sms_message ?? '').trim() || followUpText(db, part);
+
 function queueFollowUpSms(db, partner, part, level, at, automatic = false) {
   if (automatic && search(db, 'sms.campaign').some((campaign) => campaign.followup_sms && campaign.followup_partner_id === partner.id && campaign.followup_company_id === part.company_id && campaign.followup_level_id === level?.id && campaign.followup_oldest === part.oldest)) return db;
   if (!String(partner.mobile || partner.phone || '').trim()) throw new Error('The customer has no mobile or phone number.');
-  const body = String(level?.sms_message ?? '').trim() || followUpText(db, part);
+  const body = followUpSmsText(db, part, level);
   const campaign = create(db, 'sms.campaign', {
     name: 'Payment reminder', mailing_model: 'res.partner', body, followup_sms: true, company_id: part.company_id,
     ...(automatic ? { followup_partner_id: partner.id, followup_company_id: part.company_id, followup_level_id: level?.id, followup_oldest: part.oldest } : {}),
@@ -2304,27 +2306,39 @@ export function isFollowUpSmsDiff(diff, db) {
   const traces = diff.upserts?.['sms.trace'] ?? [];
   if (!campaigns.length && !traces.length) return false;
 
-  const existingCampaigns = new Map((db?.records?.['sms.campaign'] ?? []).map((c) => [c.id, c]));
-  const followupCampaignIds = new Set();
-
-  for (const c of campaigns) {
-    if (!c || c.followup_sms !== true) return false;
-    const prior = existingCampaigns.get(c.id);
-    if (prior && prior.followup_sms !== true) return false;
-    followupCampaignIds.add(c.id);
+  const existingCampaigns = new Map(search(db, 'sms.campaign').map((c) => [c.id, c]));
+  const resultingCampaigns = new Map(existingCampaigns);
+  const touched = new Set();
+  for (const campaign of campaigns) {
+    const prior = existingCampaigns.get(campaign.id);
+    if (campaign.followup_sms !== true || (prior && prior.followup_sms !== true)) return false;
+    resultingCampaigns.set(campaign.id, campaign);
+    touched.add(campaign.id);
   }
 
-  const existingTraces = new Map((db?.records?.['sms.trace'] ?? []).map((t) => [t.id, t]));
-  for (const t of traces) {
-    if (!t) return false;
-    if (t.res_model && t.res_model !== 'res.partner') return false;
-    const campaignId = t.campaign_id;
-    const isFollowupCampaign = followupCampaignIds.has(campaignId) || existingCampaigns.get(campaignId)?.followup_sms === true;
-    if (!isFollowupCampaign) return false;
-    const prior = existingTraces.get(t.id);
-    if (prior) {
-      const priorCamp = existingCampaigns.get(prior.campaign_id);
-      if (priorCamp && priorCamp.followup_sms !== true) return false;
+  const existingTraces = new Map(search(db, 'sms.trace').map((t) => [t.id, t]));
+  const resultingTraces = new Map(existingTraces);
+  for (const trace of traces) {
+    const prior = existingTraces.get(trace.id);
+    if (prior && prior.campaign_id !== trace.campaign_id) return false;
+    resultingTraces.set(trace.id, trace);
+    touched.add(trace.campaign_id);
+  }
+
+  const at = today();
+  const groups = followUps(db, at).flatMap(followUpCompanies);
+  for (const id of touched) {
+    const campaign = resultingCampaigns.get(id);
+    if (!campaign || campaign.followup_sms !== true || campaign.mailing_model !== 'res.partner') return false;
+    const campaignTraces = [...resultingTraces.values()].filter((trace) => trace.campaign_id === id);
+    if (!campaignTraces.length) return false;
+    for (const trace of campaignTraces) {
+      const partner = read(db, 'res.partner', trace.res_id);
+      const group = groups.find((f) => f.partner_id === trace.res_id && f.company_id === (campaign.company_id ?? 1) && !f.upcoming);
+      const level = group && followUpLevel(db, group, at);
+      if (trace.res_model !== 'res.partner' || !partner || !group || !level?.send_sms) return false;
+      const phone = normalizePhone(partner.mobile || partner.phone);
+      if (!phone || trace.phone !== phone || campaign.body !== followUpSmsText(db, group, level)) return false;
     }
   }
 

@@ -63,9 +63,9 @@ async function mountView(renderElement, initialDb) {
   };
 }
 
-function fixture(phone = '+201001112233') {
+function fixture(phone = '+201001112233', due = '2026-01-01') {
   const partner = create(seed(), 'res.partner', { name: 'SMS customer', email: 'sms@example.test', mobile: phone });
-  const invoice = create(partner.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: partner.id, invoice_date: '2025-12-01', invoice_date_due: '2026-01-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });
+  const invoice = create(partner.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: partner.id, invoice_date: addDays(due, -31), invoice_date_due: due, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });
   const level = create(postMove(invoice.db, invoice.id), 'account.followup.level', { delay: 19, send_email: true, send_sms: true, sms_message: 'Please pay' });
   return { db: level.db, partner: partner.id, level: level.id };
 }
@@ -191,8 +191,8 @@ test('Finding 3: missing phone number does not flood duplicate notes on repeated
 });
 
 test('Finding 1: accounting users can persist manual follow-up SMS diffs via scoped permission but not arbitrary campaigns', () => {
-  const f = fixture();
-  const next = logManualFollowUp(f.db, f.partner, '2026-01-20', { channel: 'sms' });
+  const f = fixture(undefined, addDays(today(), -19));
+  const next = logManualFollowUp(f.db, f.partner, today(), { channel: 'sms' });
   const acctApps = ['accounting'];
   const diff = diffDb(f.db, next);
 
@@ -218,6 +218,39 @@ test('Finding 1: accounting users can persist manual follow-up SMS diffs via sco
   const promoScoped = scopedWritableModels(acctApps, promoDiff, f.db);
   assert.equal(promoScoped.has('sms.campaign'), false);
   assert.throws(() => applyDiff(f.db, promoDiff, { allowed: promoScoped, author: 'Accountant' }), /No access to sms\.campaign/);
+});
+
+test('accounting SMS permission validates current follow-up data for every campaign trace', async () => {
+  const f = fixture(undefined, addDays(today(), -19));
+  const accept = (next) => {
+    const diff = diffDb(f.db, next);
+    return applyDiff(f.db, diff, { allowed: scopedWritableModels(['accounting'], diff, f.db), author: 'Accountant' });
+  };
+  const manual = logManualFollowUp(f.db, f.partner, today(), { channel: 'sms' });
+  const campaign = search(manual, 'sms.campaign').find((c) => c.followup_sms);
+  const trace = search(manual, 'sms.trace').find((t) => t.campaign_id === campaign.id);
+  assert.ok(read(accept(manual), 'sms.trace', trace.id));
+  const scheduled = await runFollowUps(f.db, today(), () => ({ status: 'sent' }));
+  assert.ok(search(accept(scheduled), 'sms.trace').some((t) => t.res_id === f.partner));
+
+  const reject = (next) => assert.throws(() => accept(next), /No access to sms\.(campaign|trace)/);
+  reject(write(manual, 'sms.campaign', campaign.id, { body: 'Custom promotion' }));
+  reject(write(manual, 'sms.trace', trace.id, { phone: '+201999999999' }));
+  const other = create(f.db, 'res.partner', { name: 'No overdue invoice', mobile: '+201111111111' });
+  const otherManual = logManualFollowUp(other.db, f.partner, today(), { channel: 'sms' });
+  const otherTrace = search(otherManual, 'sms.trace').find((t) => t.res_id === f.partner);
+  const forged = write(otherManual, 'sms.trace', otherTrace.id, { res_id: other.id, phone: '+201111111111' });
+  const forgedDiff = diffDb(other.db, forged);
+  assert.throws(() => applyDiff(other.db, forgedDiff, { allowed: scopedWritableModels(['accounting'], forgedDiff, other.db) }), /No access to sms\.(campaign|trace)/);
+
+  const existing = accept(manual);
+  const disabled = write(existing, 'sms.campaign', campaign.id, { followup_sms: false });
+  const disabledDiff = diffDb(existing, disabled);
+  assert.throws(() => applyDiff(existing, disabledDiff, { allowed: scopedWritableModels(['accounting'], disabledDiff, existing) }), /No access to sms\.campaign/);
+  const promo = create(f.db, 'sms.campaign', { name: 'Existing promotion', body: campaign.body, mailing_model: 'res.partner' });
+  const reclassified = write(promo.db, 'sms.campaign', promo.id, { followup_sms: true });
+  const reclassifiedDiff = diffDb(promo.db, reclassified);
+  assert.throws(() => applyDiff(promo.db, reclassifiedDiff, { allowed: scopedWritableModels(['accounting'], reclassifiedDiff, promo.db) }), /No access to sms\.campaign/);
 });
 
 test('Finding 4: dual-channel level provides levelChannels and distinct SMS manual action in Follow-ups screen', async () => {
