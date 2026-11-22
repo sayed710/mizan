@@ -258,6 +258,19 @@ test('upsertCurrencyRate and upsertCurrencyRates write rates only for active cur
   assert.equal(rows3.length, 1);
   assert.equal(rows3[0].rate, 0.94);
   assert.equal((read(db, 'res.currency', inactId).rate_ids ?? []).length, 0);
+
+  // Array-form upsertCurrencyRates with base entry (USD) and foreign entry (EUR)
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const usdRowsBefore = read(db, 'res.currency', usd.id).rate_ids ?? [];
+  db = upsertCurrencyRates(db, [
+    { currency_id: usd.id, rate: 1.0 },
+    { currency_id: eur.id, rate: 0.96 },
+  ], { date: '2026-11-19', companyId: 1 });
+  const eurAfter4 = read(db, 'res.currency', eur.id);
+  const rows4 = eurAfter4.rate_ids.filter((r) => r.date === '2026-11-19' && r.company_id === 1);
+  assert.equal(rows4.length, 1);
+  assert.equal(rows4[0].rate, 0.96);
+  assert.deepEqual(read(db, 'res.currency', usd.id).rate_ids ?? [], usdRowsBefore, 'Base currency must not receive rate rows');
 });
 
 test('upsertCurrencyRate replaces all legacy duplicate rows for (currency, date, company) with one updated row', () => {

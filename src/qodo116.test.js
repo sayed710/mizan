@@ -179,7 +179,7 @@ test('finding 2: signedDocumentAmount matches signedCompanyTotal sign for all in
   }
 });
 
-test('finding 3: base currency displayed rate and inverse rate use implicit 1 and hide Rates tab even with a stored row when company currency differs', () => {
+test('finding 3: base currency displayed rate and inverse rate use implicit 1 and hide Rates tab on company currency', () => {
   const db = seed();
   const own = db.records['res.company'].find((c) => c.id === 1).currency_id;
   const base = db.records['res.currency'].find((c) => c.id !== own);
@@ -208,10 +208,10 @@ test('finding 3: base currency displayed rate and inverse rate use implicit 1 an
   assert.equal(baseRec.inverse_rate, 4);
   assert.equal(baseRec.rate_date, null);
 
-  // Company currency keeps Rates tab when it is not base; base currency hides Rates tab so ignored rows aren't edited.
+  // Matches Odoo: Rates tab is hidden only on the active company's own currency, and shown on foreign currencies (even base).
   const tabs = models['res.currency'].form.tabs;
-  assert.deepEqual(tabs(read(setup, 'res.currency', base.id), setup), []);
-  assert.deepEqual(tabs(read(setup, 'res.currency', own), setup).map((tab) => tab.label), ['Rates']);
+  assert.deepEqual(tabs(read(setup, 'res.currency', own), setup), []);
+  assert.deepEqual(tabs(read(setup, 'res.currency', base.id), setup).map((tab) => tab.label), ['Rates']);
 });
 
 test('finding 4: statusInPayment gives identical results for paid, in_payment, and reversed invoices across cached and updated snapshots', () => {
