@@ -334,7 +334,7 @@ export function Checks() {
           </thead>
           <tbody>
             {!rows.length ? (
-              <tr><td colSpan={7} className="empty">{t('No checks yet.')}</td></tr>
+              <tr><td colSpan={6} className="empty">{t('No checks yet.')}</td></tr>
             ) : !filtered.length ? (
               <tr><td colSpan={8} className="empty">{t('No matching checks found.')}</td></tr>
             ) : grouped ? (
