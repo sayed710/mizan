@@ -473,13 +473,13 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
 
       <div className="settings-block" data-block="customer_invoices">
         <h3>{t('Customer Invoices')}</h3>
-        <SettingRow id="use_invoice_terms" label="Default Terms & Conditions">
+        <SettingRow id="use_invoice_terms" label="Default Terms & Conditions" description="Terms printed on new customer invoices and credit notes.">
           <input id="use_invoice_terms" type="checkbox" checked={!!company?.use_invoice_terms} disabled={readOnly || !company}
             onChange={(e) => onWriteCompany({ use_invoice_terms: e.target.checked })} />
           {company?.use_invoice_terms && <textarea aria-label={t('Terms and Conditions')} disabled={readOnly || !company} value={company?.invoice_terms ?? ''}
             onChange={(e) => onWriteCompany({ invoice_terms: e.target.value })} />}
         </SettingRow>
-        <SettingRow id="incoterm_id" label="Default Incoterm">
+        <SettingRow id="incoterm_id" label="Default Incoterm" description="Trade term set on new customer invoices.">
           <select id="incoterm_id" disabled={readOnly || !company} value={company?.incoterm_id ?? ''}
             onChange={(e) => onWriteCompany({ incoterm_id: e.target.value ? Number(e.target.value) : null })}>
             <option value="">{t('None')}</option>

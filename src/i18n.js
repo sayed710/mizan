@@ -3565,6 +3565,9 @@ const ar = {
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
   'Default Terms & Conditions': 'الشروط والأحكام الافتراضية',
   'Default Incoterm': 'شرط التجارة الدولي الافتراضي',
+  'Customer Invoices': 'فواتير العملاء',
+  'Terms printed on new customer invoices and credit notes.': 'الشروط المطبوعة على فواتير العملاء والإشعارات الدائنة الجديدة.',
+  'Trade term set on new customer invoices.': 'شرط التجارة المعيّن على فواتير العملاء الجديدة.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
