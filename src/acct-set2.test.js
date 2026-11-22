@@ -459,6 +459,54 @@ test('regression Qodo Finding 1: child legacy credit limits consolidate onto com
   assert.equal(p300.credit_limit, 700);
 });
 
+test('regression Qodo Finding: seeded parent partner 1 inherits child credit limit when child has positive limit', () => {
+  const fresh = seed();
+  const partner1 = read(fresh, 'res.partner', 1);
+  const legacyDb = {
+    ...fresh,
+    schema_version: 63,
+    records: {
+      ...fresh.records,
+      'res.partner': [
+        { ...partner1, credit_limit: 100000 },
+        { id: 101, name: 'Nile Furniture Branch', parent_id: 1, credit_limit: 400 },
+      ],
+      'account.move': [
+        {
+          id: 51,
+          move_type: 'out_invoice',
+          state: 'draft',
+          partner_id: 1,
+          company_id: 1,
+          currency_id: 1,
+          invoice_date: today(),
+          invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 500, tax: 0 }],
+        },
+      ],
+    },
+  };
+
+  const migrated = migrate(legacyDb);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(read(migrated, 'res.company', 1).account_use_credit_limit, true);
+
+  const p1 = read(migrated, 'res.partner', 1);
+  assert.equal(p1.use_partner_credit_limit, true);
+  assert.equal(p1.credit_limit, 400);
+
+  const p101 = read(migrated, 'res.partner', 101);
+  assert.equal(p101.use_partner_credit_limit, true);
+  assert.equal(p101.credit_limit, 400);
+
+  const inv = read(migrated, 'account.move', 51);
+  const warn = models['account.move'].form.warning(inv, migrated);
+  assert.equal(
+    warn,
+    'Nile Furniture Co. has reached its credit limit of: $400.00. Total amount due (including this document): $500.00',
+  );
+  assert.equal(migrate(migrated), migrated);
+});
+
 test('regression Qodo Finding 2: fresh and upgraded databases agree on credit limits being off by default', () => {
   const fresh = seed();
   assert.equal(read(fresh, 'res.company', 1).account_use_credit_limit, undefined);

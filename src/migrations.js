@@ -1938,6 +1938,52 @@ MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (d
   return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
 } });
 
+export function migrateTaxPriceIncludeOverride(db) {
+  const companies = db?.records?.['res.company'];
+  let companiesChanged = false;
+  const nextCompanies = Array.isArray(companies) ? companies.map((c) => {
+    if (!c || c.account_price_include != null) return c;
+    companiesChanged = true;
+    return { ...c, account_price_include: 'tax_excluded' };
+  }) : companies;
+
+  const taxes = db?.records?.['account.tax'];
+  let taxesChanged = false;
+  const isTruthyLegacy = (v) => {
+    if (v === true || v === 1 || v === '1') return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      return s === 'true' || s === 'yes' || s === 't' || s === '1';
+    }
+    return Boolean(v);
+  };
+  const nextTaxes = Array.isArray(taxes) ? taxes.map((t) => {
+    if (!t || typeof t !== 'object') return t;
+    const hasLegacy = 'price_include' in t;
+    if (t.price_include_override != null) {
+      if (!hasLegacy) return t;
+      taxesChanged = true;
+      const { price_include: _legacy, ...rest } = t;
+      return rest;
+    }
+    if (!hasLegacy) return t;
+    taxesChanged = true;
+    const { price_include, ...rest } = t;
+    return isTruthyLegacy(price_include) ? { ...rest, price_include_override: 'tax_included' } : rest;
+  }) : taxes;
+
+  if (!companiesChanged && !taxesChanged) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(companiesChanged ? { 'res.company': nextCompanies } : {}),
+      ...(taxesChanged ? { 'account.tax': nextTaxes } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
+
 export function migrateSalesCreditLimit(db) {
   const partners = db?.records?.['res.partner'];
   const companies = db?.records?.['res.company'];
@@ -1996,13 +2042,16 @@ export function migrateSalesCreditLimit(db) {
   let changed = false;
 
   const nextPartners = (partners ?? []).map((p) => {
+    const cId = commercialIdOf(p);
+    const consolidated = groupConsolidatedLimit.get(cId);
     if (isDemoSeedLimit(p)) {
       changed = true;
+      if (consolidated && p.id === cId) {
+        return { ...p, use_partner_credit_limit: true, credit_limit: consolidated };
+      }
       const { credit_limit: _cl, ...rest } = p;
       return rest;
     }
-    const cId = commercialIdOf(p);
-    const consolidated = groupConsolidatedLimit.get(cId);
     if (consolidated) {
       const nextLimit = p.id === cId ? consolidated : (p.credit_limit != null ? consolidated : p.credit_limit);
       if (!p.use_partner_credit_limit || p.credit_limit !== nextLimit) {
@@ -2031,7 +2080,7 @@ export function migrateSalesCreditLimit(db) {
     },
   };
 }
-MIGRATIONS.push({ version: 65, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
+MIGRATIONS.push({ version: 66, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
