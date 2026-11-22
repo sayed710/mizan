@@ -72,6 +72,106 @@ export function trialBalance(db, { from, to, company_id, analyticAccountIds, inc
   return { rows: list, totals: { initial: total('initial'), debit: total('debit'), credit: total('credit'), end: total('end') } };
 }
 
+/** General ledger: accounts with opening balance, movements inside the period, and ending balance, optionally grouped by partner. */
+export function generalLedger(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, groupByPartner = false } = {}) {
+  const mode = reportReviewMode({ reviewMode, includeUnposted });
+  const items = filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds);
+  const opening = from ? trialOpeningItems(db, filterByAnalytic(journalItems(db, { to: from, company_id, reviewMode: mode }), analyticAccountIds).filter((l) => l.date < from), from) : [];
+  const accountIdSet = new Set([...items, ...opening].map((l) => l.account_id));
+  const accounts = [...accountIdSet]
+    .map((id) => read(db, 'account.account', id))
+    .filter(Boolean)
+    .sort((a, b) => a.code.localeCompare(b.code));
+
+  const booked = (l, amount) => reportingBookedAmount(db, l, amount);
+  const debitOf = (l) => booked(l, Number(l.debit) || 0);
+  const creditOf = (l) => booked(l, Number(l.credit) || 0);
+  const bal = (ls) => ls.reduce((s, l) => s + debitOf(l) - creditOf(l), 0);
+
+  const rows = accounts.map((account) => {
+    const accLines = items.filter((l) => l.account_id === account.id).sort((x, y) => x.date.localeCompare(y.date));
+    const accOpening = opening.filter((l) => l.account_id === account.id);
+    const start = bal(accOpening);
+    let run = start;
+    const lines = accLines.map((l) => {
+      const debit = debitOf(l);
+      const credit = creditOf(l);
+      run += debit - credit;
+      return {
+        ...l,
+        debit,
+        credit,
+        balance: round(run),
+      };
+    });
+    const debitTotal = accLines.reduce((s, l) => s + debitOf(l), 0);
+    const creditTotal = accLines.reduce((s, l) => s + creditOf(l), 0);
+    const end = round(start + debitTotal - creditTotal);
+
+    let partners = [];
+    if (groupByPartner) {
+      const partnerIds = new Set([...accLines, ...accOpening].map((l) => l.partner_id ?? null));
+      const partnerRows = [...partnerIds].map((pId) => {
+        const pLines = accLines.filter((l) => (l.partner_id ?? null) === pId);
+        const pOpening = accOpening.filter((l) => (l.partner_id ?? null) === pId);
+        const pStart = bal(pOpening);
+        let pRun = pStart;
+        const mappedLines = pLines.map((l) => {
+          const debit = debitOf(l);
+          const credit = creditOf(l);
+          pRun += debit - credit;
+          return {
+            ...l,
+            debit,
+            credit,
+            balance: round(pRun),
+          };
+        });
+        const pDebit = pLines.reduce((s, l) => s + debitOf(l), 0);
+        const pCredit = pLines.reduce((s, l) => s + creditOf(l), 0);
+        const pEnd = round(pStart + pDebit - pCredit);
+        const partner = pId ? read(db, 'res.partner', pId) : null;
+        return {
+          partner_id: pId,
+          partner,
+          name: partner?.name ?? '',
+          initial: round(pStart),
+          debit: round(pDebit),
+          credit: round(pCredit),
+          end: pEnd,
+          lines: mappedLines,
+        };
+      }).filter((p) => p.lines.length || p.initial);
+
+      partnerRows.sort((a, b) => {
+        if (!a.partner_id) return 1;
+        if (!b.partner_id) return -1;
+        return a.name.localeCompare(b.name);
+      });
+      partners = partnerRows;
+    }
+
+    return {
+      account,
+      initial: round(start),
+      debit: round(debitTotal),
+      credit: round(creditTotal),
+      end,
+      lines,
+      partners,
+    };
+  });
+
+  return {
+    rows,
+    totals: {
+      debit: round(rows.reduce((s, r) => s + r.debit, 0)),
+      credit: round(rows.reduce((s, r) => s + r.credit, 0)),
+      end: round(rows.reduce((s, r) => s + r.end, 0)),
+    },
+  };
+}
+
 /** Period movements grouped by the explicit fiscal category on each trial-balance account. */
 export function fiscalReport(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
   const trial = trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode });
@@ -148,6 +248,7 @@ export function partnerLedger(db, { from, to, company_id, analyticAccountIds, pa
     const dueDate = l.date_maturity ?? read(db, 'account.move', l.move_id)?.invoice_date_due ?? l.date;
     r.lines.push({
       date: l.date, dueDate, move_id: l.move_id, move_name: l.move_name,
+      journal_id: l.journal_id, account_id: l.account_id,
       ...(l.matching_number ? { matchingNumber: l.matching_number } : {}),
       label: l.name ?? '', ...(l.ref ? { ref: l.ref } : {}),
       debit, credit, currency_id: l.currency_id ?? null, amount_currency: l.amount_currency ?? null,
