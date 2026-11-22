@@ -144,7 +144,7 @@ export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
     tax_include: taxPriceInclude(db, tax, companyId),
     tax_cash_basis: tax.tax_exigibility === 'on_payment',
     tax_name: tax.name,
-    invoice_legal_notes: tax.invoice_legal_notes ?? '',
+    ...(tax.invoice_legal_notes ? { invoice_legal_notes: tax.invoice_legal_notes } : {}),
     invoice_repartition_line_ids: invRepart,
     refund_repartition_line_ids: refRepart,
     ...(invoiceLabel ? { tax_invoice_label: invoiceLabel } : {}),
