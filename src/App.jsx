@@ -58,10 +58,13 @@ export function App() {
   useEffect(() => {
     const follow = (e) => {
       const { app: appId, menu, id, query } = parseHash();
-      const app = apps.find((a) => a.id === appId);
-      const model = app && findLeaf(app, menu)?.model;
-      const moved = model && e.detail[model]?.[Number(id)];
-      if (moved) location.replace(`#/${appId}/${menu}/${moved}${query ? `?${query}` : ''}`);
+      const model = appId === 'print' ? menu : apps.find((a) => a.id === appId) && findLeaf(apps.find((a) => a.id === appId), menu)?.model;
+      const moved = model && (e.detail[model]?.[Number(id)] ?? e.detail[model]?.[id]);
+      if (moved) {
+        const next = `#/${appId}/${menu}/${moved}${query ? `?${query}` : ''}`;
+        if (typeof location.replace === 'function') location.replace(next);
+        else location.hash = next;
+      }
     };
     window.addEventListener('mizan:remapped', follow);
     return () => window.removeEventListener('mizan:remapped', follow);
