@@ -292,6 +292,7 @@ const CONTROL_FIELDS = [
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
   'transfer_account_id',
   'account_use_credit_limit', 'account_default_credit_limit',
+  'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
 
 /**
@@ -359,6 +360,12 @@ function companyGuard(db, before, r, ctx) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  if (r.incoterm_id) {
+    const incoterm = record(db, 'account.incoterm', r.incoterm_id);
+    if (!incoterm) return 'Select an active incoterm';
+    const incotermChanged = !before || (before.incoterm_id ?? null) !== (r.incoterm_id ?? null);
+    if (incotermChanged && incoterm.active === false) return 'Select an active incoterm';
+  }
   const countryChanged = before && (r.country ?? '') !== (before.country ?? '');
   const currencyChanged = before && (r.currency_id ?? null) !== (before.currency_id ?? null);
   if (countryChanged || currencyChanged) {
@@ -721,6 +728,9 @@ export const companyModels = {
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
+      use_invoice_terms: { type: 'boolean', label: 'Default Terms & Conditions' },
+      invoice_terms: { type: 'text', label: 'Terms and Conditions' },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Default Incoterm', domain: (r) => r.active !== false },
       invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       gain_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Gain Account' },

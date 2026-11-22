@@ -464,7 +464,7 @@ test('regression Qodo Finding: seeded parent partner 1 inherits child credit lim
   const partner1 = read(fresh, 'res.partner', 1);
   const legacyDb = {
     ...fresh,
-    schema_version: 63,
+    schema_version: 66,
     records: {
       ...fresh.records,
       'res.partner': [

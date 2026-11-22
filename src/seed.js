@@ -140,6 +140,7 @@ export function seed() {
       ...(journal.refund_sequence != null ? { refund_sequence: journal.refund_sequence } : {}),
       ...(journal.payment_sequence != null ? { payment_sequence: journal.payment_sequence } : {}),
       ...(journal.bank_statements_source ? { bank_statements_source: journal.bank_statements_source } : {}),
+      ...(journal.sepa_pain_version ? { sepa_pain_version: journal.sepa_pain_version } : {}),
       ...(journal.invoice_reference_type ? { invoice_reference_type: journal.invoice_reference_type } : {}),
       ...(journal.invoice_reference_model ? { invoice_reference_model: journal.invoice_reference_model } : {}),
       ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
