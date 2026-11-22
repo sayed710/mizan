@@ -45,6 +45,36 @@ const canResetAsset = (db, asset) => ['open', 'cancel'].includes(asset.state)
   && (!db || !search(db, 'account.asset').some((child) => child.parent_id === asset.id || child.origin_asset_id === asset.id));
 
 const postedCents = (asset) => (asset.depreciation_ids ?? []).filter((l) => l.posted).reduce((s, l) => s + cents(l.amount), 0);
+const remainingDepreciableCents = (asset) => cents(asset.original_value)
+  - cents(asset.salvage_value)
+  - cents(asset.already_depreciated)
+  - postedCents(asset);
+const isDisposedAsset = (asset) => Boolean(asset?.disposal_date || asset?.disposal_move_id);
+const hasDerivedAsset = (db, asset) => Boolean(db && search(db, 'account.asset').some((a) => a.origin_asset_id === asset.id));
+
+function pendingScheduleValid(asset, remaining) {
+  const unposted = (asset.depreciation_ids ?? []).filter((line) => !line.posted);
+  const unpostedTotal = unposted.reduce((sum, line) => sum + cents(line.amount), 0);
+  return remaining > 0
+    && unposted.length > 0
+    && unpostedTotal === remaining
+    && unposted.every((line) => line.date && cents(line.amount) >= 0 && line.move_id == null);
+}
+
+function reopenAssetError(db, before, asset) {
+  if (isDisposedAsset(before) || isDisposedAsset(asset) || hasDerivedAsset(db, before)) {
+    return 'Cannot set a disposed or transferred asset to running';
+  }
+  if (!pendingScheduleValid(asset, remainingDepreciableCents(asset))) {
+    return 'Closed asset has no remaining depreciation to run';
+  }
+  return null;
+}
+
+/** True when a closed asset is neither disposed nor transferred and still has depreciable value to run. */
+export function canSetAssetRunning(db, asset) {
+  return Boolean(asset && asset.state === 'close' && !isDisposedAsset(asset) && !hasDerivedAsset(db, asset) && remainingDepreciableCents(asset) > 0);
+}
 
 // A cancellation must carry a complete, posted, line-for-line reversal for each linked entry.
 function hasAssetReversal(db, moveId) {
@@ -228,6 +258,11 @@ export function validateAssetIntegrity(db, before, asset, vals) {
 
     if (before.state === 'open' && asset.state === 'cancel' && (before.origin_asset_id || before.parent_id || search(db, 'account.asset').some((child) => child.parent_id === before.id || child.origin_asset_id === before.id) || ((before.depreciation_ids ?? []).some((line) => line.posted) || (before.revaluation_ids ?? []).some((entry) => entry.move_id)) && (asset.depreciation_ids ?? []).some((line) => !line.posted) || [...(before.depreciation_ids ?? []).filter((line) => line.posted).map((line) => line.move_id), ...(before.revaluation_ids ?? []).filter((entry) => entry.move_id).map((entry) => entry.move_id)].some((id) => !hasAssetReversal(db, id)))) {
       return 'Cannot cancel an asset with posted entries or linked assets';
+    }
+
+    if (before.state === 'close' && ['open', 'paused'].includes(asset.state)) {
+      const reopenErr = reopenAssetError(db, before, asset);
+      if (reopenErr) return reopenErr;
     }
 
     // G2: Immutable core fields
@@ -530,6 +565,31 @@ export function depreciationReport(db, period, companyId = 'all') {
 /** Validate the asset, build its board and start depreciating. */
 export function confirmAsset(db, asset) {
   return write(computeBoard(db, asset), 'account.asset', asset.id, { state: 'open' });
+}
+
+/** Reopen a closed asset that still has depreciable value, rebuilding pending lines if none remain. */
+export function setAssetRunning(db, asset) {
+  asset = read(db, 'account.asset', asset.id) ?? asset;
+  if (asset.state !== 'close') throw new Error('Only closed assets can be set to running');
+  if (isDisposedAsset(asset) || hasDerivedAsset(db, asset)) throw new Error('Cannot set a disposed or transferred asset to running');
+  const remaining = remainingDepreciableCents(asset);
+  if (!(remaining > 0)) throw new Error('Closed asset has no remaining depreciation to run');
+  if (pendingScheduleValid(asset, remaining)) {
+    return write(db, 'account.asset', asset.id, { state: 'open' });
+  }
+  validate(db, asset);
+  const posted = (asset.depreciation_ids ?? []).filter((line) => line.posted);
+  const accumulated = cents(asset.already_depreciated) + postedCents(asset);
+  const board = (posted.length
+    ? depreciationBoard(asset, {
+      periods: Math.max(1, Math.ceil(Number(asset.method_number) - posted.length)),
+      startDate: posted.at(-1).date,
+      remainingBase: remaining,
+      initialCumulated: accumulated,
+    })
+    : depreciationBoard(asset)
+  ).map((line) => ({ ...line, posted: false, move_id: null }));
+  return write(db, 'account.asset', asset.id, { state: 'open', depreciation_ids: [...posted, ...board] });
 }
 
 /** Returns true if the asset has unposted depreciation lines dated on or before `upTo`. */
@@ -1041,7 +1101,7 @@ export const assetModels = {
             return { db: disposeAsset(db, r, { date: values.date ?? today(), saleValue: values.sale_value == null || values.sale_value === '' ? undefined : Number(values.sale_value), invoiceId: values.invoice_id || null, invoiceLine: Number(values.invoice_line ?? 0), lossAccountId: values.loss_account_id || null, gainAccountId: values.gain_account_id || null, note: values.note }) };
           } },
         { label: 'Cancel Asset', when: (r) => r.state === 'open', run: (db, r) => ({ db: cancelAsset(db, r) }) },
-        { label: 'Set to Running', when: (r, db) => r.state === 'close' && !r.disposal_date && !search(db, 'account.asset').some((a) => a.origin_asset_id === r.id), vals: { state: 'open' } },
+        { label: 'Set to Running', when: (r, db) => canSetAssetRunning(db, r), run: (db, r) => ({ db: setAssetRunning(db, r) }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',

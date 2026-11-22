@@ -228,14 +228,17 @@ export function JournalItems({ leaf = {} } = {}) {
   const hashParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
   const accountFilter = Number(hashParams.get('account')) || null;
   const reconciledOf = Number(hashParams.get('reconciled_of')) || null;
+  const companyParam = Number(hashParams.get('company')) || null;
+  const allowedCompanies = new Set(db.settings?.allowed_company_ids ?? [db.settings?.current_company_id ?? 1]);
+  const scopedCompanyParam = companyParam && allowedCompanies.has(companyParam) ? companyParam : null;
   // Same company scope as accountBalance: the account's company, else the reconciled move's, else current one.
   const filterAccount = accountFilter ? read(db, 'account.account', accountFilter) : null;
   const filterMove = reconciledOf ? read(db, 'account.move', reconciledOf) : null;
   const filterCompany = filterAccount
-    ? (filterAccount.company_id ?? db.settings?.current_company_id ?? 1)
+    ? (filterAccount.company_id ?? scopedCompanyParam ?? db.settings?.current_company_id ?? 1)
     : filterMove
-      ? (filterMove.company_id ?? db.settings?.current_company_id ?? 1)
-      : null;
+      ? (filterMove.company_id ?? scopedCompanyParam ?? db.settings?.current_company_id ?? 1)
+      : (scopedCompanyParam ?? null);
   const matchedMoves = reconciledOf ? matchedMoveIds(db, reconciledOf) : null;
   const multiCompany = companiesOf(db).length > 1;
   const multiCurrency = hasMultiCurrency(db);

@@ -50,6 +50,7 @@ const MAINTAINED = {
   'account.move': ['ref', 'to_check'], // the reference and the review flag stay editable on posted entries
   'account.payment': ['memo'], // memo stays editable on posted payments
   'account.bank.statement.line': ['move_id', 'payment_id'], // validated unreconciliation clears the matched links
+  'account.asset': ['depreciation_ids'], // Set to Running may rebuild missing pending lines when reopening
 };
 
 export function withLocks(models) {
@@ -64,7 +65,10 @@ export function withLocks(models) {
         if (own) return own;
         // Enforced for non-admin users on the server (applyDiff passes ctx); administrators may correct records.
         if (ctx?.isAdmin !== false || !before || !locked(before, db)) return null;
-        const maintained = (name === 'sign.request' && before.state !== 'sent') || (name === 'hr.expense.sheet' && before.state === r.state) ? [] : MAINTAINED[name] ?? [];
+        const maintained = (name === 'sign.request' && before.state !== 'sent')
+          || (name === 'hr.expense.sheet' && before.state === r.state)
+          || (name === 'account.asset' && !(before.state === 'close' && ['open', 'paused'].includes(r.state)))
+          ? [] : MAINTAINED[name] ?? [];
         const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f));
         const changed = fields.filter((f) => !same(model.fields[f], before[f], r[f]));
         if (name === 'sign.request' && before.state !== 'sent') {

@@ -1,11 +1,11 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { accountId } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
-import { confirmAsset, postDepreciation, modifyAsset, disposeAsset, depreciationBoard, depreciationReport, activateDepreciation } from './models/assets.js';
+import { confirmAsset, postDepreciation, modifyAsset, disposeAsset, depreciationBoard, depreciationReport, activateDepreciation, setAssetRunning } from './models/assets.js';
 import { models } from './registry.js';
 import { diffDb, applyDiff } from './sync.js';
 
@@ -285,4 +285,70 @@ test('sync rejects disposal that omits a selected negative invoice account', () 
   assert.equal(read(sync(db, next), 'account.asset', initial.id).sale_value, 200);
   const tampered = { ...next, records: { ...next.records, 'account.move': next.records['account.move'].map((move) => move.id !== asset.disposal_move_id ? move : { ...move, line_ids: move.line_ids.filter((line) => line.account_id !== negativeAccount).map((line) => line.account_id === accountId(db, '680000') ? { ...line, debit: line.debit - 100 } : line) }) } };
   assert.throws(() => sync(db, tampered), /Disposal move must book the sale/);
+});
+
+test('Set to Running rejects fully depreciated, disposed and transferred assets, and rebuilds missing pending lines when value remains', () => {
+  const button = models['account.asset'].form.buttons.find((b) => b.label === 'Set to Running');
+  const user = { author: 'Test User', isAdmin: false };
+  const userSync = (db, next) => applyDiff(db, diffDb(db, next), user);
+
+  // 1. Fully depreciated closed asset: button hidden and reopen rejected via write and applyDiff
+  const full = running();
+  const completedDb = postDepreciation(full.db, read(full.db, 'account.asset', full.id), '2035-12-31');
+  const completed = read(completedDb, 'account.asset', full.id);
+  assert.equal(completed.state, 'close');
+  assert.equal(button.when(completed, completedDb), false);
+  assert.throws(() => button.run(completedDb, completed), /not available/i);
+  assert.throws(() => setAssetRunning(completedDb, completed), /no remaining depreciation/i);
+  assert.throws(() => write(completedDb, 'account.asset', full.id, { state: 'open' }), /no remaining depreciation/i);
+  assert.throws(() => userSync(completedDb, forged(completedDb, full.id, { state: 'open' })), /no remaining depreciation/i);
+  assert.throws(() => userSync(completedDb, forged(completedDb, full.id, {
+    state: 'open',
+    depreciation_ids: [...completed.depreciation_ids, { date: '2031-12-31', amount: 100, cumulated: 1100, remaining: 0, posted: false, move_id: null }],
+  })), /no remaining depreciation/i);
+
+  // 2. Disposed and activated closed assets: button hidden and reopen rejected via write and applyDiff
+  const disp = running();
+  const disposedDb = disposeAsset(disp.db, read(disp.db, 'account.asset', disp.id), { date: '2026-06-01' });
+  const disposed = read(disposedDb, 'account.asset', disp.id);
+  assert.equal(button.when(disposed, disposedDb), false);
+  assert.throws(() => write(disposedDb, 'account.asset', disp.id, { state: 'open' }), /disposed or transferred/i);
+  assert.throws(() => userSync(disposedDb, forged(disposedDb, disp.id, { state: 'open' })), /disposed or transferred/i);
+
+  const act = running();
+  const activatedDb = activateDepreciation(act.db, read(act.db, 'account.asset', act.id), { date: '2026-06-01', newAccountAssetId: accountId(act.db, '151000') });
+  const activated = read(activatedDb, 'account.asset', act.id);
+  assert.equal(button.when(activated, activatedDb), false);
+  assert.throws(() => write(activatedDb, 'account.asset', act.id, { state: 'open' }), /disposed or transferred/i);
+  assert.throws(() => userSync(activatedDb, forged(activatedDb, act.id, { state: 'open' })), /disposed or transferred/i);
+
+  // 3. Closed asset with existing unposted lines reopens cleanly and stays open until due
+  const partial = running();
+  const onePostedDb = postDepreciation(partial.db, read(partial.db, 'account.asset', partial.id), '2026-12-31');
+  const closedWithPendingDb = forged(onePostedDb, partial.id, { state: 'close' });
+  const closedWithPending = read(closedWithPendingDb, 'account.asset', partial.id);
+  assert.equal(button.when(closedWithPending, closedWithPendingDb), true);
+  const reopenedPendingDb = button.run(closedWithPendingDb, closedWithPending).db;
+  const syncedPendingDb = userSync(closedWithPendingDb, reopenedPendingDb);
+  const reopenedPending = read(syncedPendingDb, 'account.asset', partial.id);
+  assert.equal(reopenedPending.state, 'open');
+  assert.equal(reopenedPending.depreciation_ids.filter((l) => !l.posted).length, 4);
+  assert.equal(read(postDepreciation(syncedPendingDb, reopenedPending, '2027-06-01'), 'account.asset', partial.id).state, 'open');
+
+  // 4. Closed asset with remaining depreciable value and dropped unposted lines rebuilds its board on Set to Running
+  const missingBoardDb = forged(onePostedDb, partial.id, {
+    state: 'close',
+    depreciation_ids: read(onePostedDb, 'account.asset', partial.id).depreciation_ids.filter((l) => l.posted),
+  });
+  const missingBoard = read(missingBoardDb, 'account.asset', partial.id);
+  assert.equal(button.when(missingBoard, missingBoardDb), true);
+  const rebuiltDb = button.run(missingBoardDb, missingBoard).db;
+  const syncedRebuiltDb = userSync(missingBoardDb, rebuiltDb);
+  const rebuilt = read(syncedRebuiltDb, 'account.asset', partial.id);
+  assert.equal(rebuilt.state, 'open');
+  const rebuiltUnposted = rebuilt.depreciation_ids.filter((l) => !l.posted);
+  assert.equal(rebuiltUnposted.length, 4);
+  assert.equal(rebuiltUnposted.reduce((s, l) => s + Math.round(l.amount * 100), 0), 80000);
+  assert.deepEqual(rebuiltUnposted.map((l) => l.date), ['2027-12-31', '2028-12-31', '2029-12-31', '2030-12-31']);
+  assert.equal(read(postDepreciation(syncedRebuiltDb, rebuilt, '2027-06-01'), 'account.asset', partial.id).state, 'open');
 });

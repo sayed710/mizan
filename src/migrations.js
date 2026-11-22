@@ -1774,6 +1774,153 @@ MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (
 } });
 MIGRATIONS.push({ version: 61, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
 
+function convertLegacyBoardLineCreditAdjustments(line, deferral, movesById) {
+  const creditMoveIds = new Set(
+    (deferral?.credit_adjustments ?? []).flatMap((adj) => [
+      ...(Array.isArray(adj?.move_ids) ? adj.move_ids : []),
+      ...(adj?.move_id != null ? [adj.move_id] : []),
+    ])
+  );
+  const isCreditReversal = Boolean(line.reversal_move_id && creditMoveIds.has(line.reversal_move_id));
+  const moveIds = [
+    ...(Array.isArray(line.credit_adjustment_move_ids) ? line.credit_adjustment_move_ids : []),
+    ...(isCreditReversal ? [line.reversal_move_id] : []),
+  ];
+  const uniqueMoveIds = [...new Set(moveIds.filter((id) => id != null))];
+  if (!uniqueMoveIds.length) {
+    if (Number(line.credit_adjusted_amount) > 0) {
+      throw new Error(`Cannot determine move and date for credit adjusted amount on deferral ${deferral.id}`);
+    }
+    return line;
+  }
+  const adjustments = uniqueMoveIds.map((mid) => {
+    const m = movesById.get(mid);
+    if (!m) throw new Error(`Cannot determine move ${mid} for credit adjustment on deferral ${deferral.id}`);
+    const date = m.date ?? m.invoice_date;
+    if (!date || typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error(`Cannot determine date for credit adjustment move ${mid} on deferral ${deferral.id}`);
+    }
+    const moveAmt = (m.line_ids ?? [])
+      .filter((l) => l.account_id === deferral.recognition_account_id)
+      .reduce((sum, l) => sum + Math.max(Number(l.debit) || 0, Number(l.credit) || 0), 0);
+    const amount = moveAmt > 0 ? moveAmt
+      : uniqueMoveIds.length === 1 && Number(line.credit_adjusted_amount) > 0 ? Number(line.credit_adjusted_amount)
+      : uniqueMoveIds.length === 1 && isCreditReversal && line.reversal_move_id === mid && Number(line.amount) > 0 ? Math.abs(Number(line.amount))
+      : 0;
+    if (!(amount > 0)) throw new Error(`Cannot determine amount for credit adjustment move ${mid} on deferral ${deferral.id}`);
+    return { move_id: mid, amount, date };
+  });
+  const { credit_adjustment_move_ids: _cams, credit_adjusted_amount: _caa, ...rest } = line;
+  return { ...rest, credit_adjustments: adjustments };
+}
+
+export function migrateDeferralCreditAdjustments(db) {
+  const deferrals = db?.records?.['account.deferral'];
+  if (!Array.isArray(deferrals) || !deferrals.length) return db;
+  const movesById = new Map((db?.records?.['account.move'] ?? []).map((m) => [m.id, m]));
+  let changed = false;
+
+  const convertLine = (line, d) => {
+    if (!line || typeof line !== 'object') return line;
+    if (Array.isArray(line.credit_adjustments) && line.credit_adjustments.length > 0) {
+      for (const adj of line.credit_adjustments) {
+        if (!adj?.date || !(Number(adj.amount) > 0) || adj.move_id == null) {
+          throw new Error(`Invalid credit adjustment on deferral ${d.id}`);
+        }
+      }
+      return line;
+    }
+    return convertLegacyBoardLineCreditAdjustments(line, d, movesById);
+  };
+
+  const nextDeferrals = deferrals.map((d) => {
+    let schedChanged = false;
+    let nextBoard = d.board;
+    if (Array.isArray(d?.board) && d.board.length) {
+      let boardChanged = false;
+      nextBoard = d.board.map((line) => {
+        const converted = convertLine(line, d);
+        if (converted !== line) boardChanged = true;
+        return converted;
+      });
+      if (boardChanged) schedChanged = true;
+    }
+
+    let nextCreditAdjustments = d.credit_adjustments;
+    if (Array.isArray(d?.credit_adjustments) && d.credit_adjustments.length) {
+      let caChanged = false;
+      nextCreditAdjustments = d.credit_adjustments.map((entry) => {
+        if (!entry || typeof entry !== 'object' || !Array.isArray(entry.board_before)) return entry;
+        let bbChanged = false;
+        const nextBoardBefore = entry.board_before.map((line) => {
+          const converted = convertLine(line, d);
+          if (converted !== line) bbChanged = true;
+          return converted;
+        });
+        if (bbChanged) {
+          caChanged = true;
+          return { ...entry, board_before: nextBoardBefore };
+        }
+        return entry;
+      });
+      if (caChanged) schedChanged = true;
+    }
+
+    if (schedChanged) {
+      changed = true;
+      return {
+        ...d,
+        ...(nextBoard !== d.board ? { board: nextBoard } : {}),
+        ...(nextCreditAdjustments !== d.credit_adjustments ? { credit_adjustments: nextCreditAdjustments } : {}),
+      };
+    }
+    return d;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.deferral': nextDeferrals } } : db;
+}
+
+MIGRATIONS.push({ version: 62, name: 'canonical-deferral-credit-adjustments', up: migrateDeferralCreditAdjustments });
+
+export function migrateFollowUpNextActionDate(db) {
+  if (!db?.records?.['res.partner']) return db;
+  const currentCompanyId = db.settings?.current_company_id ?? 1;
+  let changed = false;
+  const partners = db.records['res.partner'].map((p) => {
+    let partnerChanged = false;
+    let nextPartner = p;
+
+    if (!nextPartner.followup_reminder_type) {
+      nextPartner = { ...nextPartner, followup_reminder_type: 'automatic' };
+      partnerChanged = true;
+    }
+
+    if ('followup_next_action_date' in nextPartner) {
+      partnerChanged = true;
+      const { followup_next_action_date, ...rest } = nextPartner;
+      if (followup_next_action_date != null) {
+        const lines = [...(nextPartner.followup_lines ?? [])];
+        const idx = lines.findIndex((l) => l.company_id === currentCompanyId);
+        if (idx >= 0) {
+          if (lines[idx].followup_next_action_date == null) {
+            lines[idx] = { ...lines[idx], followup_next_action_date };
+          }
+        } else {
+          lines.push({ company_id: currentCompanyId, followup_next_action_date });
+        }
+        nextPartner = { ...rest, followup_lines: lines };
+      } else {
+        nextPartner = rest;
+      }
+    }
+
+    if (partnerChanged) changed = true;
+    return nextPartner;
+  });
+  if (!changed) return db;
+  return { ...db, records: { ...db.records, 'res.partner': partners } };
+}
+MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
