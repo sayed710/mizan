@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
-import { create, read, search, messagesOf } from './orm.js';
+import { create, read, search, write, messagesOf } from './orm.js';
 import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
 import { postMove, payMove } from './models/accounting.js';
 import { runScheduledJobs } from './models/scheduler.js';
 import { agedBalance, followUps, followUpCompanies, followUpText, formatFollowUpTotals, logManualFollowUp, runFollowUps } from './models/finance.js';
 import { checkRegisterRows, postBatch } from './models/payments.js';
+import { printBatchChecks } from './models/pay.js';
 import { toCsv } from './csv.js';
 import { documentText } from '../server/mail.js';
 import { documentCompany } from './models/company.js';
@@ -86,10 +87,11 @@ test('Qodo 29: mixed-currency reminder notes do not claim "0 overdue"', () => {
   assert.ok(!/ 0 overdue/.test(notes));
 });
 
-test('Qodo 30: postBatch allocates check numbers to unnumbered outbound payments', () => {
+test('Qodo 30: batch validation leaves checks unnumbered and printBatchChecks allocates check numbers', () => {
   let db = seed();
   const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
   assert.ok(bankJournal);
+  db = write(db, 'account.journal', bankJournal.id, { check_next_number: 8500 });
   const bill = create(db, 'account.move', {
     move_type: 'in_invoice',
     partner_id: 7,
@@ -97,33 +99,47 @@ test('Qodo 30: postBatch allocates check numbers to unnumbered outbound payments
   });
   db = postMove(bill.db, bill.id);
 
-  // Pay bill without a check number (e.g. created directly via payment or bank)
-  const paidDb = payMove(db, bill.id, 300, today(), { journalId: bankJournal.id });
-  const payment = search(paidDb, 'account.payment').findLast((p) => p.payment_type === 'outbound');
+  // Pay bill with check method line
+  const checkLine = bankJournal.outbound_payment_method_line_ids?.find((l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing');
+  const draftPay = create(db, 'account.payment', {
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    partner_id: 7,
+    amount: 300,
+    journal_id: bankJournal.id,
+    ...(checkLine ? { payment_method_line_id: checkLine.id } : {}),
+  });
+  const paidDb = payMove(draftPay.db, bill.id, 300, today(), { paymentId: draftPay.id, journalId: bankJournal.id });
+  const payment = read(paidDb, 'account.payment', draftPay.id);
   assert.ok(payment.check_number == null);
 
   // Create an outbound batch containing this unnumbered payment
   const batch = create(paidDb, 'account.batch.payment', {
     batch_type: 'outbound',
     journal_id: bankJournal.id,
-    check_number_start: 8500,
     lines: [{ payment_id: payment.id, amount: 300 }],
   });
 
   const posted = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
   const postedBatch = read(posted, 'account.batch.payment', batch.id);
-  assert.equal(postedBatch.lines[0].check_number, 8500);
+  // Unnumbered at validation
+  assert.equal(postedBatch.lines[0].check_number, null);
+
+  // Allocated at print
+  const printed = printBatchChecks(posted, batch.id);
+  const printedBatch = read(printed, 'account.batch.payment', batch.id);
+  assert.equal(printedBatch.lines[0].check_number, 8500);
 
   // Payment record in account.payment must also have check_number set
-  const updatedPayment = read(posted, 'account.payment', payment.id);
+  const updatedPayment = read(printed, 'account.payment', payment.id);
   assert.equal(updatedPayment.check_number, 8500);
 
   // Journal check_next_number must be advanced
-  const journal = read(posted, 'account.journal', bankJournal.id);
+  const journal = read(printed, 'account.journal', bankJournal.id);
   assert.equal(journal.check_next_number, 8501);
 
   // checkRegisterRows must include this check
-  const rows = checkRegisterRows(posted, [postedBatch], [updatedPayment]);
+  const rows = checkRegisterRows(printed, [printedBatch], [updatedPayment]);
   assert.ok(rows.some((r) => r.checkNumber === 8500 && r.paymentId === payment.id));
 });
 

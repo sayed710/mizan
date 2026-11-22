@@ -354,7 +354,6 @@ test('new bank accounts default to untrusted and outbound payments are refused u
 
   const batch = create(db, 'account.batch.payment', {
     batch_type: 'outbound',
-    check_number_start: 100,
     journal_id: bankJournal.id,
     lines: [{ move_id: bill.id, amount: 200 }],
   });

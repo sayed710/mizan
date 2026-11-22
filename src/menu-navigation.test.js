@@ -330,7 +330,7 @@ test('Accounting exposes tax groups and issued checks through their menus', asyn
   const { createRoot } = await import('react-dom/client');
   const { initStore, commit } = await import('./store.js');
   const { seed } = await import('./seed.js');
-  const { create, read } = await import('./orm.js');
+  const { create, read, search, write } = await import('./orm.js');
   const { models } = await import('./models/index.js');
   await initStore();
   const group = create(seed(), 'account.tax.group', { name: 'TEST VAT GROUP' });
@@ -338,8 +338,12 @@ test('Accounting exposes tax groups and issued checks through their menus', asyn
   const bill = create(bank.db, 'account.move', { move_type: 'in_invoice', partner_id: 7, invoice_line_ids: [{ qty: 1, price_unit: 125, tax: 0 }] });
   const action = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
   const posted = action(bill.db, 'account.move', bill.id, 'Confirm');
-  const batch = create(posted, 'account.batch.payment', { name: 'CHECK BATCH', batch_type: 'outbound', date: '2026-01-01', check_number_start: 431, lines: [{ amount: 125, move_id: bill.id }] });
-  await commit(action(batch.db, 'account.batch.payment', batch.id, 'Validate'));
+  const journal = search(posted, 'account.journal').find((j) => j.type === 'bank');
+  const withJournal = write(posted, 'account.journal', journal.id, { check_next_number: 431 });
+  const batch = create(withJournal, 'account.batch.payment', { name: 'CHECK BATCH', batch_type: 'outbound', journal_id: journal.id, date: '2026-01-01', lines: [{ amount: 125, move_id: bill.id }] });
+  let nextDb = action(batch.db, 'account.batch.payment', batch.id, 'Validate');
+  nextDb = action(nextDb, 'account.batch.payment', batch.id, 'Print Checks');
+  await commit(nextDb);
   location.hash = '#/accounting/tax-groups';
   const { App } = await import('./App.jsx');
   const root = createRoot(container);

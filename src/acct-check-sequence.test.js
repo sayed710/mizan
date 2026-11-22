@@ -6,7 +6,7 @@ import { create, messagesOf, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { postBatch } from './models/payments.js';
-import { reversePayment } from './models/pay.js';
+import { reversePayment, printBatchChecks } from './models/pay.js';
 
 test('outbound checks keep journal-specific sequential numbers on payments after reversal', () => {
   const base = seed();
@@ -22,6 +22,7 @@ test('outbound checks keep journal-specific sequential numbers on payments after
       db = postMove(bill.db, bill.id);
       const batch = create(db, 'account.batch.payment', { batch_type: 'outbound', journal_id: journal.id, date: '2026-01-02', lines: [{ move_id: bill.id, amount: 100 }] });
       db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+      db = printBatchChecks(db, batch.id);
       return read(db, 'account.batch.payment', batch.id).lines[0];
     };
     const first = issue();

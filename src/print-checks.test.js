@@ -12,7 +12,7 @@ test('printing batch checks requires a posted linked payment and excludes revers
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
   const { initStore, getDb, commit } = await import('./store.js');
-  const { create, read } = await import('./orm.js');
+  const { create, read, search, write } = await import('./orm.js');
   const { models } = await import('./models/index.js');
   const { PrintDoc } = await import('./views/PrintDoc.jsx');
   await initStore();
@@ -23,8 +23,11 @@ test('printing batch checks requires a posted linked payment and excludes revers
   };
   const first = bill(getDb());
   const second = bill(first.db);
-  const batch = create(second.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 7000, lines: [{ move_id: first.id, amount: 100 }, { move_id: second.id, amount: 100 }] });
-  const posted = action(batch.db, 'account.batch.payment', batch.id, 'Validate');
+  const journal = search(second.db, 'account.journal').find((j) => j.type === 'bank');
+  const withJournal = write(second.db, 'account.journal', journal.id, { check_next_number: 7000 });
+  const batch = create(withJournal, 'account.batch.payment', { batch_type: 'outbound', journal_id: journal.id, lines: [{ move_id: first.id, amount: 100 }, { move_id: second.id, amount: 100 }] });
+  const validated = action(batch.db, 'account.batch.payment', batch.id, 'Validate');
+  const posted = action(validated, 'account.batch.payment', batch.id, 'Print Checks');
   const [firstLine, secondLine] = read(posted, 'account.batch.payment', batch.id).lines;
   assert.equal(read(posted, 'account.payment', secondLine.payment_id).state, 'posted');
   await React.act(async () => commit(posted));

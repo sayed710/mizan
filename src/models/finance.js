@@ -71,7 +71,7 @@ export function duplicateBillWarning(db, bill) {
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
 /** Hashed fields that can never change once an entry receives an inalterability hash. */
-const HASHED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
+const HASHED_FIELDS = ['ref', 'name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
 export const moveDate = (m) => m?.date ?? m?.invoice_date ?? today();
@@ -243,7 +243,7 @@ export function accountDeleteGuard(db, account, pending = db) {
 }
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active'];
 
 function isBankStatementMove(db, moveId) {
   return (db.records?.['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === moveId);
@@ -306,6 +306,7 @@ export function bankStatementRewriteAllowed(db, before, after, ctx = null) {
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(db, before, after, ctx = null) {
+  if (before && changedFields(before, after, ['tax_closing_lines'])) return 'Tax closing line links cannot be changed';
   if (before?.state === 'posted' && after.state === 'posted') {
     if (isBankStatementMove(db, after.id)) {
       const bankErr = bankStatementMoveRewriteError(db, before, after, ctx);
@@ -355,7 +356,7 @@ export const appliedValue = (db, inv, p) => {
 };
 
 /** Reason a credit note cannot settle an invoice (direction/type, link, company, partner, account, currency), or null. */
-export function creditNotePairError(db, note, invoice) {
+export function creditNotePairError(db, note, invoice, { allowDifferentCurrencies = false } = {}) {
   if (!note || note.state !== 'posted' || !['out_refund', 'in_refund'].includes(note.move_type)) return 'A posted credit note or refund is required';
   if (!invoice || invoice.state !== 'posted' || !['out_invoice', 'in_invoice'].includes(invoice.move_type)) return 'A posted invoice or bill is required';
   const expectedNoteType = invoice.move_type === 'out_invoice' ? 'out_refund' : 'in_refund';
@@ -364,7 +365,7 @@ export function creditNotePairError(db, note, invoice) {
   if ((note.company_id ?? 1) !== (invoice.company_id ?? 1)) return 'The credit note and invoice must belong to the same company';
   if (!sameCommercialPartner(db, note.partner_id, invoice.partner_id)) return 'The credit note and invoice must belong to the same partner';
   if (invoiceCounterpartAccount(db, note) !== invoiceCounterpartAccount(db, invoice)) return 'The credit note and invoice must share the same receivable or payable account';
-  if ((note.currency_id ?? null) !== (invoice.currency_id ?? null)) return 'The credit note and invoice must use the same currency';
+  if (!allowDifferentCurrencies && (note.currency_id ?? null) !== (invoice.currency_id ?? null)) return 'The credit note and invoice must use the same currency';
   return null;
 }
 
@@ -683,7 +684,17 @@ export function fxProvenanceError(db, entry) {
 
 /** A posted payment must have its own posted journal entry, booked for its partner. */
 export function paymentInvariant(db, after) {
-  if (after.check_number != null && (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound' || (after.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number) || (db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && (p.check_number === after.check_number || (p.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number))))) return 'Check number must be unique within its journal';
+  if (after.check_number != null) {
+    if (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound') {
+      return 'Check number must be unique within its journal';
+    }
+    if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && (p.check_number === after.check_number || (p.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number)))) {
+      return 'Check number must be unique within its journal';
+    }
+  }
+  if ((after.voided_check_numbers ?? []).some((v) => (db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && (p.check_number === v.check_number || (p.voided_check_numbers ?? []).some((pv) => pv.check_number === v.check_number))))) {
+    return 'Check number must be unique within its journal';
+  }
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
@@ -1091,9 +1102,46 @@ function closingPeriodCalculation(db, ret, companyId) {
     return [...groups][0];
   };
 
+  // References use the move and the ledger's stable embedded-line identity. A linked
+  // posted closing is the authority; cancelled closings no longer cover anything.
+  const closingIds = ret.closing_move_ids ?? (ret.id ? read(db, 'account.return', ret.id)?.closing_move_ids : null) ?? [];
+  const ownClosing = ['submitted', 'paid'].includes(ret.state)
+    ? closingIds.map((id) => read(db, 'account.move', id))
+      .find((move) => move?.state === 'posted' && (move.company_id ?? 1) === companyId)
+    : null;
+  const ref = (line) => {
+    const identity = JSON.parse(line.line_identity);
+    delete identity.blocked;
+    return JSON.stringify([line.move_id, JSON.stringify(identity)]);
+  };
+  const ownRefs = Array.isArray(ownClosing?.tax_closing_lines) ? new Set(ownClosing.tax_closing_lines) : null;
+  const covered = new Set();
+  const legacyPeriods = [];
+  for (const other of db.records['account.return'] ?? []) {
+    if (other.id === ret.id) continue;
+    for (const id of other.closing_move_ids ?? []) {
+      const move = read(db, 'account.move', id);
+      if (!move || move.state !== 'posted' || move.tax_return_id !== other.id || (move.company_id ?? 1) !== companyId) continue;
+      if (Array.isArray(move.tax_closing_lines)) move.tax_closing_lines.forEach((key) => covered.add(key));
+      else legacyPeriods.push(other);
+    }
+  }
+  const isLegacyOwnClosing = Boolean(ownClosing && !Array.isArray(ownClosing.tax_closing_lines));
+  const available = (line) => {
+    if (ownRefs) return ownRefs.has(ref(line));
+    if (isLegacyOwnClosing) return true;
+    return !covered.has(ref(line))
+      && !legacyPeriods.some((period) => line.date >= period.date_from && line.date <= period.date_to);
+  };
+  const itemScope = isLegacyOwnClosing
+    ? { from: ret.date_from, to: ret.date_to, company_id: companyId }
+    : { to: ret.date_to, company_id: companyId };
+  const sourceLines = journalItems(db, itemScope)
+    .filter((line) => !line.is_closing && !line.is_tax_closing && !line.is_tax_payment && isItemClosable(line) && available(line));
+  const sourceRefs = [...new Set(sourceLines.map(ref))].sort();
   const balances = new Map();
   const groupNets = new Map();
-  for (const line of journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: companyId })) {
+  for (const line of sourceLines) {
     if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
     if (isItemClosable(line)) {
       const net = (Number(line.debit) || 0) - (Number(line.credit) || 0);
@@ -1104,13 +1152,13 @@ function closingPeriodCalculation(db, ret, companyId) {
     }
   }
 
-  const periodItems = taxItems(db, { from: ret.date_from, to: ret.date_to, company_id: companyId });
-  const closableItems = periodItems.filter(isItemClosable);
+  const periodItems = taxItems(db, itemScope);
+  const closableItems = periodItems.filter((line) => isItemClosable(line) && available(line));
   const closableOutput = moneyRound(closableItems.filter((l) => l.side === 'sale').reduce((s, l) => s + l.tax, 0));
   const closableInput = moneyRound(closableItems.filter((l) => l.side === 'purchase').reduce((s, l) => s + l.tax, 0));
   const closablePayable = moneyRound(closableOutput - closableInput);
 
-  return { currency, moneyRound, balances, groupNets, closablePayable };
+  return { currency, moneyRound, balances, groupNets, closablePayable, sourceRefs };
 }
 
 /** Closable payable/recoverable total for a return (single company or tax unit), without posting a closing entry. */
@@ -1135,7 +1183,7 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   }
   ret = { ...ret, company_id: companyId, tax_unit_id: null };
   validateTaxReturnPeriod(db, ret);
-  const { currency, moneyRound, balances, groupNets, closablePayable } = closingPeriodCalculation(db, ret, companyId);
+  const { currency, moneyRound, balances, groupNets, closablePayable, sourceRefs } = closingPeriodCalculation(db, ret, companyId);
   const tolerance = moneyRound(TAX_CLOSING_ROUNDING_MINOR_UNITS * Number(currency?.rounding ?? 0.01));
 
   const lines = [];
@@ -1214,7 +1262,7 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   if (!lines.length) {
     lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
   }
-  return { lines, obligations, payable: closablePayable, payableAccount, receivableAccount, partner: partner.id };
+  return { lines, obligations, payable: closablePayable, payableAccount, receivableAccount, partner: partner.id, sourceRefs };
 }
 
 /** Build the representative company payment summary and per-company inter-company settlement entries for a tax unit return. */
@@ -1339,7 +1387,7 @@ export function taxUnitPaymentEntryError(db, payment, entry, spec = null) {
 }
 
 /** Validate a submitted closing against its linked return and the posted ledger. */
-export function taxClosingMatchesReturn(db, ret) {
+export function taxClosingMatchesReturn(db, ret, validateCoverage = false) {
   const ids = ret.closing_move_ids ?? [];
   // The candidate link may not yet be written on a local transition.
   const staged = { ...db, records: { ...db.records, 'account.return': (db.records['account.return'] ?? []).map((r) => r.id === ret.id ? ret : r) } };
@@ -1352,6 +1400,10 @@ export function taxClosingMatchesReturn(db, ret) {
       if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
         || move.date !== ret.date_to || move.invoice_date !== ret.date_to) return false;
       const spec = taxClosingSpec(staged, ret, companyId);
+      if (validateCoverage) {
+        const open = closingPeriodCalculation(staged, { ...ret, state: 'reviewed' }, companyId);
+        if (JSON.stringify(move.tax_closing_lines) !== JSON.stringify(open.sourceRefs)) return false;
+      }
       const currency = findCompanyCurrencyRecord(staged, companyId);
       payable = round(payable + spec.payable);
       const expected = spec.lines.map((line) => {
@@ -1374,9 +1426,10 @@ export function postTaxReturnClosing(db, returnId) {
   const specs = returnCompanies(db, ret).map((company) => ({ company, ...taxClosingSpec(db, ret, company) }));
   let next = db;
   const ids = [];
-  for (const { company, lines } of specs) {
+  for (const { company, lines, sourceRefs } of specs) {
     const entry = postEntry(next, { journal: 'MISC', date: ret.date_to, ref: `Tax Closing: ${ret.name}`, lines, company, tax_return_id: ret.id });
-    next = entry.db;
+    next = { ...entry.db, records: { ...entry.db.records, 'account.move': entry.db.records['account.move'].map((move) =>
+      move.id === entry.id ? { ...move, tax_closing_lines: sourceRefs } : move) } };
     ids.push(entry.id);
   }
   return { db: next, ids, payable: round(specs.reduce((s, spec) => s + spec.payable, 0)) };

@@ -5,7 +5,7 @@ import { seed } from './seed.js';
 import { assetAccounts } from './test-support/asset-accounts.js';
 import { create, read, search, write } from './orm.js';
 import { models } from './registry.js';
-import { reprintCheck } from './models/pay.js';
+import { reprintCheck, printBatchChecks } from './models/pay.js';
 import { postBatch } from './models/payments.js';
 import { postMove, payMove } from './models/accounting.js';
 import { secureEntries } from './models/hash_chain.js';
@@ -31,6 +31,7 @@ test('1. Posted check numbers cannot be forged by supplying voided_check_numbers
     lines: [{ move_id: bill.id, amount: 150 }],
   });
   db = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
+  db = printBatchChecks(db, batch.id);
   const payId = read(db, 'account.batch.payment', batch.id).lines[0].payment_id;
   const pay = read(db, 'account.payment', payId);
   assert.equal(pay.check_number, 500);
@@ -297,7 +298,7 @@ test('13. Dispute flag (blocked) can be toggled on posted entries in a locked pe
 
   // Lock the period covering the invoice.
   db = write(db, 'res.company', 1, { lock_date: '2026-04-30' });
-  assert.ok(read(db, 'res.company', 1).hard_lock_date >= '2026-04-30');
+  assert.ok(read(db, 'res.company', 1).lock_date >= '2026-04-30');
 
   // Toggling `blocked` on the receivable line passes securedMoveRule, lockRule, and postedMoveRule.
   const toggledLines = posted.line_ids.map((l) => (l.debit > 0 ? { ...l, blocked: true } : l));

@@ -842,10 +842,14 @@ test('PKG-08(F): general path rejects foreign-currency items cleanly while deleg
     journal: misc.code, journal_id: misc.id, company: 1, date: '2026-03-02', ref: 'USD entry',
     lines: [{ account_id: ar, partner_id: partner.id, credit: 200 }, { account_id: rev, debit: 200 }],
   });
-  assert.throws(
-    () => reconcileLedgerItems(companyMisc.db, [itemSelection(companyMisc.db, fcInv.id, ar), itemSelection(companyMisc.db, companyMisc.id, ar)], { date: '2026-03-02' }),
-    /company currency/i,
-  );
+  const settledDirect = reconcileLedgerItems(companyMisc.db, [itemSelection(companyMisc.db, fcInv.id, ar), itemSelection(companyMisc.db, companyMisc.id, ar)], { date: '2026-03-02' });
+  assert.equal(read(settledDirect, 'account.move', fcInv.id).amount_residual, 0);
+  const directPartials = (settledDirect.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
+  assert.equal(directPartials.length, 1);
+  assert.equal(directPartials[0].amount, 200);
+  assert.equal(directPartials[0].debit_amount_currency, 100);
+  assert.equal(directPartials[0].credit_amount_currency, null);
+  assert.equal(directPartials[0].exchange_move_id, null);
 
   // Different-rate payment on the FC invoice via delegated path still closes with FX difference:
   // post the standalone FX payment before the invoice exists so it keeps its unapplied credit for manual reconciliation
