@@ -3,7 +3,7 @@ import { read, search, write } from '../orm.js';
 import { monthFilters, shiftMonth, today } from './common.js';
 import { bookedBankSuspenseAccountId, bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
-import { appendDocumentSettlement, residual, settleWriteoff } from './accounting.js';
+import { appendDocumentSettlement, bookEarlyDiscount, earlyDiscountForAmount, residual, settleWriteoff } from './accounting.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { applyRule, counterpartTaxLines, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
@@ -40,11 +40,18 @@ export function matchError(db, line, move) {
 /** Open posted invoices (money in) or bills (money out) whose amount due equals the line amount; same partner first. */
 export function candidates(db, line) {
   const incoming = line.amount > 0;
+  const lineDate = line?.date ?? today();
+  const journalCurrency = line?.journal_id ? (read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, line.company_id)?.id) : null;
+  const lineAmount = Math.abs(Number(line?.amount) || 0);
+  const targetResidual = (m) => {
+    const disc = earlyDiscountForAmount(db, m, lineAmount, lineDate, journalCurrency);
+    return disc > 0 ? m.amount_residual - disc : m.amount_residual;
+  };
   return search(db, 'account.move')
     .filter((m) => m.state === 'posted' && (m.company_id ?? 1) === (line.company_id ?? 1) && m.amount_residual > 0 && (incoming ? inboundTypes : outboundTypes).includes(m.move_type)
       && (!line.partner_id || sameCommercialPartner(db, m.partner_id, line.partner_id)))
     .sort((a, b) => Number(sameCommercialPartner(db, b.partner_id, line.partner_id)) - Number(sameCommercialPartner(db, a.partner_id, line.partner_id))
-      || Math.abs(a.amount_residual - Math.abs(line.amount)) - Math.abs(b.amount_residual - Math.abs(line.amount)));
+      || Math.abs(targetResidual(a) - lineAmount) - Math.abs(targetResidual(b) - lineAmount));
 }
 
 /** Book the statement line's bank movement once into the bank suspense account and record it on the line
@@ -146,8 +153,21 @@ export function reconcileWith(db, line, moveId) {
   const total = bookedStatementAmount(db, line);
   const foreignOpen = docRound(Math.abs(line.amount) * available / total);
   const sameCurrency = journalCurrency === (move.currency_id ?? companyCurrencyRecord(db, company)?.id);
-  const value = Math.min(docRound(move.amount_residual), sameCurrency ? foreignOpen : Number((Math.floor(available * rate / step + 1e-9) * step).toPrecision(15)));
-  const used = sameCurrency && value === foreignOpen ? available : sameCurrency && line.bank_move_id ? round(total * value / Math.abs(line.amount)) : toCompany(db, move.currency_id, value, date, company);
+  const payCurrency = read(db, 'res.currency', journalCurrency);
+  const linePayAmount = total ? roundCurrency(Math.abs(line.amount) * available / total, payCurrency) : Math.abs(line.amount);
+  const discount = earlyDiscountForAmount(db, move, linePayAmount, date, journalCurrency);
+  if (discount > 0) {
+    const sale = inboundTypes.includes(move.move_type);
+    const comp = read(db, 'res.company', company);
+    const discountAccount = sale ? comp?.expense_early_payment_discount_account_id : comp?.income_early_payment_discount_account_id;
+    if (!discountAccount) throw new Error(`Configure the early payment discount ${sale ? 'expense' : 'income'} account on company ${comp?.name ?? company}`);
+  }
+  const value = discount > 0
+    ? docRound(move.amount_residual - discount)
+    : Math.min(docRound(move.amount_residual), sameCurrency ? foreignOpen : Number((Math.floor(available * rate / step + 1e-9) * step).toPrecision(15)));
+  const used = discount > 0
+    ? available
+    : (sameCurrency && value === foreignOpen ? available : sameCurrency && line.bank_move_id ? round(total * value / Math.abs(line.amount)) : toCompany(db, move.currency_id, value, date, company));
   if (!(value > 0) || !(used > 0) || used > available) throw new Error('The open statement amount is too small to settle this invoice');
   const remaining = round(available - used);
   // The write-off fields describe the line's one write-off; once it is booked they are not a new request.
@@ -222,6 +242,10 @@ export function reconcileWith(db, line, moveId) {
     final: value >= residual(move, current),
   });
   current = settled.db;
+
+  if (discount > 0) {
+    current = bookEarlyDiscount(current, move.id, discount, date, bankMoveId);
+  }
 
   const writeoff = hasWriteoff ? settleWriteoff(current, moveId, writeoffValue, statementCompanyAmount(db, line, Number(line.writeoff_amount)), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id, analyticDistribution: line.writeoff_analytic_distribution ?? null }) : null;
   current = writeoff?.db ?? current;
@@ -545,7 +569,11 @@ export function matchPayment(db, line) {
 
 function autoReconcile(db, line) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
-  const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? statementCompanyAmount(db, line)));
+  const target = round(line.open_amount ?? statementCompanyAmount(db, line));
+  const journalCurrency = line?.journal_id ? (read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, line.company_id)?.id) : null;
+  const lineAmount = Math.abs(Number(line?.amount) || 0);
+  const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === target
+    || Boolean(earlyDiscountForAmount(db, m, lineAmount, line.date ?? today(), journalCurrency)));
   if (!line.partner_id) {
     if (exact.length) throw new Error('Select the statement partner, then review and confirm a matching invoice candidate');
     throw new Error('No open invoice or bill with this exact amount. Pick one in "Match with" or book it to an account.');

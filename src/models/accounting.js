@@ -1631,6 +1631,23 @@ export function appliedEarlyDiscount(db, r, docAmount, date = today()) {
   return gap > 0 && available > 0 && available >= gap ? docRound(gap) : 0;
 }
 
+/** Early-payment discount applicable to `r` on `date` for payment `amount` (in `currencyId`, default invoice currency). */
+export function earlyDiscountForAmount(db, r, amount, date = today(), currencyId = null) {
+  if (!r || !(residual(r, db) > 0)) return 0;
+  const available = discountAvailable(db, r, date);
+  if (!(available > 0)) return 0;
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
+  const invCurrId = r.currency_id ?? companyCurrencyRecord(db, r.company_id)?.id;
+  const payCurrId = currencyId ?? invCurrId;
+  const isForeign = payCurrId !== invCurrId;
+  const docAmount = isForeign
+    ? invoiceCurrencyAmount(db, r, Math.abs(amount), date, payCurrId)
+    : docRound(Math.abs(amount));
+  const due = residual(r, db);
+  if (docRound(due - docAmount) !== available) return 0;
+  return appliedEarlyDiscount(db, r, docAmount, date);
+}
+
 /** Reverse the discounted share of invoice-basis taxes using their posted accounts and bases. */
 function discountTaxLines(db, invoice, term, discount) {
   if (discountTaxComputation(term) !== 'included') return [];

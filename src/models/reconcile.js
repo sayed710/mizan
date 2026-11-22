@@ -3,6 +3,7 @@ import { read, search, write } from '../orm.js';
 import { bookedBankSuspenseAccountId, ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { writeBankStatementMove } from './finance.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { earlyDiscountForAmount } from './accounting.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
@@ -502,7 +503,10 @@ export function applyRule(db, rule, line) {
     const target = roundCurrency(line.open_amount ?? statementCompanyAmount(db, line), companyCurrency);
     const residual = (m) => toCompany(db, m.currency_id, m.amount_residual, line.date, m.company_id);
     const ordered = [...candidates(db, line)].sort(byMatchingOrder(rule.matching_order || 'old_first'));
-    const exact = ordered.filter((m) => residual(m) === target);
+    const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrency?.id;
+    const total = bookedStatementAmount(db, line);
+    const linePayAmount = total ? roundCurrency(Math.abs(line.amount) * target / total, read(db, 'res.currency', journalCurrency)) : Math.abs(line.amount);
+    const exact = ordered.filter((m) => residual(m) === target || Boolean(earlyDiscountForAmount(db, m, linePayAmount, line.date, journalCurrency)));
     if (!line.partner_id) {
       if (exact.length) throw new Error('Select the statement partner, then review and confirm a matching invoice');
       return db;
