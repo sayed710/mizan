@@ -713,6 +713,16 @@ export const companyModels = {
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
       invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
+      account_check_printing_layout: {
+        type: 'selection',
+        label: 'Check Layout',
+        options: [
+          ['none', 'None'],
+          ['top', 'Check on top'],
+          ['middle', 'Check in middle'],
+          ['bottom', 'Check in bottom'],
+        ],
+      },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       gain_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Gain Account' },
       loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Loss Account' },

@@ -3602,6 +3602,12 @@ const ar = {
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
   'Purchase order line must match the vendor, company, and product': 'يجب أن يطابق بند أمر الشراء المورد والشركة والمنتج',
   'Depreciation reversal must match the excess from a vendor refund': 'يجب أن يطابق عكس الإهلاك الزيادة الناتجة عن مرتجع المورد',
+  'Check on top': 'شيك في الأعلى',
+  'Check in middle': 'شيك في المنتصف',
+  'Check on bottom': 'شيك في الأسفل',
+  'Check Printed': 'تمت طباعة الشيك',
+  'Select a valid check layout': 'اختر تخطيط شيك صالح',
+  'Select the layout used when printing checks.': 'حدد التخطيط المستخدم عند طباعة الشيكات.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

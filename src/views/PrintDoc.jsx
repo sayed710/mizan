@@ -79,7 +79,7 @@ function Checks({ db, batch }) {
           amounts = { numeric: t(e.message), words: t(e.message) };
         }
         const journal = (payment?.journal_id ?? batch.journal_id) ? read(db, 'account.journal', payment?.journal_id ?? batch.journal_id) : null;
-        const layout = journal?.check_printing_layout || 'top';
+        const layout = company?.account_check_printing_layout || journal?.check_printing_layout || 'top';
         const stubLines = payment
           ? paymentRemittanceLines(db, payment)
           : (move ? [{ move, name: move.name || move.ref || '—', date: move.invoice_date || move.date, original_amount: move.amount_total, paid_amount: l.amount, currency: documentCurrency(db, move) }] : []);
@@ -178,7 +178,8 @@ function Checks({ db, batch }) {
             <article key={`${number ?? l.move_id}-page-${pageIdx}`} className={`paper check check-layout-${layout}`}>
               {layout === 'bottom' && [stubSection(pageLines, 'stub-top'), checkBody(isVoid)]}
               {layout === 'middle' && [stubSection(pageLines, 'stub-top'), checkBody(isVoid), stubSection(pageLines, 'stub-bottom')]}
-              {layout === 'top' && [checkBody(isVoid), stubSection(pageLines, 'stub-bottom')]}
+              {(layout === 'top' || !['bottom', 'middle', 'none'].includes(layout)) && [checkBody(isVoid), stubSection(pageLines, 'stub-bottom')]}
+              {layout === 'none' && [checkBody(isVoid)]}
             </article>
           );
         });
