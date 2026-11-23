@@ -824,3 +824,183 @@ test('Finding 3 regression: disposal integrity rejects entries debiting sale acc
     /Disposal move must book the sale on the sale invoice line account/
   );
 });
+
+test('Finding 1 code review: multi-line sale with gross-increase child using loss account does not reject its own entry', async () => {
+  const { confirmAsset, modifyAsset, disposeAsset } = await import('./models/assets.js');
+  const { postMove } = await import('./models/accounting.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { read, search } = await import('./orm.js');
+  let db = seed();
+  const lossAcc = accountId(db, '680000');
+  const otherIncomeAcc = accountId(db, '700000');
+  const fixedAcc = accountId(db, '151000');
+  const depAcc = accountId(db, '152000');
+  const baseAsset = create(db, 'account.asset', {
+    name: 'Parent Asset',
+    company_id: 1,
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: fixedAcc,
+    account_depreciation_id: depAcc,
+    account_depreciation_expense_id: lossAcc,
+  });
+  db = confirmAsset(baseAsset.db, read(baseAsset.db, 'account.asset', baseAsset.id));
+  db = modifyAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-04-01',
+    valueChange: 200,
+    accountId: lossAcc,
+  });
+  const child = search(db, 'account.asset').find((a) => a.parent_id === baseAsset.id);
+  assert.ok(child, 'Child exists');
+
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [
+      { name: 'Part 1', qty: 1, price_unit: 150, tax: 0, account_id: lossAcc },
+      { name: 'Part 2', qty: 1, price_unit: 50, tax: 0, account_id: otherIncomeAcc },
+    ],
+  });
+  db = postMove(inv.db, inv.id);
+
+  const disposedDb = disposeAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-06-01',
+    lossAccountId: lossAcc,
+    invoiceLines: [
+      { invoice_id: inv.id, line_index: 0 },
+      { invoice_id: inv.id, line_index: 1 },
+    ],
+  });
+
+  const parentClosed = read(disposedDb, 'account.asset', baseAsset.id);
+  const childClosed = read(disposedDb, 'account.asset', child.id);
+  assert.equal(parentClosed.state, 'close');
+  assert.equal(childClosed.state, 'close');
+  assert.equal(childClosed.disposal_move_id, parentClosed.disposal_move_id);
+});
+
+test('Finding 2 code review: selling parent collects all gross-increase descendants including grandchildren', async () => {
+  const { confirmAsset, modifyAsset, disposeAsset } = await import('./models/assets.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { read, search } = await import('./orm.js');
+  let db = seed();
+  const lossAcc = accountId(db, '680000');
+  const fixedAcc = accountId(db, '151000');
+  const depAcc = accountId(db, '152000');
+  const baseAsset = create(db, 'account.asset', {
+    name: 'Parent Asset',
+    company_id: 1,
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: fixedAcc,
+    account_depreciation_id: depAcc,
+    account_depreciation_expense_id: lossAcc,
+  });
+  db = confirmAsset(baseAsset.db, read(baseAsset.db, 'account.asset', baseAsset.id));
+  db = modifyAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-02-01',
+    valueChange: 300,
+    accountId: lossAcc,
+  });
+  const child = search(db, 'account.asset').find((a) => a.parent_id === baseAsset.id);
+  assert.ok(child, 'Child exists');
+
+  // Modify child to create a grandchild
+  db = modifyAsset(db, read(db, 'account.asset', child.id), {
+    date: '2026-03-01',
+    valueChange: 150,
+    accountId: lossAcc,
+  });
+  const grandchild = search(db, 'account.asset').find((a) => a.parent_id === child.id);
+  assert.ok(grandchild, 'Grandchild exists');
+  assert.equal(grandchild.state, 'open');
+
+  const disposedDb = disposeAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-06-01',
+    lossAccountId: lossAcc,
+  });
+
+  const parentClosed = read(disposedDb, 'account.asset', baseAsset.id);
+  const childClosed = read(disposedDb, 'account.asset', child.id);
+  const grandchildClosed = read(disposedDb, 'account.asset', grandchild.id);
+
+  assert.equal(parentClosed.state, 'close');
+  assert.equal(childClosed.state, 'close');
+  assert.equal(grandchildClosed.state, 'close');
+  assert.equal(grandchildClosed.disposal_date, '2026-06-01');
+  assert.equal(grandchildClosed.disposal_move_id, parentClosed.disposal_move_id);
+  assert.equal((grandchildClosed.depreciation_ids ?? []).filter((l) => !l.posted).length, 0);
+
+  const dispMove = read(disposedDb, 'account.move', parentClosed.disposal_move_id);
+  assert.ok(dispMove.line_ids.some((l) => l.account_id === grandchildClosed.account_asset_id && l.credit === 150));
+});
+
+test('Finding 3 code review: fully depreciated gross-increase child is cleared on parent disposal', async () => {
+  const { confirmAsset, modifyAsset, disposeAsset, postDepreciation } = await import('./models/assets.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { read, search } = await import('./orm.js');
+  let db = seed();
+  const lossAcc = accountId(db, '680000');
+  const fixedAcc = accountId(db, '151000');
+  const depAcc = accountId(db, '152000');
+  const baseAsset = create(db, 'account.asset', {
+    name: 'Parent Asset',
+    company_id: 1,
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 1,
+    method_period: '1',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: fixedAcc,
+    account_depreciation_id: depAcc,
+    account_depreciation_expense_id: lossAcc,
+  });
+  db = confirmAsset(baseAsset.db, read(baseAsset.db, 'account.asset', baseAsset.id));
+  db = modifyAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-01-15',
+    valueChange: 200,
+    accountId: lossAcc,
+  });
+  const child = search(db, 'account.asset').find((a) => a.parent_id === baseAsset.id);
+  assert.ok(child, 'Child exists');
+
+  // Fully depreciate child (child has 1 period ending 2026-01-31)
+  db = postDepreciation(db, read(db, 'account.asset', child.id), '2026-02-01');
+  const childDepreciated = read(db, 'account.asset', child.id);
+  assert.equal(childDepreciated.state, 'close');
+  assert.equal(childDepreciated.disposal_date, undefined);
+  assert.equal(childDepreciated.disposal_move_id, undefined);
+
+  // Dispose parent
+  const disposedDb = disposeAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-06-01',
+    lossAccountId: lossAcc,
+  });
+
+  const parentClosed = read(disposedDb, 'account.asset', baseAsset.id);
+  const childClosed = read(disposedDb, 'account.asset', child.id);
+
+  assert.equal(childClosed.state, 'close');
+  assert.equal(childClosed.disposal_date, '2026-06-01');
+  assert.equal(childClosed.disposal_move_id, parentClosed.disposal_move_id);
+
+  const dispMove = read(disposedDb, 'account.move', parentClosed.disposal_move_id);
+  assert.ok(dispMove.line_ids.some((l) => l.account_id === childClosed.account_asset_id && l.credit === 200));
+  assert.ok(dispMove.line_ids.some((l) => l.account_id === childClosed.account_depreciation_id && l.debit === 200));
+});

@@ -68,6 +68,40 @@ const remainingDepreciableCents = (asset) => cents(asset.original_value)
 const isDisposedAsset = (asset) => Boolean(asset?.disposal_date || asset?.disposal_move_id);
 const hasDerivedAsset = (db, asset) => Boolean(db && search(db, 'account.asset').some((a) => a.origin_asset_id === asset.id));
 
+/** Follow parent_id up to find the root ancestor asset ID. */
+export function rootAssetId(db, assetOrId) {
+  let curr = typeof assetOrId === 'object' && assetOrId !== null ? assetOrId : (read(db, 'account.asset', assetOrId) ?? null);
+  const seen = new Set();
+  while (curr && curr.parent_id && !seen.has(curr.id)) {
+    seen.add(curr.id);
+    const parent = read(db, 'account.asset', curr.parent_id);
+    if (!parent) break;
+    curr = parent;
+  }
+  return curr?.id ?? null;
+}
+
+/** Collect all undisposed gross-increase descendants of an asset in the hierarchy. */
+export function assetDescendants(db, parentId) {
+  const result = [];
+  const queue = [parentId];
+  const allAssets = db?.records?.['account.asset'] ?? [];
+  const visited = new Set([parentId]);
+  while (queue.length > 0) {
+    const currentId = queue.shift();
+    for (const child of allAssets) {
+      if (child.parent_id === currentId && !visited.has(child.id)) {
+        visited.add(child.id);
+        queue.push(child.id);
+        if (['open', 'paused', 'close'].includes(child.state) && !isDisposedAsset(child)) {
+          result.push(child);
+        }
+      }
+    }
+  }
+  return result;
+}
+
 export function pendingScheduleValid(asset, remaining) {
   const unposted = (asset.depreciation_ids ?? []).filter((line) => !line.posted);
   const unpostedTotal = unposted.reduce((sum, line) => sum + cents(line.amount), 0);
@@ -344,8 +378,9 @@ export function validateAssetIntegrity(db, before, asset, vals) {
         return 'Disposal move must credit the fixed asset account by the asset original value';
       }
     }
+    const rootId = rootAssetId(db, asset);
     const moveUsedElsewhere = (db.records['account.asset'] ?? []).some(
-      (a) => (a.id !== asset.id && a.parent_id !== asset.id && asset.parent_id !== a.id && (!a.parent_id || a.parent_id !== asset.parent_id) && a.disposal_move_id === asset.disposal_move_id)
+      (a) => (a.id !== asset.id && rootAssetId(db, a) !== rootId && a.disposal_move_id === asset.disposal_move_id)
         || (a.depreciation_ids ?? []).some((l) => l.move_id === asset.disposal_move_id)
         || (a.revaluation_ids ?? []).some((r) => r.move_id === asset.disposal_move_id),
     );
@@ -369,9 +404,17 @@ export function validateAssetIntegrity(db, before, asset, vals) {
         accounts.set(info.accountId, (accounts.get(info.accountId) ?? 0) + info.amount);
       }
       if (total !== cents(asset.sale_value)) return 'Sale price must match the invoice line amount';
-      const linkedChildren = (db.records['account.asset'] ?? []).filter(
-        (a) => a.parent_id === asset.id && a.disposal_move_id === asset.disposal_move_id,
-      );
+      const linkedChildren = (db.records['account.asset'] ?? []).filter((a) => {
+        if (a.id === asset.id || rootAssetId(db, a) !== rootId) return false;
+        if (a.disposal_move_id === asset.disposal_move_id) return true;
+        if (!isDisposedAsset(a) && ['open', 'paused', 'close'].includes(a.state)) {
+          const aOrig = cents(a.original_value);
+          return (dispMove.line_ids ?? []).some(
+            (l) => l.account_id === a.account_asset_id && cents(l.credit) === aOrig && (cents(l.debit) || 0) === 0,
+          );
+        }
+        return false;
+      });
       const totalOrig = origCents + linkedChildren.reduce((sum, c) => sum + cents(c.original_value), 0);
       const totalAcc = accumulated + linkedChildren.reduce((sum, c) => sum + postedCents(c) + cents(c.already_depreciated), 0);
       const netLoss = totalOrig - totalAcc - cents(asset.sale_value);
@@ -1004,7 +1047,7 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   if (Number(saleValue) > 0 && !invoiceId && !invoiceLines.length) throw new Error('Select the customer invoice for this sale');
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
   if (asset.state !== 'open' && (asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
-  const children = search(db, 'account.asset').filter((a) => a.parent_id === asset.id && ['open', 'paused'].includes(a.state));
+  const children = assetDescendants(db, asset.id);
   for (const child of children) {
     if ((child.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
     if (child.state !== 'open' && (child.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
@@ -1068,17 +1111,7 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
     loss < 0 && { account: disposalAccount, credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
   const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
-  let result = write(postAnalytic(booked, id), 'account.asset', asset.id, {
-    depreciation_ids: kept,
-    cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })),
-    state: 'close',
-    disposal_date: date,
-    sale_value: sale / 100,
-    sale_invoice_id: invoice?.id ?? null,
-    sale_invoice_line: invoice ? Number(invoiceLine) : null,
-    ...(invoiceLines.length ? { sale_invoice_line_ids: invoiceLines } : {}),
-    disposal_move_id: id,
-  });
+  let result = postAnalytic(booked, id);
   for (const c of currentChildren) {
     const cKept = (c.depreciation_ids ?? []).filter((l) => l.posted);
     result = write(result, 'account.asset', c.id, {
@@ -1090,6 +1123,17 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
     });
     if (note?.trim()) result = postNote(result, 'account.asset', c.id, note.trim());
   }
+  result = write(result, 'account.asset', asset.id, {
+    depreciation_ids: kept,
+    cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })),
+    state: 'close',
+    disposal_date: date,
+    sale_value: sale / 100,
+    sale_invoice_id: invoice?.id ?? null,
+    sale_invoice_line: invoice ? Number(invoiceLine) : null,
+    ...(invoiceLines.length ? { sale_invoice_line_ids: invoiceLines } : {}),
+    disposal_move_id: id,
+  });
   return note?.trim() ? postNote(result, 'account.asset', asset.id, note.trim()) : result;
 }
 
