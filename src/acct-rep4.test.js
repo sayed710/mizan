@@ -10,6 +10,16 @@ import { depreciationReport } from './models/assets.js';
 import { budgetReport } from './models/analyticplus.js';
 import { applyDiff, diffDb } from './sync.js';
 import { find, setupDom } from './test-support/dom.js';
+import { today } from './models/common.js';
+import { postMove } from './models/accounting.js';
+
+const replaceRecord = (db, model, id, values) => ({
+  ...db,
+  records: {
+    ...db.records,
+    [model]: db.records[model].map((r) => r.id === id ? { ...r, ...values } : r),
+  },
+});
 
 async function renderReport(report, db) {
   const { initStore, commit } = await import('./store.js');
@@ -183,7 +193,7 @@ test('REP4-4 Budget comparison displays period headers and the same amounts as s
   const textOf = (node) => node.nodeType === 3 ? node.nodeValue : (node.childNodes ?? []).map(textOf).join('');
   try {
     await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'budget' } })));
-    const row = () => find(container, (n) => n.tagName === 'TR' && n.className === 'rep-detail');
+    const row = () => find(container, (n) => n.tagName === 'TR' && n.className === 'rep-detail' && textOf(n.childNodes[0]) === '6');
     const single = row().childNodes.map(textOf);
     const comparison = find(container, (n) => n.tagName === 'SELECT' && n.options.some((o) => textOf(o) === 'Previous Period'));
     await React.act(async () => props(comparison).onChange({ target: { value: 'previous' } }));
@@ -199,4 +209,195 @@ test('REP4-4 Budget comparison displays period headers and the same amounts as s
   } finally {
     await React.act(async () => root.unmount());
   }
+});
+
+test('REP4-5 Current unfinished budget period evaluates achievement against elapsed target', async () => {
+  let db = seed();
+  const currentYear = today().slice(0, 4);
+  const an = create(db, 'account.analytic.account', { name: 'Unfinished Project', company_id: 1 });
+  db = an.db;
+  const posted = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: 1, company_id: 1, date: `${currentYear}-01-01`, invoice_date: `${currentYear}-01-01`,
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(posted.db, posted.id);
+  db = create(db, 'account.analytic.line', {
+    account_id: an.id, move_id: posted.id, company_id: 1, date: `${currentYear}-01-02`, amount: -2000, general_account: '600000',
+  }).db;
+  const budget = create(db, 'account.budget', {
+    name: 'Unfinished period budget',
+    company_id: 1,
+    date_from: `${currentYear}-01-01`,
+    date_to: '2030-12-31',
+    state: 'confirmed',
+    lines: [
+      { planned: -10000, analytic_account_id: an.id, general_account: '600', date_from: `${currentYear}-01-01`, date_to: '2030-12-31' },
+    ],
+  });
+  db = budget.db;
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+  const { reportMoney } = await import('./views/reportCompany.jsx');
+  const money = reportMoney(db, 1);
+
+  const period = { from: `${currentYear}-01-01`, to: '2030-12-31' };
+  const html = renderToStaticMarkup(
+    React.createElement('table', null,
+      React.createElement(Budget, { db, period, companyId: '1', money })
+    )
+  );
+
+  const expectedReport = budgetReport(db, budget.id, today(), { period, company_id: 1 });
+  const expectedAchievement = expectedReport[0].achievement;
+  assert.ok(expectedAchievement > 20, `Achievement ${expectedAchievement}% reflects elapsed target, not full period (20%)`);
+  assert.match(html, new RegExp(`${expectedAchievement}%`));
+  assert.doesNotMatch(html, />20%</);
+});
+
+test('REP4-6 Budget starting in current period displays zero metrics for nonoverlapping earlier period', async () => {
+  let db = seed();
+  const budget = create(db, 'account.budget', {
+    name: 'Current Year Only Budget',
+    company_id: 1,
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    state: 'confirmed',
+    lines: [
+      { planned: 10000, general_account: '6' },
+    ],
+  });
+  db = budget.db;
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+  const { reportMoney } = await import('./views/reportCompany.jsx');
+  const money = reportMoney(db, 1);
+
+  // Comparison between earlier period (2025) and current period (2026)
+  const periods = [
+    { label: '2025', from: '2025-01-01', to: '2025-12-31' },
+    { label: '2026', from: '2026-01-01', to: '2026-12-31' },
+  ];
+  const html = renderToStaticMarkup(
+    React.createElement('table', null,
+      React.createElement(Budget, { db, period: periods[1], periods, companyId: '1', money })
+    )
+  );
+
+  assert.match(html, /Current Year Only Budget/);
+  // Current period (2026) displays planned $10,000.00
+  assert.match(html, />\$10,000\.00</);
+  // Earlier nonoverlapping period (2025) renders zero metrics ($0.00) without negative variance
+  const rowMatch = html.match(/<tr class="rep-detail"><td>6<\/td>(.*?)<\/tr>/);
+  assert.ok(rowMatch, 'found detail row');
+  const cells = rowMatch[1].match(/<td[^>]*>(.*?)<\/td>/g) || [];
+  // Period 2025 cells: planned 0, practical 0, committed 0, variance 0, achievement empty
+  const p2025Cells = cells.slice(0, 5);
+  assert.deepEqual(p2025Cells, [
+    '<td class="num">$0.00</td>',
+    '<td class="num">$0.00</td>',
+    '<td class="num">$0.00</td>',
+    '<td class="num">$0.00</td>',
+    '<td class="num"></td>',
+  ]);
+});
+
+test('REP4-7 Analytic filter retains companyless budgets and failed reports', async () => {
+  let db = seed();
+  const an = create(db, 'account.analytic.account', { name: 'Active Filter Account', company_id: 1 });
+  db = an.db;
+
+  const b1 = create(db, 'account.budget', {
+    name: 'Companyless Budget',
+    company_id: 1,
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    state: 'confirmed',
+    lines: [{ planned: 5000, analytic_account_id: an.id }],
+  });
+  db = replaceRecord(b1.db, 'account.budget', b1.id, { company_id: null });
+
+  const b2 = create(db, 'account.budget', {
+    name: 'Error Budget',
+    company_id: 1,
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    state: 'confirmed',
+    lines: [{ planned: 5000, account_id: 999999, analytic_account_id: an.id }],
+  });
+  db = b2.db;
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+  const { reportMoney } = await import('./views/reportCompany.jsx');
+  const money = reportMoney(db, 1);
+
+  const period = { from: '2026-01-01', to: '2026-12-31' };
+  const html = renderToStaticMarkup(
+    React.createElement('table', null,
+      React.createElement(Budget, { db, period, companyId: 'all', analyticAccountIds: [an.id], money })
+    )
+  );
+
+  assert.match(html, /Companyless Budget/);
+  assert.match(html, /Select a company to show this budget report/);
+  assert.match(html, /Error Budget/);
+  assert.match(html, /Budget account not found/);
+});
+
+test('REP4-8 Later comparison period failure renders unavailable cells and does not reuse earlier figures', async () => {
+  let db = seed();
+  const budget = create(db, 'account.budget', {
+    name: 'Comparison Error Budget',
+    company_id: 1,
+    date_from: '2025-01-01',
+    date_to: '2026-12-31',
+    state: 'confirmed',
+    lines: [
+      { planned: 12345, general_account: '600' },
+    ],
+  });
+  db = budget.db;
+
+  const po1 = create(db, 'purchase.order', {
+    state: 'purchase', partner_id: 1, company_id: 1, date_order: '2025-06-01',
+    order_line: [{ id: 991, purchase_line_key: 'line-unique-2025', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = po1.db;
+
+  const po2 = create(db, 'purchase.order', {
+    state: 'purchase', partner_id: 1, company_id: 1, date_order: '2026-06-01',
+    order_line: [
+      { id: 992, purchase_line_key: 'dup', qty: 1, price_unit: 100, tax: 0 },
+      { id: 992, purchase_line_key: 'dup', qty: 1, price_unit: 100, tax: 0 },
+    ],
+  });
+  db = po2.db;
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+  const { reportMoney } = await import('./views/reportCompany.jsx');
+  const money = reportMoney(db, 1);
+
+  const periods = [
+    { label: '2025', from: '2025-01-01', to: '2025-12-31' },
+    { label: '2026', from: '2026-01-01', to: '2026-12-31' },
+  ];
+
+  const html = renderToStaticMarkup(
+    React.createElement('table', null,
+      React.createElement(Budget, { db, period: periods[0], periods, companyId: '1', money })
+    )
+  );
+
+  assert.match(html, />\$12,345\.00</);
+  assert.match(html, /Configure a unique purchase order line link/);
+  const matches = html.match(/>\$12,345\.00</g) || [];
+  assert.equal(matches.length, 1, 'Planned amount 12345 should only appear for period 2025, not repeated in period 2026');
+  assert.match(html, /—/);
 });

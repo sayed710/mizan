@@ -106,7 +106,8 @@ test('2. Modify Depreciation and dispose still work on an open asset', () => {
     accountId: revalAccId,
   });
   let asset = read(db, 'account.asset', open.id);
-  assert.equal(asset.original_value, 12000);
+  assert.equal(asset.original_value, 10000);
+  assert.equal(search(db, 'account.asset').find((child) => child.parent_id === asset.id).original_value, 2000);
 
   // Dispose via disposeAsset
   db = disposeAsset(db, asset, { date: '2026-07-01' });
@@ -332,7 +333,8 @@ test('8. Running asset with non-general journal can still Post Depreciation, Pau
     accountId: revalAccId,
   });
   asset = read(db, 'account.asset', open.id);
-  assert.equal(asset.original_value, 13000);
+  assert.equal(asset.original_value, 12000);
+  assert.equal(search(db, 'account.asset').find((child) => child.parent_id === asset.id).original_value, 1000);
 
   // 5. Sell or Dispose
   db = disposeAsset(db, asset, { date: '2026-05-01' });
@@ -469,7 +471,8 @@ test('11. Structural invariants G1-G5 enforced identically by ORM write and serv
     accountId: revalAccId,
   });
   const syncedIncrease = applyDiff(db, diffDb(db, modifiedIncrease), { author: 'test', isAdmin: false });
-  assert.equal(read(syncedIncrease, 'account.asset', asset.id).original_value, 14400);
+  assert.equal(read(syncedIncrease, 'account.asset', asset.id).original_value, 12000);
+  assert.equal(search(syncedIncrease, 'account.asset').find((child) => child.parent_id === asset.id).original_value, 2400);
 
   // 2b. Impairment / value decrease (-1200)
   const modifiedImpair = modifyAsset(db, asset, {
@@ -513,13 +516,13 @@ test('11. Structural invariants G1-G5 enforced identically by ORM write and serv
     /inconsistent with asset values|recorded value adjustments/i,
   );
 
-  // 5. Re-drafting an open asset (state: 'draft') rejected by write and by applyDiff (G1)
+  // 5. Posted depreciation prevents re-drafting through both paths (G1)
   assert.throws(
-    () => write(db, 'account.asset', asset.id, { state: 'draft' }),
+    () => write(syncedPost, 'account.asset', asset.id, { state: 'draft' }),
     /Cannot reset a confirmed asset to draft/i,
   );
   assert.throws(
-    () => applyDiff(db, { upserts: { 'account.asset': [{ ...asset, state: 'draft' }] } }, { author: 'test', isAdmin: false }),
+    () => applyDiff(syncedPost, { upserts: { 'account.asset': [{ ...assetAfterPost, state: 'draft' }] } }, { author: 'test', isAdmin: false }),
     /Cannot reset a confirmed asset to draft/i,
   );
 
@@ -578,7 +581,8 @@ test('11. Structural invariants G1-G5 enforced identically by ORM write and serv
   const bModify = modifyAsset(runningWithBank, bankAsset, { date: '2027-01-15', value_change: 1000, accountId: revalAccId });
   runningWithBank = applyDiff(runningWithBank, diffDb(runningWithBank, bModify), { author: 'test', isAdmin: false });
   bankAsset = read(runningWithBank, 'account.asset', asset.id);
-  assert.equal(bankAsset.original_value, 13000);
+  assert.equal(bankAsset.original_value, 12000);
+  assert.equal(search(runningWithBank, 'account.asset').find((child) => child.parent_id === bankAsset.id).original_value, 1000);
 
   // Dispose via applyDiff
   const bDispose = disposeAsset(runningWithBank, bankAsset, { date: '2027-02-01' });
@@ -817,21 +821,24 @@ test('14. Q3: revaluation_ids prefix immutable, appended entries reference poste
   const asset = read(db, 'account.asset', open.id);
   const revalAccId = accountId(db, '450300');
 
-  // Legitimate 1: modifyAsset value increase (+2400) passes applyDiff
+  // Increases create a separate child; decreases retain guarded adjustment history on the parent.
   const modifiedInc = modifyAsset(db, asset, { date: '2026-06-15', value_change: 2400, accountId: revalAccId });
-  const syncedInc = applyDiff(db, diffDb(db, modifiedInc), { author: 'test', isAdmin: false });
+  const increased = applyDiff(db, diffDb(db, modifiedInc), { author: 'test', isAdmin: false });
+  assert.equal(read(increased, 'account.asset', asset.id).original_value, 12000);
+  assert.equal(search(increased, 'account.asset').find((child) => child.parent_id === asset.id).original_value, 2400);
+  const firstDecrease = modifyAsset(increased, read(increased, 'account.asset', asset.id), { date: '2026-06-16', value_change: -1200 });
+  const syncedInc = applyDiff(increased, diffDb(increased, firstDecrease), { author: 'test', isAdmin: false });
   const assetInc = read(syncedInc, 'account.asset', asset.id);
-  assert.equal(assetInc.original_value, 14400);
+  assert.equal(assetInc.original_value, 10800);
   assert.equal(assetInc.revaluation_ids.length, 1);
   const rev1 = assetInc.revaluation_ids[0];
-  assert.equal(rev1.amount, 2400);
+  assert.equal(rev1.amount, -1200);
   assert.ok(rev1.move_id);
 
-  // Legitimate 2: modifyAsset impairment (-1200) passes applyDiff
   const modifiedDec = modifyAsset(syncedInc, assetInc, { date: '2026-07-01', value_change: -1200 });
   const syncedDec = applyDiff(syncedInc, diffDb(syncedInc, modifiedDec), { author: 'test', isAdmin: false });
   const assetDec = read(syncedDec, 'account.asset', asset.id);
-  assert.equal(assetDec.original_value, 13200);
+  assert.equal(assetDec.original_value, 9600);
   assert.equal(assetDec.revaluation_ids.length, 2);
 
   // Legitimate 3: modifyAsset methodNumber change (no value change) passes applyDiff

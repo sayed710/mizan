@@ -35,9 +35,9 @@ test('partner ledger and customer statement include archived receivable accounts
   assert.equal(customerStatement(fixture, 9999, { to: '2026-01-01', company_id: 1 }).closing, 100);
 });
 
-test('aged report uses the earlier of the period end and today', () => {
-  assert.equal(agedReportDate('9999-12-31', '2026-11-04'), '2026-11-04');
-  assert.equal(agedReportDate('2026-11-30', '2026-11-04'), '2026-11-04');
+test('aged report uses the chosen as-of date, past or future, defaulting to today', () => {
+  assert.equal(agedReportDate('9999-12-31', '2026-11-04'), '9999-12-31');
+  assert.equal(agedReportDate('', '2026-11-04'), '2026-11-04');
   assert.equal(agedReportDate('2026-10-31', '2026-11-04'), '2026-10-31');
 });
 
