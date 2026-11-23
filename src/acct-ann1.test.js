@@ -75,6 +75,10 @@ test('annual report body regenerates when section_ids change and stays editable'
   );
   assert.ok(onchangeRes?.body?.includes('Draft note'));
 
+  // A body edited in the same save as a section change is kept, not regenerated.
+  db = write(db, 'audit.report', report.id, { section_ids: [{ type: 'report', report_id: balance.id, sequence: 10 }], body: '<p>Edited with sections</p>' });
+  assert.equal(read(db, 'audit.report', report.id).body, '<p>Edited with sections</p>');
+
   // The body stays editable: a user-edited body is kept when the report is marked done.
   db = write(db, 'audit.report', report.id, { body: '<p>Reviewed by the auditor</p>' });
   const doneBtn = auditReportModels['audit.report'].form.buttons.find((b) => b.label === 'Mark as Done');

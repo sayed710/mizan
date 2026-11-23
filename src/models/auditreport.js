@@ -268,6 +268,8 @@ export const auditReportModels = {
     onchange: (r, key, db) => (key === 'section_ids' ? sectionBody(db, r) ?? {} : {}),
     prepareWrite: (db, vals, before) => {
       if (vals.section_ids == null || JSON.stringify(vals.section_ids) === JSON.stringify(before?.section_ids)) return { db, vals };
+      // A body the user edited in the same save wins over the regenerated one.
+      if (vals.body != null && vals.body !== before?.body) return { db, vals };
       return { db, vals: { ...vals, ...sectionBody(db, { ...before, ...vals }) } };
     },
     guard: (db, before, after) => {
