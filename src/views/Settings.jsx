@@ -223,6 +223,9 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
   }
+  if (vals.account_check_printing_layout !== undefined && vals.account_check_printing_layout !== null && !['none', 'top', 'middle', 'bottom'].includes(vals.account_check_printing_layout)) {
+    return 'Select a valid check layout';
+  }
   for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id', 'tax_cash_basis_journal_id']) {
     if (vals[field] === undefined || vals[field] === null) continue;
     const journal = (db.records['account.journal'] ?? []).find((x) => x.id === vals[field]);
@@ -507,6 +510,25 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
             {(db.records['account.incoterm'] ?? []).filter((item) => item.active !== false || item.id === company?.incoterm_id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </SettingRow>
+          {hasField('account_check_printing_layout') && (
+            <SettingRow id="account_check_printing_layout" label="Check Layout" description="Select the layout used when printing checks.">
+              <select
+                id="account_check_printing_layout"
+                disabled={readOnly || !company}
+                value={company?.account_check_printing_layout ?? 'top'}
+                onChange={(e) => onWriteCompany({ account_check_printing_layout: e.target.value })}
+              >
+                {(fields.account_check_printing_layout?.options ?? [
+                  ['none', 'None'],
+                  ['top', 'Check on top'],
+                  ['middle', 'Check in middle'],
+                  ['bottom', 'Check in bottom'],
+                ]).map(([val, label]) => (
+                  <option key={val} value={val}>{t(label)}</option>
+                ))}
+              </select>
+            </SettingRow>
+          )}
       </div>
 
       {showCustomerPayments && (

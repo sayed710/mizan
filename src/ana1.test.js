@@ -69,7 +69,8 @@ test('budget commitments track confirmed unbilled allocations through partial bi
   const html = renderToStaticMarkup(React.createElement(Reports, { leaf: { report: 'budget' }, initialPeriod: 'all' }));
   assert.match(html, /Committed/);
   assert.match(html, new RegExp(`#/open/purchase.order/${po.id}`));
-  assert.match(html, /-\$324\.00/);
+  assert.match(html, />\$324\.00<\/td>/);
+  assert.match(html, />\$540\.00<\/td>/);
   const cancelled = write(db, 'purchase.order', po.id, { state: 'cancel' });
   assert.equal(actual(cancelled, b.id).committed, 0);
 });
