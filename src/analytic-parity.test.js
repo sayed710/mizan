@@ -125,7 +125,7 @@ test('account.analytic.plan list opens first, uses sequence handle, drops parent
 
 test('account.analytic.plan form smart counts, conditional default_applicability/tab, and applicability columns', async () => {
   const def = models['account.analytic.plan'];
-  assert.deepEqual(def.form.groups, [['parent_id', 'default_applicability', 'color']]);
+  assert.deepEqual(def.form.groups, [['parent_id', 'default_applicability', 'color', 'description']]);
   assert.deepEqual(
     Object.keys(def.fields.applicability_ids.fields),
     ['business_domain', 'company_id', 'applicability', 'account_prefix', 'product_categ_id'],
@@ -352,7 +352,7 @@ test('account.analytic.account form layout, Archived ribbon, Gross Margin stat b
 });
 
 test('migration 46 backfills analytic plan sequences and Arabic labels resolve cleanly', async () => {
-  assert.ok(SCHEMA_VERSION >= 66);
+  assert.equal(SCHEMA_VERSION, 75);
   const legacy = {
     schema_version: 45,
     records: {
@@ -363,7 +363,7 @@ test('migration 46 backfills analytic plan sequences and Arabic labels resolve c
     },
   };
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 75);
   assert.equal(migrated.records['account.analytic.plan'][0].sequence, 10);
   assert.equal(migrated.records['account.analytic.plan'][0].default_applicability, 'optional');
   assert.equal(migrated.records['account.analytic.plan'][1].sequence, 20);

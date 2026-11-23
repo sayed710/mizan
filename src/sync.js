@@ -669,6 +669,21 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         if (submitted.fx_payment_move_id != null || submitted.fx_invoice_id != null) throw new Error('Exchange provenance cannot be changed');
       }
       if (model === 'account.move') {
+        if (!prior) {
+          if (submitted.digitized_document != null || submitted.digitized_vendor_id != null || submitted.digitized_unedited != null) {
+            throw new Error('Digitization provenance cannot be changed');
+          }
+        } else {
+          if ((submitted.digitized_document !== undefined && submitted.digitized_document !== prior.digitized_document) ||
+              (submitted.digitized_vendor_id !== undefined && submitted.digitized_vendor_id !== prior.digitized_vendor_id)) {
+            throw new Error('Digitization provenance cannot be changed');
+          }
+          if (submitted.digitized_unedited !== undefined && submitted.digitized_unedited !== prior.digitized_unedited) {
+            if (!(prior.digitized_unedited === true && submitted.digitized_unedited === false)) {
+              throw new Error('Digitization provenance cannot be changed');
+            }
+          }
+        }
         if (prior && submitted.system_generated !== undefined && submitted.system_generated !== prior.system_generated) {
           throw new Error('System-generated status cannot be changed');
         }
@@ -679,6 +694,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         : submitted;
       const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
       const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
+      if (model === 'account.move' && rec.state === 'draft' && rec.posting_order != null && (!submitted || submitted.posting_order === undefined)) delete rec.posting_order;
       if (companies) scopeNestedCompanyArrays(model, rec, companies, { prior, submitted, write: true });
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
@@ -756,7 +772,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const stripVolatiles = (val) => {
       if (val == null || typeof val !== 'object') return val;
       if (Array.isArray(val)) return val.map(stripVolatiles);
-      const { line_id: _ignoredLineId, payments: _ignoredPayments, amount_paid: _ignoredAmountPaid, payment_date: _ignoredPaymentDate, ...rest } = val;
+      const { line_id: _ignoredLineId, payments: _ignoredPayments, amount_paid: _ignoredAmountPaid, payment_date: _ignoredPaymentDate, posting_order: _ignoredPostingOrder, ...rest } = val;
       return Object.fromEntries(Object.keys(rest).filter((k) => rest[k] !== undefined).sort().map((k) => [k, stripVolatiles(rest[k])]));
     };
     if (JSON.stringify(stripVolatiles(expected)) !== JSON.stringify(stripVolatiles(actual))) {

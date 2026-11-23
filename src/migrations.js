@@ -2019,6 +2019,22 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
   };
 } });
 
+export function migrateReconcileModelTolerance(db) {
+  const rules = db?.records?.['account.reconcile.model'];
+  if (!Array.isArray(rules) || !rules.length) return db;
+  let changed = false;
+  const nextRules = rules.map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    const tolType = r.payment_tolerance_type || 'percentage';
+    if (tolType === 'percentage' && Number(r.payment_tolerance) > 100) {
+      changed = true;
+      return { ...r, payment_tolerance: 100 };
+    }
+    return r;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
+}
+MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 export function migrateJournalGroups(db) {
   const groups = [...(db.records['account.journal.group'] ?? [])].sort(
     (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id
@@ -2040,7 +2056,7 @@ export function migrateJournalGroups(db) {
   const cleanGroups = groups.map(({ journal_ids: _old, ...group }) => group);
   return { ...db, records: { ...db.records, 'account.journal': journals, 'account.journal.group': cleanGroups } };
 }
-MIGRATIONS.push({ version: 68, name: 'journal-ledger-direction', up: migrateJournalGroups });
+MIGRATIONS.push({ version: 75, name: 'journal-ledger-direction', up: migrateJournalGroups });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

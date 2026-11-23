@@ -463,8 +463,8 @@ test('migration 45 backfills tax group company_id from owning taxes (else main c
   };
 
   const migrated = migrate(legacy);
-  assert.ok(SCHEMA_VERSION >= 66);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 75);
+  assert.equal(migrated.schema_version, 75);
 
   const migratedBranchGroup = read(migrated, 'account.tax.group', groupBranch.id);
   const migratedUnownedGroup = read(migrated, 'account.tax.group', groupUnowned.id);
@@ -479,7 +479,7 @@ test('migration 45 backfills tax group company_id from owning taxes (else main c
 
   // Idempotent rerun preserves assignments
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, SCHEMA_VERSION);
+  assert.equal(twice.schema_version, 75);
   assert.deepEqual(read(twice, 'account.tax.group', groupBranch.id), migratedBranchGroup);
   assert.deepEqual(read(twice, 'account.cash.rounding', r.id), migratedRounding);
 });

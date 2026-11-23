@@ -6,7 +6,7 @@ import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { budgetReport } from './models/analyticplus.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -85,9 +85,9 @@ test('migration fills budget_type: both on legacy budgets and allows status chan
   // Before migration, writing or confirming throws because budget_type is missing
   assert.throws(() => write(unmigrated, 'account.budget', 991, { state: 'confirmed' }), /Budget Type is required/);
 
-  // Migrating upgrades database to schema_version 67 and fills budget_type: 'both'
+  // Migrating upgrades database to schema_version 68 and fills budget_type: 'both'
   const upgraded = migrate(unmigrated);
-  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
+  assert.equal(upgraded.schema_version, 75);
   assert.equal(read(upgraded, 'account.budget', 991).budget_type, 'both');
 
   // Status transition on migrated budget succeeds
