@@ -2034,7 +2034,7 @@ export function migrateReconcileModelTolerance(db) {
   });
   return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
 }
-MIGRATIONS.push({ version: 67, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
+MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
