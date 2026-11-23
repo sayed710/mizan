@@ -93,6 +93,7 @@ function optionalMenuButtons(thead) {
 
 function buildRichJournalItemsDb() {
   let db = seed();
+  db = write(db, 'res.company', 1, { group_analytic_accounting: true });
   const dateNow = today();
   const yesterday = addDays(dateNow, -1);
   const tomorrow = addDays(dateNow, 10);
@@ -297,7 +298,9 @@ function buildRichJournalItemsDb() {
 
 test('Journal Items list columns match Odoo 20 order, optional state, multi-company and multi-currency gating', async () => {
   // Single-company + multi-currency default seed DB.
-  const singleCtx = await mountJournalItems(seed());
+  let singleDb = seed();
+  singleDb = write(singleDb, 'res.company', 1, { group_analytic_accounting: true });
+  const singleCtx = await mountJournalItems(singleDb);
   try {
     const { thead, visibleHeaders, toggleBtn } = journalColumnsAndMenus(singleCtx.host);
     assert.deepEqual(
@@ -319,6 +322,7 @@ test('Journal Items list columns match Odoo 20 order, optional state, multi-comp
 
   // Single-currency DB hides In Currency, Currency, and Residual in Currency.
   let oneCurrDb = seed();
+  oneCurrDb = write(oneCurrDb, 'res.company', 1, { group_analytic_accounting: true });
   for (const c of search(oneCurrDb, 'res.currency')) {
     if (c.id !== 1) oneCurrDb = write(oneCurrDb, 'res.currency', c.id, { active: false });
   }
@@ -336,6 +340,7 @@ test('Journal Items list columns match Odoo 20 order, optional state, multi-comp
 
   // Multi-company + multi-currency DB exposes all 25 columns in exact Odoo 20 order when enabled.
   let multiDb = seed();
+  multiDb = write(multiDb, 'res.company', 1, { group_analytic_accounting: true });
   const branchRes = createCompany(multiDb, { name: 'Branch Co', code: 'BRC' });
   multiDb = setCompanies(branchRes.db, { current: 1, allowed: [1, branchRes.id] });
   const multiCtx = await mountJournalItems(multiDb);
