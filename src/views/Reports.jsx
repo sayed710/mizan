@@ -27,7 +27,7 @@ import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowAnalyticColumns, cashflowColumns, detailReportColumns, executiveColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
-import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage } from './reportNavigation.js';
+import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage, updateReportParam } from './reportNavigation.js';
 import { statementUrl } from '../statementNavigation.js';
 export { PERIODS };
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -959,9 +959,9 @@ export const REPORTS = {
   deferredExpense: { title: 'Deferred Expense', Body: DeferredBody, firstCol: 'Account', cols: ['Total', 'Not Started', 'Before', 'Current', 'Recognized', '<= 12 Months', '> 12 Months'] },
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   fiscal: { title: 'Fiscal Report', Body: FiscalReport, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger, cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger, cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
   executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
@@ -979,6 +979,9 @@ export const REPORTS = {
   journalAudit: { title: 'Journal Audit', Body: JournalAudit, firstCol: 'Date', cols: ['Number', 'Partner', 'Account', 'Label', 'Debit', 'Credit'] },
   inalterability: { title: 'Data Inalterability Check', Body: InalterabilityCheck, firstCol: 'Journal', cols: ['First Secured Entry', 'Last Secured Entry', 'Status'] },
 };
+
+export const PERIODIC_BODY_REPORTS = new Set(['trial', 'fiscal', 'tax', 'budget']);
+export const COMPARABLE_REPORTS = new Set([...PERIODIC_BODY_REPORTS, 'pnl', 'balance', 'cashflow', 'executive']);
 
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf, id, params }) {
@@ -1019,6 +1022,11 @@ function ReportPage({ leaf, params }) {
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [partnerFilterIds, setPartnerFilterIds] = useState([]);
   const [unreconciledOnly, setUnreconciledOnly] = useState(false);
+  const [accountType, setAccountType] = useState(() => {
+    const param = params?.get('accountType');
+    if (param && ['both', 'receivable', 'payable'].includes(param)) return param;
+    return leaf.report === 'partnerPayable' ? 'payable' : 'both';
+  });
   const [groupByPartner, setGroupByPartner] = useState(false);
   const [showJournalAccount, setShowJournalAccount] = useState(false);
   const [showInitialBalance, setShowInitialBalance] = useState(true);
@@ -1105,7 +1113,7 @@ function ReportPage({ leaf, params }) {
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
   const isTrial = leaf.report === 'trial';
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
-  const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'budget', 'tax', 'fiscal'].includes(leaf.report) && periodKey !== 'all';
+  const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement', 'depreciation'].includes(leaf.report);
   const effectivePeriod = useMemo(
     () => (showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period),
@@ -1387,6 +1395,22 @@ function ReportPage({ leaf, params }) {
       )}
       {isPartnerLedger && <>
         <label className="inline-select">
+          {t('Account Type')}
+          <select
+            aria-label={t('Account Type')}
+            value={accountType}
+            onChange={(e) => {
+              const val = e.target.value;
+              setAccountType(val);
+              updateReportParam('accountType', val, leaf);
+            }}
+          >
+            <option value="both">{t('Both')}</option>
+            <option value="receivable">{t('Receivable')}</option>
+            <option value="payable">{t('Payable')}</option>
+          </select>
+        </label>
+        <label className="inline-select">
           <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
         </label>
         <label className="inline-select">
@@ -1481,7 +1505,7 @@ function ReportPage({ leaf, params }) {
               {isTaxBoxes && detailComparison && <th>{t('Description')}</th>}
               {(detailComparison
                 ? periods.flatMap((p) => (leaf.report === 'tax' ? ['Base', 'Tax'] : ['Debit', 'Credit', 'Balance']).map((label) => `${p.label} - ${t(label)}`))
-                : periods && ['trial', 'fiscal', 'tax', 'budget'].includes(leaf.report)
+                : periods && PERIODIC_BODY_REPORTS.has(leaf.report)
                   ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} - ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} - ${t(typeof c === 'object' && c ? c.label : c)}`)))
                   : data
                     ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])]
@@ -1496,7 +1520,7 @@ function ReportPage({ leaf, params }) {
           </thead>
           {detailComparison ? (
             <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} money={fmtMoney} />
-          ) : periods && ['trial', 'fiscal', 'tax', 'budget'].includes(leaf.report) ? (
+          ) : periods && PERIODIC_BODY_REPORTS.has(leaf.report) ? (
             <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} money={fmtMoney} />
           ) : data ? (
             <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} />
@@ -1523,6 +1547,7 @@ function ReportPage({ leaf, params }) {
               hasUnassigned={hasUnassigned}
               money={fmtMoney}
               includeDraft={leaf.report === 'depreciation' && includeUnposted}
+              accountType={accountType}
               groupByPartner={groupByPartner}
               showJournalAccount={showJournalAccount}
               showInitialBalance={showInitialBalance}

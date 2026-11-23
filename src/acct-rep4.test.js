@@ -449,3 +449,76 @@ test('REP4-9 Expense budget unbilled purchase commitment detail matches committe
   assert.match(poRowMatch[1], />\$150\.00</, 'commitment detail row should match the positive committed summary');
 });
 
+test('REP4-10 Periodic body reports and comparison use canonical PERIODIC_BODY_REPORTS and COMPARABLE_REPORTS', async () => {
+  const { PERIODIC_BODY_REPORTS, COMPARABLE_REPORTS, REPORTS } = await import('./views/Reports.jsx');
+  assert.ok(PERIODIC_BODY_REPORTS instanceof Set, 'PERIODIC_BODY_REPORTS should be a Set');
+  assert.ok(COMPARABLE_REPORTS instanceof Set, 'COMPARABLE_REPORTS should be a Set');
+
+  for (const rep of ['trial', 'fiscal', 'tax', 'budget']) {
+    assert.ok(PERIODIC_BODY_REPORTS.has(rep), `PERIODIC_BODY_REPORTS should include ${rep}`);
+    assert.ok(COMPARABLE_REPORTS.has(rep), `COMPARABLE_REPORTS should include ${rep}`);
+    assert.ok(REPORTS[rep]?.Body, `Report ${rep} should define a Body component`);
+  }
+
+  // Adding a report to PERIODIC_BODY_REPORTS should dynamically control both header and body rendering in ReportPage
+  const { makeEl } = setupDom();
+  globalThis.window = Object.assign(new EventTarget(), { HTMLIFrameElement: class {}, scrollTo() {}, document: globalThis.document, location: { hash: '' } });
+  globalThis.document.createElementNS = (_, tag) => makeEl(tag);
+  globalThis.location = globalThis.window.location;
+  const container = makeEl('div');
+  container.ownerDocument = globalThis.document;
+
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const db = seed();
+  await initStore();
+  await React.act(async () => commit(db));
+
+  const { Reports } = await import('./views/Reports.jsx');
+  const root = createRoot(container);
+  const textOf = (node) => node.nodeType === 3 ? node.nodeValue : (node.childNodes ?? []).map(textOf).join('');
+
+  const customKey = 'test_periodic_rep';
+  REPORTS[customKey] = {
+    title: 'Custom Test Report',
+    Body: ({ periods }) => React.createElement('tbody', null,
+      React.createElement('tr', { className: 'rep-detail' },
+        React.createElement('td', null, 'RowTitle'),
+        ...(periods ?? []).flatMap((p) => [
+          React.createElement('td', { key: `${p.label}-1`, className: 'num' }, '10'),
+          React.createElement('td', { key: `${p.label}-2`, className: 'num' }, '20'),
+        ]),
+      )
+    ),
+    cols: ['Col1', 'Col2'],
+  };
+
+  try {
+    PERIODIC_BODY_REPORTS.add(customKey);
+    COMPARABLE_REPORTS.add(customKey);
+
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: customKey } })));
+    const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+    const comparison = find(container, (n) => n.tagName === 'SELECT' && n.options.some((o) => textOf(o) === 'Previous Period'));
+    assert.ok(comparison, 'Comparison selector is rendered because COMPARABLE_REPORTS includes the report');
+
+    await React.act(async () => props(comparison).onChange({ target: { value: 'previous' } }));
+
+    const thead = find(container, (n) => n.tagName === 'THEAD');
+    const headerCols = thead.childNodes[0].childNodes.map(textOf);
+    assert.equal(headerCols.length, 5, 'Header columns rendered via PERIODIC_BODY_REPORTS branch');
+
+    const tr = find(container, (n) => n.tagName === 'TR' && n.className === 'rep-detail');
+    const bodyCells = tr.childNodes.map(textOf);
+    assert.equal(bodyCells.length, 5, 'Body row cells match header columns count');
+    assert.equal(bodyCells.length, headerCols.length, 'Header column count and body cell count stay aligned');
+  } finally {
+    delete REPORTS[customKey];
+    if (PERIODIC_BODY_REPORTS) PERIODIC_BODY_REPORTS.delete(customKey);
+    if (COMPARABLE_REPORTS) COMPARABLE_REPORTS.delete(customKey);
+    await React.act(async () => root.unmount());
+  }
+});
+
+
