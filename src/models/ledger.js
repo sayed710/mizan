@@ -649,8 +649,8 @@ export function invoiceLines(db, move) {
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
   const taxes = invoiceTaxGroups(db, move, roundingMethod);
-  const actualTaxes = taxes.filter((g) => g.amount !== 0 || g.document_amount !== 0);
-  const rounding = appliedCashRounding(move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null, actualTaxes.length > 0);
+  const netTaxDoc = docRound(taxes.reduce((s, g) => s + g.document_amount, 0));
+  const rounding = appliedCashRounding(move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null, netTaxDoc !== 0);
 
   const rawTotalDoc = mixedDiscountFactor(term) !== 1
     ? docRound(amounts(move.invoice_line_ids, docCurrency, { roundingMethod, side: refund ? 'refund' : 'invoice' }).untaxed + taxes.reduce((s, group) => s + group.document_amount, 0))
@@ -660,9 +660,12 @@ export function invoiceLines(db, move) {
   const total = companyRound(totalDoc / rate);
   const diff = companyRound(diffDoc / rate);
 
-  const adjustTax = Boolean(rounding && rounding.strategy === 'biggest_tax' && actualTaxes.length && diffDoc !== 0);
+  const adjustTax = Boolean(rounding && rounding.strategy === 'biggest_tax' && netTaxDoc !== 0 && diffDoc !== 0);
   if (adjustTax) {
-    const largest = taxes.reduce((best, g, i) => (Math.abs(g.amount) > Math.abs(taxes[best].amount) ? i : best), 0);
+    const largest = taxes.reduce(
+      (best, g, i) => (Math.abs(g.amount) > Math.abs(taxes[best].amount) || (Math.abs(g.amount) === Math.abs(taxes[best].amount) && Math.abs(g.document_amount) > Math.abs(taxes[best].document_amount)) ? i : best),
+      0,
+    );
     taxes[largest] = { ...taxes[largest], amount: companyRound(taxes[largest].amount + diff), document_amount: docRound(taxes[largest].document_amount + diffDoc) };
   }
 
