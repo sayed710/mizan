@@ -3571,6 +3571,8 @@ const ar = {
   'Report Footer': 'تذييل التقرير',
   'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Aging period length (days)': 'طول فترة التقادم (بالأيام)',
+  'Unknown Partner': 'شريك غير معروف',
   'Gross Increase': 'الزيادة الإجمالية',
   'Set to Draft': 'إعادة إلى المسودة',
   'Parent Asset': 'الأصل الرئيسي',
