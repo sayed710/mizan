@@ -65,7 +65,7 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { menuModelsForApps, models, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
+import { menuModelsForApps, models, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps, scopedWritableModels } from '../src/models/index.js';
 const MAX_AUDIT_MODELS = 20;
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, scopeAuditChanges, setCompanies, visibleTo } from '../src/models/company.js';
@@ -369,7 +369,7 @@ const publicImagesOf = () => {
 
 const readOnlyFor = (u) => (u.isAdmin || !u.apps?.length ? null : readOnlyForApps(u.apps));
 /** Models a session/API user may change (null = everything). */
-const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsForApps(u.apps));
+const allowedFor = (u, diff = null) => (u.isAdmin || !u.apps?.length ? null : diff ? scopedWritableModels(u.apps, diff, db) : writableModelsForApps(u.apps));
 /** Models on a user's own app menus (null = everything): who may share portal links or run booking operations, never via a relation. */
 const menuModelsFor = (u) => (u.isAdmin || !u.apps?.length ? null : menuModelsForApps(u.apps));
 /** Models a session/API user may read (null = everything). */
@@ -918,7 +918,7 @@ async function api(req, res, path) {
         }
         diff.settings = rest;
       }
-      commitDb(applyDiff(db, diff, writeOptions(user)), { actor: user.login });
+      commitDb(applyDiff(db, diff, writeOptions(user, allowedFor(user, diff))), { actor: user.login });
       if (selection) saveSelection(user, selection);
     } catch (e) {
       return send(res, e.conflict ? 409 : 400, { error: e.message, db: visibleDb(user) }, stamp());
@@ -1166,6 +1166,11 @@ const runJobs = async () => {
     };
     const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP }), commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+    if (integrationStatus(ENV).sms) {
+      const store = storeFor({ author: 'Scheduler', isAdmin: true }, 'scheduler');
+      const pending = search(db, 'sms.campaign').filter((campaign) => campaign.followup_sms && search(db, 'sms.trace').some((trace) => trace.campaign_id === campaign.id && trace.state === 'outgoing'));
+      for (const campaign of pending) await sendSmsCampaign(ENV, store, { id: campaign.id });
+    }
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });
   } finally {
