@@ -10,6 +10,7 @@ import { isIP } from 'node:net';
 import { request as httpsRequest } from 'node:https';
 import { createHash, randomBytes } from 'node:crypto';
 import { models } from '../src/models/index.js';
+import { postMove } from '../src/models/accounting.js';
 import { create, messagesOf, postNote, read, search, write } from '../src/orm.js';
 import { addShipping, orderWeight } from '../src/models/logistics.js';
 import { markSms, queueSms } from '../src/models/sms.js';
@@ -217,10 +218,30 @@ export async function digitizeBill(db, { id, file }) {
     product_id: null, name: String(l.description ?? '').slice(0, 500), qty: num(l.quantity), price_unit: num(l.unit_price), discount: 0, tax: num(l.tax_percent),
   }));
   const next = write(withVendor, 'account.move', bill.id, {
+    digitized_document: true, digitized_unedited: true, digitized_vendor_id: partner_id,
     partner_id, ref: String(data.reference ?? '').slice(0, 100), invoice_line_ids,
     invoice_date: isoOrNull(data.invoice_date) ?? bill.invoice_date, invoice_date_due: isoOrNull(data.due_date) ?? bill.invoice_date_due,
   });
   return { db: postNote(next, 'account.move', bill.id, `Digitized from ${String(file.name ?? 'document').slice(0, 100)}`), message: `${invoice_line_ids.length} line(s) read from ${name}` };
+}
+
+/** Commit the filled draft before attempting a separately validated post. */
+export async function finishDigitizedBill(store, input) {
+  const filled = await digitizeBill(store.get(), input);
+  store.commitDigitizedBill(filled.db, Number(input.id));
+  const db = store.get();
+  const bill = read(db, 'account.move', Number(input.id));
+  const company = read(db, 'res.company', bill.company_id ?? 1);
+  const vendor = read(db, 'res.partner', bill.partner_id);
+  if (company?.autopost_bills && vendor?.autopost_bills === 'always') {
+    try {
+      store.commit(postNote(postMove(db, bill.id), 'account.move', bill.id, 'The bill was posted automatically'));
+      return { message: `${filled.message}. The bill was posted automatically` };
+    } catch (error) {
+      return { message: `${filled.message}. Automatic posting failed: ${error.message}` };
+    }
+  }
+  return { message: filled.message };
 }
 
 // ---- WhatsApp / SMS ----

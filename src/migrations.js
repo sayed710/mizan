@@ -2019,6 +2019,22 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
   };
 } });
 
+export function migrateReconcileModelTolerance(db) {
+  const rules = db?.records?.['account.reconcile.model'];
+  if (!Array.isArray(rules) || !rules.length) return db;
+  let changed = false;
+  const nextRules = rules.map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    const tolType = r.payment_tolerance_type || 'percentage';
+    if (tolType === 'percentage' && Number(r.payment_tolerance) > 100) {
+      changed = true;
+      return { ...r, payment_tolerance: 100 };
+    }
+    return r;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
+}
+MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 export function migratePartnerTags(db) {
   if (!db?.records) return db;
   const existingCategories = [...(db.records['res.partner.category'] ?? [])];
@@ -2121,7 +2137,7 @@ export function migratePartnerTags(db) {
     },
   };
 }
-MIGRATIONS.push({ version: 68, name: 'partner-tags-res-partner-category', up: migratePartnerTags });
+MIGRATIONS.push({ version: 71, name: 'partner-tags-res-partner-category', up: migratePartnerTags });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
