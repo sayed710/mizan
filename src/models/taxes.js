@@ -144,6 +144,7 @@ export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
     tax_include: taxPriceInclude(db, tax, companyId),
     tax_cash_basis: tax.tax_exigibility === 'on_payment',
     tax_name: tax.name,
+    ...(tax.invoice_legal_notes ? { invoice_legal_notes: tax.invoice_legal_notes } : {}),
     invoice_repartition_line_ids: invRepart,
     refund_repartition_line_ids: refRepart,
     ...(invoiceLabel ? { tax_invoice_label: invoiceLabel } : {}),
@@ -162,7 +163,19 @@ export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
 };
 
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
-export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', tax_group_id: null, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', invoice_legal_notes: '', tax_group_id: null, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+
+/** Distinct legal notes captured on taxable invoice lines and their tax components. */
+export function invoiceTaxLegalNotes(lines) {
+  const notes = new Set();
+  const collect = (snapshot) => {
+    const note = String(snapshot?.invoice_legal_notes ?? '').trim();
+    if (note) notes.add(note);
+    for (const child of snapshot?.tax_breakdown ?? []) collect(child);
+  };
+  for (const line of lines ?? []) if (!isSectionOrNote(line)) collect(line);
+  return [...notes];
+}
 
 /** All tax IDs carried by a line (scalar tax_id, multi tax_ids, and tax_breakdown). */
 export function lineTaxIds(line) {
@@ -567,6 +580,7 @@ export function taxRepartitionSplits(t, line, side, currency) {
   const explicit = rows.length > 0;
   const taxRows = explicit ? rows : [{ repartition_type: 'tax', factor_percent: 100, account_id: t.tax_account_id ?? line.tax_account_id ?? null, tag_ids: t.tax_tag_ids ?? line.tax_tag_ids ?? [], use_in_tax_closing: true }];
   const factors = taxRows.map((r) => Number(r.factor_percent) || 0);
+  const contributing = factors.reduce((best, f, i) => (Math.abs(f) > Math.abs(factors[best]) ? i : best), 0);
   const split = (value) => {
     if (factors.length === 1 && factors[0] === 100) return [value];
     const portions = factors.map(() => 0);
@@ -577,10 +591,16 @@ export function taxRepartitionSplits(t, line, side, currency) {
       const allocated = allocateCents(total, indexes.map((item) => Math.abs(item.factor)), currency, { tieBreak: 'last' });
       indexes.forEach((item, i) => { portions[item.index] = allocated[i]; });
     }
+    const netFactor = factors.reduce((sum, f) => sum + f, 0);
+    const roundedNetTax = roundCurrency(value * netFactor / 100, currency);
+    const currentNet = roundCurrency(portions.reduce((sum, p) => sum + p, 0), currency);
+    const residual = roundCurrency(roundedNetTax - currentNet, currency);
+    if (residual !== 0) {
+      portions[contributing] = roundCurrency(portions[contributing] + residual, currency);
+    }
     return portions;
   };
   const amounts = split(t.amount);
-  const contributing = factors.reduce((best, f, i) => (Math.abs(f) > Math.abs(factors[best]) ? i : best), 0);
   return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: i === contributing ? t.base : 0 })) };
 }
 
@@ -808,7 +828,7 @@ export const taxModels = {
       },
       amount: { type: 'float', label: 'Amount', tracking: true },
       children_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Child Taxes' },
-      description: { type: 'char', label: 'Description', optional: 'show' },
+      description: { type: 'text', label: 'Description', optional: 'show' },
       type_tax_use: { type: 'selection', label: 'Tax Type', tracking: true, options: TAX_TYPES },
       tax_scope: { type: 'selection', label: 'Tax Scope', tracking: true, options: [['consu', 'Goods'], ['service', 'Services']] },
       fiscal_position_ids: { type: 'many2many', relation: 'account.fiscal.position', label: 'Fiscal Position' },
@@ -823,6 +843,7 @@ export const taxModels = {
         newLine: () => ({ fiscal_position_id: null, original_tax_ids: [] }),
       },
       invoice_label: { type: 'char', label: 'Label on Invoices' },
+      invoice_legal_notes: { type: 'text', label: 'Legal Notes' },
       price_include_override: {
         type: 'selection',
         label: 'Included in Price',
@@ -937,7 +958,7 @@ export const taxModels = {
     form: {
       title: 'name',
       groups: (r) => [
-        ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : []), 'description'],
+        ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : [])],
         // Odoo 20 configures substitutions with Fiscal Position x Replaces; per-position rows exist only on upgraded taxes.
         ['type_tax_use', 'tax_scope', 'fiscal_position_ids', 'original_tax_ids', ...(r?.fiscal_position_mapping_ids?.length ? ['fiscal_position_mapping_ids'] : [])],
       ],
@@ -952,7 +973,7 @@ export const taxModels = {
         {
           label: 'Advanced Options',
           groups: [
-            ['invoice_label', 'tax_group_id'],
+            ['invoice_label', 'description', 'invoice_legal_notes', 'tax_group_id'],
             ['price_include_override', 'include_base_amount', 'is_base_affected', 'active', 'tax_exigibility', 'cash_basis_transition_account_id'],
           ],
         },

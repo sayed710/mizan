@@ -437,6 +437,21 @@ function orderRoundingAccount(db, { original = null, config = null, roundingDiff
     }
     return acc.id;
   }
+  // Orders posted before rounding_account_id was recorded: reuse the account of the posted Cash Rounding line Mizan wrote.
+  if (original) {
+    const ids = original.accounting_entries?.map((entry) => entry.move_id) ?? [];
+    for (const moveId of ids) {
+      const move = read(db, 'account.move', moveId);
+      const roundingLine = (move?.line_ids ?? []).find((l) => l.name === 'Cash Rounding');
+      if (roundingLine?.account_id) {
+        const acc = read(db, 'account.account', roundingLine.account_id);
+        if (!acc || acc.active === false || (acc.company_id && acc.company_id !== (companyId ?? 1))) {
+          throw new Error('Original POS rounding account belongs to another company or is inactive');
+        }
+        return acc.id;
+      }
+    }
+  }
   const isProfit = Number(roundingDiff) > 0;
   const rounding = posCashRounding(db, config, companyId, companyCurrencyRecord(db, companyId)?.id);
   return roundingAccount(db, rounding, isProfit, companyId);
@@ -475,7 +490,7 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
       }
     }
   }
-  const shouldValidateRounding = original ? roundCurrency(total.total, currency) !== 0 : roundCurrency(expectedTotal, currency) !== 0;
+  const shouldValidateRounding = Number(roundingDiff || 0) !== 0 || (original ? roundCurrency(total.total, currency) !== 0 : roundCurrency(expectedTotal, currency) !== 0);
   return shouldValidateRounding
     ? orderRoundingAccount(db, { original, config, roundingDiff, companyId: session.company_id })
     : null;
