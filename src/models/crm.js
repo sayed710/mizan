@@ -16,6 +16,27 @@ export function partnerCategoryCompleteName(db, r) {
   return names.join(' / ');
 }
 
+export function partnerTagIds(db, names) {
+  let currentDb = db;
+  const ids = [];
+  const list = Array.isArray(names) ? names : names ? [names] : [];
+  for (const raw of list) {
+    const trimmed = String(raw ?? '').trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    const categories = currentDb?.records?.['res.partner.category'] ?? [];
+    const existing = categories.find((c) => c.active !== false && String(c.name ?? '').trim().toLowerCase() === lower);
+    if (existing) {
+      if (!ids.includes(existing.id)) ids.push(existing.id);
+    } else {
+      const { db: nextDb, id } = create(currentDb, 'res.partner.category', { name: trimmed });
+      currentDb = nextDb;
+      if (!ids.includes(id)) ids.push(id);
+    }
+  }
+  return { db: currentDb, ids };
+}
+
 export function guardPartnerCategory(db, before, r) {
   let id = r.parent_id;
   const targetId = before?.id ?? r.id;
@@ -161,7 +182,7 @@ export const crmModels = {
         }).map((p) => p.id),
       },
       child_ids: {
-        type: 'one2many',
+        type: 'many2many',
         relation: 'res.partner.category',
         label: 'Child Tags',
         readonly: true,

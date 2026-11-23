@@ -14,6 +14,7 @@ import { create, messagesOf, postNote, read, search, write } from '../src/orm.js
 import { addShipping, orderWeight } from '../src/models/logistics.js';
 import { markSms, queueSms } from '../src/models/sms.js';
 import { markWhatsApp, queueWhatsApp, renderWhatsApp, replyTarget } from '../src/models/whatsapp.js';
+import { partnerTagIds } from '../src/models/crm.js';
 
 const AI_MODEL = 'claude-opus-5-5';
 
@@ -355,7 +356,8 @@ export async function syncMarketplace(db, { id }) {
     const email = String(c.email ?? '').slice(0, 254);
     let partnerId = email && search(next, 'res.partner').find((p) => p.email?.toLowerCase() === email.toLowerCase())?.id;
     if (!partnerId) {
-      const res = create(next, 'res.partner', { name: String(c.name ?? 'Marketplace customer').slice(0, 120), email, phone: String(c.phone ?? '').slice(0, 40), city: String(c.city ?? '').slice(0, 80), country: String(c.country ?? '').slice(0, 80), tag_ids: [conn.platform] });
+      const { db: withTags, ids } = partnerTagIds(next, [conn.platform]);
+      const res = create(withTags, 'res.partner', { name: String(c.name ?? 'Marketplace customer').slice(0, 120), email, phone: String(c.phone ?? '').slice(0, 40), city: String(c.city ?? '').slice(0, 80), country: String(c.country ?? '').slice(0, 80), tag_ids: ids });
       next = res.db;
       partnerId = res.id;
     }

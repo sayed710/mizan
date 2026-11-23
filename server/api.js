@@ -10,6 +10,7 @@ import { payQuote } from '../src/models/quoteplus.js';
 import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/models/shop.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
+import { partnerTagIds } from '../src/models/crm.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
 import { lazyRestrictedRecords, visibleTo } from '../src/models/company.js';
 import { referFromLink } from '../src/models/skillsplus.js';
@@ -89,7 +90,9 @@ const openEvents = (db) => search(db, 'event.event').filter((e) => ['booked', 'a
 /** Visitor contact, matched by email or created (tagged Website). */
 function websitePartner(db, { name, email, phone }) {
   const known = search(db, 'res.partner').find((p) => p.email?.toLowerCase() === email.toLowerCase());
-  return known ? { db, id: known.id } : create(db, 'res.partner', { name, email, phone, tag_ids: ['Website'] });
+  if (known) return { db, id: known.id };
+  const { db: withTags, ids } = partnerTagIds(db, ['Website']);
+  return create(withTags, 'res.partner', { name, email, phone, tag_ids: ids });
 }
 
 const visitor = (b) => ({ name: String(b.name ?? '').trim().slice(0, 120), email: String(b.email ?? '').trim().slice(0, 254), phone: String(b.phone ?? '').slice(0, 40) });
@@ -236,7 +239,9 @@ const tokenMatches = (token, hash) => {
  */
 function checkoutPartners(db, v, address) {
   const known = search(db, 'res.partner').some((p) => p.email?.toLowerCase() === v.email.toLowerCase());
-  const res = create(db, 'res.partner', { ...v, ...address, tag_ids: known ? ['Website', 'To Merge'] : ['Website'] });
+  const tagNames = known ? ['Website', 'To Merge'] : ['Website'];
+  const { db: withTags, ids } = partnerTagIds(db, tagNames);
+  const res = create(withTags, 'res.partner', { ...v, ...address, tag_ids: ids });
   return { db: res.db, partnerId: res.id, shippingId: res.id };
 }
 
