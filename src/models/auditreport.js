@@ -264,12 +264,30 @@ export const auditReportModels = {
         section_ids: sections,
       };
     },
+    prepareCreate: (db, vals) => {
+      if (vals?.section_ids == null || vals?.body == null) return { db, vals };
+      const defaultYear = today().slice(0, 4);
+      const defaultStartDate = `${defaultYear}-01-01`;
+      const defaultEndDate = `${defaultYear}-12-31`;
+      const companyId = vals.company_id ?? (db ? currentCompany(db) : 1);
+      const sectionChangeBody = sectionBody(db, {
+        start_date: defaultStartDate,
+        end_date: defaultEndDate,
+        company_id: companyId,
+        section_ids: vals.section_ids,
+      })?.body;
+      if (vals.body === sectionChangeBody) {
+        return { db, vals: { ...vals, ...sectionBody(db, { ...vals, company_id: companyId }) } };
+      }
+      return { db, vals };
+    },
     // Changing the sections regenerates the body, so the report, print, CSV and XLSX follow the saved sections.
     onchange: (r, key, db) => (key === 'section_ids' ? sectionBody(db, r) ?? {} : {}),
     prepareWrite: (db, vals, before) => {
       if (vals.section_ids == null || JSON.stringify(vals.section_ids) === JSON.stringify(before?.section_ids)) return { db, vals };
       // A body the user edited in the same save wins over the regenerated one.
-      if (vals.body != null && vals.body !== before?.body) return { db, vals };
+      const sectionChangeBody = sectionBody(db, { ...before, section_ids: vals.section_ids })?.body;
+      if (vals.body != null && vals.body !== before?.body && vals.body !== sectionChangeBody) return { db, vals };
       return { db, vals: { ...vals, ...sectionBody(db, { ...before, ...vals }) } };
     },
     guard: (db, before, after) => {

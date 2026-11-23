@@ -6,6 +6,8 @@ import { diffDb, applyDiff } from './sync.js';
 import { createCompany } from './models/company.js';
 import { findStatementReport } from './models/statementReports.js';
 import { auditReportModels, annualReportToRows } from './models/auditreport.js';
+import { changeFormValue, newDefaults } from './views/formDefaults.js';
+import { postEntry } from './models/ledger.js';
 
 test('annual report sections select and order reports and notes, scoped to the company and preserved through print and export', () => {
   const base = seed();
@@ -197,6 +199,76 @@ test('annualReportToRows preserves line breaks in multiline notes for non-DOM an
     const domRows = annualReportToRows(html);
     assert.deepEqual(domRows, [[multilineNote]]);
   } finally {
-    globalThis.document = savedDoc;
+    if (savedDoc) globalThis.document = savedDoc;
+    else delete globalThis.document;
   }
 });
+
+test('annual report regenerates body when sections change then dates change before saving', () => {
+  let db = seed();
+  const entry2025 = postEntry(db, {
+    journal: 'MISC',
+    date: '2025-06-15',
+    ref: '2025 Sales Entry',
+    company: 1,
+    lines: [
+      { account: '121000', debit: 5000 },
+      { account: '400000', credit: 5000 },
+    ],
+  });
+  db = entry2025.db;
+  const pnl = findStatementReport(db, 'pnl', 1);
+  const balance = findStatementReport(db, 'balance', 1);
+
+  const created = create(db, 'audit.report', {
+    title: 'Test Report Period',
+    start_date: '2026-01-01',
+    end_date: '2026-12-31',
+    section_ids: [{ type: 'report', report_id: balance.id, sequence: 10 }],
+  });
+  db = created.db;
+  const report = read(db, 'audit.report', created.id);
+
+  // Auditor changes sections (adds PnL), putting generated HTML into pending form changes
+  let changes = changeFormValue('audit.report', report, {}, 'section_ids', [
+    { type: 'report', report_id: pnl.id, sequence: 10 },
+  ], db);
+  assert.ok(changes.body.includes('8,400.00'), 'Pending body generated for 2026 includes 2026 figures');
+
+  // Auditor then changes the dates to 2025 before saving
+  changes = changeFormValue('audit.report', report, changes, 'start_date', '2025-01-01', db);
+  changes = changeFormValue('audit.report', report, changes, 'end_date', '2025-12-31', db);
+
+  // Auditor saves the form
+  db = write(db, 'audit.report', report.id, changes);
+  const saved = read(db, 'audit.report', report.id);
+
+  assert.equal(saved.start_date, '2025-01-01');
+  assert.equal(saved.end_date, '2025-12-31');
+  assert.ok(saved.body.includes('5,000.00'), 'Saved body must reflect figures for 2025');
+  assert.ok(!saved.body.includes('8,400.00'), 'Saved body must not include figures from 2026');
+
+  // An explicitly user-edited body is still preserved even when sections and dates change
+  let manualChanges = changeFormValue('audit.report', report, {}, 'section_ids', [
+    { type: 'report', report_id: balance.id, sequence: 10 },
+  ], db);
+  manualChanges = changeFormValue('audit.report', report, manualChanges, 'start_date', '2025-01-01', db);
+  manualChanges = changeFormValue('audit.report', report, manualChanges, 'end_date', '2025-12-31', db);
+  manualChanges = changeFormValue('audit.report', report, manualChanges, 'body', '<p>Auditor explicit edit for 2025</p>', db);
+  db = write(db, 'audit.report', report.id, manualChanges);
+  assert.equal(read(db, 'audit.report', report.id).body, '<p>Auditor explicit edit for 2025</p>');
+
+  // On a new report form, changing sections then dates also regenerates the body for the final dates
+  const initialNew = newDefaults(db, 'audit.report', {}, new URLSearchParams(), null);
+  let newChanges = changeFormValue('audit.report', initialNew, {}, 'section_ids', [
+    { type: 'report', report_id: pnl.id, sequence: 10 },
+  ], db);
+  assert.ok(newChanges.body.includes('8,400.00'));
+  newChanges = changeFormValue('audit.report', initialNew, newChanges, 'start_date', '2025-01-01', db);
+  newChanges = changeFormValue('audit.report', initialNew, newChanges, 'end_date', '2025-12-31', db);
+  const newCreated = create(db, 'audit.report', { ...initialNew, ...newChanges, title: 'New Created Report' });
+  const newSaved = read(newCreated.db, 'audit.report', newCreated.id);
+  assert.ok(newSaved.body.includes('5,000.00'), 'New record body reflects 2025 figures');
+  assert.ok(!newSaved.body.includes('8,400.00'), 'New record body does not reflect 2026 figures');
+});
+
