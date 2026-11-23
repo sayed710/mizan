@@ -1509,8 +1509,8 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   }
 }
 
-/** The reporting cutoff is never later than the day the report is run. */
-export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
+/** Use the requested reporting cutoff, defaulting to today. */
+export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
