@@ -125,7 +125,7 @@ test('account.analytic.plan list opens first, uses sequence handle, drops parent
 
 test('account.analytic.plan form smart counts, conditional default_applicability/tab, and applicability columns', async () => {
   const def = models['account.analytic.plan'];
-  assert.deepEqual(def.form.groups, [['parent_id', 'default_applicability', 'color']]);
+  assert.deepEqual(def.form.groups, [['parent_id', 'default_applicability', 'color', 'description']]);
   assert.deepEqual(
     Object.keys(def.fields.applicability_ids.fields),
     ['business_domain', 'company_id', 'applicability', 'account_prefix', 'product_categ_id'],
