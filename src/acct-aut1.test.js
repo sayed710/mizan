@@ -312,3 +312,81 @@ test('Suggestion uses immutable bill IDs rather than accounting dates', () => {
   const draft = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 7, digitized_vendor_id: 7, digitized_document: true, digitized_unedited: true });
   assert.equal(suggestBillAutopost(draft.db, read(draft.db, 'account.move', draft.id)), true);
 });
+
+test('Finding review regression: drafts created and posted out of order respect posting order not bill IDs', () => {
+  let db = write(seed(), 'res.company', 1, { autopost_bills: true });
+  const vendorId = 7;
+
+  // Case 1: An older draft bill (id 1) was edited before posting.
+  // Three newer drafts (ids 2, 3, 4) were posted unedited FIRST.
+  // Then the older edited draft (id 1) was posted LAST.
+  // Because the most recently posted bill was edited, the next draft must NOT suggest Always.
+  const draftA = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, ref: 'orig', invoice_line_ids: [{ name: 'A', qty: 1, price_unit: 100, tax: 0 }] });
+  db = draftA.db;
+  db = write(db, 'account.move', draftA.id, { ref: 'edited' }); // clears digitized_unedited flag
+
+  const draftB = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, invoice_line_ids: [{ name: 'B', qty: 1, price_unit: 100, tax: 0 }] });
+  db = draftB.db;
+  const draftC = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, invoice_line_ids: [{ name: 'C', qty: 1, price_unit: 100, tax: 0 }] });
+  db = draftC.db;
+  const draftD = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, invoice_line_ids: [{ name: 'D', qty: 1, price_unit: 100, tax: 0 }] });
+  db = draftD.db;
+
+  // Post B, C, D first
+  db = postMove(db, draftB.id);
+  db = postMove(db, draftC.id);
+  db = postMove(db, draftD.id);
+  // Post edited draft A last
+  db = postMove(db, draftA.id);
+
+  const nextDraft1 = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true });
+  db = nextDraft1.db;
+  assert.equal(suggestBillAutopost(db, read(db, 'account.move', nextDraft1.id)), false, 'Should not suggest autopost when the most recently posted bill was edited');
+
+  // Case 2: An older draft was unedited, but an intermediate draft was edited and posted first.
+  let db2 = write(seed(), 'res.company', 1, { autopost_bills: true });
+  const draft1 = create(db2, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, invoice_line_ids: [{ name: '1', qty: 1, price_unit: 100, tax: 0 }] });
+  db2 = draft1.db;
+  const draft2 = create(db2, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, ref: 'orig', invoice_line_ids: [{ name: '2', qty: 1, price_unit: 100, tax: 0 }] });
+  db2 = write(draft2.db, 'account.move', draft2.id, { ref: 'edited' });
+  const draft3 = create(db2, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, invoice_line_ids: [{ name: '3', qty: 1, price_unit: 100, tax: 0 }] });
+  db2 = draft3.db;
+  const draft4 = create(db2, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true, invoice_line_ids: [{ name: '4', qty: 1, price_unit: 100, tax: 0 }] });
+  db2 = draft4.db;
+
+  // Post edited draft 2 first
+  db2 = postMove(db2, draft2.id);
+  // Then post unedited drafts 1, 3, 4
+  db2 = postMove(db2, draft1.id);
+  db2 = postMove(db2, draft3.id);
+  db2 = postMove(db2, draft4.id);
+
+  const nextDraft2 = create(db2, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, digitized_vendor_id: vendorId, digitized_document: true, digitized_unedited: true });
+  db2 = nextDraft2.db;
+  assert.equal(suggestBillAutopost(db2, read(db2, 'account.move', nextDraft2.id)), true, 'Should suggest autopost when the last 3 posted bills were unedited regardless of creation order');
+
+  // Case 3: Client cannot forge posting_order on draft moves or modify it on posted moves
+  const draftForCheck = create(db, 'account.move', { move_type: 'in_invoice', partner_id: vendorId, invoice_line_ids: [{ name: 'F', qty: 1, price_unit: 10, tax: 0 }] });
+  const forgedDraft = {
+    ...draftForCheck.db,
+    records: {
+      ...draftForCheck.db.records,
+      'account.move': draftForCheck.db.records['account.move'].map((m) =>
+        m.id === draftForCheck.id ? { ...m, posting_order: 999 } : m
+      ),
+    },
+  };
+  assert.throws(() => applyDiff(draftForCheck.db, diffDb(draftForCheck.db, forgedDraft), { isAdmin: true }), /posting order/i);
+
+  const postedMove = postMove(draftForCheck.db, draftForCheck.id);
+  const forgedPosted = {
+    ...postedMove,
+    records: {
+      ...postedMove.records,
+      'account.move': postedMove.records['account.move'].map((m) =>
+        m.id === draftForCheck.id ? { ...m, posting_order: 8888 } : m
+      ),
+    },
+  };
+  assert.throws(() => applyDiff(postedMove, diffDb(postedMove, forgedPosted), { isAdmin: true }), /posting order/i);
+});

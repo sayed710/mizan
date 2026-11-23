@@ -247,6 +247,16 @@ export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
+const recipientBankDomain = (b, r, db) => {
+  if (b.active === false) return false;
+  const companyId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+  if (b.company_id && b.company_id !== companyId) return false;
+  if (isInbound(r)) {
+    const companyPartnerId = db ? read(db, 'res.company', companyId)?.partner_id : null;
+    return Boolean(b.partner_id && companyPartnerId && b.partner_id === companyPartnerId);
+  }
+  return !b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id);
+};
 export const residual = (r, db) => {
   if (!isInvoice(r)) return 0;
   let curr;
@@ -465,6 +475,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
   'to_check', // a review flag belongs to the reviewed entry only
+  'posting_order',
 ]);
 function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
@@ -696,6 +707,10 @@ const digitizedPostingChanged = (before, after) => {
   const projection = (line) => Object.fromEntries(['product_id', 'name', 'qty', 'price_unit', 'discount', 'tax'].map((key) => [key, line[key] ?? null]));
   return JSON.stringify((before.invoice_line_ids ?? []).map(projection)) !== JSON.stringify((after.invoice_line_ids ?? []).map(projection));
 };
+export const nextPostingOrder = (db) => 1 + (db.records['account.move'] ?? []).reduce((max, m) => {
+  const o = Number(m.posting_order);
+  return Number.isFinite(o) && o > max ? o : max;
+}, 0);
 /** Whether this draft qualifies for the vendor auto-post suggestion. */
 export function suggestBillAutopost(db, bill) {
   if (bill?.state !== 'draft' || bill.move_type !== 'in_invoice' || !bill.digitized_document || !bill.partner_id || bill.partner_id !== bill.digitized_vendor_id) return false;
@@ -707,7 +722,7 @@ export function suggestBillAutopost(db, bill) {
     Boolean(m.digitized_document) &&
     (m.partner_id === bill.partner_id || m.digitized_vendor_id === bill.partner_id) &&
     (m.company_id ?? 1) === (bill.company_id ?? 1)
-  ).sort((a, b) => b.id - a.id);
+  ).sort((a, b) => (Number(b.posting_order) || 0) - (Number(a.posting_order) || 0) || b.id - a.id);
   return postedBills.length >= 3 && postedBills.slice(0, 3).every((m) => Boolean(m.digitized_unedited));
 }
 
@@ -856,7 +871,8 @@ export function postMove(db, id, { autoPost = false } = {}) {
     : (!r.payment_reference?.trim() && isPurchase(r) && r.ref?.trim()
         ? { payment_reference: r.ref.trim() }
         : {});
-  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -1530,8 +1546,8 @@ export function creditNote(db, r, options = {}) {
   const docCurr = documentCurrency(db, r);
   const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m, db), 0);
   if (roundCurrency(credited, docCurr) >= roundCurrency(total(r, db), docCurr)) throw new Error(`${r.name} is already fully credited`);
-  if (['cancel', 'modify'].includes(method) && (roundCurrency(credited, docCurr) > 0 || roundCurrency(Number(r.amount_paid) || 0, docCurr) > 0)) {
-    throw new Error('Full refund and modify require an unpaid invoice with no existing credit notes');
+  if (['cancel', 'modify'].includes(method) && roundCurrency(credited, docCurr) > 0) {
+    throw new Error('Full refund and modify require an invoice with no existing credit notes');
   }
   const date = opts.date ?? opts.invoice_date ?? today();
   if (!validDate(date)) {
@@ -1941,6 +1957,11 @@ const {
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
 
+const invoiceLineProductDomain = (product, line) => {
+  if (product.active === false) return false;
+  return isPurchase(line) ? product.purchase_ok !== false : product.sale_ok !== false;
+};
+
 const invoiceLineTaxDomain = (tax, line, db) => {
   if (tax.active === false) return false;
   const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
@@ -2021,7 +2042,7 @@ const invoiceLineField = {
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
     source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true },
-    product_id: invoiceLineProduct,
+    product_id: { ...invoiceLineProduct, domain: invoiceLineProductDomain },
     name: { type: 'char', label: 'Label' },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
     analytic_account_id: { ...invoiceLineAnalytic, hidden: true },
@@ -3423,6 +3444,9 @@ export const accountingModels = {
       }
       const moveType = nextVals.move_type ?? before.move_type;
       const state = nextVals.state ?? before.state;
+      if (state === 'draft' && before.posting_order != null && vals.posting_order === undefined) {
+        nextVals.posting_order = null;
+      }
       if (moveType === 'entry' && state === 'draft') {
         const touches = ['line_ids', 'date', 'invoice_date', 'currency_id'].some((k) => k in nextVals);
         if (touches) {
@@ -3500,7 +3524,11 @@ export const accountingModels = {
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
         return 'The inter-company bill is posted or paid; issue a credit note instead';
       }
-      return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
+      const baseErr = archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx);
+      if (baseErr) return baseErr;
+      if (after.state === 'draft' && after.posting_order != null) return 'Draft move cannot have a posting order';
+      if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
+      return (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
     invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
@@ -3539,7 +3567,7 @@ export const accountingModels = {
         const isEligibleVendorBank = (b) => b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1)) && sameCommercialPartner(db, b.partner_id, r.partner_id);
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const eligibleBanks = partnerChange && isPurchase(r) ? search(db, 'res.partner.bank').filter(isEligibleVendorBank).sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment))) : [];
-        const partnerBank = selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
+        const partnerBank = isInbound(r) ? (selectedBank && recipientBankDomain(selectedBank, r, db) ? selectedBank.id : null) : selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
           ? selectedBank.id : (eligibleBanks[0]?.id ?? null);
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
         const nextContext = { ...r, ...fiscal, journal_id: journal };
@@ -3688,7 +3716,12 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
+      partner_bank_id: {
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        domain: recipientBankDomain,
+      },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
@@ -3784,6 +3817,7 @@ export const accountingModels = {
       digitized_document: { type: 'boolean', label: 'Digitized Document', hidden: true },
       digitized_unedited: { type: 'boolean', label: 'Digitized Unedited', hidden: true },
       digitized_vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Digitized Vendor', hidden: true },
+      posting_order: { type: 'integer', label: 'Posting Order', readonly: true, hidden: true, copy: false },
       should_be_paid: { type: 'selection', label: 'Should Be Paid', compute: (r, db) => shouldBePaid(db, r), options: [['yes', 'Yes'], ['no', 'No'], ['exception', 'Exception']] },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
       fx_payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment Entry', readonly: true },
@@ -3833,7 +3867,14 @@ export const accountingModels = {
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
-    menuActions: [{ label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) }],
+    menuActions: [
+      { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+      {
+        label: 'Proforma Invoice',
+        when: (r) => r.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r.move_type),
+        run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=proforma` }),
+      },
+    ],
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
