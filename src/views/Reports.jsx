@@ -9,7 +9,7 @@ import { FollowUpWizard } from './FollowUpLetter.jsx';
 import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { reportingBookedAmount } from '../models/money.js';
-import { budgetReport } from '../models/analyticplus.js';
+import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -625,19 +625,88 @@ export function Budget({ db, period, companyId = 'all' }) {
   );
 }
 
-function Analytic({ db, period, money: moneyProp }) {
+function Analytic({ db, period, money: moneyProp, rootPlans: rootPlansProp, hasUnassigned: hasUnassignedProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
   const actual = analyticActuals(db, period);
   const lines = analyticActualLines(db, period);
+  const rootPlans = rootPlansProp ?? rootAnalyticPlans(db);
+  const hasRootPlans = rootPlans.length > 0;
+  const rootPlanIds = useMemo(() => new Set(rootPlans.map((p) => p.id)), [rootPlans]);
+  const rootPlanByPlanId = useMemo(() => rootPlanMap(db), [db]);
+  const movesById = useMemo(() => {
+    const map = new Map();
+    for (const m of db.records?.['account.move'] ?? []) {
+      map.set(m.id, m);
+    }
+    return map;
+  }, [db]);
+  const displayedAccounts = useMemo(() => {
+    return (db.records?.['account.analytic.account'] ?? [])
+      .filter((a) => a.active !== false || actual.has(a.id));
+  }, [db, actual]);
+  const hasUnassigned = hasUnassignedProp ?? (hasRootPlans && displayedAccounts.some((a) => !a.plan_id || !rootPlanIds.has(rootPlanByPlanId.get(a.plan_id))));
+
   return (
     <tbody>
-      {search(db, 'account.analytic.account', { includeArchived: true }).filter((a) => a.active !== false || actual.has(a.id)).map((a) => <Fragment key={a.id}>
-        <Total label={a.name} value={actual.get(a.id) ?? 0} money={fmtMoney} />
-        {lines.filter((line) => line.account_id === a.id).map((line) => <tr key={line.id} className="rep-detail">
-          <td><a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>{line.move_id && <>{' · '}<a href={`#/open/account.move/${line.move_id}`}>{read(db, 'account.move', line.move_id)?.name ?? line.move_id}</a></>}</td>
-          <td className="num">{fmtMoney(analyticReportAmount(db, line))}</td>
-        </tr>)}
-      </Fragment>)}
+      {displayedAccounts.map((a) => {
+        const rootId = a.plan_id ? (rootPlanByPlanId.get(a.plan_id) ?? null) : null;
+        const isAssigned = rootId != null && rootPlanIds.has(rootId);
+        const accountLines = lines.filter((line) => line.account_id === a.id);
+        return (
+          <Fragment key={a.id}>
+            <tr className="rep-total">
+              <td>{a.name}</td>
+              {hasRootPlans ? (
+                <>
+                  {rootPlans.map((rp) => (
+                    <td key={rp.id} className="num">
+                      {isAssigned && rootId === rp.id ? fmtMoney(actual.get(a.id) ?? 0) : ''}
+                    </td>
+                  ))}
+                  {hasUnassigned && (
+                    <td key="unassigned" className="num">
+                      {!isAssigned ? fmtMoney(actual.get(a.id) ?? 0) : ''}
+                    </td>
+                  )}
+                </>
+              ) : (
+                <td className="num">{fmtMoney(actual.get(a.id) ?? 0)}</td>
+              )}
+            </tr>
+            {accountLines.map((line) => (
+              <tr key={line.id} className="rep-detail">
+                <td>
+                  <a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>
+                  {line.move_id && (
+                    <>
+                      {' · '}
+                      <a href={`#/open/account.move/${line.move_id}`}>
+                        {movesById.get(line.move_id)?.name ?? line.move_id}
+                      </a>
+                    </>
+                  )}
+                </td>
+                {hasRootPlans ? (
+                  <>
+                    {rootPlans.map((rp) => (
+                      <td key={rp.id} className="num">
+                        {isAssigned && rootId === rp.id ? fmtMoney(analyticReportAmount(db, line)) : ''}
+                      </td>
+                    ))}
+                    {hasUnassigned && (
+                      <td key="unassigned" className="num">
+                        {!isAssigned ? fmtMoney(analyticReportAmount(db, line)) : ''}
+                      </td>
+                    )}
+                  </>
+                ) : (
+                  <td className="num">{fmtMoney(analyticReportAmount(db, line))}</td>
+                )}
+              </tr>
+            ))}
+          </Fragment>
+        );
+      })}
     </tbody>
   );
 }
@@ -883,15 +952,42 @@ function ReportPage({ leaf }) {
     ? taxVariant
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
-  const period = isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
+  const period = useMemo(
+    () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
+    [isAged, asOf, periodKey, customPeriod],
+  );
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
-  const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : isAged ? ['Date', ...BUCKETS(agingInterval).map(([, label]) => label), 'Total'] : isDeferred ? cols.map((col) => col === 'Current' ? periodName : col) : cols;
-  const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
   const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'tax', 'fiscal'].includes(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
-  const effectivePeriod = showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period;
+  const effectivePeriod = useMemo(
+    () => (showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period),
+    [showUnpostedOption, includeUnposted, period]
+  );
+  const rootPlans = useMemo(() => {
+    if (leaf.report !== 'analytic') return [];
+    return rootAnalyticPlans(db);
+  }, [db, leaf.report]);
+  const hasUnassigned = useMemo(() => {
+    if (leaf.report !== 'analytic' || rootPlans.length === 0) return false;
+    const actual = analyticActuals(db, effectivePeriod);
+    const rootPlanIds = new Set(rootPlans.map((p) => p.id));
+    const planRoots = rootPlanMap(db);
+    const accounts = (db.records?.['account.analytic.account'] ?? [])
+      .filter((a) => a.active !== false || actual.has(a.id));
+    return accounts.some((a) => !a.plan_id || !rootPlanIds.has(planRoots.get(a.plan_id)));
+  }, [db, leaf.report, rootPlans, effectivePeriod]);
+  const reportCols = isTaxBoxes
+    ? ['Description', 'Base', 'Tax']
+    : isAged
+      ? ['Date', ...BUCKETS(agingInterval).map(([, label]) => label), 'Total']
+    : isDeferred
+      ? cols.map((col) => col === 'Current' ? periodName : col)
+      : leaf.report === 'analytic' && rootPlans.length > 0
+        ? [...rootPlans.map((p) => ({ label: p.name, raw: true })), ...(hasUnassigned ? ['Unassigned'] : [])]
+        : cols;
+  const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const primaryCompanyId = selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany);
@@ -1110,11 +1206,16 @@ function ReportPage({ leaf }) {
               {(detailComparison
                 ? periods.flatMap((p) => (leaf.report === 'tax' ? ['Base', 'Tax'] : ['Debit', 'Credit', 'Balance']).map((label) => `${p.label} - ${t(label)}`))
                 : periods && ['trial', 'fiscal', 'tax'].includes(leaf.report)
-                  ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} - ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} - ${t(c)}`)))
+                  ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} - ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} - ${t(typeof c === 'object' && c ? c.label : c)}`)))
                   : data
                     ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])]
                     : reportCols
-              ).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}
+              ).map((c) => {
+                const isRaw = typeof c === 'object' && c !== null && c.raw;
+                const label = typeof c === 'object' && c !== null ? c.label : c;
+                const text = isRaw ? label : (data ? label.split(' ').map((part) => t(part)).join(' ') : t(label));
+                return <th key={label} className={label === 'Description' ? undefined : 'num'}>{text}</th>;
+              })}
             </tr>
           </thead>
           {detailComparison
@@ -1125,7 +1226,7 @@ function ReportPage({ leaf }) {
                 ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} />
                 : isAudit
                   ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} />
-                  : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} agingOptions={agingOptions} money={fmtMoney} />}
+                  : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} agingOptions={agingOptions} rootPlans={rootPlans} hasUnassigned={hasUnassigned} money={fmtMoney} />}
         </table>
       </div>
     </ReportPrintView>
