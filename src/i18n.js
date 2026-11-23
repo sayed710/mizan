@@ -87,6 +87,9 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Report Sections': 'أقسام التقرير', 'Section Type': 'نوع القسم', 'Financial Report': 'التقرير المالي',
+  'Invalid report sections': 'أقسام التقرير غير صالحة', 'Invalid report section type': 'نوع قسم التقرير غير صالح',
+  'Select an active report for this company': 'اختر تقريراً نشطاً لهذه الشركة',
   'Batch invoices must use the same currency; a mixed-currency total is unavailable': 'فواتير الدفعة يجب أن تكون بعملة واحدة؛ لا يمكن حساب إجمالي بعملات مختلفة',
   'Configure a company currency before adding invoices to the batch': 'حدّد عملة الشركة قبل إضافة فواتير إلى الدفعة',
   'Configure a currency for every company before adding invoices to the batch': 'حدّد عملة لكل شركة قبل إضافة فواتير إلى الدفعة',
@@ -1329,6 +1332,7 @@ const ar = {
   'As of': 'كما في',
   'Principal Repaid': 'أصل القرض المسدد',
   'Interest Paid': 'الفوائد المدفوعة',
+  'Historical valuation unavailable': 'التقييم التاريخي غير متاح',
   'Historical entry links unavailable': 'روابط القيود التاريخية غير متوفرة',
   'Invoices To Be Issued': 'فواتير مطلوب إصدارها',
   'Invoiced Not Delivered': 'مفوتر ولم يتم تسليمه',
@@ -3568,6 +3572,8 @@ const ar = {
   'Report Footer': 'تذييل التقرير',
   'Show installment dates': 'إظهار تواريخ الأقساط',
   'VOID - KEEP FOR YOUR RECORDS': 'ملغى - للاحتفاظ به في سجلاتك',
+  'Aging period length (days)': 'طول فترة التقادم (بالأيام)',
+  'Unknown Partner': 'شريك غير معروف',
   'Gross Increase': 'الزيادة الإجمالية',
   'Set to Draft': 'إعادة إلى المسودة',
   'Parent Asset': 'الأصل الرئيسي',

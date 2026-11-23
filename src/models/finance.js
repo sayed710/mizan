@@ -1,4 +1,5 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
+import { indexGlMatchings, lineKey } from './glMatchIndex.js';
 import { installments } from './terms.js';
 import { normalizePhone, queueSms } from './sms.js';
 import { models } from '../registry.js';
@@ -1375,7 +1376,13 @@ export function postTaxReturnClosing(db, returnId) {
   return { db: next, ids, payable: round(specs.reduce((s, spec) => s + spec.payable, 0)) };
 }
 
-const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
+export const BUCKETS = (interval = 30) => {
+  const length = Number.isSafeInteger(Number(interval)) && Number(interval) > 0 ? Number(interval) : 30;
+  return [['current', 'At Date', -Infinity, 0], ...Array.from({ length: 4 }, (_, i) => {
+    const from = i * length + 1, to = (i + 1) * length;
+    return [`${from}_${to}`, `${from}-${to}`, from, to];
+  }), ['older', 'Older', 4 * length + 1, Infinity]];
+};
 
 /** Per-tax report row a tax item belongs to: its side and tax, or its tax name when it has no tax. */
 export function taxItemKey(l) {
@@ -1510,23 +1517,59 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   }
 }
 
+/** Include other posted receivable/payable journal lines, with matching effective at the cutoff. */
+function ageOtherEntries(db, kind, at, moves, add) {
+  // Settlement entries and their reversals are already reflected by document/payment residuals.
+  const paymentMoves = new Set(search(db, 'account.payment').map((payment) => payment.move_id).filter(Boolean));
+  for (const move of moves) for (const application of move.payments ?? []) {
+    for (const id of [application.move_id, application.payment_fx_move_id, application.cash_basis_move_id]) if (id) paymentMoves.add(id);
+  }
+  for (const matching of db.records['account.partial.reconcile'] ?? []) if (matching.exchange_move_id) paymentMoves.add(matching.exchange_move_id);
+  for (const move of moves) if (paymentMoves.has(move.reversed_entry_id)) paymentMoves.add(move.id);
+  const matchings = indexGlMatchings(db);
+  const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+  const sign = kind === 'receivable' ? 1 : -1;
+  for (const move of moves) {
+    if (move.state !== 'posted' || move.move_type !== 'entry' || paymentMoves.has(move.id)) continue;
+    const moveDate = move.date ?? move.invoice_date;
+    if (!moveDate || moveDate > at) continue;
+    (move.line_ids ?? []).forEach((line, index) => {
+      const date = line.date ?? moveDate;
+      if (date > at || read(db, 'account.account', line.account_id)?.account_type !== accountType) return;
+      const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
+      const matched = (matchings.byLine.get(lineKey(move.id, index)) ?? []).reduce((sum, link) => {
+        const otherId = link.debit_move_id === move.id ? link.credit_move_id : link.debit_move_id;
+        const other = read(db, 'account.move', otherId);
+        if (!other || other.state !== 'posted' || other.move_type !== 'entry') return sum;
+        const otherIndex = link.debit_move_id === move.id ? link.credit_line_index : link.debit_line_index;
+        const otherDate = other?.line_ids?.[otherIndex]?.date ?? other?.date ?? other?.invoice_date;
+        return otherDate && otherDate <= at && (!link.date || link.date <= at) ? sum + Number(link.amount) : sum;
+      }, 0);
+      const remaining = Math.max(0, round(Math.abs(balance) - matched));
+      if (remaining) add(line.partner_id ?? move.partner_id ?? null, line.date_maturity ?? date, sign * Math.sign(balance) * remaining, move);
+    });
+  }
+}
+
 /** Use the requested reporting cutoff, defaulting to today. */
 export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
-export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
+export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date' } = {}) {
+  const buckets = BUCKETS(aging_interval);
   const rows = new Map();
   const add = (partner, date, amount, document = null, source = document) => {
     amount = reportingBookedAmount(db, source, amount);
-    const days = Math.floor((new Date(at) - new Date(date)) / 864e5);
-    const bucket = BUCKETS.find(([, , from, to]) => days >= from && days <= to)[0];
-    const row = rows.get(partner) ?? { partner_id: partner, total: 0, invoices: [], ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+    const ageDate = aging_based_on === 'base_on_invoice_date' ? (document?.invoice_date ?? date) : date;
+    const days = Math.floor((new Date(at) - new Date(ageDate)) / 864e5);
+    const bucket = buckets.find(([, , from, to]) => days >= from && days <= to)[0];
+    const row = rows.get(partner) ?? { partner_id: partner, total: 0, invoices: [], ...Object.fromEntries(buckets.map(([k]) => [k, 0])) };
     row[bucket] = round(row[bucket] + amount);
     row.total = round(row.total + amount);
     if (document) {
       let detail = row.invoices.find((item) => item.move_id === document.id);
       if (!detail) {
-        detail = { move_id: document.id, name: document.name, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+        detail = { move_id: document.id, name: document.name, invoice_date: document.invoice_date ?? null, date: document.date ?? date ?? null, total: 0, ...Object.fromEntries(buckets.map(([k]) => [k, 0])) };
         row.invoices.push(detail);
       }
       detail[bucket] = round(detail[bucket] + amount);
@@ -1537,7 +1580,8 @@ export function agedBalance(db, kind = 'receivable', at = today(), companyId = n
   const moves = search(db, 'account.move').filter((m) => companyId == null || (m.company_id ?? 1) === companyId);
   ageDocumentInstallments(db, kind, at, moves, add);
   ageUnappliedCredits(db, kind, at, moves, add, companyId);
-  return { buckets: BUCKETS.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
+  ageOtherEntries(db, kind, at, moves, add);
+  return { buckets: buckets.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
 
 function lastMonths(at, count = 13) {
