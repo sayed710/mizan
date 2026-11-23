@@ -1157,6 +1157,7 @@ const ar = {
   'Select a company for this budget before showing amounts': 'اختر شركة لهذه الموازنة قبل عرض المبالغ',
   'Configure a company currency before showing budget amounts': 'حدّد عملة الشركة قبل عرض مبالغ الموازنة',
   'The selected items are no longer visible; refresh the selection': 'البنود المحددة لم تعد ظاهرة؛ حدّث التحديد',
+  'The selected transactions have no journal entry to review': 'المعاملات المحددة ليس لها قيد يومية للمراجعة',
   'Choose a valid period and date': 'اختر فترة وتاريخاً صالحين',
   'Choose a valid comparison': 'اختر مقارنة صالحة',
   // App-store summaries.
@@ -2412,6 +2413,7 @@ const ar = {
   'Tax Returns': 'الإقرارات الضريبية',
   'Set start and end dates to view the tax report.': 'حدّد تاريخي البدء والانتهاء لعرض التقرير الضريبي.',
   'Reviewed': 'تمت المراجعة',
+  'Mark as reviewed': 'تحديد كمُراجَع',
   'Submission Date': 'تاريخ التقديم',
   'Amount to Pay': 'المبلغ المستحق للدفع',
   'Closing Moves': 'قيود الإقفال',
