@@ -580,6 +580,7 @@ export function taxRepartitionSplits(t, line, side, currency) {
   const explicit = rows.length > 0;
   const taxRows = explicit ? rows : [{ repartition_type: 'tax', factor_percent: 100, account_id: t.tax_account_id ?? line.tax_account_id ?? null, tag_ids: t.tax_tag_ids ?? line.tax_tag_ids ?? [], use_in_tax_closing: true }];
   const factors = taxRows.map((r) => Number(r.factor_percent) || 0);
+  const contributing = factors.reduce((best, f, i) => (Math.abs(f) > Math.abs(factors[best]) ? i : best), 0);
   const split = (value) => {
     if (factors.length === 1 && factors[0] === 100) return [value];
     const portions = factors.map(() => 0);
@@ -590,10 +591,16 @@ export function taxRepartitionSplits(t, line, side, currency) {
       const allocated = allocateCents(total, indexes.map((item) => Math.abs(item.factor)), currency, { tieBreak: 'last' });
       indexes.forEach((item, i) => { portions[item.index] = allocated[i]; });
     }
+    const netFactor = factors.reduce((sum, f) => sum + f, 0);
+    const roundedNetTax = roundCurrency(value * netFactor / 100, currency);
+    const currentNet = roundCurrency(portions.reduce((sum, p) => sum + p, 0), currency);
+    const residual = roundCurrency(roundedNetTax - currentNet, currency);
+    if (residual !== 0) {
+      portions[contributing] = roundCurrency(portions[contributing] + residual, currency);
+    }
     return portions;
   };
   const amounts = split(t.amount);
-  const contributing = factors.reduce((best, f, i) => (Math.abs(f) > Math.abs(factors[best]) ? i : best), 0);
   return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: i === contributing ? t.base : 0 })) };
 }
 
@@ -700,6 +707,28 @@ export function isDomesticRecord(record, db) {
   const recordCountry = String(record.country ?? '').trim().toLowerCase();
   const companyCountry = String(company?.country ?? '').trim().toLowerCase();
   return Boolean(recordCountry && companyCountry && recordCountry === companyCountry);
+}
+
+/**
+ * Whether a tax is domestic for its company (or the active company if shared).
+ * A tax without fiscal positions applies domestically. If assigned to fiscal positions,
+ * at least one must match the company's domestic fiscal position or country.
+ */
+export function isDomesticTax(tax, db) {
+  if (!db || !tax) return false;
+  const fps = tax.fiscal_position_ids ?? [];
+  if (!fps.length) return true;
+  const companyId = tax.company_id ?? db.settings?.current_company_id ?? 1;
+  const company = read(db, 'res.company', companyId);
+  const companyCountry = String(company?.country ?? '').trim().toLowerCase();
+  return fps.some((fpId) => {
+    if (company?.domestic_fiscal_position_id && fpId === company.domestic_fiscal_position_id) return true;
+    const fp = read(db, 'account.fiscal.position', fpId);
+    if (!fp) return false;
+    if (fp.company_id && fp.company_id !== companyId) return false;
+    const fpCountry = String(fp.country ?? '').trim().toLowerCase();
+    return Boolean(companyCountry && fpCountry && companyCountry === fpCountry);
+  });
 }
 
 export const taxModels = {
@@ -941,7 +970,7 @@ export const taxModels = {
     filters: [
       [{ id: 'sale', label: 'Sale', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchase', fn: (r) => r.type_tax_use === 'purchase' }],
       [{ id: 'services', label: 'Services', fn: (r) => r.tax_scope === 'service' }, { id: 'goods', label: 'Goods', fn: (r) => r.tax_scope === 'consu' }],
-      [{ id: 'domestic', label: 'Domestic', fn: (r, db) => !(r.fiscal_position_ids ?? []).length || (r.fiscal_position_ids ?? []).includes(read(db, 'res.company', r.company_id ?? 1)?.domestic_fiscal_position_id) }],
+      [{ id: 'domestic', label: 'Domestic', fn: isDomesticTax }],
       [{ id: 'active', label: 'Active', fn: (r) => r.active !== false }, { id: 'inactive', label: 'Inactive', includeArchived: true, fn: (r) => r.active === false }],
     ],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
