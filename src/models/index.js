@@ -212,7 +212,7 @@ const allApps = [
           ...salesInvoiceView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
-        { key: 'products', label: 'Products', model: 'product' },
+        { key: 'products', label: 'Products', model: 'product', domain: (r) => r.sale_ok !== false, defaults: { sale_ok: true } },
         customers,
       ] },
       { label: 'Vendors', children: [
@@ -238,7 +238,7 @@ const allApps = [
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
-        { key: 'products', label: 'Products', model: 'product' },
+        { key: 'vendor-products', label: 'Products', model: 'product', domain: (r) => r.purchase_ok !== false, defaults: { purchase_ok: true } },
         vendors,
       ] },
       { label: 'Accounting', children: [
