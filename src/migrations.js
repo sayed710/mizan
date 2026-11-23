@@ -1999,6 +1999,25 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
+  const budgets = db?.records?.['account.budget'];
+  if (!Array.isArray(budgets) || !budgets.length) return db;
+  let changed = false;
+  const nextBudgets = budgets.map((b) => {
+    if (!b || typeof b !== 'object') return b;
+    if (b.budget_type) return b;
+    changed = true;
+    return { ...b, budget_type: 'both' };
+  });
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.budget': nextBudgets,
+    },
+  };
+} });
 
 export function migrateReconcileModelTolerance(db) {
   const rules = db?.records?.['account.reconcile.model'];

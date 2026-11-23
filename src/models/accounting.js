@@ -2728,6 +2728,10 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
     { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
     { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
   ],
+  ...(!purchases ? [[
+    { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
+    { id: 'is_not_sent', label: 'Not Sent', fn: (r) => !r.is_move_sent },
+  ]] : []),
   monthFilters('invoice_date', 'Invoice Date'),
   ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
   monthFilters('invoice_date_due', 'Due Date'),
@@ -3790,6 +3794,7 @@ export const accountingModels = {
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       to_check: { type: 'boolean', label: 'To Check', copy: false },
+      is_move_sent: { type: 'boolean', label: 'Is Move Sent', copy: false, readonly: true },
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
@@ -3806,6 +3811,7 @@ export const accountingModels = {
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
+    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
     menuActions: [
       { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
@@ -3815,7 +3821,6 @@ export const accountingModels = {
         run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=proforma` }),
       },
     ],
-    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
       const companyId = vals.company_id ?? currentCompany(db);
@@ -4102,7 +4107,32 @@ export const accountingModels = {
           },
           run: registerPayment,
         },
-        { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
+        {
+          label: 'Send',
+          email: 'document',
+          primary: (r) => !r.is_move_sent,
+          when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type),
+          wizard: (db, r) => {
+            const partner = r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+            return {
+              title: 'Send',
+              fields: [
+                { name: 'email', type: 'boolean', label: 'Email', default: Boolean(partner?.email?.trim?.()) },
+                { name: 'download', type: 'boolean', label: 'Download', default: false },
+              ],
+            };
+          },
+          run: (db, r, values = {}) => {
+            if (!values?.email && !values?.download) {
+              throw new Error('Select at least one channel: Email or Download');
+            }
+            const markSent = !values.live && Boolean(values.download);
+            return {
+              db: markSent ? write(db, 'account.move', r.id, { is_move_sent: true }) : db,
+              ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
+            };
+          },
+        },
         {
           label: 'Credit Note',
           when: (r) => r.state === 'posted' && r.move_type === 'out_invoice',
@@ -4157,6 +4187,7 @@ export const accountingModels = {
             const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
             const nextDb = write(cancelledDb, 'account.move', r.id, {
               state: 'draft',
+              is_move_sent: false,
               ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
               ...(isInvoice(r) ? { line_ids: [] } : {})
             });
