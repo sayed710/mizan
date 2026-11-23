@@ -81,6 +81,12 @@ export function App() {
   const app = apps.find((a) => a.id === route.app);
   // Uninstalled apps and apps outside the user's allow-list are not reachable by URL either.
   if (!app || !appOpen(db, getUser(), app.id)) return <Home />;
+  if (app.id === 'accounting' && route.menu === 'partner-ledger-payable') {
+    const params = new URLSearchParams(route.query);
+    params.set('accountType', 'payable');
+    location.replace(`#/accounting/partner-ledger?${params}`);
+    return null;
+  }
   const leaf = findLeaf(app, route.menu);
   const base = `#/${app.id}/${leaf.key}`;
   const Page = PAGES[leaf.type];
