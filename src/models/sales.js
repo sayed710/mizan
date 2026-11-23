@@ -258,6 +258,7 @@ export function refreshAdvanceDeductions(db, order, lines, exceptId = null) {
 }
 
 const invoiceableQty = (db, line) => (read(db, 'product', line.product_id)?.invoice_policy === 'delivery' ? Number(line.qty_delivered) || 0 : Number(line.qty) || 0);
+export const qtyToInvoice = (db, line) => invoiceableQty(db, line) - (Number(line.qty_invoiced) || 0);
 
 /** The order amount not yet invoiced (draft or posted), as Odoo's amount to invoice. */
 function uninvoicedAmount(db, order) {
@@ -286,7 +287,7 @@ function invoiceFrom(db, order, moveType, originField, options = {}) {
   }
   const invoiceable = (l) => invoiceableQty(db, l);
   let lines = order.order_line
-    .map((l) => ({ ...l, qty: invoiceable(l) - (Number(l.qty_invoiced) || 0) }))
+    .map((l) => ({ ...l, qty: qtyToInvoice(db, l) }))
     .filter((l) => l.qty > 0)
     .map(({ qty_invoiced, qty_delivered, purchase_method, ...l }) => l);
   if (method !== 'regular') lines = downPaymentLines(db, order, method, options.amount);
@@ -306,7 +307,7 @@ function invoiceFrom(db, order, moveType, originField, options = {}) {
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
     invoice_origin: order.name,
     fiscal_position_id: order.fiscal_position_id ?? null,
-    incoterm_id: order.incoterm_id ?? null,
+    ...(order.incoterm_id ? { incoterm_id: order.incoterm_id } : {}),
     incoterm_location: order.incoterm_location ?? null,
     ...(order.currency_id ? { currency_id: order.currency_id } : {}),
     [originField]: order.id,
@@ -325,7 +326,7 @@ const invoiceStatus = (r, confirmed) => {
 };
 const saleInvoiceStatus = (r, db) => {
   if (r.state !== 'sale' || !r.order_line?.length) return 'no';
-  if (r.order_line.some((l) => invoiceableQty(db, l) > (Number(l.qty_invoiced) || 0) + 1e-9)) return 'to_invoice';
+  if (r.order_line.some((l) => qtyToInvoice(db, l) > 1e-9)) return 'to_invoice';
   return r.order_line.every((l) => (Number(l.qty_invoiced) || 0) >= (Number(l.qty) || 0) - 1e-9) ? 'invoiced' : 'no';
 };
 const INVOICE_STATUS = [['no', 'Nothing to Invoice'], ['to_invoice', 'To Invoice'], ['invoiced', 'Fully Invoiced']];

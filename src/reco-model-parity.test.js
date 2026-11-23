@@ -415,9 +415,9 @@ test('list, form, statusbar buttons, filters, groupBys, and i18n match Odoo 20 s
   assert.equal(matchingGroups.includes('payment_tolerance'), true);
   assert.equal(matchingGroups.includes('payment_tolerance_type'), true);
 
-  assert.equal(def.form.tabs({ rule_type: 'matching_rule', payment_tolerance: 0 }).length, 0);
-  assert.equal(def.form.tabs({ rule_type: 'matching_rule', payment_tolerance: 5 }).length, 1);
-  assert.equal(def.form.tabs({ rule_type: 'reco_model', payment_tolerance: 0 }).length, 1);
+  assert.equal(def.form.tabs({ rule_type: 'matching_rule', payment_tolerance: 0 }).filter((t) => t.label === 'Counterpart Items').length, 0);
+  assert.equal(def.form.tabs({ rule_type: 'matching_rule', payment_tolerance: 5 }).filter((t) => t.label === 'Counterpart Items').length, 1);
+  assert.equal(def.form.tabs({ rule_type: 'reco_model', payment_tolerance: 0 }).filter((t) => t.label === 'Counterpart Items').length, 1);
 
   // Filters & groupBys
   const base = seed();

@@ -4,7 +4,7 @@ import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
+import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
@@ -47,6 +47,37 @@ import {
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
 
+function invoiceCompanyDefaults(db, move, previous, context = {}) {
+  const company = read(db, 'res.company', move.company_id);
+  const oldCompany = previous?.company_id ? read(db, 'res.company', previous.company_id) : null;
+  const termsEligible = ['out_invoice', 'out_refund'].includes(move.move_type);
+  const result = {};
+
+  const isEdited = (field) => {
+    if (!context?.editedFields) return false;
+    if (context.editedFields instanceof Set) return context.editedFields.has(field);
+    if (Array.isArray(context.editedFields)) return context.editedFields.includes(field);
+    return Object.hasOwn(context.editedFields, field);
+  };
+
+  const oldTerms = oldCompany?.use_invoice_terms ? (oldCompany.invoice_terms ?? '') : null;
+  const termsUntouched = context?.editedFields ? !isEdited('narration') : (move.narration === undefined || (previous && oldTerms !== null && move.narration === oldTerms));
+
+  if (termsEligible && termsUntouched) {
+    if (company?.use_invoice_terms) result.narration = company.invoice_terms ?? '';
+    else if (previous) result.narration = '';
+  }
+
+  const companyIncoterm = company?.incoterm_id ? read(db, 'account.incoterm', company.incoterm_id) : null;
+  const companyIncotermId = companyIncoterm && companyIncoterm.active !== false ? companyIncoterm.id : null;
+  const incotermUntouched = context?.editedFields ? !isEdited('incoterm_id') : (move.incoterm_id === undefined || (previous && oldCompany?.incoterm_id != null && move.incoterm_id === oldCompany.incoterm_id));
+
+  if (move.move_type === 'out_invoice' && incotermUntouched) {
+    if (companyIncotermId != null) result.incoterm_id = companyIncotermId;
+    else if (previous) result.incoterm_id = null;
+  }
+  return result;
+}
 export const includeInitialBalance = (account) => !['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'off_balance'].includes(account?.account_type);
 const canBeNonTrade = (account) => ['asset_receivable', 'liability_payable'].includes(account?.account_type);
 
@@ -218,6 +249,16 @@ export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
+const recipientBankDomain = (b, r, db) => {
+  if (b.active === false) return false;
+  const companyId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+  if (b.company_id && b.company_id !== companyId) return false;
+  if (isInbound(r)) {
+    const companyPartnerId = db ? read(db, 'res.company', companyId)?.partner_id : null;
+    return Boolean(b.partner_id && companyPartnerId && b.partner_id === companyPartnerId);
+  }
+  return !b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id);
+};
 export const residual = (r, db) => {
   if (!isInvoice(r)) return 0;
   let curr;
@@ -1477,8 +1518,8 @@ export function creditNote(db, r, options = {}) {
   const docCurr = documentCurrency(db, r);
   const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m, db), 0);
   if (roundCurrency(credited, docCurr) >= roundCurrency(total(r, db), docCurr)) throw new Error(`${r.name} is already fully credited`);
-  if (['cancel', 'modify'].includes(method) && (roundCurrency(credited, docCurr) > 0 || roundCurrency(Number(r.amount_paid) || 0, docCurr) > 0)) {
-    throw new Error('Full refund and modify require an unpaid invoice with no existing credit notes');
+  if (['cancel', 'modify'].includes(method) && roundCurrency(credited, docCurr) > 0) {
+    throw new Error('Full refund and modify require an invoice with no existing credit notes');
   }
   const date = opts.date ?? opts.invoice_date ?? today();
   if (!validDate(date)) {
@@ -1742,7 +1783,7 @@ function registerPayment(db, r, values = {}) {
   if (!validDate(date)) throw new Error('Enter a valid payment date');
   if (!journalIdVal) throw new Error('Select a payment journal');
   const payment = paymentJournal(db, journalIdVal, r.company_id ?? 1);
-  const methodError = paymentMethodLineError(db, { journal_id: payment.id, payment_type: isInbound(r) ? 'inbound' : 'outbound', payment_method_line_id: values.payment_method_line_id });
+  const methodError = paymentMethodLineError(db, { journal_id: payment.id, payment_type: isInbound(r) ? 'inbound' : 'outbound', payment_method_line_id: values.payment_method_line_id }, { requireActive: true });
   if (methodError) throw new Error(methodError);
   const memo = values.memo !== undefined ? values.memo : invoicePaymentMemo(r);
 
@@ -1891,6 +1932,11 @@ const {
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
 
+const invoiceLineProductDomain = (product, line) => {
+  if (product.active === false) return false;
+  return isPurchase(line) ? product.purchase_ok !== false : product.sale_ok !== false;
+};
+
 const invoiceLineTaxDomain = (tax, line, db) => {
   if (tax.active === false) return false;
   const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
@@ -1971,7 +2017,7 @@ const invoiceLineField = {
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
     source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true },
-    product_id: invoiceLineProduct,
+    product_id: { ...invoiceLineProduct, domain: invoiceLineProductDomain },
     name: { type: 'char', label: 'Label' },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
     analytic_account_id: { ...invoiceLineAnalytic, hidden: true },
@@ -2711,12 +2757,27 @@ const registerPaymentsListAction = {
     const companyId = docs[0].company_id ?? 1;
     const journalId = defaultPaymentJournalId(db, companyId);
     const direction = isInbound(docs[0]) ? 'inbound' : 'outbound';
-    const singlePayment = (vals) => paymentDocumentGroups(db, docs, vals?.group_payment !== false).size === 1;
+    const singleGroup = (vals) => {
+      const groups = paymentDocumentGroups(db, docs, vals?.group_payment !== false);
+      return groups.size === 1 ? groups.values().next().value : null;
+    };
+    const singlePayment = (vals) => Boolean(singleGroup(vals));
+    const defaultAmount = (vals) => {
+      const group = singleGroup(vals);
+      return group ? String(groupPaymentRequirement(db, group, vals?.date || today()).totalCashAmount) : '';
+    };
     return {
       title: 'Register Payment',
       fields: [
         ...(docs.length > 1 ? [{ name: 'group_payment', type: 'boolean', label: 'Group Payments', default: true }] : []),
-        { name: 'amount', type: 'monetary', label: 'Payment Amount', default: String(paymentDocumentsNetAmount(db, docs, today())), readonly: (vals) => !singlePayment(vals) },
+        {
+          name: 'amount',
+          type: 'monetary',
+          label: 'Payment Amount',
+          default: defaultAmount({ group_payment: true }),
+          readonly: (vals) => !singlePayment(vals),
+          invisible: (vals) => !singlePayment(vals),
+        },
         { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
         {
           name: 'journal_id',
@@ -2732,7 +2793,7 @@ const registerPaymentsListAction = {
       ],
       onchange: (vals, key) => {
         if (key === 'journal_id') return { payment_method_line_id: defaultPaymentMethodLineId(db, vals.journal_id, direction) };
-        if (key === 'date') return { amount: String(paymentDocumentsNetAmount(db, docs, vals.date || today())) };
+        if (key === 'date' || key === 'group_payment') return { amount: defaultAmount(vals) };
         return {};
       },
     };
@@ -3480,7 +3541,7 @@ export const accountingModels = {
         const isEligibleVendorBank = (b) => b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1)) && sameCommercialPartner(db, b.partner_id, r.partner_id);
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const eligibleBanks = partnerChange && isPurchase(r) ? search(db, 'res.partner.bank').filter(isEligibleVendorBank).sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment))) : [];
-        const partnerBank = selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
+        const partnerBank = isInbound(r) ? (selectedBank && recipientBankDomain(selectedBank, r, db) ? selectedBank.id : null) : selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
           ? selectedBank.id : (eligibleBanks[0]?.id ?? null);
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
         const nextContext = { ...r, ...fiscal, journal_id: journal };
@@ -3516,6 +3577,7 @@ export const accountingModels = {
           : {};
         return {
           ...fiscal,
+          ...(key === 'company_id' && !r.id ? invoiceCompanyDefaults(db, r, previous, context) : {}),
           ...(partnerChange && isPurchase(r) ? { partner_bank_id: partnerBank } : {}),
           ...linesUpdate,
           ...(partnerChange ? {
@@ -3628,7 +3690,12 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
+      partner_bank_id: {
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        domain: recipientBankDomain,
+      },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
@@ -3770,7 +3837,14 @@ export const accountingModels = {
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
-    menuActions: [{ label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) }],
+    menuActions: [
+      { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+      {
+        label: 'Proforma Invoice',
+        when: (r) => r.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r.move_type),
+        run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=proforma` }),
+      },
+    ],
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
@@ -3781,6 +3855,7 @@ export const accountingModels = {
           ? resolveDocumentJournal(db, { move_type: moveType, company_id: companyId })?.id ?? null
           : null;
         return {
+          ...invoiceCompanyDefaults(db, { ...vals, move_type: moveType, company_id: companyId }),
           ...(salesperson ? { invoice_user_id: salesperson } : {}),
           ...(defaultJournal ? { journal_id: defaultJournal } : {}),
         };

@@ -328,8 +328,21 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   const id = rawId === undefined ? null : Number(rawId);
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 
+  // Strip derived res.partner.bank upserts produced by res.bank onWrite so applyDiff validates the bank change
+  // first and then synchronizes linked partner bank accounts across all companies.
+  const bankDiffOnly = (diff) => {
+    const { 'res.partner.bank': _upserts, ...upserts } = diff.upserts;
+    const { 'res.partner.bank': _bases, ...bases } = diff.bases;
+    const { 'res.partner.bank': _created, ...created } = diff.created;
+    const messages = diff.messages.filter((m) => m.model !== 'res.partner.bank');
+    return { ...diff, upserts, bases, created, messages };
+  };
   // Writes go through the same validation as the web client (applyDiff strips undeclared fields).
-  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, readOnly, login: user.login, companies }) });
+  const commit = (next) => {
+    const rawDiff = diffDb(db, next);
+    const diff = model === 'res.bank' ? bankDiffOnly(rawDiff) : rawDiff;
+    return { db: applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed, readOnly, login: user.login, companies }) };
+  };
   const visible = (r) => r && visibleTo(companies, model, r, db);
   // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;

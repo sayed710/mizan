@@ -87,7 +87,7 @@ const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
   'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'res.country.group']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
-const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
+const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
 /** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
 const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
@@ -290,7 +290,8 @@ const CONTROL_FIELDS = [
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
-  'transfer_account_id',
+  'transfer_account_id', 'account_check_printing_layout',
+  'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
 
 /**
@@ -305,6 +306,7 @@ function returnLockChange(db, companyId, from, to) {
 }
 
 function companyGuard(db, before, r, ctx) {
+  if (r.account_check_printing_layout != null && r.account_check_printing_layout !== '' && !['none', 'top', 'middle', 'bottom'].includes(r.account_check_printing_layout)) return 'Select a valid check layout';
   for (const field of LOCK_DATE_FIELDS) {
     if (r[field] != null && r[field] !== '' && !validDate(r[field])) return `${companyModels['res.company'].fields[field].label} must be a valid date`;
   }
@@ -354,6 +356,12 @@ function companyGuard(db, before, r, ctx) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  if (r.incoterm_id) {
+    const incoterm = record(db, 'account.incoterm', r.incoterm_id);
+    if (!incoterm) return 'Select an active incoterm';
+    const incotermChanged = !before || (before.incoterm_id ?? null) !== (r.incoterm_id ?? null);
+    if (incotermChanged && incoterm.active === false) return 'Select an active incoterm';
+  }
   const countryChanged = before && (r.country ?? '') !== (before.country ?? '');
   const currencyChanged = before && (r.currency_id ?? null) !== (before.currency_id ?? null);
   if (countryChanged || currencyChanged) {
@@ -716,7 +724,20 @@ export const companyModels = {
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
+      use_invoice_terms: { type: 'boolean', label: 'Default Terms & Conditions' },
+      invoice_terms: { type: 'text', label: 'Terms and Conditions' },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Default Incoterm', domain: (r) => r.active !== false },
       invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
+      account_check_printing_layout: {
+        type: 'selection',
+        label: 'Check Layout',
+        options: [
+          ['none', 'None'],
+          ['top', 'Check on top'],
+          ['middle', 'Check in middle'],
+          ['bottom', 'Check in bottom'],
+        ],
+      },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       gain_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Gain Account' },
       loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Loss Account' },
