@@ -58,7 +58,14 @@ test('Accounting Settings renders Odoo block order with descriptions, currency l
     assert.equal(h2?.textContent, 'Accounting');
 
     const blocks = collect(accountingSection, (n) => props(n)?.['data-block']);
-assert.deepEqual(      blocks.map((b) => props(b)['data-block']),      ['taxes', 'currencies', 'customer_invoices', 'customer_payments', 'vendor_bills', 'quick_encoding', 'fiscal_periods', 'deferred_revenues', 'deferred_expenses', 'storno'],    );    assert.deepEqual(      blocks.map((b) => find(b, (n) => n.tagName === 'H3')?.textContent),      ['Taxes', 'Currencies', 'Customer Invoices', 'Customer Payments', 'Vendor Bills', 'Quick encoding', 'Fiscal Periods', 'Deferred Revenues', 'Deferred Expenses', 'Storno Accounting'],    );
+    assert.deepEqual(
+      blocks.map((b) => props(b)['data-block']),
+      ['taxes', 'currencies', 'customer_invoices', 'customer_payments', 'vendor_bills', 'quick_encoding', 'fiscal_periods', 'deferred_revenues', 'deferred_expenses', 'storno'],
+    );
+    assert.deepEqual(
+      blocks.map((b) => find(b, (n) => n.tagName === 'H3')?.textContent),
+      ['Taxes', 'Currencies', 'Customer Invoices', 'Customer Payments', 'Vendor Bills', 'Quick encoding', 'Fiscal Periods', 'Deferred Revenues', 'Deferred Expenses', 'Storno Accounting'],
+    );
 
     const rows = collect(accountingSection, (n) => props(n)?.['data-setting']);
     assert.ok(rows.length >= 16);
