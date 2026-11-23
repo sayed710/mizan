@@ -4,7 +4,7 @@ import { monthFilters, shiftMonth, today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
-import { payMove, settleWriteoff } from './accounting.js';
+import { markAsReviewed, payMove, settleWriteoff } from './accounting.js';
 import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { roundStatementAmount } from './bankstatement.js';
@@ -54,7 +54,7 @@ export function bookBankMovement(db, line, company, { date, openAmount }) {
   const via = paymentJournal(db, line.journal_id, company);
   const incoming = line.amount > 0;
   const amount = statementCompanyAmount(db, line);
-  const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
+  const currency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(db, company)?.id;
   const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * Math.abs(line.amount) } : {};
   const booked = postEntry(db, { journal: via.code, journal_id: line.journal_id, date, ref: line.payment_ref, company,
@@ -128,7 +128,7 @@ export function reconcileWith(db, line, moveId) {
   const step = Number(docCurrency?.rounding ?? 0.01);
   const available = round(line.open_amount ?? statementCompanyAmount(db, line));
   const rate = rateAt(db, move.currency_id, date, company);
-  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const journalCurrency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   const total = bookedStatementAmount(db, line);
   const foreignOpen = docRound(Math.abs(line.amount) * available / total);
   const sameCurrency = journalCurrency === (move.currency_id ?? companyCurrencyRecord(db, company)?.id);
@@ -156,7 +156,7 @@ export function reconcileWith(db, line, moveId) {
   let current = db;
   let bankMoveId = line.bank_move_id;
   let suspense = null;
-  const bankCurrency = read(db, 'account.journal', line.journal_id)?.currency_id;
+  const bankCurrency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id;
   if (bankMoveId || remaining > 0 || (bankCurrency && bankCurrency !== companyCurrencyRecord(db, company)?.id)) {
     const bookedBank = bookBankMovement(db, line, company, { date, openAmount: available });
     current = bookedBank.db;
@@ -558,7 +558,7 @@ export function bookToAccount(db, line, opts = {}) {
     bankMoveId = bookedBank.bankMoveId;
   }
   const liquidity = bankMoveId ? ensureBankSuspense(current, line.company_id ?? 1, line.journal_id).id : via.accountId;
-  const currency = read(current, 'account.journal', line.journal_id)?.currency_id;
+  const currency = line.currency_id ?? read(current, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(current, line.company_id)?.id;
   const foreignValue = foreign
     ? (requested === open && line.open_amount == null
@@ -1087,11 +1087,22 @@ export const bankModels = {
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
     defaults: () => ({ sequence: 10, date: today(), state: 'to_check' }),
-    createDefaults: (db, vals) => ({ currency_id: read(db, 'account.journal', vals.journal_id)?.currency_id ?? companyCurrencyRecord(db, vals.company_id)?.id ?? null }),
+    createDefaults: (db, vals = {}) => {
+      const journal = vals.journal_id ? read(db, 'account.journal', vals.journal_id) : null;
+      const companyId = vals.company_id ?? journal?.company_id ?? 1;
+      return {
+        company_id: companyId,
+        currency_id: journal?.currency_id ?? companyCurrencyRecord(db, companyId)?.id ?? null,
+      };
+    },
     onchange: (r, key, db) => {
       if (key !== 'journal_id') return {};
       const journal = read(db, 'account.journal', r.journal_id);
-      return { currency_id: journal?.currency_id ?? companyCurrencyRecord(db, journal?.company_id ?? r.company_id)?.id ?? null };
+      const companyId = journal?.company_id ?? r.company_id ?? 1;
+      return {
+        company_id: companyId,
+        currency_id: journal?.currency_id ?? companyCurrencyRecord(db, companyId)?.id ?? null,
+      };
     },
     sort: statementLineOrder,
     // The handle orders transactions of the same day; the date always comes first.
@@ -1114,9 +1125,23 @@ export const bankModels = {
       [{ id: 'unassigned', label: 'Without a Journal', fn: isStatementLineWithoutJournal }],
     ],
     groupBys: ['currency_id', 'company_id', 'journal_id', 'date'],
-    kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'] },
+    // Odoo's bank transaction kanban is not drag-editable: moving a card must not rewrite its journal or state.
+    kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'], noDrop: true },
     list: ['sequence', 'date', 'payment_ref', 'partner_id', 'amount', 'journal_id', 'running_balance', 'bank_move_id', 'account_number', 'narration', 'ref', 'transaction_type', 'state'],
     listLabels: { journal_id: 'Journal', bank_move_id: 'Journal Entry' },
+    listActions: [
+      {
+        label: 'Mark as reviewed',
+        requiresSelection: true,
+        run: (db, ids) => {
+          const moveIds = ids
+            .map((id) => read(db, 'account.bank.statement.line', id)?.bank_move_id)
+            .filter((moveId) => moveId && read(db, 'account.move', moveId)?.to_check);
+          if (!moveIds.length) throw new Error('The selected transactions have no journal entry to review');
+          return markAsReviewed(db, moveIds);
+        },
+      },
+    ],
     listDecoration: (r) => (r.state === 'to_check' ? 'info' : null),
     views: ['list', 'kanban'],
     form: {
@@ -1124,6 +1149,7 @@ export const bankModels = {
       lockedWhen: (r) => r.state === 'reconciled',
       buttons: [
         { label: 'Unreconcile', when: (r) => r.state === 'reconciled' || Boolean(r.bank_move_id), run: unreconcile },
+        { label: 'Mark as reviewed', when: (r, db) => Boolean(read(db, 'account.move', r?.bank_move_id)?.to_check), run: (db, r) => ({ db: markAsReviewed(db, r.bank_move_id) }) },
         { label: 'Reconcile', primary: true, when: (r) => r.state === 'to_check' && !r.move_id, run: autoReconcile },
         { label: 'Match Payment', primary: true, when: (r) => r.state === 'to_check' && (r.payment_id || (r.payment_ids ?? []).length || r.batch_payment_id), run: matchPayment },
         { label: 'Match', primary: true, when: (r) => r.state === 'to_check' && r.move_id, run: (db, r) => ({ db: reconcileWith(db, r, r.move_id) }) },

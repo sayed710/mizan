@@ -967,10 +967,10 @@ export function outstandingAccount(db, journal, company, inbound, methodLine = n
   return id;
 }
 
-/** Statement amounts use the journal currency; open allocations use company currency. */
+/** Statement amounts use the line's recorded currency or the journal currency; open allocations use company currency. */
 export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
   const company = line.company_id ?? 1;
-  const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const currency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
 
@@ -1588,7 +1588,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       }));
     });
   if (reviewMode !== 'unreconciled') return rows;
-  return rows.filter((line) => isReconcilableAccount(read(db, 'account.account', line.account_id)) && line.reconciled !== true);
+  return rows.filter((line) => isReconcilableAccount(read(db, 'account.account', line.account_id)) && (line.amount_residual == null || Math.abs(line.amount_residual) > 1e-9));
 }
 
 /** Balance per account (debit − credit) over the given items. */

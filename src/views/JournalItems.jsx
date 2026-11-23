@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
 import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, matchedMoveIds } from '../models/ledger.js';
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
@@ -13,6 +13,10 @@ import { money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
 import { downloadXlsx } from '../xlsx.js';
+import { downloadCsv } from '../csv.js';
+import { ReportPrintView } from './FinancialReportPrint.jsx';
+import { currentCompany, documentCompany } from '../models/company.js';
+import { markAsReviewed } from '../models/accounting.js';
 
 const OPTIONAL_STORAGE_KEY = 'mizan-report-cols:journalItems';
 
@@ -93,7 +97,7 @@ const ITEM_FILTER_GROUPS = [
   monthFilters('invoice_date', 'Invoice Date'),
 ];
 
-const defaultFiltersForMode = (mode) => (mode === 'draft' ? ['unposted'] : mode === 'unreconciled' ? ['posted', 'unreconciled'] : ['posted']);
+const defaultFiltersForMode = (mode) => (mode === 'draft' ? ['unposted'] : mode === 'unreconciled' ? ['posted', 'unreconciled'] : mode === 'to_check' ? ['to_check'] : ['posted']);
 
 function formatMonthLabel(monthKey) {
   if (!monthKey) return t('Undefined');
@@ -186,7 +190,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [query, setQuery] = useState('');
-  const [group, setGroup] = useState('');
+  const [group, setGroup] = useState(() => (leaf.groupBy?.[0] ? leaf.groupBy[0].replace('_id', '') : (mode === 'to_check' ? 'journal' : '')));
   const [activeFilters, setActiveFilters] = useState(() => defaultFiltersForMode(mode));
   const [optionalState, isVisible, toggleCol] = useOptionalColumns(OPTIONAL_STORAGE_KEY);
   const [selected, setSelected] = useState([]);
@@ -198,6 +202,9 @@ export function JournalItems({ leaf = {} } = {}) {
   const [label, setLabel] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const tableRef = useRef(null);
+
   const keyOf = (line) => JSON.stringify([line.move_id, line.line_identity]);
   const toggleFilter = (id) => setActiveFilters((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const run = async (event) => {
@@ -221,9 +228,28 @@ export function JournalItems({ leaf = {} } = {}) {
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
+
+  const handleMarkReviewed = async () => {
+    setError('');
+    setBusy(true);
+    try {
+      const moveIds = [...new Set(selected.map((s) => s.move_id).filter(Boolean))];
+      let nextDb = getDb();
+      if (moveIds.length) nextDb = markAsReviewed(nextDb, moveIds);
+      const res = await commit(nextDb);
+      if (res.ok) setSelected([]);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const name = (model, id) => read(db, model, id)?.name ?? '';
   const names = (model, ids) => ids.map((id) => name(model, id)).filter(Boolean).join(', ');
-  const title = mode === 'unreconciled' ? 'Unreconciled' : mode === 'draft' ? 'Draft Entries' : 'Journal Items';
+  const title = mode === 'unreconciled' ? 'Unreconciled' : mode === 'draft' ? 'Draft Entries' : mode === 'to_check' ? 'To Check' : 'Journal Items';
+  const baseName = mode === 'unreconciled' ? 'unreconciled' : mode === 'draft' ? 'draft_entries' : mode === 'to_check' ? 'to_check' : 'journal_items';
+
   // The account form's Balance button opens this report scoped to that account (#/...?account=ID),
   // and Reconciled items smart button scopes it to the matched reconciliation set (#/...?reconciled_of=ID).
   const hashParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
@@ -278,11 +304,12 @@ export function JournalItems({ leaf = {} } = {}) {
         balance: (Number(line.debit) || 0) - (Number(line.credit) || 0),
       };
     });
+
   const activeGroups = ITEM_FILTER_GROUPS
     .map((g) => g.filter((f) => activeFilters.includes(f.id)))
     .filter((g) => g.length);
   const rows = enriched
-    .filter((line) => activeGroups.every((g) => g.some((f) => f.fn(line))))
+    .filter((line) => activeGroups.every((g) => g.some((f) => mode === 'unreconciled' && f.id === 'unreconciled' ? isReconcilableAccount(line._account) && (line.amount_residual == null || Math.abs(line.amount_residual) > 1e-9) : f.fn(line))))
     .filter((line) => matchesItemSearch(line, query));
 
   const groups = new Map();
@@ -313,7 +340,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const totalBalance = roundCurrency(totalDebit - totalCredit, sumCurrency);
   const totalResidual = sumField(rows, 'amount_residual');
   const todayDate = today();
-  const selectableRows = rows.filter((line) => line.move_state !== 'draft');
+  const selectableRows = mode === 'draft' ? [] : (mode === 'to_check' ? rows : rows.filter((line) => line.move_state !== 'draft'));
   const visibleKeys = new Set(selectableRows.map(keyOf));
   const selectedKeys = new Set(selected.map(keyOf));
   const allSelected = selectableRows.length > 0 && selectableRows.every((line) => selectedKeys.has(keyOf(line)));
@@ -353,8 +380,8 @@ export function JournalItems({ leaf = {} } = {}) {
 
   const renderCell = (line, col) => {
     switch (col.key) {
-      case 'move_id': return <a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a>;
-      case 'status': return line.status ? <span className={`badge badge-${stateField.badge[line.move_state]}`}>{t(line.status)}</span> : '';
+      case 'move_id': return line.move_id ? <a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a> : line.move_name;
+      case 'status': return line.status ? <span className={`badge badge-${stateField.badge[line.move_state] ?? 'info'}`}>{t(line.status)}</span> : '';
       case 'amount_currency': return line._isForeign && line.amount_currency != null ? money(line.amount_currency, null, line._currency) : '';
       case 'debit': return money(line.debit || 0, null, line._companyCurrency);
       case 'credit': return money(line.credit || 0, null, line._companyCurrency);
@@ -366,9 +393,8 @@ export function JournalItems({ leaf = {} } = {}) {
     }
   };
 
-  const exportXlsx = () => {
+  const buildExportRows = () => {
     const displayedRows = [...groups.values()].flat();
-    const baseName = mode === 'unreconciled' ? 'unreconciled' : mode === 'draft' ? 'draft_entries' : 'journal_items';
     let exportCols = [...visibleCols];
     const needCompanyCurrency = multiCompany || new Set(displayedRows.map((l) => l._companyCurrency?.name).filter(Boolean)).size > 1;
     if (needCompanyCurrency && !exportCols.some((c) => c.key === 'company_currency_id')) {
@@ -403,6 +429,16 @@ export function JournalItems({ leaf = {} } = {}) {
       exportRows.push(totalsRow);
     }
 
+    return { exportCols, exportRows };
+  };
+
+  const exportCsv = () => {
+    const { exportRows } = buildExportRows();
+    downloadCsv(`${baseName}.csv`, exportRows);
+  };
+
+  const exportXlsx = () => {
+    const { exportCols, exportRows } = buildExportRows();
     downloadXlsx(
       `${baseName}.xlsx`,
       exportRows,
@@ -413,63 +449,92 @@ export function JournalItems({ leaf = {} } = {}) {
     );
   };
 
-  return <main className="action report-page">
-    <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
-      {accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
-      {journalFilter && <span className="facet">{t('Journal')}: {read(db, 'account.journal', journalFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
-      <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
-      <label>{t('To')} <input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-      <label>{t('Search')} <input aria-label={t('Search')} placeholder={t('Journal Item')} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
-      <label>{t('Group By')} <select aria-label={t('Group By')} value={group} onChange={(e) => setGroup(e.target.value)}>
-        <option value="">{t('None')}</option>{GROUP_OPTIONS.map((opt) => <option key={opt.key} value={opt.key}>{t(opt.label)}</option>)}
-      </select></label>
-      <span className="spacer" />
-      <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
-    </div>
-    <div className="control-panel" role="group" aria-label={t('Filters')}>
-      {ITEM_FILTER_GROUPS.map((grp, gi) => <Fragment key={gi}>
-        {gi > 0 && <span className="filter-sep" aria-hidden="true">|</span>}
-        {grp.map((f) => <button key={f.id} type="button" className={`btn sm${activeFilters.includes(f.id) ? ' active' : ''}`} aria-pressed={activeFilters.includes(f.id)} onClick={() => toggleFilter(f.id)}>{t(f.label)}</button>)}
-      </Fragment>)}
-    </div>
-    {mode !== 'draft' && <div className="control-panel">
-      <span>{t('{n} selected', { n: selected.length })}</span>
-      {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off'].map((btn) => <button type="button" className="btn" key={btn} disabled={!selected.length || busy} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>)}
-    </div>}
-    {action && <form onSubmit={run} className="control-panel" aria-label={t(action)}>
-      <h2>{t(action)}</h2>
-      {action === 'Unreconcile' && <p>{t('This removes the matching: payments stay posted with their credit available again, and GL entries (including write-offs created by Reconcile with write-off) stay posted with their open balance restored. Standalone Write Off entries and direct bank matches are reversed on the selected date.')}</p>}
-      <label>{t('Date')} <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
-      {(action === 'Reconcile' || action === 'Write Off') && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
-      {(action === 'Write Off' || action === 'Reconcile with write-off') && <>
-        <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => action === 'Write Off' ? isLiquidityJournal(j) : (j.active !== false && ['general', 'bank', 'cash', 'credit'].includes(j.type))).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
-        <label>{t('Write-off Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => a.active !== false && !a.deprecated && !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
-        <label>{t('Write-off Label')} <input required value={label} onChange={(e) => setLabel(e.target.value)} /></label>
-      </>}
-      <button className="btn primary" disabled={busy}>{t('Confirm')}</button><button type="button" className="btn" disabled={busy} onClick={() => setAction('')}>{t('Cancel')}</button>
-      {error && <p role="alert">{t(error)}</p>}
-    </form>}
-    <div className="list-wrap"><table className="list report"><thead><tr><th><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
-      <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
-        {group && <tr className="group-row"><th /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th /></tr>}
-        {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
-          <td><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={line.move_state === 'draft' || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
-          {visibleCols.map((col) => <td key={col.key} className={cellClassName(col, line, todayDate)}>{renderCell(line, col)}</td>)}
-          <td className="o2m-cols-td" />
-        </tr>)}
-      </Fragment>)}</tbody>
-      {rows.length > 0 && <tfoot><tr>
-        <td />
-        {visibleCols.map((col) => {
-          const sumValue = col.key === 'debit' ? totalDebit : col.key === 'credit' ? totalCredit : col.key === 'balance' ? totalBalance : col.key === 'amount_residual' ? totalResidual : null;
-          const tip = col.numeric && unratedLines ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedLines }) : (col.sum ? t(col.sum) : undefined);
-          return <td key={col.key} className={col.numeric ? 'num' : undefined} title={tip} aria-label={col.sum ? t(col.sum) : undefined}>
-            {sumValue != null ? money(sumValue, null, sumCurrency) : ''}
-            {col.key === 'debit' && <RateNote count={unratedLines} />}
-          </td>;
-        })}
-        <td className="o2m-cols-td" />
-      </tr></tfoot>}
-    </table></div>
-  </main>;
+  const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  const actualCompanyIds = [...new Set(rows.map((l) => l.company_id).filter(Boolean))];
+  const printCompanies = filterCompany
+    ? null
+    : (multiCompany
+      ? (actualCompanyIds.length > 0 ? actualCompanyIds : allowedIds).map((cId) => documentCompany(db, { company_id: cId })).filter(Boolean)
+      : null);
+  const printCompany = isPrinting
+    ? documentCompany(db, { company_id: filterCompany ?? actualCompanyIds[0] ?? currentCompany(db) })
+    : null;
+
+  const controls = (
+    <>
+      <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
+        {accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
+        {journalFilter && <span className="facet">{t('Journal')}: {read(db, 'account.journal', journalFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
+        <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+        <label>{t('To')} <input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+        <label>{t('Search')} <input aria-label={t('Search')} placeholder={t('Journal Item')} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
+        <label>{t('Group By')} <select aria-label={t('Group By')} value={group} onChange={(e) => setGroup(e.target.value)}>
+          <option value="">{t('None')}</option>{GROUP_OPTIONS.map((opt) => <option key={opt.key} value={opt.key}>{t(opt.label)}</option>)}
+        </select></label>
+        <span className="spacer" />
+        <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+        <button type="button" className="btn sm" onClick={exportCsv}>{t('Export CSV')}</button>
+        <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
+      </div>
+      <div className="control-panel" role="group" aria-label={t('Filters')}>
+        {ITEM_FILTER_GROUPS.map((grp, gi) => <Fragment key={gi}>
+          {gi > 0 && <span className="filter-sep" aria-hidden="true">|</span>}
+          {grp.map((f) => <button key={f.id} type="button" className={`btn sm${activeFilters.includes(f.id) ? ' active' : ''}`} aria-pressed={activeFilters.includes(f.id)} onClick={() => toggleFilter(f.id)}>{t(f.label)}</button>)}
+        </Fragment>)}
+      </div>
+      {mode !== 'draft' && <div className="control-panel">
+        <span>{t('{n} selected', { n: selected.length })}</span>
+        <button type="button" className="btn" disabled={!selected.length || busy} onClick={handleMarkReviewed}>{t('Mark as reviewed')}</button>
+        {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off'].map((btn) => <button type="button" className="btn" key={btn} disabled={!selected.length || busy} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>)}
+      </div>}
+      {action && <form onSubmit={run} className="control-panel" aria-label={t(action)}>
+        <h2>{t(action)}</h2>
+        {action === 'Unreconcile' && <p>{t('This removes the matching: payments stay posted with their credit available again, and GL entries (including write-offs created by Reconcile with write-off) stay posted with their open balance restored. Standalone Write Off entries and direct bank matches are reversed on the selected date.')}</p>}
+        <label>{t('Date')} <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+        {(action === 'Reconcile' || action === 'Write Off') && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
+        {(action === 'Write Off' || action === 'Reconcile with write-off') && <>
+          <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => action === 'Write Off' ? isLiquidityJournal(j) : (j.active !== false && ['general', 'bank', 'cash', 'credit'].includes(j.type))).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
+          <label>{t('Write-off Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => a.active !== false && !a.deprecated && !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
+          <label>{t('Write-off Label')} <input required value={label} onChange={(e) => setLabel(e.target.value)} /></label>
+        </>}
+        <button className="btn primary" disabled={busy}>{t('Confirm')}</button><button type="button" className="btn" disabled={busy} onClick={() => setAction('')}>{t('Cancel')}</button>
+        {error && <p role="alert">{t(error)}</p>}
+      </form>}
+    </>
+  );
+
+  return (
+    <ReportPrintView
+      active={isPrinting}
+      company={printCompany}
+      companies={printCompanies}
+      title={t(title)}
+      subtitle={from || to ? `${from || '...'} → ${to || '...'}` : ''}
+      controls={controls}
+      onBack={() => setIsPrinting(false)}
+    >
+      <div className="list-wrap"><table className="list report" ref={tableRef}><thead><tr><th className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th no-print"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
+        <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
+          {group && <tr className="group-row"><th className={isPrinting ? 'no-print' : undefined} /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th className="no-print" /></tr>}
+          {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
+            <td className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={(line.move_state === 'draft' && mode !== 'to_check') || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
+            {visibleCols.map((col) => <td key={col.key} className={cellClassName(col, line, todayDate)}>{renderCell(line, col)}</td>)}
+            <td className="o2m-cols-td no-print" />
+          </tr>)}
+        </Fragment>)}</tbody>
+        {rows.length > 0 && <tfoot><tr>
+          <td className={isPrinting ? 'no-print' : undefined} />
+          {visibleCols.map((col) => {
+            const sumValue = col.key === 'debit' ? totalDebit : col.key === 'credit' ? totalCredit : col.key === 'balance' ? totalBalance : col.key === 'amount_residual' ? totalResidual : null;
+            const tip = col.numeric && unratedLines ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedLines }) : (col.sum ? t(col.sum) : undefined);
+            return <td key={col.key} className={col.numeric ? 'num' : undefined} title={tip} aria-label={col.sum ? t(col.sum) : undefined}>
+              {sumValue != null ? money(sumValue, null, sumCurrency) : ''}
+              {col.key === 'debit' && <RateNote count={unratedLines} />}
+            </td>;
+          })}
+          <td className="o2m-cols-td no-print" />
+        </tr></tfoot>}
+      </table></div>
+    </ReportPrintView>
+  );
 }

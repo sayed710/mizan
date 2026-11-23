@@ -2690,6 +2690,13 @@ function moveActivities(r, db) {
 
 const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.journal', r.journal_id)?.type ?? null : null);
 
+/** Mark the selected journal entries as reviewed. */
+export function markAsReviewed(db, moveIds) {
+  const ids = Array.isArray(moveIds) ? moveIds : [moveIds];
+  return ids.reduce((next, id) => read(next, 'account.move', id)?.to_check
+    ? write(next, 'account.move', id, { to_check: false }) : next, db);
+}
+
 export const journalEntriesView = {
   defaults: { move_type: 'entry' },
   list: ['accounting_date', 'display_name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
@@ -2702,6 +2709,11 @@ export const journalEntriesView = {
       requiresSelection: true,
       wizard: (db) => ({ title: 'Reverse Entries', fields: reversalWizardFields(null, db?.settings?.current_company_id ?? 1) }),
       run: (db, ids, values = {}) => reverseEntries(db, ids, values),
+    },
+    {
+      label: 'Mark as reviewed',
+      requiresSelection: true,
+      run: (db, ids) => markAsReviewed(db, ids),
     },
   ],
   filters: [
@@ -3097,6 +3109,12 @@ export const accountingModels = {
           const blockedOwner = companies.find((c) => c[field] === before.id && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id)));
           if (blockedOwner) {
             return `Clear the ${label} of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+          }
+        }
+        if ((before.currency_id ?? null) !== (after.currency_id ?? null)) {
+          const statementLines = (db.records['account.bank.statement.line'] ?? []).filter((l) => l.journal_id === before.id);
+          if (statementLines.some((l) => !l.currency_id || !read(db, 'res.currency', l.currency_id))) {
+            return 'Cannot change journal currency when existing transactions cannot be safely interpreted in their original currency';
           }
         }
       }
@@ -4299,6 +4317,7 @@ export const accountingModels = {
           },
         },
         { label: 'Lock', when: canLockEntry, run: (db, r) => ({ db: secureEntries(db, { throughMoveId: r.id }) }) },
+        { label: 'Mark as reviewed', when: (r) => Boolean(r?.to_check), run: (db, r) => ({ db: markAsReviewed(db, r.id) }) },
         { label: 'Cancel Entry', when: (r) => r.move_type === 'entry' && r.state === 'draft' && Boolean(r.id) && !r.inalterable_hash, run: cancelMove },
         { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, visible: (r) => isInvoice(r), run: cancelMove },
       ],
