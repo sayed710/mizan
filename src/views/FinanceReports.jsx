@@ -30,21 +30,27 @@ export function TrialBalance({ db, period, periods, companyId, analyticAccountId
   );
 }
 
-function FiscalCategoryRows({ row, money: fmtMoney = money }) {
+function FiscalCategoryRows({ rows, money: fmtMoney = money }) {
   const [open, setOpen] = useState(false);
+  const row = rows.find(Boolean);
   const name = row.category ? row.category.name : t('Uncategorized');
+  const accounts = new Map(rows.flatMap((group) => (group?.accounts ?? []).map((line) => [line.account.id, line.account])));
+  const accountsByPeriod = rows.map((group) => new Map((group?.accounts ?? []).map((line) => [line.account.id, line])));
+  const cells = (values) => values.flatMap((value, index) => ['debit', 'credit', 'balance'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>));
   return <>
-    <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} {name}</button></td>{num(row.debit, fmtMoney)}{num(row.credit, fmtMoney)}{num(row.balance, fmtMoney)}</tr>
-    {open && row.accounts.map((line) => <tr key={line.account.id} className="rep-detail"><td><a href={`#/open/account.account/${line.account.id}`}>{line.account.code} {line.account.name}</a></td>{num(line.debit, fmtMoney)}{num(line.credit, fmtMoney)}{num(line.balance, fmtMoney)}</tr>)}
+    <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} {name}</button></td>{cells(rows)}</tr>
+    {open && [...accounts.values()].map((account) => <tr key={account.id} className="rep-detail"><td><a href={`#/open/account.account/${account.id}`}>{account.code} {account.name}</a></td>{cells(accountsByPeriod.map((byAccount) => byAccount.get(account.id)))}</tr>)}
   </>;
 }
 
-export function FiscalReport({ db, period, analyticAccountIds, money: moneyProp }) {
+export function FiscalReport({ db, period, periods, analyticAccountIds, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
-  const { rows, totals } = fiscalReport(db, { ...period, analyticAccountIds });
+  const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period.reviewMode, company_id: period.company_id, analyticAccountIds }));
+  const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
+  const groups = new Map(reports.flatMap((report) => report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   return <tbody>
-    {rows.map((row) => <FiscalCategoryRows key={row.category?.id ?? 'uncategorized'} row={row} money={fmtMoney} />)}
-    <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.debit, fmtMoney)}{num(totals.credit, fmtMoney)}{num(totals.balance, fmtMoney)}</tr>
+    {[...groups.keys()].map((id) => <FiscalCategoryRows key={id} rows={rowsByReport.map((byCategory) => byCategory.get(id))} money={fmtMoney} />)}
+    <tr className="rep-total strong"><td>{t('Total')}</td>{reports.flatMap((report, index) => ['debit', 'credit', 'balance'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(report.totals[key])}</td>))}</tr>
   </tbody>;
 }
 

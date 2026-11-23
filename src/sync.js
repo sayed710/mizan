@@ -15,6 +15,7 @@ import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
 import { isProtectedAuditMessage } from './models/auditRules.js';
 import { syncJournalMethodLines, unlinkJournalMethodLines } from './models/paymentmethod.js';
+import { syncLinkedPartnerBanks } from './models/resbank.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
@@ -81,6 +82,23 @@ function generatedAssetMove(seen, original, move, changed) {
   return asset.state === expectedState;
 }
 
+function generatedAssetCancellationReversal(seen, original, move, changed) {
+  const source = (original.records['account.move'] ?? []).find((entry) => entry.id === move.reversed_entry_id);
+  if (!source || source.state !== 'posted' || (move.company_id ?? 1) !== (source.company_id ?? 1)) return false;
+  const links = (original.records['account.asset'] ?? []).flatMap((asset) => (asset.depreciation_ids ?? [])
+    .filter((line) => line.posted && line.move_id === source.id).map((line) => ({ asset, line })));
+  if (links.length !== 1) return false;
+  const { asset, line } = links[0];
+  if (asset.state !== 'open' || !depreciationMoveMatches(original, asset, line, source)
+    || !changed.some(([model, record]) => model === 'account.asset' && record.id === asset.id && record.state === 'cancel')) return false;
+  const signature = (entry, reverse = false) => JSON.stringify([
+    entry.account_id, Number(reverse ? entry.credit : entry.debit) || 0, Number(reverse ? entry.debit : entry.credit) || 0,
+    Object.entries(entry.analytic_distribution ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  ]);
+  return same((source.line_ids ?? []).map((entry) => signature(entry, true)).sort())
+    === same((move.line_ids ?? []).map((entry) => signature(entry)).sort());
+}
+
 /** Resolve both sides of a newly created revaluation pair through their explicit workflow links. */
 function generatedRevaluationMoves(seen, original, changed) {
   const allMoves = byId(seen.records['account.move']);
@@ -123,7 +141,8 @@ function generatedMoveOrigin(seen, original, move, changed, revaluationMoves) {
     changed.some(([model, record]) => model === 'account.fiscal.year' && record.id === year.id)
     && (year.closing_move_id === move.id || year.opening_move_id === move.id)
   ));
-  return fiscalOrigin || revaluationMoves.has(move.id) || generatedAssetMove(seen, original, move, changed);
+  return fiscalOrigin || revaluationMoves.has(move.id) || generatedAssetMove(seen, original, move, changed)
+    || generatedAssetCancellationReversal(seen, original, move, changed);
 }
 
 /** Fields the server keeps (computed and undeclared ones are dropped, so they never conflict). */
@@ -650,6 +669,21 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         if (submitted.fx_payment_move_id != null || submitted.fx_invoice_id != null) throw new Error('Exchange provenance cannot be changed');
       }
       if (model === 'account.move') {
+        if (!prior) {
+          if (submitted.digitized_document != null || submitted.digitized_vendor_id != null || submitted.digitized_unedited != null) {
+            throw new Error('Digitization provenance cannot be changed');
+          }
+        } else {
+          if ((submitted.digitized_document !== undefined && submitted.digitized_document !== prior.digitized_document) ||
+              (submitted.digitized_vendor_id !== undefined && submitted.digitized_vendor_id !== prior.digitized_vendor_id)) {
+            throw new Error('Digitization provenance cannot be changed');
+          }
+          if (submitted.digitized_unedited !== undefined && submitted.digitized_unedited !== prior.digitized_unedited) {
+            if (!(prior.digitized_unedited === true && submitted.digitized_unedited === false)) {
+              throw new Error('Digitization provenance cannot be changed');
+            }
+          }
+        }
         if (prior && submitted.system_generated !== undefined && submitted.system_generated !== prior.system_generated) {
           throw new Error('System-generated status cannot be changed');
         }
@@ -660,6 +694,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         : submitted;
       const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
       const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
+      if (model === 'account.move' && rec.state === 'draft' && rec.posting_order != null && (!submitted || submitted.posting_order === undefined)) delete rec.posting_order;
       if (companies) scopeNestedCompanyArrays(model, rec, companies, { prior, submitted, write: true });
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
@@ -737,7 +772,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const stripVolatiles = (val) => {
       if (val == null || typeof val !== 'object') return val;
       if (Array.isArray(val)) return val.map(stripVolatiles);
-      const { line_id: _ignoredLineId, payments: _ignoredPayments, amount_paid: _ignoredAmountPaid, payment_date: _ignoredPaymentDate, ...rest } = val;
+      const { line_id: _ignoredLineId, payments: _ignoredPayments, amount_paid: _ignoredAmountPaid, payment_date: _ignoredPaymentDate, posting_order: _ignoredPostingOrder, ...rest } = val;
       return Object.fromEntries(Object.keys(rest).filter((k) => rest[k] !== undefined).sort().map((k) => [k, stripVolatiles(rest[k])]));
     };
     if (JSON.stringify(stripVolatiles(expected)) !== JSON.stringify(stripVolatiles(actual))) {
@@ -809,6 +844,13 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     if (model === 'account.journal') {
       const submitted = submittedByRecord.get(`${model}:${rec.id}`);
       const nextDb = syncJournalMethodLines({ ...db, records, seq: stagedSeq }, rec, submitted, before);
+      records = nextDb.records;
+      stagedSeq = nextDb.seq;
+      seen.records = records;
+    }
+    if (model === 'res.bank') {
+      const nextDb = syncLinkedPartnerBanks({ ...db, records, seq: stagedSeq }, rec, before);
+      growth += json(nextDb.records['res.partner.bank']) - json(records['res.partner.bank']);
       records = nextDb.records;
       stagedSeq = nextDb.seq;
       seen.records = records;

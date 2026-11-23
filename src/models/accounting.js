@@ -4,7 +4,7 @@ import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, paymentDocuments, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
+import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
@@ -35,6 +35,8 @@ import {
   defaultPaymentMethodLineId,
   isMethodLineJournal,
   journalMethodLineGuard,
+  journalMethodLines,
+  paymentMethodLineError,
   METHOD_LINE_FIELDS,
   methodLineAccountDomain,
   methodLineOnchange,
@@ -247,6 +249,16 @@ export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
+const recipientBankDomain = (b, r, db) => {
+  if (b.active === false) return false;
+  const companyId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+  if (b.company_id && b.company_id !== companyId) return false;
+  if (isInbound(r)) {
+    const companyPartnerId = db ? read(db, 'res.company', companyId)?.partner_id : null;
+    return Boolean(b.partner_id && companyPartnerId && b.partner_id === companyPartnerId);
+  }
+  return !b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id);
+};
 export const residual = (r, db) => {
   if (!isInvoice(r)) return 0;
   let curr;
@@ -465,6 +477,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
   'to_check', // a review flag belongs to the reviewed entry only
+  'posting_order',
 ]);
 function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
@@ -687,6 +700,34 @@ export function postedInvoiceLines(db, move, name = move.name) {
   return { line_ids, resolvedLines, journalRecord, journal };
 }
 
+const digitizedFields = ['partner_id', 'ref', 'invoice_date', 'invoice_date_due', 'invoice_payment_term_id', 'fiscal_position_id', 'company_id', 'invoice_line_ids'];
+const digitizedChanged = (before, after) => digitizedFields.some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null));
+const digitizedPostingChanged = (before, after) => {
+  const fields = ['partner_id', 'ref', 'invoice_date'];
+  if (fields.some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return true;
+  if (before.invoice_date_due && before.invoice_date_due !== after.invoice_date_due && !before.invoice_payment_term_id) return true;
+  const projection = (line) => Object.fromEntries(['product_id', 'name', 'qty', 'price_unit', 'discount', 'tax'].map((key) => [key, line[key] ?? null]));
+  return JSON.stringify((before.invoice_line_ids ?? []).map(projection)) !== JSON.stringify((after.invoice_line_ids ?? []).map(projection));
+};
+export const nextPostingOrder = (db) => 1 + (db.records['account.move'] ?? []).reduce((max, m) => {
+  const o = Number(m.posting_order);
+  return Number.isFinite(o) && o > max ? o : max;
+}, 0);
+/** Whether this draft qualifies for the vendor auto-post suggestion. */
+export function suggestBillAutopost(db, bill) {
+  if (bill?.state !== 'draft' || bill.move_type !== 'in_invoice' || !bill.digitized_document || !bill.partner_id || bill.partner_id !== bill.digitized_vendor_id) return false;
+  if (!read(db, 'res.company', bill.company_id ?? 1)?.autopost_bills || (read(db, 'res.partner', bill.partner_id)?.autopost_bills ?? 'ask') !== 'ask') return false;
+  const postedBills = (db.records['account.move'] ?? []).filter((m) =>
+    m.id !== bill.id &&
+    m.state === 'posted' &&
+    m.move_type === 'in_invoice' &&
+    Boolean(m.digitized_document) &&
+    (m.partner_id === bill.partner_id || m.digitized_vendor_id === bill.partner_id) &&
+    (m.company_id ?? 1) === (bill.company_id ?? 1)
+  ).sort((a, b) => (Number(b.posting_order) || 0) - (Number(a.posting_order) || 0) || b.id - a.id);
+  return postedBills.length >= 3 && postedBills.slice(0, 3).every((m) => Boolean(m.digitized_unedited));
+}
+
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id, { autoPost = false } = {}) {
   let r = read(db, 'account.move', id);
@@ -832,7 +873,8 @@ export function postMove(db, id, { autoPost = false } = {}) {
     : (!r.payment_reference?.trim() && isPurchase(r) && r.ref?.trim()
         ? { payment_reference: r.ref.trim() }
         : {});
-  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -1506,8 +1548,8 @@ export function creditNote(db, r, options = {}) {
   const docCurr = documentCurrency(db, r);
   const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m, db), 0);
   if (roundCurrency(credited, docCurr) >= roundCurrency(total(r, db), docCurr)) throw new Error(`${r.name} is already fully credited`);
-  if (['cancel', 'modify'].includes(method) && (roundCurrency(credited, docCurr) > 0 || roundCurrency(Number(r.amount_paid) || 0, docCurr) > 0)) {
-    throw new Error('Full refund and modify require an unpaid invoice with no existing credit notes');
+  if (['cancel', 'modify'].includes(method) && roundCurrency(credited, docCurr) > 0) {
+    throw new Error('Full refund and modify require an invoice with no existing credit notes');
   }
   const date = opts.date ?? opts.invoice_date ?? today();
   if (!validDate(date)) {
@@ -1771,6 +1813,8 @@ function registerPayment(db, r, values = {}) {
   if (!validDate(date)) throw new Error('Enter a valid payment date');
   if (!journalIdVal) throw new Error('Select a payment journal');
   const payment = paymentJournal(db, journalIdVal, r.company_id ?? 1);
+  const methodError = paymentMethodLineError(db, { journal_id: payment.id, payment_type: isInbound(r) ? 'inbound' : 'outbound', payment_method_line_id: values.payment_method_line_id }, { requireActive: true });
+  if (methodError) throw new Error(methodError);
   const memo = values.memo !== undefined ? values.memo : invoicePaymentMemo(r);
 
   const isReconcile = values.payment_difference_handling === 'reconcile';
@@ -1783,6 +1827,7 @@ function registerPayment(db, r, values = {}) {
     memo,
     currencyId: payCurrencyId,
     partnerBankId: values.partner_bank_id ?? null,
+    paymentMethodLineId: values.payment_method_line_id,
     ...(values.settleAmount != null ? { settleAmount: values.settleAmount } : {}),
     ...(values.excessAmount != null ? { excessAmount: values.excessAmount } : {}),
   });
@@ -1917,6 +1962,11 @@ const {
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
 
+const invoiceLineProductDomain = (product, line) => {
+  if (product.active === false) return false;
+  return isPurchase(line) ? product.purchase_ok !== false : product.sale_ok !== false;
+};
+
 const invoiceLineTaxDomain = (tax, line, db) => {
   if (tax.active === false) return false;
   const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
@@ -1997,7 +2047,7 @@ const invoiceLineField = {
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
     source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true },
-    product_id: invoiceLineProduct,
+    product_id: { ...invoiceLineProduct, domain: invoiceLineProductDomain },
     name: { type: 'char', label: 'Label' },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
     analytic_account_id: { ...invoiceLineAnalytic, hidden: true },
@@ -2713,10 +2763,20 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
     { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
     { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
   ],
+  ...(!purchases ? [[
+    { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
+    { id: 'is_not_sent', label: 'Not Sent', fn: (r) => !r.is_move_sent },
+  ]] : []),
   monthFilters('invoice_date', 'Invoice Date'),
   ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
   monthFilters('invoice_date_due', 'Due Date'),
 ];
+
+const registerMethodField = (db, journalId, direction) => ({
+  name: 'payment_method_line_id', type: 'many2one', relation: 'account.payment.method.line', label: 'Payment Method',
+  default: defaultPaymentMethodLineId(db, journalId, direction),
+  domain: (line, values) => journalMethodLines(db, values?.journal_id, direction).some((candidate) => candidate.id === line.id),
+});
 
 /** List action: pay every selected invoice or bill at once, one payment per partner group or one per document. */
 const registerPaymentsListAction = {
@@ -2724,21 +2784,34 @@ const registerPaymentsListAction = {
   requiresSelection: true,
   wizard: (db, ids) => {
     const docs = paymentDocuments(db, ids);
-    const partnerGroups = new Map();
-    for (const doc of docs) {
-      const key = JSON.stringify([doc.partner_id, invoiceCounterpartAccount(db, doc), doc.currency_id ?? companyCurrencyRecord(db, doc.company_id)?.id ?? null, doc.partner_bank_id ?? null]);
-      partnerGroups.set(key, [...(partnerGroups.get(key) ?? []), doc]);
-    }
+    const partnerGroups = paymentDocumentGroups(db, docs);
     for (const group of partnerGroups.values()) {
-      const invTotal = group.filter((d) => !isRefund(d)).reduce((sum, d) => sum + Math.max(0, residual(d, db) - discountAvailable(db, d, today())), 0);
-      const noteTotal = group.filter((d) => isRefund(d)).reduce((sum, d) => sum + residual(d, db), 0);
-      if (!(invTotal - noteTotal > 0)) throw new Error('The net payment amount must be greater than zero');
+      if (!(paymentDocumentsNetAmount(db, group, today()) > 0)) throw new Error('The net payment amount must be greater than zero');
     }
     const companyId = docs[0].company_id ?? 1;
+    const journalId = defaultPaymentJournalId(db, companyId);
+    const direction = isInbound(docs[0]) ? 'inbound' : 'outbound';
+    const singleGroup = (vals) => {
+      const groups = paymentDocumentGroups(db, docs, vals?.group_payment !== false);
+      return groups.size === 1 ? groups.values().next().value : null;
+    };
+    const singlePayment = (vals) => Boolean(singleGroup(vals));
+    const defaultAmount = (vals) => {
+      const group = singleGroup(vals);
+      return group ? String(groupPaymentRequirement(db, group, vals?.date || today()).totalCashAmount) : '';
+    };
     return {
       title: 'Register Payment',
       fields: [
         ...(docs.length > 1 ? [{ name: 'group_payment', type: 'boolean', label: 'Group Payments', default: true }] : []),
+        {
+          name: 'amount',
+          type: 'monetary',
+          label: 'Payment Amount',
+          default: defaultAmount({ group_payment: true }),
+          readonly: (vals) => !singlePayment(vals),
+          invisible: (vals) => !singlePayment(vals),
+        },
         { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
         {
           name: 'journal_id',
@@ -2749,8 +2822,14 @@ const registerPaymentsListAction = {
           default: defaultPaymentJournalId(db, companyId),
           domain: (j) => (!j.company_id || j.company_id === companyId) && isLiquidityJournal(j),
         },
+        registerMethodField(db, journalId, direction),
         { name: 'memo', type: 'char', label: 'Memo', default: '' },
       ],
+      onchange: (vals, key) => {
+        if (key === 'journal_id') return { payment_method_line_id: defaultPaymentMethodLineId(db, vals.journal_id, direction) };
+        if (key === 'date' || key === 'group_payment') return { amount: defaultAmount(vals) };
+        return {};
+      },
     };
   },
   run: (db, ids, values = {}) => registerPayments(db, ids, values),
@@ -3383,8 +3462,25 @@ export const accountingModels = {
     },
     prepareWrite: (db, vals, before) => {
       let nextVals = { ...vals };
+      const onchangeFn = accountingModels['account.move']?.onchange;
+      const base = { ...nextVals };
+      const onchangeUpdates = onchangeFn
+        ? Object.fromEntries(
+            Object.keys(base)
+              .flatMap((k) => Object.entries(onchangeFn({ ...before, ...base }, k, db) ?? {}))
+              .filter(([k]) => !(k in base))
+          )
+        : {};
+      const wouldBe = { ...before, ...base, ...onchangeUpdates };
+
+      if (before.digitized_unedited && (nextVals.state ?? before.state) === before.state && digitizedChanged(before, wouldBe)) {
+        nextVals.digitized_unedited = false;
+      }
       const moveType = nextVals.move_type ?? before.move_type;
       const state = nextVals.state ?? before.state;
+      if (state === 'draft' && before.posting_order != null && vals.posting_order === undefined) {
+        nextVals.posting_order = null;
+      }
       if (moveType === 'entry' && state === 'draft') {
         const touches = ['line_ids', 'date', 'invoice_date', 'currency_id'].some((k) => k in nextVals);
         if (touches) {
@@ -3399,6 +3495,11 @@ export const accountingModels = {
       return { db, vals: nextVals };
     },
     guard: (db, before, after, ctx) => {
+      if (before?.state === 'draft' && before.digitized_unedited && after.state === 'draft' && digitizedChanged(before, after) && after.digitized_unedited) return 'Edited digitized bill must be marked as changed';
+      if (before?.state === 'draft' && before.digitized_unedited && after.state === 'posted' && after.digitized_unedited && digitizedPostingChanged(before, after)) return 'Edited digitized bill must be marked as changed';
+      if (before?.state === 'posted' && before.digitized_unedited && after.state === 'posted' && digitizedChanged(before, after) && after.digitized_unedited) return 'Edited digitized bill must be marked as changed';
+      if (before?.digitized_document && !after.digitized_document) return 'Digitization provenance cannot be changed';
+      if (before?.digitized_document && before.digitized_vendor_id && after.digitized_vendor_id !== before.digitized_vendor_id) return 'Digitization provenance cannot be changed';
       if (['in_invoice', 'in_refund'].includes(after.move_type)) {
         const previous = before?.invoice_line_ids ?? [];
         for (const [index, line] of (after.invoice_line_ids ?? []).entries()) {
@@ -3457,7 +3558,11 @@ export const accountingModels = {
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
         return 'The inter-company bill is posted or paid; issue a credit note instead';
       }
-      return archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
+      const baseErr = archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx);
+      if (baseErr) return baseErr;
+      if (after.state === 'draft' && after.posting_order != null) return 'Draft move cannot have a posting order';
+      if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
+      return (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
     invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
@@ -3496,7 +3601,7 @@ export const accountingModels = {
         const isEligibleVendorBank = (b) => b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1)) && sameCommercialPartner(db, b.partner_id, r.partner_id);
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const eligibleBanks = partnerChange && isPurchase(r) ? search(db, 'res.partner.bank').filter(isEligibleVendorBank).sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment))) : [];
-        const partnerBank = selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
+        const partnerBank = isInbound(r) ? (selectedBank && recipientBankDomain(selectedBank, r, db) ? selectedBank.id : null) : selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
           ? selectedBank.id : (eligibleBanks[0]?.id ?? null);
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
         const nextContext = { ...r, ...fiscal, journal_id: journal };
@@ -3645,7 +3750,12 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
+      partner_bank_id: {
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        domain: recipientBankDomain,
+      },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
@@ -3738,6 +3848,10 @@ export const accountingModels = {
           unavailable: 'muted',
         },
       },
+      digitized_document: { type: 'boolean', label: 'Digitized Document', hidden: true },
+      digitized_unedited: { type: 'boolean', label: 'Digitized Unedited', hidden: true },
+      digitized_vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Digitized Vendor', hidden: true },
+      posting_order: { type: 'integer', label: 'Posting Order', readonly: true, hidden: true, copy: false },
       should_be_paid: { type: 'selection', label: 'Should Be Paid', compute: (r, db) => shouldBePaid(db, r), options: [['yes', 'Yes'], ['no', 'No'], ['exception', 'Exception']] },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
       fx_payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment Entry', readonly: true },
@@ -3770,6 +3884,7 @@ export const accountingModels = {
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       to_check: { type: 'boolean', label: 'To Check', copy: false },
+      is_move_sent: { type: 'boolean', label: 'Is Move Sent', copy: false, readonly: true },
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
@@ -3786,9 +3901,16 @@ export const accountingModels = {
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
+    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
-    menuActions: [{ label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) }],
-    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
+    menuActions: [
+      { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+      {
+        label: 'Proforma Invoice',
+        when: (r) => r.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r.move_type),
+        run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=proforma` }),
+      },
+    ],
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
       const companyId = vals.company_id ?? currentCompany(db);
@@ -3905,6 +4027,8 @@ export const accountingModels = {
         },
       ],
       buttons: [
+        { label: 'Always', when: (r, db) => suggestBillAutopost(db, r), run: (db, r) => ({ db: write(db, 'res.partner', r.partner_id, { autopost_bills: 'always' }) }) },
+        { label: 'Never', when: (r, db) => suggestBillAutopost(db, r), run: (db, r) => ({ db: write(db, 'res.partner', r.partner_id, { autopost_bills: 'never' }) }) },
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', visible: (r) => isInvoice(r), run: (db, r) => ({ db: postMove(db, r.id) }) },
         { label: 'Post', primary: true, when: (r) => r.move_type === 'entry' && r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
         {
@@ -4012,6 +4136,8 @@ export const accountingModels = {
               },
             ];
 
+            fields.push(registerMethodField(db, defaultPaymentJournalId(db, r.company_id ?? 1), isInbound(r) ? 'inbound' : 'outbound'));
+
             if (isPurchase(r) && !isInbound(r)) {
               fields.push({
                 name: 'partner_bank_id',
@@ -4064,6 +4190,7 @@ export const accountingModels = {
               title: 'Register Payment',
               fields,
               onchange: (vals, key) => {
+                if (key === 'journal_id') return { payment_method_line_id: defaultPaymentMethodLineId(db, vals.journal_id, isInbound(r) ? 'inbound' : 'outbound') };
                 if (key === 'date' || key === 'currency_id') {
                   const d = vals?.date || today();
                   const c = vals?.currency_id ?? initialCurrId;
@@ -4075,7 +4202,32 @@ export const accountingModels = {
           },
           run: registerPayment,
         },
-        { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
+        {
+          label: 'Send',
+          email: 'document',
+          primary: (r) => !r.is_move_sent,
+          when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type),
+          wizard: (db, r) => {
+            const partner = r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+            return {
+              title: 'Send',
+              fields: [
+                { name: 'email', type: 'boolean', label: 'Email', default: Boolean(partner?.email?.trim?.()) },
+                { name: 'download', type: 'boolean', label: 'Download', default: false },
+              ],
+            };
+          },
+          run: (db, r, values = {}) => {
+            if (!values?.email && !values?.download) {
+              throw new Error('Select at least one channel: Email or Download');
+            }
+            const markSent = !values.live && Boolean(values.download);
+            return {
+              db: markSent ? write(db, 'account.move', r.id, { is_move_sent: true }) : db,
+              ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
+            };
+          },
+        },
         {
           label: 'Credit Note',
           when: (r) => r.state === 'posted' && r.move_type === 'out_invoice',
@@ -4130,6 +4282,7 @@ export const accountingModels = {
             const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
             const nextDb = write(cancelledDb, 'account.move', r.id, {
               state: 'draft',
+              is_move_sent: false,
               ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
               ...(isInvoice(r) ? { line_ids: [] } : {})
             });
@@ -4144,6 +4297,7 @@ export const accountingModels = {
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
+      banner: (r, db) => suggestBillAutopost(db, r) ? 'Automatically post future digitized bills from this vendor?' : null,
       warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : ['in_invoice', 'in_refund'].includes(r.move_type) ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
       groups: (r) => (isInvoice(r)
         ? [

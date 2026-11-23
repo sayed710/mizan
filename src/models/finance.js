@@ -1507,8 +1507,8 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   }
 }
 
-/** The reporting cutoff is never later than the day the report is run. */
-export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
+/** Use the requested reporting cutoff, defaulting to today. */
+export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
@@ -1687,22 +1687,40 @@ export function classifyDue(dueDate, at = today(), beforeCutoff = null) {
   return null;
 }
 
-export function partnerReceivableLines(db, partnerId, companyId = 1, at = today(), { upcoming = false } = {}) {
-  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
-  const hasInvoice = (db?.records?.['account.move'] ?? []).some((m) => m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && m.partner_id === partnerId && (m.company_id ?? 1) === cId && !m.exclude_from_followup && (!m.invoice_date || m.invoice_date <= at));
-  if (!hasInvoice) return { total_due: 0, total_overdue: 0, lines: [], invoices: [], due: [], overdue: [] };
-  const compCurr = companyCurrencyRecord(db, cId);
-  const scopeMoves = search(db, 'account.move').filter((m) => (m.company_id ?? 1) === cId);
-  const moves = scopeMoves.filter((m) =>
-    m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice'
-    && m.partner_id === partnerId && (m.company_id ?? 1) === cId && !m.exclude_from_followup
-    && (!m.invoice_date || m.invoice_date <= at)
-  );
+function buildPartnerReceivable(db, partnerId, moves, partnerCredits, cId, compCurr, at, upcoming = false) {
+  if (!moves || moves.length === 0) {
+    return { total_due: 0, total_overdue: 0, lines: [], invoices: [], due: [], overdue: [] };
+  }
   const lines = [];
   const invoices = [];
   for (const m of moves) {
-    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: true });
-    if (dues.length) {
+    const hasReceivableLines = (m.line_ids ?? []).some((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable');
+    if (!hasReceivableLines) {
+      const res = models['account.move'].fields.amount_residual.compute(m, db);
+      if (!(res > 0)) {
+        continue;
+      }
+      const compResidual = toCompany(db, m.currency_id, res, m.invoice_date ?? m.date, cId);
+      const rawDues = openInstallments(db, m, 'receivable', at, { includeBlocked: true });
+      const duesTotal = rawDues.reduce((s, d) => s + d.amount, 0);
+      let dues = [];
+      if (rawDues.length && duesTotal > compResidual) {
+        let toDeduct = roundCurrency(duesTotal - compResidual, compCurr);
+        for (const due of rawDues) {
+          if (toDeduct > 0) {
+            const deduct = Math.min(due.amount, toDeduct);
+            const newAmt = roundCurrency(due.amount - deduct, compCurr);
+            toDeduct = roundCurrency(toDeduct - deduct, compCurr);
+            if (newAmt > 0) dues.push({ ...due, amount: newAmt });
+          } else {
+            dues.push(due);
+          }
+        }
+      } else if (rawDues.length) {
+        dues = rawDues;
+      } else {
+        dues = [{ date: m.invoice_date_due ?? m.invoice_date ?? m.date, amount: compResidual, blocked: false }];
+      }
       for (const due of dues) {
         const isOverdue = !due.blocked && classifyDue(due.date, at) === 'overdue';
         lines.push({
@@ -1712,68 +1730,157 @@ export function partnerReceivableLines(db, partnerId, companyId = 1, at = today(
           number: m.name,
           reference: m.ref ?? '',
           residual_amount: roundCurrency(due.amount, compCurr),
+          is_credit: false,
           is_overdue: isOverdue,
           move: m,
         });
       }
     } else {
-      const res = models['account.move'].fields.amount_residual.compute(m, db);
-      if (res > 0) {
-        const compAmount = toCompany(db, m.currency_id, res, m.invoice_date ?? m.date, cId);
-        const dueDate = m.invoice_date_due ?? m.invoice_date ?? m.date;
-        const isOverdue = classifyDue(dueDate, at) === 'overdue';
+      const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: true });
+      for (const due of dues) {
+        const isOverdue = !due.blocked && classifyDue(due.date, at) === 'overdue';
         lines.push({
           move_id: m.id,
           invoice_date: m.invoice_date ?? m.date,
-          due_date: dueDate,
+          due_date: due.date,
           number: m.name,
           reference: m.ref ?? '',
-          residual_amount: compAmount,
+          residual_amount: roundCurrency(due.amount, compCurr),
+          is_credit: false,
           is_overdue: isOverdue,
           move: m,
         });
       }
     }
-    const currency = documentCurrency(db, m);
-    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-    const late = lines.filter((line) => line.move_id === m.id && line.is_overdue).reduce((sum, line) => sum + line.residual_amount, 0);
-    const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), currency);
-    const residual = models['account.move'].fields.amount_residual.compute(m, db);
-    if (residual > 0) invoices.push({ ...m, amount_residual: residual, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount });
+
+    const moveLines = lines.filter((line) => line.move_id === m.id);
+    const openCompanyAmount = moveLines.reduce((sum, line) => sum + line.residual_amount, 0);
+    if (openCompanyAmount > 0) {
+      const currency = documentCurrency(db, m);
+      const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+      const bookedAmount = Math.abs(booked) || toCompany(db, currency.id, Number(m.amount_total) || 0, m.invoice_date ?? m.date, cId) || Number(m.amount_total) || 1;
+      const residual = roundCurrency(openCompanyAmount * (Number(m.amount_total) || 0) / bookedAmount, currency);
+      const late = moveLines.filter((line) => line.is_overdue).reduce((sum, line) => sum + line.residual_amount, 0);
+      const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / bookedAmount, currency);
+      invoices.push({ ...m, amount_residual: residual, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount });
+    }
   }
-  const credits = new Map();
-  const addCredit = (partner, date, amount, document) => {
-    if (partner !== partnerId || !(amount < 0) || !document || document.exclude_from_followup || (document.company_id ?? 1) !== cId) return;
-    const previous = credits.get(document.id) ?? { document, date, amount: 0 };
-    previous.amount += amount;
-    credits.set(document.id, previous);
-  };
-  ageDocumentInstallments(db, 'receivable', at, scopeMoves, addCredit);
-  ageUnappliedCredits(db, 'receivable', at, scopeMoves, addCredit, cId);
-  const creditRows = [...credits.values()].map(({ document, date, amount }) => {
-    const currency = documentCurrency(db, document) ?? compCurr;
-    const booked = (document.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.credit) || 0) - (Number(l.debit) || 0), 0);
-    const residual = document.move_type === 'out_refund' ? roundCurrency(amount * (Number(document.amount_total) || 0) / (Math.abs(booked) || Number(document.amount_total) || 1), currency) : roundCurrency(amount, compCurr);
-    return { ...document, invoice_date: document.invoice_date ?? document.date ?? '', invoice_date_due: document.invoice_date_due ?? date, amount_residual: residual, followup_currency: currency, overdue: false, overdueAmount: 0 };
+
+  const creditList = partnerCredits instanceof Map ? [...partnerCredits.values()] : (partnerCredits ?? []);
+  const creditRows = creditList.map(({ document, date, amount }) => {
+    const isRefund = document.move_type === 'out_refund';
+    const docCurr = documentCurrency(db, document) ?? compCurr;
+    const currency = isRefund ? docCurr : compCurr;
+    let residual;
+    if (isRefund) {
+      const booked = (document.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.credit) || 0) - (Number(l.debit) || 0), 0);
+      const bookedAmount = Math.abs(booked) || toCompany(db, docCurr.id, Number(document.amount_total) || 0, document.invoice_date ?? document.date, cId) || Number(document.amount_total) || 1;
+      residual = roundCurrency(amount * (Number(document.amount_total) || 0) / bookedAmount, docCurr);
+    } else {
+      residual = roundCurrency(amount, compCurr);
+    }
+    const compAmount = roundCurrency(amount, compCurr);
+    return {
+      ...document,
+      invoice_date: document.invoice_date ?? document.date ?? '',
+      invoice_date_due: document.invoice_date_due ?? date,
+      amount_residual: residual,
+      followup_currency: currency,
+      overdue: false,
+      overdueAmount: 0,
+      companyAmount: compAmount,
+    };
   });
+
   for (const credit of creditRows) {
-    const amount = -Math.abs(toCompany(db, credit.followup_currency.id, Math.abs(credit.amount_residual), credit.invoice_date || credit.date, cId));
-    lines.push({ move_id: credit.id, invoice_date: credit.invoice_date, due_date: credit.invoice_date_due, number: credit.name, reference: credit.ref ?? '', residual_amount: amount, is_overdue: true, move: credit });
+    lines.push({
+      move_id: credit.id,
+      invoice_date: credit.invoice_date,
+      due_date: credit.invoice_date_due,
+      number: credit.name,
+      reference: credit.ref ?? '',
+      residual_amount: credit.companyAmount,
+      is_credit: true,
+      is_overdue: false,
+      move: credit,
+    });
   }
+
   invoices.push(...creditRows);
   lines.sort((a, b) => String(a.due_date ?? '').localeCompare(String(b.due_date ?? '')) || String(a.number ?? '').localeCompare(String(b.number ?? '')));
   const total_due = roundCurrency(Math.max(0, lines.reduce((s, l) => s + l.residual_amount, 0)), compCurr);
-  const total_overdue = roundCurrency(Math.max(0, lines.filter((l) => l.is_overdue).reduce((s, l) => s + l.residual_amount, 0)), compCurr);
-  return { total_due, total_overdue, lines, invoices, due: followUpSummary(invoices).totals, overdue: upcoming || total_overdue === 0 ? [] : followUpSummary([...invoices.filter((m) => m.overdue).map((m) => ({ ...m, amount_residual: m.overdueAmount })), ...creditRows]).totals };
+  const total_overdue = roundCurrency(Math.max(0, lines.filter((l) => l.is_overdue || l.is_credit).reduce((s, l) => s + l.residual_amount, 0)), compCurr);
+  return {
+    total_due,
+    total_overdue,
+    lines,
+    invoices,
+    due: followUpSummary(invoices).totals,
+    overdue: upcoming || total_overdue === 0 ? [] : followUpSummary([...invoices.filter((m) => m.overdue).map((m) => ({ ...m, amount_residual: m.overdueAmount })), ...creditRows]).totals,
+  };
+}
+
+export function companyReceivableLines(db, companyId = 1, at = today(), { upcoming = false } = {}) {
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const compCurr = companyCurrencyRecord(db, cId);
+  const scopeMoves = search(db, 'account.move').filter((m) => (m.company_id ?? 1) === cId);
+
+  const movesByPartner = new Map();
+  for (const m of scopeMoves) {
+    if (m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && !m.exclude_from_followup && (!m.invoice_date || m.invoice_date <= at)) {
+      let list = movesByPartner.get(m.partner_id);
+      if (!list) {
+        list = [];
+        movesByPartner.set(m.partner_id, list);
+      }
+      list.push(m);
+    }
+  }
+
+  const creditsByPartner = new Map();
+  const addCredit = (partner, date, amount, document) => {
+    if (!(amount < 0) || !document || document.exclude_from_followup || (document.company_id ?? 1) !== cId) return;
+    let partnerCredits = creditsByPartner.get(partner);
+    if (!partnerCredits) {
+      partnerCredits = new Map();
+      creditsByPartner.set(partner, partnerCredits);
+    }
+    const previous = partnerCredits.get(document.id) ?? { document, date, amount: 0 };
+    previous.amount += amount;
+    partnerCredits.set(document.id, previous);
+  };
+  ageDocumentInstallments(db, 'receivable', at, scopeMoves, addCredit);
+  ageUnappliedCredits(db, 'receivable', at, scopeMoves, addCredit, cId);
+
+  const result = new Map();
+  for (const [partnerId, moves] of movesByPartner.entries()) {
+    const credits = creditsByPartner.get(partnerId);
+    result.set(partnerId, buildPartnerReceivable(db, partnerId, moves, credits, cId, compCurr, at, upcoming));
+  }
+  return result;
+}
+
+export function partnerReceivableLines(db, partnerId, companyId = 1, at = today(), { upcoming = false } = {}) {
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const byPartner = companyReceivableLines(db, cId, at, { upcoming });
+  return byPartner.get(partnerId) ?? { total_due: 0, total_overdue: 0, lines: [], invoices: [], due: [], overdue: [] };
 }
 
 export function partnerTotalDue(db, partnerId, companyId = null, at = today()) {
   if (!partnerId || !db) return 0;
+  if (companyId == null) {
+    const companies = db.records?.['res.company'] ?? [{ id: 1 }];
+    return roundCurrency(companies.reduce((sum, c) => sum + partnerReceivableLines(db, partnerId, c.id, at).total_due, 0), companyCurrencyRecord(db, 1));
+  }
   return partnerReceivableLines(db, partnerId, companyId, at).total_due;
 }
 
 export function partnerTotalOverdue(db, partnerId, companyId = null, at = today()) {
   if (!partnerId || !db) return 0;
+  if (companyId == null) {
+    const companies = db.records?.['res.company'] ?? [{ id: 1 }];
+    return roundCurrency(companies.reduce((sum, c) => sum + partnerReceivableLines(db, partnerId, c.id, at).total_overdue, 0), companyCurrencyRecord(db, 1));
+  }
   return partnerReceivableLines(db, partnerId, companyId, at).total_overdue;
 }
 
@@ -1960,8 +2067,6 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
       partner_id,
       invoices,
       ...summary,
-      total_due: partnerTotalDue(db, partner_id, companyId, at),
-      total_overdue: partnerTotalOverdue(db, partner_id, companyId, at),
       oldest: oldestOverdueDate(invoices),
       ...(upcoming ? { upcoming: true } : {}),
     };
@@ -2564,6 +2669,7 @@ export const financeModels = {
     fields: {
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       name: { type: 'char', label: 'Budget Name', required: true },
+      budget_type: { type: 'selection', label: 'Budget Type', required: true, options: [['expense', 'Expense'], ['revenue', 'Revenue'], ['both', 'Both']] },
       date_from: { type: 'date', label: 'Start Date' },
       date_to: { type: 'date', label: 'End Date' },
       lines: {
@@ -2574,7 +2680,7 @@ export const financeModels = {
       },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['confirmed', 'Confirmed'], ['done', 'Done']] },
     },
-    defaults: () => ({ state: 'draft', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
+    defaults: () => ({ state: 'draft', budget_type: 'expense', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
     kanban: { title: 'name', lines: ['date_from', 'date_to'], badge: 'state' },
     list: ['name', 'date_from', 'date_to', 'state'],
     form: {
@@ -2582,7 +2688,7 @@ export const financeModels = {
       statusbarClickable: true,
       buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
-      groups: [['date_from', 'company_id'], ['date_to']],
+      groups: [['date_from', 'company_id'], ['date_to', 'budget_type']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],
       chatter: true,
     },
