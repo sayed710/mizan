@@ -570,11 +570,12 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
               if (!budgetOverlaps) {
                 const zeroLines = baseBudgetLines.map((line) => ({
                   ...line,
-                  planned: 0,
-                  practical: 0,
-                  committed: 0,
-                  variance: 0,
-                  achievement: 0,
+                  planned_amount: 0,
+                  achieved_amount: 0,
+                  committed_amount: 0,
+                  budget_variance: 0,
+                  budget_achievement: 0,
+                  budget_theoretical: 0,
                   analytic_lines: [],
                   commitment_lines: [],
                 }));
@@ -591,11 +592,12 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                     if (!datesOverlap(lineFrom, lineTo, p.from, p.to)) {
                       return {
                         ...line,
-                        planned: 0,
-                        practical: 0,
-                        committed: 0,
-                        variance: 0,
-                        achievement: 0,
+                        planned_amount: 0,
+                        achieved_amount: 0,
+                        committed_amount: 0,
+                        budget_variance: 0,
+                        budget_achievement: 0,
+                        budget_theoretical: 0,
                         analytic_lines: [],
                         commitment_lines: [],
                       };
@@ -650,17 +652,17 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                     }
                     const pLine = pr.lines[i];
                     return [
-                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.practical} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.variance} currency={currency} money={money} />,
-                      <td key={`${pIdx}-a`} className="num">{pLine.planned ? `${pLine.achievement}%` : ''}</td>,
+                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount} currency={currency} money={money} />,
+                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={money} />,
+                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={money} />,
+                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={money} />,
+                      <td key={`${pIdx}-a`} className="num">{pLine.budget_theoretical ? `${pLine.budget_achievement}%` : ''}</td>,
                     ];
                   })}
                 </tr>
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.analytic_lines ?? []).map((item) => <tr className="rep-detail" key={item.id}>
                   <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                  <td /><BudgetMoneyCell value={item.amount} currency={currency} money={money} /><td /><td /><td />
+                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td /><td />
                 </tr>)}
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.commitment_lines ?? []).map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
                   <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
