@@ -109,6 +109,13 @@ export function documentCurrency(db, record) {
   return companyCurrencyRecord(db, record?.company_id ?? null);
 }
 
+/** Resolve the currency printed on a check from explicit payment, invoice, or company configuration. */
+export function checkPaymentCurrency(db, payment, invoice) {
+  if (payment?.currency_id) return (db?.records?.['res.currency'] ?? []).find((c) => c.id === payment.currency_id) ?? null;
+  if (invoice) return documentCurrency(db, invoice);
+  return payment?.company_id ? findCompanyCurrencyRecord(db, payment.company_id) : null;
+}
+
 /** Integer count of the currency's rounding units. */
 export function currencyUnits(amount, currency) {
   const step = Number(currency?.rounding ?? 0.01);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
-import { create, search, groupRecords } from './orm.js';
+import { create, read, search, groupRecords } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { depreciationReport } from './models/assets.js';
@@ -401,3 +401,51 @@ test('REP4-8 Later comparison period failure renders unavailable cells and does 
   assert.equal(matches.length, 1, 'Planned amount 12345 should only appear for period 2025, not repeated in period 2026');
   assert.match(html, /—/);
 });
+
+test('REP4-9 Expense budget unbilled purchase commitment detail matches committed summary sign', async () => {
+  let db = seed();
+  const analytic = create(db, 'account.analytic.account', { name: 'Expense Project', company_id: 1 });
+  db = analytic.db;
+  const budget = create(db, 'account.budget', {
+    name: 'Expense Commitment Budget',
+    budget_type: 'expense',
+    company_id: 1,
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    state: 'confirmed',
+    lines: [{ analytic_account_id: analytic.id, planned: 1000 }],
+  });
+  db = budget.db;
+
+  const purchase = create(db, 'purchase.order', {
+    name: 'PO-2026-EXP',
+    partner_id: 2,
+    date_order: '2026-01-10',
+    order_line: [{ product_id: 5, qty: 1, price_unit: 150, tax: 0, analytic_distribution: { [analytic.id]: 100 } }],
+  });
+  const confirm = models['purchase.order'].form.buttons.find((button) => button.label === 'Confirm Order');
+  db = confirm.run(purchase.db, read(purchase.db, 'purchase.order', purchase.id)).db;
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+  const { reportMoney } = await import('./views/reportCompany.jsx');
+  const money = reportMoney(db, 1);
+
+  const period = { from: '2026-01-01', to: '2026-12-31' };
+  const html = renderToStaticMarkup(
+    React.createElement('table', null,
+      React.createElement(Budget, { db, period, companyId: '1', money })
+    )
+  );
+
+  // The summary row committed column shows positive $150.00 for expense budget
+  assert.match(html, />\$150\.00</);
+  // Specifically in the purchase order commitment detail row, it must show $150.00, not -$150.00
+  assert.match(html, /PO-2026-EXP/);
+  const poRowMatch = html.match(/<tr class="rep-detail"><td><a[^>]*>PO-2026-EXP<\/a><\/td>(.*?)<\/tr>/);
+  assert.ok(poRowMatch, 'found commitment detail row for PO-2026-EXP');
+  assert.doesNotMatch(poRowMatch[1], />-\$150\.00</, 'commitment detail row should not be negative');
+  assert.match(poRowMatch[1], />\$150\.00</, 'commitment detail row should match the positive committed summary');
+});
+
