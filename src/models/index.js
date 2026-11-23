@@ -314,7 +314,6 @@ const allApps = [
           { key: 'customer-statement', label: 'Customer Statement', type: 'report', report: 'customerStatement' },
           { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
           { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
-          { key: 'partner-ledger-payable', label: 'Partner Ledger (Payable)', type: 'report', report: 'partnerPayable' },
           { key: 'follow-ups', label: 'Follow-up Reports', type: 'report', report: 'followups' },
         ] },
                 { label: 'Taxes & Fiscal', children: [

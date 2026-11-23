@@ -722,9 +722,9 @@ export const REPORTS = {
   deferredExpense: { title: 'Deferred Expense', Body: DeferredBody, firstCol: 'Account', cols: ['Total', 'Not Started', 'Before', 'Current', 'Recognized', '<= 12 Months', '> 12 Months'] },
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   fiscal: { title: 'Fiscal Report', Body: FiscalReport, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger, cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger, cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
   executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
@@ -744,7 +744,7 @@ export const REPORTS = {
 };
 
 /** Financial reports computed live from posted journal items. */
-export function Reports({ leaf, id }) {
+export function Reports({ leaf, id, params }) {
   if (leaf.report === 'configurable') return <ConfigurableReportPage id={id} />;
   if (leaf.report === 'pnl' || leaf.report === 'balance') {
     return <ConfigurableReportPage key={leaf.report} statementKind={leaf.report} title={REPORTS[leaf.report].title} />;
@@ -755,12 +755,12 @@ export function Reports({ leaf, id }) {
     : leaf.report === 'loansAnalysis' ? LoansAnalysis
     : leaf.report === 'cashflowAnalysis' ? CashflowAnalysis
       : ['invoicesToBeIssued', 'invoicedNotDelivered'].includes(leaf.report) ? SalesReview : ReportPage;
-  return reportPage(leaf, component);
+  return reportPage(leaf, component, params);
 }
 
 const LEDGER_REPORTS = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit', 'cashflow', 'executive'];
 
-function ReportPage({ leaf }) {
+function ReportPage({ leaf, params }) {
   const sourceDb = useDb();
   const isDeferred = ['deferredRevenue', 'deferredExpense'].includes(leaf.report);
   const deferredKind = leaf.report === 'deferredRevenue' ? 'revenue' : 'expense';
@@ -782,6 +782,7 @@ function ReportPage({ leaf }) {
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [partnerFilterIds, setPartnerFilterIds] = useState([]);
   const [unreconciledOnly, setUnreconciledOnly] = useState(false);
+  const [accountType, setAccountType] = useState(() => leaf.report === 'partnerPayable' || params?.get('accountType') === 'payable' ? 'payable' : 'both');
   const [auditSort, setAuditSort] = useState('date');
   const [inalterabilityJournalId, setInalterabilityJournalId] = useState('');
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
@@ -991,6 +992,14 @@ function ReportPage({ leaf }) {
       )}
       {isPartnerLedger && <>
         <label className="inline-select">
+          {t('Account Type')}
+          <select aria-label={t('Account Type')} value={accountType} onChange={(e) => setAccountType(e.target.value)}>
+            <option value="both">{t('Both')}</option>
+            <option value="receivable">{t('Receivable')}</option>
+            <option value="payable">{t('Payable')}</option>
+          </select>
+        </label>
+        <label className="inline-select">
           <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
         </label>
       </>}
@@ -1054,7 +1063,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`))) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
+          {periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} accountType={accountType} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
         </table>
       </div>
     </ReportPrintView>

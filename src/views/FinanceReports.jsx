@@ -79,17 +79,17 @@ function PartnerRows({ db, p, money: fmtMoney = money }) {
   );
 }
 
-export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, money: moneyProp }) {
+export function PartnerLedger({ db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, accountType, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
-  const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, kind);
+  const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, accountType);
   return (
     <tbody>
       {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} money={fmtMoney} />)}
       <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td />{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{fmtMoney(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
-};
+}
 
 export function CustomerStatement({ db, period, companyId, money: moneyProp }) {
   const [partnerId, setPartnerId] = useState('');
