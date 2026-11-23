@@ -1,6 +1,7 @@
 // MOD-008: a record the form shows as locked (form.lockedWhen) stays locked on the server, not only in the form.
 // For non-admin users, the editable fields of a locked record cannot change; workflow fields (status, links and
 // amounts that buttons set, which the form shows read-only or not at all) still can.
+import { isVerifiedReopenBoard } from './assets.js';
 
 const groupFields = (items = []) => items.flatMap((item) => {
   if (typeof item === 'string') return [item];
@@ -51,6 +52,7 @@ const MAINTAINED = {
   'account.payment': ['memo'], // memo stays editable on posted payments
   'account.batch.payment': ['replacement_date', 'replacement_identifier', 'replacement_sequence', 'replacement_sepa_file'],
   'account.bank.statement.line': ['move_id', 'payment_id'], // validated unreconciliation clears the matched links
+  'account.asset': ['depreciation_ids'], // Set to Running may rebuild missing pending lines when reopening
 };
 
 export function withLocks(models) {
@@ -65,7 +67,14 @@ export function withLocks(models) {
         if (own) return own;
         // Enforced for non-admin users on the server (applyDiff passes ctx); administrators may correct records.
         if (ctx?.isAdmin !== false || !before || !locked(before, db)) return null;
-        const maintained = (name === 'sign.request' && before.state !== 'sent') || (name === 'hr.expense.sheet' && before.state === r.state) ? [] : MAINTAINED[name] ?? [];
+        const isReopeningAsset = name === 'account.asset'
+          && before.state === 'close'
+          && ['open', 'paused'].includes(r.state)
+          && isVerifiedReopenBoard(before, r, db);
+        const maintained = (name === 'sign.request' && before.state !== 'sent')
+          || (name === 'hr.expense.sheet' && before.state === r.state)
+          || (name === 'account.asset' && !isReopeningAsset)
+          ? [] : MAINTAINED[name] ?? [];
         const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f)
           && !(name === 'account.move' && f === 'line_ids' && ctx?.verifiedBankRewrite));
         const changed = fields.filter((f) => !same(model.fields[f], before[f], r[f]));
