@@ -45,3 +45,63 @@ test('loan totals respect currency and unavailable history, and selected rows us
     assert.match(find(host, (n) => n.tagName === 'TFOOT').textContent, /Unavailable/);
   } finally { await React.act(async () => root.unmount()); }
 });
+
+test('loan totals format in company 1 currency for legacy company-less loans when another company is active', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+  const db = seed();
+  const eur = db.records['res.currency'].find((c) => c.name === 'EUR');
+  const company = db.records['res.company'][0];
+  db.records['res.company'].push({ ...company, id: 99, name: 'Other', currency_id: eur.id });
+  db.settings.allowed_company_ids = [company.id, 99];
+  db.settings.current_company_id = 99;
+  db.records['account.move'].push(
+    {
+      id: 99010,
+      company_id: company.id,
+      state: 'posted',
+      date: '2020-01-01',
+      line_ids: [{ account_id: 999, credit: 500, debit: 0 }],
+    },
+    {
+      id: 99011,
+      company_id: company.id,
+      state: 'posted',
+      date: '2020-02-01',
+      line_ids: [
+        { account_id: 999, debit: 100, credit: 0 },
+        { account_id: 888, debit: 20, credit: 0 },
+      ],
+    },
+  );
+  db.records['account.loan'] = [
+    {
+      id: 99010,
+      name: 'Legacy Loan',
+      receipt_move_id: 99010,
+      principal_account_id: 999,
+      interest_account_id: 888,
+      line_ids: [{ move_id: 99011 }],
+    },
+  ];
+  await React.act(async () => store.commit(db));
+  const { LoansAnalysis } = await import('./views/LoansAnalysis.jsx');
+  const host = makeEl('div'); host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(LoansAnalysis)));
+    const tbody = find(host, (n) => n.tagName === 'TBODY');
+    const tfoot = find(host, (n) => n.tagName === 'TFOOT');
+    assert.match(tbody.textContent, /\$500\.00/);
+    assert.match(tbody.textContent, /\$100\.00/);
+    assert.match(tbody.textContent, /\$20\.00/);
+    assert.match(tbody.textContent, /\$400\.00/);
+    assert.doesNotMatch(tfoot.textContent, /€/);
+    const footCells = find(tfoot, (n) => n.tagName === 'TR').childNodes.map((c) => c.textContent);
+    assert.deepEqual(footCells, ['Total', '$500.00', '$100.00', '$20.00', '$400.00']);
+  } finally { await React.act(async () => root.unmount()); }
+});
+

@@ -16,7 +16,7 @@ import {
   setStatementLinePartner,
   statementCompanyAmount,
 } from '../models/bank.js';
-import { applyRule, isWriteoffButtonModel, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
+import { applyRule, isWriteoffButtonModel, mapStatementPartner, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { display, money } from '../ui.jsx';
@@ -161,8 +161,10 @@ export function BankReconcile() {
 
   const quickActionModels = useMemo(() => {
     if (!selectedLine) return [];
-    return (search(db, 'account.reconcile.model') ?? [])
-      .filter((r) => isWriteoffButtonModel(r) && ruleMatches(r, selectedLine))
+    const mappedDb = mapStatementPartner(db, selectedLine);
+    const lineForRules = read(mappedDb, 'account.bank.statement.line', selectedLine.id) ?? selectedLine;
+    return (search(mappedDb, 'account.reconcile.model') ?? [])
+      .filter((r) => isWriteoffButtonModel(r) && ruleMatches(r, lineForRules))
       .sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.id ?? 0) - (b.id ?? 0));
   }, [db, selectedLine]);
 
@@ -196,6 +198,7 @@ export function BankReconcile() {
       if (!freshLine || freshLine.state !== 'to_check') {
         throw new Error('This bank transaction is already reconciled');
       }
+      // applyRule maps the partner first when the line has none.
       const nextDb = applyRule(currentDb, model, freshLine);
       const res = await commit(nextDb);
       if (res.ok) {

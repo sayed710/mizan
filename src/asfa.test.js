@@ -1,7 +1,7 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { accountId } from './models/ledger.js';
@@ -75,7 +75,9 @@ test('depreciation report excludes later asset value adjustments', () => {
   const report = (to) => depreciationReport(db, { to }, '1').rows.find((row) => row.a.id === made.id);
   assert.equal(report('2026-12-31').original, 1000);
   assert.equal(report('2026-12-31').book, 800);
-  assert.equal(report('2027-01-01').original, 1500);
+  assert.equal(report('2027-01-01').original, 1000);
+  const child = search(db, 'account.asset').find((a) => a.parent_id === made.id);
+  assert.equal(depreciationReport(db, { to: '2027-01-01' }, '1').rows.find((row) => row.a.id === child.id).original, 500);
 });
 
 test('resume shifts unposted depreciation past the paused interval', () => {

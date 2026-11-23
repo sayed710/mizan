@@ -1507,8 +1507,8 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   }
 }
 
-/** The reporting cutoff is never later than the day the report is run. */
-export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
+/** Use the requested reporting cutoff, defaulting to today. */
+export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
@@ -2117,7 +2117,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
     if (channel === 'email' && partner.email?.trim() && deliver) {
-      const message = { to: partner.email.trim(), subject: levelName, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
+      const message = followUpEmail(nextDb, f, level, partner);
       // Validate the bookkeeping before attempting an irreversible delivery.
       const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
       /** Interpret mail-transport outcome strictly per the single delivery contract. */
@@ -2183,9 +2183,43 @@ const currencyOf = (db, move) => {
 export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${formatCurrency(amount, currency, '')} ${currency.name}`).join(', ');
 export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${formatCurrency(m.amount_residual, documentCurrency(db, m), '')} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
 
-const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
+/** Current open invoices and per-currency balances for a customer letter. */
+export function followUpLetter(db, partnerId, companyId, at = today()) {
+  const reminder = followUps(db, at, { companyId, ignoreNextActionDate: true }).flatMap(followUpCompanies).find((f) => f.partner_id === partnerId && f.company_id === companyId);
+  if (!reminder) throw new Error('This customer has no overdue invoices');
+  const level = followUpLevel(db, reminder, at);
+  if (!level) throw new Error('No follow-up level applies to this customer');
+  const openInvoices = search(db, 'account.move').filter((m) => m.partner_id === partnerId && (m.company_id ?? 1) === companyId && m.state === 'posted' && m.move_type === 'out_invoice' && m.active !== false && !m.exclude_from_followup && Number(m.amount_residual) > 0 && (!m.invoice_date || m.invoice_date <= at)).map((m) => {
+    const currency = documentCurrency(db, m);
+    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false });
+    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const late = dues.filter((d) => d.date && d.date < at).reduce((sum, d) => sum + d.amount, 0);
+    const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), currency);
+    return { ...m, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount };
+  });
+  const creditRows = (reminder.invoices ?? [])
+    .filter((m) => Number(m.amount_residual) < 0)
+    .map((c) => ({
+      ...c,
+      invoice_date: c.invoice_date ?? c.date ?? '',
+      followup_currency: c.followup_currency ?? documentCurrency(db, c) ?? companyCurrencyRecord(db, companyId),
+      overdue: false,
+      overdueAmount: 0,
+    }));
+  const invoices = [...openInvoices, ...creditRows];
+  const due = followUpSummary(invoices).totals;
+  const overdue = reminder.upcoming ? [] : reminder.totals;
+  return { reminder, level, invoices, due, overdue };
+}
+
+/** The automatic and manual email share the same subject and introductory text. */
+export function followUpEmail(db, reminder, level, partner) {
+  return { to: partner.email.trim(), subject: followUpLevelName(level), text: `${level.message ?? ''}\n${followUpText(db, reminder)}`.trim() };
+}
+
+const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate = true } = {}) => {
   const allowed = new Set(search(scope, 'account.move').map((move) => move.id));
-  const f = followUps(db, at).find((x) => x.partner_id === partnerId);
+  const f = followUps(db, at, { companyId: companyId ?? reminder?.company_id ?? null, ignoreNextActionDate }).find((x) => x.partner_id === partnerId);
   if (!f) throw new Error('This customer has no overdue invoices');
   const allGroups = followUpCompanies({ ...f, invoices: f.invoices.filter((invoice) => allowed.has(invoice.id)) });
   const targetCompany = companyId ?? reminder?.company_id ?? null;
@@ -2195,19 +2229,19 @@ const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => 
 };
 
 /** Record preparation without claiming that the email was sent. */
-export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
-  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
+export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, ignoreNextActionDate = true } = {}) {
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
   return groups.reduce((next, part) => postNote(next, 'res.partner', partnerId,
     `Payment reminder opened in mail app:\n${followUpText(scope, part)}`, reminderSource(part)), db);
 }
 
 /** Record a reminder confirmed sent by hand. */
-export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null } = {}) {
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null, ignoreNextActionDate = true } = {}) {
   if (!['email', 'sms', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
   if (channel === 'email' && !read(db, 'res.partner', partnerId)?.email?.trim()) {
     throw new Error('A customer email address is required to send an email reminder');
   }
-  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
   return applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate);
 }
 

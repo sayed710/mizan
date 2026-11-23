@@ -20,7 +20,7 @@ export function LoansAnalysis() {
   const loans = viewRecords(db, 'account.loan').filter((loan) => selectedCompany === 'all' || (loan.company_id ?? 1) === Number(selectedCompany));
   const posted = (id, loan) => {
     const move = read(db, 'account.move', id);
-    return move?.state === 'posted' && move.company_id === loan.company_id && (move.date || move.invoice_date) <= date ? move : null;
+    return move?.state === 'posted' && (move.company_id ?? 1) === (loan.company_id ?? 1) && (move.date || move.invoice_date) <= date ? move : null;
   };
   const amount = (move, accountId) => (move?.line_ids ?? []).reduce((sum, line) => (
     line.account_id === accountId ? sum + (Number(line.debit) || 0) - (Number(line.credit) || 0) : sum
@@ -38,6 +38,7 @@ export function LoansAnalysis() {
   });
   const currencies = rows.map(({ loan }) => findCompanyCurrencyRecord(db, loan.company_id ?? 1));
   const canTotal = rows.every((row) => !row.unavailable) && currencies.every((currency) => currency && currency.id === currencies[0]?.id);
+  const totalCompany = rows[0] ? (rows[0].loan.company_id ?? 1) : selectedCompany;
   const totals = ['principal', 'repaid', 'interest', 'balance'].map((key) => rows.reduce((sum, row) => sum + row[key], 0));
   const [isPrinting, setIsPrinting] = useState(false);
   const printCompanies = (selectedCompany === 'all' ? companies : companies.filter((company) => company.id === Number(selectedCompany))).map((company) => documentCompany(sourceDb, { company_id: company.id })).filter(Boolean);
@@ -59,7 +60,7 @@ export function LoansAnalysis() {
         <td><a href={`#/accounting/loans/${loan.id}`}>{loan.name}</a></td><td>{read(db, 'res.partner', loan.lender_id)?.name ?? ''}</td>
         {unavailable ? <td colSpan="4">{t('Historical entry links unavailable')}</td> : [principal, repaid, interest, balance].map((value, i) => <td key={i} className="num">{reportMoney(db, loan.company_id ?? 1)(value)}</td>)}
       </tr>)}</tbody>
-      <tfoot><tr><th colSpan="2">{t('Total')}</th>{totals.map((value, i) => <td key={i}>{canTotal ? reportMoney(db, rows[0]?.loan.company_id ?? selectedCompany)(value) : t('Unavailable')}</td>)}</tr></tfoot>
+      <tfoot><tr><th colSpan="2">{t('Total')}</th>{totals.map((value, i) => <td key={i}>{canTotal ? reportMoney(db, totalCompany)(value) : t('Unavailable')}</td>)}</tr></tfoot>
     </table></div>
   </ReportPrintView>;
 }
