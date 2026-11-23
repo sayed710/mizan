@@ -2695,6 +2695,7 @@ const ar = {
   'Label parameter is required for the selected label condition': 'قيمة الوصف مطلوبة لشرط الوصف المحدد',
   'Invalid regular expression in label parameter': 'تعبير نمطي غير صالح في قيمة الوصف',
   'Payment tolerance cannot be negative': 'لا يمكن أن يكون التسامح في الدفع سالباً',
+  'A percentage payment tolerance cannot exceed 100': 'لا يمكن أن يتجاوز التسامح في الدفع كنسبة مئوية 100',
   'Each counterpart item requires an account unless a partner is set': 'يتطلب كل بند مقابل حساباً ما لم يتم تحديد شريك',
   'Invalid regular expression in counterpart line amount': 'تعبير نمطي غير صالح في مبلغ البند المقابل',
   'Counterpart line amount must be numeric': 'يجب أن يكون مبلغ البند المقابل رقمياً',
