@@ -587,3 +587,102 @@ test('Finding 7 regression: credit lines have is_credit: true and is_overdue: fa
   const element = FollowUps({ db, sourceDb: db, companyId: 1 });
   assert.ok(element);
 });
+
+test('Foreign legacy debts show wrong totals: foreign-currency legacy invoice without receivable lines converts installment schedule to company currency', () => {
+  const base = seed();
+  const eur = (base.records['res.currency'] || []).find((c) => c.name === 'EUR');
+  assert.ok(eur);
+  // Rate on 2026-01-01 is 0.8 (100 EUR = 125 USD)
+  let db = upsertCurrencyRates(base, [
+    { currency_id: eur.id, date: '2026-01-01', rate: 0.8 },
+  ]);
+  const partner = create(db, 'res.partner', { name: 'Foreign Legacy Cust' });
+
+  // Foreign-currency legacy invoice without line_ids (no receivable journal lines)
+  const legacyId = 99910;
+  const legacyInv = {
+    id: legacyId,
+    name: 'INV/2026/LEGACY',
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: partner.id,
+    currency_id: eur.id,
+    invoice_date: '2026-01-01',
+    invoice_date_due: '2026-01-15',
+    amount_total: 100,
+    amount_paid: 0,
+    payment_date: null,
+    line_ids: [],
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }],
+    state: 'posted',
+    active: true,
+  };
+  db = { ...partner.db, records: { ...partner.db.records, 'account.move': [...partner.db.records['account.move'], legacyInv] } };
+
+  const linesInfo = partnerReceivableLines(db, partner.id, 1, '2026-02-01');
+  assert.equal(linesInfo.lines.length, 1);
+  // Company currency residual must be converted: 100 EUR / 0.8 = 125 USD
+  assert.equal(linesInfo.lines[0].residual_amount, 125);
+  assert.equal(linesInfo.total_due, 125);
+  assert.equal(linesInfo.total_overdue, 125);
+
+  // Document currency letter summary should preserve 100 EUR residual
+  assert.equal(linesInfo.due.length, 1);
+  assert.equal(linesInfo.due[0].currency.id, eur.id);
+  assert.equal(linesInfo.due[0].amount, 100);
+  assert.equal(linesInfo.overdue.length, 1);
+  assert.equal(linesInfo.overdue[0].currency.id, eur.id);
+  assert.equal(linesInfo.overdue[0].amount, 100);
+
+  const letter = followUpLetter(db, partner.id, 1, '2026-02-01');
+  assert.equal(letter.due.length, 1);
+  assert.equal(letter.due[0].amount, 100);
+  assert.equal(letter.overdue.length, 1);
+  assert.equal(letter.overdue[0].amount, 100);
+
+  // Render report UI
+  const element = FollowUps({ db, sourceDb: db, companyId: 1 });
+  assert.ok(element);
+
+  // Multi-installment payment term on foreign legacy invoice
+  const termPartner = create(db, 'res.partner', { name: 'Foreign Term Cust' });
+  const term = create(termPartner.db, 'account.payment.term', {
+    name: '40 now, 60 later',
+    line_ids: [
+      { value_type: 'percent', value: 40, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 60, nb_days: 30, delay_type: 'days_after' },
+    ],
+  });
+  const termLegacyId = 99911;
+  const termLegacyInv = {
+    id: termLegacyId,
+    name: 'INV/2026/LEGACY-TERM',
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: termPartner.id,
+    currency_id: eur.id,
+    invoice_date: '2026-01-01',
+    invoice_payment_term_id: term.id,
+    amount_total: 200,
+    amount_paid: 0,
+    payment_date: null,
+    line_ids: [],
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 200, tax: 0 }],
+    state: 'posted',
+    active: true,
+  };
+  db = { ...term.db, records: { ...term.db.records, 'account.move': [...term.db.records['account.move'], termLegacyInv] } };
+
+  // On 2026-01-15: 40% (80 EUR = 100 USD) due 2026-01-01 is overdue; 60% (120 EUR = 150 USD) due 2026-01-31 is not overdue
+  const termLines = partnerReceivableLines(db, termPartner.id, 1, '2026-01-15');
+  assert.equal(termLines.lines.length, 2);
+  assert.equal(termLines.lines[0].residual_amount, 100);
+  assert.equal(termLines.lines[0].is_overdue, true);
+  assert.equal(termLines.lines[1].residual_amount, 150);
+  assert.equal(termLines.lines[1].is_overdue, false);
+  assert.equal(termLines.total_due, 250);
+  assert.equal(termLines.total_overdue, 100);
+  assert.equal(termLines.due[0].amount, 200);
+  assert.equal(termLines.overdue[0].amount, 80);
+});
+
