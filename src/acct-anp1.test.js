@@ -10,6 +10,8 @@ import {
   isRootPlan,
   rootAnalyticPlans,
   planAccountCount,
+  rootPlanMap,
+  rawPlanMap,
 } from './models/analyticplus.js';
 import { diffDb, applyDiff } from './sync.js';
 import { setupDom } from './test-support/dom.js';
@@ -232,6 +234,262 @@ test('ANP-3: Analytic Report renders one column per root analytic plan', async (
     assert.equal(fallbackRow1Cells[0], 'Website Redesign');
     assert.equal(fallbackRow1Cells[1], '-$500.00', 'Balance column displays total');
   } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+// Regression test: Finding 1 - Accounts without a resolvable root plan render in Unassigned column
+test('Finding 1: Accounts without a resolvable root plan render in Unassigned column with aligned headers and detail rows', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  const { Reports } = await import('./views/Reports.jsx');
+
+  const reportDb = {
+    settings: { current_company_id: 1, allowed_company_ids: [1] },
+    records: {
+      'res.company': [{ id: 1, name: 'Test Corp', currency_id: 1 }],
+      'res.currency': [{ id: 1, name: 'USD', symbol: '$', decimal_places: 2 }],
+      'account.analytic.plan': [
+        { id: 1, name: 'Projects', parent_id: null, sequence: 10, active: true },
+      ],
+      'account.analytic.account': [
+        { id: 10, name: 'Website Redesign', plan_id: 1, company_id: 1, active: true },
+        { id: 20, name: 'General Overhead', plan_id: null, company_id: 1, active: true },
+        { id: 30, name: 'Orphaned Account', plan_id: 999, company_id: 1, active: true },
+      ],
+      'account.analytic.line': [
+        { id: 101, account_id: 10, amount: -500, date: '2026-03-01', name: 'Design Services' },
+        { id: 102, account_id: 20, amount: -200, date: '2026-03-02', name: 'Office Supplies' },
+        { id: 103, account_id: 30, amount: -150, date: '2026-03-03', name: 'Legacy Expense' },
+      ],
+      'account.move': [],
+      'account.move.line': [],
+    },
+  };
+
+  await React.act(async () => commit(reportDb));
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(Reports, { leaf: { report: 'analytic', label: 'Analytic Report' } }));
+    });
+
+    const ths = findAll(host, (node) => node.tagName === 'TH');
+    const headerTexts = ths.map((th) => textOf(th).trim());
+    assert.deepEqual(headerTexts, ['', 'Projects', 'Unassigned'], 'Headers include Unassigned column when unplanned accounts exist');
+
+    const rows = findAll(host, (node) => node.tagName === 'TR');
+    const totalRows = rows.filter((r) => r.className?.includes('rep-total'));
+    assert.equal(totalRows.length, 3, 'Three analytic accounts displayed');
+
+    // 1. Planned account: Website Redesign (Projects)
+    const row1Cells = findAll(totalRows[0], (node) => node.tagName === 'TD').map((td) => textOf(td).trim());
+    assert.deepEqual(row1Cells, ['Website Redesign', '-$500.00', ''], 'Planned account amount in Projects column');
+
+    // 2. Unplanned account: General Overhead (no plan_id)
+    const row2Cells = findAll(totalRows[1], (node) => node.tagName === 'TD').map((td) => textOf(td).trim());
+    assert.deepEqual(row2Cells, ['General Overhead', '', '-$200.00'], 'Unplanned account amount renders in Unassigned column');
+
+    // 3. Orphaned account: Orphaned Account (plan_id: 999 unresolvable)
+    const row3Cells = findAll(totalRows[2], (node) => node.tagName === 'TD').map((td) => textOf(td).trim());
+    assert.deepEqual(row3Cells, ['Orphaned Account', '', '-$150.00'], 'Unresolvable plan account amount renders in Unassigned column');
+
+    // Verify detail rows
+    const detailRows = rows.filter((r) => r.className?.includes('rep-detail'));
+    assert.equal(detailRows.length, 3, 'Three detail lines displayed');
+
+    const detail1Cells = findAll(detailRows[0], (node) => node.tagName === 'TD').map((td) => textOf(td).trim());
+    assert.deepEqual(detail1Cells, ['Design Services', '-$500.00', ''], 'Planned detail line in Projects column');
+
+    const detail2Cells = findAll(detailRows[1], (node) => node.tagName === 'TD').map((td) => textOf(td).trim());
+    assert.deepEqual(detail2Cells, ['Office Supplies', '', '-$200.00'], 'Unplanned detail line in Unassigned column');
+
+    const detail3Cells = findAll(detailRows[2], (node) => node.tagName === 'TD').map((td) => textOf(td).trim());
+    assert.deepEqual(detail3Cells, ['Legacy Expense', '', '-$150.00'], 'Unresolvable detail line in Unassigned column');
+
+    // Header and body column counts alignment
+    for (const r of [...totalRows, ...detailRows]) {
+      const cells = findAll(r, (node) => node.tagName === 'TD');
+      assert.equal(cells.length, headerTexts.length, 'Every row must have the same number of cells as header columns');
+    }
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+// Regression test: Finding 2 - Some plan names change in Arabic reports
+test('Finding 2: Analytic report headings show stored plan names and an Unassigned column', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { tableToRows } = await import('./csv.js');
+  await initStore();
+
+  const { Reports } = await import('./views/Reports.jsx');
+
+
+  const reportDb = {
+    settings: { current_company_id: 1, allowed_company_ids: [1] },
+    records: {
+      'res.company': [{ id: 1, name: 'Test Corp', currency_id: 1 }],
+      'res.currency': [{ id: 1, name: 'USD', symbol: '$', decimal_places: 2 }],
+      'account.analytic.plan': [
+        // 'Sales' is a known UI term that translates to 'المبيعات' in Arabic
+        { id: 1, name: 'Sales', parent_id: null, sequence: 10, active: true },
+      ],
+      'account.analytic.account': [
+        { id: 10, name: 'Domestic Sales', plan_id: 1, company_id: 1, active: true },
+        { id: 20, name: 'Unassigned Account', plan_id: null, company_id: 1, active: true },
+      ],
+      'account.analytic.line': [
+        { id: 101, account_id: 10, amount: 1000, date: '2026-03-01', name: 'Invoice Item' },
+        { id: 102, account_id: 20, amount: 200, date: '2026-03-02', name: 'Misc Item' },
+      ],
+      'account.move': [],
+      'account.move.line': [],
+    },
+  };
+
+  await React.act(async () => commit(reportDb));
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(Reports, { leaf: { report: 'analytic', label: 'Analytic Report' } }));
+    });
+
+    const ths = findAll(host, (node) => node.tagName === 'TH');
+    const headerTexts = ths.map((th) => textOf(th).trim());
+    // Stored plan names are shown as saved, never passed through t()
+    // the static Unassigned heading is a UI label
+    assert.equal(headerTexts[1], 'Sales', 'Dynamic plan name heading must preserve stored name');
+    assert.equal(headerTexts[2], 'Unassigned', 'Static Unassigned heading');
+
+    // Verify table export via tableToRows
+    const tableEl = findAll(host, (node) => node.tagName === 'TABLE')[0];
+    const exportedRows = tableToRows(tableEl);
+    assert.ok(exportedRows.length > 0, 'Table rows exported');
+    assert.equal(exportedRows[0][1], 'Sales', 'Exported CSV/XLSX header must preserve stored plan name');
+    assert.equal(exportedRows[0][2], 'Unassigned', 'Exported header includes Unassigned');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+// Regression test: Finding 3 - Large analytic reports repeat full scans
+test('Finding 3: Plan hierarchy indices account counts once per snapshot and rootPlanMap avoids per-account ORM reads', async () => {
+  const baseDb = {
+    settings: { current_company_id: 1, allowed_company_ids: [1] },
+    records: {
+      'account.analytic.plan': [
+        { id: 1, name: 'Root 1', parent_id: null },
+        { id: 2, name: 'Child 1-1', parent_id: 1 },
+        { id: 3, name: 'Grandchild 1-1-1', parent_id: 2 },
+        { id: 4, name: 'Root 2', parent_id: null },
+      ],
+      'account.analytic.account': [
+        { id: 101, name: 'A1', plan_id: 1, active: true },
+        { id: 102, name: 'A2', plan_id: 2, active: true },
+        { id: 103, name: 'A3', plan_id: 3, active: true },
+        { id: 104, name: 'A4', plan_id: 4, active: true },
+        { id: 105, name: 'Archived', plan_id: 3, active: false },
+      ],
+    },
+  };
+
+  // 1. Verify rootPlanMap builds root plan lookups once per snapshot
+  const rootsMap1 = rootPlanMap(baseDb);
+  const rootsMap2 = rootPlanMap(baseDb);
+  assert.equal(rootsMap1, rootsMap2, 'rootPlanMap returns cached index on same snapshot');
+  assert.equal(rootsMap1.get(1), 1);
+  assert.equal(rootsMap1.get(2), 1);
+  assert.equal(rootsMap1.get(3), 1);
+  assert.equal(rootsMap1.get(4), 4);
+
+  // 2. Verify planAccountCount uses indexed snapshot cache
+  const p1 = read(baseDb, 'account.analytic.plan', 1);
+  const p2 = read(baseDb, 'account.analytic.plan', 2);
+  const p3 = read(baseDb, 'account.analytic.plan', 3);
+  const p4 = read(baseDb, 'account.analytic.plan', 4);
+
+  assert.equal(planAccountCount(baseDb, p1), 3, 'Root 1 counts accounts in 1, 2, 3 (excluding archived)');
+  assert.equal(planAccountCount(baseDb, p2), 2, 'Child 1-1 counts accounts in 2, 3');
+  assert.equal(planAccountCount(baseDb, p3), 1, 'Grandchild counts account in 3');
+  assert.equal(planAccountCount(baseDb, p4), 1, 'Root 2 counts account in 4');
+
+  // Verify rawPlanMap lookup
+  const rawMap = rawPlanMap(baseDb);
+  assert.equal(rawMap.get(2)?.name, 'Child 1-1');
+
+  // Verify that rendering Analytic does not call read() for 'account.analytic.plan' per account row
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  const { Reports } = await import('./views/Reports.jsx');
+
+  // Add 10 accounts under plan 1 to simulate repeated accounts sharing a plan
+  const manyAccountsDb = {
+    settings: { current_company_id: 1, allowed_company_ids: [1] },
+    records: {
+      'res.company': [{ id: 1, name: 'Test Corp', currency_id: 1 }],
+      'res.currency': [{ id: 1, name: 'USD', symbol: '$', decimal_places: 2 }],
+      'account.analytic.plan': [
+        { id: 1, name: 'Shared Plan', parent_id: null, sequence: 10, active: true },
+      ],
+      'account.analytic.account': Array.from({ length: 10 }, (_, i) => ({
+        id: 100 + i,
+        name: `Account ${i}`,
+        plan_id: 1,
+        company_id: 1,
+        active: true,
+      })),
+      'account.analytic.line': [],
+      'account.move': [],
+      'account.move.line': [],
+    },
+  };
+
+  await React.act(async () => commit(manyAccountsDb));
+
+  const origCompute = models['account.analytic.plan'].fields.account_count.compute;
+  let planComputeCount = 0;
+  models['account.analytic.plan'].fields.account_count.compute = (r, db) => {
+    planComputeCount += 1;
+    return origCompute(r, db);
+  };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(Reports, { leaf: { report: 'analytic', label: 'Analytic Report' } }));
+    });
+
+    // Before fix, read() was called on each account row, computing account_count 10 extra times (>= 11 total).
+    // With fix, rootPlanMap is used and account_count is computed only for root plans in the header (1 total).
+    assert.equal(planComputeCount, 1, 'Analytic report rendering must not recompute plan account_count per account row');
+  } finally {
+    models['account.analytic.plan'].fields.account_count.compute = origCompute;
     await React.act(async () => root.unmount());
   }
 });
