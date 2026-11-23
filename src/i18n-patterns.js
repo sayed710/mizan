@@ -206,7 +206,7 @@ const patterns = {
   'Only {1} of {2} in stock': 'المتوفر في المخزون {1} فقط من {2}',
   'Missing attachment {1}': 'المرفق {1} مفقود',
   'The {1} integration is not configured': 'تكامل {1*} غير مُعدّ',
-  'Email could not be sent: {1}': 'تعذّر إرسال البريد: {1}',
+  'Email could not be sent: {1}': 'تعذّر إرسال البريد: {1*}',
   'At most {1} models allowed': 'الحد الأقصى {1} نموذجاً',
   'Unknown audit model: {1}': 'نموذج تدقيق غير معروف: {1}',
   '{1} answered {2}: {3}': 'رد {1} بالحالة {2}: {3}',
