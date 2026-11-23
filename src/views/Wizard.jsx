@@ -28,6 +28,22 @@ export const missingFields = (spec, values) => spec.fields
   .map((f) => t(f.label));
 
 function WizardField({ db, field, value, values, onChange, id, disabled = false }) {
+  if (field.picker === 'asset_invoice_lines') {
+    const options = field.options(db, values);
+    const selected = new Set(value ?? []);
+    return (
+      <fieldset id={id} className="wizard-choices">
+        <legend className="sr-only">{t(field.label)}</legend>
+        {!options.length && <p className="muted">{t('Nothing to choose from.')}</p>}
+        {options.map((option) => (
+          <label key={option.key} className="check">
+            <input type="checkbox" checked={selected.has(option.key)} disabled={disabled} onChange={(e) => onChange(e.target.checked ? [...selected, option.key] : [...selected].filter((key) => key !== option.key))} />
+            {option.label}
+          </label>
+        ))}
+      </fieldset>
+    );
+  }
   if (field.type === 'many2one' || field.type === 'many2many') {
     const candidates = viewRecords(db, field.relation).filter((r) => !field.domain || field.domain(r, values));
     if (field.type === 'many2one') {
