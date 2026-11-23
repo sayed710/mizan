@@ -333,3 +333,102 @@ test('LED-3: Trial Balance column options for Initial and End Balance and compar
     await React.act(async () => root.unmount());
   }
 });
+
+test('LED-4: generalLedger converts each entry once and does not repeatedly scan entries per account and partner', () => {
+  let db = seed();
+  const date = '2025-03-15';
+  const openingDate = '2025-01-10';
+  const misc = search(db, 'account.journal').find((j) => j.code === 'MISC');
+  const resAcc = create(db, 'account.account', { code: '121088', name: 'GL Perf Receivable', account_type: 'asset_receivable', company_id: 1 });
+  const resInc = create(resAcc.db, 'account.account', { code: '400088', name: 'GL Perf Income', account_type: 'income', company_id: 1 });
+  const p1 = create(resInc.db, 'res.partner', { name: 'Perf Partner 1' });
+  const p2 = create(p1.db, 'res.partner', { name: 'Perf Partner 2' });
+  db = p2.db;
+
+  // Opening move before period from date
+  const mOpen = create(db, 'account.move', {
+    move_type: 'entry',
+    partner_id: p1.id,
+    journal_id: misc.id,
+    company_id: 1,
+    date: openingDate,
+    line_ids: [
+      { account_id: resAcc.id, partner_id: p1.id, debit: 50, credit: 0, name: 'Open L1' },
+      { account_id: resInc.id, partner_id: p1.id, debit: 0, credit: 50, name: 'Open L1 income' },
+    ],
+  });
+  db = postMove(mOpen.db, mOpen.id);
+
+  const m1 = create(db, 'account.move', {
+    move_type: 'entry',
+    partner_id: p1.id,
+    journal_id: misc.id,
+    company_id: 1,
+    date,
+    line_ids: [
+      { account_id: resAcc.id, partner_id: p1.id, debit: 100, credit: 0, name: 'L1' },
+      { account_id: resInc.id, partner_id: p1.id, debit: 0, credit: 100, name: 'L1 income' },
+    ],
+  });
+  db = postMove(m1.db, m1.id);
+
+  const m2 = create(db, 'account.move', {
+    move_type: 'entry',
+    partner_id: p2.id,
+    journal_id: misc.id,
+    company_id: 1,
+    date,
+    line_ids: [
+      { account_id: resAcc.id, partner_id: p2.id, debit: 200, credit: 0, name: 'L2' },
+      { account_id: resInc.id, partner_id: p2.id, debit: 0, credit: 200, name: 'L2 income' },
+    ],
+  });
+  db = postMove(m2.db, m2.id);
+
+  // Set up tracking on currency conversion invocations via db.settings.current_company_id
+  let conversionCount = 0;
+  const originalSettings = db.settings ?? {};
+  const trackingDb = {
+    ...db,
+    settings: {
+      ...originalSettings,
+      get current_company_id() {
+        conversionCount++;
+        return originalSettings.current_company_id ?? 1;
+      },
+    },
+  };
+
+  // Run generalLedger with from date and groupByPartner: true
+  const res = generalLedger(trackingDb, { from: '2025-02-01', groupByPartner: true });
+  assert.ok(res.rows.length > 0);
+
+  const recRow = res.rows.find((r) => r.account.id === resAcc.id);
+  assert.ok(recRow);
+  assert.equal(recRow.initial, 50);
+  assert.equal(recRow.debit, 300);
+  assert.equal(recRow.credit, 0);
+  assert.equal(recRow.end, 350);
+  assert.equal(recRow.partners.length, 2);
+
+  const p1Row = recRow.partners.find((p) => p.partner_id === p1.id);
+  const p2Row = recRow.partners.find((p) => p.partner_id === p2.id);
+  assert.ok(p1Row && p2Row);
+  assert.equal(p1Row.initial, 50);
+  assert.equal(p1Row.debit, 100);
+  assert.equal(p1Row.end, 150);
+  assert.equal(p2Row.initial, 0);
+  assert.equal(p2Row.debit, 200);
+  assert.equal(p2Row.end, 200);
+
+  // For each journal item (period and opening), debit and credit should be converted at most once.
+  // Without the fix, entries are repeatedly converted per partner and for running totals (4x to 6x conversions).
+  const totalPeriodItems = res.rows.reduce((s, r) => s + r.lines.length, 0);
+  assert.ok(totalPeriodItems > 0);
+  // Opening items exist for accounts and are converted at most once (debit + credit)
+  const maxExpectedConversions = (totalPeriodItems + 20) * 2;
+  assert.ok(
+    conversionCount <= maxExpectedConversions,
+    `Expected at most ${maxExpectedConversions} conversions, but got ${conversionCount}`
+  );
+});

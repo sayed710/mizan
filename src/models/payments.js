@@ -6,7 +6,7 @@ import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, f
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { defaultPaymentJournalId, isLiquidityJournal, paymentJournal } from './ledger.js';
 import { journalMethodLines } from './paymentmethod.js';
-import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks } from './pay.js';
+import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks, nextCheckNumber } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
 import { buildSepaXml, DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
@@ -682,7 +682,35 @@ export const paymentModels = {
             return { db: nextDb, download: file };
           },
         },
-        { label: 'Print Checks', when: (r, db) => r.state === 'posted' && r.batch_type === 'outbound' && (!db || isCheckBatch(db, r)), run: (db, r) => ({ db: printBatchChecks(db, r), go: '#/print/account.batch.payment/' + r.id }) },
+        {
+          label: 'Print Checks',
+          when: (r, db) => r.state === 'posted' && r.batch_type === 'outbound' && (!db || isCheckBatch(db, r)),
+          wizard: (db, r) => {
+            const journalId = r?.journal_id ?? (r?.lines?.[0]?.payment_id && db ? read(db, 'account.payment', r.lines[0].payment_id)?.journal_id : null);
+            const journal = db && journalId ? read(db, 'account.journal', journalId) : null;
+            const payments = (r?.lines ?? [])
+              .map((l) => (db && l.payment_id ? read(db, 'account.payment', l.payment_id) : null))
+              .filter(Boolean);
+            if (journal?.check_manual_sequencing) {
+              const missing = payments.filter((p) => p.state === 'posted' && paymentPaysByCheck(db, p)
+                && (p.check_number == null || (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number)));
+              if (!missing.length) return null;
+              return { title: 'Print Checks', fields: missing.map((p) => ({ name: `check_number_${p.id}`, type: 'integer', label: 'Check Number', required: true })) };
+            }
+            const nextNum = db && journalId ? nextCheckNumber(db, journalId) : 1;
+            return {
+              title: 'Print Checks',
+              fields: [
+                { name: 'next_check_number', type: 'integer', label: 'Next Check Number', default: nextNum, required: true },
+              ],
+            };
+          },
+          run: (db, r, values = {}) => {
+            const requested = Object.fromEntries(Object.entries(values).filter(([key]) => key.startsWith('check_number_')).map(([key, value]) => [key.slice(13), Number(value)]));
+            const nextDb = printBatchChecks(db, r, Object.keys(requested).length ? requested : (values?.next_check_number ?? values?.check_number ?? null));
+            return { db: nextDb, go: '#/print/account.batch.payment/' + r.id };
+          },
+        },
         { label: 'Print Deposit Slip', when: (r) => r.state === 'posted' && r.batch_type === 'inbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],
       title: 'name',

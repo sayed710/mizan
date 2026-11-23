@@ -77,97 +77,51 @@ export function generalLedger(db, { from, to, company_id, analyticAccountIds, in
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const items = filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds);
   const opening = from ? trialOpeningItems(db, filterByAnalytic(journalItems(db, { to: from, company_id, reviewMode: mode }), analyticAccountIds).filter((l) => l.date < from), from) : [];
-  const accountIdSet = new Set([...items, ...opening].map((l) => l.account_id));
-  const accounts = [...accountIdSet]
+
+  // Convert each item to the reporting currency once, then group by key in a single pass (large ledgers stay linear).
+  const converted = (ls) => ls.map((l) => ({ ...l, debit: reportingBookedAmount(db, l, Number(l.debit) || 0), credit: reportingBookedAmount(db, l, Number(l.credit) || 0) }));
+  const groupBy = (ls, key) => { const map = new Map(); for (const l of ls) { const k = key(l); if (!map.has(k)) map.set(k, []); map.get(k).push(l); } return map; };
+  const periodLines = groupBy(converted(items).sort((x, y) => x.date.localeCompare(y.date)), (l) => l.account_id);
+  const openingLines = groupBy(converted(opening), (l) => l.account_id);
+
+  /** Opening balance, totals and running balance of one account or one partner within it. */
+  const section = (lines, openingOf) => {
+    const start = openingOf.reduce((sum, l) => sum + l.debit - l.credit, 0);
+    let run = start;
+    const withBalance = lines.map((l) => { run += l.debit - l.credit; return { ...l, balance: round(run) }; });
+    const debit = lines.reduce((sum, l) => sum + l.debit, 0);
+    const credit = lines.reduce((sum, l) => sum + l.credit, 0);
+    return { initial: round(start), debit: round(debit), credit: round(credit), end: round(start + debit - credit), lines: withBalance };
+  };
+
+  const accounts = [...new Set([...periodLines.keys(), ...openingLines.keys()])]
     .map((id) => read(db, 'account.account', id))
     .filter(Boolean)
-    .sort((a, b) => a.code.localeCompare(b.code));
-
-  const booked = (l, amount) => reportingBookedAmount(db, l, amount);
-  const debitOf = (l) => booked(l, Number(l.debit) || 0);
-  const creditOf = (l) => booked(l, Number(l.credit) || 0);
-  const bal = (ls) => ls.reduce((s, l) => s + debitOf(l) - creditOf(l), 0);
+    .sort((x, y) => x.code.localeCompare(y.code));
 
   const rows = accounts.map((account) => {
-    const accLines = items.filter((l) => l.account_id === account.id).sort((x, y) => x.date.localeCompare(y.date));
-    const accOpening = opening.filter((l) => l.account_id === account.id);
-    const start = bal(accOpening);
-    let run = start;
-    const lines = accLines.map((l) => {
-      const debit = debitOf(l);
-      const credit = creditOf(l);
-      run += debit - credit;
-      return {
-        ...l,
-        debit,
-        credit,
-        balance: round(run),
-      };
-    });
-    const debitTotal = accLines.reduce((s, l) => s + debitOf(l), 0);
-    const creditTotal = accLines.reduce((s, l) => s + creditOf(l), 0);
-    const end = round(start + debitTotal - creditTotal);
-
+    const accLines = periodLines.get(account.id) ?? [];
+    const accOpening = openingLines.get(account.id) ?? [];
     let partners = [];
     if (groupByPartner) {
-      const partnerIds = new Set([...accLines, ...accOpening].map((l) => l.partner_id ?? null));
-      const partnerRows = [...partnerIds].map((pId) => {
-        const pLines = accLines.filter((l) => (l.partner_id ?? null) === pId);
-        const pOpening = accOpening.filter((l) => (l.partner_id ?? null) === pId);
-        const pStart = bal(pOpening);
-        let pRun = pStart;
-        const mappedLines = pLines.map((l) => {
-          const debit = debitOf(l);
-          const credit = creditOf(l);
-          pRun += debit - credit;
-          return {
-            ...l,
-            debit,
-            credit,
-            balance: round(pRun),
-          };
-        });
-        const pDebit = pLines.reduce((s, l) => s + debitOf(l), 0);
-        const pCredit = pLines.reduce((s, l) => s + creditOf(l), 0);
-        const pEnd = round(pStart + pDebit - pCredit);
+      const partnerOf = (l) => l.partner_id ?? null;
+      const byPartner = groupBy(accLines, partnerOf);
+      const openingByPartner = groupBy(accOpening, partnerOf);
+      partners = [...new Set([...byPartner.keys(), ...openingByPartner.keys()])].map((pId) => {
         const partner = pId ? read(db, 'res.partner', pId) : null;
-        return {
-          partner_id: pId,
-          partner,
-          name: partner?.name ?? '',
-          initial: round(pStart),
-          debit: round(pDebit),
-          credit: round(pCredit),
-          end: pEnd,
-          lines: mappedLines,
-        };
-      }).filter((p) => p.lines.length || p.initial);
-
-      partnerRows.sort((a, b) => {
-        if (!a.partner_id) return 1;
-        if (!b.partner_id) return -1;
-        return a.name.localeCompare(b.name);
-      });
-      partners = partnerRows;
+        return { partner_id: pId, partner, name: partner?.name ?? '', ...section(byPartner.get(pId) ?? [], openingByPartner.get(pId) ?? []) };
+      }).filter((p) => p.lines.length || p.initial)
+        .sort((x, y) => (!x.partner_id ? 1 : !y.partner_id ? -1 : x.name.localeCompare(y.name)));
     }
-
-    return {
-      account,
-      initial: round(start),
-      debit: round(debitTotal),
-      credit: round(creditTotal),
-      end,
-      lines,
-      partners,
-    };
+    return { account, ...section(accLines, accOpening), partners };
   });
 
   return {
     rows,
     totals: {
-      debit: round(rows.reduce((s, r) => s + r.debit, 0)),
-      credit: round(rows.reduce((s, r) => s + r.credit, 0)),
-      end: round(rows.reduce((s, r) => s + r.end, 0)),
+      debit: round(rows.reduce((sum, r) => sum + r.debit, 0)),
+      credit: round(rows.reduce((sum, r) => sum + r.credit, 0)),
+      end: round(rows.reduce((sum, r) => sum + r.end, 0)),
     },
   };
 }
