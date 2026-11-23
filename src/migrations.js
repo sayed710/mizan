@@ -2052,7 +2052,26 @@ export function migratePartnerRanks(db) {
   }));
   return { ...db, records: { ...db.records, 'res.partner': updatedPartners } };
 }
-MIGRATIONS.push({ version: 67, name: 'partner-ranks', up: migratePartnerRanks });
+MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
+  const budgets = db?.records?.['account.budget'];
+  if (!Array.isArray(budgets) || !budgets.length) return db;
+  let changed = false;
+  const nextBudgets = budgets.map((b) => {
+    if (!b || typeof b !== 'object') return b;
+    if (b.budget_type) return b;
+    changed = true;
+    return { ...b, budget_type: 'both' };
+  });
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.budget': nextBudgets,
+    },
+  };
+} });
+MIGRATIONS.push({ version: 68, name: 'partner-ranks', up: migratePartnerRanks });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

@@ -248,6 +248,16 @@ export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
+const recipientBankDomain = (b, r, db) => {
+  if (b.active === false) return false;
+  const companyId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+  if (b.company_id && b.company_id !== companyId) return false;
+  if (isInbound(r)) {
+    const companyPartnerId = db ? read(db, 'res.company', companyId)?.partner_id : null;
+    return Boolean(b.partner_id && companyPartnerId && b.partner_id === companyPartnerId);
+  }
+  return !b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id);
+};
 export const residual = (r, db) => {
   if (!isInvoice(r)) return 0;
   let curr;
@@ -2720,6 +2730,10 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
     { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
     { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
   ],
+  ...(!purchases ? [[
+    { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
+    { id: 'is_not_sent', label: 'Not Sent', fn: (r) => !r.is_move_sent },
+  ]] : []),
   monthFilters('invoice_date', 'Invoice Date'),
   ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
   monthFilters('invoice_date_due', 'Due Date'),
@@ -3503,7 +3517,7 @@ export const accountingModels = {
         const isEligibleVendorBank = (b) => b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1)) && sameCommercialPartner(db, b.partner_id, r.partner_id);
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const eligibleBanks = partnerChange && isPurchase(r) ? search(db, 'res.partner.bank').filter(isEligibleVendorBank).sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment))) : [];
-        const partnerBank = selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
+        const partnerBank = isInbound(r) ? (selectedBank && recipientBankDomain(selectedBank, r, db) ? selectedBank.id : null) : selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
           ? selectedBank.id : (eligibleBanks[0]?.id ?? null);
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
         const nextContext = { ...r, ...fiscal, journal_id: journal };
@@ -3652,7 +3666,12 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
+      partner_bank_id: {
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        domain: recipientBankDomain,
+      },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
@@ -3777,6 +3796,7 @@ export const accountingModels = {
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       to_check: { type: 'boolean', label: 'To Check', copy: false },
+      is_move_sent: { type: 'boolean', label: 'Is Move Sent', copy: false, readonly: true },
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
@@ -3793,6 +3813,7 @@ export const accountingModels = {
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
+    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
     menuActions: [
       { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
@@ -3802,7 +3823,6 @@ export const accountingModels = {
         run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=proforma` }),
       },
     ],
-    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
       const companyId = vals.company_id ?? currentCompany(db);
@@ -4089,7 +4109,32 @@ export const accountingModels = {
           },
           run: registerPayment,
         },
-        { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
+        {
+          label: 'Send',
+          email: 'document',
+          primary: (r) => !r.is_move_sent,
+          when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type),
+          wizard: (db, r) => {
+            const partner = r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+            return {
+              title: 'Send',
+              fields: [
+                { name: 'email', type: 'boolean', label: 'Email', default: Boolean(partner?.email?.trim?.()) },
+                { name: 'download', type: 'boolean', label: 'Download', default: false },
+              ],
+            };
+          },
+          run: (db, r, values = {}) => {
+            if (!values?.email && !values?.download) {
+              throw new Error('Select at least one channel: Email or Download');
+            }
+            const markSent = !values.live && Boolean(values.download);
+            return {
+              db: markSent ? write(db, 'account.move', r.id, { is_move_sent: true }) : db,
+              ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
+            };
+          },
+        },
         {
           label: 'Credit Note',
           when: (r) => r.state === 'posted' && r.move_type === 'out_invoice',
@@ -4144,6 +4189,7 @@ export const accountingModels = {
             const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
             const nextDb = write(cancelledDb, 'account.move', r.id, {
               state: 'draft',
+              is_move_sent: false,
               ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
               ...(isInvoice(r) ? { line_ids: [] } : {})
             });
