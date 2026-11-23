@@ -11,7 +11,7 @@ import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
 import { postMove } from './models/accounting.js';
 import { financeModels, runFollowUps, logManualFollowUp, levelChannels, isFollowUpSmsDiff } from './models/finance.js';
-import { scopedWritableModels, writableModelsForApps } from './models/index.js';
+import { scopedWritableModels, writableModelsForApps, redactForApps } from './models/index.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -279,5 +279,150 @@ test('Finding 4: dual-channel level provides levelChannels and distinct SMS manu
     assert.equal(line?.followup_channel, 'sms');
   } finally {
     await mounted.done();
+  }
+});
+
+test('Code Review Finding 1: accounting diffs cannot forge SMS delivery state, attempt metadata or counters', () => {
+  const f = fixture(undefined, addDays(today(), -19));
+  const manual = logManualFollowUp(f.db, f.partner, today(), { channel: 'sms' });
+  const campaign = search(manual, 'sms.campaign').find((c) => c.followup_sms);
+  const trace = search(manual, 'sms.trace').find((t) => t.campaign_id === campaign.id);
+
+  // 1. Newly created trace marked 'sent' instead of 'outgoing' is rejected
+  const forgedNewTrace = write(manual, 'sms.trace', trace.id, { state: 'sent', delivery_pending: false });
+  const forgedNewDiff = diffDb(f.db, forgedNewTrace);
+  assert.equal(isFollowUpSmsDiff(forgedNewDiff, f.db), false);
+
+  // 2. Newly created trace with delivery_pending: false is rejected
+  const notPending = write(manual, 'sms.trace', trace.id, { delivery_pending: false });
+  assert.equal(isFollowUpSmsDiff(diffDb(f.db, notPending), f.db), false);
+
+  // 3. Newly created trace with unpermitted field is rejected
+  const extraField = write(manual, 'sms.trace', trace.id, { unpermitted_field: 'hack' });
+  assert.equal(isFollowUpSmsDiff(diffDb(f.db, extraField), f.db), false);
+
+  // 4. An existing trace in db cannot have its state forged to 'sent'
+  const savedDb = applyDiff(f.db, diffDb(f.db, manual), { allowed: scopedWritableModels(['accounting'], diffDb(f.db, manual), f.db), author: 'Accountant' });
+  const modifiedTrace = write(savedDb, 'sms.trace', trace.id, { state: 'sent', delivery_pending: false });
+  const modifiedDiff = diffDb(savedDb, modifiedTrace);
+  assert.equal(isFollowUpSmsDiff(modifiedDiff, savedDb), false);
+
+  // 5. Existing campaign cannot have delivery counters incremented by client
+  const counterModified = write(savedDb, 'sms.campaign', campaign.id, { delivered: 1 });
+  assert.equal(isFollowUpSmsDiff(diffDb(savedDb, counterModified), savedDb), false);
+});
+
+test('Code Review Finding 2: dual-channel manual confirmation uses phone or letter fallback when customer has no email', async () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.followup.level': [], 'account.move': [] } };
+  const lvl = create(db, 'account.followup.level', { delay: 10, reminder_timing: 'after', send_email: true, send_sms: true, sms_message: 'Pay now' });
+  // Manual reminder customer with phone but NO email
+  const partner = create(lvl.db, 'res.partner', { name: 'No Email Customer', email: '', phone: '+201112223344', followup_reminder_type: 'manual' });
+  const due = addDays(today(), -15);
+  const inv = create(partner.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: partner.id, invoice_date: addDays(due, -10), invoice_date_due: due, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+
+  const { FollowUps } = await import('./views/Reports.jsx');
+  const mounted = await mountView((React) => React.createElement(FollowUps, { db }), db);
+  try {
+    const confirmBtn = find(mounted.host, (n) => n.tagName === 'BUTTON' && textOf(n).trim() === 'Confirm Sent');
+    assert.ok(confirmBtn, 'Confirm Sent button exists');
+    const smsBtn = find(mounted.host, (n) => n.tagName === 'BUTTON' && textOf(n).trim() === 'Send SMS');
+    assert.ok(smsBtn, 'Send SMS button exists because phone is available');
+
+    // Clicking Confirm Sent must NOT throw "email required"; it confirms the phone fallback
+    await mounted.React.act(async () => props(confirmBtn).onClick());
+    const saved = mounted.getDb();
+    const line = read(saved, 'res.partner', partner.id).followup_lines.find((l) => l.company_id === 1);
+    assert.equal(line?.followup_channel, 'phone');
+  } finally {
+    await mounted.done();
+  }
+
+  // Customer with NEITHER email NOR phone: confirms letter, Send SMS button NOT rendered
+  const letterPartner = create(db, 'res.partner', { name: 'Letter Only', email: '', phone: '', mobile: '', followup_reminder_type: 'manual' });
+  const inv2 = create(letterPartner.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: letterPartner.id, invoice_date: addDays(due, -10), invoice_date_due: due, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 50, tax: 0 }] });
+  db = postMove(inv2.db, inv2.id);
+
+  const mountedLetter = await mountView((React) => React.createElement(FollowUps, { db }), db);
+  try {
+    const buttons = [];
+    const collectButtons = (n) => {
+      if (n.tagName === 'BUTTON') buttons.push(n);
+      for (const child of n.childNodes ?? []) collectButtons(child);
+    };
+    collectButtons(mountedLetter.host);
+    const smsButtons = buttons.filter((b) => textOf(b).trim() === 'Send SMS');
+    assert.equal(smsButtons.length, 1, 'Only the phone customer has Send SMS, not the letter-only customer');
+  } finally {
+    await mountedLetter.done();
+  }
+});
+
+test('Code Review Finding 3: accounting sessions cannot read marketing SMS campaigns or recipient traces', () => {
+  const f = fixture(undefined, addDays(today(), -19));
+  const followUpDb = logManualFollowUp(f.db, f.partner, today(), { channel: 'sms' });
+  const followUpCampaign = search(followUpDb, 'sms.campaign').find((c) => c.followup_sms);
+  const followUpTrace = search(followUpDb, 'sms.trace').find((t) => t.campaign_id === followUpCampaign.id);
+
+  // Add an unrelated marketing campaign and trace
+  const promo = create(followUpDb, 'sms.campaign', { name: 'Summer Promo', body: '50% off everything', stage_id: 'sent' });
+  const promoTrace = create(promo.db, 'sms.trace', { campaign_id: promo.id, phone: '+201999888777', name: 'Marketing Lead', state: 'sent' });
+  const fullDb = promoTrace.db;
+
+  // Redaction for Accounting-only user:
+  const acctDb = redactForApps(fullDb, ['accounting']);
+  const acctCampaigns = search(acctDb, 'sms.campaign');
+  const acctTraces = search(acctDb, 'sms.trace');
+
+  assert.equal(acctCampaigns.some((c) => c.id === followUpCampaign.id), true, 'Follow-up campaign is visible');
+  assert.equal(acctCampaigns.some((c) => c.id === promo.id), false, 'Marketing campaign is filtered out');
+  assert.equal(acctTraces.some((t) => t.id === followUpTrace.id), true, 'Follow-up trace is visible');
+  assert.equal(acctTraces.some((t) => t.id === promoTrace.id), false, 'Marketing trace is filtered out');
+
+  // Redaction for SMS Marketing user preserves full access:
+  const smsDb = redactForApps(fullDb, ['sms']);
+  assert.equal(search(smsDb, 'sms.campaign').some((c) => c.id === promo.id), true, 'Marketing campaign visible to SMS user');
+  assert.equal(search(smsDb, 'sms.trace').some((t) => t.id === promoTrace.id), true, 'Marketing trace visible to SMS user');
+
+  // Redaction for user with both apps preserves full access:
+  const dualDb = redactForApps(fullDb, ['accounting', 'sms']);
+  assert.equal(search(dualDb, 'sms.campaign').some((c) => c.id === promo.id), true);
+  assert.equal(search(dualDb, 'sms.trace').some((t) => t.id === promoTrace.id), true);
+});
+
+test('Code Review Finding 4: blacklisted numbers are rejected in follow-up diffs and blocked at delivery', async () => {
+  const phone = '+201009998877';
+  const f = fixture(phone, addDays(today(), -19));
+  // Blacklist the phone number
+  const blacklistedDb = create(f.db, 'phone.blacklist', { number: phone, active: true }).db;
+
+  // 1. A follow-up SMS diff for a blacklisted number is rejected
+  const manual = logManualFollowUp(f.db, f.partner, today(), { channel: 'sms' });
+  const diff = diffDb(f.db, manual);
+  assert.equal(isFollowUpSmsDiff(diff, blacklistedDb), false, 'isFollowUpSmsDiff rejects blacklisted number');
+  assert.equal(scopedWritableModels(['accounting'], diff, blacklistedDb).has('sms.campaign'), false);
+
+  // 2. In server/integrations.js sendSmsCampaign: enforce opt-outs at delivery as a safeguard for persisted traces
+  // Setup store with an already-persisted outgoing trace whose phone is now blacklisted
+  const campaign = search(manual, 'sms.campaign').find((c) => c.followup_sms);
+  const trace = search(manual, 'sms.trace').find((t) => t.campaign_id === campaign.id);
+  let dbWithBlacklist = create(manual, 'phone.blacklist', { number: phone, active: true }).db;
+
+  const store = { get: () => dbWithBlacklist, commit: (next) => { dbWithBlacklist = next; } };
+  let gatewayCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { gatewayCalled = true; return new Response('OK', { status: 200 }); };
+  try {
+    const result = await sendSmsCampaign({ MIZAN_TWILIO_SID: 'test', MIZAN_TWILIO_TOKEN: 'test', MIZAN_TWILIO_FROM: '+201001112200' }, store, { id: campaign.id });
+    assert.equal(gatewayCalled, false, 'Gateway was never called for blacklisted number');
+    const updatedTrace = read(dbWithBlacklist, 'sms.trace', trace.id);
+    assert.equal(updatedTrace.state, 'error');
+    assert.equal(updatedTrace.error, 'Blacklisted phone number');
+    assert.equal(updatedTrace.delivery_pending, false);
+    assert.equal(read(dbWithBlacklist, 'sms.campaign', campaign.id).failed, 1);
+    assert.match(result.message, /1 failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

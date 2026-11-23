@@ -136,7 +136,7 @@ test('account.tax form shows one Tax Group, conditional Child Taxes, Definition 
   );
   try {
     const topGroups = allFind(ctx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group')).slice(0, 2);
-    assert.deepEqual(fieldLabelsOf(topGroups[0]), ['Tax Computation', 'Amount', 'Description']);
+    assert.deepEqual(fieldLabelsOf(topGroups[0]), ['Tax Computation', 'Amount']);
     assert.deepEqual(fieldLabelsOf(topGroups[1]), ['Tax Type', 'Tax Scope', 'Fiscal Position', 'Replaces']);
     assert.equal(allFind(ctx.host, (n) => n.textContent?.trim() === 'Sequence').length, 0, 'Sequence leaves the form');
 
@@ -144,7 +144,7 @@ test('account.tax form shows one Tax Group, conditional Child Taxes, Definition 
     const compSelect = find(topGroups[0], (n) => n.tagName === 'SELECT');
     await ctx.React.act(async () => props(compSelect).onChange({ target: { value: 'group' } }));
     const updatedLeft = allFind(ctx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'))[0];
-    assert.deepEqual(fieldLabelsOf(updatedLeft), ['Tax Computation', 'Amount', 'Child Taxes', 'Description']);
+    assert.deepEqual(fieldLabelsOf(updatedLeft), ['Tax Computation', 'Amount', 'Child Taxes']);
 
     const tabButtons = allFind(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab');
     assert.deepEqual(tabButtons.map((b) => b.textContent.trim()), ['Definition', 'Advanced Options']);
@@ -165,7 +165,7 @@ test('account.tax form shows one Tax Group, conditional Child Taxes, Definition 
     const advPanel = find(ctx.host, (n) => props(n)?.role === 'tabpanel');
     const advGroups = allFind(advPanel, (n) => hasClass(n, 'group'));
     assert.equal(advGroups.length, 2);
-    assert.deepEqual(fieldLabelsOf(advGroups[0]), ['Label on Invoices', 'Tax Group']);
+    assert.deepEqual(fieldLabelsOf(advGroups[0]), ['Label on Invoices', 'Description', 'Legal Notes', 'Tax Group']);
     assert.deepEqual(fieldLabelsOf(advGroups[1]), [
       'Included in Price',
       'Affect Base of Subsequent Taxes',

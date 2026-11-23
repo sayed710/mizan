@@ -1508,8 +1508,8 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   }
 }
 
-/** The reporting cutoff is never later than the day the report is run. */
-export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
+/** Use the requested reporting cutoff, defaulting to today. */
+export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
@@ -2170,7 +2170,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
       }
     }
     if (channel === 'email' && partner.email?.trim() && deliver) {
-      const message = { to: partner.email.trim(), subject: levelName, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
+      const message = followUpEmail(nextDb, f, level, partner);
       // Validate the bookkeeping before attempting an irreversible delivery.
       const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
       const emailSent = () => {
@@ -2260,9 +2260,43 @@ const currencyOf = (db, move) => {
 export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${formatCurrency(amount, currency, '')} ${currency.name}`).join(', ');
 export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${formatCurrency(m.amount_residual, documentCurrency(db, m), '')} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
 
-const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
+/** Current open invoices and per-currency balances for a customer letter. */
+export function followUpLetter(db, partnerId, companyId, at = today()) {
+  const reminder = followUps(db, at, { companyId, ignoreNextActionDate: true }).flatMap(followUpCompanies).find((f) => f.partner_id === partnerId && f.company_id === companyId);
+  if (!reminder) throw new Error('This customer has no overdue invoices');
+  const level = followUpLevel(db, reminder, at);
+  if (!level) throw new Error('No follow-up level applies to this customer');
+  const openInvoices = search(db, 'account.move').filter((m) => m.partner_id === partnerId && (m.company_id ?? 1) === companyId && m.state === 'posted' && m.move_type === 'out_invoice' && m.active !== false && !m.exclude_from_followup && Number(m.amount_residual) > 0 && (!m.invoice_date || m.invoice_date <= at)).map((m) => {
+    const currency = documentCurrency(db, m);
+    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false });
+    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const late = dues.filter((d) => d.date && d.date < at).reduce((sum, d) => sum + d.amount, 0);
+    const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), currency);
+    return { ...m, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount };
+  });
+  const creditRows = (reminder.invoices ?? [])
+    .filter((m) => Number(m.amount_residual) < 0)
+    .map((c) => ({
+      ...c,
+      invoice_date: c.invoice_date ?? c.date ?? '',
+      followup_currency: c.followup_currency ?? documentCurrency(db, c) ?? companyCurrencyRecord(db, companyId),
+      overdue: false,
+      overdueAmount: 0,
+    }));
+  const invoices = [...openInvoices, ...creditRows];
+  const due = followUpSummary(invoices).totals;
+  const overdue = reminder.upcoming ? [] : reminder.totals;
+  return { reminder, level, invoices, due, overdue };
+}
+
+/** The automatic and manual email share the same subject and introductory text. */
+export function followUpEmail(db, reminder, level, partner) {
+  return { to: partner.email.trim(), subject: followUpLevelName(level), text: `${level.message ?? ''}\n${followUpText(db, reminder)}`.trim() };
+}
+
+const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate = true } = {}) => {
   const allowed = new Set(search(scope, 'account.move').map((move) => move.id));
-  const f = followUps(db, at).find((x) => x.partner_id === partnerId);
+  const f = followUps(db, at, { companyId: companyId ?? reminder?.company_id ?? null, ignoreNextActionDate }).find((x) => x.partner_id === partnerId);
   if (!f) throw new Error('This customer has no overdue invoices');
   const allGroups = followUpCompanies({ ...f, invoices: f.invoices.filter((invoice) => allowed.has(invoice.id)) });
   const targetCompany = companyId ?? reminder?.company_id ?? null;
@@ -2272,24 +2306,35 @@ const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => 
 };
 
 /** Record preparation without claiming that the email was sent. */
-export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
-  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
+export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, ignoreNextActionDate = true } = {}) {
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
   return groups.reduce((next, part) => postNote(next, 'res.partner', partnerId,
     `Payment reminder opened in mail app:\n${followUpText(scope, part)}`, reminderSource(part)), db);
 }
 
 /** Record a reminder confirmed sent by hand. */
-export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null } = {}) {
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null, ignoreNextActionDate = true } = {}) {
   if (!['email', 'sms', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
   if (channel === 'email' && !read(db, 'res.partner', partnerId)?.email?.trim()) {
     throw new Error('A customer email address is required to send an email reminder');
   }
-  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
   const queued = channel === 'sms'
     ? groups.reduce((state, part) => queueFollowUpSms(state, read(state, 'res.partner', partnerId), part, followUpLevel(scope, part, at), at), db)
     : db;
   return applyFollowUpReminder(queued, scope, partnerId, groups, at, channel, nextLevelBaseDate);
 }
+
+const ALLOWED_FOLLOWUP_CAMPAIGN_FIELDS = new Set([
+  'id', 'name', 'mailing_model', 'body', 'followup_sms', 'company_id',
+  'followup_partner_id', 'followup_company_id', 'followup_level_id', 'followup_oldest',
+  'stage_id', 'sent_date', 'sent', 'delivered', 'failed',
+]);
+
+const ALLOWED_FOLLOWUP_TRACE_FIELDS = new Set([
+  'id', 'campaign_id', 'company_id', 'phone', 'name', 'res_model', 'res_id',
+  'state', 'delivery_pending', 'attempted_at', 'error', 'date',
+]);
 
 /**
  * Whether a diff contains only validated follow-up SMS campaigns and traces.
@@ -2306,12 +2351,27 @@ export function isFollowUpSmsDiff(diff, db) {
   const traces = diff.upserts?.['sms.trace'] ?? [];
   if (!campaigns.length && !traces.length) return false;
 
+  const banned = new Set(search(db, 'phone.blacklist').filter((b) => b.active !== false).map((b) => normalizePhone(b.number)));
+
   const existingCampaigns = new Map(search(db, 'sms.campaign').map((c) => [c.id, c]));
   const resultingCampaigns = new Map(existingCampaigns);
   const touched = new Set();
   for (const campaign of campaigns) {
+    if (Object.keys(campaign).some((k) => !ALLOWED_FOLLOWUP_CAMPAIGN_FIELDS.has(k))) return false;
     const prior = existingCampaigns.get(campaign.id);
     if (campaign.followup_sms !== true || (prior && prior.followup_sms !== true)) return false;
+    if (prior) {
+      if ((campaign.delivered ?? 0) !== (prior.delivered ?? 0)) return false;
+      if ((campaign.failed ?? 0) !== (prior.failed ?? 0)) return false;
+      if ((campaign.sent ?? 0) !== (prior.sent ?? 0)) return false;
+      if (campaign.stage_id !== prior.stage_id) return false;
+      if (campaign.body !== prior.body) return false;
+      if ((campaign.company_id ?? 1) !== (prior.company_id ?? 1)) return false;
+    } else {
+      if (campaign.mailing_model !== 'res.partner') return false;
+      if ((campaign.delivered ?? 0) !== 0 || (campaign.failed ?? 0) !== 0) return false;
+      if (campaign.stage_id !== 'sent') return false;
+    }
     resultingCampaigns.set(campaign.id, campaign);
     touched.add(campaign.id);
   }
@@ -2319,8 +2379,26 @@ export function isFollowUpSmsDiff(diff, db) {
   const existingTraces = new Map(search(db, 'sms.trace').map((t) => [t.id, t]));
   const resultingTraces = new Map(existingTraces);
   for (const trace of traces) {
+    if (Object.keys(trace).some((k) => !ALLOWED_FOLLOWUP_TRACE_FIELDS.has(k))) return false;
     const prior = existingTraces.get(trace.id);
-    if (prior && prior.campaign_id !== trace.campaign_id) return false;
+    if (prior) {
+      if (prior.campaign_id !== trace.campaign_id) return false;
+      if (trace.state !== prior.state) return false;
+      if ((trace.delivery_pending ?? false) !== (prior.delivery_pending ?? false)) return false;
+      if ((trace.attempted_at ?? null) !== (prior.attempted_at ?? null)) return false;
+      if ((trace.error ?? '') !== (prior.error ?? '')) return false;
+      if (trace.phone !== prior.phone) return false;
+      if (trace.res_model !== prior.res_model || trace.res_id !== prior.res_id) return false;
+      if (trace.state === 'outgoing' && banned.has(normalizePhone(trace.phone))) return false;
+    } else {
+      if (existingCampaigns.has(trace.campaign_id)) return false;
+      if (trace.state !== 'outgoing') return false;
+      if (trace.delivery_pending !== true) return false;
+      if (trace.attempted_at != null) return false;
+      if (trace.error) return false;
+      if (trace.res_model !== 'res.partner') return false;
+      if (banned.has(normalizePhone(trace.phone))) return false;
+    }
     resultingTraces.set(trace.id, trace);
     touched.add(trace.campaign_id);
   }
@@ -2339,6 +2417,7 @@ export function isFollowUpSmsDiff(diff, db) {
       if (trace.res_model !== 'res.partner' || !partner || !group || !level?.send_sms) return false;
       const phone = normalizePhone(partner.mobile || partner.phone);
       if (!phone || trace.phone !== phone || campaign.body !== followUpSmsText(db, group, level)) return false;
+      if (banned.has(phone)) return false;
     }
   }
 
@@ -2582,6 +2661,7 @@ export const financeModels = {
     fields: {
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       name: { type: 'char', label: 'Budget Name', required: true },
+      budget_type: { type: 'selection', label: 'Budget Type', required: true, options: [['expense', 'Expense'], ['revenue', 'Revenue'], ['both', 'Both']] },
       date_from: { type: 'date', label: 'Start Date' },
       date_to: { type: 'date', label: 'End Date' },
       lines: {
@@ -2592,7 +2672,7 @@ export const financeModels = {
       },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['confirmed', 'Confirmed'], ['done', 'Done']] },
     },
-    defaults: () => ({ state: 'draft', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
+    defaults: () => ({ state: 'draft', budget_type: 'expense', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
     kanban: { title: 'name', lines: ['date_from', 'date_to'], badge: 'state' },
     list: ['name', 'date_from', 'date_to', 'state'],
     form: {
@@ -2600,7 +2680,7 @@ export const financeModels = {
       statusbarClickable: true,
       buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
-      groups: [['date_from', 'company_id'], ['date_to']],
+      groups: [['date_from', 'company_id'], ['date_to', 'budget_type']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],
       chatter: true,
     },
