@@ -100,7 +100,7 @@ test('invalid payment term schedule does not throw during invoice rendering', ()
   const term = create(db0, 'account.payment.term', {
     name: 'Fixed 500',
     display_on_invoice: true,
-    line_ids: [{ value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' }],
+    line_ids: [{ value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' }, { value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
   });
   // Draft invoice total is only 100 (fixed 500 exceeds 100)
   const inv = create(term.db, 'account.move', {
@@ -134,7 +134,7 @@ test('invalid payment term schedule does not throw during invoice rendering', ()
   let postedDb = postMove(inv2.db, inv2.id);
   // Edit the term to an invalid fixed amount
   postedDb = write(postedDb, 'account.payment.term', validTerm.id, {
-    line_ids: [{ value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' }],
+    line_ids: [{ value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' }, { value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
   });
   const postedInv2 = read(postedDb, 'account.move', inv2.id);
   assert.doesNotThrow(() => {
