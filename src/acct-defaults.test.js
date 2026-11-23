@@ -8,6 +8,7 @@ import { postMove } from './models/accounting.js';
 import { moveValued, stockAccount } from './models/valuation.js';
 
 const PARTNER_ACCOUNTING_FIELDS = [
+  'autopost_bills',
   'property_account_position_id',
   'property_payment_term_id',
   'property_supplier_payment_term_id',
