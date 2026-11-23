@@ -4,7 +4,7 @@ import { monthFilters, shiftMonth, today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
-import { payMove, settleWriteoff } from './accounting.js';
+import { markAsReviewed, payMove, settleWriteoff } from './accounting.js';
 import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { roundStatementAmount } from './bankstatement.js';
@@ -1114,9 +1114,23 @@ export const bankModels = {
       [{ id: 'unassigned', label: 'Without a Journal', fn: isStatementLineWithoutJournal }],
     ],
     groupBys: ['currency_id', 'company_id', 'journal_id', 'date'],
-    kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'] },
+    // Odoo's bank transaction kanban is not drag-editable: moving a card must not rewrite its journal or state.
+    kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'], noDrop: true },
     list: ['sequence', 'date', 'payment_ref', 'partner_id', 'amount', 'journal_id', 'running_balance', 'bank_move_id', 'account_number', 'narration', 'ref', 'transaction_type', 'state'],
     listLabels: { journal_id: 'Journal', bank_move_id: 'Journal Entry' },
+    listActions: [
+      {
+        label: 'Mark as reviewed',
+        requiresSelection: true,
+        run: (db, ids) => {
+          const moveIds = ids
+            .map((id) => read(db, 'account.bank.statement.line', id)?.bank_move_id)
+            .filter((moveId) => moveId && read(db, 'account.move', moveId)?.to_check);
+          if (!moveIds.length) throw new Error('The selected transactions have no journal entry to review');
+          return markAsReviewed(db, moveIds);
+        },
+      },
+    ],
     listDecoration: (r) => (r.state === 'to_check' ? 'info' : null),
     views: ['list', 'kanban'],
     form: {
@@ -1124,6 +1138,7 @@ export const bankModels = {
       lockedWhen: (r) => r.state === 'reconciled',
       buttons: [
         { label: 'Unreconcile', when: (r) => r.state === 'reconciled' || Boolean(r.bank_move_id), run: unreconcile },
+        { label: 'Mark as reviewed', when: (r, db) => Boolean(read(db, 'account.move', r?.bank_move_id)?.to_check), run: (db, r) => ({ db: markAsReviewed(db, r.bank_move_id) }) },
         { label: 'Reconcile', primary: true, when: (r) => r.state === 'to_check' && !r.move_id, run: autoReconcile },
         { label: 'Match Payment', primary: true, when: (r) => r.state === 'to_check' && (r.payment_id || (r.payment_ids ?? []).length || r.batch_payment_id), run: matchPayment },
         { label: 'Match', primary: true, when: (r) => r.state === 'to_check' && r.move_id, run: (db, r) => ({ db: reconcileWith(db, r, r.move_id) }) },

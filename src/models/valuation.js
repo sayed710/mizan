@@ -22,7 +22,7 @@ const stockQuantity = (db, p, company = companyOf(db)) => {
   const qs = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === p.id);
   if (qs.length) return qs.filter((q) => (q.company_id ?? 1) === company).reduce((s, q) => s + q.quantity, 0);
   // Unlocated legacy stock is attributed in the same way as ensureQuants.
-  return (p.company_id || companyOf(db)) === company ? Number(p.qty_available) || 0 : 0;
+  return (p.company_id || 1) === company ? Number(p.qty_available) || 0 : 0;
 };
 const product = (db, id) => {
   const p = read(db, 'product', id);
@@ -40,7 +40,7 @@ function prepare(db, id, date, company = companyOf(db)) {
   const ls = layers(db, id, company);
   if (ls.some((l) => l.date > date)) throw new Error('Valuation date cannot precede an existing layer');
   const onHand = stockQuantity(db, p, company);
-  const owned = onHand + ((p.company_id || companyOf(db)) === company ? Number(p.qty_rented || 0) : 0);
+  const owned = onHand + ((p.company_id || 1) === company ? Number(p.qty_rented || 0) : 0);
   if (ls.length && Math.abs(quantity(ls) - owned) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
   if (ls.length || !onHand) return db;
   if (onHand < 0) throw new Error('Reconcile negative opening stock before valuation');
@@ -332,13 +332,17 @@ export function revalue(db, productId, newUnitCost, { date = today() } = {}) {
     value: round(target - valueOf(ls)), description: 'Stock revaluation', kind: 'revaluation' });
 }
 
+const isProductVisible = (p, companyId) => !companyId || p.company_id == null || p.company_id === false || p.company_id === '' || p.company_id === companyId;
+
 /** Per-product layer totals at a date, including implicit legacy opening stock until first valued. */
-export function valuationReport(db, { at = today(), company } = {}) {
-  const comp = company ?? companyOf(db);
-  return Object.fromEntries(search(db, 'product').filter((p) => p.type === 'goods').map((p) => {
-    const all = layers(db, p.id, comp);
+export function valuationReport(db, { at = today(), companyId = companyOf(db) } = {}) {
+  const targetCompany = companyId && companyId !== 'all' ? Number(companyId) : null;
+  return Object.fromEntries(search(db, 'product').filter((p) => p.type === 'goods' && isProductVisible(p, targetCompany)).map((p) => {
+    const all = layers(db, p.id, targetCompany ?? companyOf(db));
     const ls = all.filter((l) => l.date <= at);
-    const qty = all.length ? quantity(ls) : stockQuantity(db, p, comp);
+    const legacyQty = all.length ? 0 : stockQuantity(db, p, targetCompany ?? companyOf(db));
+    if (!all.length && legacyQty && at < today()) return [p.id, { qty: null, value: null, unitCost: null }];
+    const qty = all.length ? quantity(ls) : legacyQty;
     const value = all.length ? valueOf(ls) : round(qty * (Number(p.cost) || 0));
     return [p.id, { qty, value, unitCost: qty ? value / qty : 0 }];
   }));
