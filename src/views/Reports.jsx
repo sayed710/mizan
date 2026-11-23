@@ -754,21 +754,22 @@ function AuditRows({ db, rows }) {
 }
 
 /** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
-function Valuation({ db, period, money: fmtMoney = money }) {
-  const report = valuationReport(db, { at: period.to || today() });
-  const rows = Object.entries(report).filter(([, v]) => v.qty)
+function Valuation({ db, period, companyId, money: fmtMoney = money }) {
+  const report = valuationReport(db, { at: period.to || today(), companyId: Number(companyId) });
+  const unavailable = Object.values(report).some((v) => v.qty === null);
+  const rows = Object.entries(report).filter(([, v]) => v.qty !== 0)
     .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
   return (
     <tbody>
       {rows.map(({ p, value }) => (
         <tr key={p.id} className="rep-detail">
           <td><a href={`#/open/product/${p.id}`}>{p.default_code ? `[${p.default_code}] ` : ''}{p.name}</a></td>
-          <td className="num">{p.qty_available}</td>
-          <td className="num">{fmtMoney(p.cost)}</td>
-          <td className="num">{fmtMoney(value)}</td>
+          <td className="num">{p.qty_available ?? t('Historical valuation unavailable')}</td>
+          <td className="num">{p.cost == null ? '-' : fmtMoney(p.cost)}</td>
+          <td className="num">{value == null ? '-' : fmtMoney(value)}</td>
         </tr>
       ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td className="num">{fmtMoney(rows.reduce((s, r) => s + r.value, 0))}</td></tr>
+      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td className="num">{unavailable ? t('Historical valuation unavailable') : fmtMoney(rows.reduce((s, r) => s + r.value, 0))}</td></tr>
     </tbody>
   );
 }
@@ -936,7 +937,7 @@ function ReportPage({ leaf, params }) {
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
     const allLedgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
     const activeLedger = LEDGER_REPORTS.includes(leaf.report) ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
-    const journals = (activeLedger ? search(companyDb, 'account.journal').filter((j) => (activeLedger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal'))
+    const journals = (activeLedger ? search(companyDb, 'account.journal').filter((j) => (activeLedger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal', { includeArchived: leaf.report === 'inalterability' }))
       .filter((j) => selectedCompany === 'all' || !j.company_id || j.company_id === Number(selectedCompany));
     const chosenIds = LEDGER_REPORTS.includes(leaf.report)
       ? journalIds.filter((jId) => journals.some((j) => j.id === jId))
@@ -1318,7 +1319,7 @@ function ReportPage({ leaf, params }) {
             statementIds.map((partnerId) => <CustomerStatement key={partnerId} db={db} period={effectivePeriod} companyId={selectedCompany} initialPartnerId={partnerId} fixedPartner money={fmtMoney} />)
           ) : (
             <Body
-              db={db}
+              db={leaf.report === 'valuation' ? companyDb : db}
               sourceDb={sourceDb}
               period={effectivePeriod}
               companyId={selectedCompany}
