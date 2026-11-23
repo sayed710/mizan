@@ -145,6 +145,7 @@ export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
     tax_include: taxPriceInclude(db, tax, companyId),
     tax_cash_basis: tax.tax_exigibility === 'on_payment',
     tax_name: tax.name,
+    ...(tax.invoice_legal_notes ? { invoice_legal_notes: tax.invoice_legal_notes } : {}),
     invoice_repartition_line_ids: invRepart,
     refund_repartition_line_ids: refRepart,
     ...(invoiceLabel ? { tax_invoice_label: invoiceLabel } : {}),
@@ -163,7 +164,19 @@ export const taxSnapshot = (tax, db = null, fpId = null, companyId = null) => {
 };
 
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
-export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', tax_group_id: null, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', invoice_legal_notes: '', tax_group_id: null, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+
+/** Distinct legal notes captured on taxable invoice lines and their tax components. */
+export function invoiceTaxLegalNotes(lines) {
+  const notes = new Set();
+  const collect = (snapshot) => {
+    const note = String(snapshot?.invoice_legal_notes ?? '').trim();
+    if (note) notes.add(note);
+    for (const child of snapshot?.tax_breakdown ?? []) collect(child);
+  };
+  for (const line of lines ?? []) if (!isSectionOrNote(line)) collect(line);
+  return [...notes];
+}
 
 /** All tax IDs carried by a line (scalar tax_id, multi tax_ids, and tax_breakdown). */
 export function lineTaxIds(line) {
@@ -342,6 +355,7 @@ export function autoFiscalPosition(db, address, companyId = null) {
   const matchesPosition = (fp) => {
     if (companyId && fp.company_id && fp.company_id !== companyId) return false;
     if (!fp.auto_apply) return false;
+    if (fp.unresolved_targeting) return false;
     if (fp.vat_required && !String(p.vat ?? '').trim()) return false;
     if (!zipMatches(fp)) return false;
     const fpCountry = fp.country_id ?? countryIdFor(db, fp.country);
@@ -812,7 +826,7 @@ export const taxModels = {
       },
       amount: { type: 'float', label: 'Amount', tracking: true },
       children_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Child Taxes' },
-      description: { type: 'char', label: 'Description', optional: 'show' },
+      description: { type: 'text', label: 'Description', optional: 'show' },
       type_tax_use: { type: 'selection', label: 'Tax Type', tracking: true, options: TAX_TYPES },
       tax_scope: { type: 'selection', label: 'Tax Scope', tracking: true, options: [['consu', 'Goods'], ['service', 'Services']] },
       fiscal_position_ids: { type: 'many2many', relation: 'account.fiscal.position', label: 'Fiscal Position' },
@@ -827,6 +841,7 @@ export const taxModels = {
         newLine: () => ({ fiscal_position_id: null, original_tax_ids: [] }),
       },
       invoice_label: { type: 'char', label: 'Label on Invoices' },
+      invoice_legal_notes: { type: 'text', label: 'Legal Notes' },
       price_include_override: {
         type: 'selection',
         label: 'Included in Price',
@@ -942,7 +957,7 @@ export const taxModels = {
     form: {
       title: 'name',
       groups: (r) => [
-        ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : []), 'description'],
+        ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : [])],
         // Odoo 20 configures substitutions with Fiscal Position x Replaces; per-position rows exist only on upgraded taxes.
         ['type_tax_use', 'tax_scope', 'fiscal_position_ids', 'original_tax_ids', ...(r?.fiscal_position_mapping_ids?.length ? ['fiscal_position_mapping_ids'] : [])],
       ],
@@ -957,7 +972,7 @@ export const taxModels = {
         {
           label: 'Advanced Options',
           groups: [
-            ['invoice_label', 'tax_group_id', 'country_id'],
+            ['invoice_label', 'description', 'invoice_legal_notes', 'tax_group_id', 'country_id'],
             ['price_include_override', 'include_base_amount', 'is_base_affected', 'active', 'tax_exigibility', 'cash_basis_transition_account_id'],
           ],
         },
@@ -971,7 +986,9 @@ export const taxModels = {
     guard: (db, _before, after) => {
       const countryError = countryReferenceError(db, after);
       if (countryError) return countryError;
-      if ((after.state_ids ?? []).some((id) => !stateIdFor(db, id, after.country_id))) return 'Select states belonging to the selected country';
+      if ((after.state_ids ?? []).some((id) => !stateIdFor(db, id, after.country_id))) {
+        return after.country_id ? 'Select states belonging to the selected country' : 'Selected state does not exist';
+      }
       if (after.country_group_id && !read(db, 'res.country.group', after.country_group_id)) {
         return 'Selected country group does not exist';
       }

@@ -1,5 +1,5 @@
 import { purchaseLineId } from './models/purchase-links.js';
-import { countryIdFor, ensureCountries, stateIdFor } from './models/country.js';
+import { ensureCountries } from './models/country.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -2001,16 +2001,87 @@ export function migrateTaxPriceIncludeOverride(db) {
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
 
+function normalizeLegacyCountry(next, country) {
+  if (country == null) return null;
+  if (Number.isInteger(country)) {
+    return (next.records['res.country'] ?? []).some((r) => r.id === country) ? country : null;
+  }
+  const raw = String(country).trim();
+  if (!raw) return null;
+  const countries = next.records['res.country'] ?? [];
+  const lower = raw.toLowerCase();
+  const byCodeOrName = countries.filter((r) => r.code?.toLowerCase() === lower || r.name?.toLowerCase() === lower);
+  if (byCodeOrName.length === 1) return byCodeOrName[0].id;
+  return null;
+}
+
+function normalizeLegacyState(next, state, countryId) {
+  if (state == null) return null;
+  if (Number.isInteger(state)) {
+    return (next.records['res.country.state'] ?? []).some((r) => r.id === state && (countryId == null || r.country_id === countryId)) ? state : null;
+  }
+  const raw = String(state).trim();
+  if (!raw) return null;
+  const states = next.records['res.country.state'] ?? [];
+  const lower = raw.toLowerCase();
+  const byCodeOrName = states.filter((r) => (countryId == null || r.country_id === countryId) && (r.code?.toLowerCase() === lower || r.name?.toLowerCase() === lower));
+  if (byCodeOrName.length === 1) return byCodeOrName[0].id;
+
+  if (countryId) {
+    let stateSeq = Math.max(next.seq?.['res.country.state'] ?? 0, 0, ...states.map((r) => r.id));
+    const code = raw.length <= 5 ? raw.toUpperCase() : raw;
+    const newState = { id: ++stateSeq, name: raw, code, country_id: countryId };
+    states.push(newState);
+    next.seq = { ...next.seq, 'res.country.state': stateSeq };
+    return newState.id;
+  }
+  return null;
+}
+
 export function migrateCountries(db) {
   const next = ensureCountries(db);
   const records = { ...next.records };
   for (const model of ['account.tax.group', 'account.tax', 'account.account.tag', 'account.fiscal.position']) {
     if (!Array.isArray(records[model])) continue;
     records[model] = records[model].map((record) => {
-      const { country, ...rest } = record;
-      const countryId = record.country_id ?? countryIdFor(next, country);
-      const result = { ...rest, country_id: countryId };
-      if (model === 'account.fiscal.position') result.state_ids = (record.state_ids ?? []).map((s) => stateIdFor(next, s, countryId)).filter((s) => s != null);
+      const countryId = record.country_id ?? normalizeLegacyCountry(next, record.country);
+      const hadCountryTarget = Boolean(record.country);
+      const unresolvedCountry = hadCountryTarget && countryId == null;
+
+      let result = { ...record };
+      if (countryId != null) {
+        delete result.country;
+        result.country_id = countryId;
+      } else {
+        result.country_id = null;
+        if (!hadCountryTarget) delete result.country;
+      }
+
+      if (model === 'account.fiscal.position') {
+        const rawStates = record.state_ids ?? [];
+        let unresolvedState = false;
+        const resolvedStates = [];
+
+        for (const s of rawStates) {
+          const sid = normalizeLegacyState(next, s, countryId);
+          if (sid != null) {
+            resolvedStates.push(sid);
+          } else {
+            unresolvedState = true;
+          }
+        }
+
+        result.state_ids = resolvedStates;
+        if (unresolvedState) {
+          result.states = record.states ?? rawStates;
+        }
+
+        if (record.auto_apply && (unresolvedCountry || unresolvedState)) {
+          result.auto_apply = false;
+          result.unresolved_targeting = true;
+          console.warn(`Fiscal position "${record.name}" auto_apply disabled due to unresolved targeting (country: "${record.country}", states: ${JSON.stringify(rawStates)})`);
+        }
+      }
       return result;
     });
   }

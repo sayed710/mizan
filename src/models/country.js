@@ -8,8 +8,8 @@ export function countryIdFor(db, value) {
 }
 
 export function stateIdFor(db, value, countryId) {
-  if (Number.isInteger(value)) return (db.records['res.country.state'] ?? []).some((r) => r.id === value && r.country_id === countryId) ? value : null;
-  const matches = (db.records['res.country.state'] ?? []).filter((r) => r.country_id === countryId && value && (r.name === value || r.code === value));
+  if (Number.isInteger(value)) return (db.records['res.country.state'] ?? []).some((r) => r.id === value && (countryId == null || r.country_id === countryId)) ? value : null;
+  const matches = (db.records['res.country.state'] ?? []).filter((r) => (countryId == null || r.country_id === countryId) && value && (r.name === value || r.code === value));
   return matches.length === 1 ? matches[0].id : null;
 }
 
