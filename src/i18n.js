@@ -1641,7 +1641,7 @@ const ar = {
   'Invoice Sequence Prefix': 'بادئة تسلسل الفواتير', 'Next Invoice Number': 'رقم الفاتورة التالي',
   'Refund Sequence Prefix': 'بادئة تسلسل المرتجعات', 'Next Refund Number': 'رقم المرتجع التالي',
   'Default Sales Journal': 'دفتر المبيعات الافتراضي', 'Default Purchase Journal': 'دفتر المشتريات الافتراضي', 'Default General Journal': 'دفتر اليومية الافتراضي',
-  Receivable: 'المدينون', 'Bank and Cash': 'البنك والنقدية', 'Current Assets': 'الأصول المتداولة', 'Fixed Assets': 'الأصول الثابتة',
+  'Account Type': 'نوع الحساب', Receivable: 'المدينون', 'Bank and Cash': 'البنك والنقدية', 'Current Assets': 'الأصول المتداولة', 'Fixed Assets': 'الأصول الثابتة',
   'Non-current Assets': 'الأصول غير المتداولة', Prepayments: 'المدفوعات المقدمة', 'Non-current Liabilities': 'الالتزامات غير المتداولة', 'Credit Card': 'بطاقة ائتمان', 'Off-Balance Sheet': 'خارج الميزانية',
   'Current Liabilities': 'الخصوم المتداولة', Income: 'الإيرادات', Entries: 'القيود',
   'Email Marketing': 'التسويق بالبريد', Sign: 'التوقيع', Documents: 'المستندات', Planning: 'التخطيط', Rental: 'التأجير',
