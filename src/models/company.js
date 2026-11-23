@@ -290,7 +290,7 @@ const CONTROL_FIELDS = [
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
-  'transfer_account_id', 'account_check_printing_layout',
+  'transfer_account_id', 'account_storno', 'account_check_printing_layout',
   'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
 
@@ -792,6 +792,7 @@ export const companyModels = {
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
       account_price_include: { type: 'selection', label: 'Default Sales Price Include', options: [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']] },
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
+      account_storno: { type: 'boolean', label: 'Storno accounting', default: false },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       autopost_bills: { type: 'boolean', label: 'Auto-post bills', default: false },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },

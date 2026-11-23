@@ -506,8 +506,13 @@ export const posPlusModels = {
   'pos.config': {
     label: 'Point of Sale',
     guard: (db, before, after) => {
-      const target = (c) => ({ id: c.rounding_method_id, companyId: c.company_id ?? 1, currencyId: findCompanyCurrencyRecord(db, c.company_id ?? 1)?.id });
-      return cashRoundingError(db, target(after), before && target(before));
+      const target = (c) => ({
+        id: c.rounding_method_id,
+        companyId: c.company_id ?? 1,
+        currencyId: findCompanyCurrencyRecord(db, c.company_id ?? 1)?.id,
+        enabled: Boolean(c.cash_rounding),
+      });
+      return cashRoundingError(db, target(after), before && target(before), { posOnly: true });
     },
     fields: {
       name: { type: 'char', label: 'Name', required: true },
@@ -523,7 +528,7 @@ export const posPlusModels = {
       cash_rounding: { type: 'boolean', label: 'Cash Rounding' },
       rounding_method_id: {
         type: 'many2one', relation: 'account.cash.rounding', label: 'Rounding Method',
-        domain: (r, config, db) => r.active !== false && cashRoundingApplies(r, config?.company_id ?? 1, findCompanyCurrencyRecord(db, config?.company_id ?? 1)?.id),
+        domain: (r, config, db) => r.active !== false && r.strategy === 'add_invoice_line' && cashRoundingApplies(r, config?.company_id ?? 1, findCompanyCurrencyRecord(db, config?.company_id ?? 1)?.id),
       },
       only_round_cash_method: { type: 'boolean', label: 'Only Round Cash' },
     },
