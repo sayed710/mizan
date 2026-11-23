@@ -1619,6 +1619,7 @@ const ar = {
   Employee: 'الموظف', Batch: 'الدفعة', From: 'من', To: 'إلى', Code: 'الكود', Amount: 'المبلغ',
   'Journal Entries': 'القيود اليومية', 'Miscellaneous Entries': 'قيود متنوعة', 'Profit and Loss': 'الأرباح والخسائر',
   'Balance Sheet': 'الميزانية العمومية', 'General Ledger': 'دفتر الأستاذ العام', 'Chart of Accounts': 'دليل الحسابات', Journals: 'اليوميات',
+  'Group by Partner': 'تجميع حسب الشريك', 'Show Journal and Account': 'عرض اليومية والحساب', 'Show Journal & Account': 'عرض اليومية والحساب',
   'Journal Items': 'بنود القيد', Undefined: 'غير محدد', 'Invoice Sources': 'مصادر الفاتورة', 'Journal Entry': 'قيد يومية', Account: 'الحساب', Label: 'البيان', Debit: 'مدين', Credit: 'دائن',
   Balance: 'الرصيد', Revenue: 'الإيرادات', 'Cost of Revenue': 'تكلفة الإيرادات', 'Gross Profit': 'مجمل الربح', 'Net Operating Income': 'صافي الدخل التشغيلي',
   'Other Expenses': 'مصروفات أخرى', 'Net Income': 'صافي الدخل', Assets: 'الأصول', 'Total Assets': 'إجمالي الأصول', Liabilities: 'الخصوم',
