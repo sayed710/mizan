@@ -178,6 +178,7 @@ export function cashflowAnalysis(db, { from, to, company_id }) {
 export function partnerLedger(db, { from, to, company_id, analyticAccountIds, partnerIds, unreconciledOnly = false, includeUnposted, reviewMode } = {}, kind = 'receivable') {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const accounts = accountIds(db, kind === 'payable' ? 'liability_payable' : 'asset_receivable');
+  if (kind === 'both') for (const id of accountIds(db, 'liability_payable')) accounts.add(id);
   const partners = partnerIds?.length ? new Set(partnerIds.map(Number)) : null;
   // Odoo's "unreconciled entries only" keeps items with an open residual, in the period and in the opening alike.
   const keep = (l) => accounts.has(l.account_id) && (!partners || partners.has(l.partner_id)) && (!unreconciledOnly || Math.abs(l.amount_residual ?? 0) > 1e-9);
