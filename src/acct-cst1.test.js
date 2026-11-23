@@ -146,12 +146,12 @@ async function verifyStatementEndpoint() {
     assert.equal((await send(payload)).status, 200);
     assert.ok(recipients.includes(`RCPT TO:<${partner.email}>`));
     const count = recipients.length;
-    assert.equal((await send({ ...payload, companyId: 999999 })).status, 502);
+    assert.equal((await send({ ...payload, companyId: 999999 })).status, 400);
     assert.equal(recipients.length, count);
     const invalidPeriod = await send({ ...payload, from: '2026-12-31', to: '2026-01-01' });
-    assert.equal(invalidPeriod.status, 502);
+    assert.equal(invalidPeriod.status, 400);
     const invalidJson = await invalidPeriod.json();
-    assert.equal(invalidJson.error, 'Email could not be sent: Invalid statement period');
+    assert.equal(invalidJson.error, 'Invalid statement period');
   } finally {
     if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -203,7 +203,11 @@ test('CST-1 selected customers receive separate statements for printing and emai
   assert.deepEqual(delivered.map((mail) => mail.to), ['alpha@example.com', 'beta@example.com']);
   assert.ok(delivered[0].text.includes('ALPHA-ONLY') && !delivered[0].text.includes('BETA-ONLY'));
   assert.ok(delivered[1].text.includes('BETA-ONLY') && !delivered[1].text.includes('ALPHA-ONLY'));
-  await assert.rejects(sendCustomerStatement({}, db, { partnerId: a, companyId: 999, from: '2026-02-01', to: '2026-02-28' }, async () => assert.fail('must not send')), /company/);
+  const refused = await sendCustomerStatement({}, db, { partnerId: a, companyId: 999, from: '2026-02-01', to: '2026-02-28' }, async () => assert.fail('must not send'));
+  // Validation problems are answered as 400 with the bare, translatable message (not a 502 mail error).
+  assert.equal(refused.status, 400);
+  assert.match(refused.body.error, /company/);
+  assert.equal((await sendCustomerStatement({}, db, { partnerId: a, companyId: 1, from: '2026-03-01', to: '2026-02-28' }, async () => assert.fail('must not send'))).body.error, 'Invalid statement period');
   await verifyStatementEndpoint();
 });
 
