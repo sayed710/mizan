@@ -683,6 +683,15 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
           </div>
         );
       })}
+      {hasField('account_storno') && (
+        <div className="settings-block" data-block="storno">
+          <h3>{t('Storno Accounting')}</h3>
+          <SettingRow id="account_storno" label="Storno accounting" description="Use negative numbers to reverse original entries">
+            <input id="account_storno" type="checkbox" checked={!!company?.account_storno} disabled={readOnly || !company}
+              onChange={(e) => onWriteCompany({ account_storno: e.target.checked })} />
+          </SettingRow>
+        </div>
+      )}
     </section>
   );
 }

@@ -22,5 +22,38 @@ export const PERIODS = {
 
 /** Reports remount when the selected report changes, resetting its filters. */
 export function reportPage(leaf, component, params) {
-  return createElement(component, { key: `${leaf.report}:${params?.get('accountType') ?? ''}`, leaf, params });
+  return createElement(component, { key: `${leaf.report}:${params?.toString() ?? ''}`, leaf, params });
+}
+
+/** Update a query parameter on the current report route in location.hash without a hash navigation that remounts the view. */
+export function updateReportParam(key, value, leaf) {
+  if (typeof location === 'undefined') return;
+  const rawHash = location.hash || '';
+  const [hashPath, query = ''] = rawHash.replace(/^#\/?/, '').split('?');
+  const path = hashPath || `accounting/${leaf?.key ?? 'partner-ledger'}`;
+  const searchParams = new URLSearchParams(query);
+  if (value == null) searchParams.delete(key);
+  else searchParams.set(key, value);
+  const q = searchParams.toString();
+  const nextHash = `#/${path}${q ? `?${q}` : ''}`;
+  let replaced = false;
+  if (typeof history !== 'undefined' && typeof history.replaceState === 'function') {
+    try {
+      history.replaceState(history.state, '', nextHash);
+      replaced = true;
+    } catch {
+      replaced = false;
+    }
+  }
+  if (!replaced || location.hash !== nextHash) {
+    if (typeof location.replace === 'function') {
+      try {
+        location.replace(nextHash);
+      } catch {
+        location.hash = nextHash;
+      }
+    } else {
+      location.hash = nextHash;
+    }
+  }
 }
