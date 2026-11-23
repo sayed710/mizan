@@ -293,9 +293,9 @@ export const amountFields = (lineField) => {
  * Next "PREFIX00001"-style number among records matching `filter`: one past the highest. The server keeps a
  * high-water mark per model and prefix (`db.numbering`), so deleting the latest record never frees its number.
  */
-export const nextName = (db, model, prefix, filter = () => true) => {
+export const nextName = (db, model, prefix, filter = () => true, size = 5) => {
   const used = (db.records[model] ?? []).filter((r) => filter(r) && r.name?.startsWith(prefix)).map((r) => Number(r.name.slice(prefix.length)));
-  return prefix + pad(Math.max(0, db.numbering?.[model]?.[prefix] ?? 0, ...used.filter(Number.isSafeInteger)) + 1);
+  return prefix + pad(Math.max(0, db.numbering?.[model]?.[prefix] ?? 0, ...used.filter(Number.isSafeInteger)) + 1, size);
 };
 
 export const monthFilters = (field, labelPrefix = '', value = (r) => r[field]) => [

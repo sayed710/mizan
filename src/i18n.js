@@ -3693,10 +3693,13 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  'Self Billing': 'الفوترة الذاتية',
+  'Self Billing Credit Note': 'إشعار دائن للفوترة الذاتية',
+  'Self Billing is only valid for purchase journals': 'الفوترة الذاتية صالحة فقط لدفاتر يومية المشتريات',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
-const ownArabic = (label) => (Object.hasOwn(ar, label) ? ar[label] : undefined);
+export const ownArabic = (label) => (Object.hasOwn(ar, label) ? ar[label] : undefined);
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
 export function t(s, vars) {

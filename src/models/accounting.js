@@ -1,7 +1,7 @@
 import { purchaseLineId } from './purchase-links.js';
 import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
+import { addDays, amounts, commercialPartnerId, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, pad, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
@@ -180,8 +180,28 @@ function journalSequenceGuard(db, before, after) {
   return duplicates ? 'Each journal sequence prefix must be unique' : null;
 }
 
+/** True when the move belongs to a self-billing journal (Odoo: account.move.is_self_billing is related to journal_id.is_self_billing). */
+export const isSelfBillingMove = (db, move) => Boolean(move?.journal_id && read(db, 'account.journal', move.journal_id)?.is_self_billing);
+
 /** Resolve the sequence prefix and next number field to use for posting an invoice or credit note. */
 export function journalInvoiceSequence(journal, move, db = null) {
+  if (journal?.is_self_billing) {
+    const commPartnerId = db && move?.partner_id ? (commercialPartnerId(db, move.partner_id) ?? move.partner_id) : (move?.partner_id ?? 0);
+    const partnerCode = pad(commPartnerId, 5);
+    const date = move?.invoice_date ?? move?.date ?? today();
+    const year = date.slice(0, 4);
+    const month = date.slice(5, 7);
+    const prefix = `${journal.code ?? ''}${partnerCode}/${year}/${month}/`;
+    const filter = (candidate) => candidate.journal_id === journal.id && candidate.state === 'posted' && (!db || !move?.partner_id || sameCommercialPartner(db, candidate.partner_id, move.partner_id));
+    const fallback = db
+      ? nextName(db, 'account.move', prefix, filter, 4)
+      : `${prefix}0001`;
+    return {
+      name: db ? journalSequenceName(db, journal, date, fallback, filter) : fallback,
+      numberField: null,
+      nextNumber: null,
+    };
+  }
   const refund = isRefund(move) && Boolean(journal.refund_sequence);
   const prefixField = refund ? 'refund_sequence_prefix' : 'invoice_sequence_prefix';
   const numberField = refund ? 'refund_sequence_next_number' : 'invoice_sequence_next_number';
@@ -839,7 +859,9 @@ export function postMove(db, id, { autoPost = false } = {}) {
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
   }
   if (matchWarnings.length) posted = postNote(posted, 'account.move', id, `Purchase price mismatch: ${matchWarnings.map((line) => `${read(db, 'product', line.product_id)?.name ?? 'Unknown product'}, difference ${line.priceDifference}`).join('; ')}`);
-  posted = write(posted, 'account.journal', journal, { [sequence.numberField]: sequence.nextNumber + 1 });
+  if (sequence.numberField) {
+    posted = write(posted, 'account.journal', journal, { [sequence.numberField]: sequence.nextNumber + 1 });
+  }
   if (journalRecord.restrict_mode_hash_table) posted = secureEntries(posted, { throughMoveId: id });
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   if (isRefund(r) && r.reversed_entry_id) {
@@ -3074,6 +3096,7 @@ export const accountingModels = {
         if (after.type !== 'bank') return 'SEPA Pain Version is only valid for bank journals';
         if (!isValidSepaPainVersion(after.sepa_pain_version)) return 'Select a valid SEPA Pain Version';
       }
+      if (after.is_self_billing && after.type !== 'purchase') return 'Self Billing is only valid for purchase journals';
       return journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after) ?? journalMethodLineGuard(db, before, after, vals);
     },
     protectDelete: (db, journal, staged) => ((journal.secure_chain_heads ?? []).length ? 'Journals with secure chains cannot be deleted' : null)
@@ -3104,6 +3127,7 @@ export const accountingModels = {
       invoice_sequence_next_number: { type: 'integer', label: 'Next Invoice Number' },
       refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
       refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
+      is_self_billing: { type: 'boolean', label: 'Self Billing' },
       default_account_id: {
         type: 'many2one', relation: 'account.account', label: 'Default Account',
         required: (r, _db, { isNew } = {}) => ['sale', 'purchase'].includes(r?.type) || (!isNew && isLiquidityJournal(r)),
@@ -3244,6 +3268,7 @@ export const accountingModels = {
       type: 'general', active: true, sequence: 10,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
       check_manual_sequencing: false, check_printing_layout: 'top',
+      is_self_billing: false,
     }),
     prepareCreate: (db, vals) => {
       let nextVals = { ...vals };
@@ -3297,6 +3322,7 @@ export const accountingModels = {
           ...(r.type === 'bank' && !r.sepa_pain_version ? { sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION } : r.type !== 'bank' && r.sepa_pain_version ? { sepa_pain_version: null } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_type ? { invoice_reference_type: 'invoice' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_model ? { invoice_reference_model: 'odoo' } : {}),
+          ...(r.type !== 'purchase' && r.is_self_billing ? { is_self_billing: false } : {}),
           payment_sequence: isLiquidityJournal(r),
           ...(r.refund_sequence ? {} : derivedRefundSequence(r)),
           ...methodLines,
@@ -3373,6 +3399,7 @@ export const accountingModels = {
         ];
         const advancedGroups = [
           ...(j.type !== 'bank' ? [{ title: 'Automation', fields: ['restrict_mode_hash_table'] }] : []),
+          ...(j.type === 'purchase' ? [{ title: 'Self Billing', fields: ['is_self_billing'] }] : []),
           ...(j.type === 'sale' ? [{
             title: 'Payment Communications',
             fields: j.invoice_reference_type === 'none'
@@ -3665,6 +3692,12 @@ export const accountingModels = {
       name: { type: 'char', label: 'Number', readonly: true, tracking: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.name && r.name !== '/' ? r.name : t('Draft (* {id})', { id: r.id })) },
       move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
+      is_self_billing: {
+        type: 'boolean',
+        label: 'Self Billing',
+        readonly: true,
+        compute: (r, db) => isSelfBillingMove(db, r),
+      },
       journal_id: {
         type: 'many2one',
         relation: 'account.journal',
@@ -4173,7 +4206,12 @@ export const accountingModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, visible: (r) => isInvoice(r), run: cancelMove },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
-      subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
+      subtitle: (r, db) => {
+        if (isSelfBillingMove(db, r) && ['in_invoice', 'in_refund'].includes(r?.move_type)) {
+          return r.move_type === 'in_refund' ? 'Self Billing Credit Note' : 'Self Billing';
+        }
+        return ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice';
+      },
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
       warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : ['in_invoice', 'in_refund'].includes(r.move_type) ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),

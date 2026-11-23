@@ -718,7 +718,7 @@ export function FormView({ leaf, id, base, params }) {
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
             {!isNew && def.form.smart && <SmartButtons db={db} model={model} rec={current} smart={def.form.smart} />}
-            {def.form.subtitle && <div className="subtitle">{t(def.form.subtitle(current))}</div>}
+            {def.form.subtitle && <div className="subtitle">{t(def.form.subtitle(current, db))}</div>}
             {!def.form.hideTitle && <div className="title-field">
               {def.form.titleLabel && <label className="title-label" htmlFor={`f-${def.form.title}`}>{t(typeof def.form.titleLabel === 'string' ? def.form.titleLabel : titleField.label)}</label>}
               {Array.isArray(def.form.titleFields)
