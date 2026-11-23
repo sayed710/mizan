@@ -113,6 +113,13 @@ export function annualReportToRows(body) {
   if (typeof document !== 'undefined') {
     const div = document.createElement('div');
     div.innerHTML = body || '';
+    for (const br of div.querySelectorAll('br')) {
+      if (typeof br.replaceWith === 'function') {
+        br.replaceWith('\n');
+      } else if (br.parentNode) {
+        br.parentNode.replaceChild(document.createTextNode('\n'), br);
+      }
+    }
     const rows = [];
     for (const tr of div.querySelectorAll('tr')) {
       const cells = Array.from(tr.querySelectorAll('th, td')).map((c) => c.textContent.trim());
@@ -128,8 +135,9 @@ export function annualReportToRows(body) {
     const cells = [];
     let cellMatch;
     while ((cellMatch = cellRegex.exec(trMatch[1])) !== null) {
+      const cellContent = cellMatch[1].replace(/<br\s*\/?>/gi, '\n');
       cells.push(
-        htmlToText(cellMatch[1]).trim(),
+        htmlToText(cellContent).trim(),
       );
     }
     if (cells.length) rows.push(cells);
@@ -198,6 +206,15 @@ export function renderAnnualReportHtml(db, { start_date, end_date, company_id, s
   return `<div class="annual-report-body">\n${content}\n</div>`;
 }
 
+/** Body regenerated from the report's sections, or null when the sections are invalid (the guard reports that). */
+function sectionBody(db, r) {
+  if (r.section_ids == null) return null;
+  const company_id = r.company_id ?? currentCompany(db);
+  if (sectionError(db, r.section_ids, company_id)) return null;
+  const year = today().slice(0, 4);
+  return { body: renderAnnualReportHtml(db, { start_date: r.start_date || `${year}-01-01`, end_date: r.end_date || `${year}-12-31`, company_id, section_ids: r.section_ids }) };
+}
+
 export const auditReportModels = {
   'audit.report': {
     label: 'Annual Report',
@@ -246,6 +263,12 @@ export const auditReportModels = {
         body,
         section_ids: sections,
       };
+    },
+    // Changing the sections regenerates the body, so the report, print, CSV and XLSX follow the saved sections.
+    onchange: (r, key, db) => (key === 'section_ids' ? sectionBody(db, r) ?? {} : {}),
+    prepareWrite: (db, vals, before) => {
+      if (vals.section_ids == null || JSON.stringify(vals.section_ids) === JSON.stringify(before?.section_ids)) return { db, vals };
+      return { db, vals: { ...vals, ...sectionBody(db, { ...before, ...vals }) } };
     },
     guard: (db, before, after) => {
       if (before?.status === 'done' && after.status === 'done') {
