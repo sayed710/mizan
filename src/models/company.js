@@ -280,7 +280,7 @@ export function withCompany(models) {
 // Accounting settings shown in General Settings are company controls and can only be changed by administrators over sync.
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
-  'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
+  'audit_trail', 'three_way_matching', 'autopost_bills', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'fiscalyear_last_day', 'fiscalyear_last_month',
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
@@ -290,7 +290,7 @@ const CONTROL_FIELDS = [
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
-  'transfer_account_id', 'account_check_printing_layout',
+  'transfer_account_id', 'account_storno', 'account_check_printing_layout',
   'account_use_credit_limit', 'account_default_credit_limit',
   'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
@@ -785,7 +785,9 @@ export const companyModels = {
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
       account_price_include: { type: 'selection', label: 'Default Sales Price Include', options: [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']] },
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
+      account_storno: { type: 'boolean', label: 'Storno accounting', default: false },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
+      autopost_bills: { type: 'boolean', label: 'Auto-post bills', default: false },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
       account_use_credit_limit: { type: 'boolean', label: 'Sales Credit Limit' },
       account_default_credit_limit: { type: 'monetary', label: 'Default Credit Limit' },

@@ -2019,6 +2019,22 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
   };
 } });
 
+export function migrateReconcileModelTolerance(db) {
+  const rules = db?.records?.['account.reconcile.model'];
+  if (!Array.isArray(rules) || !rules.length) return db;
+  let changed = false;
+  const nextRules = rules.map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    const tolType = r.payment_tolerance_type || 'percentage';
+    if (tolType === 'percentage' && Number(r.payment_tolerance) > 100) {
+      changed = true;
+      return { ...r, payment_tolerance: 100 };
+    }
+    return r;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
+}
+MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 export function migrateSalesCreditLimit(db) {
   const partners = db?.records?.['res.partner'];
   const companies = db?.records?.['res.company'];
@@ -2115,7 +2131,7 @@ export function migrateSalesCreditLimit(db) {
     },
   };
 }
-MIGRATIONS.push({ version: 68, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
+MIGRATIONS.push({ version: 70, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

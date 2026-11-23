@@ -129,6 +129,7 @@ export const crmModels = {
         readonly: (r) => !r?.use_partner_credit_limit,
       },
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      autopost_bills: { type: 'selection', label: 'Auto-post bills', options: [['always', 'Always'], ['ask', 'Ask after 3 validations without edits'], ['never', 'Never']], default: 'ask', hideWhen: (_r, db) => !read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.autopost_bills },
       property_supplier_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Supplier Payment Terms' },
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       property_account_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
@@ -199,7 +200,7 @@ export const crmModels = {
         },
       },
     },
-    defaults: () => ({ tag_ids: [], followup_reminder_type: 'automatic' }),
+    defaults: () => ({ tag_ids: [], followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
     onchange: (r, key, db) => {
       if (key === 'use_partner_credit_limit') {
         const comp = db ? read(db, 'res.company', db.settings?.current_company_id ?? 1) : null;
@@ -279,7 +280,7 @@ export const crmModels = {
       tabs: [
         {
           label: 'Accounting',
-          fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
+          fields: ['autopost_bills', 'property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
           groups: [['use_partner_credit_limit']],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },

@@ -282,7 +282,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
   const showCurrencies = hasField('currency_id') || !company;
   const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
-  const showVendorBills = hasField('three_way_matching');
+  const showVendorBills = hasField('three_way_matching') || hasField('autopost_bills');
   const showFiscalPeriods = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail'].some(hasField);
   const priceIncludeOptions = fields.account_price_include?.options ?? [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']];
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
@@ -586,6 +586,12 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
       {showVendorBills && (
         <div className="settings-block" data-block="vendor_bills">
           <h3>{t('Vendor Bills')}</h3>
+          {hasField('autopost_bills') && (
+            <SettingRow id="autopost_bills" label="Auto-post bills" description="Automatically post eligible digitized vendor bills.">
+              <input id="autopost_bills" type="checkbox" checked={!!company?.autopost_bills} disabled={readOnly || !company}
+                onChange={(e) => onWriteCompany({ autopost_bills: e.target.checked })} />
+            </SettingRow>
+          )}
           {hasField('three_way_matching') && (
             <SettingRow id="three_way_matching" label="Three-Way Matching" description="Verify that vendor bill quantities match the purchase order and receipt before marking bills ready to pay.">
               <input id="three_way_matching" type="checkbox" checked={!!company?.three_way_matching} disabled={readOnly || !company}
@@ -716,6 +722,15 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
           </div>
         );
       })}
+      {hasField('account_storno') && (
+        <div className="settings-block" data-block="storno">
+          <h3>{t('Storno Accounting')}</h3>
+          <SettingRow id="account_storno" label="Storno accounting" description="Use negative numbers to reverse original entries">
+            <input id="account_storno" type="checkbox" checked={!!company?.account_storno} disabled={readOnly || !company}
+              onChange={(e) => onWriteCompany({ account_storno: e.target.checked })} />
+          </SettingRow>
+        </div>
+      )}
     </section>
   );
 }
