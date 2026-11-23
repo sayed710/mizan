@@ -709,6 +709,28 @@ export function isDomesticRecord(record, db) {
   return Boolean(recordCountry && companyCountry && recordCountry === companyCountry);
 }
 
+/**
+ * Whether a tax is domestic for its company (or the active company if shared).
+ * A tax without fiscal positions applies domestically. If assigned to fiscal positions,
+ * at least one must match the company's domestic fiscal position or country.
+ */
+export function isDomesticTax(tax, db) {
+  if (!db || !tax) return false;
+  const fps = tax.fiscal_position_ids ?? [];
+  if (!fps.length) return true;
+  const companyId = tax.company_id ?? db.settings?.current_company_id ?? 1;
+  const company = read(db, 'res.company', companyId);
+  const companyCountry = String(company?.country ?? '').trim().toLowerCase();
+  return fps.some((fpId) => {
+    if (company?.domestic_fiscal_position_id && fpId === company.domestic_fiscal_position_id) return true;
+    const fp = read(db, 'account.fiscal.position', fpId);
+    if (!fp) return false;
+    if (fp.company_id && fp.company_id !== companyId) return false;
+    const fpCountry = String(fp.country ?? '').trim().toLowerCase();
+    return Boolean(companyCountry && fpCountry && companyCountry === fpCountry);
+  });
+}
+
 export const taxModels = {
   'account.tax.group': {
     label: 'Tax Groups',
@@ -948,6 +970,7 @@ export const taxModels = {
     filters: [
       [{ id: 'sale', label: 'Sale', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchase', fn: (r) => r.type_tax_use === 'purchase' }],
       [{ id: 'services', label: 'Services', fn: (r) => r.tax_scope === 'service' }, { id: 'goods', label: 'Goods', fn: (r) => r.tax_scope === 'consu' }],
+      [{ id: 'domestic', label: 'Domestic', fn: isDomesticTax }],
       [{ id: 'active', label: 'Active', fn: (r) => r.active !== false }, { id: 'inactive', label: 'Inactive', includeArchived: true, fn: (r) => r.active === false }],
     ],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
