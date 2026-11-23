@@ -112,7 +112,7 @@ export function termScheduleError(term, total, currency = null) {
     if (requestedTotal > totalCents + lines.length / 2) {
       return 'Payment terms must allocate 100% of the total';
     }
-  } else if (!(hasFixed && hasPercent) && Math.abs(requestedTotal - totalCents) > lines.length / 2) {
+  } else if (hasFixed && hasPercent ? Math.round(lines.filter((line) => line.value_type === 'percent').reduce((sum, line) => sum + (Number(line.value) || 0), 0) * 100) !== 10000 : Math.abs(requestedTotal - totalCents) > lines.length / 2) {
     return 'Payment terms must allocate 100% of the total';
   }
   return null;
@@ -197,7 +197,7 @@ function termConfigurationError(term) {
   const total = percents.reduce((sum, line) => sum + Number(line.value), 0);
   const balance = lines.some((line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance'));
   if (balance ? total > 100 : Math.round(total * 100) !== 10000) return 'The Payment Term must have at least one percent line and the sum of the percent must be 100%.';
-  if (term.early_discount && lines.length !== 1) return 'The Early Payment Discount functionality can only be used with payment terms using a single 100% line. ';
+  if (term.early_discount && (lines.length !== 1 || lines[0].value_type !== 'percent' || Number(lines[0].value) !== 100)) return 'The Early Payment Discount functionality can only be used with payment terms using a single 100% line. ';
   if (term.early_discount && !(Number(term.discount_percent) > 0)) return 'The Early Payment Discount must be strictly positive.';
   if (term.early_discount && !(Number(term.discount_days) > 0)) return 'The Early Payment Discount days must be strictly positive.';
   return null;
@@ -315,6 +315,7 @@ export const termModels = {
     createDefaults: (db, vals) => ({ discount_tax_computation: defaultDiscountTaxComputation(db, vals?.company_id) }),
     onchange: (r, key, db) => (key === 'company_id' || (key === 'early_discount' && r.early_discount && !r.discount_tax_computation) ? { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) } : {}),
     guard: (_db, before, after, _ctx, vals) => {
+      if (before && after.active === false && before.active !== false && Object.keys(after).every((key) => key === 'active' || JSON.stringify(after[key]) === JSON.stringify(before[key])) && Object.keys(before).every((key) => key === 'active' || Object.hasOwn(after, key))) return null;
       const exampleErr = exampleInputsError(vals);
       if (exampleErr) return exampleErr;
       // Terms saved before the mode existed keep reading as 'included' (discountTaxComputation) and stay editable.
@@ -324,7 +325,7 @@ export const termModels = {
       }
       return termConfigurationError(after) ?? dueTermLinesError(after);
     },
-    protectDelete: (db, r, staged = db) => [db, staged].some((source) => (source.records['account.move'] ?? []).some((move) => move.invoice_payment_term_id === r.id)) ? "Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them. How about archiving them instead?" : null,
+    protectDelete: (db, r, staged = db, context = {}) => ((context.finalRecords ?? staged.records)['account.move'] ?? []).some((move) => move.invoice_payment_term_id === r.id) ? "Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them. How about archiving them instead?" : null,
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     views: ['list', 'kanban'],
     kanban: { title: 'name', lines: ['note'] },
