@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
 import { read, search } from '../orm.js';
 import { amounts } from '../models/common.js';
+import { posCashRounding } from '../models/configured-account.js';
 import { closeSession, openSession, payOrder, posOrderTotal, priceLines, sessionTotals, startSession } from '../models/pos.js';
 import { posCategories, posPaymentMethods, posProducts } from '../models/posplus.js';
 import { commit, getDb, isServer, serverAction, useDb } from '../store.js';
@@ -74,7 +75,7 @@ export function Pos() {
   const total = amounts(lines, currency);
 
   // Cash rounding
-  const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
+  const rounding = posCashRounding(db, config, session?.company_id ?? config?.company_id ?? 1, currency?.id);
   const { roundedTotal: payableTotal, roundingDifference } = posOrderTotal(db, lines, { configId, payments: splitPayments });
   const paidSoFar = roundMoney(splitPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
   const remaining = roundMoney(payableTotal - paidSoFar);

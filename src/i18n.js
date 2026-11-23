@@ -1338,6 +1338,9 @@ const ar = {
   'Ledgers': 'دفاتر الأستاذ',
   'Partner Reports': 'تقارير الشركاء',
   'Customer Statement': 'كشف حساب العميل',
+  'Invalid statement period': 'فترة كشف الحساب غير صالحة',
+  'Configure the document or company currency before emailing.': 'هيئ عملة المستند أو الشركة قبل الإرسال بالبريد.',
+  'Configure the document company before emailing.': 'هيئ شركة المستند قبل الإرسال بالبريد.',
   'Select a customer': 'اختر عميلاً',
   'Closing Balance': 'الرصيد الختامي',
   'Taxes & Fiscal': 'الضرائب والشؤون المالية',
@@ -3255,6 +3258,8 @@ const ar = {
   'checks': 'شيكات',
   'Status Filter': 'تصفية الحالة',
   'Void Check': 'إلغاء الشيك',
+  'Invalid wizard values': 'قيم المعالج غير صالحة',
+  'Void Checks': 'إلغاء الشيكات',
   'Print Check': 'طباعة الشيك',
   'Void': 'إلغاء',
   'Voided': 'ملغى',
@@ -3664,6 +3669,9 @@ const ar = {
   'The base currency rate is fixed at 1 and cannot be modified': 'سعر العملة الأساسية ثابت عند 1 ولا يمكن تعديله',
   'Tax Closing Lines': 'بنود الإقفال الضريبي',
   'Tax closing line links cannot be changed': 'لا يمكن تغيير روابط بنود الإقفال الضريبي',
+  'Storno accounting': 'المحاسبة بالقيد العكسي السالب',
+  'Storno Accounting': 'المحاسبة بالقيد العكسي السالب',
+  'Use negative numbers to reverse original entries': 'استخدام أرقام سالبة لعكس القيود الأصلية',
   'Automatically post future digitized bills from this vendor?': 'هل تريد ترحيل الفواتير المرقمنة المستقبلية لهذا المورد تلقائيًا؟',
   'Auto-post bills': 'الترحيل التلقائي لفواتير الموردين',
   'Automatically post eligible digitized vendor bills.': 'ترحيل فواتير الموردين المرقمنة المؤهلة تلقائيًا.',
@@ -3767,6 +3775,8 @@ const ar = {
   'Amount is required': 'المبلغ مطلوب',
   'Invalid date': 'تاريخ غير صالح',
   'Invalid amount': 'مبلغ غير صالح',
+  'The matched entry belongs to another partner': 'القيد المطابق ينتمي إلى شريك آخر',
+  "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

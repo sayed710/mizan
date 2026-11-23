@@ -5,9 +5,10 @@ import { ConflictError, applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
 import { addressLines, documentCompany, documentTaxBreakdown } from '../src/models/company.js';
-import { subtotal, today } from '../src/models/common.js';
+import { subtotal, today, validDate } from '../src/models/common.js';
+import { customerStatement } from '../src/models/reports.js';
 import { followUpEmail, followUpLetter, logManualFollowUp, partnerFollowUp } from '../src/models/finance.js';
-import { formatCurrency } from '../src/money.js';
+import { findCompanyCurrencyRecord, formatCurrency } from '../src/money.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
@@ -137,6 +138,37 @@ export async function sendDocument(cfg, db, _user, { model, id }) {
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
   await sendMail(cfg, email);
   return { status: 200, body: { ok: true }, db: next };
+}
+
+/** Deliver one company-scoped customer statement using the accounting report calculation. */
+export async function sendCustomerStatement(cfg, db, { partnerId, companyId, from, to, reviewMode }, deliver = sendMail) {
+  // Input problems are the caller's, not the mail server's: answer 400 with the bare message so the client can translate it.
+  const invalid = (error) => ({ status: 400, body: { error } });
+  const company = Number(companyId);
+  if (!Number.isSafeInteger(company) || !read(db, 'res.company', company)
+    || !(db.settings?.allowed_company_ids ?? [db.settings?.current_company_id ?? 1]).includes(company)) {
+    return invalid('Configure the document company before emailing.');
+  }
+  if ((from && !validDate(from)) || !validDate(to) || (from && from > to)) return invalid('Invalid statement period');
+  const partner = read(db, 'res.partner', Number(partnerId));
+  if (!partner) return invalid('Record not found');
+  if (!partner.email?.trim()) return invalid('The customer has no email address');
+  const statementDb = (db.settings?.current_company_id ?? 1) === company ? db : { ...db, settings: { ...db.settings, current_company_id: company } };
+  const currency = findCompanyCurrencyRecord(statementDb, company);
+  if (!currency) return invalid('Configure the document or company currency before emailing.');
+  const docCompany = documentCompany(statementDb, { company_id: company });
+  if (!docCompany) return invalid('Configure the document company before emailing.');
+  const report = customerStatement(statementDb, partner.id, { from, to, company_id: company, reviewMode: reviewMode === 'all' ? 'all' : 'posted' });
+  const amount = (value) => formatCurrency(value, currency);
+  const rows = report.lines.map((line) => [line.date, line.move_name, line.ref ?? '', amount(line.debit), amount(line.credit), amount(line.balance)]);
+  const headings = ['Date', 'Journal Entry', 'Reference', 'Debit', 'Credit', 'Balance'];
+  const header = [docCompany.name, partner.name, 'Customer Statement', `${from || ''} – ${to}`];
+  const opening = `Opening Balance: ${amount(report.opening)}`;
+  const closing = `Closing Balance: ${amount(report.closing)}`;
+  const text = [...header, opening, headings.join(' | '), ...rows.map((row) => row.join(' | ')), closing].join('\n');
+  const html = `<h1>${escapeHtml(docCompany.name)}</h1><h2>${escapeHtml(partner.name)} – Customer Statement</h2><p>${escapeHtml(header[3])}</p><p>${escapeHtml(opening)}</p><table border="1"><thead><tr>${headings.map((value) => `<th>${escapeHtml(value)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</tbody></table><p>${escapeHtml(closing)}</p>`;
+  await deliver(cfg, { to: partner.email.trim(), subject: `${docCompany.name} – Customer Statement`, text, html });
+  return { status: 200, body: { ok: true } };
 }
 
 /** Send a follow-up and persist its existing manual reminder transition after delivery. */

@@ -845,6 +845,96 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
   return null;
 }
 
+/**
+ * Validate a cash difference line created when closing a cash statement with an ending count gap.
+ */
+function isAuthorizedCashDifferenceLine(db, statement, before, after) {
+  if (before) return false;
+  if (!after.counterpart_account_id || !after.amount) return false;
+  const journal = read(db, 'account.journal', after.journal_id);
+  if (journal?.type !== 'cash') return false;
+  const expectedAccount = after.amount > 0 ? journal.profit_account_id : journal.loss_account_id;
+  if (!expectedAccount || after.counterpart_account_id !== expectedAccount) return false;
+  const otherLines = search(db, 'account.bank.statement.line').filter(
+    (l) => l.statement_id === statement.id && l.id !== after.id && l.active !== false
+  );
+  const hasExistingDiff = otherLines.some(
+    (l) => l.counterpart_account_id === journal.profit_account_id || l.counterpart_account_id === journal.loss_account_id
+  );
+  if (hasExistingDiff) return false;
+  const otherSum = otherLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
+  const expectedDiff = roundStatementAmount(
+    db,
+    statement,
+    Number(statement.balance_end_real || 0) - (Number(statement.balance_start || 0) + otherSum)
+  );
+  return expectedDiff !== 0 && roundStatementAmount(db, statement, after.amount) === expectedDiff;
+}
+
+/**
+ * Whether a partner update on a statement line is part of a validated reconciliation or payment allocation
+ * establishing that partner, rather than an arbitrary partner change or unrelated move reference.
+ */
+function partnerIdentifiedByReconciliation(db, before, after) {
+  if (before?.partner_id != null || after.partner_id == null) return false;
+  const targetPartner = after.partner_id;
+
+  const beforeAllocations = before?.allocations ?? [];
+  const afterAllocations = after.allocations ?? [];
+  const newAllocations = afterAllocations.slice(beforeAllocations.length);
+  if (newAllocations.length > 0) {
+    const allocationIdentifies = newAllocations.some((a) => {
+      if (a.invoice_id) {
+        const inv = read(db, 'account.move', a.invoice_id);
+        return inv?.state === 'posted' && sameCommercialPartner(db, inv.partner_id, targetPartner);
+      }
+      if (a.payment_ids?.length) {
+        return a.payment_ids.some((pid) => {
+          const p = read(db, 'account.payment', pid);
+          return p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner);
+        });
+      }
+      if (a.payment_id) {
+        const p = read(db, 'account.payment', a.payment_id);
+        return p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner);
+      }
+      if (a.payment_move_id) {
+        const p = (db.records['account.payment'] ?? []).find((pay) => pay.move_id === a.payment_move_id);
+        if (p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner)) return true;
+        const pm = read(db, 'account.move', a.payment_move_id);
+        return pm?.state === 'posted' && sameCommercialPartner(db, pm.partner_id, targetPartner);
+      }
+      return false;
+    });
+    if (allocationIdentifies) return true;
+  }
+
+  if (before?.state !== 'reconciled' && after.state === 'reconciled') {
+    if (after.move_id) {
+      const m = read(db, 'account.move', after.move_id);
+      if (m?.state === 'posted' && sameCommercialPartner(db, m.partner_id, targetPartner)) return true;
+    }
+    if (after.payment_id) {
+      const p = read(db, 'account.payment', after.payment_id);
+      if (p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner)) return true;
+    }
+    if (after.payment_ids?.length) {
+      if (after.payment_ids.some((pid) => {
+        const p = read(db, 'account.payment', pid);
+        return p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner);
+      })) return true;
+    }
+    if (after.payment_move_id) {
+      const p = (db.records['account.payment'] ?? []).find((pay) => pay.move_id === after.payment_move_id);
+      if (p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner)) return true;
+      const pm = read(db, 'account.move', after.payment_move_id);
+      if (pm?.state === 'posted' && sameCommercialPartner(db, pm.partner_id, targetPartner)) return true;
+    }
+  }
+
+  return false;
+}
+
 /** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
 function lineGuard(db, before, after, ctx = null) {
   const clearingBooking = before?.bank_move_id && (!after.bank_move_id || after.open_amount == null || (after.allocations ?? []).length < (before.allocations ?? []).length);
@@ -870,32 +960,16 @@ function lineGuard(db, before, after, ctx = null) {
     if (statement.journal_id !== after.journal_id || (statement.company_id ?? 1) !== comp) {
       return 'Statement lines must belong to the statement journal and company';
     }
+    const isCashDiff = isAuthorizedCashDifferenceLine(db, statement, before, after);
     if ((!before || before.statement_id !== after.statement_id) && statement.state !== 'closed' && statementHasReconciledLines(db, after.statement_id)) {
-      return before
-        ? 'Cannot add existing lines to a statement with reconciled lines'
-        : 'Cannot add lines to a statement with reconciled lines';
+      if (!isCashDiff) {
+        return before
+          ? 'Cannot add existing lines to a statement with reconciled lines'
+          : 'Cannot add lines to a statement with reconciled lines';
+      }
     }
     if (statement.state === 'closed' && (!before || before.statement_id !== after.statement_id)) {
-      if (before) return 'Cannot add lines to a closed statement';
-      const journal = read(db, 'account.journal', after.journal_id);
-      const isCash = journal?.type === 'cash';
-      const expectedAccount = after.amount > 0 ? journal?.profit_account_id : journal?.loss_account_id;
-      const validAccount = expectedAccount && after.counterpart_account_id === expectedAccount;
-      if (!isCash || !validAccount) return 'Cannot add lines to a closed statement';
-      const otherLines = search(db, 'account.bank.statement.line').filter(
-        (l) => l.statement_id === statement.id && l.id !== after.id
-      );
-      const hasExistingDiff = otherLines.some(
-        (l) => l.counterpart_account_id === journal?.profit_account_id || l.counterpart_account_id === journal?.loss_account_id
-      );
-      if (hasExistingDiff) return 'Cannot add lines to a closed statement';
-      const otherSum = otherLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
-      const expectedDiff = roundStatementAmount(
-        db,
-        statement,
-        Number(statement.balance_end_real || 0) - (Number(statement.balance_start || 0) + otherSum)
-      );
-      if (roundStatementAmount(db, statement, after.amount) !== expectedDiff) {
+      if (!isCashDiff) {
         return 'Cannot add lines to a closed statement';
       }
     }
@@ -917,13 +991,7 @@ function lineGuard(db, before, after, ctx = null) {
     const partnerChanged = JSON.stringify(before.partner_id ?? null) !== JSON.stringify(after.partner_id ?? null);
     const authorizedReconcile = partnerChanged
       && before.partner_id == null
-      && (
-        (after.move_id && read(db, 'account.move', after.move_id)?.state === 'posted')
-        || (after.payment_move_id && read(db, 'account.move', after.payment_move_id)?.state === 'posted')
-        || (after.bank_move_id && read(db, 'account.move', after.bank_move_id)?.state === 'posted')
-        || (after.payment_id && read(db, 'account.payment', after.payment_id)?.state === 'posted')
-        || ((after.allocations ?? []).length > 0 && after.allocations.every((a) => a.payment_move_id || a.invoice_id))
-      );
+      && partnerIdentifiedByReconciliation(db, before, after);
     const changed = ['amount', 'date', 'payment_ref', 'ref', 'journal_id', 'company_id', 'currency_id'].find(
       (k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)
     ) || (partnerChanged && !authorizedReconcile ? 'partner_id' : null)
@@ -993,6 +1061,9 @@ function lineGuard(db, before, after, ctx = null) {
     const move = read(db, 'account.move', id);
     if (move?.state !== 'posted') return 'A bank transaction can only be reconciled against a posted journal entry';
     if ((move.company_id ?? 1) !== company) return 'The matched entry belongs to another company';
+    if (after.partner_id && move.partner_id && !sameCommercialPartner(db, move.partner_id, after.partner_id)) {
+      return 'The matched entry belongs to another partner';
+    }
     const journal = read(db, 'account.journal', move.journal_id);
     if (journal?.company_id && journal.company_id !== company) return 'The matched entry journal belongs to another company';
     if ((move.line_ids ?? []).some((l) => {

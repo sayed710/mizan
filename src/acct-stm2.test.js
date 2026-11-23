@@ -9,6 +9,7 @@ import { seed } from './seed.js';
 import { menusFor } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { reconcileWith, setStatementLinePartner, bankModels } from './models/bank.js';
+import { closeStatement } from './models/bankstatement.js';
 import { autoReconcile, mapStatementPartner } from './models/reconcile.js';
 import { runScheduledJobs } from './models/scheduler.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -473,6 +474,28 @@ test('STM2-5: Ordinary partner edits on locked statements are rejected while aut
     /Cannot change lines of a statement with reconciled lines/
   );
 
+  // Direct write of partner_id alongside an unrelated posted move on unreconciled line 2 must throw
+  const unrelatedInv = makePostedInvoice(db, { partnerId: partnerA.id, price: 50, date: '2026-06-01' });
+  db = unrelatedInv.db;
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', line2.id, { partner_id: partnerB.id, move_id: unrelatedInv.id }),
+    /Cannot change lines of a statement with reconciled lines/
+  );
+
+  // Direct write of partner_id on an unreconciled line with an existing bank booking must also throw
+  const line2WithBooking = { ...read(db, 'account.bank.statement.line', line2.id), bank_move_id: unrelatedInv.id, open_amount: 100 };
+  const dbWithBooking = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => (l.id === line2.id ? line2WithBooking : l)),
+    },
+  };
+  assert.throws(
+    () => write(dbWithBooking, 'account.bank.statement.line', line2.id, { partner_id: partnerB.id }),
+    /Cannot change lines of a statement with reconciled lines/
+  );
+
   // 3. Model field partner_id is readonly for line 2
   const isReadonly = bankModels['account.bank.statement.line'].fields.partner_id.readonly(read(db, 'account.bank.statement.line', line2.id), db);
   assert.equal(isReadonly, true);
@@ -519,4 +542,83 @@ test('STM2-6: Reordering transactions updates sequence even when lines are recon
   const updatedDb = writeMany(db, 'account.bank.statement.line', updates);
   assert.equal(read(updatedDb, 'account.bank.statement.line', lineA.id).sequence, 20);
   assert.equal(read(updatedDb, 'account.bank.statement.line', lineB.id).sequence, 10);
+});
+
+test('STM2-7: Closing a cash statement with a reconciled line and a nonzero count difference books difference line', async () => {
+  let db = seed();
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash' && (j.company_id ?? 1) === 1);
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '600000')?.id ?? 1;
+  const lossAccount = search(db, 'account.account').find((a) => a.code === '600000')?.id ?? 1;
+  db = write(db, 'account.journal', cashJournal.id, {
+    profit_account_id: profitAccount,
+    loss_account_id: lossAccount,
+  });
+  const partner = search(db, 'res.partner')[0];
+
+  const cashStmt = create(db, 'account.bank.statement', {
+    name: 'CASH/2026/001',
+    journal_id: cashJournal.id,
+    date: '2026-06-01',
+    balance_start: 100,
+    balance_end_real: 220,
+    line_ids: [
+      { date: '2026-06-01', payment_ref: 'Cash Sale 1', partner_id: partner.id, amount: 100 },
+    ],
+  });
+  db = cashStmt.db;
+  const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === cashStmt.id);
+  const line1 = lines[0];
+
+  // Reconcile line 1 so the cash statement has a reconciled line
+  const inv = makePostedInvoice(db, { partnerId: partner.id, price: 100, date: '2026-06-01' });
+  db = reconcileWith(inv.db, line1, inv.id);
+  assert.equal(read(db, 'account.bank.statement.line', line1.id).state, 'reconciled');
+
+  // Computed balance is 100 (start) + 100 (line1) = 200.
+  // Counted ending balance is 220. Difference is +20 (surplus).
+  // Ordinary new lines on this statement with reconciled lines are rejected
+  assert.throws(
+    () => create(db, 'account.bank.statement.line', {
+      statement_id: cashStmt.id,
+      journal_id: cashJournal.id,
+      date: '2026-06-01',
+      payment_ref: 'Unauthorized cash line',
+      amount: 20,
+    }),
+    /Cannot add lines to a statement with reconciled lines/
+  );
+
+  // Closing the cash statement must succeed and create + book the cash difference line
+  const closedDb = closeStatement(db, cashStmt.id);
+  const closedStmt = read(closedDb, 'account.bank.statement', cashStmt.id);
+  assert.equal(closedStmt.state, 'closed');
+
+  const allLines = search(closedDb, 'account.bank.statement.line').filter((l) => l.statement_id === cashStmt.id);
+  assert.equal(allLines.length, 2);
+  const diffLine = allLines.find((l) => l.id !== line1.id);
+  assert.ok(diffLine, 'Cash difference line must be created');
+  assert.equal(diffLine.amount, 20);
+  assert.equal(diffLine.counterpart_account_id, profitAccount);
+  assert.ok(diffLine.bank_move_id, 'Cash difference line must be booked');
+});
+
+test('STM2-8: Escaping reconciliation error in runScheduledJobs reports identifiable job name autoReconcile', async () => {
+  const db = seed();
+  const reportedJobs = [];
+  const faultyDb = {
+    ...db,
+    records: new Proxy(db.records, {
+      get(target, prop) {
+        if (prop === 'account.bank.statement.line') {
+          throw new Error('Disk read error during bank statement line search');
+        }
+        return target[prop];
+      },
+    }),
+  };
+  runScheduledJobs(faultyDb, '2026-06-01', {
+    onError: (job) => reportedJobs.push(job),
+  });
+  assert.ok(reportedJobs.includes('autoReconcile'), `Expected onError to report 'autoReconcile', got: ${reportedJobs}`);
+  assert.ok(!reportedJobs.includes('job'), `onError must not fall back to generic 'job' name`);
 });

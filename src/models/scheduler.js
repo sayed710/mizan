@@ -61,7 +61,7 @@ export function runScheduledJobs(db, at = today(), { onError = () => {}, deliver
       const save = (state) => (commitFollowUps && state !== db ? commitFollowUps(db, state) : state);
       return sent && typeof sent.then === 'function' ? sent.then(save) : save(sent);
     }],
-    ['accounting', tolerant((db) => autoReconcile(db))],
+    ['accounting', tolerant(autoReconcile)],
     ['accounting', tolerant(syncDueOnlineLinks)],
     ['automation', tolerant(processDue)],
     ['social', publishDue],
