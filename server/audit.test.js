@@ -833,6 +833,40 @@ test('GET /api/audit filters by user, model, record, field, date range and rejec
     assert.equal(tsFiltered.status, 200);
     assert.ok(tsFiltered.body.some((r) => r.res_id === lead.id));
 
+    // Colonless timezone offsets (e.g. +0200, -0500) and fractional-second boundary tests
+    const leadRow = tsFiltered.body.find((r) => r.res_id === lead.id);
+    assert.ok(leadRow, 'Lead row must exist in audit log');
+    const leadMs = new Date(leadRow.at).getTime();
+    const pad = (n) => String(n).padStart(2, '0');
+    const leadPlus2 = new Date(leadMs + 2 * 3600000);
+    const colonlessPlus2 = `${leadPlus2.getUTCFullYear()}-${pad(leadPlus2.getUTCMonth() + 1)}-${pad(leadPlus2.getUTCDate())}T${pad(leadPlus2.getUTCHours())}:${pad(leadPlus2.getUTCMinutes())}:${pad(leadPlus2.getUTCSeconds())}.${String(leadPlus2.getUTCMilliseconds()).padStart(3, '0')}+0200`;
+    const colonlessFiltered = await admin('GET', `/api/audit?model=crm.lead&date_from=${encodeURIComponent(colonlessPlus2)}&date_to=${encodeURIComponent(colonlessPlus2)}`);
+    assert.equal(colonlessFiltered.status, 200);
+    assert.ok(colonlessFiltered.body.some((r) => r.res_id === lead.id), 'Colonless timezone offset must match matching audit entries');
+
+    const colonlessNoMsFrom = `${leadPlus2.getUTCFullYear()}-${pad(leadPlus2.getUTCMonth() + 1)}-${pad(leadPlus2.getUTCDate())}T${pad(leadPlus2.getUTCHours())}:${pad(leadPlus2.getUTCMinutes())}:${pad(leadPlus2.getUTCSeconds())}+0200`;
+    const colonlessNoMsTo = new Date(leadMs + 3600000).toISOString().replace('Z', '+0000');
+    const colonlessNoMsFiltered = await admin('GET', `/api/audit?model=crm.lead&date_from=${encodeURIComponent(colonlessNoMsFrom)}&date_to=${encodeURIComponent(colonlessNoMsTo)}`);
+    assert.equal(colonlessNoMsFiltered.status, 200);
+    assert.ok(colonlessNoMsFiltered.body.some((r) => r.res_id === lead.id));
+
+    // Fractional-second boundary precision
+    const exactIso = new Date(leadMs).toISOString();
+    const beforeMsIso = new Date(leadMs - 1).toISOString();
+    const afterMsIso = new Date(leadMs + 1).toISOString();
+
+    const exactMatch = await admin('GET', `/api/audit?model=crm.lead&date_from=${encodeURIComponent(exactIso)}&date_to=${encodeURIComponent(exactIso)}`);
+    assert.equal(exactMatch.status, 200);
+    assert.ok(exactMatch.body.some((r) => r.res_id === lead.id), 'Exact millisecond boundary must match');
+
+    const beforeUpper = await admin('GET', `/api/audit?model=crm.lead&date_to=${encodeURIComponent(beforeMsIso)}`);
+    assert.equal(beforeUpper.status, 200);
+    assert.ok(!beforeUpper.body.some((r) => r.res_id === lead.id), 'date_to 1ms before record creation must exclude it');
+
+    const afterLower = await admin('GET', `/api/audit?model=crm.lead&date_from=${encodeURIComponent(afterMsIso)}`);
+    assert.equal(afterLower.status, 200);
+    assert.ok(!afterLower.body.some((r) => r.res_id === lead.id), 'date_from 1ms after record creation must exclude it');
+
     const pastFiltered = await admin('GET', '/api/audit?model=crm.lead&date_from=2000-01-01&date_to=2000-01-02');
     assert.equal(pastFiltered.status, 200);
     assert.equal(pastFiltered.body.length, 0);

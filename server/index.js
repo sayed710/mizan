@@ -28,7 +28,7 @@ import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, 
 import { smtpConfig } from './smtp.js';
 import { createMailTransport } from './mailTransport.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
-import { recordSent, sendDocument, sendFollowUp, sendMailing } from './mail.js';
+import { recordSent, sendDocument, sendFollowUp, sendMailing, sendCustomerStatement } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
@@ -95,8 +95,13 @@ function parseAuditDateBound(raw) {
     if (hour > 23 || min > 59 || sec > 59) return null;
     const utcDate = new Date(Date.UTC(year, month - 1, day));
     if (utcDate.getUTCFullYear() !== year || utcDate.getUTCMonth() !== month - 1 || utcDate.getUTCDate() !== day) return null;
-    const isoStr = s.includes('T') ? s : s.replace(' ', 'T');
-    const fullIso = tsMatch[8] ? isoStr : isoStr + 'Z';
+    let fullIso = s.includes('T') ? s : s.replace(' ', 'T');
+    if (!tsMatch[8]) {
+      fullIso += 'Z';
+    } else if (/^[+-]\d{4}$/.test(tsMatch[8])) {
+      const idx = fullIso.lastIndexOf(tsMatch[8]);
+      fullIso = fullIso.slice(0, idx) + tsMatch[8].slice(0, 3) + ':' + tsMatch[8].slice(3);
+    }
     const dt = new Date(fullIso);
     if (!Number.isFinite(dt.getTime())) return null;
     return {
@@ -104,6 +109,7 @@ function parseAuditDateBound(raw) {
       raw: s,
       startMs: dt.getTime(),
       endMs: dt.getTime(),
+      iso: dt.toISOString(),
     };
   }
   return null;
@@ -831,21 +837,23 @@ async function api(req, res, path) {
       return send(res, 400, { error: e.message });
     }
   }
-  if ((path === '/api/mail/document' || path === '/api/mail/mailing' || path === '/api/mail/followup') && req.method === 'POST') {
+  if ((path === '/api/mail/document' || path === '/api/mail/mailing' || path === '/api/mail/followup' || path === '/api/mail/statement') && req.method === 'POST') {
     if (!SMTP) return send(res, 400, { error: 'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)' });
     const body = await readJson(req);
-    const model = path.endsWith('mailing') ? 'mailing.mailing' : path.endsWith('followup') ? 'res.partner' : String(body.model ?? '');
-    if (path.endsWith('followup') && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
+    const model = path.endsWith('mailing') ? 'mailing.mailing' : (path.endsWith('followup') || path.endsWith('statement')) ? 'res.partner' : String(body.model ?? '');
+    if ((path.endsWith('followup') || path.endsWith('statement')) && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     let delivered = false;
     try {
       const baseUrl = baseUrlOf(req);
-      const snapshot = scopeFor(user);
+      const snapshot = path.endsWith('statement') ? visibleDb(user, { models: false }) : scopeFor(user);
       const at = epoch;
       const out = path.endsWith('mailing')
         ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), user.login, () => scopeFor(user)), body, baseUrl)
-        : path.endsWith('followup')
+        : path.endsWith('statement')
+          ? await sendCustomerStatement(SMTP, snapshot, body)
+          : path.endsWith('followup')
           ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
       delivered = Boolean(out.db);
@@ -991,8 +999,8 @@ async function api(req, res, path) {
         conditions.push('substr(at, 1, 10) >= ?');
         params.push(dateFrom.raw);
       } else {
-        conditions.push('datetime(at) >= datetime(?)');
-        params.push(dateFrom.raw);
+        conditions.push('at >= ?');
+        params.push(dateFrom.iso);
       }
     }
     if (dateTo) {
@@ -1000,8 +1008,8 @@ async function api(req, res, path) {
         conditions.push('substr(at, 1, 10) <= ?');
         params.push(dateTo.raw);
       } else {
-        conditions.push('datetime(at) <= datetime(?)');
-        params.push(dateTo.raw);
+        conditions.push('at <= ?');
+        params.push(dateTo.iso);
       }
     }
     if (fieldParam) {
