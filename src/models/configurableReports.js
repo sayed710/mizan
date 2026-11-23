@@ -14,7 +14,7 @@ import { addDays, today } from './common.js';
 import { reportingBookedAmount } from './money.js';
 import { distributionOfLine, normalizeDistribution } from './analyticplus.js';
 import { companyFilter } from './company.js';
-import { reportReviewMode } from './reports.js';
+import { reportAmountsVisible, reportReviewMode } from './reports.js';
 import {
   findStatementReport,
   STANDARD_BALANCE_LINES,
@@ -489,7 +489,7 @@ export function configurableReport(db, report, period, group = null, options = {
       });
       return [...accountMap.values()]
         .map((entry) => ({ ...entry, values: entry.values.map((v) => round(v)) }))
-        .filter((entry) => entry.values.some((v) => v !== 0))
+        .filter((entry) => options.includeZeroRows || reportAmountsVisible(entry.values, true))
         .sort((a, b) => String(a.account.code ?? '').localeCompare(String(b.account.code ?? '')));
     })();
     return { ...line, values, accountRows };
@@ -499,6 +499,12 @@ export function configurableReport(db, report, period, group = null, options = {
 
 /** Compute period comparison columns, variances, and merged account drilldown rows for a configurable report. */
 export function compareConfigurableReport(db, report, periods, baseFilter = {}, group = null, options = {}) {
+  const filterRows = (rows) => {
+    if (!options.hideZeroLines) return rows;
+    const parents = new Set(rows.map((row) => row.parent_code).filter(Boolean));
+    return rows.filter((row) => row.strong || parents.has(row.code) || reportAmountsVisible(row.values, true))
+      .map((row) => ({ ...row, accountRows: row.accountRows.filter((account) => reportAmountsVisible(account.values, true)) }));
+  };
   const effectivePeriods = periods?.length ? periods : [{ from: baseFilter.from ?? '', to: baseFilter.to ?? '', label: 'Balance' }];
   if (group || effectivePeriods.length === 1) {
     const period = { ...baseFilter, ...effectivePeriods[0] };
@@ -508,7 +514,7 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
       if (!bucket.label) return single.columns.length === 1 && effectivePeriods[0].label ? effectivePeriods[0].label : colTitle;
       return single.columns.length === 1 ? bucket.label : `${bucket.label} - ${colTitle}`;
     }));
-    return { ...single, headers, showVariance: false, rows: single.rows.map((r) => ({ ...r, variance: null, accountRows: r.accountRows.map((a) => ({ ...a, variance: null })) })) };
+    return { ...single, headers, showVariance: false, rows: filterRows(single.rows.map((r) => ({ ...r, variance: null, accountRows: r.accountRows.map((a) => ({ ...a, variance: null })) }))) };
   }
   const results = effectivePeriods.map((p) => configurableReport(db, report, { ...baseFilter, from: p.from, to: p.to }, null, options));
   const varianceOf = (vals) => {
@@ -532,7 +538,7 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
       .map((entry) => ({ ...entry, variance: varianceOf(entry.values) }));
     return { ...baseRow, values, variance: varianceOf(values), accountRows };
   });
-  return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows };
+  return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows: filterRows(rows) };
 }
 
 /** Whether a computed report line can be unfolded into its contributing account rows. */

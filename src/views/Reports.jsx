@@ -131,7 +131,7 @@ function Comparison({ data, report, money: fmtMoney = money }) {
   );
 }
 
-function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = false, money: moneyProp }) {
+function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = false, hideZeroLines = false, money: moneyProp }) {
   const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
   const fmtMoney = moneyProp ?? reportMoney(db, targetCompanyId ?? period?.company_id);
   const report = generalLedger(db, {
@@ -140,6 +140,7 @@ function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = fa
     analyticAccountIds,
     reviewMode: period?.reviewMode,
     groupByPartner,
+    hideZeroLines,
   });
   const [open, setOpen] = useState(() => new Set());
   const [openPartners, setOpenPartners] = useState(() => new Set());
@@ -869,6 +870,7 @@ function ReportPage({ leaf, params }) {
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
   const [includeUnposted, setIncludeUnposted] = useState(false);
+  const [hideZeroLines, setHideZeroLines] = useState(false);
   const [horizontalGroupId, setHorizontalGroupId] = useState('');
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [partnerFilterIds, setPartnerFilterIds] = useState([]);
@@ -1139,6 +1141,9 @@ function ReportPage({ leaf, params }) {
           </select>
         </label>
       )}
+      {['trial', 'ledger'].includes(leaf.report) && <label className="inline-select">
+        <input type="checkbox" checked={hideZeroLines} onChange={(e) => setHideZeroLines(e.target.checked)} /> {t('Hide lines at 0')}
+      </label>}
       {leaf.report === 'ledger' && (
         <label className="inline-select">
           <input type="checkbox" checked={groupByPartner} onChange={(e) => setGroupByPartner(e.target.checked)} /> {t('Group by Partner')}
@@ -1257,7 +1262,7 @@ function ReportPage({ leaf, params }) {
             </tr>
           </thead>
           {periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? (
-            <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} money={fmtMoney} />
+            <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} hideZeroLines={hideZeroLines} money={fmtMoney} />
           ) : data ? (
             <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} />
           ) : isAudit ? (
@@ -1281,6 +1286,7 @@ function ReportPage({ leaf, params }) {
               rootPlans={rootPlans}
               hasUnassigned={hasUnassigned}
               money={fmtMoney}
+              hideZeroLines={hideZeroLines}
               groupByPartner={groupByPartner}
               showJournalAccount={showJournalAccount}
               showInitialBalance={showInitialBalance}

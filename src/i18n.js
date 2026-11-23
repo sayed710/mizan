@@ -87,6 +87,7 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Hide lines at 0': 'إخفاء البنود الصفرية',
   'Batch invoices must use the same currency; a mixed-currency total is unavailable': 'فواتير الدفعة يجب أن تكون بعملة واحدة؛ لا يمكن حساب إجمالي بعملات مختلفة',
   'Configure a company currency before adding invoices to the batch': 'حدّد عملة الشركة قبل إضافة فواتير إلى الدفعة',
   'Configure a currency for every company before adding invoices to the batch': 'حدّد عملة لكل شركة قبل إضافة فواتير إلى الدفعة',

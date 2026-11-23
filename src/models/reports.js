@@ -12,6 +12,8 @@ import { isLiquidityJournal } from './ledger.js';
 import { configuredEarningsAccount } from './earnings.js';
 import { includeInitialBalance } from './accounting.js';
 
+export const reportAmountsVisible = (values, hideZeroLines = false) => !hideZeroLines || values.some((value) => value != null && Number(value) !== 0);
+
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
 
 /**
@@ -49,7 +51,7 @@ export function trialOpeningItems(db, items, from) {
 }
 
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
-export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, includeClosing = false } = {}) {
+export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, includeClosing = false, includeZeroRows = false } = {}) {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const opening = new Map(balances(db, trialOpeningItems(db, itemsBefore(db, from, company_id, analyticAccountIds, mode), from)).map((b) => [b.account.id, b.balance]));
   const rows = new Map();
@@ -66,14 +68,14 @@ export function trialBalance(db, { from, to, company_id, analyticAccountIds, inc
   const list = [...rows.values()]
     .filter((r) => r.account)
     .map((r) => ({ account: r.account, initial: r.initial, debit: round(r.debit), credit: round(r.credit), end: round(r.initial + r.debit - r.credit) }))
-    .filter((r) => r.initial || r.debit || r.credit || r.end)
+    .filter((r) => includeZeroRows || reportAmountsVisible([r.initial, r.debit, r.credit, r.end], true))
     .sort((a, b) => a.account.code.localeCompare(b.account.code));
   const total = (key) => round(list.reduce((s, r) => s + r[key], 0));
   return { rows: list, totals: { initial: total('initial'), debit: total('debit'), credit: total('credit'), end: total('end') } };
 }
 
 /** General ledger: accounts with opening balance, movements inside the period, and ending balance, optionally grouped by partner. */
-export function generalLedger(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, groupByPartner = false } = {}) {
+export function generalLedger(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, groupByPartner = false, hideZeroLines = false } = {}) {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const items = filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds);
   const opening = from ? trialOpeningItems(db, filterByAnalytic(journalItems(db, { to: from, company_id, reviewMode: mode }), analyticAccountIds).filter((l) => l.date < from), from) : [];
@@ -116,8 +118,13 @@ export function generalLedger(db, { from, to, company_id, analyticAccountIds, in
     return { account, ...section(accLines, accOpening), partners };
   });
 
+  const visibleRows = rows.filter((row) => reportAmountsVisible([row.debit, row.credit, row.end], hideZeroLines)).map((row) => ({
+    ...row,
+    lines: row.lines.filter((line) => reportAmountsVisible([line.debit, line.credit, line.balance], hideZeroLines)),
+    partners: row.partners.map((partner) => ({ ...partner, lines: partner.lines.filter((line) => reportAmountsVisible([line.debit, line.credit, line.balance], hideZeroLines)) })),
+  }));
   return {
-    rows,
+    rows: visibleRows,
     totals: {
       debit: round(rows.reduce((sum, r) => sum + r.debit, 0)),
       credit: round(rows.reduce((sum, r) => sum + r.credit, 0)),
