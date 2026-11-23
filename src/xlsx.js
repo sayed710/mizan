@@ -368,7 +368,7 @@ export function extractTableGrid(table) {
     const cells = rowCells(tr);
     const isHeaderRow = (tr.parentElement ?? tr.parentNode)?.tagName?.toUpperCase() === 'THEAD'
       || (cells.length > 0 && cells.every((c) => c.tagName?.toUpperCase() === 'TH'));
-    if (isHeaderRow) headerRowCount = Math.max(headerRowCount, rIdx + 1);
+    if (isHeaderRow && headerRowCount === rIdx) headerRowCount += 1;
 
     let cIdx = 0;
     for (const cell of cells) {

@@ -290,7 +290,7 @@ const CONTROL_FIELDS = [
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
-  'transfer_account_id',
+  'transfer_account_id', 'account_check_printing_layout',
   'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
 
@@ -306,6 +306,7 @@ function returnLockChange(db, companyId, from, to) {
 }
 
 function companyGuard(db, before, r, ctx) {
+  if (r.account_check_printing_layout != null && r.account_check_printing_layout !== '' && !['none', 'top', 'middle', 'bottom'].includes(r.account_check_printing_layout)) return 'Select a valid check layout';
   for (const field of LOCK_DATE_FIELDS) {
     if (r[field] != null && r[field] !== '' && !validDate(r[field])) return `${companyModels['res.company'].fields[field].label} must be a valid date`;
   }
@@ -737,6 +738,16 @@ export const companyModels = {
           ['out_invoices', 'Customer Invoices'],
           ['in_invoices', 'Vendor Bills'],
           ['out_and_in_invoices', 'Customer Invoices and Vendor Bills'],
+        ],
+      },
+      account_check_printing_layout: {
+        type: 'selection',
+        label: 'Check Layout',
+        options: [
+          ['none', 'None'],
+          ['top', 'Check on top'],
+          ['middle', 'Check in middle'],
+          ['bottom', 'Check in bottom'],
         ],
       },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },

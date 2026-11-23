@@ -81,6 +81,23 @@ function generatedAssetMove(seen, original, move, changed) {
   return asset.state === expectedState;
 }
 
+function generatedAssetCancellationReversal(seen, original, move, changed) {
+  const source = (original.records['account.move'] ?? []).find((entry) => entry.id === move.reversed_entry_id);
+  if (!source || source.state !== 'posted' || (move.company_id ?? 1) !== (source.company_id ?? 1)) return false;
+  const links = (original.records['account.asset'] ?? []).flatMap((asset) => (asset.depreciation_ids ?? [])
+    .filter((line) => line.posted && line.move_id === source.id).map((line) => ({ asset, line })));
+  if (links.length !== 1) return false;
+  const { asset, line } = links[0];
+  if (asset.state !== 'open' || !depreciationMoveMatches(original, asset, line, source)
+    || !changed.some(([model, record]) => model === 'account.asset' && record.id === asset.id && record.state === 'cancel')) return false;
+  const signature = (entry, reverse = false) => JSON.stringify([
+    entry.account_id, Number(reverse ? entry.credit : entry.debit) || 0, Number(reverse ? entry.debit : entry.credit) || 0,
+    Object.entries(entry.analytic_distribution ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  ]);
+  return same((source.line_ids ?? []).map((entry) => signature(entry, true)).sort())
+    === same((move.line_ids ?? []).map((entry) => signature(entry)).sort());
+}
+
 /** Resolve both sides of a newly created revaluation pair through their explicit workflow links. */
 function generatedRevaluationMoves(seen, original, changed) {
   const allMoves = byId(seen.records['account.move']);
@@ -123,7 +140,8 @@ function generatedMoveOrigin(seen, original, move, changed, revaluationMoves) {
     changed.some(([model, record]) => model === 'account.fiscal.year' && record.id === year.id)
     && (year.closing_move_id === move.id || year.opening_move_id === move.id)
   ));
-  return fiscalOrigin || revaluationMoves.has(move.id) || generatedAssetMove(seen, original, move, changed);
+  return fiscalOrigin || revaluationMoves.has(move.id) || generatedAssetMove(seen, original, move, changed)
+    || generatedAssetCancellationReversal(seen, original, move, changed);
 }
 
 /** Fields the server keeps (computed and undeclared ones are dropped, so they never conflict). */
