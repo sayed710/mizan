@@ -2115,7 +2115,7 @@ export function migrateSalesCreditLimit(db) {
     },
   };
 }
-MIGRATIONS.push({ version: 67, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
+MIGRATIONS.push({ version: 68, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
