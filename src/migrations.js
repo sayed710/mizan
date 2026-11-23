@@ -2106,7 +2106,7 @@ export function migrateCountries(db) {
   }
   return { ...next, records };
 }
-MIGRATIONS.push({ version: 67, name: 'country-records', up: migrateCountries });
+MIGRATIONS.push({ version: 68, name: 'country-records', up: migrateCountries });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
