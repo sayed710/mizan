@@ -376,7 +376,12 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
       ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
     const committed = roundCurrency(commitment_lines.reduce((sum, line) => sum + line.amount, 0), companyCurrency);
     const theoretical = roundCurrency(planned * fraction, companyCurrency);
-    return { ...line, planned, practical, committed, theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
+    const isExpense = budget.budget_type === 'expense';
+    const planned_amount = planned;
+    const budget_theoretical = roundCurrency(planned_amount * fraction, companyCurrency);
+    const budgetSign = isExpense ? -1 : 1;
+    const achieved_amount = roundCurrency(practical * budgetSign, companyCurrency);
+    return { ...line, planned, practical, committed, budgetSign, planned_amount, budget_theoretical, achieved_amount, committed_amount: roundCurrency((practical + committed) * budgetSign, companyCurrency), theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, budget_variance: roundCurrency(achieved_amount - planned_amount, companyCurrency), budget_achievement: budget_theoretical ? round(achieved_amount / budget_theoretical * 100) : 0, analytic_lines, commitment_lines };
   });
 }
 
@@ -390,22 +395,186 @@ const transition = (label, from, state) => ({
   },
 });
 
+const rawPlans = (db) => db?.records?.['account.analytic.plan'] ?? [];
+const planIndexCache = new WeakMap();
+
+function getPlanIndex(db) {
+  if (!db?.records) {
+    return {
+      rawPlans: new Map(),
+      childrenMap: new Map(),
+      counts: new Map(),
+      roots: new Map(),
+    };
+  }
+  let cached = planIndexCache.get(db.records);
+  if (cached) return cached;
+
+  const rawPlans = new Map();
+  const childrenMap = new Map();
+  const plans = db.records['account.analytic.plan'] ?? [];
+  for (const p of plans) {
+    rawPlans.set(p.id, p);
+    if (p.parent_id != null) {
+      let list = childrenMap.get(p.parent_id);
+      if (!list) {
+        list = [];
+        childrenMap.set(p.parent_id, list);
+      }
+      list.push(p.id);
+    }
+  }
+
+  const directCounts = new Map();
+  for (const a of db.records['account.analytic.account'] ?? []) {
+    if (a.active !== false && a.plan_id != null) {
+      directCounts.set(a.plan_id, (directCounts.get(a.plan_id) ?? 0) + 1);
+    }
+  }
+
+  const counts = new Map();
+  const visiting = new Set();
+  function getCount(planId) {
+    if (counts.has(planId)) return counts.get(planId);
+    if (visiting.has(planId)) return 0;
+    visiting.add(planId);
+    let total = directCounts.get(planId) ?? 0;
+    const children = childrenMap.get(planId);
+    if (children) {
+      for (const childId of children) {
+        total += getCount(childId);
+      }
+    }
+    visiting.delete(planId);
+    counts.set(planId, total);
+    return total;
+  }
+
+  const roots = new Map();
+  function getRoot(planId) {
+    if (roots.has(planId)) return roots.get(planId);
+    const p = rawPlans.get(planId);
+    if (!p) return null;
+    if (!p.parent_id) {
+      roots.set(planId, p.id);
+      return p.id;
+    }
+    const seen = new Set([planId]);
+    let cur = p;
+    while (cur?.parent_id) {
+      if (seen.has(cur.parent_id)) break;
+      seen.add(cur.parent_id);
+      const parent = rawPlans.get(cur.parent_id);
+      if (!parent) break;
+      cur = parent;
+    }
+    const rootId = cur?.id ?? p.id;
+    roots.set(planId, rootId);
+    return rootId;
+  }
+
+  for (const p of plans) {
+    getCount(p.id);
+    getRoot(p.id);
+  }
+
+  const index = { rawPlans, childrenMap, counts, roots };
+  planIndexCache.set(db.records, index);
+  return index;
+}
+
+export function rawPlanMap(db) {
+  return getPlanIndex(db).rawPlans;
+}
+
+export function rootPlanMap(db) {
+  return getPlanIndex(db).roots;
+}
+
+const rawPlan = (db, id) => getPlanIndex(db).rawPlans.get(id) ?? rawPlans(db).find((p) => p.id === id);
+
 /** Return a plan's id together with all descendant subplan ids. */
 export function planSubtreeIds(db, rootId) {
   if (!rootId) return [];
-  const plans = search(db, 'account.analytic.plan');
+  const childrenMap = getPlanIndex(db).childrenMap;
   const out = [rootId];
   const seen = new Set(out);
   for (let i = 0; i < out.length; i += 1) {
     const pid = out[i];
-    for (const p of plans) {
-      if (p.parent_id === pid && !seen.has(p.id)) {
-        seen.add(p.id);
-        out.push(p.id);
+    const children = childrenMap.get(pid);
+    if (children) {
+      for (const cid of children) {
+        if (!seen.has(cid)) {
+          seen.add(cid);
+          out.push(cid);
+        }
       }
     }
   }
   return out;
+}
+
+/** Complete hierarchical name for a plan (e.g. "Parent / Child"). */
+export function completePlanName(db, plan) {
+  if (!plan?.name) return '';
+  if (!plan.parent_id || !db) return plan.name;
+  const names = [plan.name];
+  const seen = new Set([plan.id]);
+  let curId = plan.parent_id;
+  while (curId) {
+    if (seen.has(curId)) break;
+    seen.add(curId);
+    const parent = rawPlan(db, curId);
+    if (!parent?.name) break;
+    names.unshift(parent.name);
+    curId = parent.parent_id;
+  }
+  return names.join(' / ');
+}
+
+/** Return the id of the topmost ancestor plan in the hierarchy. */
+export function rootPlanId(db, plan) {
+  if (!plan?.id) return null;
+  if (!plan.parent_id || !db) return plan.id;
+  const roots = getPlanIndex(db).roots;
+  if (roots.has(plan.id)) return roots.get(plan.id);
+  const seen = new Set([plan.id]);
+  let cur = plan;
+  while (cur?.parent_id) {
+    if (seen.has(cur.parent_id)) break;
+    seen.add(cur.parent_id);
+    const parent = rawPlan(db, cur.parent_id);
+    if (!parent) break;
+    cur = parent;
+  }
+  return cur?.id ?? plan.id;
+}
+
+/** Return the topmost ancestor plan record in the hierarchy. */
+export function rootPlan(db, plan) {
+  const id = rootPlanId(db, plan);
+  return id ? read(db, 'account.analytic.plan', id) : null;
+}
+
+/** Whether a plan is a root plan (has no parent plan). */
+export const isRootPlan = (plan) => !plan?.parent_id;
+
+/** All root plans in sequence order. */
+export function rootAnalyticPlans(db) {
+  if (!db) return [];
+  return (search(db, 'account.analytic.plan', { includeArchived: true }) ?? [])
+    .filter(isRootPlan)
+    .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id);
+}
+
+/** Total number of analytic accounts under a plan and its subplans. */
+export function planAccountCount(db, plan) {
+  if (!db || !plan?.id) return 0;
+  const index = getPlanIndex(db);
+  if (index.counts.has(plan.id)) return index.counts.get(plan.id);
+  const planIds = new Set(planSubtreeIds(db, plan.id));
+  const accounts = db.records?.['account.analytic.account'] ?? [];
+  return accounts.filter((a) => a.active !== false && planIds.has(a.plan_id)).length;
 }
 
 /** Validate that a plan does not reference itself as an ancestor. */
@@ -416,7 +585,7 @@ export function planHierarchyError(db, plan) {
   while (cur) {
     if (seen.has(cur)) return 'A plan cannot be its own ancestor';
     seen.add(cur);
-    cur = read(db, 'account.analytic.plan', cur)?.parent_id ?? null;
+    cur = rawPlan(db, cur)?.parent_id ?? null;
   }
   return null;
 }
@@ -454,6 +623,23 @@ export const analyticPlusModels = {
         hideWhen: (r) => Boolean(r?.parent_id),
       },
       color: { type: 'integer', label: 'Color' },
+      description: { type: 'text', label: 'Description' },
+      complete_name: {
+        type: 'char', label: 'Complete Name', readonly: true,
+        compute: (r, db) => completePlanName(db, r),
+      },
+      children_ids: {
+        type: 'many2many', relation: 'account.analytic.plan', label: 'Subplans', readonly: true,
+        compute: (r, db) => (db ? (getPlanIndex(db).childrenMap.get(r?.id) ?? []) : (r?.children_ids ?? [])),
+      },
+      root_plan_id: {
+        type: 'many2one', relation: 'account.analytic.plan', label: 'Root Plan', readonly: true,
+        compute: (r, db) => rootPlanId(db, r),
+      },
+      account_count: {
+        type: 'integer', label: 'Analytic Accounts', readonly: true,
+        compute: (r, db) => planAccountCount(db, r),
+      },
       applicability_ids: {
         type: 'one2many',
         label: 'Applicability',
@@ -467,7 +653,7 @@ export const analyticPlusModels = {
         newLine: () => ({ business_domain: null, account_prefix: '', product_categ_id: null, applicability: 'mandatory', company_id: null }),
       },
     },
-    defaults: () => ({ default_applicability: 'optional', color: 0, applicability_ids: [] }),
+    defaults: () => ({ default_applicability: 'optional', color: 0, description: '', applicability_ids: [] }),
     createDefaults: (db) => ({ sequence: nextSequence(db, 'account.analytic.plan') }),
     guard: (db, _before, after) => planHierarchyError(db, after),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
@@ -481,7 +667,7 @@ export const analyticPlusModels = {
         { label: 'Subplans', model: 'account.analytic.plan', field: 'parent_id', target: 'accounting/analytic-plans' },
         { label: 'Analytic Accounts', model: 'account.analytic.account', field: 'plan_id', ids: (db, rec) => planSubtreeIds(db, rec.id), target: 'accounting/analytic' },
       ],
-      groups: [['parent_id', 'default_applicability', 'color']],
+      groups: [['parent_id', 'default_applicability', 'color', 'description']],
       tabs: [{ label: 'Applicability', when: (r) => !r?.parent_id, fields: ['applicability_ids'] }],
       chatter: true,
     },
