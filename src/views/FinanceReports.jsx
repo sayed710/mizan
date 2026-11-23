@@ -50,9 +50,10 @@ function FiscalCategoryRows({ rows, money: fmtMoney = money }) {
   </>;
 }
 
-export function FiscalReport({ db, period, periods, analyticAccountIds, money: moneyProp }) {
-  const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
-  const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period.reviewMode, company_id: period.company_id, analyticAccountIds }));
+export function FiscalReport({ db, period, periods, companyId, analyticAccountIds, money: moneyProp }) {
+  const effectiveCompanyId = companyId && companyId !== 'all' ? Number(companyId) : (period?.company_id ?? null);
+  const fmtMoney = moneyProp ?? reportMoney(db, effectiveCompanyId);
+  const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period?.reviewMode, company_id: effectiveCompanyId, analyticAccountIds }));
   const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   const groups = new Map(reports.flatMap((report) => report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   return <tbody>
