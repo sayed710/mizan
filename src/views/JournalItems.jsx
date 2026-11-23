@@ -228,6 +228,7 @@ export function JournalItems({ leaf = {} } = {}) {
   // and Reconciled items smart button scopes it to the matched reconciliation set (#/...?reconciled_of=ID).
   const hashParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
   const accountFilter = Number(hashParams.get('account')) || null;
+  const journalFilter = Number(hashParams.get('journal')) || null;
   const reconciledOf = Number(hashParams.get('reconciled_of')) || null;
   const companyParam = Number(hashParams.get('company')) || null;
   const allowedCompanies = new Set(db.settings?.allowed_company_ids ?? [db.settings?.current_company_id ?? 1]);
@@ -245,7 +246,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const multiCurrency = hasMultiCurrency(db);
   const stateField = models['account.move'].fields.state;
   const enriched = journalItems(db, { from, to, reviewMode: 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
-    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!matchedMoves || (matchedMoves.has(line.move_id) && line.reconciled)))
+    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!matchedMoves || (matchedMoves.has(line.move_id) && line.reconciled)))
     .map((line) => {
       const move = read(db, 'account.move', line.move_id);
       const lineCompanyCurr = findCompanyCurrencyRecord(db, line.company_id);
@@ -415,6 +416,7 @@ export function JournalItems({ leaf = {} } = {}) {
   return <main className="action report-page">
     <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
       {accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
+      {journalFilter && <span className="facet">{t('Journal')}: {read(db, 'account.journal', journalFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
       <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
       <label>{t('To')} <input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
       <label>{t('Search')} <input aria-label={t('Search')} placeholder={t('Journal Item')} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
