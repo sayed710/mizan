@@ -157,6 +157,8 @@ test('invalid assets are refused on confirm', () => {
   assert.throws(() => running({ original_value: 0 }), /original value must be positive/);
   assert.throws(() => running({ method_number: 0 }), /duration must be positive/);
   assert.throws(() => running({ method_number: -2.5 }), /duration must be positive/);
+  const fractional = running({ method_number: 2.5 });
+  assert.equal(read(fractional.db, 'account.asset', fractional.id).method_number, 2.5);
   assert.throws(() => running({ salvage_value: 10000 }), /lower than the original value/);
 });
 

@@ -5,7 +5,8 @@ import { depreciationReport } from '../models/assets.js';
 import { deferredReport, trialOpeningItems } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { filterByAnalytic, journalItems } from '../models/ledger.js';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { FollowUpWizard } from './FollowUpLetter.jsx';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -284,7 +285,7 @@ function TaxAmountToggle({ value, open, onToggle, money: fmtMoney = money }) {
   return <button type="button" className="tax-drill-toggle" aria-expanded={open} onClick={onToggle}>{fmtMoney(value)}</button>;
 }
 
-export function Tax({ db, period, companyId = 'all', variant = null, money: moneyProp }) {
+export function Tax({ db, period, periods, companyId = 'all', variant = null, money: moneyProp }) {
   const effectiveCompanyId = companyId && companyId !== 'all' ? Number(companyId) : (period?.company_id ?? null);
   const fmtMoney = moneyProp ?? reportMoney(db, effectiveCompanyId);
   const effectivePeriod = effectiveCompanyId ? { ...period, company_id: effectiveCompanyId } : period;
@@ -297,6 +298,27 @@ export function Tax({ db, period, companyId = 'all', variant = null, money: mone
     else next.add(code);
     return next;
   });
+
+  if (periods) {
+    const specs = periods.map((p) => ({ ...p, ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}), tax_return_template: activeVariant }));
+    const reports = specs.map((spec) => activeVariant === 'generic' ? genericTaxRows(taxesByTax(db, spec)) : taxReturnBoxes(db, spec).boxes);
+    const rowKey = (row) => activeVariant === 'generic' ? taxItemKey({ ...row, tax_name: row.name }) : row.code;
+    const rowsByReport = reports.map((rows) => new Map(rows.map((row) => [rowKey(row), row])));
+    const keys = new Map(reports.flatMap((rows) => rows.map((row) => [rowKey(row), row])));
+    const gridReports = activeVariant === 'generic' ? specs.map((spec) => taxesByGrid(db, spec)) : [];
+    const gridsByReport = gridReports.map((rows) => new Map(rows.map((row) => [row.id, row])));
+    const grids = new Map(gridReports.flatMap((rows) => rows.map((row) => [row.id, row])));
+    const totals = specs.map((spec) => taxReport(db, spec));
+    const renderRows = (rows) => rows.map((row) => <tr key={rowKey(row)} className="rep-detail">{activeVariant !== 'generic' && <td>{row.code}</td>}<td>{t(row.label ?? row.name)}</td>{rowsByReport.flatMap((byKey, index) => { const value = byKey.get(rowKey(row)); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>);
+    const section = (title) => <tr className="rep-section"><td>{t(title)}</td>{periods.flatMap((_, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} />])}</tr>;
+    const mergedRows = [...keys.values()];
+    return <tbody>
+      {activeVariant === 'generic' ? <>{section('Sales')}{renderRows(mergedRows.filter((row) => row.side === 'sale'))}{section('Purchases')}{renderRows(mergedRows.filter((row) => row.side === 'purchase'))}</> : renderRows(mergedRows)}
+      {grids.size > 0 && section('Tax Grids')}
+      {[...grids.values()].map((row) => <tr key={`grid-${row.id}`} className="rep-detail"><td>{row.name}</td>{gridsByReport.flatMap((byId, index) => { const value = byId.get(row.id); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>)}
+      {activeVariant === 'generic' && ['output', 'input', 'payable'].map((key) => <tr key={key} className={`rep-total ${key === 'payable' ? 'strong' : ''}`}><td>{t(key === 'output' ? 'Output Tax' : key === 'input' ? 'Input Tax' : 'Tax Payable')}</td>{totals.flatMap((total, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} className="num">{fmtMoney(total[key])}</td>])}</tr>)}
+    </tbody>;
+  }
 
   if (activeVariant !== 'generic') {
     const returnSpec = { ...effectivePeriod, tax_return_template: activeVariant };
@@ -406,20 +428,19 @@ const Aged = (kind) => function AgedBody({ db, period, companyId, partnerIds, ag
 };
 
 function FollowUpActions({ db, reminder, companyId }) {
+  const [open, setOpen] = useState(false);
   const partner = read(db, 'res.partner', reminder.partner_id);
   const email = partner?.email?.trim();
   const channel = levelChannel(followUpLevel(db, reminder));
   const isManual = partner?.followup_reminder_type === 'manual';
   const fallbackChannel = partner?.phone?.trim() ? 'phone' : 'letter';
-  const manualChannel = ['sms', 'phone', 'letter'].includes(channel)
-    ? channel
-    : (isManual && !email ? fallbackChannel : 'email');
+  const manualChannel = ['sms', 'phone', 'letter'].includes(channel) ? channel : (isManual && !email ? fallbackChannel : 'email');
   const options = { scope: db, reminder, companyId };
-  return <>
+  return <><button type="button" className="btn sm" onClick={() => setOpen(true)}>{t('Send')}</button>{' '}
+    {open && <FollowUpWizard partnerId={reminder.partner_id} companyId={companyId} onClose={() => setOpen(false)} />}
     {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}
       onClick={() => commit(openManualFollowUp(getDb(), reminder.partner_id, today(), options))}>{t('Open Reminder in Mail App')}</a>{' '}</>}
-    {(manualChannel !== 'email' || email) &&
-      <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: manualChannel }))}>{t('Confirm Sent')}</button>}
+    {(manualChannel !== 'email' || email) && <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: manualChannel }))}>{t('Confirm Sent')}</button>}
   </>;
 }
 
@@ -496,7 +517,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   );
 }
 
-function Budget({ db, period }) {
+export function Budget({ db, period, companyId = 'all' }) {
   const availableCompanies = companiesOf(db);
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
@@ -511,7 +532,7 @@ function Budget({ db, period }) {
   };
   return (
     <tbody>
-      {search(db, 'account.budget').filter((b) => !['draft', 'cancel'].includes(b.state) && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
+      {search(db, 'account.budget').filter((b) => (companyId === 'all' || b.company_id === Number(companyId)) && !['draft', 'cancel'].includes(b.state) && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
         const company = b.company_id ? read(db, 'res.company', b.company_id) : null;
         const companyMissing = !company;
         let currency = null;
@@ -746,9 +767,10 @@ function ReportPage({ leaf }) {
   const deferredKind = leaf.report === 'deferredRevenue' ? 'revenue' : 'expense';
   const [generationError, setGenerationError] = useState('');
   const [companyId, setCompanyId] = useState('all');
+  const allowAllCompanies = !isDeferred && !['customerStatement', 'valuation'].includes(leaf.report);
   const { companyDb, availableCompanies, companies, selectedCompany } = useMemo(
-    () => reportCompanyScope(sourceDb, companyId, { allowAll: !['customerStatement', 'valuation'].includes(leaf.report) && !isDeferred }),
-    [sourceDb, companyId, leaf.report, isDeferred],
+    () => reportCompanyScope(sourceDb, companyId, { allowAll: allowAllCompanies }),
+    [sourceDb, companyId, allowAllCompanies],
   );
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [asOf, setAsOf] = useState(today());
@@ -826,7 +848,7 @@ function ReportPage({ leaf }) {
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
   const reportCols = isTaxBoxes ? ['Description', 'Base', 'Tax'] : isDeferred ? cols.map((col) => col === 'Current' ? periodName : col) : cols;
   const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
-  const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial'].includes(leaf.report) && periodKey !== 'all';
+  const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'tax', 'fiscal'].includes(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
   const effectivePeriod = showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period;
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
@@ -945,8 +967,8 @@ function ReportPage({ leaf }) {
           <option value="number">{t('Journal Entry Number')}</option>
         </select>
       </label>}
-      {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
-        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={!['customerStatement', 'valuation'].includes(leaf.report) && !isDeferred} />
+      {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+        <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={allowAllCompanies} />
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">
@@ -1032,8 +1054,8 @@ function ReportPage({ leaf }) {
     >
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
-          <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && leaf.report === 'trial' ? periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`)) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {periods && leaf.report === 'trial' ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={leaf.report === 'valuation' ? companyDb : db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
+          <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`))) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
+          {periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={leaf.report === 'valuation' ? companyDb : db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
         </table>
       </div>
     </ReportPrintView>

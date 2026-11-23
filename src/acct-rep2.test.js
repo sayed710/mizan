@@ -49,8 +49,6 @@ test('inalterability exposes and passes a journal filter', async () => {
   const { readFileSync } = await import('node:fs');
   assert.match(readFileSync(new URL('./views/Reports.jsx', import.meta.url), 'utf8'), /checkInalterability\(db,\s*\{\s*companyId:\s*id,\s*journalId/);
 });
-
-
 test('valuation requires a single company and respects its stock scope', async () => {
   const base = seed();
   const branch = createCompany(base, { name: 'Branch', currency_id: read(base, 'res.company', 1).currency_id });
@@ -77,4 +75,19 @@ test('inalterability journal filter includes archived journals only for that rep
   const archived = write(db, 'account.journal', journal.id, { active: false, name: 'Archived review journal' });
   assert.match(await render('inalterability', archived), /Archived review journal/);
   assert.doesNotMatch(await render('ledger', archived), /Archived review journal/);
+});
+
+test('valuation assigns unowned legacy stock to company 1 even when current company is a branch', () => {
+  const base = seed();
+  const branch = createCompany(base, { name: 'Branch', currency_id: read(base, 'res.company', 1).currency_id });
+  const scoped = setCompanies(branch.db, { current: branch.id, allowed: [1, branch.id] });
+  const item = create(scoped, 'product', { name: 'Legacy unowned stock', type: 'goods', cost: 10, qty_available: 5 });
+  const db = structuredClone(item.db);
+  db.records['stock.quant'] = (db.records['stock.quant'] ?? []).filter((q) => q.product_id !== item.id);
+  const rep1 = valuationReport(db, { companyId: 1 });
+  const rep2 = valuationReport(db, { companyId: branch.id });
+  assert.equal(rep1[item.id].qty, 5);
+  assert.equal(rep1[item.id].value, 50);
+  assert.equal(rep2[item.id].qty, 0);
+  assert.equal(rep2[item.id].value, 0);
 });

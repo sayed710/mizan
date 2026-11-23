@@ -22,7 +22,7 @@ const stockQuantity = (db, p, company = companyOf(db)) => {
   const qs = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === p.id);
   if (qs.length) return qs.filter((q) => (q.company_id ?? 1) === company).reduce((s, q) => s + q.quantity, 0);
   // Unlocated legacy stock is attributed in the same way as ensureQuants.
-  return (p.company_id || companyOf(db)) === company ? Number(p.qty_available) || 0 : 0;
+  return (p.company_id || 1) === company ? Number(p.qty_available) || 0 : 0;
 };
 const product = (db, id) => {
   const p = read(db, 'product', id);
@@ -40,7 +40,7 @@ function prepare(db, id, date, company = companyOf(db)) {
   const ls = layers(db, id, company);
   if (ls.some((l) => l.date > date)) throw new Error('Valuation date cannot precede an existing layer');
   const onHand = stockQuantity(db, p, company);
-  const owned = onHand + ((p.company_id || companyOf(db)) === company ? Number(p.qty_rented || 0) : 0);
+  const owned = onHand + ((p.company_id || 1) === company ? Number(p.qty_rented || 0) : 0);
   if (ls.length && Math.abs(quantity(ls) - owned) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
   if (ls.length || !onHand) return db;
   if (onHand < 0) throw new Error('Reconcile negative opening stock before valuation');

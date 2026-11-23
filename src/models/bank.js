@@ -5,7 +5,7 @@ import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
-import { applyRule, counterpartTaxLines, sameCommercialPartner, suggestRule } from './reconcile.js';
+import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { roundStatementAmount } from './bankstatement.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
@@ -522,6 +522,8 @@ export function matchPayment(db, line) {
 }
 
 function autoReconcile(db, line) {
+  db = mapStatementPartner(db, line);
+  line = read(db, 'account.bank.statement.line', line.id);
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? statementCompanyAmount(db, line)));
   if (!line.partner_id) {
@@ -1128,6 +1130,8 @@ export const bankModels = {
         {
           label: 'Apply Reconciliation Model', when: (r) => r.state === 'to_check',
           run: (db, r) => {
+            db = mapStatementPartner(db, r);
+            r = read(db, 'account.bank.statement.line', r.id);
             const model = modelFor(db, r);
             if (!model) throw new Error('No reconciliation model matches this transaction');
             return { db: applyRule(db, model, r) };
