@@ -202,8 +202,10 @@ test('Settings omits skipped Odoo features and omits any setting whose res.compa
   const companyFields = models['res.company'].fields;
   const savedVat = companyFields.vat;
   const savedThreeWay = companyFields.three_way_matching;
+  const savedAutopost = companyFields.autopost_bills;
   delete companyFields.vat;
   delete companyFields.three_way_matching;
+  delete companyFields.autopost_bills;
   const ctx = await renderSettings();
   try {
     const labels = collect(ctx.host, (n) => ['LABEL', 'H2', 'H3'].includes(n.tagName)).map((n) => n.textContent);
@@ -221,6 +223,7 @@ test('Settings omits skipped Odoo features and omits any setting whose res.compa
   } finally {
     companyFields.vat = savedVat;
     companyFields.three_way_matching = savedThreeWay;
+    companyFields.autopost_bills = savedAutopost;
     await ctx.cleanup();
   }
 });
@@ -253,5 +256,19 @@ test('Settings Accounting labels and descriptions have Arabic translations in i1
     'Prevent altering posted entries, logs and sequences once permanently enabled.',
   ]) {
     assert.ok(i18nSrc.includes(key), `i18n includes translation for "${key}"`);
+  }
+});
+
+test('Vendor Bills block remains visible when only auto-post is available', async () => {
+  const fields = models['res.company'].fields;
+  const saved = fields.three_way_matching;
+  delete fields.three_way_matching;
+  const ctx = await renderSettings();
+  try {
+    assert.ok(find(ctx.host, (n) => props(n)?.['data-block'] === 'vendor_bills'));
+    assert.ok(ctx.control('autopost_bills'));
+  } finally {
+    fields.three_way_matching = saved;
+    await ctx.cleanup();
   }
 });

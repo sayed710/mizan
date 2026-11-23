@@ -280,7 +280,7 @@ export function withCompany(models) {
 // Accounting settings shown in General Settings are company controls and can only be changed by administrators over sync.
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
-  'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
+  'audit_trail', 'three_way_matching', 'autopost_bills', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'fiscalyear_last_day', 'fiscalyear_last_month',
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
@@ -782,6 +782,7 @@ export const companyModels = {
       tax_cash_basis_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Cash Basis Journal' },
       account_storno: { type: 'boolean', label: 'Storno accounting', default: false },
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
+      autopost_bills: { type: 'boolean', label: 'Auto-post bills', default: false },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
       fiscalyear_last_day: { type: 'integer', label: 'Fiscal Year End Day' },
       fiscalyear_last_month: { type: 'integer', label: 'Fiscal Year End Month' },
