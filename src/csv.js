@@ -192,7 +192,7 @@ export function rowCells(tr) {
 /** Extracts 2D array of string cells from a table element or tree. */
 export function tableToRows(table) {
   if (!table) return [];
-  return tableRows(table).map((tr) => rowCells(tr).map(extractTableCellText)).filter((cells) => cells.length > 0);
+  return tableRows(table).map((tr) => rowCells(tr).flatMap((cell) => [extractTableCellText(cell), ...Array(Math.max(1, Number(cell.colSpan) || Number(cell.getAttribute?.('colspan')) || 1) - 1).fill('')])).filter((cells) => cells.length > 0);
 }
 
 /** Downloads text content as a file via a dynamic link in browser, returns the text. */
