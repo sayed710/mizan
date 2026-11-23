@@ -631,6 +631,9 @@ function guardReconcileModel(db, _before, rule) {
   if (rule.payment_tolerance != null && Number(rule.payment_tolerance) < 0) {
     return 'Payment tolerance cannot be negative';
   }
+  if ((rule.payment_tolerance_type || 'percentage') === 'percentage' && Number(rule.payment_tolerance) > 100) {
+    return 'A percentage payment tolerance cannot exceed 100';
+  }
   for (const line of rule.line_ids ?? []) {
     if (!line.account_id && !line.partner_id && !line.account_code) {
       return 'Each counterpart item requires an account unless a partner is set';

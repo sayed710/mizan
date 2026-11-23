@@ -1,6 +1,6 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
-import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
+import { monthFilters, nextName, promptedAmount, sameCommercialPartner, today, validDate } from './common.js';
 import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payWithDiscount, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
@@ -770,6 +770,63 @@ export function paymentDocuments(db, ids) {
   return docs;
 }
 
+/** Group documents according to the payment's partner and accounting constraints. */
+export function paymentDocumentGroups(db, docs, grouped = true) {
+  const groups = new Map();
+  for (const doc of docs) {
+    const key = grouped
+      ? JSON.stringify([doc.partner_id, invoiceCounterpartAccount(db, doc), doc.currency_id ?? companyCurrencyRecord(db, doc.company_id)?.id ?? null, doc.partner_bank_id ?? null])
+      : doc.id;
+    groups.set(key, [...(groups.get(key) ?? []), doc]);
+  }
+  return groups;
+}
+
+/** Compute cash specs and requirements for a payment group after applying any selected credit notes. */
+export function groupPaymentRequirement(db, group, date = today()) {
+  const invoices = group.filter((d) => !isRefund(d));
+  const creditNotes = group.filter((d) => isRefund(d));
+  let next = db;
+  for (const note of creditNotes) {
+    const candidateInvoices = note.reversed_entry_id
+      ? [...invoices.filter((i) => i.id === note.reversed_entry_id), ...invoices.filter((i) => i.id !== note.reversed_entry_id)]
+      : invoices;
+    for (const inv of candidateInvoices) {
+      const noteOpen = residual(read(next, 'account.move', note.id), next);
+      if (!(noteOpen > 0)) break;
+      const invOpen = residual(read(next, 'account.move', inv.id), next);
+      if (!(invOpen > 0)) continue;
+      const take = Math.min(noteOpen, invOpen);
+      next = applyCreditNote(next, note.id, inv.id, date, take);
+    }
+  }
+  const openInvoices = invoices.filter((d) => residual(read(next, 'account.move', d.id), next) > 0);
+  const invSpecs = openInvoices.map((inv) => {
+    const currentInv = read(next, 'account.move', inv.id);
+    const openAmount = residual(currentInv, next);
+    const discount = Math.min(openAmount, discountAvailable(next, currentInv, date));
+    const docCurr = documentCurrency(next, currentInv);
+    const cash = roundCurrency(openAmount - discount, docCurr);
+    return { id: inv.id, openAmount, discount, cash };
+  });
+  const unappliedNotes = creditNotes.reduce((sum, n) => sum + residual(read(next, 'account.move', n.id), next), 0);
+  const leadDoc = openInvoices[0] || invoices[0] || group[0];
+  const docCurr = leadDoc ? documentCurrency(next, leadDoc) : null;
+  const totalCashAmount = roundCurrency(invSpecs.reduce((sum, s) => sum + s.cash, 0), docCurr);
+  const net = totalCashAmount - unappliedNotes;
+  return { db: next, invSpecs, totalCashAmount, net };
+}
+
+/** Net cash due for selected documents on a payment date. */
+export function paymentDocumentsNetAmount(db, docs, date = today()) {
+  const groups = paymentDocumentGroups(db, docs);
+  let total = 0;
+  for (const group of groups.values()) {
+    total += groupPaymentRequirement(db, group, date).net;
+  }
+  return total;
+}
+
 /**
  * Register payments for several invoices or bills. Grouped: one payment per partner, receivable/payable account, currency
  * and recipient bank, paying all of that group's documents in full; ungrouped: one payment per document. Every payment is
@@ -782,58 +839,32 @@ export function registerPayments(db, ids, values = {}) {
   if (!grouped && docs.some((d) => isRefund(d))) {
     throw new Error('Credit notes can only be paid when Group Payments is enabled');
   }
-  const groups = new Map();
-  for (const doc of docs) {
-    const key = grouped
-      ? JSON.stringify([doc.partner_id, invoiceCounterpartAccount(db, doc), doc.currency_id ?? companyCurrencyRecord(db, doc.company_id)?.id ?? null, doc.partner_bank_id ?? null])
-      : doc.id;
-    groups.set(key, [...(groups.get(key) ?? []), doc]);
-  }
+  const groups = paymentDocumentGroups(db, docs, grouped);
+  const requestedAmount = groups.size === 1 && values.amount != null ? promptedAmount(values.amount) : null;
+  if (groups.size === 1 && values.amount != null && requestedAmount == null) throw new Error('Enter a payment amount greater than zero');
   let next = db;
   for (const group of groups.values()) {
-    const invoices = group.filter((d) => !isRefund(d));
-    const creditNotes = group.filter((d) => isRefund(d));
     const paymentDate = values.date || today();
-    const invTotal = invoices.reduce((sum, d) => sum + Math.max(0, residual(d, next) - discountAvailable(next, d, paymentDate)), 0);
-    const noteTotal = creditNotes.reduce((sum, d) => sum + residual(d, next), 0);
-    const net = invTotal - noteTotal;
+    const { db: afterNotesDb, invSpecs, totalCashAmount, net } = groupPaymentRequirement(next, group, paymentDate);
     if (!(net > 0)) throw new Error('The net payment amount must be greater than zero');
+    next = afterNotesDb;
+    if (!invSpecs.length) continue;
 
-    for (const note of creditNotes) {
-      const candidateInvoices = note.reversed_entry_id
-        ? [...invoices.filter((i) => i.id === note.reversed_entry_id), ...invoices.filter((i) => i.id !== note.reversed_entry_id)]
-        : invoices;
-      for (const inv of candidateInvoices) {
-        const noteOpen = residual(read(next, 'account.move', note.id), next);
-        if (!(noteOpen > 0)) break;
-        const invOpen = residual(read(next, 'account.move', inv.id), next);
-        if (!(invOpen > 0)) continue;
-        const take = Math.min(noteOpen, invOpen);
-        next = applyCreditNote(next, note.id, inv.id, paymentDate, take);
-      }
-    }
-
-    const openInvoices = invoices.filter((d) => residual(read(next, 'account.move', d.id), next) > 0);
-    const invSpecs = openInvoices.map((inv) => {
-      const currentInv = read(next, 'account.move', inv.id);
-      const openAmount = residual(currentInv, next);
-      const discount = Math.min(openAmount, discountAvailable(next, currentInv, paymentDate));
-      const docCurr = documentCurrency(next, currentInv);
-      const cash = roundCurrency(openAmount - discount, docCurr);
-      return { id: inv.id, openAmount, discount, cash };
-    });
     const [leadSpec, ...restSpecs] = invSpecs;
     const lead = read(next, 'account.move', leadSpec.id);
-    const totalCashAmount = roundCurrency(invSpecs.reduce((sum, s) => sum + s.cash, 0), documentCurrency(next, lead));
-    const restCash = roundCurrency(restSpecs.reduce((sum, s) => sum + s.cash, 0), documentCurrency(next, lead));
+    const amount = requestedAmount ?? totalCashAmount;
+    const partial = amount < totalCashAmount;
+    const leadCash = Math.min(amount, leadSpec.cash);
+    const restCash = roundCurrency(Math.max(0, amount - leadCash), documentCurrency(next, lead));
     const memo = values.memo || (group.length > 1 ? group.map((d) => d.name).join(', ') : undefined);
     next = registerPayment(next, lead, {
-      amount: String(totalCashAmount),
+      amount: String(amount),
       date: values.date,
       journal_id: values.journal_id,
       currency_id: lead.currency_id ?? undefined,
       partner_bank_id: values.partner_bank_id ?? null,
-      settleAmount: leadSpec.cash,
+      payment_method_line_id: values.payment_method_line_id,
+      settleAmount: leadCash,
       excessAmount: restCash,
       ...(memo !== undefined ? { memo } : {}),
     }).db;
@@ -841,15 +872,27 @@ export function registerPayments(db, ids, values = {}) {
       const moveId = read(next, 'account.move', lead.id).payments.filter((p) => !p.discount).at(-1).move_id;
       const payment = search(next, 'account.payment').find((p) => p.move_id === moveId && p.state === 'posted');
       for (const spec of restSpecs) {
-        if (spec.cash > 0) {
-          next = applyPaymentCredit(next, payment.id, spec.id, values.date, spec.cash);
+        const paymentRec = read(next, 'account.payment', payment.id);
+        const available = Number(paymentRec?.unapplied) || 0;
+        let allocated = 0;
+        const inv = read(next, 'account.move', spec.id);
+        const docCurr = documentCurrency(next, inv);
+        if (spec.cash > 0 && available > 0) {
+          const rate = rateAt(next, inv.currency_id, paymentDate, inv.company_id);
+          const step = Number(docCurr?.rounding ?? 0.01);
+          if (Math.floor((available * rate / step) + 1e-9) * step > 0) {
+            const openBefore = residual(inv, next);
+            next = applyPaymentCredit(next, payment.id, spec.id, paymentDate, spec.cash);
+            const openAfter = residual(read(next, 'account.move', spec.id), next);
+            allocated = roundCurrency(openBefore - openAfter, docCurr);
+          }
         }
-        if (spec.discount > 0) {
+        if (spec.discount > 0 && allocated >= spec.cash) {
           next = bookEarlyDiscount(next, spec.id, spec.discount, paymentDate, payment.move_id);
         }
       }
     }
-    for (const doc of group) {
+    for (const doc of partial ? [] : group) {
       if (residual(read(next, 'account.move', doc.id), next) > 0) throw new Error('The payment could not settle every selected document; nothing was registered');
     }
   }

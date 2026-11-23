@@ -134,10 +134,11 @@ export function paymentMethodLineGuard(db, before, after) {
 }
 
 /** Validate that a payment's `payment_method_line_id` (when set) belongs to its journal and direction. */
-export function paymentMethodLineError(db, payment) {
+export function paymentMethodLineError(db, payment, { requireActive = false } = {}) {
   if (payment?.payment_method_line_id == null || payment.payment_method_line_id === '') return null;
   const line = read(db, 'account.payment.method.line', payment.payment_method_line_id);
   if (!line) return 'Selected payment method line does not exist';
+  if (requireActive && line.active === false) return 'Selected payment method line is archived';
   if (!payment.journal_id || line.journal_id !== payment.journal_id) return 'Payment method must belong to the payment journal';
   if (line.payment_type !== payment.payment_type) return 'Payment method direction must match the payment type';
   return null;
