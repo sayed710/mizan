@@ -217,6 +217,7 @@ const ar = {
   'Debits and credits cannot be negative': 'لا يمكن أن يكون المدين أو الدائن سالباً',
   'Journal entry is not balanced: total debit must equal total credit': 'القيد غير متوازن: يجب أن يساوي إجمالي المدين إجمالي الدائن',
   'Selected journal does not exist': 'دفتر اليومية المحدد غير موجود',
+  'Invalid journal identifier': 'معرف دفتر اليومية غير صالح',
   'Partner is required': 'الشريك مطلوب',
   'Add at least one invoice line': 'أضف بنداً واحداً على الأقل للفاتورة',
   'The total must be positive; use a credit note or refund instead': 'يجب أن يكون الإجمالي موجباً؛ استخدم إشعاراً دائناً أو استرداداً بدلاً من ذلك',

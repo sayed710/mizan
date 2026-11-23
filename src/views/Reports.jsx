@@ -752,7 +752,8 @@ function JournalAudit({ db, period, companyId, sort = 'date', money: moneyProp }
 function InalterabilityCheck({ db, companyId, journalId }) {
   const allowed = db.settings?.allowed_company_ids ?? [currentCompany(db)];
   const selected = companyId === 'all' ? allowed : allowed.filter((id) => id === Number(companyId));
-  const results = selected.flatMap((id) => checkInalterability(db, { companyId: id, journalId: journalId ? Number(journalId) : null }));
+  const targetJournal = journalId ? Number(journalId) : null;
+  const results = selected.flatMap((id) => checkInalterability(db, { companyId: id, journalId: targetJournal }));
 
   if (!results.length) {
     return <tbody><tr><td colSpan={4} className="muted">{t('No restricted journals configured.')}</td></tr></tbody>;
@@ -854,6 +855,17 @@ function ReportPage({ leaf, params }) {
   const [unreconciledOnly, setUnreconciledOnly] = useState(false);
   const [auditSort, setAuditSort] = useState('date');
   const [inalterabilityJournalId, setInalterabilityJournalId] = useState('');
+  const [inalterabilityCompany, setInalterabilityCompany] = useState(selectedCompany);
+  if (inalterabilityCompany !== selectedCompany) {
+    setInalterabilityCompany(selectedCompany);
+    setInalterabilityJournalId('');
+  }
+  const inalterabilityJournals = useMemo(() => {
+    if (leaf.report !== 'inalterability') return [];
+    return search(companyDb, 'account.journal', { includeArchived: true })
+      .filter((j) => selectedCompany === 'all' || !j.company_id || j.company_id === Number(selectedCompany));
+  }, [companyDb, leaf.report, selectedCompany]);
+  const activeInalterabilityJournalId = inalterabilityJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : '';
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
     const allLedgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
     const activeLedger = LEDGER_REPORTS.includes(leaf.report) ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
@@ -1044,7 +1056,7 @@ function ReportPage({ leaf, params }) {
           {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'valuation', 'budget', 'deferredRevenue', 'deferredExpense'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
         </select>
       </label>}
-      {!isAged && periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+      {!isAged && periodKey === 'custom' && <><label>{t('From')}<input aria-label={t('From')} type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input aria-label={t('To')} type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
       {LEDGER_REPORTS.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
         <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
           <option value="">{t('All Ledgers')}</option>
@@ -1056,12 +1068,14 @@ function ReportPage({ leaf, params }) {
           {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
         </select>
       </label>}
-      {leaf.report === 'inalterability' && <label className="inline-select">{t('Journal')}
-        <select aria-label={t('Journal')} value={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} onChange={(e) => setInalterabilityJournalId(e.target.value)}>
-          <option value="">{t('All Journals')}</option>
-          {availableJournals.map((j) => <option key={j.id} value={j.id}>{j.name} ({j.code})</option>)}
-        </select>
-      </label>}
+      {leaf.report === 'inalterability' && (
+        <label className="inline-select">{t('Journal')}
+          <select aria-label={t('Journal')} value={activeInalterabilityJournalId} onChange={(e) => setInalterabilityJournalId(e.target.value)}>
+            <option value="">{t('All Journals')}</option>
+            {inalterabilityJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
+          </select>
+        </label>
+      )}
       {leaf.report === 'journalAudit' && <label className="inline-select">{t('Sort by')}
         <select aria-label={t('Sort by')} value={auditSort} onChange={(e) => setAuditSort(e.target.value)}>
           <option value="date">{t('Date')}</option>
@@ -1212,7 +1226,7 @@ function ReportPage({ leaf, params }) {
               variant={activeTaxVariant}
               sort={auditSort}
               kind={deferredKind}
-              journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''}
+              journalId={leaf.report === 'inalterability' ? activeInalterabilityJournalId : undefined}
               agedData={agedData}
               rootPlans={rootPlans}
               hasUnassigned={hasUnassigned}
