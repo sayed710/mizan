@@ -3255,6 +3255,8 @@ const ar = {
   'checks': 'شيكات',
   'Status Filter': 'تصفية الحالة',
   'Void Check': 'إلغاء الشيك',
+  'Invalid wizard values': 'قيم المعالج غير صالحة',
+  'Void Checks': 'إلغاء الشيكات',
   'Print Check': 'طباعة الشيك',
   'Void': 'إلغاء',
   'Voided': 'ملغى',
