@@ -5,7 +5,7 @@ import { commit, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { checkRegisterRows, CHECK_REGISTER_STATES } from '../models/payments.js';
-import { paymentPaysByCheck, printCheck, voidCheck } from '../models/pay.js';
+import { isCheckNumberVoided, paymentPaysByCheck, printBatchChecks, printCheck, voidCheck } from '../models/pay.js';
 
 export function Checks() {
   const db = useDb();
@@ -22,7 +22,7 @@ export function Checks() {
     const existingRows = checkRegisterRows(db, batches, payments);
     const toPrintRows = payments
       .filter((p) => p.state === 'posted' && p.payment_type === 'outbound' && paymentPaysByCheck(db, p)
-        && (p.check_number == null || (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number)))
+        && (p.check_number == null || isCheckNumberVoided(p)))
       .map((p) => ({
         key: `payment-${p.id}-to-print`,
         checkNumber: '—',
@@ -115,12 +115,17 @@ export function Checks() {
     }
 
     try {
+      for (const batchId of new Set(printableRows.filter((r) => r.batchId && r.paymentId && read(nextDb, 'account.payment', r.paymentId)?.check_number == null).map((r) => r.batchId))) {
+        nextDb = printBatchChecks(nextDb, batchId);
+      }
       for (const row of printableRows) {
-        if (row.state === 'To Print' && row.paymentId) {
+        const current = row.paymentId ? read(nextDb, 'account.payment', row.paymentId) : null;
+        const needsNumber = current && (current.check_number == null || isCheckNumberVoided(current));
+        if (row.state === 'To Print' && needsNumber) {
           const p = read(nextDb, 'account.payment', row.paymentId);
           if (p) {
             const journal = p.journal_id ? read(nextDb, 'account.journal', p.journal_id) : null;
-            if (journal?.check_manual_sequencing && p.check_number == null) {
+            if (journal?.check_manual_sequencing && (p.check_number == null || isCheckNumberVoided(p))) {
               window.location.hash = `#/open/account.payment/${p.id}`;
               return;
             }
@@ -154,7 +159,10 @@ export function Checks() {
       setError(t('Select at least one record first'));
       return;
     }
-    const voidableRows = selectedRows.filter((r) => ['Posted', 'Issued'].includes(r.state) && Boolean(r.paymentId));
+    const voidableRows = selectedRows.filter((r) => {
+      const p = read(db, 'account.payment', r.paymentId);
+      return ['Posted', 'Issued'].includes(r.state) && p?.check_number != null && p.check_printed !== false && !isCheckNumberVoided(p);
+    });
     if (!voidableRows.length) {
       setError(t('Only issued checks can be voided'));
       return;

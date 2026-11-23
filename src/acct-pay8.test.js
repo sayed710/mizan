@@ -7,6 +7,7 @@ import { applyDiff, diffDb } from './sync.js';
 import { customerPaymentView, vendorPaymentView, postPayment, issueCheckNumber } from './models/pay.js';
 import { postPayments, printPaymentsChecks, printChecksListAction } from './models/payments.js';
 import { setupDom, find } from './test-support/dom.js';
+import { checkPaymentCurrency } from './money.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -20,16 +21,15 @@ const findAll = (node, pred, acc = []) => {
   return acc;
 };
 
-test('PAY8-1: Customer and Vendor Payments lists expose Validate and Print Checks list actions', () => {
+test('PAY8-1: Customer and Vendor Payments lists expose appropriate list actions', () => {
   assert.ok(customerPaymentView.listActions, 'customerPaymentView should have listActions');
   assert.ok(vendorPaymentView.listActions, 'vendorPaymentView should have listActions');
 
   const custValidate = customerPaymentView.listActions.find((a) => a.label === 'Validate');
   const custPrint = customerPaymentView.listActions.find((a) => a.label === 'Print Checks');
   assert.ok(custValidate, 'customerPaymentView must expose Validate list action');
-  assert.ok(custPrint, 'customerPaymentView must expose Print Checks list action');
+  assert.equal(custPrint, undefined, 'customer payments must not expose Print Checks');
   assert.equal(custValidate.requiresSelection, true);
-  assert.equal(custPrint.requiresSelection, true);
 
   const vendValidate = vendorPaymentView.listActions.find((a) => a.label === 'Validate');
   const vendPrint = vendorPaymentView.listActions.find((a) => a.label === 'Print Checks');
@@ -465,4 +465,103 @@ test('PAY8-i18n: Arabic translations exist for all PAY8 labels and errors', asyn
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('PAY8 regression: unapplied checks use their company currency and reject missing configuration before posting', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const line = bank.outbound_payment_method_line_ids.find((l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing');
+  const made = create(db, 'account.payment', { payment_type: 'outbound', partner_type: 'supplier', partner_id: search(db, 'res.partner')[0].id, amount: 25, journal_id: bank.id, payment_method_line_id: line.id, date: today(), state: 'draft' });
+  db = made.db;
+  const p = read(db, 'account.payment', made.id);
+  const result = printPaymentsChecks(db, [p.id]);
+  assert.equal(read(result.db, 'account.payment', p.id).check_printed, true);
+  const missing = { ...db, records: { ...db.records, 'account.payment': db.records['account.payment'].map((item) => item.id === p.id ? { ...item, currency_id: 999999 } : item) } };
+  assert.equal(checkPaymentCurrency(missing, { ...p, currency_id: 999999 }, null), null);
+  assert.equal(missing.records['account.payment'].find((item) => item.id === p.id).state, 'draft');
+});
+
+test('PAY8 regression: bulk print redirects a voided manual check for a replacement number', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit, getDb } = await import('./store.js');
+  const { Checks } = await import('./views/Checks.jsx');
+  await initStore();
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_manual_sequencing: true });
+  const line = bank.outbound_payment_method_line_ids.find((l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing');
+  const made = create(db, 'account.payment', { payment_type: 'outbound', partner_type: 'supplier', partner_id: search(db, 'res.partner')[0].id, amount: 25, journal_id: bank.id, payment_method_line_id: line.id, date: today(), state: 'draft' });
+  db = postPayment(made.db, read(made.db, 'account.payment', made.id));
+  db = issueCheckNumber(db, made.id, { number: 812 });
+  const { voidCheck } = await import('./models/pay.js');
+  db = voidCheck(db, made.id);
+  commit(db);
+  const host = makeEl('div'); host.ownerDocument = document;
+  const root = createRoot(host);
+  await React.act(async () => root.render(React.createElement(Checks)));
+  const row = find(host, (n) => n.tagName === 'TR' && n.textContent.includes('To Print'));
+  const checkbox = find(row, (n) => n.tagName === 'INPUT');
+  await React.act(async () => props(checkbox).onChange());
+  const button = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Print'));
+  await React.act(async () => props(button).onClick());
+  assert.equal(window.location.hash, `#/open/account.payment/${made.id}`);
+  assert.equal(read(getDb(), 'account.payment', made.id).check_number, 812);
+  await React.act(async () => root.unmount());
+});
+
+test('PAY8 regression: multi-company checks render each company identity', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+  await initStore();
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const line = bank.outbound_payment_method_line_ids.find((l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing');
+  const made = create(db, 'account.payment', { payment_type: 'outbound', partner_type: 'supplier', partner_id: search(db, 'res.partner')[0].id, amount: 25, journal_id: bank.id, payment_method_line_id: line.id, date: today(), state: 'draft' });
+  db = postPayment(made.db, read(made.db, 'account.payment', made.id));
+  db = issueCheckNumber(db, made.id, { number: 812 });
+  const company = read(db, 'res.company', read(db, 'account.payment', made.id).company_id);
+  const other = { ...company, id: 99991, name: 'Second Test Company', account_check_printing_layout: 'bottom' };
+  const payment = { ...db.records['account.payment'].find((p) => p.id === made.id), id: 99992, company_id: other.id, check_number: 813 };
+  db = { ...db, records: { ...db.records, 'res.company': [...db.records['res.company'], other], 'account.payment': [...db.records['account.payment'], payment] } };
+  commit(db);
+  const host = makeEl('div'); host.ownerDocument = document;
+  const root = createRoot(host);
+  await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: `${made.id},${payment.id}` })));
+  assert.ok(host.textContent.includes(company.name));
+  assert.ok(host.textContent.includes(other.name));
+  await React.act(async () => root.unmount());
+});
+
+test('PAY8 regression: bulk batch rows issue reserved numbers and skip unissued checks when voiding', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit, getDb } = await import('./store.js');
+  const { Checks } = await import('./views/Checks.jsx');
+  await initStore();
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  db = write(db, 'account.journal', bank.id, { check_manual_sequencing: true });
+  const line = bank.outbound_payment_method_line_ids.find((l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing');
+  const made = create(db, 'account.payment', { payment_type: 'outbound', partner_type: 'supplier', partner_id: search(db, 'res.partner')[0].id, amount: 25, journal_id: bank.id, payment_method_line_id: line.id, date: today(), state: 'draft' });
+  db = postPayment(made.db, read(made.db, 'account.payment', made.id));
+  const batch = { id: 99993, name: 'BATCH/TEST', company_id: read(db, 'account.payment', made.id).company_id, journal_id: bank.id, state: 'posted', batch_type: 'outbound', date: today(), lines: [{ payment_id: made.id, amount: 25, check_number: 875 }] };
+  db = { ...db, records: { ...db.records, 'account.batch.payment': [...(db.records['account.batch.payment'] ?? []), batch] } };
+  commit(db);
+  const host = makeEl('div'); host.ownerDocument = document;
+  const root = createRoot(host);
+  await React.act(async () => root.render(React.createElement(Checks)));
+  const row = find(host, (n) => n.tagName === 'TR' && n.textContent.includes('875'));
+  await React.act(async () => props(find(row, (n) => n.tagName === 'INPUT')).onChange());
+  await React.act(async () => props(find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Void'))).onClick());
+  assert.ok(read(getDb(), 'account.payment', made.id).check_number == null);
+  await React.act(async () => props(find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Print'))).onClick());
+  assert.equal(read(getDb(), 'account.payment', made.id).check_number, 875, host.textContent);
+  assert.ok(window.location.hash.includes(String(made.id)));
+  await React.act(async () => root.unmount());
 });

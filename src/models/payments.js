@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { nextName, today, validDate } from './common.js';
 import { discountAvailable, payMove, payWithDiscount } from './accounting.js';
-import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
+import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency, checkPaymentCurrency } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { defaultPaymentJournalId, isLiquidityJournal, paymentJournal } from './ledger.js';
 import { journalMethodLines } from './paymentmethod.js';
@@ -512,7 +512,7 @@ export function amountInWords(amount, currency) {
 
 /** Numeric and written check amounts use the posted payment's currency, then its invoice currency. */
 export function checkAmountDisplay(db, payment, invoice, amount) {
-  const currency = payment?.currency_id ? read(db, 'res.currency', payment.currency_id) : documentCurrency(db, invoice);
+  const currency = checkPaymentCurrency(db, payment, invoice);
   if (!currency) throw new Error('Configure the payment currency before printing this check');
   return { currency, numeric: formatCurrency(amount, currency), words: amountInWords(amount, currency.currency_unit_label ?? currency.unit_name) };
 }
@@ -826,7 +826,6 @@ const attachListAction = (target, action) => {
   }
 };
 attachListAction(customerPaymentView, validatePaymentsListAction);
-attachListAction(customerPaymentView, printChecksListAction);
 attachListAction(customerPaymentView, createBatchPaymentListAction);
 
 attachListAction(vendorPaymentView, validatePaymentsListAction);

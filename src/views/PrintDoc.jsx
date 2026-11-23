@@ -321,12 +321,9 @@ export function PrintDoc({ model, id, proforma = false }) {
   }
   if (model === 'account.payment') {
     if (multiPayments?.length) {
-      const batch = {
-        company_id: multiPayments[0].company_id,
-        date: multiPayments[0].date,
-        lines: multiPayments.map((p) => ({ move_id: p.invoice_id, payment_id: p.id, amount: p.amount })),
-      };
-      return <Checks db={db} batch={batch} />;
+      return multiPayments.map((p) => (
+        <Checks key={p.id} db={db} batch={{ company_id: p.company_id, date: p.date, lines: [{ move_id: p.invoice_id, payment_id: p.id, amount: p.amount }] }} />
+      ));
     }
     if (rec && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
       const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
