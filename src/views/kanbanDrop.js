@@ -11,6 +11,7 @@ export function canDropOn(model, groupBy) {
   const def = models[model];
   const field = def?.fields[groupBy];
   if (!field || !DROPPABLE.includes(field.type) || field.readonly) return false;
+  if (def.kanban?.noDrop) return false;
   const statusbar = def.form?.statusbar;
   if (groupBy === statusbar) return Boolean(def.form.statusbarClickable);
   return groupBy !== 'state';

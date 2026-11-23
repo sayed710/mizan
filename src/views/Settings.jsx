@@ -568,7 +568,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
 
       {hasField('quick_edit_mode') && (
         <div className="settings-block" data-block="quick_encoding">
-          <h3>{t('Quick encoding')}</h3>
+          <h3>{t('Quick Encoding')}</h3>
           <SettingRow id="quick_edit_mode" label="Quick encoding" description="Enter the tax-included total on draft invoices and bills to prefill new lines with the remaining amount.">
             <select id="quick_edit_mode" disabled={readOnly || !company} value={company?.quick_edit_mode ?? ''}
               onChange={(e) => onWriteCompany({ quick_edit_mode: e.target.value || null })}>

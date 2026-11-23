@@ -13,6 +13,13 @@ import { seed } from './seed.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
+function collect(node, predicate, out = []) {
+  if (!node) return out;
+  if (predicate(node)) out.push(node);
+  for (const child of node.childNodes ?? []) collect(child, predicate, out);
+  return out;
+}
+
 const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
 
 async function renderSettings(setupDb) {
@@ -121,7 +128,7 @@ test('QE-1: quick_edit_mode company field, Settings block, validation, and admin
     const block = find(ctx.host, (n) => props(n)?.['data-block'] === 'quick_encoding');
     assert.ok(block, 'Quick encoding block renders in Settings');
     const h3 = find(block, (n) => n.tagName === 'H3');
-    assert.equal(h3?.textContent, 'Quick encoding');
+    assert.equal(h3?.textContent, 'Quick Encoding');
     const select = ctx.control('quick_edit_mode');
     assert.ok(select, '#quick_edit_mode select exists');
     assert.equal(props(select).value, '');
@@ -482,6 +489,7 @@ test('QE i18n: Arabic translations exist for all new labels, options, descriptio
     const { t } = await import(`./i18n.js?qe_ar=${Date.now()}`);
     for (const s of [
       'Quick encoding',
+      'Quick Encoding',
       'Customer Invoices',
       'Vendor Bills',
       'Customer Invoices and Vendor Bills',
@@ -744,4 +752,22 @@ test('QE regression: negative remaining on existing discounted invoice with mixe
   });
   const lineZero = lineDef.newLine(read(invZero.db, 'account.move', invZero.id), invZero.db);
   assert.ok(Number.isFinite(lineZero.price_unit));
+});
+
+test('QE finding 3 regression: Settings block heading uses Title Case "Quick Encoding" matching sibling headings', async () => {
+  const ctx = await renderSettings();
+  try {
+    const block = find(ctx.host, (n) => props(n)?.['data-block'] === 'quick_encoding');
+    assert.ok(block, 'quick_encoding block renders in Settings');
+    const h3 = find(block, (n) => n.tagName === 'H3');
+    assert.equal(h3?.textContent, 'Quick Encoding');
+
+    const accountingSection = find(ctx.host, (n) => n.tagName === 'SECTION' && props(n)?.className === 'settings-accounting');
+    const blocks = collect(accountingSection, (n) => props(n)?.['data-block']);
+    const headings = blocks.map((b) => find(b, (n) => n.tagName === 'H3')?.textContent);
+    assert.ok(headings.includes('Quick Encoding'));
+    assert.ok(!headings.includes('Quick encoding'));
+  } finally {
+    await ctx.cleanup();
+  }
 });

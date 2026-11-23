@@ -1588,7 +1588,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       }));
     });
   if (reviewMode !== 'unreconciled') return rows;
-  return rows.filter((line) => isReconcilableAccount(read(db, 'account.account', line.account_id)) && line.reconciled !== true);
+  return rows.filter((line) => isReconcilableAccount(read(db, 'account.account', line.account_id)) && (line.amount_residual == null || Math.abs(line.amount_residual) > 1e-9));
 }
 
 /** Balance per account (debit − credit) over the given items. */
