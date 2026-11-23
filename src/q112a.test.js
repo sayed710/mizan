@@ -132,7 +132,7 @@ test('refund reverses original rounding account even if rounding method changed,
   );
 });
 
-test('refund of historical order without recorded rounding_account_id resolves from current configuration or fails clearly', () => {
+test('refund of historical order without recorded rounding_account_id recovers from posted entry or resolves from current configuration', () => {
   let db = seed();
   const cfg = search(db, 'pos.config')[0];
   const cash = search(db, 'pos.payment.method').find((m) => m.type === 'cash');
@@ -174,37 +174,55 @@ test('refund of historical order without recorded rounding_account_id resolves f
   assert.equal(histOrder.rounding_account_id, null);
   assert.equal(histOrder.rounding_difference, 0.03);
 
-  // 1. With current config pointing to rounding2, historical order resolves from current config (profitAcc2)
+  // 1. With original entry present, historical refund recovers original rounding account (profitAcc1) even if current config points to rounding2
   const config2Db = write(histDb, 'pos.config', cfg.id, { rounding_method_id: rounding2.id });
   const refundResolved = payOrder(config2Db, { lines: histOrder.lines, method: cash.id, refund_of: histOrder.id });
   const refOrder = read(refundResolved.db, 'pos.order', refundResolved.id);
   const refEntry = read(refundResolved.db, 'account.move', refOrder.accounting_entries[0].move_id);
-  const refRoundingLine = refEntry.line_ids.find((l) => l.account_id === profitAcc2.id);
-  assert.ok(refRoundingLine, 'historical refund must use currently configured rounding account');
+  const refRoundingLine = refEntry.line_ids.find((l) => l.account_id === profitAcc1);
+  assert.ok(refRoundingLine, 'historical refund must recover rounding account from original posted entry');
   assert.equal(refRoundingLine.debit, 0.03);
 
   // 1b. Verify the refundOrder public function (UI action) behaves identically
   const refundViaButton = refundOrder(config2Db, histOrder);
   const refBtnOrder = read(refundViaButton.db, 'pos.order', refundViaButton.id);
   const refBtnEntry = read(refundViaButton.db, 'account.move', refBtnOrder.accounting_entries[0].move_id);
-  const refBtnRoundingLine = refBtnEntry.line_ids.find((l) => l.account_id === profitAcc2.id);
-  assert.ok(refBtnRoundingLine, 'historical refund via refundOrder must use currently configured rounding account');
+  const refBtnRoundingLine = refBtnEntry.line_ids.find((l) => l.account_id === profitAcc1);
+  assert.ok(refBtnRoundingLine, 'historical refund via refundOrder must recover rounding account from original posted entry');
   assert.equal(refBtnRoundingLine.debit, 0.03);
 
-  // 2. When cash rounding is disabled in current config, refund of historical order fails clearly
+  // 2. Even when cash rounding is disabled in current config, refund recovers from original entry
   const disabledDb = write(histDb, 'pos.config', cfg.id, { cash_rounding: false, rounding_method_id: null });
+  const refundDisabled = payOrder(disabledDb, { lines: histOrder.lines, method: cash.id, refund_of: histOrder.id });
+  const refDisabledOrder = read(refundDisabled.db, 'pos.order', refundDisabled.id);
+  const refDisabledEntry = read(refundDisabled.db, 'account.move', refDisabledOrder.accounting_entries[0].move_id);
+  const refDisabledLine = refDisabledEntry.line_ids.find((l) => l.account_id === profitAcc1);
+  assert.ok(refDisabledLine, 'historical refund must succeed and use original entry rounding account when current config has cash rounding disabled');
+  assert.equal(refDisabledLine.debit, 0.03);
+
+  // 3. When original entry has no rounding line, fallback to current config is used or fails clearly
+  const noRoundingEntryMove = create(histDb, 'account.move', {
+    name: 'MISC/2026/9999',
+    move_type: 'entry',
+    state: 'posted',
+    journal_id: search(histDb, 'account.journal')[0].id,
+    date: '2026-01-01',
+    line_ids: [{ account_id: profitAcc1, debit: 10, credit: 0 }, { account_id: profitAcc1, debit: 0, credit: 10 }],
+  });
+  const histNoEntryRoundDb = write(noRoundingEntryMove.db, 'pos.order', sale.id, { accounting_entries: [{ move_id: noRoundingEntryMove.id }] });
+  const disabledNoRoundDb = write(histNoEntryRoundDb, 'pos.config', cfg.id, { cash_rounding: false, rounding_method_id: null });
   assert.throws(
-    () => payOrder(disabledDb, { lines: histOrder.lines, method: cash.id, refund_of: histOrder.id }),
+    () => payOrder(disabledNoRoundDb, { lines: histOrder.lines, method: cash.id, refund_of: histOrder.id }),
     /Configure the profit account on the cash rounding method/
   );
   assert.throws(
-    () => refundOrder(disabledDb, histOrder),
+    () => refundOrder(disabledNoRoundDb, histOrder),
     /Configure the profit account on the cash rounding method/
   );
 
-  // 3. When a legacy stored rounding method has no profit account, refund of historical order fails clearly
+  // 4. When fallback method has no profit account, refund of historical order fails clearly
   assert.throws(
-    () => create(histDb, 'account.cash.rounding', {
+    () => create(histNoEntryRoundDb, 'account.cash.rounding', {
       name: '0.05 UP Unconfigured',
       rounding: 0.05,
       rounding_method: 'UP',
@@ -214,14 +232,14 @@ test('refund of historical order without recorded rounding_account_id resolves f
     }),
     /Configure the profit account on 0.05 UP Unconfigured/
   );
-  const unconfiguredId = (histDb.seq['account.cash.rounding'] ?? 0) + 1;
+  const unconfiguredId = (histNoEntryRoundDb.seq['account.cash.rounding'] ?? 0) + 1;
   const unconfiguredStoredDb = {
-    ...histDb,
-    seq: { ...histDb.seq, 'account.cash.rounding': unconfiguredId },
+    ...histNoEntryRoundDb,
+    seq: { ...histNoEntryRoundDb.seq, 'account.cash.rounding': unconfiguredId },
     records: {
-      ...histDb.records,
+      ...histNoEntryRoundDb.records,
       'account.cash.rounding': [
-        ...(histDb.records['account.cash.rounding'] ?? []),
+        ...(histNoEntryRoundDb.records['account.cash.rounding'] ?? []),
         { id: unconfiguredId, name: '0.05 UP Unconfigured', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line', active: true, profit_account_id: null, loss_account_id: null },
       ],
     },
