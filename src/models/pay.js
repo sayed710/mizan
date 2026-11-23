@@ -1,11 +1,11 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, promptedAmount, sameCommercialPartner, today, validDate } from './common.js';
-import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
+import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, stornoLine, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payWithDiscount, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
-import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
+import { checkPaymentCurrency, companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
@@ -906,7 +906,8 @@ export function reconcileReversalLines(db, sourceId, reversalId, date) {
   const reconciled = reconciledJournalItems(db, source);
   return source.line_ids.reduce((acc, line, i) => {
     const mirror = reversal.line_ids?.[i];
-    if (!mirror || mirror.account_id !== line.account_id || (Number(mirror.debit) || 0) !== (Number(line.credit) || 0) || (Number(mirror.credit) || 0) !== (Number(line.debit) || 0)) return acc;
+    const expected = stornoLine({ debit: line.credit, credit: line.debit }, reversal.is_storno);
+    if (!mirror || mirror.account_id !== line.account_id || (Number(mirror.debit) || 0) !== (Number(expected.debit) || 0) || (Number(mirror.credit) || 0) !== (Number(expected.credit) || 0)) return acc;
     if (!isReconcilableAccount(read(acc, 'account.account', line.account_id)) || reconciled[i]?.reconciled) return acc;
     if (!(Number(line.debit) || Number(line.credit))) return acc;
     return reconcileLedgerItems(acc, [
@@ -958,20 +959,22 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     date,
     ref,
     reversed_entry_id: source.id,
+    is_storno: Boolean(read(db, 'res.company', companyId)?.account_storno),
     ...(opts.scheduled && opts.reconciliation_reversal ? { reconciliation_reversal: true } : {}),
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     ...(source.cash_basis_base_grid ? { cash_basis_base_grid: true } : {}),
     partner_id: source.partner_id ?? null,
+    ...(source.currency_id ? { currency_id: source.currency_id } : {}),
     name: opts.scheduled ? '/' : nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
-    line_ids: (source.line_ids ?? []).map((l) => ({
+    line_ids: (source.line_ids ?? []).map((l) => stornoLine({
       ...l,
       debit: l.credit,
       credit: l.debit,
       ...(l.currency_id ? { amount_currency: -(Number(l.amount_currency) || 0) } : {}),
       ...(l.tax_zero || l.tax_base_signed ? { tax_base: -(Number(l.tax_base) || 0) } : {}),
       name: `Reversal: ${l.name ?? ''}`.trim(),
-    })),
+    }, Boolean(read(db, 'res.company', companyId)?.account_storno))),
   }, { archivedOriginIds: [source.id] });
   let next = opts.scheduled ? created.db : postAnalytic(created.db, created.id);
   const currentSource = read(next, 'account.move', source.id);
@@ -1155,7 +1158,7 @@ const paymentEntries = (db, payment) => [payment.move_id, payment.destination_mo
 export function resetToDraftError(db, payment, ctx = null) {
   if (!payment) return 'Payment not found';
   const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
-  const isUnvoidedCheck = (p) => p && p.check_number != null && !(p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
+  const isUnvoidedCheck = (p) => p && p.check_number != null && !isCheckNumberVoided(p);
   if (isUnvoidedCheck(payment) || (paired && isUnvoidedCheck(paired))) {
     return 'Void the check before resetting the payment to draft';
   }
@@ -1341,7 +1344,7 @@ export function issueCheckNumber(db, payment, { number = null, isReprint = false
   }
   const journal = read(db, 'account.journal', p.journal_id);
   const isManual = Boolean(journal?.check_manual_sequencing);
-  const isVoided = (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
+  const isVoided = isCheckNumberVoided(p);
 
   if (isReprint) {
     if (p.check_number == null || (p.check_printed === false && !isVoided)) throw new Error('Only issued checks can be reprinted');
@@ -1420,7 +1423,7 @@ export function voidCheck(db, payment) {
   if (!p || p.state !== 'posted' || p.payment_type !== 'outbound' || p.check_number == null) {
     throw new Error('Only issued checks can be voided');
   }
-  const isAlreadyVoided = (p.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
+  const isAlreadyVoided = isCheckNumberVoided(p);
   if (isAlreadyVoided) {
     throw new Error('Check is already voided');
   }
@@ -1493,7 +1496,7 @@ export function printBatchChecks(db, batchOrId, requestedStartNumber = null) {
     if (!payment || payment.state !== 'posted') continue;
     if (!paymentPaysByCheck(next, payment)) continue;
 
-    const isVoided = (payment.voided_check_numbers ?? []).some((v) => v.check_number === payment.check_number);
+    const isVoided = isCheckNumberVoided(payment);
     if (isManual) {
       const num = isVoided ? requestedStartNumber?.[payment.id] : (payment.check_number ?? requestedStartNumber?.[payment.id] ?? line.check_number);
       if (num == null) {
@@ -1527,6 +1530,100 @@ export function printBatchChecks(db, batchOrId, requestedStartNumber = null) {
 export function reprintCheck(db, payment, replacementNumber = null) {
   return issueCheckNumber(db, payment, { number: replacementNumber, isReprint: true });
 }
+
+/** Validate draft payments in bulk. */
+export function postPayments(db, ids) {
+  if (!ids?.length) throw new Error('Select at least one payment');
+  const uniqueIds = [...new Set(ids)];
+  const payments = uniqueIds.map((id) => read(db, 'account.payment', id)).filter(Boolean);
+  if (payments.length !== uniqueIds.length) throw new Error('Payment not found');
+  if (payments.some((p) => p.state !== 'draft')) throw new Error('Only draft payments can be confirmed');
+  const drafts = payments;
+  let next = db;
+  for (const draft of drafts) {
+    next = postPayment(next, read(next, 'account.payment', draft.id));
+  }
+  return next;
+}
+
+/** Validate the selection consistently before opening or running the wizard. */
+function checkPrintSelection(db, ids) {
+  if (!ids?.length) throw new Error('Select at least one payment');
+  const uniqueIds = [...new Set(ids)];
+  const payments = uniqueIds.map((id) => read(db, 'account.payment', id)).filter(Boolean);
+  if (payments.length !== uniqueIds.length) throw new Error('Payment not found');
+  if (new Set(payments.map((p) => p.journal_id)).size > 1) throw new Error('Selected payments must belong to the same journal');
+  if (payments.some((p) => p.payment_type !== 'outbound')) throw new Error('Only posted outbound payments can be printed');
+  if (payments.some((p) => !paymentPaysByCheck(db, p))) throw new Error('Payment does not pay by check');
+  return payments;
+}
+
+/** Post and print a selection using the existing check issuance logic. */
+/** Whether the payment's current check number was voided. */
+export const isCheckNumberVoided = (p) => (p?.voided_check_numbers ?? []).some((v) => v.check_number === p.check_number);
+
+export function printPaymentsChecks(db, ids, values = {}) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('Invalid wizard values');
+  const payments = checkPrintSelection(db, ids);
+  for (const payment of payments) {
+    if (!checkPaymentCurrency(db, payment, read(db, 'account.move', payment.invoice_id))) throw new Error('Configure the payment currency before printing this check');
+  }
+  let next = db;
+  for (const payment of payments) {
+    if (payment.state === 'draft') next = postPayment(next, read(next, 'account.payment', payment.id));
+  }
+  const journal = read(next, 'account.journal', payments[0].journal_id);
+  if (!journal || journal.type !== 'bank') throw new Error('Checks require a bank journal');
+  let start = values.next_check_number ?? null;
+  for (const selected of payments) {
+    const payment = read(next, 'account.payment', selected.id);
+    if (payment.state !== 'posted') throw new Error('Only posted outbound payments can be printed');
+    const voided = isCheckNumberVoided(payment);
+    if (payment.check_number == null || voided || (journal.check_manual_sequencing && payment.check_printed === false)) {
+      const number = journal.check_manual_sequencing
+        ? (values[`check_number_${payment.id}`] ?? (voided ? null : payment.check_number)) : start;
+      next = printCheck(next, payment, number);
+      start = null;
+    }
+  }
+  return { db: next, go: `#/print/account.payment/${payments.map((p) => p.id).join(',')}` };
+}
+
+export const validatePaymentsListAction = {
+  label: 'Validate',
+  requiresSelection: true,
+  run: (db, ids) => postPayments(db, ids),
+};
+
+export const printChecksListAction = {
+  label: 'Print Checks',
+  requiresSelection: true,
+  wizard: (db, ids) => {
+    const payments = checkPrintSelection(db, ids);
+    const journal = payments[0]?.journal_id ? read(db, 'account.journal', payments[0].journal_id) : null;
+    if (journal?.check_manual_sequencing) {
+      const missing = payments.filter((p) => p.check_number == null || isCheckNumberVoided(p));
+      if (!missing.length) return null;
+      return {
+        title: 'Print Checks',
+        fields: missing.map((p) => ({
+          name: `check_number_${p.id}`,
+          type: 'integer',
+          label: 'Check Number',
+          required: true,
+        })),
+      };
+    }
+    const nextNum = db && journal ? nextCheckNumber(db, journal.id) : 1;
+    return {
+      title: 'Print Checks',
+      fields: [
+        { name: 'next_check_number', type: 'integer', label: 'Next Check Number', default: nextNum, required: true },
+      ],
+    };
+  },
+  run: (db, ids, values = {}) => printPaymentsChecks(db, ids, values),
+};
 
 const STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
 const DISPLAY_STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['reconciled', 'Reconciled'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
@@ -1986,7 +2083,7 @@ export const payModels = {
           when: (r, db) => {
             if (r.state !== 'posted' || r.payment_type !== 'outbound') return false;
             if (!db || !paymentPaysByCheck(db, r)) return false;
-            const isVoided = (r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number);
+            const isVoided = isCheckNumberVoided(r);
             if (r.check_number != null && r.check_printed !== false && !isVoided) return false;
             const journal = r.journal_id ? read(db, 'account.journal', r.journal_id) : null;
             if (journal?.check_manual_sequencing && isVoided) {
@@ -2020,20 +2117,20 @@ export const payModels = {
         {
           label: 'Void Check',
           when: (r) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null
-            && !(r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number),
+            && !isCheckNumberVoided(r),
           run: (db, r) => ({ db: voidCheck(db, r) }),
         },
         {
           label: 'Reprint Check',
           when: (r, db) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null && r.check_printed !== false
-            && !(r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number)
+            && !isCheckNumberVoided(r)
             && !(db && r.journal_id && read(db, 'account.journal', r.journal_id)?.check_manual_sequencing),
           run: (db, r) => ({ db: reprintCheck(db, r), go: `#/print/account.payment/${r.id}` }),
         },
         {
           label: 'Reprint Check',
           when: (r, db) => r.state === 'posted' && r.payment_type === 'outbound' && r.check_number != null && r.check_printed !== false
-            && !(r.voided_check_numbers ?? []).some((v) => v.check_number === r.check_number)
+            && !isCheckNumberVoided(r)
             && Boolean(db && r.journal_id && read(db, 'account.journal', r.journal_id)?.check_manual_sequencing),
           ask: [{ label: 'New Check Number', type: 'number' }],
           run: (db, r, answers) => ({ db: reprintCheck(db, r, answers?.[0] ?? null), go: `#/print/account.payment/${r.id}` }),

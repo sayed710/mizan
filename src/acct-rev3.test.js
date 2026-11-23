@@ -670,3 +670,103 @@ test('Finding 9: Draft Entries leaf has only Mark as reviewed listAction and doe
   assert.equal(actions.includes('Reverse Entries'), false, 'draft-entries does not offer Reverse Entries');
   assert.equal(leaf.list, undefined, 'draft-entries does not override list columns with entry-only list');
 });
+
+test('Finding: Draft entries printing renders complete unpaged list exceeding one page in dedicated print view while retaining screen pagination', async () => {
+  const { makeEl } = setupDom();
+  globalThis.document.createElementNS = (_ns, tag) => makeEl(tag);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = seed();
+  for (let i = 1; i <= 90; i++) {
+    const res = create(db, 'account.move', {
+      name: `DRAFT/2026/${String(i).padStart(3, '0')}`,
+      move_type: 'entry',
+      state: 'draft',
+      date: today(),
+      invoice_date: today(),
+    });
+    db = res.db;
+  }
+  const receivableId = accountId(db, '121000');
+  const revenueId = accountId(db, '400000');
+  const posted = postEntry(db, {
+    journal: 'INV',
+    date: today(),
+    lines: [
+      { account: receivableId, debit: 100, credit: 0 },
+      { account: revenueId, debit: 0, credit: 100 },
+    ],
+  });
+  db = posted.db;
+  await store.commit(db);
+
+  const { ActionView } = await import('./views/ActionView.jsx');
+  const app = apps.find((a) => a.id === 'accounting');
+  const leaf = findLeaf(app, 'draft-entries');
+  assert.ok(leaf, 'draft-entries leaf found');
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  await React.act(async () => {
+    root.render(React.createElement(ActionView, {
+      leaf,
+      base: '#/accounting/draft-entries',
+      params: new URLSearchParams(),
+    }));
+  });
+
+  const pager = find(host, (n) => n.className?.includes('pager'));
+  assert.ok(pager, 'Pager rendered on screen');
+  assert.ok(pager.textContent.includes('1-80 / 91'), 'Pager shows page 1 (1-80 / 91)');
+
+  const table = find(host, (n) => n.tagName === 'TABLE');
+  assert.ok(table, 'Table rendered on screen');
+  const tbody = find(table, (n) => n.tagName === 'TBODY');
+  const dataRows = findAll(tbody, (n) => n.tagName === 'TR');
+  assert.equal(dataRows.length, 80, 'Normal screen list renders only current page (80 entries)');
+  assert.ok(!table.textContent.includes('DRAFT/2026/090'), 'Draft entry outside first page is not on screen before print');
+
+  let printCalled = false;
+  const origPrint = globalThis.print;
+  globalThis.print = () => { printCalled = true; };
+
+  const buttons = findAll(host, (n) => n.tagName === 'BUTTON');
+  const printBtn = buttons.find((b) => b.textContent === 'Print');
+  assert.ok(printBtn, 'Print button exists on draft-entries list');
+
+  await React.act(async () => props(printBtn).onClick());
+
+  const printPage = find(host, (n) => n.className?.includes('print-page'));
+  assert.ok(printPage, 'Print view opened');
+
+  const backBtn = findAll(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent === 'Back');
+  assert.ok(backBtn, 'Back button exists in print view');
+
+  const printTable = find(printPage, (n) => n.tagName === 'TABLE');
+  assert.ok(printTable, 'Table rendered in print view');
+  const printTbody = find(printTable, (n) => n.tagName === 'TBODY');
+  const printRows = findAll(printTbody, (n) => n.tagName === 'TR');
+  assert.equal(printRows.length, 91, 'Print view renders all 91 matching draft entries unpaginated');
+  assert.ok(printPage.textContent.includes('DRAFT/2026/001'), 'First draft entry appears in print view');
+  assert.ok(printPage.textContent.includes('DRAFT/2026/090'), 'Draft entry outside first page appears in print view');
+  assert.ok(!printPage.textContent.includes('POSTED/2026/001'), 'Filtered out posted entries do not appear in print view');
+  assert.equal(printCalled, true, 'Print was triggered');
+
+  await React.act(async () => props(backBtn).onClick());
+  const restoredPager = find(host, (n) => n.className?.includes('pager'));
+  assert.ok(restoredPager, 'Pager restored on screen after exiting print view');
+  assert.ok(restoredPager.textContent.includes('1-80 / 91'), 'Pager remains 1-80 / 91');
+  const restoredTable = find(host, (n) => n.tagName === 'TABLE');
+  const restoredTbody = find(restoredTable, (n) => n.tagName === 'TBODY');
+  assert.equal(findAll(restoredTbody, (n) => n.tagName === 'TR').length, 80, 'Normal pagination restored on screen');
+  assert.ok(!restoredTable.textContent.includes('DRAFT/2026/090'), 'Draft entry outside first page is not on screen after exiting print view');
+
+  await React.act(async () => root.unmount());
+  globalThis.print = origPrint;
+});
+
