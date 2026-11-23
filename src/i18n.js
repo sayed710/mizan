@@ -2280,7 +2280,7 @@ const ar = {
   '690000 Bank Fees': '690000 رسوم بنكية', 'Equity Transactions': 'معاملات حقوق الملكية', Rule: 'قاعدة', Connector: 'موصل',
   'Custom feed': 'موجز مخصص', 'Carrier API (DHL, FedEx, Aramex…)': 'واجهة شركة الشحن (DHL، FedEx، Aramex…)', 'Tracking URL ({ref})': 'رابط التتبع ({ref})',
   Scale: 'ميزان', Sensor: 'مستشعر', Printer: 'طابعة', Scanner: 'ماسح ضوئي', Meter: 'عداد', 'Token (hash)': 'الرمز (مُجزأ)',
-  Plan: 'الخطة', Regions: 'المناطق', 'Budget Name': 'اسم الموازنة', 'Budget Lines': 'بنود الموازنة', 'Planned Amount': 'المبلغ المخطط',
+  Plan: 'الخطة', Regions: 'المناطق', 'Budget Name': 'اسم الموازنة', 'Budget Type': 'نوع الموازنة', Both: 'كلاهما', 'Budget Lines': 'بنود الموازنة', 'Planned Amount': 'المبلغ المخطط',
   Team: 'الفريق', 'Round Robin': 'بالتناوب', 'Balanced Workload': 'توزيع متوازن للعمل', 'Team Members': 'أعضاء الفريق',
   'Automatic Closing': 'إغلاق تلقائي', 'Close After (Days)': 'الإغلاق بعد (أيام)', 'Customer Ratings': 'تقييمات العملاء',
   High: 'عالية', Duration: 'المدة', Bill: 'فاتورة مورد', 'Bill Line': 'بند فاتورة المورد', 'Sale Invoice': 'فاتورة بيع', 'Sale Invoice Line': 'بند فاتورة البيع', 'Invoice Line': 'بند الفاتورة', 'Paid/Received': 'مدفوع/مستلم',
