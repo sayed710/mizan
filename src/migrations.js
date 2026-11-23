@@ -2019,7 +2019,23 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
   };
 } });
 
-MIGRATIONS.push({ version: 68, name: 'preserve-legacy-analytic-accounting', up: (db) => {
+export function migrateReconcileModelTolerance(db) {
+  const rules = db?.records?.['account.reconcile.model'];
+  if (!Array.isArray(rules) || !rules.length) return db;
+  let changed = false;
+  const nextRules = rules.map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    const tolType = r.payment_tolerance_type || 'percentage';
+    if (tolType === 'percentage' && Number(r.payment_tolerance) > 100) {
+      changed = true;
+      return { ...r, payment_tolerance: 100 };
+    }
+    return r;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
+}
+MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
+MIGRATIONS.push({ version: 74, name: 'preserve-legacy-analytic-accounting', up: (db) => {
   const companies = db.records?.['res.company'];
   if (!Array.isArray(companies)) return db;
   return { ...db, records: { ...db.records, 'res.company': companies.map((company) => (

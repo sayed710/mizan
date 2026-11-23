@@ -87,7 +87,7 @@ test('migration fills budget_type: both on legacy budgets and allows status chan
 
   // Migration 67 fills budget_type: 'both'
   const upgraded = migrate(unmigrated);
-  assert.equal(upgraded.schema_version, 68);
+  assert.equal(upgraded.schema_version, 74);
   assert.equal(read(upgraded, 'account.budget', 991).budget_type, 'both');
 
   // Status transition on migrated budget succeeds
