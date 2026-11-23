@@ -42,10 +42,32 @@ test('OPT-1: zero lines are selectable across reports, comparisons, print and ex
     { ...period, label: 'Current' },
   ], period, null, { hideZeroLines: true });
   assert.ok(comparison.rows.some((row) => row.code === 'CASH' && row.values[0] !== 0 && row.values[1] === 0));
+  assert.ok(comparison.rows.some((row) => row.code === 'CUR_ASSETS'));
+  const bsPlain = compareConfigurableReport(db, findStatementReport(db, 'balance', 1), [period], period);
+  const bsHidden = compareConfigurableReport(db, findStatementReport(db, 'balance', 1), [period], period, null, { hideZeroLines: true });
+  assert.ok(bsPlain.rows.some((row) => row.code === 'CUR_ASSETS'));
+  assert.ok(!bsHidden.rows.some((row) => row.code === 'CUR_ASSETS'));
+  assert.ok(bsHidden.rows.some((row) => row.code === 'ASSETS'));
+  assert.ok(bsHidden.rows.some((row) => row.code === 'LIAB_EQUITY'));
   const ledgerPlain = generalLedger(db, period);
   const ledgerHidden = generalLedger(db, { ...period, hideZeroLines: true });
   assert.ok(ledgerPlain.rows.length > ledgerHidden.rows.length);
   assert.ok(trialBalance(db, { ...period, includeZeroRows: true }).rows.length > trialBalance(db, period).rows.length);
+  const partnerEntry = postEntry(db, {
+    journal: 'MISC', company: 1, date: `${year}-05-01`,
+    lines: [
+      { account: '101401', debit: 50, partner_id: 1 },
+      { account: '101401', debit: 0, credit: 0, partner_id: 2 },
+      { account: '301000', credit: 50 },
+    ],
+  }).db;
+  const glPlainGrouped = generalLedger(partnerEntry, { ...period, groupByPartner: true });
+  const glHiddenGrouped = generalLedger(partnerEntry, { ...period, groupByPartner: true, hideZeroLines: true });
+  const glAcctPlain = glPlainGrouped.rows.find((r) => r.account.code === '101401');
+  const glAcctHidden = glHiddenGrouped.rows.find((r) => r.account.code === '101401');
+  assert.equal(glAcctPlain.partners.length, 2);
+  assert.equal(glAcctHidden.partners.length, 1);
+  assert.equal(glAcctHidden.partners[0].partner_id, 1);
   await React.act(async () => commit(db));
   const host = makeEl('div');
   host.ownerDocument = globalThis.document;
@@ -64,6 +86,7 @@ test('OPT-1: zero lines are selectable across reports, comparisons, print and ex
       assert.ok(checkbox, `${report}: option exists`);
       await React.act(async () => props(checkbox).onChange({ target: { checked: true } }));
       assert.ok(!names(host).some((name) => name.includes(zeroName)), `${report}: zero row hidden in exported table`);
+      if (report === 'balance') assert.ok(!names(host).some((name) => name === 'Current Assets'), 'balance: zero Current Assets section hidden');
       if (totalName) assert.ok(names(host).some((name) => name === totalName));
       const csvRows = fromCsv(toCsv(tableToRows(table(host))));
       const xlsxRows = readXlsx(buildXlsx(table(host))).rows;

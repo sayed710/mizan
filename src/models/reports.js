@@ -118,11 +118,14 @@ export function generalLedger(db, { from, to, company_id, analyticAccountIds, in
     return { account, ...section(accLines, accOpening), partners };
   });
 
-  const visibleRows = rows.filter((row) => reportAmountsVisible([row.debit, row.credit, row.end], hideZeroLines)).map((row) => ({
-    ...row,
-    lines: row.lines.filter((line) => reportAmountsVisible([line.debit, line.credit, line.balance], hideZeroLines)),
-    partners: row.partners.map((partner) => ({ ...partner, lines: partner.lines.filter((line) => reportAmountsVisible([line.debit, line.credit, line.balance], hideZeroLines)) })),
-  }));
+  const visibleRows = rows.filter((row) => reportAmountsVisible([row.debit, row.credit, row.end], hideZeroLines)).map((row) => {
+    const partnerList = hideZeroLines ? row.partners.filter((partner) => reportAmountsVisible([partner.debit, partner.credit, partner.end], true)) : row.partners;
+    return {
+      ...row,
+      lines: row.lines.filter((line) => reportAmountsVisible([line.debit, line.credit, line.balance], hideZeroLines)),
+      partners: partnerList.map((partner) => ({ ...partner, lines: partner.lines.filter((line) => reportAmountsVisible([line.debit, line.credit, line.balance], hideZeroLines)) })),
+    };
+  });
   return {
     rows: visibleRows,
     totals: {

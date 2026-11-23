@@ -501,8 +501,21 @@ export function configurableReport(db, report, period, group = null, options = {
 export function compareConfigurableReport(db, report, periods, baseFilter = {}, group = null, options = {}) {
   const filterRows = (rows) => {
     if (!options.hideZeroLines) return rows;
-    const parents = new Set(rows.map((row) => row.parent_code).filter(Boolean));
-    return rows.filter((row) => row.strong || parents.has(row.code) || reportAmountsVisible(row.values, true))
+    const rowByCode = new Map(rows.filter((r) => r.code).map((r) => [r.code, r]));
+    const visibleRows = new Set();
+    for (const row of rows) {
+      if (row.strong || reportAmountsVisible(row.values, true)) {
+        visibleRows.add(row);
+        let parentCode = row.parent_code;
+        while (parentCode) {
+          const parentRow = rowByCode.get(parentCode);
+          if (!parentRow || visibleRows.has(parentRow)) break;
+          visibleRows.add(parentRow);
+          parentCode = parentRow.parent_code;
+        }
+      }
+    }
+    return rows.filter((row) => visibleRows.has(row))
       .map((row) => ({ ...row, accountRows: row.accountRows.filter((account) => reportAmountsVisible(account.values, true)) }));
   };
   const effectivePeriods = periods?.length ? periods : [{ from: baseFilter.from ?? '', to: baseFilter.to ?? '', label: 'Balance' }];

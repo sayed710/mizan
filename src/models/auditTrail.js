@@ -50,7 +50,32 @@ const recordTitleOf = (db, model, id) => {
  * Collect all matching Audit Trail rows without any 500-row cap, normalizing server audit entries
  * or local tracking messages into `{ id, model, res_id, recordName, field, oldValue, newValue, body, author, date }`.
  */
-export function collectAuditTrailRows(db, sourceDb, period, serverLog = null) {
+export function collectAuditTrailRows(db, sourceDb, period, serverLog = null, filters = {}) {
+  const matchRow = (r) => {
+    if (filters.user) {
+      const u = String(filters.user).trim().toLowerCase();
+      if (u && !String(r.author ?? '').toLowerCase().includes(u)) return false;
+    }
+    if (filters.model && r.model !== filters.model) return false;
+    if (filters.record != null && filters.record !== '') {
+      const rec = String(filters.record).trim();
+      const recClean = rec.replace(/^#/, '');
+      if (rec && String(r.res_id) !== rec && String(r.res_id) !== recClean && !String(r.recordName ?? '').toLowerCase().includes(rec.toLowerCase())) return false;
+    }
+    if (filters.field) {
+      const f = String(filters.field).trim().toLowerCase();
+      if (f) {
+        const match = String(r.fieldKey ?? '').toLowerCase().includes(f)
+          || String(r.field ?? '').toLowerCase().includes(f)
+          || String(r.body ?? '').toLowerCase().includes(f)
+          || String(r.oldValue ?? '').toLowerCase().includes(f)
+          || String(r.newValue ?? '').toLowerCase().includes(f);
+        if (!match) return false;
+      }
+    }
+    return true;
+  };
+
   if (serverLog !== null) {
     if (!Array.isArray(serverLog)) return [];
     const scoped = scopeAuditRows(sourceDb, serverLog).filter((e) => AUDIT_MODELS.includes(e.model) && inPeriod(e.at, period));
@@ -63,18 +88,20 @@ export function collectAuditTrailRows(db, sourceDb, period, serverLog = null) {
         for (const [k, [oldVal, newVal]] of lockChanges) {
           const field = fieldLabelOf(e.model, k);
           const { oldValue, newValue, body } = changeDetailOf(db, e.model, k, oldVal, newVal);
-          rows.push({
+          const row = {
             id: `${e.id}:${k}`,
             model: e.model,
             res_id: e.res_id,
             recordName,
+            fieldKey: k,
             field,
             oldValue,
             newValue,
             body,
             author: e.actor,
             date: e.at,
-          });
+          };
+          if (matchRow(row)) rows.push(row);
         }
         continue;
       }
@@ -82,22 +109,24 @@ export function collectAuditTrailRows(db, sourceDb, period, serverLog = null) {
         for (const [k, [oldVal, newVal]] of entries) {
           const field = fieldLabelOf(e.model, k);
           const { oldValue, newValue, body } = changeDetailOf(db, e.model, k, oldVal, newVal);
-          rows.push({
+          const row = {
             id: `${e.id}:${k}`,
             model: e.model,
             res_id: e.res_id,
             recordName,
+            fieldKey: k,
             field,
             oldValue,
             newValue,
             body,
             author: e.actor,
             date: e.at,
-          });
+          };
+          if (matchRow(row)) rows.push(row);
         }
       } else {
         const body = auditSummary(e);
-        rows.push({
+        const row = {
           id: e.id,
           model: e.model,
           res_id: e.res_id,
@@ -108,7 +137,8 @@ export function collectAuditTrailRows(db, sourceDb, period, serverLog = null) {
           body,
           author: e.actor,
           date: e.at,
-        });
+        };
+        if (matchRow(row)) rows.push(row);
       }
     }
     return rows;
@@ -122,13 +152,15 @@ export function collectAuditTrailRows(db, sourceDb, period, serverLog = null) {
       model: m.model,
       res_id: m.res_id,
       recordName: recordTitleOf(db, m.model, m.res_id),
+      fieldKey: m.field ?? '',
       field: m.field ? fieldLabelOf(m.model, m.field) : '',
       oldValue: m.old_value ?? '',
       newValue: m.new_value ?? (m.field ? '' : (m.body ?? '')),
       body: m.body,
       author: m.author,
       date: m.date,
-    }));
+    }))
+    .filter(matchRow);
 }
 
 /** Build RFC 4180 CSV text for ALL matching Audit Trail rows. */
