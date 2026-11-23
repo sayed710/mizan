@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read } from './orm.js';
 import { models, menusFor, apps, findLeaf } from './models/index.js';
+import { incrementPartnerRank } from './models/crm.js';
 import { migrate } from './migrations.js';
 import { seed } from './seed.js';
 import { newDefaults } from './views/formDefaults.js';
@@ -25,10 +26,55 @@ test('posting invoices and confirming orders increments the commercial partner r
   assert.equal(models['res.partner'].fields.supplier_rank.readonly, true);
 });
 
-test('migration counts only posted invoices and confirmed orders for commercial partners', () => {
+test('runtime increments partner rank for contacts whose parent was deleted', () => {
+  const db = seed();
+  const orphan = create(db, 'res.partner', { name: 'Orphan Contact', parent_id: 999999 });
+  assert.equal(read(orphan.db, 'res.partner', orphan.id).customer_rank, 0);
+  assert.equal(read(orphan.db, 'res.partner', orphan.id).supplier_rank, 0);
+
+  const next = incrementPartnerRank(orphan.db, orphan.id, 'customer_rank');
+  assert.equal(read(next, 'res.partner', orphan.id).customer_rank, 1);
+
+  const nextSupp = incrementPartnerRank(next, orphan.id, 'supplier_rank');
+  assert.equal(read(nextSupp, 'res.partner', orphan.id).supplier_rank, 1);
+});
+
+test('posting an invoice for a contact whose parent was deleted marks it as a customer', () => {
+  let db = seed();
+  const orphan = create(db, 'res.partner', { name: 'Orphan Customer', parent_id: 999999 });
+  const line = { product_id: 1, qty: 1, price_unit: 10, tax: 0 };
+  const invoice = create(orphan.db, 'account.move', { partner_id: orphan.id, move_type: 'out_invoice', invoice_line_ids: [line] });
+  db = press(invoice.db, 'account.move', invoice.id, 'Confirm');
+  assert.equal(read(db, 'res.partner', orphan.id).customer_rank, 1);
+});
+
+test('migration marks only posted invoices and confirmed orders for commercial partners', () => {
   const db = { schema_version: 62, records: { 'res.partner': [{ id: 1 }, { id: 2, parent_id: 1 }, { id: 3 }], 'account.move': [{ id: 1, partner_id: 2, state: 'posted', move_type: 'out_invoice' }, { id: 2, partner_id: 2, state: 'draft', move_type: 'in_invoice' }], 'sale.order': [{ id: 1, partner_id: 2, state: 'sale' }], 'purchase.order': [{ id: 1, partner_id: 2, state: 'purchase' }] } };
   const next = migrate(db);
-  assert.deepEqual(next.records['res.partner'].map((p) => [p.customer_rank, p.supplier_rank]), [[2, 1], [0, 0], [0, 0]]);
+  assert.deepEqual(next.records['res.partner'].map((p) => [p.customer_rank, p.supplier_rank]), [[1, 1], [0, 0], [0, 0]]);
+});
+
+test('migration backfills rank 1 for multiple qualifying transactions while preserving existing positive rank', () => {
+  const db = {
+    schema_version: 62,
+    records: {
+      'res.partner': [
+        { id: 1, customer_rank: 0, supplier_rank: 0 },
+        { id: 2, customer_rank: 5, supplier_rank: 0 },
+      ],
+      'account.move': [
+        { id: 1, partner_id: 1, state: 'posted', move_type: 'out_invoice' },
+        { id: 2, partner_id: 1, state: 'posted', move_type: 'out_invoice' },
+        { id: 3, partner_id: 1, state: 'posted', move_type: 'out_invoice' },
+        { id: 4, partner_id: 2, state: 'posted', move_type: 'out_invoice' },
+      ],
+    },
+  };
+  const next = migrate(db);
+  const p1 = next.records['res.partner'].find((p) => p.id === 1);
+  const p2 = next.records['res.partner'].find((p) => p.id === 2);
+  assert.equal(p1.customer_rank, 1, 'partner with multiple transactions backfills rank 1 as activity flag');
+  assert.equal(p2.customer_rank, 5, 'partner with existing positive rank preserves its value');
 });
 
 test('accounting partner and product leaves use removable default filters', () => {

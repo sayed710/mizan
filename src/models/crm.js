@@ -4,7 +4,7 @@ import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank
 import { updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 
-/** Mark a commercial partner as a customer or vendor. ponytail: sets the rank to 1 only when it is 0 (no counting), so concurrent postings never write conflicting ranks; count usage if rank-based ordering is needed. */
+/** Mark a commercial partner as a customer or vendor. Sets the rank to 1 only when it is 0 (activity flag), so concurrent postings never write conflicting ranks. */
 export function incrementPartnerRank(db, partnerId, field) {
   const id = commercialPartnerId(db, partnerId);
   const partner = id == null ? null : read(db, 'res.partner', id);

@@ -1999,7 +1999,7 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
-/** Customer and vendor ranks counted from posted invoices and confirmed orders, per commercial partner. */
+/** Customer and vendor ranks marked from posted invoices and confirmed orders, per commercial partner. */
 export function migratePartnerRanks(db) {
   const partners = db.records['res.partner'] ?? [];
   const partnerById = new Map(partners.map((p) => [p.id, p]));
@@ -2025,31 +2025,35 @@ export function migratePartnerRanks(db) {
     return cid;
   };
 
-  const customerCounts = new Map();
-  const supplierCounts = new Map();
-  const addCount = (counts, partnerId) => {
+  const hasCustomerActivity = new Set();
+  const hasSupplierActivity = new Set();
+  const markActivity = (set, partnerId) => {
     const cid = commercialId(partnerId);
-    if (cid != null) counts.set(cid, (counts.get(cid) ?? 0) + 1);
+    if (cid != null) set.add(cid);
   };
 
   for (const move of db.records['account.move'] ?? []) {
     if (move.state === 'posted') {
-      if (move.move_type === 'out_invoice') addCount(customerCounts, move.partner_id);
-      else if (move.move_type === 'in_invoice') addCount(supplierCounts, move.partner_id);
+      if (move.move_type === 'out_invoice') markActivity(hasCustomerActivity, move.partner_id);
+      else if (move.move_type === 'in_invoice') markActivity(hasSupplierActivity, move.partner_id);
     }
   }
   for (const order of db.records['sale.order'] ?? []) {
-    if (order.state === 'sale' || order.state === 'done') addCount(customerCounts, order.partner_id);
+    if (order.state === 'sale' || order.state === 'done') markActivity(hasCustomerActivity, order.partner_id);
   }
   for (const order of db.records['purchase.order'] ?? []) {
-    if (order.state === 'purchase' || order.state === 'done') addCount(supplierCounts, order.partner_id);
+    if (order.state === 'purchase' || order.state === 'done') markActivity(hasSupplierActivity, order.partner_id);
   }
 
-  const updatedPartners = partners.map((p) => ({
-    ...p,
-    customer_rank: Math.max(Number(p.customer_rank) || 0, customerCounts.get(p.id) ?? 0),
-    supplier_rank: Math.max(Number(p.supplier_rank) || 0, supplierCounts.get(p.id) ?? 0),
-  }));
+  const updatedPartners = partners.map((p) => {
+    const currentCust = Number(p.customer_rank) || 0;
+    const currentSupp = Number(p.supplier_rank) || 0;
+    return {
+      ...p,
+      customer_rank: currentCust > 0 ? currentCust : (hasCustomerActivity.has(p.id) ? 1 : 0),
+      supplier_rank: currentSupp > 0 ? currentSupp : (hasSupplierActivity.has(p.id) ? 1 : 0),
+    };
+  });
   return { ...db, records: { ...db.records, 'res.partner': updatedPartners } };
 }
 MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
