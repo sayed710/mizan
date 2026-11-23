@@ -299,3 +299,374 @@ test('REV-4: review leaves retain model lists, actions, and list exports', async
     await React.act(async () => root.unmount());
   }
 });
+
+test('Finding 1: bank-linked journal items can be reconciled and actioned without visibility rejection', async () => {
+  const { makeEl } = setupDom();
+  globalThis.document.createElementNS = (_ns, tag) => makeEl(tag);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const receivableId = accountId(db, '121000');
+  const revenueId = accountId(db, '400000');
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+
+  // Customer invoice
+  const inv = create(db, 'account.move', {
+    name: 'INV/2026/F1',
+    move_type: 'out_invoice',
+    journal_id: search(db, 'account.journal').find((j) => j.type === 'sale').id,
+    partner_id: partner.id,
+    state: 'draft',
+    date: today(),
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, account_id: revenueId }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  // Bank entry
+  const bankEntry = postEntry(db, {
+    journal: 'BNK1',
+    date: today(),
+    lines: [
+      { account: bankJournal.default_account_id, debit: 100, credit: 0 },
+      { account: receivableId, partner_id: partner.id, debit: 0, credit: 100 },
+    ],
+  });
+  db = bankEntry.db;
+  const bankMove = read(db, 'account.move', bankEntry.id);
+
+  // Bank statement line linked to bankEntry
+  const stLine = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    date: today(),
+    payment_ref: 'Payment F1',
+    partner_id: partner.id,
+    amount: 100,
+    bank_move_id: bankEntry.id,
+  });
+  db = stLine.db;
+  await store.commit(db);
+
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  await React.act(async () => {
+    root.render(React.createElement(JournalItems, { leaf: { key: 'journal-items', label: 'Journal Items', report: 'journalItems' } }));
+  });
+
+  const checkboxes = findAll(host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label']?.includes('Select journal item'));
+  assert.ok(checkboxes.length >= 2, 'Checkboxes found for journal items');
+
+  const receivableAccount = read(db, 'account.account', receivableId);
+  for (const cb of checkboxes) {
+    const aria = props(cb)?.['aria-label'] ?? '';
+    if (aria.includes(receivableAccount.name) && (aria.includes('INV/2026/F1') || aria.includes(bankMove.name))) {
+      await React.act(async () => props(cb).onChange({ target: { checked: true } }));
+    }
+  }
+
+  const reconcileBtn = findAll(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent === 'Reconcile');
+  assert.ok(reconcileBtn, 'Reconcile button exists');
+  await React.act(async () => props(reconcileBtn).onClick());
+
+  const form = find(host, (n) => n.tagName === 'FORM');
+  assert.ok(form, 'Reconcile form is visible');
+  await React.act(async () => props(form).onSubmit({ preventDefault() {} }));
+
+  const alertText = find(host, (n) => props(n)?.role === 'alert')?.textContent;
+  assert.equal(alertText, undefined, 'Reconciliation of bank-linked item succeeded without visibility rejection');
+
+  // Verify Unreconcile with bank-linked item
+  const unreconcileBtn = findAll(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent === 'Unreconcile');
+  assert.ok(unreconcileBtn, 'Unreconcile button exists');
+
+  const checkboxesRecon = findAll(host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label']?.includes('Select journal item'));
+  for (const cb of checkboxesRecon) {
+    const aria = props(cb)?.['aria-label'] ?? '';
+    if (aria.includes(receivableAccount.name) && aria.includes(bankMove.name)) {
+      await React.act(async () => props(cb).onChange({ target: { checked: true } }));
+    }
+  }
+
+  await React.act(async () => props(unreconcileBtn).onClick());
+  const unrecForm = find(host, (n) => n.tagName === 'FORM');
+  assert.ok(unrecForm, 'Unreconcile form is visible');
+  await React.act(async () => props(unrecForm).onSubmit({ preventDefault() {} }));
+  const unrecAlert = find(host, (n) => props(n)?.role === 'alert')?.textContent;
+  assert.equal(unrecAlert, undefined, 'Unreconcile of bank-linked item succeeded without visibility rejection');
+
+  await React.act(async () => root.unmount());
+});
+
+test('Finding 2: bank statement lines cannot change journal via kanban drag-and-drop', async () => {
+  const { canDropOn } = await import('./views/kanbanDrop.js');
+  assert.equal(canDropOn('account.bank.statement.line', 'journal_id'), false, 'bank statement lines cannot drop on journal_id');
+
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const line = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    date: today(),
+    payment_ref: 'Unlinked transaction',
+    amount: 50,
+  });
+  db = line.db;
+  await store.commit(db);
+
+  const { Kanban } = await import('./views/Kanban.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  await React.act(async () => {
+    root.render(React.createElement(Kanban, {
+      db,
+      model: 'account.bank.statement.line',
+      records: [read(db, 'account.bank.statement.line', line.id)],
+      open: () => {},
+      groupBy: 'journal_id',
+    }));
+  });
+
+  const card = find(host, (n) => n.tagName === 'ARTICLE' && n.className.includes('card'));
+  assert.ok(card, 'Card rendered in kanban');
+  assert.equal(Boolean(props(card)?.draggable), false, 'Card is not draggable between journal columns');
+
+  await React.act(async () => root.unmount());
+});
+
+test('Finding 3: Mark as reviewed throws when selected bank lines have no journal entry to review', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const receivableId = accountId(db, '121000');
+  const revenueId = accountId(db, '400000');
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const lineWithoutMove = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    date: today(),
+    payment_ref: 'No move',
+    amount: 100,
+  });
+  db = lineWithoutMove.db;
+
+  const action = models['account.bank.statement.line'].listActions.find((a) => a.label === 'Mark as reviewed');
+  assert.ok(action, 'Mark as reviewed action exists on bank lines');
+
+  assert.throws(
+    () => action.run(db, [lineWithoutMove.id]),
+    /The selected transactions have no journal entry to review/
+  );
+
+  const move = postEntry(db, {
+    journal: 'MISC',
+    date: today(),
+    lines: [
+      { account: receivableId, partner_id: partner.id, debit: 200, credit: 0 },
+      { account: revenueId, debit: 0, credit: 200 },
+    ],
+  });
+  db = write(move.db, 'account.move', move.id, { to_check: true });
+  const lineWithMove = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    date: today(),
+    payment_ref: 'With move',
+    amount: 200,
+    bank_move_id: move.id,
+  });
+  db = lineWithMove.db;
+
+  const reviewed = action.run(db, [lineWithMove.id]);
+  assert.equal(read(reviewed, 'account.move', move.id).to_check, false, 'Linked move to_check flag is cleared');
+});
+
+test('Finding 4: unpriced open items with null residual stay in unreconciled review report', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const receivableId = accountId(db, '121000');
+  const revenueId = accountId(db, '400000');
+  const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
+
+  const inv = create(db, 'account.move', {
+    name: 'INV/2026/UNPRICED',
+    move_type: 'out_invoice',
+    journal_id: saleJournal.id,
+    partner_id: partner.id,
+    state: 'draft',
+    date: today(),
+    invoice_date: today(),
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, account_id: revenueId }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  // Unconfigure company currency so document currency cannot be resolved
+  db = write(db, 'res.company', 1, { currency_id: null });
+
+  const unreconciledItems = journalItems(db, { reviewMode: 'unreconciled' });
+  const invLines = unreconciledItems.filter((l) => l.move_id === inv.id && l.account_id === receivableId);
+  assert.ok(invLines.length > 0, 'Unpriced open item remains visible in journalItems unreconciled report');
+  assert.equal(invLines[0].amount_residual, null, 'Unpriced item has null amount_residual');
+});
+
+test('Finding 6: scoped journal items report prints only the scoped company, not other allowed companies', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = seed();
+  const c2 = create(db, 'res.company', { name: 'Company Two', currency_id: 1 });
+  db = c2.db;
+  db = {
+    ...db,
+    settings: {
+      ...db.settings,
+      allowed_company_ids: [1, c2.id],
+      current_company_id: 1,
+    },
+  };
+
+  const accountC2 = create(db, 'account.account', {
+    name: 'C2 Receivable',
+    code: '121002',
+    account_type: 'asset_receivable',
+    company_id: c2.id,
+  });
+  db = accountC2.db;
+
+  const moveC2 = create(db, 'account.move', {
+    name: 'C2/2026/001',
+    move_type: 'entry',
+    state: 'posted',
+    company_id: c2.id,
+    date: today(),
+    line_ids: [
+      { account_id: accountC2.id, debit: 100, credit: 0, company_id: c2.id },
+      { account_id: accountId(db, '400000'), debit: 0, credit: 100, company_id: c2.id },
+    ],
+  });
+  db = moveC2.db;
+  await store.commit(db);
+
+  globalThis.location = { hash: `#/accounting/journal-items?account=${accountC2.id}` };
+
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  await React.act(async () => {
+    root.render(React.createElement(JournalItems, { leaf: { key: 'journal-items', label: 'Journal Items', report: 'journalItems' } }));
+  });
+
+  const printBtn = findAll(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent === 'Print');
+  await React.act(async () => props(printBtn).onClick());
+
+  const printPage = find(host, (n) => n.className?.includes('print-page'));
+  assert.ok(printPage, 'Print view opened');
+  const printText = printPage.textContent;
+  assert.ok(printText.includes('Company Two'), 'Scoped company appears in print');
+  assert.ok(!printText.includes('YourCompany, Company Two'), 'Does not print multiple companies header when scoped to one company');
+
+  await React.act(async () => root.unmount());
+  globalThis.location = { hash: '' };
+});
+
+test('Finding 7: JournalItems GROUP_OPTIONS has no statement group-by and items have no statement scan', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+  await store.commit(seed());
+
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  await React.act(async () => {
+    root.render(React.createElement(JournalItems, { leaf: { key: 'journal-items', label: 'Journal Items', report: 'journalItems' } }));
+  });
+
+  const select = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Group By');
+  assert.ok(select, 'Group By select found');
+  const options = findAll(select, (n) => n.tagName === 'OPTION').map((o) => o.value);
+  assert.equal(options.includes('statement'), false, 'statement is not in GROUP_OPTIONS');
+
+  await React.act(async () => root.unmount());
+});
+
+test('Finding 8: CSV export uses structured export rows with Company Currency and without UI controls', async () => {
+  const { makeEl } = setupDom();
+  const spy = setupDownloadSpy(makeEl);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = seed();
+  const c2 = create(db, 'res.company', { name: 'Co 2', currency_id: 1 });
+  db = c2.db;
+  db = { ...db, settings: { ...db.settings, allowed_company_ids: [1, c2.id] } };
+  const receivableId = accountId(db, '121000');
+  const revenueId = accountId(db, '400000');
+
+  const posted = postEntry(db, {
+    journal: 'INV',
+    date: today(),
+    company_id: c2.id,
+    lines: [
+      { account: receivableId, debit: 300, credit: 0, company_id: c2.id },
+      { account: revenueId, debit: 0, credit: 300, company_id: c2.id },
+    ],
+  });
+  db = posted.db;
+  await store.commit(db);
+
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(JournalItems, { leaf: { key: 'journal-items', label: 'Journal Items', report: 'journalItems' } }));
+    });
+
+    const csvBtn = findAll(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.includes('Export CSV'));
+    await React.act(async () => props(csvBtn).onClick());
+
+    const csvDl = await spy.takeLast();
+    const csvText = await csvDl.text();
+
+    assert.ok(csvText.includes('Company Currency'), 'CSV export contains Company Currency column in multi-company');
+    assert.ok(!csvText.includes('"Select",'), 'CSV export does not contain Select UI control column');
+  } finally {
+    spy.restore();
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Finding 9: Draft Entries leaf has only Mark as reviewed listAction and does not have Reverse Entries', () => {
+  const app = apps.find((a) => a.id === 'accounting');
+  const leaf = findLeaf(app, 'draft-entries');
+  assert.ok(leaf, 'draft-entries leaf found');
+
+  const actions = (leaf.listActions ?? []).map((a) => a.label);
+  assert.ok(actions.includes('Mark as reviewed'), 'draft-entries offers Mark as reviewed');
+  assert.equal(actions.includes('Reverse Entries'), false, 'draft-entries does not offer Reverse Entries');
+  assert.equal(leaf.list, undefined, 'draft-entries does not override list columns with entry-only list');
+});

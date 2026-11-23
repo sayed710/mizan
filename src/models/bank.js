@@ -1114,11 +1114,22 @@ export const bankModels = {
       [{ id: 'unassigned', label: 'Without a Journal', fn: isStatementLineWithoutJournal }],
     ],
     groupBys: ['currency_id', 'company_id', 'journal_id', 'date'],
-    kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'] },
+    // Odoo's bank transaction kanban is not drag-editable: moving a card must not rewrite its journal or state.
+    kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'], noDrop: true },
     list: ['sequence', 'date', 'payment_ref', 'partner_id', 'amount', 'journal_id', 'running_balance', 'bank_move_id', 'account_number', 'narration', 'ref', 'transaction_type', 'state'],
     listLabels: { journal_id: 'Journal', bank_move_id: 'Journal Entry' },
     listActions: [
-      { label: 'Mark as reviewed', requiresSelection: true, run: (db, ids) => markAsReviewed(db, ids.map((id) => read(db, 'account.bank.statement.line', id)?.bank_move_id).filter(Boolean)) },
+      {
+        label: 'Mark as reviewed',
+        requiresSelection: true,
+        run: (db, ids) => {
+          const moveIds = ids
+            .map((id) => read(db, 'account.bank.statement.line', id)?.bank_move_id)
+            .filter((moveId) => moveId && read(db, 'account.move', moveId)?.to_check);
+          if (!moveIds.length) throw new Error('The selected transactions have no journal entry to review');
+          return markAsReviewed(db, moveIds);
+        },
+      },
     ],
     listDecoration: (r) => (r.state === 'to_check' ? 'info' : null),
     views: ['list', 'kanban'],

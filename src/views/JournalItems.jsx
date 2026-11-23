@@ -13,7 +13,7 @@ import { money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
 import { downloadXlsx } from '../xlsx.js';
-import { downloadCsv, tableToRows } from '../csv.js';
+import { downloadCsv } from '../csv.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { markAsReviewed } from '../models/accounting.js';
@@ -172,7 +172,6 @@ function groupKeyForLine(line, group) {
   if (group === 'tax_grids') return line.gridKey;
   if (group === 'matching') return line.matchingText;
   if (group === 'status') return line.move_state ?? null;
-  if (group === 'statement') return line.statement_id ?? null;
   if (group) return line[`${group}_id`] ?? null;
   return null;
 }
@@ -206,7 +205,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const [isPrinting, setIsPrinting] = useState(false);
   const tableRef = useRef(null);
 
-  const keyOf = (line) => JSON.stringify([line.move_id, line.line_identity, line.statement_line_id]);
+  const keyOf = (line) => JSON.stringify([line.move_id, line.line_identity]);
   const toggleFilter = (id) => setActiveFilters((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const run = async (event) => {
     event.preventDefault();
@@ -214,7 +213,7 @@ export function JournalItems({ leaf = {} } = {}) {
     setBusy(true);
     try {
       const visible = new Set(journalItems(companyViewDb(getDb())).map(keyOf));
-      if (selected.some((item) => item.move_id && !visible.has(keyOf(item)))) throw new Error('The selected items are no longer visible; refresh the selection');
+      if (selected.some((item) => !visible.has(keyOf(item)))) throw new Error('The selected items are no longer visible; refresh the selection');
       const execute = {
         Reconcile: (d, sel, opts) => reconcileLedgerItems(d, sel, { date: opts.date, amount: opts.amount }),
         'Reconcile with write-off': (d, sel, opts) => reconcileLedgerItems(d, sel, {
@@ -275,8 +274,6 @@ export function JournalItems({ leaf = {} } = {}) {
     .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!matchedMoves || (matchedMoves.has(line.move_id) && line.reconciled)))
     .map((line) => {
       const move = read(db, 'account.move', line.move_id);
-      const stLine = (db.records['account.bank.statement.line'] ?? []).find((l) => l.bank_move_id === line.move_id || l.move_id === line.move_id);
-      const statementId = move?.statement_id ?? stLine?.statement_id ?? null;
       const lineCompanyCurr = findCompanyCurrencyRecord(db, line.company_id);
       const isForeign = Boolean(line.currency_id && lineCompanyCurr && line.currency_id !== lineCompanyCurr.id);
       const { taxIds, taxes, originatorTax } = resolveLineTaxInfo(db, line, move);
@@ -284,9 +281,6 @@ export function JournalItems({ leaf = {} } = {}) {
       const matchingText = line.matching_number ?? (line.reconciled ? t('Reconciled') : '');
       return {
         ...line,
-        statement_id: statementId,
-        statement: name('account.bank.statement', statementId),
-        statement_line_id: stLine?.id ?? null,
         _account: read(db, 'account.account', line.account_id),
         _journal: read(db, 'account.journal', line.journal_id),
         _companyCurrency: lineCompanyCurr,
@@ -314,7 +308,7 @@ export function JournalItems({ leaf = {} } = {}) {
     .map((g) => g.filter((f) => activeFilters.includes(f.id)))
     .filter((g) => g.length);
   const rows = enriched
-    .filter((line) => activeGroups.every((g) => g.some((f) => mode === 'unreconciled' && f.id === 'unreconciled' ? isReconcilableAccount(line._account) && Math.abs(line.amount_residual ?? 0) > 1e-9 : f.fn(line))))
+    .filter((line) => activeGroups.every((g) => g.some((f) => mode === 'unreconciled' && f.id === 'unreconciled' ? isReconcilableAccount(line._account) && (line.amount_residual == null || Math.abs(line.amount_residual) > 1e-9) : f.fn(line))))
     .filter((line) => matchesItemSearch(line, query));
 
   const groups = new Map();
@@ -330,7 +324,6 @@ export function JournalItems({ leaf = {} } = {}) {
     if (group === 'tax_grids') return lines[0].tax_grids || t('Undefined');
     if (group === 'matching') return lines[0].matchingText || t('Undefined');
     if (group === 'status') return t(lines[0].status) || t('Undefined');
-    if (group === 'statement') return lines[0].statement || t('Undefined');
     return lines[0][group] || t('Undefined');
   };
 
@@ -439,8 +432,8 @@ export function JournalItems({ leaf = {} } = {}) {
   };
 
   const exportCsv = () => {
-    const rows = tableRef.current ? tableToRows(tableRef.current) : buildExportRows().exportRows;
-    downloadCsv(`${baseName}.csv`, rows);
+    const { exportRows } = buildExportRows();
+    downloadCsv(`${baseName}.csv`, exportRows);
   };
 
   const exportXlsx = () => {
@@ -456,10 +449,15 @@ export function JournalItems({ leaf = {} } = {}) {
   };
 
   const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
-  const printCompanies = multiCompany
-    ? allowedIds.map((cId) => documentCompany(db, { company_id: cId })).filter(Boolean)
+  const actualCompanyIds = [...new Set(rows.map((l) => l.company_id).filter(Boolean))];
+  const printCompanies = filterCompany
+    ? null
+    : (multiCompany
+      ? (actualCompanyIds.length > 0 ? actualCompanyIds : allowedIds).map((cId) => documentCompany(db, { company_id: cId })).filter(Boolean)
+      : null);
+  const printCompany = isPrinting
+    ? documentCompany(db, { company_id: filterCompany ?? actualCompanyIds[0] ?? currentCompany(db) })
     : null;
-  const printCompany = isPrinting ? (printCompanies?.[0] ?? documentCompany(db, { company_id: filterCompany ?? currentCompany(db) })) : null;
 
   const controls = (
     <>
@@ -513,11 +511,11 @@ export function JournalItems({ leaf = {} } = {}) {
       controls={controls}
       onBack={() => setIsPrinting(false)}
     >
-      <div className="list-wrap"><table className="list report" ref={tableRef}><thead><tr><th className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity, statement_line_id: line.statement_line_id })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th no-print"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
+      <div className="list-wrap"><table className="list report" ref={tableRef}><thead><tr><th className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th no-print"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
         <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
           {group && <tr className="group-row"><th className={isPrinting ? 'no-print' : undefined} /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th className="no-print" /></tr>}
           {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
-            <td className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={(line.move_state === 'draft' && mode !== 'to_check') || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity, statement_line_id: line.statement_line_id }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
+            <td className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={(line.move_state === 'draft' && mode !== 'to_check') || busy} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
             {visibleCols.map((col) => <td key={col.key} className={cellClassName(col, line, todayDate)}>{renderCell(line, col)}</td>)}
             <td className="o2m-cols-td no-print" />
           </tr>)}

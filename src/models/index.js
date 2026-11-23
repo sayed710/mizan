@@ -88,6 +88,7 @@ import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
 import { isAuditReturn, taxReturnModels } from './taxreturn.js';
 import { auditReportModels } from './auditreport.js';
+import { resBankModels } from './resbank.js';
 import { partnerBankModels } from './partnerbank.js';
 import { calendarModels } from './calendar.js';
 import { declareWorkflowFields } from './workflowFields.js';
@@ -107,7 +108,7 @@ const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys',
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
+export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, resBankModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -212,7 +213,7 @@ const allApps = [
           ...salesInvoiceView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
-        { key: 'products', label: 'Products', model: 'product' },
+        { key: 'products', label: 'Products', model: 'product', domain: (r) => r.sale_ok !== false, defaults: { sale_ok: true } },
         customers,
       ] },
       { label: 'Vendors', children: [
@@ -238,7 +239,7 @@ const allApps = [
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
-        { key: 'products', label: 'Products', model: 'product' },
+        { key: 'vendor-products', label: 'Products', model: 'product', domain: (r) => r.purchase_ok !== false, defaults: { purchase_ok: true } },
         vendors,
       ] },
       { label: 'Accounting', children: [
@@ -268,7 +269,15 @@ const allApps = [
           { key: 'journal-items', label: 'Journal Items', type: 'report', report: 'journalItems' },
           { key: 'to-check', label: 'To Check', model: 'account.bank.statement.line', domain: (r) => r.state === 'to_check', defaults: { state: 'to_check' }, groupBy: ['journal_id'] },
           { key: 'unreconciled', label: 'Unreconciled', type: 'report', report: 'unreconciledItems', reviewMode: 'unreconciled' },
-          { key: 'draft-entries', label: 'Draft Entries', model: 'account.move', ...journalEntriesView, domain: (r) => r.state === 'draft', defaults: { state: 'draft' } },
+          {
+            key: 'draft-entries',
+            label: 'Draft Entries',
+            model: 'account.move',
+            ...entriesSearch,
+            listActions: journalEntriesView.listActions.filter((a) => a.label === 'Mark as reviewed'),
+            domain: (r) => r.state === 'draft',
+            defaults: { state: 'draft' },
+          },
           { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
           { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
           { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
@@ -361,6 +370,7 @@ const allApps = [
           { key: 'budgets', label: 'Financial Budgets', model: 'account.budget' },
           { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model', listLabels: { match_journal_ids: 'Journals' } },
           { key: 'followup-levels', label: 'Invoice Reminders', model: 'account.followup.level' },
+          { key: 'banks', label: 'Banks', model: 'res.bank' },
           { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
         ] },
                 { label: 'Analytic Accounting', children: [
@@ -413,7 +423,7 @@ const allApps = [
       ] },
     ],
   },
-  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }] },
+  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }, { label: 'Configuration', children: [{ key: 'banks', label: 'Banks', model: 'res.bank' }] }] },
   { id: 'calendar', name: 'Calendar', color: ['#0ea5e9', '#1d4ed8'], menus: [{ key: 'meetings', label: 'Meetings', model: 'calendar.event' }] },
   {
     id: 'project', name: 'Project', color: ['#22c55e', '#15803d'],
