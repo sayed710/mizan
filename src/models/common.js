@@ -176,7 +176,7 @@ export function total(r, db) {
       : amounts(r.invoice_line_ids, docCurr, { roundingMethod, side }).total;
   if (r.invoice_cash_rounding_id && r.state === 'posted') {
     const main = (r.line_ids ?? []).filter((l) => l.name === r.name);
-    if (main.length) return main.some((l) => l.currency_id) ? Math.abs(main.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)) : main.reduce((sum, l) => sum + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0) || base;
+    if (main.length) return main.some((l) => l.currency_id) ? Math.abs(main.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)) : Math.abs(main.reduce((sum, l) => sum + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0)) || base;
   }
   const selected = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
   const hasTax = selected?.strategy === 'biggest_tax' && (mixed

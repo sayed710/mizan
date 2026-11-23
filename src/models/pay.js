@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, promptedAmount, sameCommercialPartner, today, validDate } from './common.js';
-import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, valueOnlyCurrencyFields } from './ledger.js';
+import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, stornoLine, valueOnlyCurrencyFields } from './ledger.js';
 import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payWithDiscount, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -906,7 +906,8 @@ export function reconcileReversalLines(db, sourceId, reversalId, date) {
   const reconciled = reconciledJournalItems(db, source);
   return source.line_ids.reduce((acc, line, i) => {
     const mirror = reversal.line_ids?.[i];
-    if (!mirror || mirror.account_id !== line.account_id || (Number(mirror.debit) || 0) !== (Number(line.credit) || 0) || (Number(mirror.credit) || 0) !== (Number(line.debit) || 0)) return acc;
+    const expected = stornoLine({ debit: line.credit, credit: line.debit }, reversal.is_storno);
+    if (!mirror || mirror.account_id !== line.account_id || (Number(mirror.debit) || 0) !== (Number(expected.debit) || 0) || (Number(mirror.credit) || 0) !== (Number(expected.credit) || 0)) return acc;
     if (!isReconcilableAccount(read(acc, 'account.account', line.account_id)) || reconciled[i]?.reconciled) return acc;
     if (!(Number(line.debit) || Number(line.credit))) return acc;
     return reconcileLedgerItems(acc, [
@@ -958,20 +959,22 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     date,
     ref,
     reversed_entry_id: source.id,
+    is_storno: Boolean(read(db, 'res.company', companyId)?.account_storno),
     ...(opts.scheduled && opts.reconciliation_reversal ? { reconciliation_reversal: true } : {}),
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     ...(source.cash_basis_base_grid ? { cash_basis_base_grid: true } : {}),
     partner_id: source.partner_id ?? null,
+    ...(source.currency_id ? { currency_id: source.currency_id } : {}),
     name: opts.scheduled ? '/' : nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
-    line_ids: (source.line_ids ?? []).map((l) => ({
+    line_ids: (source.line_ids ?? []).map((l) => stornoLine({
       ...l,
       debit: l.credit,
       credit: l.debit,
       ...(l.currency_id ? { amount_currency: -(Number(l.amount_currency) || 0) } : {}),
       ...(l.tax_zero || l.tax_base_signed ? { tax_base: -(Number(l.tax_base) || 0) } : {}),
       name: `Reversal: ${l.name ?? ''}`.trim(),
-    })),
+    }, Boolean(read(db, 'res.company', companyId)?.account_storno))),
   }, { archivedOriginIds: [source.id] });
   let next = opts.scheduled ? created.db : postAnalytic(created.db, created.id);
   const currentSource = read(next, 'account.move', source.id);
