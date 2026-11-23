@@ -1,3 +1,4 @@
+import { analyticAccountingEnabled } from './analytic-setting.js';
 import { purchaseLineId } from './purchase-links.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
@@ -1942,6 +1943,7 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 
 const invoiceLineField = {
   ...invoiceLineBase,
+  columnsFor: (record, db) => Object.entries(invoiceLineField.fields).filter(([key]) => key !== 'analytic_distribution' || analyticAccountingEnabled(db, record?.company_id)),
   newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
   onchange: (line, key, db, move, context = {}) => {
     const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: resolveDocumentJournal(db, move)?.id } : move);
@@ -2520,7 +2522,7 @@ const lineItem = {
       ['tax_ids', { ...lineItem.fields.tax_ids, widget: 'many2many_tags', hidden: false }],
       ['debit', lineItem.fields.debit],
       ['credit', lineItem.fields.credit],
-      ...(db && search(db, 'account.analytic.plan').length
+      ...(db && analyticAccountingEnabled(db, record?.company_id) && search(db, 'account.analytic.plan').length
         ? [['analytic_distribution', { ...lineItem.fields.analytic_distribution, hidden: false }]]
         : []),
       ['tax_tag_ids', { ...lineItem.fields.tax_tag_ids, label: 'Tax Grids', hidden: false, optional: 'hide' }],

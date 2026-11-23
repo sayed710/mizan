@@ -320,6 +320,9 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   return (
     <section className="settings-accounting" aria-label={t('Accounting')}>
       <h2>{t('Accounting')}</h2>
+      <div className="settings-block">
+        <label><input type="checkbox" checked={Boolean(company?.group_analytic_accounting)} disabled={readOnly || !company} onChange={(e) => onWriteCompany({ group_analytic_accounting: e.target.checked })} /> {t('Analytic Accounting')}</label>
+      </div>
 
       {showTaxes && (
         <div className="settings-block" data-block="taxes">

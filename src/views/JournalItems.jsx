@@ -1,3 +1,4 @@
+import { analyticAccountingEnabled } from '../models/analytic-setting.js';
 import { Fragment, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
 import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, matchedMoveIds } from '../models/ledger.js';
@@ -300,7 +301,7 @@ export function JournalItems({ leaf = {} } = {}) {
     return lines[0][group] || t('Undefined');
   };
 
-  const availableCols = ITEM_COLUMNS.filter((c) => (!c.multiCompanyOnly || multiCompany) && (!c.multiCurrencyOnly || multiCurrency));
+  const availableCols = ITEM_COLUMNS.filter((c) => (c.key !== 'analytic_distribution' || analyticAccountingEnabled(db)) && (!c.multiCompanyOnly || multiCompany) && (!c.multiCurrencyOnly || multiCurrency));
   const visibleCols = availableCols.filter((c) => !c.optional || isVisible(c.key, c.optional !== 'hide'));
   const optionalCols = availableCols.filter((c) => c.optional);
   const sumCurrency = companyCurrencyRecord(db, db.settings?.current_company_id);

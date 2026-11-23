@@ -2019,6 +2019,14 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
   };
 } });
 
+MIGRATIONS.push({ version: 68, name: 'preserve-legacy-analytic-accounting', up: (db) => {
+  const companies = db.records?.['res.company'];
+  if (!Array.isArray(companies)) return db;
+  return { ...db, records: { ...db.records, 'res.company': companies.map((company) => (
+    company && company.group_analytic_accounting == null ? { ...company, group_analytic_accounting: true } : company
+  )) } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

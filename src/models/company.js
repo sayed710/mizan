@@ -280,7 +280,7 @@ export function withCompany(models) {
 // Accounting settings shown in General Settings are company controls and can only be changed by administrators over sync.
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
-  'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
+  'group_analytic_accounting', 'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'fiscalyear_last_day', 'fiscalyear_last_month',
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
@@ -705,6 +705,7 @@ export const companyModels = {
     label: 'Companies',
     fields: {
       name: { type: 'char', label: 'Company Name', required: true },
+      group_analytic_accounting: { type: 'boolean', label: 'Analytic Accounting' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       account_default_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Default Receivable Account' },
       account_default_payable_id: { type: 'many2one', relation: 'account.account', label: 'Default Payable Account' },
@@ -798,6 +799,7 @@ export const companyModels = {
     },
     defaults: () => ({
       active: true,
+      group_analytic_accounting: false,
       fiscalyear_last_day: 31,
       fiscalyear_last_month: 12,
       currency_provider: 'none',
