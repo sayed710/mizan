@@ -299,14 +299,14 @@ test('res.currency form groups, company banner, hidden Rates tab, and newest-fir
     const basePerUnitAfter = find(eurCtx.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Base/Unit 1');
     assert.equal(props(basePerUnitAfter).value, 4);
 
-    // Save persists stored rate = 0.25 cleanly without extra computed keys on rate_ids
+    // Save persists stored base-relative rate (0.25 * Euro Co EUR rate 0.9 = 0.225) cleanly without extra computed keys on rate_ids
     const saveBtn = find(eurCtx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
     await eurCtx.React.act(async () => {
       props(saveBtn).onClick();
     });
     const saved = read(eurCtx.getDb(), 'res.currency', eur.id);
     const newest = [...saved.rate_ids].sort((a, b) => b.date.localeCompare(a.date))[0];
-    assert.equal(newest.rate, 0.25);
+    assert.equal(newest.rate, 0.225);
     assert.equal('company_rate' in newest, false);
     assert.equal('inverse_company_rate' in newest, false);
 
@@ -363,8 +363,8 @@ test('migration 43 renames unit_name to currency_unit_label, preserves checkAmou
     },
   };
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 61);
-  assert.equal(SCHEMA_VERSION, 61);
+  assert.equal(migrated.schema_version, 66);
+  assert.equal(SCHEMA_VERSION, 66);
 
   const migratedEur = read(migrated, 'res.currency', eur.id);
   assert.equal(migratedEur.currency_unit_label, 'Dinars');

@@ -1,7 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
-import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal } from './common.js';
+import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
@@ -14,6 +14,7 @@ import { models } from '../registry.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
 import { buildMatchingNumbers, entryMatchedAmounts, indexGlMatchings, lineKey } from './glMatchIndex.js';
+import { DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 /** Whether `account` belongs to the income or expense account type family. */
@@ -54,7 +55,7 @@ export const CHART = [
 export const JOURNALS = [
   { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, invoice_reference_type: 'invoice', invoice_reference_model: 'odoo', company_default: 'sales' },
   { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
-  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true, payment_sequence: true, bank_statements_source: 'undefined' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true, payment_sequence: true, bank_statements_source: 'undefined', sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION },
   { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501', payment_sequence: true },
   { code: 'MISC', name: 'Miscellaneous Operations', type: 'general', company_default: 'general' },
   { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
@@ -631,10 +632,11 @@ export function invoiceLines(db, move) {
     });
   }
 
-  const schedule = term ? installments(term, totalDoc, move.invoice_date ?? today(), docCurrency) : [{ date: move.invoice_date_due, amount: totalDoc }];
+  const baseDate = validDate(move.invoice_date) ? move.invoice_date : today();
+  const schedule = term ? installments(term, totalDoc, baseDate, docCurrency) : [{ date: move.invoice_date_due, amount: totalDoc }];
   let allocated = 0;
   let cumDoc = 0;
-  const discountDate = term?.early_discount && (move.invoice_date || today()) ? addDays(move.invoice_date ?? today(), Number(term.discount_days) || 0) : null;
+  const discountDate = term?.early_discount ? addDays(baseDate, Number(term.discount_days) || 0) : null;
   const discountPercent = term?.early_discount ? Number(term.discount_percent) || 0 : 0;
   const counterparts = schedule.map((item, index) => {
     cumDoc = docRound(cumDoc + item.amount);
@@ -642,7 +644,7 @@ export function invoiceLines(db, move) {
     const amount = companyRound(targetCompany - allocated);
     allocated = companyRound(allocated + amount);
     const discountDoc = term?.early_discount && index === 0
-      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(discountTaxComputation(term)) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, move.invoice_date ?? today(), move.invoice_date ?? today(), docCurrency))
+      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(discountTaxComputation(term)) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, baseDate, baseDate, docCurrency))
       : 0;
     const discountCompany = discountDoc ? companyRound(discountDoc / rate) : 0;
     return {
@@ -1470,8 +1472,11 @@ export function journalItemIdentity({ reconciled: _reconciled, matching_number: 
   return JSON.stringify(line);
 }
 
-/** Journal items with their move date, optionally limited by review status, date and company. */
-export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
+/** Whether a move or journal item belongs in a report given `includeClosing` (shared by P&L, Trial Balance, and General Ledger). */
+export const includeClosingItem = (item, includeClosing = false) => includeClosing || !item?.is_closing;
+
+/** Journal items with their move date, optionally limited by review status, date, company, and closing flag. */
+export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted', includeClosing = true } = {}) {
   const targetCompany = company_id ?? company;
   const wantedState = reviewMode === 'draft' ? 'draft' : 'posted';
   const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
@@ -1481,6 +1486,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       const date = m.date ?? m.invoice_date;
       const stateOk = reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
       return stateOk
+      && includeClosingItem(m, includeClosing)
       && (!from || date >= from)
       && (!to || date <= to)
       && (!targetCompany || (m.company_id ?? 1) === targetCompany);
@@ -1612,7 +1618,7 @@ const sumTypes = (rows, types, sign = 1) => round(rows.filter((r) => types.inclu
 
 /** Profit & loss figures (income shown positive); year-end closing entries are left out unless asked for. */
 export function profitAndLoss(db, period, { includeClosing = false, weight, analyticAccountIds } = {}) {
-  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds).filter((l) => includeClosing || !l.is_closing);
+  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds).filter((l) => includeClosingItem(l, includeClosing));
   const rows = balances(db, weighted(items, weight));
   const revenue = sumTypes(rows, ['income'], -1);
   const cost = sumTypes(rows, ['expense_direct_cost']);

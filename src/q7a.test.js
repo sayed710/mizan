@@ -216,19 +216,22 @@ test('9. Modifying an asset settles due depreciation before recalculating the re
   assert.equal(asset.depreciation_ids[0].posted, true);
   assert.equal(asset.depreciation_ids[0].amount, 1000);
 
-  // Only February and March (after 2026-02-15) reflect the +600 revaluation ((3600 - 1000) / 2 = 1300 each).
+  // The parent retains its remaining schedule; the increase is a separate child asset.
   assert.equal(asset.depreciation_ids[1].date, '2026-02-28');
   assert.equal(asset.depreciation_ids[1].posted, false);
-  assert.equal(asset.depreciation_ids[1].amount, 1300);
+  assert.equal(asset.depreciation_ids[1].amount, 1000);
   assert.equal(asset.depreciation_ids[2].date, '2026-03-31');
   assert.equal(asset.depreciation_ids[2].posted, false);
-  assert.equal(asset.depreciation_ids[2].amount, 1300);
+  assert.equal(asset.depreciation_ids[2].amount, 1000);
+  const child = search(db, 'account.asset').find((item) => item.parent_id === assetId);
+  assert.equal(child.original_value, 600);
+  assert.deepEqual(child.depreciation_ids.map((line) => line.amount), [300, 300]);
 
-  // Posting remaining depreciation afterward posts Feb and Mar at 1300 and closes the asset.
+  // Posting remaining parent depreciation closes the asset.
   db = postDepreciation(db, asset, '2026-03-31');
   asset = read(db, 'account.asset', assetId);
   assert.equal(asset.state, 'close');
-  assert.deepEqual(asset.depreciation_ids.map((l) => l.amount), [1000, 1300, 1300]);
+  assert.deepEqual(asset.depreciation_ids.map((l) => l.amount), [1000, 1000, 1000]);
 });
 
 test('10. Mixed-currency billing converts linked invoice totals into the order currency for credit exposure', () => {
@@ -298,7 +301,7 @@ test('13. Dispute flag (blocked) can be toggled on posted entries in a locked pe
 
   // Lock the period covering the invoice.
   db = write(db, 'res.company', 1, { lock_date: '2026-04-30' });
-  assert.ok(read(db, 'res.company', 1).hard_lock_date >= '2026-04-30');
+  assert.ok(read(db, 'res.company', 1).lock_date >= '2026-04-30');
 
   // Toggling `blocked` on the receivable line passes securedMoveRule, lockRule, and postedMoveRule.
   const toggledLines = posted.line_ids.map((l) => (l.debit > 0 ? { ...l, blocked: true } : l));

@@ -270,19 +270,18 @@ test('header buttons per state, Lock hashing, Reset to Draft locks, Reverse Entr
     const noBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Discard');
     await ctx.React.act(async () => props(noBtn).onClick());
 
-    // Post m1: state becomes posted, Journal Items becomes readonly, buttons become Reverse Entry, Reset to Draft, Lock.
+    // Posting a restricted entry hashes it and leaves only Reverse Entry available.
     await ctx.React.act(async () => props(find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Post')).onClick());
     assert.equal(read(ctx.getDb(), 'account.move', m1.id).state, 'posted');
-    assert.deepEqual(headerButtonLabels(ctx.host), ['Reverse Entry', 'Reset to Draft', 'Lock']);
+    assert.deepEqual(headerButtonLabels(ctx.host), ['Reverse Entry']);
 
     const jiTab = find(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab' && n.textContent.trim() === 'Journal Items');
     await ctx.React.act(async () => props(jiTab).onClick());
     assert.equal(find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Add a line')), null, 'posted Journal Items are readonly');
 
-    // Click Lock -> secureEntries hashes m1 -> Lock and Reset to Draft disappear.
-    await ctx.React.act(async () => props(find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Lock')).onClick());
+    // Posting already secured m1.
     const hashed = read(ctx.getDb(), 'account.move', m1.id);
-    assert.ok(hashed.inalterable_hash, 'Lock button computes inalterable_hash via secureEntries');
+    assert.ok(hashed.inalterable_hash, 'posting computes inalterable_hash via secureEntries');
     assert.deepEqual(headerButtonLabels(ctx.host), ['Reverse Entry']);
 
     // Reverse Entry button opens reversal wizard and creates a reversal entry.
@@ -649,7 +648,7 @@ test('invoices/bills keep their form untouched and Arabic i18n covers every new 
   try {
     assert.deepEqual(headerButtonLabels(billCtx.host), ['Confirm', 'Digitize Document', 'Cancel']);
     const groups = allFind(billCtx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
-    assert.deepEqual(fieldLabelsOf(groups[0]), ['Vendor', 'Bill Reference']);
+    assert.deepEqual(fieldLabelsOf(groups[0]), ['Vendor', 'Purchase Order', 'Bill Reference']);
   } finally {
     await billCtx.done();
   }
@@ -661,7 +660,6 @@ test('Lock secures only the entry journal up to that entry and leaves the compan
   const journals = search(db, 'account.journal');
   const misc = journals.find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
   const sale = journals.find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
-  for (const j of [misc, sale]) db = write(db, 'account.journal', j.id, { restrict_mode_hash_table: true });
   const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
   const [acc1, acc2] = [accounts.find((a) => a.account_type === 'expense'), accounts.find((a) => a.account_type === 'asset_current')];
   const entry = (date) => {
@@ -673,6 +671,7 @@ test('Lock secures only the entry journal up to that entry and leaves the compan
   const second = entry('2026-03-02');
   const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: '2026-02-01', invoice_line_ids: [{ qty: 1, price_unit: 50, tax: 0 }] });
   db = postMove(inv.db, inv.id);
+  for (const j of [misc, sale]) db = write(db, 'account.journal', j.id, { restrict_mode_hash_table: true });
   const before = read(db, 'res.company', 1).hard_lock_date ?? null;
 
   const locked = secureEntries(db, { throughMoveId: first });
@@ -699,7 +698,6 @@ test('Lock refuses while an earlier numbered draft of the journal could rejoin t
   const { secureEntries } = await import('./models/hash_chain.js');
   let db = seed();
   const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
-  db = write(db, 'account.journal', misc.id, { restrict_mode_hash_table: true });
   const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
   const [acc1, acc2] = [accounts.find((a) => a.account_type === 'expense'), accounts.find((a) => a.account_type === 'asset_current')];
   const post = (date) => {
@@ -710,6 +708,7 @@ test('Lock refuses while an earlier numbered draft of the journal could rejoin t
   const first = post('2026-03-01');
   const second = post('2026-03-02');
   db = write(db, 'account.move', first, { state: 'draft' });
+  db = write(db, 'account.journal', misc.id, { restrict_mode_hash_table: true });
   assert.ok(read(db, 'account.move', first).name, 'the reset entry keeps its number');
   assert.throws(() => secureEntries(db, { throughMoveId: second }), /earlier draft entries/);
 });

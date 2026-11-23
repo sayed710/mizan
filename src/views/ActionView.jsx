@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
-import { display, SimulatedNote } from '../ui.jsx';
-import { toCsv } from '../csv.js';
+import { display, PagerButtons, SimulatedNote } from '../ui.jsx';
+import { downloadCsv } from '../csv.js';
+import { downloadXlsx } from '../xlsx.js';
 import { commit, getDb, useDb } from '../store.js';
 import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
@@ -26,6 +27,7 @@ export function parseRel(db, model, raw) {
   const [field, rawIds] = raw.split(':');
   const parts = (rawIds ?? '').split(',').filter(Boolean).map(Number);
   const id = parts[0] ?? 0;
+  if (field === 'id') return { field, id, ids: parts, label: 'Selected records' };
   if (model === 'account.move' && field === 'payment_id') {
     const payment = read(db, 'account.payment', id);
     return { field, fieldLabel: 'Payment', id, label: payment?.name ?? `#${id}` };
@@ -38,14 +40,6 @@ export function parseRel(db, model, raw) {
   if (!f || f.type !== 'many2one') return null;
   return { field, id, ...(parts.length > 1 ? { ids: parts } : {}), label: read(db, f.relation, id)?.name ?? `#${id}` };
 }
-
-const download = (name, text) => {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' }));
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(a.href);
-};
 
 export function ActionView({ leaf, base, params }) {
   const db = useDb();
@@ -111,15 +105,26 @@ export function ActionView({ leaf, base, params }) {
     commit(unlink(getDb(), model, [...selected]));
     setSelected(new Set());
   };
-  const exportCsv = () => {
+  const exportRows = () => {
     const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
-    download(`${model}.csv`, toCsv([
+    return [
       listCols.map((f) => colLabel(def.fields, f, listLabels)),
       ...rows.map((r) => listCols.map((f) => {
         const field = listFields?.[f] ? { ...def.fields[f], ...listFields[f] } : def.fields[f];
         return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f], r);
       })),
-    ]));
+    ];
+  };
+  const exportCsv = () => downloadCsv(`${model}.csv`, exportRows());
+  const exportXlsx = () => {
+    const columnTypes = listCols.map((f) => {
+      const field = listFields?.[f] ? { ...def.fields[f], ...listFields[f] } : def.fields[f];
+      return ['monetary', 'float', 'integer'].includes(field?.type) ? 'number' : 'text';
+    });
+    downloadXlsx(`${model}.xlsx`, exportRows(), {
+      sheetName: t(leaf.label || def.label || model),
+      columnTypes,
+    });
   };
   const importCsv = (file) => importModelFile(model, importDefaults, file, listLabels);
   const groupBy = search.groupBy;
@@ -129,8 +134,7 @@ export function ActionView({ leaf, base, params }) {
   const pager = paged && (
     <span className="pager" role="group" aria-label={t('Pager')}>
       <span aria-live="polite">{win.label} / {win.total}</span>
-      <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={win.prev == null} onClick={() => goTo(win.prev)}>‹</button>
-      <button type="button" className="btn sm" aria-label={t('Next page')} disabled={win.next == null} onClick={() => goTo(win.next)}>›</button>
+      <PagerButtons prevLabel={t('Previous page')} nextLabel={t('Next page')} prevDisabled={win.prev == null} nextDisabled={win.next == null} onPrev={() => goTo(win.prev)} onNext={() => goTo(win.next)} />
     </span>
   );
   const listActions = leaf?.listActions ?? def.listActions ?? [];
@@ -195,6 +199,7 @@ export function ActionView({ leaf, base, params }) {
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
+      <button type="button" className="btn sm" onClick={exportXlsx}>⬇ {t('Export XLSX')}</button>
       {statementImport && !defaults.journal_id && <label className="import-journal-picker">
         <span>{t('Bank Journal')}</span>
         <select aria-label={t('Bank Journal')} value={selectedImportJournalId} onChange={(e) => setSelectedImportJournalId(e.target.value)}>

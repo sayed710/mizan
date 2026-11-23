@@ -1,6 +1,8 @@
 import { create, read, write } from '../orm.js';
 import { today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
+import { updatePartnerFollowUp } from './finance.js';
+import { appOpen } from '../access.js';
 
 export function isRotting(db, model, r) {
   if (!r) return false;
@@ -125,7 +127,16 @@ export const crmModels = {
       property_account_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
       property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
       user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson', hidden: true },
-      followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible', hidden: true },
+      followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible' },
+      followup_reminder_type: { type: 'selection', label: 'Reminders', options: [['automatic', 'Automatic'], ['manual', 'Manual']], default: 'automatic' },
+      followup_next_action_date: {
+        type: 'date',
+        label: 'Next Reminder',
+        editable: true,
+        compute: (r, db) => r.followup_lines?.find((line) => line.company_id === (db?.settings?.current_company_id ?? 1))?.followup_next_action_date ?? null,
+      },
+      last_reminder: { type: 'date', label: 'Last Reminder Date', readonly: true, compute: (r, db) => r.followup_lines?.find((line) => line.company_id === (db.settings?.current_company_id ?? 1))?.followup_date ?? null },
+      followup_line_id: { type: 'many2one', relation: 'account.followup.level', label: 'Reminder Level', readonly: true, compute: (r, db) => r.followup_lines?.find((line) => line.company_id === (db.settings?.current_company_id ?? 1))?.followup_last_level ?? null },
       followup_lines: {
         type: 'one2many',
         label: 'Follow-up Progress',
@@ -140,9 +151,9 @@ export const crmModels = {
           followup_channel: { type: 'char', label: 'Channel', hidden: true },
           followup_delivery_state: { type: 'selection', label: 'Delivery State', options: [['sent', 'Sent'], ['not_sent', 'Not Sent'], ['not_configured', 'Not Configured']], hidden: true },
           followup_delivery_outcome: { type: 'selection', label: 'Delivery Outcome', options: [['sent', 'Sent'], ['outbox_only', 'Outbox Only'], ['failed', 'Failed']], hidden: true },
-          followup_next_action_date: { type: 'date', label: 'Next Action Date', hidden: true },
-          followup_status: { type: 'selection', label: 'Status', options: [['in_need_of_action', 'In need of action'], ['with_overdue_invoices', 'With overdue invoices'], ['no_action_needed', 'No action needed']], hidden: true },
-          followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible', hidden: true },
+          followup_next_action_date: { type: 'date', label: 'Next Action Date' },
+          followup_status: { type: 'selection', label: 'Status', options: [['in_need_of_action', 'In need of action'], ['with_overdue_invoices', 'With overdue invoices'], ['no_action_needed', 'No action needed']] },
+          followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible' },
           no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
@@ -154,15 +165,66 @@ export const crmModels = {
         compute: (r, db) => (db?.records?.['res.partner.bank'] ?? []).filter((b) => b.partner_id === r?.id && b.active !== false).map((b) => read(db, 'res.partner.bank', b.id)),
         fields: {
           account_number: { type: 'char', label: 'Account Number', required: true },
-          bank_name: { type: 'char', label: 'Bank Name', placeholder: 'e.g. Bank of America' },
-          bank_bic: { type: 'char', label: 'BIC/SWIFT' },
+          bank_id: { type: 'many2one', relation: 'res.bank', label: 'Bank' },
+          bank_name: {
+            type: 'char',
+            label: 'Bank Name',
+            placeholder: 'e.g. Bank of America',
+            readonly: (r) => Boolean(r?.bank_id),
+          },
+          bank_bic: {
+            type: 'char',
+            label: 'BIC/SWIFT',
+            readonly: (r) => Boolean(r?.bank_id),
+          },
           holder_name: { type: 'char', label: 'Holder Name' },
           allow_out_payment: { type: 'boolean', label: 'Trust Bank Account' },
         },
-        newLine: () => ({ account_number: '', bank_name: '', bank_bic: '', allow_out_payment: false }),
+        newLine: () => ({ account_number: '', bank_id: null, bank_name: '', bank_bic: '', allow_out_payment: false }),
+        onchange: (line, key, db) => {
+          if (key === 'bank_id') {
+            const bank = line.bank_id && db ? read(db, 'res.bank', line.bank_id) : null;
+            return bank
+              ? { ...line, bank_name: bank.name ?? '', bank_bic: bank.bic ?? '' }
+              : { ...line, bank_name: '', bank_bic: '' };
+          }
+          return line;
+        },
       },
     },
-    defaults: () => ({ tag_ids: [] }),
+    defaults: () => ({ tag_ids: [], followup_reminder_type: 'automatic' }),
+    onchange: (r, key, db) => {
+      if (key === 'followup_next_action_date') {
+        const cId = db?.settings?.current_company_id ?? 1;
+        return {
+          followup_lines: updatePartnerFollowUp(r, cId, {
+            followup_next_action_date: r.followup_next_action_date || null,
+          }).followup_lines,
+        };
+      }
+      return {};
+    },
+    prepareWrite: (db, vals, before) => {
+      if (vals && 'followup_next_action_date' in vals) {
+        const cId = db?.settings?.current_company_id ?? 1;
+        const base = { ...before, ...vals };
+        const nextPartner = updatePartnerFollowUp(base, cId, {
+          followup_next_action_date: vals.followup_next_action_date || null,
+        });
+        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+      }
+      return null;
+    },
+    prepareCreate: (db, vals) => {
+      if (vals && 'followup_next_action_date' in vals) {
+        const cId = db?.settings?.current_company_id ?? 1;
+        const nextPartner = updatePartnerFollowUp(vals, cId, {
+          followup_next_action_date: vals.followup_next_action_date || null,
+        });
+        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+      }
+      return null;
+    },
     guard: (db, before, after) => validatePartnerBankLines(db, after?.id, after?.bank_ids),
     onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
@@ -179,12 +241,18 @@ export const crmModels = {
         { label: 'Sales', model: 'sale.order', field: 'partner_id', target: 'sales/quotations' },
         { label: 'Invoiced', model: 'account.move', field: 'partner_id', target: 'accounting/invoices', sum: 'amount_total' },
       ],
-      buttons: [{ label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
+      buttons: [{
+        label: 'Send Follow-up',
+        app: 'accounting',
+        when: (_r, db, user) => appOpen(db, user, 'accounting'),
+        visible: (_r, db, user) => appOpen(db, user, 'accounting'),
+        run: (db, r) => ({ db, go: `#/followup/send/${r.id}?company=${db.settings?.current_company_id ?? 1}` }),
+      }, { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
       groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'zip', 'country', 'pricelist_id', 'credit_limit', 'tag_ids']],
       tabs: [
         {
           label: 'Accounting',
-          fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id'],
+          fields: ['property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
       ],

@@ -5,7 +5,7 @@ import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
-import { applyRule, counterpartTaxLines, sameCommercialPartner, suggestRule } from './reconcile.js';
+import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { roundStatementAmount } from './bankstatement.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
@@ -522,6 +522,8 @@ export function matchPayment(db, line) {
 }
 
 function autoReconcile(db, line) {
+  db = mapStatementPartner(db, line);
+  line = read(db, 'account.bank.statement.line', line.id);
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? statementCompanyAmount(db, line)));
   if (!line.partner_id) {
@@ -996,9 +998,18 @@ function journalRunningBalances(db, journalId) {
   const lines = (db.records['account.bank.statement.line'] ?? [])
     .filter((l) => l.active !== false && l.journal_id === journalId)
     .sort(statementLineOrder);
+  const statements = new Map((db.records['account.bank.statement'] ?? []).map((s) => [s.id, s]));
   map = new Map();
+  const anchored = new Set();
   let balance = 0;
   for (const line of lines) {
+    if (line.statement_id && !anchored.has(line.statement_id)) {
+      anchored.add(line.statement_id);
+      const stmt = statements.get(line.statement_id);
+      if (stmt && stmt.journal_id === journalId && stmt.balance_start != null) {
+        balance = Number(stmt.balance_start) || 0;
+      }
+    }
     balance += Number(line.amount) || 0;
     if (currency) balance = roundCurrency(balance, currency);
     map.set(line.id, balance);
@@ -1119,6 +1130,8 @@ export const bankModels = {
         {
           label: 'Apply Reconciliation Model', when: (r) => r.state === 'to_check',
           run: (db, r) => {
+            db = mapStatementPartner(db, r);
+            r = read(db, 'account.bank.statement.line', r.id);
             const model = modelFor(db, r);
             if (!model) throw new Error('No reconciliation model matches this transaction');
             return { db: applyRule(db, model, r) };

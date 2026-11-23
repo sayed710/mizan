@@ -40,18 +40,18 @@ export function creditWarning(db, partnerId, amount, document = {}) {
  * or (when no reference is set) the same amount and bill date.
  */
 export function duplicateBillWarning(db, bill) {
-  if (!bill || bill.move_type !== 'in_invoice' || bill.state === 'cancel' || !bill.partner_id || !db) return '';
+  if (!bill || !['in_invoice', 'in_refund'].includes(bill.move_type) || bill.state === 'cancel' || !bill.partner_id || !db) return '';
   const companyId = bill.company_id ?? 1;
   const ref = String(bill.ref ?? '').trim();
   const docCurr = documentCurrency(db, bill);
   const billTotal = roundCurrency(total(bill, db), docCurr);
-  const candidates = (db.records?.['account.move'] ?? []).filter((m) =>
+  const candidates = search(db, 'account.move').filter((m) =>
     m.id !== bill.id
     && m.active !== false
-    && m.move_type === 'in_invoice'
+    && m.move_type === bill.move_type
     && m.state !== 'cancel'
     && (m.company_id ?? 1) === companyId
-    && m.partner_id === bill.partner_id
+    && sameCommercialPartner(db, m.partner_id, bill.partner_id)
   );
   const dups = ref
     ? candidates.filter((m) => String(m.ref ?? '').trim().toLowerCase() === ref.toLowerCase())
@@ -72,7 +72,7 @@ export function duplicateBillWarning(db, bill) {
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
 /** Hashed fields that can never change once an entry receives an inalterability hash. */
-const HASHED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
+const HASHED_FIELDS = ['ref', 'name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
 export const moveDate = (m) => m?.date ?? m?.invoice_date ?? today();
@@ -244,10 +244,11 @@ export function accountDeleteGuard(db, account, pending = db) {
 }
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active'];
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(db, before, after) {
+  if (before && changedFields(before, after, ['tax_closing_lines'])) return 'Tax closing line links cannot be changed';
   if (before?.state === 'posted' && after.state === 'posted') {
     if (changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
   }
@@ -674,7 +675,7 @@ export function paymentInvariant(db, after) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const currencyId = invoice ? invoice.currency_id : after.currency_id;
+  const currencyId = after.currency_id ?? invoice?.currency_id;
   const expected = currencyId
     ? toCompany(db, currencyId, after.amount, after.date, invoice?.company_id ?? after.company_id)
     : companyRound(Number(after.amount));
@@ -1039,9 +1040,46 @@ function closingPeriodCalculation(db, ret, companyId) {
     return [...groups][0];
   };
 
+  // References use the move and the ledger's stable embedded-line identity. A linked
+  // posted closing is the authority; cancelled closings no longer cover anything.
+  const closingIds = ret.closing_move_ids ?? (ret.id ? read(db, 'account.return', ret.id)?.closing_move_ids : null) ?? [];
+  const ownClosing = ['submitted', 'paid'].includes(ret.state)
+    ? closingIds.map((id) => read(db, 'account.move', id))
+      .find((move) => move?.state === 'posted' && (move.company_id ?? 1) === companyId)
+    : null;
+  const ref = (line) => {
+    const identity = JSON.parse(line.line_identity);
+    delete identity.blocked;
+    return JSON.stringify([line.move_id, JSON.stringify(identity)]);
+  };
+  const ownRefs = Array.isArray(ownClosing?.tax_closing_lines) ? new Set(ownClosing.tax_closing_lines) : null;
+  const covered = new Set();
+  const legacyPeriods = [];
+  for (const other of db.records['account.return'] ?? []) {
+    if (other.id === ret.id) continue;
+    for (const id of other.closing_move_ids ?? []) {
+      const move = read(db, 'account.move', id);
+      if (!move || move.state !== 'posted' || move.tax_return_id !== other.id || (move.company_id ?? 1) !== companyId) continue;
+      if (Array.isArray(move.tax_closing_lines)) move.tax_closing_lines.forEach((key) => covered.add(key));
+      else legacyPeriods.push(other);
+    }
+  }
+  const isLegacyOwnClosing = Boolean(ownClosing && !Array.isArray(ownClosing.tax_closing_lines));
+  const available = (line) => {
+    if (ownRefs) return ownRefs.has(ref(line));
+    if (isLegacyOwnClosing) return true;
+    return !covered.has(ref(line))
+      && !legacyPeriods.some((period) => line.date >= period.date_from && line.date <= period.date_to);
+  };
+  const itemScope = isLegacyOwnClosing
+    ? { from: ret.date_from, to: ret.date_to, company_id: companyId }
+    : { to: ret.date_to, company_id: companyId };
+  const sourceLines = journalItems(db, itemScope)
+    .filter((line) => !line.is_closing && !line.is_tax_closing && !line.is_tax_payment && isItemClosable(line) && available(line));
+  const sourceRefs = [...new Set(sourceLines.map(ref))].sort();
   const balances = new Map();
   const groupNets = new Map();
-  for (const line of journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: companyId })) {
+  for (const line of sourceLines) {
     if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
     if (isItemClosable(line)) {
       const net = (Number(line.debit) || 0) - (Number(line.credit) || 0);
@@ -1052,13 +1090,13 @@ function closingPeriodCalculation(db, ret, companyId) {
     }
   }
 
-  const periodItems = taxItems(db, { from: ret.date_from, to: ret.date_to, company_id: companyId });
-  const closableItems = periodItems.filter(isItemClosable);
+  const periodItems = taxItems(db, itemScope);
+  const closableItems = periodItems.filter((line) => isItemClosable(line) && available(line));
   const closableOutput = moneyRound(closableItems.filter((l) => l.side === 'sale').reduce((s, l) => s + l.tax, 0));
   const closableInput = moneyRound(closableItems.filter((l) => l.side === 'purchase').reduce((s, l) => s + l.tax, 0));
   const closablePayable = moneyRound(closableOutput - closableInput);
 
-  return { currency, moneyRound, balances, groupNets, closablePayable };
+  return { currency, moneyRound, balances, groupNets, closablePayable, sourceRefs };
 }
 
 /** Closable payable/recoverable total for a return (single company or tax unit), without posting a closing entry. */
@@ -1083,7 +1121,7 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   }
   ret = { ...ret, company_id: companyId, tax_unit_id: null };
   validateTaxReturnPeriod(db, ret);
-  const { currency, moneyRound, balances, groupNets, closablePayable } = closingPeriodCalculation(db, ret, companyId);
+  const { currency, moneyRound, balances, groupNets, closablePayable, sourceRefs } = closingPeriodCalculation(db, ret, companyId);
   const tolerance = moneyRound(TAX_CLOSING_ROUNDING_MINOR_UNITS * Number(currency?.rounding ?? 0.01));
 
   const lines = [];
@@ -1162,7 +1200,7 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   if (!lines.length) {
     lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
   }
-  return { lines, obligations, payable: closablePayable, payableAccount, receivableAccount, partner: partner.id };
+  return { lines, obligations, payable: closablePayable, payableAccount, receivableAccount, partner: partner.id, sourceRefs };
 }
 
 /** Build the representative company payment summary and per-company inter-company settlement entries for a tax unit return. */
@@ -1287,7 +1325,7 @@ export function taxUnitPaymentEntryError(db, payment, entry, spec = null) {
 }
 
 /** Validate a submitted closing against its linked return and the posted ledger. */
-export function taxClosingMatchesReturn(db, ret) {
+export function taxClosingMatchesReturn(db, ret, validateCoverage = false) {
   const ids = ret.closing_move_ids ?? [];
   // The candidate link may not yet be written on a local transition.
   const staged = { ...db, records: { ...db.records, 'account.return': (db.records['account.return'] ?? []).map((r) => r.id === ret.id ? ret : r) } };
@@ -1300,6 +1338,10 @@ export function taxClosingMatchesReturn(db, ret) {
       if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
         || move.date !== ret.date_to || move.invoice_date !== ret.date_to) return false;
       const spec = taxClosingSpec(staged, ret, companyId);
+      if (validateCoverage) {
+        const open = closingPeriodCalculation(staged, { ...ret, state: 'reviewed' }, companyId);
+        if (JSON.stringify(move.tax_closing_lines) !== JSON.stringify(open.sourceRefs)) return false;
+      }
       const currency = findCompanyCurrencyRecord(staged, companyId);
       payable = round(payable + spec.payable);
       const expected = spec.lines.map((line) => {
@@ -1322,9 +1364,10 @@ export function postTaxReturnClosing(db, returnId) {
   const specs = returnCompanies(db, ret).map((company) => ({ company, ...taxClosingSpec(db, ret, company) }));
   let next = db;
   const ids = [];
-  for (const { company, lines } of specs) {
+  for (const { company, lines, sourceRefs } of specs) {
     const entry = postEntry(next, { journal: 'MISC', date: ret.date_to, ref: `Tax Closing: ${ret.name}`, lines, company, tax_return_id: ret.id });
-    next = entry.db;
+    next = { ...entry.db, records: { ...entry.db.records, 'account.move': entry.db.records['account.move'].map((move) =>
+      move.id === entry.id ? { ...move, tax_closing_lines: sourceRefs } : move) } };
     ids.push(entry.id);
   }
   return { db: next, ids, payable: round(specs.reduce((s, spec) => s + spec.payable, 0)) };
@@ -1494,6 +1537,7 @@ function ageOtherEntries(db, kind, at, moves, add) {
       const matched = (matchings.byLine.get(lineKey(move.id, index)) ?? []).reduce((sum, link) => {
         const otherId = link.debit_move_id === move.id ? link.credit_move_id : link.debit_move_id;
         const other = read(db, 'account.move', otherId);
+        if (!other || other.state !== 'posted' || other.move_type !== 'entry') return sum;
         const otherIndex = link.debit_move_id === move.id ? link.credit_line_index : link.debit_line_index;
         const otherDate = other?.line_ids?.[otherIndex]?.date ?? other?.date ?? other?.invoice_date;
         return otherDate && otherDate <= at && (!link.date || link.date <= at) ? sum + Number(link.amount) : sum;
@@ -1504,8 +1548,8 @@ function ageOtherEntries(db, kind, at, moves, add) {
   }
 }
 
-/** The reporting cutoff is never later than the day the report is run. */
-export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
+/** Use the requested reporting cutoff, defaulting to today. */
+export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date' } = {}) {
@@ -1983,6 +2027,12 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
     const detail = `${levelName}: ${summaryAmount} ${dueWord} — ${invoices}. ${level?.message ?? ''}`.trim();
     const channelText = channel ? `sent by ${channel}` : 'processed';
     const noteBody = `Payment reminder ${channelText}${level ? ` (${levelName})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
+    for (const invoice of part.invoices.filter((move) => Number(move.amount_residual) > 0 && (part.upcoming ? Boolean(move.upcoming) : !move.upcoming))) {
+      nextDb = postNote(nextDb, 'account.move', invoice.id, `Payment reminder ${channelText}${level ? ` (${levelName})` : ''}.`, null, {
+        ...(channel ? { delivery_channel: channel } : {}),
+        delivery_state: 'sent',
+      });
+    }
     nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part), {
       ...(channel ? { delivery_channel: channel } : {}),
       delivery_state: 'sent',
@@ -2008,7 +2058,9 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
         followup_delivery_outcome: 'sent',
         ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
       });
-    nextDb = write(nextDb, 'res.partner', partnerId, { followup_lines: updatedPartner.followup_lines });
+    nextDb = write(nextDb, 'res.partner', partnerId, {
+      followup_lines: updatedPartner.followup_lines,
+    });
   }
 
   return nextDb;
@@ -2034,6 +2086,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
   let nextDb = db;
 
   for (const partner of partners.values()) {
+    if (partner.followup_reminder_type === 'manual') continue;
     const lines = partner.followup_lines ?? [];
     for (const line of lines) {
       const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_activity_level != null || line.followup_delivery_state != null || line.followup_delivery_outcome != null;
@@ -2060,7 +2113,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
     const companyId = f.invoices[0].company_id ?? 1;
     const level = followUpLevel(nextDb, f, at);
     const partner = partners.get(f.partner_id);
-    if (!level || !partner) return nextDb;
+    if (!level || !partner || partner.followup_reminder_type === 'manual') return nextDb;
 
     const currentPartner = read(nextDb, 'res.partner', partner.id) ?? partner;
     const progress = partnerFollowUp(currentPartner, companyId);
@@ -2108,7 +2161,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
     if (channel === 'email' && partner.email?.trim() && deliver) {
-      const message = { to: partner.email.trim(), subject: levelName, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
+      const message = followUpEmail(nextDb, f, level, partner);
       // Validate the bookkeeping before attempting an irreversible delivery.
       const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
       /** Interpret mail-transport outcome strictly per the single delivery contract. */
@@ -2174,9 +2227,43 @@ const currencyOf = (db, move) => {
 export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${formatCurrency(amount, currency, '')} ${currency.name}`).join(', ');
 export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${formatCurrency(m.amount_residual, documentCurrency(db, m), '')} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
 
-const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
+/** Current open invoices and per-currency balances for a customer letter. */
+export function followUpLetter(db, partnerId, companyId, at = today()) {
+  const reminder = followUps(db, at, { companyId, ignoreNextActionDate: true }).flatMap(followUpCompanies).find((f) => f.partner_id === partnerId && f.company_id === companyId);
+  if (!reminder) throw new Error('This customer has no overdue invoices');
+  const level = followUpLevel(db, reminder, at);
+  if (!level) throw new Error('No follow-up level applies to this customer');
+  const openInvoices = search(db, 'account.move').filter((m) => m.partner_id === partnerId && (m.company_id ?? 1) === companyId && m.state === 'posted' && m.move_type === 'out_invoice' && m.active !== false && !m.exclude_from_followup && Number(m.amount_residual) > 0 && (!m.invoice_date || m.invoice_date <= at)).map((m) => {
+    const currency = documentCurrency(db, m);
+    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false });
+    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const late = dues.filter((d) => d.date && d.date < at).reduce((sum, d) => sum + d.amount, 0);
+    const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), currency);
+    return { ...m, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount };
+  });
+  const creditRows = (reminder.invoices ?? [])
+    .filter((m) => Number(m.amount_residual) < 0)
+    .map((c) => ({
+      ...c,
+      invoice_date: c.invoice_date ?? c.date ?? '',
+      followup_currency: c.followup_currency ?? documentCurrency(db, c) ?? companyCurrencyRecord(db, companyId),
+      overdue: false,
+      overdueAmount: 0,
+    }));
+  const invoices = [...openInvoices, ...creditRows];
+  const due = followUpSummary(invoices).totals;
+  const overdue = reminder.upcoming ? [] : reminder.totals;
+  return { reminder, level, invoices, due, overdue };
+}
+
+/** The automatic and manual email share the same subject and introductory text. */
+export function followUpEmail(db, reminder, level, partner) {
+  return { to: partner.email.trim(), subject: followUpLevelName(level), text: `${level.message ?? ''}\n${followUpText(db, reminder)}`.trim() };
+}
+
+const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate = true } = {}) => {
   const allowed = new Set(search(scope, 'account.move').map((move) => move.id));
-  const f = followUps(db, at).find((x) => x.partner_id === partnerId);
+  const f = followUps(db, at, { companyId: companyId ?? reminder?.company_id ?? null, ignoreNextActionDate }).find((x) => x.partner_id === partnerId);
   if (!f) throw new Error('This customer has no overdue invoices');
   const allGroups = followUpCompanies({ ...f, invoices: f.invoices.filter((invoice) => allowed.has(invoice.id)) });
   const targetCompany = companyId ?? reminder?.company_id ?? null;
@@ -2186,19 +2273,19 @@ const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => 
 };
 
 /** Record preparation without claiming that the email was sent. */
-export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
-  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
+export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, ignoreNextActionDate = true } = {}) {
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
   return groups.reduce((next, part) => postNote(next, 'res.partner', partnerId,
     `Payment reminder opened in mail app:\n${followUpText(scope, part)}`, reminderSource(part)), db);
 }
 
 /** Record a reminder confirmed sent by hand. */
-export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null } = {}) {
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null, ignoreNextActionDate = true } = {}) {
   if (!['email', 'sms', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
   if (channel === 'email' && !read(db, 'res.partner', partnerId)?.email?.trim()) {
     throw new Error('A customer email address is required to send an email reminder');
   }
-  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
   return applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate);
 }
 

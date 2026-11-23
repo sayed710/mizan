@@ -11,7 +11,8 @@ import { downloadXlsx } from '../xlsx.js';
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { periodsFor, selectedOptionIds } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, PERIODS } from './reportNavigation.js';
-import { ReportPrintView } from './ReportPrintView.jsx';
+import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
+import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 
 function RowCells({ values, variance, showVariance }) {
   return (
@@ -138,15 +139,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   );
 
   const expandableCodes = data.rows.filter(isExpandableLine).map((line) => line.code);
-  const allUnfolded = expandableCodes.length > 0 && expandableCodes.every((code) => openCodes.has(code));
-  const toggleAll = () => setOpenCodes(allUnfolded ? new Set() : new Set(expandableCodes));
-
-  const toggle = (code) => setOpenCodes((prev) => {
-    const next = new Set(prev);
-    if (next.has(code)) next.delete(code);
-    else next.add(code);
-    return next;
-  });
+  const toggle = (code) => setOpenCodes((prev) => toggleReportFold(prev, code));
 
   const exportCsv = () => {
     const baseName = statementKind || report.code || report.name || 'report';
@@ -290,11 +283,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
         <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
       </label>
       <span className="spacer" />
-      {expandableCodes.length > 0 && (
-        <button type="button" className="btn sm" aria-pressed={allUnfolded} onClick={toggleAll}>
-          {t(allUnfolded ? 'Collapse All' : 'Unfold All')}
-        </button>
-      )}
+      <ReportFoldAll keys={expandableCodes} open={openCodes} onToggle={() => setOpenCodes((prev) => toggleAllReportFolds(prev, expandableCodes))} />
       <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
       <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>

@@ -28,6 +28,8 @@ const Spreadsheet = view(() => import('./views/Spreadsheet.jsx'), 'Spreadsheet')
 const Studio = view(() => import('./views/Studio.jsx'), 'Studio');
 const Kitchen = view(() => import('./views/Kitchen.jsx'), 'Kitchen');
 const Knowledge = view(() => import('./views/Knowledge.jsx'), 'Knowledge');
+const FollowUpLetter = view(() => import('./views/FollowUpLetter.jsx'), 'FollowUpLetter');
+const FollowUpWizard = view(() => import('./views/FollowUpLetter.jsx'), 'FollowUpWizard');
 const PrintDoc = view(() => import('./views/PrintDoc.jsx'), 'PrintDoc');
 const AnalysisPage = view(() => import('./views/Analysis.jsx'), 'AnalysisPage');
 const BankReconcile = view(() => import('./views/BankReconcile.jsx'), 'BankReconcile');
@@ -56,16 +58,21 @@ export function App() {
   useEffect(() => {
     const follow = (e) => {
       const { app: appId, menu, id, query } = parseHash();
-      const app = apps.find((a) => a.id === appId);
-      const model = app && findLeaf(app, menu)?.model;
-      const moved = model && e.detail[model]?.[Number(id)];
-      if (moved) location.replace(`#/${appId}/${menu}/${moved}${query ? `?${query}` : ''}`);
+      const model = appId === 'print' ? menu : apps.find((a) => a.id === appId) && findLeaf(apps.find((a) => a.id === appId), menu)?.model;
+      const moved = model && (e.detail[model]?.[Number(id)] ?? e.detail[model]?.[id]);
+      if (moved) {
+        const next = `#/${appId}/${menu}/${moved}${query ? `?${query}` : ''}`;
+        if (typeof location.replace === 'function') location.replace(next);
+        else location.hash = next;
+      }
     };
     window.addEventListener('mizan:remapped', follow);
     return () => window.removeEventListener('mizan:remapped', follow);
   }, []);
 
-  if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} /></Suspense>;
+  if (route.app === 'print' && route.menu === 'followup') return <Suspense fallback={<Loading />}><FollowUpLetter partnerId={route.id} companyId={route.params.get('company') || undefined} /></Suspense>;
+  if (route.app === 'followup' && route.menu === 'send') return <Suspense fallback={<Loading />}><FollowUpWizard partnerId={route.id} companyId={route.params.get('company') || undefined} onClose={() => history.back()} /></Suspense>;
+  if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} proforma={route.params.get('report') === 'proforma'} /></Suspense>;
   if (route.app === 'open') {
     // #/open/<model>/<id>: jump to the record inside whichever app shows that model.
     location.replace(`${targetOf(route.menu, db.settings?.uninstalled)}/${route.id}`);

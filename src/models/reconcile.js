@@ -1,7 +1,9 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
+import { today } from './common.js';
 import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
@@ -22,8 +24,9 @@ const parseStrictNumber = (raw) => {
 // (a{1,3}){1,2}, stay allowed.
 // ponytail: shape check, not a full regex analyser (does not parse character classes or lookarounds); isolate matching in a worker if patterns ever need nested repeats or alternations.
 const NESTED_REPEAT = [
-  /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\d*\})/,
+  /\((?:[^()\x5c]|\x5c.)*(?:[+*]|\{\d+,\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+(?:,\d*)?\})/,
   /\((?:[^()\x5c]|\x5c.)*(?:[+*?|]|\{\d+,?\d*\})(?:[^()\x5c]|\x5c.)*\)(?:[+*]|\{\d+,\})/,
+  /\((?:[^()\x5c]|\x5c.)*[|][\s\S]*?\)+(?:[+*]|\{\d+(?:,\d*)?\})/,
 ];
 
 /** Compile a regular expression case-insensitively, returning null if invalid, empty or prone to runaway backtracking. */
@@ -36,6 +39,9 @@ function compileRegex(pattern) {
     return null;
   }
 }
+
+/** Whether a stored pattern matches the text; patterns are vetted by compileRegex (invalid or runaway ones never match). */
+const regexMatches = (pattern, text) => compileRegex(pattern)?.test(String(text ?? '')) ?? false;
 
 /** Whether the rule operates as an invoice/bill matching rule (supports legacy invoice_matching). */
 export const isMatchingRule = (rule) => rule?.rule_type === 'matching_rule' || rule?.rule_type === 'invoice_matching';
@@ -474,6 +480,10 @@ export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) throw new Error('Reconciliation model belongs to another company');
+  if (!line.partner_id) {
+    db = mapStatementPartner(db, line);
+    line = read(db, 'account.bank.statement.line', line.id) ?? line;
+  }
   if (!ruleMatches(rule, line)) throw new Error('Reconciliation model does not apply to this transaction');
   const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_id);
   if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
@@ -540,24 +550,52 @@ export function applyRule(db, rule, line) {
 
 const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => r.active !== false).sort(bySequence);
 
+/** Apply the first configured partner mapping before evaluating reconciliation rules. */
+export function mapStatementPartner(db, line) {
+  if (!line || line.partner_id || line.state === 'reconciled') return db;
+  if (line.bank_move_id || line.move_id) {
+    const lock = recordLockDate(db, line);
+    if (lock && String(line.date ?? today()) <= lock) return db;
+  }
+  const lineCompany = line.company_id ?? 1;
+  for (const rule of activeRules(db)) {
+    if (rule.company_id && rule.company_id !== lineCompany) continue;
+    if ((rule.match_journal_ids ?? []).length && !rule.match_journal_ids.includes(line.journal_id)) continue;
+    for (const mapping of rule.partner_mapping_line_ids ?? []) {
+      if (!mapping.partner_id || (!mapping.payment_ref_regex && !mapping.narration_regex)) continue;
+      if (mapping.payment_ref_regex && !regexMatches(mapping.payment_ref_regex, line.payment_ref)) continue;
+      if (mapping.narration_regex && !regexMatches(mapping.narration_regex, line.narration)) continue;
+      const partner = read(db, 'res.partner', mapping.partner_id);
+      if (partner && partner.active !== false && (!partner.company_id || partner.company_id === lineCompany)) {
+        return write(db, 'account.bank.statement.line', line.id, { partner_id: mapping.partner_id });
+      }
+    }
+  }
+  return db;
+}
+
 /**
  * Reconcile every 'to_check' line with the first matching auto-validated active rule (by sequence).
- * Runs unattended on the server, so regex rules (user patterns could backtrack for ages) are left to manual use,
- * and a line that fails (locked period, bad rule) is skipped rather than stopping the run. A rule that already
- * allocated part of a line left the rest for another match, so it is not applied to that line again; other
- * rules and manual matching remain available for the remainder.
+ * Lines whose regex amount pattern does not match the label are skipped by `writeOff`, and a line that fails
+ * (locked period, bad rule) is skipped rather than stopping the run. A rule that already allocated part of a
+ * line left the rest for another match, so it is not applied to that line again; other rules and manual
+ * matching remain available for the remainder.
  */
 export function autoReconcile(db) {
-  const rules = activeRules(db).filter((r) => isAutoRule(r) && !(r.line_ids ?? []).some((l) => l.amount_type === 'regex'));
+  const rules = activeRules(db).filter(isAutoRule);
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
-    const line = read(acc, 'account.bank.statement.line', l.id);
-    const rule = rules.find((r) => ruleMatches(r, line) && !(line.allocations ?? []).some((a) => a.reconcile_model_id === r.id));
-    if (!rule) return acc;
-    try {
-      return applyRule(acc, rule, line);
-    } catch {
-      return acc;
+    const mappedDb = mapStatementPartner(acc, read(acc, 'account.bank.statement.line', l.id));
+    const line = read(mappedDb, 'account.bank.statement.line', l.id);
+    for (const rule of rules) {
+      if (!ruleMatches(rule, line) || (line.allocations ?? []).some((a) => a.reconcile_model_id === rule.id)) continue;
+      try {
+        const next = applyRule(mappedDb, rule, line);
+        if (next !== mappedDb) return next;
+      } catch {
+        return mappedDb;
+      }
     }
+    return mappedDb;
   }, db);
 }
 
@@ -577,6 +615,17 @@ function guardReconcileModel(db, _before, rule) {
     if (isBlank(rule.match_label_param)) return 'Label parameter is required for the selected label condition';
     if (rule.match_label === 'match_regex' && !compileRegex(rule.match_label_param)) {
       return 'Invalid regular expression in label parameter';
+    }
+  }
+  for (const mapping of rule.partner_mapping_line_ids ?? []) {
+    for (const pattern of [mapping.payment_ref_regex, mapping.narration_regex]) {
+      if (pattern && !compileRegex(pattern)) return 'Invalid regular expression in partner mapping';
+    }
+    if (mapping.partner_id) {
+      const partner = read(db, 'res.partner', mapping.partner_id);
+      if (!partner || partner.active === false || (rule.company_id && partner.company_id && partner.company_id !== rule.company_id)) {
+        return 'Partner in partner mapping must belong to the model company';
+      }
     }
   }
   if (rule.payment_tolerance != null && Number(rule.payment_tolerance) < 0) {
@@ -712,6 +761,21 @@ export const reconcileModels = {
           return line;
         },
       },
+      partner_mapping_line_ids: {
+        type: 'one2many',
+        label: 'Partner Mapping',
+        fields: {
+          payment_ref_regex: { type: 'char', label: 'Label Regex' },
+          narration_regex: { type: 'char', label: 'Notes Regex' },
+          partner_id: {
+            type: 'many2one',
+            relation: 'res.partner',
+            label: 'Partner',
+            domain: (p, r) => p.active !== false && (!r?.company_id || !p.company_id || p.company_id === r.company_id),
+          },
+        },
+        newLine: () => ({ payment_ref_regex: '', narration_regex: '', partner_id: null }),
+      },
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
@@ -785,9 +849,10 @@ export const reconcileModels = {
           'payment_tolerance_type',
         ]] : []),
       ],
-      tabs: (r) => (isMatchingRule(r) && !(Number(r?.payment_tolerance) > 0)
-        ? []
-        : [{ label: 'Counterpart Items', fields: ['line_ids'] }]),
+      tabs: (r) => [
+        ...(isMatchingRule(r) && !(Number(r?.payment_tolerance) > 0) ? [] : [{ label: 'Counterpart Items', fields: ['line_ids'] }]),
+        { label: 'Partner Mapping', fields: ['partner_mapping_line_ids'] },
+      ],
     },
   },
 };

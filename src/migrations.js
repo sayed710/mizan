@@ -1,3 +1,4 @@
+import { purchaseLineId } from './models/purchase-links.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -22,7 +23,8 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
-import { migratePaymentMethods } from './models/paymentmethod.js';
+import { ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
+import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 
 export function migrateStages(db) {
@@ -1773,6 +1775,230 @@ MIGRATIONS.push({ version: 60, name: 'tax-repartition-use-in-tax-closing', up: (
   };
 } });
 MIGRATIONS.push({ version: 61, name: 'payment-methods-and-journal-lines', up: migratePaymentMethods });
+
+function convertLegacyBoardLineCreditAdjustments(line, deferral, movesById) {
+  const creditMoveIds = new Set(
+    (deferral?.credit_adjustments ?? []).flatMap((adj) => [
+      ...(Array.isArray(adj?.move_ids) ? adj.move_ids : []),
+      ...(adj?.move_id != null ? [adj.move_id] : []),
+    ])
+  );
+  const isCreditReversal = Boolean(line.reversal_move_id && creditMoveIds.has(line.reversal_move_id));
+  const moveIds = [
+    ...(Array.isArray(line.credit_adjustment_move_ids) ? line.credit_adjustment_move_ids : []),
+    ...(isCreditReversal ? [line.reversal_move_id] : []),
+  ];
+  const uniqueMoveIds = [...new Set(moveIds.filter((id) => id != null))];
+  if (!uniqueMoveIds.length) {
+    if (Number(line.credit_adjusted_amount) > 0) {
+      throw new Error(`Cannot determine move and date for credit adjusted amount on deferral ${deferral.id}`);
+    }
+    return line;
+  }
+  const adjustments = uniqueMoveIds.map((mid) => {
+    const m = movesById.get(mid);
+    if (!m) throw new Error(`Cannot determine move ${mid} for credit adjustment on deferral ${deferral.id}`);
+    const date = m.date ?? m.invoice_date;
+    if (!date || typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error(`Cannot determine date for credit adjustment move ${mid} on deferral ${deferral.id}`);
+    }
+    const moveAmt = (m.line_ids ?? [])
+      .filter((l) => l.account_id === deferral.recognition_account_id)
+      .reduce((sum, l) => sum + Math.max(Number(l.debit) || 0, Number(l.credit) || 0), 0);
+    const amount = moveAmt > 0 ? moveAmt
+      : uniqueMoveIds.length === 1 && Number(line.credit_adjusted_amount) > 0 ? Number(line.credit_adjusted_amount)
+      : uniqueMoveIds.length === 1 && isCreditReversal && line.reversal_move_id === mid && Number(line.amount) > 0 ? Math.abs(Number(line.amount))
+      : 0;
+    if (!(amount > 0)) throw new Error(`Cannot determine amount for credit adjustment move ${mid} on deferral ${deferral.id}`);
+    return { move_id: mid, amount, date };
+  });
+  const { credit_adjustment_move_ids: _cams, credit_adjusted_amount: _caa, ...rest } = line;
+  return { ...rest, credit_adjustments: adjustments };
+}
+
+export function migrateDeferralCreditAdjustments(db) {
+  const deferrals = db?.records?.['account.deferral'];
+  if (!Array.isArray(deferrals) || !deferrals.length) return db;
+  const movesById = new Map((db?.records?.['account.move'] ?? []).map((m) => [m.id, m]));
+  let changed = false;
+
+  const convertLine = (line, d) => {
+    if (!line || typeof line !== 'object') return line;
+    if (Array.isArray(line.credit_adjustments) && line.credit_adjustments.length > 0) {
+      for (const adj of line.credit_adjustments) {
+        if (!adj?.date || !(Number(adj.amount) > 0) || adj.move_id == null) {
+          throw new Error(`Invalid credit adjustment on deferral ${d.id}`);
+        }
+      }
+      return line;
+    }
+    return convertLegacyBoardLineCreditAdjustments(line, d, movesById);
+  };
+
+  const nextDeferrals = deferrals.map((d) => {
+    let schedChanged = false;
+    let nextBoard = d.board;
+    if (Array.isArray(d?.board) && d.board.length) {
+      let boardChanged = false;
+      nextBoard = d.board.map((line) => {
+        const converted = convertLine(line, d);
+        if (converted !== line) boardChanged = true;
+        return converted;
+      });
+      if (boardChanged) schedChanged = true;
+    }
+
+    let nextCreditAdjustments = d.credit_adjustments;
+    if (Array.isArray(d?.credit_adjustments) && d.credit_adjustments.length) {
+      let caChanged = false;
+      nextCreditAdjustments = d.credit_adjustments.map((entry) => {
+        if (!entry || typeof entry !== 'object' || !Array.isArray(entry.board_before)) return entry;
+        let bbChanged = false;
+        const nextBoardBefore = entry.board_before.map((line) => {
+          const converted = convertLine(line, d);
+          if (converted !== line) bbChanged = true;
+          return converted;
+        });
+        if (bbChanged) {
+          caChanged = true;
+          return { ...entry, board_before: nextBoardBefore };
+        }
+        return entry;
+      });
+      if (caChanged) schedChanged = true;
+    }
+
+    if (schedChanged) {
+      changed = true;
+      return {
+        ...d,
+        ...(nextBoard !== d.board ? { board: nextBoard } : {}),
+        ...(nextCreditAdjustments !== d.credit_adjustments ? { credit_adjustments: nextCreditAdjustments } : {}),
+      };
+    }
+    return d;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.deferral': nextDeferrals } } : db;
+}
+
+MIGRATIONS.push({ version: 62, name: 'canonical-deferral-credit-adjustments', up: migrateDeferralCreditAdjustments });
+
+export function migrateFollowUpNextActionDate(db) {
+  if (!db?.records?.['res.partner']) return db;
+  const currentCompanyId = db.settings?.current_company_id ?? 1;
+  let changed = false;
+  const partners = db.records['res.partner'].map((p) => {
+    let partnerChanged = false;
+    let nextPartner = p;
+
+    if (!nextPartner.followup_reminder_type) {
+      nextPartner = { ...nextPartner, followup_reminder_type: 'automatic' };
+      partnerChanged = true;
+    }
+
+    if ('followup_next_action_date' in nextPartner) {
+      partnerChanged = true;
+      const { followup_next_action_date, ...rest } = nextPartner;
+      if (followup_next_action_date != null) {
+        const lines = [...(nextPartner.followup_lines ?? [])];
+        const idx = lines.findIndex((l) => l.company_id === currentCompanyId);
+        if (idx >= 0) {
+          if (lines[idx].followup_next_action_date == null) {
+            lines[idx] = { ...lines[idx], followup_next_action_date };
+          }
+        } else {
+          lines.push({ company_id: currentCompanyId, followup_next_action_date });
+        }
+        nextPartner = { ...rest, followup_lines: lines };
+      } else {
+        nextPartner = rest;
+      }
+    }
+
+    if (partnerChanged) changed = true;
+    return nextPartner;
+  });
+  if (!changed) return db;
+  return { ...db, records: { ...db.records, 'res.partner': partners } };
+}
+export function migrateElectronicAndSepa(db) {
+  const next = ensurePaymentMethods(db);
+  const journals = next?.records?.['account.journal'];
+  if (!Array.isArray(journals)) return next;
+  let changed = false;
+  const updated = journals.map((j) => {
+    if (j.type === 'bank' && !j.sepa_pain_version) {
+      changed = true;
+      return { ...j, sepa_pain_version: DEFAULT_SEPA_PAIN_VERSION };
+    }
+    return j;
+  });
+  return changed ? { ...next, records: { ...next.records, 'account.journal': updated } } : next;
+}
+MIGRATIONS.push({ version: 63, name: 'partner-followup-next-action-date-per-company', up: migrateFollowUpNextActionDate });
+MIGRATIONS.push({ version: 64, name: 'vendor-bill-line-purchase-line-id', up: (db) => {
+  const orders = db.records?.['purchase.order'] ?? [];
+  let nextId = Math.max(0, ...orders.flatMap((po) => (po.order_line ?? []).map((line) => Number(line.id) || 0)));
+  const nextOrders = orders.map((po) => ({ ...po, order_line: (po.order_line ?? []).map((line) => line.id == null ? { ...line, id: ++nextId } : line) }));
+  const nextMoves = (db.records?.['account.move'] ?? []).map((move) => {
+    if (move.inalterable_hash || !['in_invoice', 'in_refund'].includes(move.move_type) || !Array.isArray(move.invoice_line_ids)) return move;
+    return { ...move, invoice_line_ids: move.invoice_line_ids.map((line) => {
+      if (!line.purchase_line_key) return line;
+      const id = purchaseLineId({ records: { 'purchase.order': nextOrders } }, line, move.purchase_id);
+      if (id == null) return line;
+      const { purchase_line_key, ...rest } = line;
+      return { ...rest, purchase_line_id: id };
+    }) };
+  });
+  return { ...db, records: { ...db.records, 'purchase.order': nextOrders, 'account.move': nextMoves } };
+} });
+
+export function migrateTaxPriceIncludeOverride(db) {
+  const companies = db?.records?.['res.company'];
+  let companiesChanged = false;
+  const nextCompanies = Array.isArray(companies) ? companies.map((c) => {
+    if (!c || c.account_price_include != null) return c;
+    companiesChanged = true;
+    return { ...c, account_price_include: 'tax_excluded' };
+  }) : companies;
+
+  const taxes = db?.records?.['account.tax'];
+  let taxesChanged = false;
+  const isTruthyLegacy = (v) => {
+    if (v === true || v === 1 || v === '1') return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      return s === 'true' || s === 'yes' || s === 't' || s === '1';
+    }
+    return Boolean(v);
+  };
+  const nextTaxes = Array.isArray(taxes) ? taxes.map((t) => {
+    if (!t || typeof t !== 'object') return t;
+    const hasLegacy = 'price_include' in t;
+    if (t.price_include_override != null) {
+      if (!hasLegacy) return t;
+      taxesChanged = true;
+      const { price_include: _legacy, ...rest } = t;
+      return rest;
+    }
+    if (!hasLegacy) return t;
+    taxesChanged = true;
+    const { price_include, ...rest } = t;
+    return isTruthyLegacy(price_include) ? { ...rest, price_include_override: 'tax_included' } : rest;
+  }) : taxes;
+
+  if (!companiesChanged && !taxesChanged) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(companiesChanged ? { 'res.company': nextCompanies } : {}),
+      ...(taxesChanged ? { 'account.tax': nextTaxes } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
+MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

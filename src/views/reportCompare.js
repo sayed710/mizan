@@ -250,6 +250,35 @@ export function detailReportColumns(db, report, periods, { company_id = null, an
     const totals = boxes.filter((box) => box.kind === 'total').map((box) => ({ id: `total:${box.code}`, label: box.label, code: box.code, values: [box.base, box.tax], kind: 'total' }));
     return [...details, ...grids, ...totals];
   });
+  if (report === 'tax' && variant === 'generic') {
+    const saleRows = new Map();
+    const purchaseRows = new Map();
+    const gridRows = new Map();
+    const totalRows = new Map();
+    for (const rows of snapshots) {
+      for (const row of rows) {
+        if (row.side === 'sale') saleRows.set(row.id, row);
+        else if (row.side === 'purchase') purchaseRows.set(row.id, row);
+        else if (row.kind === 'grid') gridRows.set(row.id, row);
+        else if (row.kind === 'total') totalRows.set(row.id, row);
+      }
+    }
+    const combinedRows = [
+      { id: 'section:sales', label: 'Sales', values: [null, null], kind: 'section' },
+      ...saleRows.values(),
+      { id: 'section:purchases', label: 'Purchases', values: [null, null], kind: 'section' },
+      ...purchaseRows.values(),
+      ...(gridRows.size > 0 ? [{ id: 'section:grids', label: 'Tax Grids', values: [null, null], kind: 'section' }, ...gridRows.values()] : []),
+      ...totalRows.values(),
+    ];
+    return {
+      periods,
+      rows: combinedRows.map((row) => ({
+        ...row,
+        columns: snapshots.map((rows) => rows.find((item) => item.id === row.id) ?? (row.kind === 'section' ? { ...row, values: [null, null] } : null)),
+      })),
+    };
+  }
   const identities = new Map();
   for (const rows of snapshots) for (const row of rows) if (!identities.has(row.id)) identities.set(row.id, row);
   return { periods, rows: [...identities.values()].map((row) => ({ ...row, columns: snapshots.map((rows) => rows.find((item) => item.id === row.id) ?? null) })) };

@@ -1118,6 +1118,8 @@ test('TAX-13: per-line exclusion works when included/excluded rows share an acco
   assert.equal(accountBalanceUpTo(syncedA, sharedPurchAcc.id, '2027-05-31'), 10);
 
   // Case B: Invoice (use_in_tax_closing: true) vs Refund (use_in_tax_closing: false) on the SAME account
+  // Continue from the closed May period so the June closing does not pick up May's unclosed input tax.
+  db = syncedA;
   const sharedSaleAcc = create(db, 'account.account', { code: '251922', name: 'Inv vs Ref Shared Sale Acc', account_type: 'liability_current', company_id: 1 });
   db = sharedSaleAcc.db;
 
@@ -1219,9 +1221,9 @@ test('TAX-13: use_in_tax_closing stored defaults on create, migration v60, and s
       })),
     },
   };
-  assert.equal(SCHEMA_VERSION, 61);
+  assert.equal(SCHEMA_VERSION, 66);
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 61);
+  assert.equal(migrated.schema_version, 66);
   const migratedTax = read(migrated, 'account.tax', createdTax.id);
   assert.strictEqual(migratedTax.invoice_repartition_line_ids[0].use_in_tax_closing, false);
   assert.strictEqual(migratedTax.invoice_repartition_line_ids[1].use_in_tax_closing, true);

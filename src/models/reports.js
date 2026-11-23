@@ -1,13 +1,16 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
-import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, journalItems, profitAndLoss, weighted } from './ledger.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { deferredSettings, lineCreditAdjustmentAmount, recognitionTargetThroughDate, scheduleAsOf } from './deferred.js';
+import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
 import { currentCompany } from './company.js';
 import { reportingBookedAmount } from './money.js';
 import { isLiquidityJournal } from './ledger.js';
+import { configuredEarningsAccount } from './earnings.js';
+import { includeInitialBalance } from './accounting.js';
 
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
 
@@ -36,17 +39,26 @@ const cashFlowSelectedSources = (sources, analyticAccountIds) => !analyticAccoun
 /** Journal items dated strictly before `from` (none without a `from`): the opening column of every report. */
 const itemsBefore = (db, from, company_id, analyticAccountIds, reviewMode = 'posted') => (from ? filterByAnalytic(journalItems(db, { company_id, reviewMode }), analyticAccountIds).filter((l) => l.date < from) : []);
 
+/** Accounts without include_initial_balance restart at their company's fiscal-year start; earlier results open on its earnings account (Odoo's undistributed profits), so the opening column stays balanced. */
+export function trialOpeningItems(db, items, from) {
+  return items.map((line) => {
+    if (includeInitialBalance(read(db, 'account.account', line.account_id)) || line.date >= fiscalYearStart(db, from, line.company_id)) return line;
+    const earnings = configuredEarningsAccount(db, line.company_id);
+    return earnings ? { ...line, account_id: earnings.id } : line;
+  });
+}
+
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
-export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
+export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, includeClosing = false } = {}) {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
-  const opening = new Map(balances(db, itemsBefore(db, from, company_id, analyticAccountIds, mode)).map((b) => [b.account.id, b.balance]));
+  const opening = new Map(balances(db, trialOpeningItems(db, itemsBefore(db, from, company_id, analyticAccountIds, mode), from)).map((b) => [b.account.id, b.balance]));
   const rows = new Map();
   const row = (id) => {
     if (!rows.has(id)) rows.set(id, { account: read(db, 'account.account', id), initial: round(opening.get(id) ?? 0), debit: 0, credit: 0 });
     return rows.get(id);
   };
   for (const id of opening.keys()) row(id);
-  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode }), analyticAccountIds)) {
+  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing }), analyticAccountIds)) {
     const r = row(l.account_id);
     r.debit += reportingBookedAmount(db, l, l.debit);
     r.credit += reportingBookedAmount(db, l, l.credit);
@@ -168,7 +180,7 @@ export function accountCashFlowActivity(db, account) {
     const explicit = tags.find((tag) => ['operating', 'investing', 'financing'].includes(tag?.cash_flow_activity));
     if (explicit) return explicit.cash_flow_activity;
   }
-  return 'unclassified';
+  return ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost', 'expense_other', 'asset_receivable', 'liability_payable'].includes(account.account_type) ? 'operating' : 'unclassified';
 }
 
 /**
@@ -352,4 +364,55 @@ export function customerStatement(db, partnerId, { from, to, company_id, include
       return { date: l.date, move_name: l.move_name, ...(ref ? { ref } : {}), debit, credit, balance: round(run) };
     });
   return { opening, lines, closing: round(run) };
+}
+
+/** Deferred recognition by original account for the selected company and period. */
+export function deferredReport(db, { from, to, company_id } = {}, kind) {
+  const rows = new Map();
+  for (const rawSchedule of search(db, 'account.deferral')) {
+    if (rawSchedule.kind !== kind || (company_id && (rawSchedule.company_id ?? 1) !== Number(company_id))) continue;
+    const schedule = scheduleAsOf(db, rawSchedule, to);
+    if (schedule.state === 'cancel' || schedule.state === 'draft') continue;
+    const source = schedule.source_move_id ? read(db, 'account.move', schedule.source_move_id) : null;
+    const sourceDate = source?.date ?? source?.invoice_date;
+    if (schedule.source_move_id && (!source || source.state !== 'posted' || !sourceDate || (to && sourceDate > to))) continue;
+    if (!schedule.recognition_account_id || !Array.isArray(schedule.board)) continue;
+    const company = schedule.company_id ?? 1;
+    const currency = companyCurrencyRecord(db, company);
+    const method = deferredSettings(db, company, kind).computationMethod;
+    const start = schedule.start_date ?? schedule.board[0]?.date;
+    const previous = from ? new Date(Date.parse(from + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10) : null;
+    const total = schedule.board.reduce((sum, line) => {
+      if (line.cancelled) return sum;
+      const credited = lineCreditAdjustmentAmount(db, schedule, line, to);
+      return sum + Math.max(0, (Number(line.amount) || 0) - credited);
+    }, 0);
+    const through = (date) => date ? schedule.board.reduce((sum, line, index) => {
+      if (line.cancelled) return sum;
+      const target = recognitionTargetThroughDate(schedule, index, date, method, currency);
+      const credited = lineCreditAdjustmentAmount(db, schedule, line, to && date > to ? to : date);
+      return sum + Math.max(0, target - credited);
+    }, 0) : 0;
+    const before = through(previous);
+    const untilEnd = to ? through(to) : total;
+    const notStarted = start && to && start > to ? total : 0;
+    const current = untilEnd - before;
+    const cutoff = to ? new Date(`${to}T00:00:00Z`) : null;
+    if (cutoff) {
+      const month = cutoff.getUTCMonth();
+      cutoff.setUTCDate(1);
+      cutoff.setUTCFullYear(cutoff.getUTCFullYear() + 1);
+      cutoff.setUTCDate(Math.min(Number(to.slice(8, 10)), new Date(Date.UTC(cutoff.getUTCFullYear(), month + 1, 0)).getUTCDate()));
+    }
+    const withinEnd = cutoff ? through(cutoff.toISOString().slice(0, 10)) : total;
+    const recognized = untilEnd;
+    const within_year = withinEnd - recognized;
+    const after_year = total - withinEnd;
+    const row = rows.get(schedule.recognition_account_id) ?? { account_id: schedule.recognition_account_id, total: 0, not_started: 0, before: 0, current: 0, recognized: 0, within_year: 0, after_year: 0 };
+    for (const [key, value] of Object.entries({ total, not_started: notStarted, before, current, recognized, within_year, after_year })) {
+      row[key] = roundCurrency(row[key] + value, currency);
+    }
+    rows.set(row.account_id, row);
+  }
+  return [...rows.values()];
 }

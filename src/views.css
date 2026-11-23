@@ -39,7 +39,8 @@
 /* Printable documents */
 .print-page { background: #e9ebf0; min-height: 100vh; padding: 20px 16px; }
 .print-toolbar { display: flex; gap: 8px; justify-content: center; margin-bottom: 14px; }
-.paper { background: #fff; max-width: 820px; margin: 0 auto; padding: 48px 56px; box-shadow: 0 10px 40px rgb(16 24 40 / 15%); min-height: 1000px; display: flex; flex-direction: column; gap: 18px; }
+.paper { background: #fff; max-width: 820px; margin: 0 auto; padding: 48px 56px; box-shadow: 0 10px 40px rgb(16 24 40 / 15%); min-height: 1000px; display: flex; flex-direction: column; gap: 18px; position: relative; }
+.paper-watermark { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-45deg); font-size: 72px; font-weight: 800; letter-spacing: 12px; text-transform: uppercase; color: rgba(0, 0, 0, 0.08); pointer-events: none; user-select: none; z-index: 0; white-space: nowrap; }
 .paper-head { display: flex; justify-content: space-between; gap: 24px; border-bottom: 3px solid var(--brand); padding-bottom: 16px; }
 .paper-company { font-size: 22px; color: var(--brand); }
 .paper address { font-style: normal; text-align: end; line-height: 1.5; }
@@ -66,7 +67,8 @@
 @media print {
   .no-print { display: none !important; }
   .print-page { background: #fff; padding: 0; }
-  .paper { box-shadow: none; padding: 0; max-width: none; min-height: 0; }
+  .paper { box-shadow: none; padding: 0; max-width: none; min-height: 0; position: relative; }
+  .paper-watermark { color: rgba(0, 0, 0, 0.08) !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   /* One check per Letter sheet: 11in minus the 0.25in top and bottom margins of the check page. */
   .paper.check { page: check; min-height: 10.5in; height: 10.5in; break-inside: avoid; }
   .paper.check:not(:last-child) { break-after: page; }
@@ -193,6 +195,7 @@
 .list.report tr.rep-section { cursor: pointer; font-weight: 600; }
 .list.report tr.rep-section:hover { background: #f7f8fc; }
 .list.report tr.rep-detail td { color: var(--muted); padding-inline-start: 34px; font-size: 13px; }
+@media screen { .report-folded-row { display: none; } }
 .list.report tr.rep-total td { font-weight: 700; border-top: 2px solid var(--border); }
 .list.report tr.rep-total.strong td { font-size: 16px; background: var(--brand-soft); }
 .tax-drill-toggle { background: none; border: 0; padding: 0; font: inherit; color: var(--brand); cursor: pointer; text-decoration: underline; }
@@ -248,6 +251,8 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
   padding: 6px; display: flex; flex-direction: column;
 }
 .nav-dropdown a { color: var(--text); padding: 7px 10px; border-radius: 6px; }
+/* Grouped items sit side by side as inline links; inline-block gives each its own text run so Arabic letters never join across items. */
+.nav-submenu-group > a { display: inline-block; }
 .nav-dropdown a:hover, .nav-dropdown a.active { background: var(--brand-soft); color: var(--brand); }
 
 .search-wrap { position: relative; flex: 1 1 360px; max-width: 560px; }

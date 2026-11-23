@@ -214,11 +214,17 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.tax_calculation_rounding_method !== undefined && !['round_per_line', 'round_globally'].includes(vals.tax_calculation_rounding_method)) {
     return 'Select a valid tax rounding method';
   }
+  if (vals.account_price_include !== undefined && !['tax_included', 'tax_excluded'].includes(vals.account_price_include)) {
+    return 'Select a valid default sales price include setting';
+  }
   if (vals.tax_periodicity !== undefined && !['monthly', 'trimester', 'semester', 'year'].includes(vals.tax_periodicity)) {
     return 'Select a valid tax periodicity';
   }
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
+  }
+  if (vals.account_check_printing_layout !== undefined && vals.account_check_printing_layout !== null && !['none', 'top', 'middle', 'bottom'].includes(vals.account_check_printing_layout)) {
+    return 'Select a valid check layout';
   }
   for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id', 'tax_cash_basis_journal_id']) {
     if (vals[field] === undefined || vals[field] === null) continue;
@@ -264,11 +270,12 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const hasField = (name) => Boolean(fields[name]);
   const taxesByUse = (use) => (db.records['account.tax'] ?? [])
     .filter((tax) => tax.active !== false && tax.type_tax_use === use && (!tax.company_id || !company || tax.company_id === company.id));
-  const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
+  const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
   const showCurrencies = hasField('currency_id') || !company;
   const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
   const showVendorBills = hasField('three_way_matching');
   const showFiscalPeriods = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail'].some(hasField);
+  const priceIncludeOptions = fields.account_price_include?.options ?? [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']];
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
   const periodicityOptions = fields.tax_periodicity?.options ?? [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']];
   const generalJournals = (db.records['account.journal'] ?? [])
@@ -328,6 +335,14 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
                 </select>
               </SettingRow>
             ))}
+          {hasField('account_price_include') && (
+            <SettingRow id="account_price_include" label="Default Sales Price Include" description="Default price-include behaviour for taxes without an explicit override.">
+              <select id="account_price_include" disabled={readOnly || !company} value={company?.account_price_include ?? 'tax_excluded'}
+                onChange={(e) => onWriteCompany({ account_price_include: e.target.value })}>
+                {priceIncludeOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+              </select>
+            </SettingRow>
+          )}
           {hasField('tax_calculation_rounding_method') && (
             <SettingRow id="tax_calculation_rounding_method" label="Rounding Method" description="Round tax amounts per invoice line or globally per tax group on the document.">
               <select id="tax_calculation_rounding_method" disabled={readOnly || !company} value={company?.tax_calculation_rounding_method ?? 'round_per_line'}
@@ -470,6 +485,42 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
           )}
         </>
       )}
+
+      <div className="settings-block" data-block="customer_invoices">
+        <h3>{t('Customer Invoices')}</h3>
+        <SettingRow id="use_invoice_terms" label="Default Terms & Conditions" description="Terms printed on new customer invoices and credit notes.">
+          <input id="use_invoice_terms" type="checkbox" checked={!!company?.use_invoice_terms} disabled={readOnly || !company}
+            onChange={(e) => onWriteCompany({ use_invoice_terms: e.target.checked })} />
+          {company?.use_invoice_terms && <textarea aria-label={t('Terms and Conditions')} disabled={readOnly || !company} value={company?.invoice_terms ?? ''}
+            onChange={(e) => onWriteCompany({ invoice_terms: e.target.value })} />}
+        </SettingRow>
+        <SettingRow id="incoterm_id" label="Default Incoterm" description="Trade term set on new customer invoices.">
+          <select id="incoterm_id" disabled={readOnly || !company} value={company?.incoterm_id ?? ''}
+            onChange={(e) => onWriteCompany({ incoterm_id: e.target.value ? Number(e.target.value) : null })}>
+            <option value="">{t('None')}</option>
+            {(db.records['account.incoterm'] ?? []).filter((item) => item.active !== false || item.id === company?.incoterm_id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </SettingRow>
+          {hasField('account_check_printing_layout') && (
+            <SettingRow id="account_check_printing_layout" label="Check Layout" description="Select the layout used when printing checks.">
+              <select
+                id="account_check_printing_layout"
+                disabled={readOnly || !company}
+                value={company?.account_check_printing_layout ?? 'top'}
+                onChange={(e) => onWriteCompany({ account_check_printing_layout: e.target.value })}
+              >
+                {(fields.account_check_printing_layout?.options ?? [
+                  ['none', 'None'],
+                  ['top', 'Check on top'],
+                  ['middle', 'Check in middle'],
+                  ['bottom', 'Check in bottom'],
+                ]).map(([val, label]) => (
+                  <option key={val} value={val}>{t(label)}</option>
+                ))}
+              </select>
+            </SettingRow>
+          )}
+      </div>
 
       {showCustomerPayments && (
         <div className="settings-block" data-block="customer_payments">
