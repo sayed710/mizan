@@ -815,7 +815,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   const name = isDraft ? '/' : journalSequenceName(db, j, date, nextName(db, 'account.move', prefix), (move) => move.move_type === 'entry');
   const made = create(db, 'account.move', {
     move_type: 'entry', state: isDraft ? 'draft' : 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
-    ...(j.currency_id ? { currency_id: j.currency_id } : {}),
+    ...(j.currency_id && line_ids.some((l) => l.currency_id === j.currency_id) ? { currency_id: j.currency_id } : { currency_id: null }),
     name, line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
     ...(auto_post ? { auto_post } : {}),
     ...(is_tax_payment ? { is_tax_payment: true } : {}),

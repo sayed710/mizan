@@ -248,6 +248,16 @@ export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
+const recipientBankDomain = (b, r, db) => {
+  if (b.active === false) return false;
+  const companyId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+  if (b.company_id && b.company_id !== companyId) return false;
+  if (isInbound(r)) {
+    const companyPartnerId = db ? read(db, 'res.company', companyId)?.partner_id : null;
+    return Boolean(b.partner_id && companyPartnerId && b.partner_id === companyPartnerId);
+  }
+  return !b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id);
+};
 export const residual = (r, db) => {
   if (!isInvoice(r)) return 0;
   let curr;
@@ -1507,8 +1517,8 @@ export function creditNote(db, r, options = {}) {
   const docCurr = documentCurrency(db, r);
   const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m, db), 0);
   if (roundCurrency(credited, docCurr) >= roundCurrency(total(r, db), docCurr)) throw new Error(`${r.name} is already fully credited`);
-  if (['cancel', 'modify'].includes(method) && (roundCurrency(credited, docCurr) > 0 || roundCurrency(Number(r.amount_paid) || 0, docCurr) > 0)) {
-    throw new Error('Full refund and modify require an unpaid invoice with no existing credit notes');
+  if (['cancel', 'modify'].includes(method) && roundCurrency(credited, docCurr) > 0) {
+    throw new Error('Full refund and modify require an invoice with no existing credit notes');
   }
   const date = opts.date ?? opts.invoice_date ?? today();
   if (!validDate(date)) {
@@ -1918,6 +1928,11 @@ const {
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
 
+const invoiceLineProductDomain = (product, line) => {
+  if (product.active === false) return false;
+  return isPurchase(line) ? product.purchase_ok !== false : product.sale_ok !== false;
+};
+
 const invoiceLineTaxDomain = (tax, line, db) => {
   if (tax.active === false) return false;
   const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
@@ -1998,7 +2013,7 @@ const invoiceLineField = {
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
     source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true },
-    product_id: invoiceLineProduct,
+    product_id: { ...invoiceLineProduct, domain: invoiceLineProductDomain },
     name: { type: 'char', label: 'Label' },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
     analytic_account_id: { ...invoiceLineAnalytic, hidden: true },
@@ -2714,6 +2729,10 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
     { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
     { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
   ],
+  ...(!purchases ? [[
+    { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
+    { id: 'is_not_sent', label: 'Not Sent', fn: (r) => !r.is_move_sent },
+  ]] : []),
   monthFilters('invoice_date', 'Invoice Date'),
   ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
   monthFilters('invoice_date_due', 'Due Date'),
@@ -3006,20 +3025,22 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after, _ctx, vals) => {
       const companyId = after.company_id ?? 1;
-      if (isLiquidityJournal(after) && after.default_account_id && ((!before && after.currency_id) || (before && (before.currency_id ?? null) !== (after.currency_id ?? null)))) {
+      const currencyChanged = !before || (before.currency_id ?? null) !== (after.currency_id ?? null);
+      const defaultAccountChanged = !before || (before.default_account_id ?? null) !== (after.default_account_id ?? null);
+      if (isLiquidityJournal(after) && after.default_account_id && (currencyChanged || defaultAccountChanged)) {
         const account = read(db, 'account.account', after.default_account_id);
         if (account && (account.currency_id ?? null) !== (after.currency_id ?? null)) return 'The journal and its default account must use the same currency';
       }
       if (after.sequence_override_regex) {
         try { journalSequenceRegex(after.sequence_override_regex); } catch (error) { return error.message; }
       }
-      if (after.currency_id) {
+      if (currencyChanged && after.currency_id) {
         const currency = read(db, 'res.currency', after.currency_id);
         if (!currency || currency.active === false) return 'The journal currency must be active';
       }
       if (after.journal_group_id) {
         const group = read(db, 'account.journal.group', after.journal_group_id);
-        if (!group || (group.company_id && group.company_id !== companyId)) return 'The ledger must belong to the journal company';
+        if (!group || (after.company_id && group.company_id && group.company_id !== after.company_id)) return 'The ledger must belong to the journal company';
       }
       if (before?.id) {
         const companies = db.records['res.company'] ?? [];
@@ -3259,8 +3280,10 @@ export const accountingModels = {
     },
     prepareWrite: (db, vals, before) => {
       let nextVals = { ...vals };
-      if ('currency_id' in vals && isLiquidityJournal({ ...before, ...vals }) && (vals.default_account_id ?? before?.default_account_id)) {
-        db = write(db, 'account.account', vals.default_account_id ?? before.default_account_id, { currency_id: vals.currency_id ?? null });
+      if (('currency_id' in vals || 'default_account_id' in vals) && isLiquidityJournal({ ...before, ...vals }) && (vals.default_account_id ?? before?.default_account_id)) {
+        const targetAccountId = vals.default_account_id ?? before.default_account_id;
+        const targetCurrencyId = ('currency_id' in vals ? vals.currency_id : before?.currency_id) ?? null;
+        db = write(db, 'account.account', targetAccountId, { currency_id: targetCurrencyId });
       }
       if (nextVals.type !== undefined) {
         if (nextVals.type === 'bank') {
@@ -3525,7 +3548,7 @@ export const accountingModels = {
         const isEligibleVendorBank = (b) => b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1)) && sameCommercialPartner(db, b.partner_id, r.partner_id);
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const eligibleBanks = partnerChange && isPurchase(r) ? search(db, 'res.partner.bank').filter(isEligibleVendorBank).sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment))) : [];
-        const partnerBank = selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
+        const partnerBank = isInbound(r) ? (selectedBank && recipientBankDomain(selectedBank, r, db) ? selectedBank.id : null) : selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
           ? selectedBank.id : (eligibleBanks[0]?.id ?? null);
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
         const nextContext = { ...r, ...fiscal, journal_id: journal };
@@ -3674,7 +3697,12 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
+      partner_bank_id: {
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        domain: recipientBankDomain,
+      },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
@@ -3799,6 +3827,7 @@ export const accountingModels = {
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       to_check: { type: 'boolean', label: 'To Check', copy: false },
+      is_move_sent: { type: 'boolean', label: 'Is Move Sent', copy: false, readonly: true },
       auto_post: {
         type: 'selection',
         label: 'Auto-post',
@@ -3815,29 +3844,39 @@ export const accountingModels = {
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
+    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
-    menuActions: [{ label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) }],
-    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
+    menuActions: [
+      { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+      {
+        label: 'Proforma Invoice',
+        when: (r) => r.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r.move_type),
+        run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=proforma` }),
+      },
+    ],
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
       const companyId = vals.company_id ?? currentCompany(db);
-      const journalCurrency = read(db, 'account.journal', vals.journal_id)?.currency_id;
       if (moveType !== 'entry') {
         const salesperson = vals.invoice_user_id == null ? currentUserId(db) : null;
         const defaultJournal = vals.journal_id == null && !vals.invoice_line_ids?.length && !vals.line_ids?.length
           ? resolveDocumentJournal(db, { move_type: moveType, company_id: companyId })?.id ?? null
           : null;
+        const effectiveJournalId = vals.journal_id ?? defaultJournal;
+        const journalCurrency = effectiveJournalId ? read(db, 'account.journal', effectiveJournalId)?.currency_id : null;
         return {
           ...invoiceCompanyDefaults(db, { ...vals, move_type: moveType, company_id: companyId }),
-          ...(vals.currency_id == null && journalCurrency ? { currency_id: journalCurrency } : {}),
+          ...(vals.currency_id === undefined && journalCurrency ? { currency_id: journalCurrency } : {}),
           ...(salesperson ? { invoice_user_id: salesperson } : {}),
           ...(defaultJournal ? { journal_id: defaultJournal } : {}),
         };
       }
       const date = vals.date ?? vals.invoice_date ?? today();
       const defaultJournal = vals.journal_id == null ? resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId })?.id ?? null : null;
+      const effectiveJournalId = vals.journal_id ?? defaultJournal;
+      const journalCurrency = effectiveJournalId ? read(db, 'account.journal', effectiveJournalId)?.currency_id : null;
       return {
-        ...(vals.currency_id == null && journalCurrency ? { currency_id: journalCurrency } : {}),
+        ...(vals.currency_id === undefined && journalCurrency ? { currency_id: journalCurrency } : {}),
         ...(vals.date == null ? { date } : {}),
         ...(vals.invoice_date == null ? { invoice_date: date } : {}),
         ...(defaultJournal ? { journal_id: defaultJournal } : {}),
@@ -4107,7 +4146,32 @@ export const accountingModels = {
           },
           run: registerPayment,
         },
-        { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
+        {
+          label: 'Send',
+          email: 'document',
+          primary: (r) => !r.is_move_sent,
+          when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type),
+          wizard: (db, r) => {
+            const partner = r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+            return {
+              title: 'Send',
+              fields: [
+                { name: 'email', type: 'boolean', label: 'Email', default: Boolean(partner?.email?.trim?.()) },
+                { name: 'download', type: 'boolean', label: 'Download', default: false },
+              ],
+            };
+          },
+          run: (db, r, values = {}) => {
+            if (!values?.email && !values?.download) {
+              throw new Error('Select at least one channel: Email or Download');
+            }
+            const markSent = !values.live && Boolean(values.download);
+            return {
+              db: markSent ? write(db, 'account.move', r.id, { is_move_sent: true }) : db,
+              ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
+            };
+          },
+        },
         {
           label: 'Credit Note',
           when: (r) => r.state === 'posted' && r.move_type === 'out_invoice',
@@ -4162,6 +4226,7 @@ export const accountingModels = {
             const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
             const nextDb = write(cancelledDb, 'account.move', r.id, {
               state: 'draft',
+              is_move_sent: false,
               ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
               ...(isInvoice(r) ? { line_ids: [] } : {})
             });

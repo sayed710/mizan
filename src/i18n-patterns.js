@@ -4,6 +4,7 @@
 // code picks from its own words or labels (a field label, `gain`/`loss`, a smaller message) and translates it.
 
 const patterns = {
+  'Check number {1} is already used on this journal': 'رقم الشيك {1} مستخدم بالفعل في دفتر اليومية',
   'Unknown model {1} in the backup': 'نموذج غير معروف {1} في النسخة الاحتياطية',
   'Invalid {1} records in the backup': 'سجلات {1} غير صالحة في النسخة الاحتياطية',
   'Invalid {1} record in the backup': 'سجل {1} غير صالح في النسخة الاحتياطية',

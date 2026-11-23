@@ -938,3 +938,23 @@ test('Qodo PR #189: XLSX cell text drops XML-forbidden characters so the workboo
   assert.equal(escapeXml(text), 'ABC\tD');
   assert.equal(escapeXml('x < y & "z"'), 'x &lt; y &amp; &quot;z&quot;');
 });
+
+
+test('group headings after data do not turn spreadsheet numbers into text', async () => {
+  const { makeEl } = setupDom();
+  const { buildXlsx, parseZip } = await import('./xlsx.js');
+  const table = makeEl('table');
+  const thead = makeEl('thead');
+  const header = makeEl('tr');
+  for (const label of ['Group', 'Amount']) { const cell = makeEl('th'); cell.textContent = label; header.appendChild(cell); }
+  thead.appendChild(header); table.appendChild(thead);
+  const tbody = makeEl('tbody');
+  for (const [label, amount] of [['First', '12'], ['Second', '34']]) {
+    const heading = makeEl('tr'); const title = makeEl('th'); title.textContent = label; title.colSpan = 2; heading.appendChild(title); tbody.appendChild(heading);
+    const row = makeEl('tr'); const name = makeEl('td'); name.textContent = label; const value = makeEl('td'); value.textContent = amount; value.className = 'num'; row.appendChild(name); row.appendChild(value); tbody.appendChild(row);
+  }
+  table.appendChild(tbody);
+  const xml = new TextDecoder().decode(parseZip(buildXlsx(table)).files['xl/worksheets/sheet1.xml'].data);
+  assert.match(xml, /<c r="B3" s="2"><v>12<\/v><\/c>/);
+  assert.match(xml, /<c r="B5" s="2"><v>34<\/v><\/c>/);
+});

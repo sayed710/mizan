@@ -229,8 +229,13 @@ export function accountCurrencyError(db, before, after) {
 export function accountCurrencyChangeError(db, before, after) {
   if ((before?.currency_id ?? null) === (after?.currency_id ?? null) || !after.currency_id) return null;
   const moves = db.records?.['account.move'] ?? [];
-  const bad = moves.some((move) => (move.line_ids ?? []).some((line) => line.account_id === after.id
-      && line.currency_id && line.currency_id !== after.currency_id));
+  const bad = moves.some((move) => (move.line_ids ?? []).some((line) => {
+    if (line.account_id !== after.id) return false;
+    if (move.state === 'posted') {
+      return lineCurrencyMismatch(db, line, after, move.company_id ?? after.company_id ?? 1);
+    }
+    return line.currency_id && line.currency_id !== after.currency_id;
+  }));
   return bad ? 'The account has journal items in another currency' : null;
 }
 
@@ -1506,8 +1511,8 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   }
 }
 
-/** The reporting cutoff is never later than the day the report is run. */
-export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
+/** Use the requested reporting cutoff, defaulting to today. */
+export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
@@ -2293,10 +2298,14 @@ export const financeModels = {
       const target = vals.journal_ids.includes(journal.id) ? group.id : journal.journal_group_id === group.id ? null : journal.journal_group_id;
       return target === journal.journal_group_id ? next : write(next, 'account.journal', journal.id, { journal_group_id: target });
     }, db),
-    guard: (db, before, record, _ctx, vals) => (vals?.journal_ids ?? record.journal_ids ?? []).some((id) => {
-      const journal = read(db, 'account.journal', id);
-      return !journal || (journal.company_id && journal.company_id !== record.company_id);
-    }) ? 'Select journals belonging to this company or shared journals' : null,
+    onUnlink: (db, group) => (db.records['account.journal'] ?? []).reduce((next, journal) => journal.journal_group_id === group.id ? write(next, 'account.journal', journal.id, { journal_group_id: null }) : next, db),
+    guard: (db, before, record, _ctx, vals) => {
+      const journalIds = vals?.journal_ids !== undefined ? vals.journal_ids : includedJournalIds(record, db);
+      return journalIds.some((id) => {
+        const journal = read(db, 'account.journal', id);
+        return !journal || (journal.company_id && journal.company_id !== record.company_id);
+      }) ? 'Select journals belonging to this company or shared journals' : null;
+    },
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
     list: ['sequence', 'name', 'journal_ids'],
     listFields: {
@@ -2488,6 +2497,7 @@ export const financeModels = {
     fields: {
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       name: { type: 'char', label: 'Budget Name', required: true },
+      budget_type: { type: 'selection', label: 'Budget Type', required: true, options: [['expense', 'Expense'], ['revenue', 'Revenue'], ['both', 'Both']] },
       date_from: { type: 'date', label: 'Start Date' },
       date_to: { type: 'date', label: 'End Date' },
       lines: {
@@ -2498,7 +2508,7 @@ export const financeModels = {
       },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['confirmed', 'Confirmed'], ['done', 'Done']] },
     },
-    defaults: () => ({ state: 'draft', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
+    defaults: () => ({ state: 'draft', budget_type: 'expense', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
     kanban: { title: 'name', lines: ['date_from', 'date_to'], badge: 'state' },
     list: ['name', 'date_from', 'date_to', 'state'],
     form: {
@@ -2506,7 +2516,7 @@ export const financeModels = {
       statusbarClickable: true,
       buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
-      groups: [['date_from', 'company_id'], ['date_to']],
+      groups: [['date_from', 'company_id'], ['date_to', 'budget_type']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],
       chatter: true,
     },

@@ -1999,27 +1999,48 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
+  const budgets = db?.records?.['account.budget'];
+  if (!Array.isArray(budgets) || !budgets.length) return db;
+  let changed = false;
+  const nextBudgets = budgets.map((b) => {
+    if (!b || typeof b !== 'object') return b;
+    if (b.budget_type) return b;
+    changed = true;
+    return { ...b, budget_type: 'both' };
+  });
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.budget': nextBudgets,
+    },
+  };
+} });
 
 export function migrateJournalGroups(db) {
-  const groups = db.records['account.journal.group'] ?? [];
+  const groups = [...(db.records['account.journal.group'] ?? [])].sort(
+    (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id
+  );
+  const knownJournals = new Set((db.records['account.journal'] ?? []).map((j) => j.id));
   const memberships = new Map();
   for (const group of groups) {
     for (const id of group.journal_ids ?? []) {
-      if (!(db.records['account.journal'] ?? []).some((journal) => journal.id === id)) throw new Error(`Ledger references missing journal ${id}`);
-      if (memberships.has(id) && memberships.get(id) !== group.id) throw new Error(`Journal ${id} belongs to multiple ledger groups`);
-      memberships.set(id, group.id);
+      if (!knownJournals.has(id)) continue;
+      if (!memberships.has(id)) {
+        memberships.set(id, group.id);
+      }
     }
   }
   const journals = (db.records['account.journal'] ?? []).map((journal) => {
-    const groupId = memberships.get(journal.id);
-    if (groupId == null) return journal;
-    if (journal.journal_group_id && journal.journal_group_id !== groupId) throw new Error(`Journal ${journal.id} belongs to multiple ledger groups`);
-    return { ...journal, journal_group_id: groupId };
+    const groupId = memberships.get(journal.id) ?? journal.journal_group_id ?? null;
+    return groupId != null ? { ...journal, journal_group_id: groupId } : journal;
   });
   const cleanGroups = groups.map(({ journal_ids: _old, ...group }) => group);
   return { ...db, records: { ...db.records, 'account.journal': journals, 'account.journal.group': cleanGroups } };
 }
-MIGRATIONS.push({ version: 67, name: 'journal-ledger-direction', up: migrateJournalGroups });
+MIGRATIONS.push({ version: 68, name: 'journal-ledger-direction', up: migrateJournalGroups });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
