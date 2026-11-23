@@ -2071,7 +2071,6 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
     },
   };
 } });
-MIGRATIONS.push({ version: 68, name: 'partner-ranks', up: migratePartnerRanks });
 
 export function migrateReconcileModelTolerance(db) {
   const rules = db?.records?.['account.reconcile.model'];
@@ -2089,6 +2088,7 @@ export function migrateReconcileModelTolerance(db) {
   return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
 }
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
+MIGRATIONS.push({ version: 69, name: 'partner-ranks', up: migratePartnerRanks });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
