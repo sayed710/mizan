@@ -52,18 +52,26 @@ const recordTitleOf = (db, model, id) => {
  */
 export function collectAuditTrailRows(db, sourceDb, period, serverLog = null, filters = {}) {
   const matchRow = (r) => {
-    if (filters.user && !String(r.author ?? '').toLowerCase().includes(filters.user.toLowerCase())) return false;
+    if (filters.user) {
+      const u = String(filters.user).trim().toLowerCase();
+      if (u && !String(r.author ?? '').toLowerCase().includes(u)) return false;
+    }
     if (filters.model && r.model !== filters.model) return false;
     if (filters.record != null && filters.record !== '') {
       const rec = String(filters.record).trim();
-      if (String(r.res_id) !== rec && !String(r.recordName ?? '').toLowerCase().includes(rec.toLowerCase())) return false;
+      const recClean = rec.replace(/^#/, '');
+      if (rec && String(r.res_id) !== rec && String(r.res_id) !== recClean && !String(r.recordName ?? '').toLowerCase().includes(rec.toLowerCase())) return false;
     }
     if (filters.field) {
-      const f = filters.field.toLowerCase();
-      const match = String(r.fieldKey ?? '').toLowerCase().includes(f)
-        || String(r.field ?? '').toLowerCase().includes(f)
-        || String(r.body ?? '').toLowerCase().includes(f);
-      if (!match) return false;
+      const f = String(filters.field).trim().toLowerCase();
+      if (f) {
+        const match = String(r.fieldKey ?? '').toLowerCase().includes(f)
+          || String(r.field ?? '').toLowerCase().includes(f)
+          || String(r.body ?? '').toLowerCase().includes(f)
+          || String(r.oldValue ?? '').toLowerCase().includes(f)
+          || String(r.newValue ?? '').toLowerCase().includes(f);
+        if (!match) return false;
+      }
     }
     return true;
   };

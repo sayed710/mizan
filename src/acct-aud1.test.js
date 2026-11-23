@@ -130,13 +130,16 @@ test('AUD-1: Audit Trail (Review > Control) filters: user, model, record, field 
       const u = new URL(url, 'http://localhost');
       let result = [...mockRows];
       const user = u.searchParams.get('user');
-      if (user) result = result.filter((r) => r.actor.toLowerCase() === user.toLowerCase());
+      if (user) result = result.filter((r) => r.actor.toLowerCase().includes(user.toLowerCase()));
       const model = u.searchParams.get('model');
       if (model) result = result.filter((r) => r.model === model);
       const record = u.searchParams.get('record');
-      if (record) result = result.filter((r) => String(r.res_id) === record);
+      if (record) result = result.filter((r) => String(r.res_id) === record.replace(/^#/, ''));
       const field = u.searchParams.get('field');
-      if (field) result = result.filter((r) => Object.keys(r.changes ?? {}).some((k) => k.toLowerCase() === field.toLowerCase()));
+      if (field) {
+        const lowerField = field.toLowerCase();
+        result = result.filter((r) => Object.keys(r.changes ?? {}).some((k) => k.toLowerCase().includes(lowerField)) || Object.values(r.changes ?? {}).some((v) => JSON.stringify(v).toLowerCase().includes(lowerField)));
+      }
       const from = u.searchParams.get('date_from');
       if (from) result = result.filter((r) => r.at.slice(0, 10) >= from);
       const to = u.searchParams.get('date_to');
@@ -184,6 +187,13 @@ test('AUD-1: Audit Trail (Review > Control) filters: user, model, record, field 
     assert.match(textOf(host), /AUD-INV-1/);
     assert.doesNotMatch(textOf(host), /AUD-INV-2/);
 
+    // 1b. Partial user filter: 'audit' matches 'auditor_user'
+    await React.act(async () => {
+      props(userInput).onChange({ target: { value: 'audit' } });
+    });
+    assert.match(textOf(host), /AUD-INV-1/);
+    assert.doesNotMatch(textOf(host), /AUD-INV-2/);
+
     // 2. Filter by Model: 'res.company'
     await React.act(async () => {
       props(userInput).onChange({ target: { value: '' } });
@@ -201,6 +211,23 @@ test('AUD-1: Audit Trail (Review > Control) filters: user, model, record, field 
     assert.match(textOf(host), /AUD-INV-1/);
     assert.doesNotMatch(textOf(host), /AUD-INV-2/);
 
+    // 3b. Filter by Record Name: 'INV/2026/0001' (non-numeric string)
+    requests.length = 0;
+    await React.act(async () => {
+      props(recordInput).onChange({ target: { value: 'INV/2026/0001' } });
+    });
+    assert.ok(!requests.some((url) => url.includes('record=INV')), 'Non-numeric record text is not sent to server as record param');
+    assert.doesNotMatch(textOf(host), /Only administrators can read the audit trail/);
+    assert.match(textOf(host), /AUD-INV-1/);
+    assert.doesNotMatch(textOf(host), /AUD-INV-2/);
+
+    // 3c. Filter by Record with hash prefix: '#<id>'
+    await React.act(async () => {
+      props(recordInput).onChange({ target: { value: `#${move1.id}` } });
+    });
+    assert.match(textOf(host), /AUD-INV-1/);
+    assert.doesNotMatch(textOf(host), /AUD-INV-2/);
+
     // 4. Filter by Field Changed: 'narration'
     await React.act(async () => {
       props(modelSelect).onChange({ target: { value: '' } });
@@ -208,6 +235,13 @@ test('AUD-1: Audit Trail (Review > Control) filters: user, model, record, field 
       props(fieldInput).onChange({ target: { value: 'narration' } });
     });
     assert.ok(requests.some((url) => url.includes('field=narration')), 'Query param field sent to /api/audit');
+    assert.match(textOf(host), /Extra note/);
+    assert.doesNotMatch(textOf(host), /AUD-INV-1/);
+
+    // 4b. Filter by partial Field Changed: 'narr'
+    await React.act(async () => {
+      props(fieldInput).onChange({ target: { value: 'narr' } });
+    });
     assert.match(textOf(host), /Extra note/);
     assert.doesNotMatch(textOf(host), /AUD-INV-1/);
 
@@ -235,6 +269,18 @@ test('AUD-1: Audit Trail (Review > Control) filters: user, model, record, field 
       props(userInput).onChange({ target: { value: 'non_admin_test' } });
     });
     assert.match(textOf(host), /Only administrators can read the audit trail/);
+
+    // 6b. Validation failure (400) from server does not show administrators-only warning
+    globalThis.fetch = async (url) => {
+      if (url.startsWith('/api/audit')) {
+        return { ok: false, status: 400, headers: { get: () => 'application/json' }, json: async () => ({ error: 'date_from must be a valid date or timestamp' }) };
+      }
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({}) };
+    };
+    await React.act(async () => {
+      props(userInput).onChange({ target: { value: 'trigger_400' } });
+    });
+    assert.doesNotMatch(textOf(host), /Only administrators can read the audit trail/);
     // 7. Verify Arabic translations for all new UI strings
     globalThis.localStorage = { getItem: () => 'ar' };
     const { t: tAr } = await import(`./i18n.js?lang_ar_aud1=${Date.now()}`);
@@ -356,6 +402,22 @@ test('AUD-2: Export the filtered audit rows as CSV/XLSX', async () => {
     const rowTexts = xlsxData.rows.map((r) => r.join(' ')).join('\n');
     assert.ok(rowTexts.includes('EXPORT-MATCH'), 'Filtered record is present in XLSX');
     assert.ok(!rowTexts.includes('EXPORT-OTHER'), 'Unmatched record is excluded from XLSX');
+
+    // 3. Export filtered by record name (non-numeric string)
+    const recordInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Record');
+    assert.ok(recordInput, 'Record input found');
+    await React.act(async () => {
+      props(userInput).onChange({ target: { value: '' } });
+      props(recordInput).onChange({ target: { value: 'INV/EXP/001' } });
+    });
+    await React.act(async () => {
+      props(csvButton).onClick();
+    });
+    const recordCsvDl = await spy.takeLast();
+    assert.ok(recordCsvDl, 'CSV download captured for record name search');
+    const recordCsvText = await recordCsvDl.text();
+    assert.ok(recordCsvText.includes('EXPORT-MATCH'), 'Record name matched row is exported in CSV');
+    assert.ok(!recordCsvText.includes('EXPORT-OTHER'), 'Unmatched row is excluded from exported CSV');
   } finally {
     spy.restore();
     await React.act(async () => root.unmount());

@@ -285,7 +285,12 @@ export async function listAuditAll(modelsListOrFilters = [], maybeFilters = {}) 
     queryParts.push(`models=${encodeURIComponent(normalizedModels.join(','))}`);
   }
   if (filters.user) queryParts.push(`user=${encodeURIComponent(filters.user)}`);
-  if (filters.record != null && filters.record !== '') queryParts.push(`record=${encodeURIComponent(filters.record)}`);
+  if (filters.record != null && filters.record !== '') {
+    const rawRec = String(filters.record).replace(/^#/, '').trim();
+    if (/^\d+$/.test(rawRec) && Number.isSafeInteger(Number(rawRec))) {
+      queryParts.push(`record=${encodeURIComponent(rawRec)}`);
+    }
+  }
   if (filters.field) queryParts.push(`field=${encodeURIComponent(filters.field)}`);
   if (filters.date_from) queryParts.push(`date_from=${encodeURIComponent(filters.date_from)}`);
   if (filters.date_to) queryParts.push(`date_to=${encodeURIComponent(filters.date_to)}`);
@@ -294,7 +299,10 @@ export async function listAuditAll(modelsListOrFilters = [], maybeFilters = {}) 
   while (true) {
     const beforeParam = before != null ? `&before=${before}` : '';
     const r = await api(`/api/audit?${baseParam}limit=${pageSize}&selected=1${beforeParam}`);
-    if (!r.ok) return null;
+    if (!r.ok) {
+      if (r.status === 401 || r.status === 403) return null;
+      throw new Error(r.data?.error ?? `HTTP ${r.status}`);
+    }
     const batch = Array.isArray(r.data) ? r.data : [];
     all.push(...batch);
     if (batch.length < pageSize) break;

@@ -66,6 +66,47 @@ const ACTIONS = {
 const SMTP = smtpConfig();
 import { menuModelsForApps, models, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
 const MAX_AUDIT_MODELS = 20;
+
+function parseAuditDateBound(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s) return null;
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (dateMatch) {
+    const [, y, m, d] = dateMatch;
+    const year = Number(y), month = Number(m), day = Number(d);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const dt = new Date(Date.UTC(year, month - 1, day));
+    if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return null;
+    return {
+      type: 'date',
+      raw: s,
+      startMs: dt.getTime(),
+      endMs: dt.getTime() + 86400000 - 1,
+    };
+  }
+  const tsMatch = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$/.exec(s);
+  if (tsMatch) {
+    const [, y, m, d, hh, mm, ss] = tsMatch;
+    const year = Number(y), month = Number(m), day = Number(d);
+    const hour = Number(hh), min = Number(mm), sec = Number(ss);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    if (hour > 23 || min > 59 || sec > 59) return null;
+    const utcDate = new Date(Date.UTC(year, month - 1, day));
+    if (utcDate.getUTCFullYear() !== year || utcDate.getUTCMonth() !== month - 1 || utcDate.getUTCDate() !== day) return null;
+    const isoStr = s.includes('T') ? s : s.replace(' ', 'T');
+    const fullIso = tsMatch[8] ? isoStr : isoStr + 'Z';
+    const dt = new Date(fullIso);
+    if (!Number.isFinite(dt.getTime())) return null;
+    return {
+      type: 'timestamp',
+      raw: s,
+      startMs: dt.getTime(),
+      endMs: dt.getTime(),
+    };
+  }
+  return null;
+}
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, scopeAuditChanges, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
@@ -856,13 +897,13 @@ async function api(req, res, path) {
     if (q.has('id') && (!/^\d+$/.test(q.get('id')) || !Number.isSafeInteger(id))) return send(res, 400, { error: 'id must be a nonnegative record id' });
     let recordId = id;
     if (q.has('record')) {
-      const raw = q.get('record').trim();
+      const raw = q.get('record').trim().replace(/^#/, '');
       if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
         return send(res, 400, { error: 'record must be a nonnegative record id' });
       }
       recordId = Number(raw);
     } else if (q.has('res_id')) {
-      const raw = q.get('res_id').trim();
+      const raw = q.get('res_id').trim().replace(/^#/, '');
       if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
         return send(res, 400, { error: 'res_id must be a nonnegative record id' });
       }
@@ -890,25 +931,29 @@ async function api(req, res, path) {
       modelList = [...new Set(parts)];
     }
     const actor = (q.get('user') ?? q.get('actor') ?? '').trim() || null;
-    const dateFrom = (q.get('date_from') ?? q.get('from') ?? '').trim() || null;
-    if (dateFrom && !/^\d{4}-\d{2}-\d{2}/.test(dateFrom)) {
-      return send(res, 400, { error: 'date_from must be a valid date or timestamp' });
+    const fromRaw = (q.get('date_from') ?? q.get('from') ?? '').trim() || null;
+    let dateFrom = null;
+    if (fromRaw) {
+      dateFrom = parseAuditDateBound(fromRaw);
+      if (!dateFrom) return send(res, 400, { error: 'date_from must be a valid date or timestamp' });
     }
-    const dateTo = (q.get('date_to') ?? q.get('to') ?? '').trim() || null;
-    if (dateTo && !/^\d{4}-\d{2}-\d{2}/.test(dateTo)) {
-      return send(res, 400, { error: 'date_to must be a valid date or timestamp' });
+    const toRaw = (q.get('date_to') ?? q.get('to') ?? '').trim() || null;
+    let dateTo = null;
+    if (toRaw) {
+      dateTo = parseAuditDateBound(toRaw);
+      if (!dateTo) return send(res, 400, { error: 'date_to must be a valid date or timestamp' });
     }
-    if (dateFrom && dateTo && dateFrom.slice(0, 10) > dateTo.slice(0, 10)) {
+    if (dateFrom && dateTo && dateFrom.startMs > dateTo.endMs) {
       return send(res, 400, { error: 'date_from must be before or equal to date_to' });
     }
     const fieldParam = (q.get('field') ?? q.get('field_changed') ?? '').trim() || null;
     const fieldCandidates = [];
     if (fieldParam) {
       const lower = fieldParam.toLowerCase();
-      const matched = new Set([lower]);
+      const matched = new Set();
       for (const m of Object.values(models)) {
         for (const [k, f] of Object.entries(m.fields ?? {})) {
-          if (k.toLowerCase() === lower || f?.label?.toLowerCase() === lower) {
+          if (k.toLowerCase().includes(lower) || f?.label?.toLowerCase().includes(lower)) {
             matched.add(k.toLowerCase());
           }
         }
@@ -934,20 +979,43 @@ async function api(req, res, path) {
       params.push(before);
     }
     if (actor) {
-      conditions.push('LOWER(actor) = LOWER(?)');
+      conditions.push('INSTR(LOWER(actor), LOWER(?)) > 0');
       params.push(actor);
     }
     if (dateFrom) {
-      conditions.push('((length(?) = 10 AND substr(at, 1, 10) >= ?) OR (length(?) > 10 AND at >= ?))');
-      params.push(dateFrom, dateFrom, dateFrom, dateFrom);
+      if (dateFrom.type === 'date') {
+        conditions.push('substr(at, 1, 10) >= ?');
+        params.push(dateFrom.raw);
+      } else {
+        conditions.push('datetime(at) >= datetime(?)');
+        params.push(dateFrom.raw);
+      }
     }
     if (dateTo) {
-      conditions.push('((length(?) = 10 AND substr(at, 1, 10) <= ?) OR (length(?) > 10 AND at <= ?))');
-      params.push(dateTo, dateTo, dateTo, dateTo);
+      if (dateTo.type === 'date') {
+        conditions.push('substr(at, 1, 10) <= ?');
+        params.push(dateTo.raw);
+      } else {
+        conditions.push('datetime(at) <= datetime(?)');
+        params.push(dateTo.raw);
+      }
     }
-    if (fieldCandidates.length) {
-      conditions.push(`(json_valid(changes) AND EXISTS (SELECT 1 FROM json_each(changes) WHERE LOWER(key) IN (${fieldCandidates.map(() => '?').join(',')})))`);
-      params.push(...fieldCandidates);
+    if (fieldParam) {
+      const lowerField = fieldParam.toLowerCase();
+      const subConds = [
+        'INSTR(LOWER(changes), ?) > 0',
+        'INSTR(LOWER(action), ?) > 0',
+      ];
+      const subParams = [lowerField, lowerField];
+      if (fieldCandidates.length) {
+        subConds.push(`(json_valid(changes) AND EXISTS (SELECT 1 FROM json_each(changes) WHERE INSTR(LOWER(key), ?) > 0 OR LOWER(key) IN (${fieldCandidates.map(() => '?').join(',')})))`);
+        subParams.push(lowerField, ...fieldCandidates);
+      } else {
+        subConds.push('(json_valid(changes) AND EXISTS (SELECT 1 FROM json_each(changes) WHERE INSTR(LOWER(key), ?) > 0))');
+        subParams.push(lowerField);
+      }
+      conditions.push(`(${subConds.join(' OR ')})`);
+      params.push(...subParams);
     }
     conditions.push('audit_visible(company_id, model, res_id, changes, ?) = 1');
     params.push(selected === null ? null : JSON.stringify(selected));

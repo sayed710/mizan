@@ -762,10 +762,16 @@ test('GET /api/audit filters by user, model, record, field, date range and rejec
     assert.equal((await admin('GET', '/api/audit?record=-5')).status, 400);
     assert.equal((await admin('GET', '/api/audit?res_id=xyz')).status, 400);
 
-    // Invalid dates rejected with 400
+    // Invalid dates rejected with 400 (nonexistent dates, trailing garbage, reversed bounds)
     assert.equal((await admin('GET', '/api/audit?date_from=invalid-date')).status, 400);
     assert.equal((await admin('GET', '/api/audit?date_to=invalid-date')).status, 400);
     assert.equal((await admin('GET', '/api/audit?date_from=2026-12-31&date_to=2026-01-01')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_from=2026-02-30')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_to=2026-04-31')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_from=2026-13-01')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_from=2026-03-01-garbage')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_to=2026-03-01T10:00:00Zextra')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?date_from=2026-03-01T15:00:00Z&date_to=2026-03-01T10:00:00Z')).status, 400);
 
     const snapshot = (await admin('GET', '/api/db')).body;
     const lead = create(snapshot, 'crm.lead', { name: 'Audit Filter Lead', company_id: 1 });
@@ -774,11 +780,16 @@ test('GET /api/audit filters by user, model, record, field, date range and rejec
     const saved = await admin('POST', '/api/diff', diffDb(snapshot, move.db));
     assert.equal(saved.status, 200);
 
-    // User filter
+    // User filter (exact and partial substring)
     const userFiltered = await admin('GET', '/api/audit?user=admin&limit=10');
     assert.equal(userFiltered.status, 200);
     assert.ok(userFiltered.body.length > 0);
     assert.ok(userFiltered.body.every((r) => r.actor.toLowerCase() === 'admin'));
+
+    const partialUser = await admin('GET', '/api/audit?user=adm&limit=10');
+    assert.equal(partialUser.status, 200);
+    assert.ok(partialUser.body.length > 0);
+    assert.ok(partialUser.body.every((r) => r.actor.toLowerCase().includes('adm')));
 
     // Model filter (valid model)
     const modelFiltered = await admin('GET', '/api/audit?model=crm.lead&limit=10');
@@ -786,21 +797,41 @@ test('GET /api/audit filters by user, model, record, field, date range and rejec
     assert.ok(modelFiltered.body.every((r) => r.model === 'crm.lead'));
     assert.ok(modelFiltered.body.some((r) => r.res_id === lead.id));
 
-    // Record filter (by record id)
+    // Record filter (by record id, numeric and with hash prefix)
     const recordFiltered = await admin('GET', `/api/audit?model=crm.lead&record=${lead.id}`);
     assert.equal(recordFiltered.status, 200);
     assert.ok(recordFiltered.body.every((r) => r.res_id === lead.id));
 
-    // Field changed filter
+    const hashRecordFiltered = await admin('GET', `/api/audit?model=crm.lead&record=%23${lead.id}`);
+    assert.equal(hashRecordFiltered.status, 200);
+    assert.ok(hashRecordFiltered.body.every((r) => r.res_id === lead.id));
+
+    // Field changed filter (exact key, partial key, label, value)
     const fieldFiltered = await admin('GET', '/api/audit?model=account.move&field=ref');
     assert.equal(fieldFiltered.status, 200);
     assert.ok(fieldFiltered.body.some((r) => r.res_id === move.id && 'ref' in r.changes));
 
-    // Date range filter
+    const partialField = await admin('GET', '/api/audit?model=account.move&field=re');
+    assert.equal(partialField.status, 200);
+    assert.ok(partialField.body.some((r) => r.res_id === move.id));
+
+    const labelField = await admin('GET', '/api/audit?model=account.move&field=Reference');
+    assert.equal(labelField.status, 200);
+    assert.ok(labelField.body.some((r) => r.res_id === move.id));
+
+    const valueField = await admin('GET', '/api/audit?model=account.move&field=AUD-REF-1');
+    assert.equal(valueField.status, 200);
+    assert.ok(valueField.body.some((r) => r.res_id === move.id));
+
+    // Date range filter (date and timestamp bounds)
     const todayStr = new Date().toISOString().slice(0, 10);
     const dateFiltered = await admin('GET', `/api/audit?model=crm.lead&date_from=${todayStr}&date_to=${todayStr}`);
     assert.equal(dateFiltered.status, 200);
     assert.ok(dateFiltered.body.some((r) => r.res_id === lead.id));
+
+    const tsFiltered = await admin('GET', `/api/audit?model=crm.lead&date_from=${todayStr}T00:00:00Z&date_to=${todayStr}T23:59:59Z`);
+    assert.equal(tsFiltered.status, 200);
+    assert.ok(tsFiltered.body.some((r) => r.res_id === lead.id));
 
     const pastFiltered = await admin('GET', '/api/audit?model=crm.lead&date_from=2000-01-01&date_to=2000-01-02');
     assert.equal(pastFiltered.status, 200);
