@@ -98,7 +98,7 @@ test('CAT-1: res.partner.category model, menu, partner tag_ids many2many, comple
   };
 
   const migrated = migrate(legacyDb, SCHEMA_VERSION);
-  assert.equal(migrated.schema_version, 67);
+  assert.equal(migrated.schema_version, 68);
   const cats = migrated.records['res.partner.category'];
   assert.ok(cats.length >= 3, 'Must create res.partner.category records for VIP, Wholesale, Retail');
   const vipCat = cats.find((c) => c.name === 'VIP');

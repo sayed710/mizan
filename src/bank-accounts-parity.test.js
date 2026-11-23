@@ -312,6 +312,7 @@ test('res.partner.bank form renders Odoo groups, no duplicate title field, multi
 test('new bank accounts default to untrusted and outbound payments are refused until trusted', () => {
   assert.deepEqual(models['res.partner'].fields.bank_ids.newLine(), {
     account_number: '',
+    bank_id: null,
     bank_name: '',
     bank_bic: '',
     allow_out_payment: false,

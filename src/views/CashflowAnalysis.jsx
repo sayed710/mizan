@@ -1,3 +1,6 @@
+import { ReportPrintView } from './FinancialReportPrint.jsx';
+import { documentCompany } from '../models/company.js';
+import { downloadCsv, tableToRows } from '../csv.js';
 import { useRef, useState } from 'react';
 import { t } from '../i18n.js';
 import { isoDate, today } from '../models/common.js';
@@ -26,20 +29,24 @@ export function CashflowAnalysis() {
     to,
     ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
   });
+  const [isPrinting, setIsPrinting] = useState(false);
+  const printCompanies = (selectedCompany === 'all' ? companies : companies.filter ( (company) => company.id === Number(selectedCompany))).map((company) => documentCompany(sourceDb, { company_id: company.id })).filter(Boolean);
   const exportXlsx = () => {
     if (!tableRef.current) return;
     downloadXlsx('cashflow_analysis.xlsx', tableRef.current, { sheetName: t('Cashflow Analysis') });
   };
-  return <main className="action report-page">
-    <div className="control-panel"><h1 className="cp-title">{t('Cashflow Analysis')}</h1>
+  const controls = <div className="control-panel"><h1 className="cp-title">{t('Cashflow Analysis')}</h1>
       <label>{t('From')} <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
       <label>{t('To')} <input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
       {availableCompanies.length > 1 && <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} />}
       <button type="button" className="btn sm" onClick={() => setPivot(!pivot)}>{t(pivot ? 'Monthly Summary' : 'Pivot by Journal')}</button>
       <span className="spacer" />
+      <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+      <button type="button" className="btn sm" onClick={() => downloadCsv('cashflow-analysis.csv', tableToRows(tableRef.current))}>{t('Download CSV')}</button>
       <button type="button" className="btn sm" onClick={exportXlsx}>{t('Download XLSX')}</button>
-    </div>
-    <div className="list-wrap"><table className="list report" ref={tableRef}>
+    </div>;
+  return <ReportPrintView active={isPrinting} company={printCompanies[0]} companies={printCompanies} title={t('Cashflow Analysis')} subtitle={`${from} - ${to}`} controls={controls} onBack={() => setIsPrinting(false)}>
+    <div className="list-wrap"><table ref={tableRef} className="list report">
       <thead>{pivot ? <>
         <tr><th>{t('Month')}</th>{journals.map((journal) => <th key={journal.id} colSpan={3}>{journal.name}</th>)}</tr>
         <tr><th />{journals.flatMap((journal) => measures.map((label) => <th key={`${journal.id}-${label}`} className="num">{t(label)}</th>))}</tr>
@@ -48,5 +55,5 @@ export function CashflowAnalysis() {
         {(pivot ? journals.flatMap((journal) => { const sums = row.journals.get(journal.id); return [sums?.inflow ?? 0, sums?.outflow ?? 0, sums?.net ?? 0]; }) : [row.inflow, row.outflow, row.net]).map((amount, index) => <td key={index} className="num">{money(amount)}</td>)}
       </tr>)}</tbody>
     </table></div>
-  </main>;
+  </ReportPrintView>;
 }

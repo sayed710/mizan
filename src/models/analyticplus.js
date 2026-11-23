@@ -376,7 +376,12 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
       ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
     const committed = roundCurrency(commitment_lines.reduce((sum, line) => sum + line.amount, 0), companyCurrency);
     const theoretical = roundCurrency(planned * fraction, companyCurrency);
-    return { ...line, planned, practical, committed, theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
+    const isExpense = budget.budget_type === 'expense';
+    const planned_amount = planned;
+    const budget_theoretical = roundCurrency(planned_amount * fraction, companyCurrency);
+    const budgetSign = isExpense ? -1 : 1;
+    const achieved_amount = roundCurrency(practical * budgetSign, companyCurrency);
+    return { ...line, planned, practical, committed, budgetSign, planned_amount, budget_theoretical, achieved_amount, committed_amount: roundCurrency((practical + committed) * budgetSign, companyCurrency), theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, budget_variance: roundCurrency(achieved_amount - planned_amount, companyCurrency), budget_achievement: budget_theoretical ? round(achieved_amount / budget_theoretical * 100) : 0, analytic_lines, commitment_lines };
   });
 }
 
