@@ -5,6 +5,7 @@ import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { round } from '../money.js';
 import { lineUntaxed } from '../models/taxes.js';
+import { qtyToInvoice } from '../models/sales.js';
 import { today } from '../models/common.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { CompanySelect, reportCompanyScope, reportMoney } from './reportCompany.jsx';
@@ -39,15 +40,20 @@ export function SalesReview({ leaf }) {
       if (!['sale', 'done'].includes(order.state)) return [];
       const orderCompanyId = order.company_id ?? 1;
       if (selectedCompany !== 'all' && orderCompanyId !== Number(selectedCompany)) return [];
-      const orderDate = (order.date_order ?? order.create_date ?? today()).slice(0, 10);
-      if (period.from && orderDate < period.from) return [];
-      if (period.to && orderDate > period.to) return [];
+
+      const rawDate = order.date_order ?? order.create_date;
+      const orderDate = rawDate ? String(rawDate).slice(0, 10) : null;
+      if (periodKey !== 'all') {
+        if (!orderDate) return [];
+        if (period.from && orderDate < period.from) return [];
+        if (period.to && orderDate > period.to) return [];
+      }
 
       return (order.order_line ?? []).flatMap((line, index) => {
         if (line.down_payment_key || line.is_downpayment || line.display_type) return [];
         const delivered = Number(line.qty_delivered) || 0;
         const invoiced = Number(line.qty_invoiced) || 0;
-        const difference = deliveredFirst ? delivered - invoiced : invoiced - delivered;
+        const difference = deliveredFirst ? qtyToInvoice(companyDb, line) : invoiced - delivered;
         if (difference <= 0) return [];
         const unitPrice = Number(line.price_unit) || 0;
         const amount = round(lineUntaxed({ ...line, qty: difference }));
@@ -56,7 +62,7 @@ export function SalesReview({ leaf }) {
         return [{ order, line, index, delivered, invoiced, difference, unitPrice, amount, partner, product }];
       });
     });
-  }, [companyDb, deliveredFirst, selectedCompany, period]);
+  }, [companyDb, deliveredFirst, selectedCompany, period, periodKey]);
 
   const groups = useMemo(() => {
     if (!groupBy) return null;
@@ -73,7 +79,12 @@ export function SalesReview({ leaf }) {
 
   const exportCsv = () => {
     if (!tableRef.current) return;
-    downloadCsv(`${leaf.report || 'sales_review'}.csv`, tableToRows(tableRef.current));
+    const rawRows = tableToRows(tableRef.current);
+    const colCount = 9;
+    const csvRows = rawRows.map((row) => (
+      row.length < colCount ? [...row, ...Array(colCount - row.length).fill('')] : row
+    ));
+    downloadCsv(`${leaf.report || 'sales_review'}.csv`, csvRows);
   };
 
   const exportXlsx = () => {

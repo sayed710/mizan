@@ -330,8 +330,15 @@ export function secureHeadsGuard(db, before, after, ctx) {
 }
 
 export function checkInalterability(db, { journalId = null, companyId = null } = {}) {
-  const targetJournalId = journalId != null && journalId !== '' ? Number(journalId) : null;
-  const journals = search(db, 'account.journal', { includeArchived: true }).filter((j) => !targetJournalId || j.id === targetJournalId);
+  let targetJournalId = null;
+  if (journalId != null && journalId !== '') {
+    const parsed = Number(journalId);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error('Invalid journal identifier');
+    }
+    targetJournalId = parsed;
+  }
+  const journals = search(db, 'account.journal', { includeArchived: true }).filter((j) => targetJournalId === null || j.id === targetJournalId);
   const results = [];
   for (const j of journals) {
     const secured = (db.records['account.move'] ?? []).filter((m) => m.journal_id === j.id && Boolean(m.inalterable_hash) && (!companyId || (m.company_id ?? 1) === companyId));
