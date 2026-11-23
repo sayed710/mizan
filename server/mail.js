@@ -121,19 +121,22 @@ export function documentEmail(db, model, rec, company = null) {
 /**
  * @returns {Promise<{status: number, body: object, db?: object}>}
  */
-export async function sendDocument(cfg, db, user, { model, id }) {
+export async function sendDocument(cfg, db, _user, { model, id }) {
   if (!DOCUMENTS[model]) return { status: 400, body: { error: 'This document cannot be emailed' } };
   const rec = read(db, model, Number(id));
   if (!rec) return { status: 404, body: { error: 'Record not found' } };
+  if (model === 'account.move' && rec.state !== 'posted') return { status: 400, body: { error: 'Only posted invoices can be emailed.' } };
   const partner = read(db, 'res.partner', rec.partner_id);
   if (!partner?.email) return { status: 400, body: { error: 'The customer has no email address' } };
   const company = documentCompany(db, rec);
   if (!company) return { status: 400, body: { error: 'Configure the document company before emailing.' } };
-  await sendMail(cfg, { to: partner.email, ...documentEmail(db, model, rec, company) });
+  const email = { to: partner.email, ...documentEmail(db, model, rec, company) };
   const nextState = DOCUMENTS[model][rec.state];
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
+  if (model === 'account.move' && rec.state === 'posted') next = write(next, model, rec.id, { is_move_sent: true });
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
-  return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
+  await sendMail(cfg, email);
+  return { status: 200, body: { ok: true }, db: next };
 }
 
 /** Send a follow-up and persist its existing manual reminder transition after delivery. */
@@ -245,9 +248,18 @@ export function reconcileFollowUp(current, snapshot, sent, opts, partnerId, comp
  * turn the send into a failure: on a conflict only the "sent" note is recorded and the newer state is kept.
  * @returns {{db: object, notice?: string}}
  */
-export function recordSent(current, snapshot, sent, opts, reconcile = null) {
+export function recordSent(current, snapshot, sent, opts, { document = null, reconcile = null } = {}) {
+  const diff = diffDb(snapshot, sent);
+  const original = document?.model === 'account.move' ? read(snapshot, document.model, Number(document.id)) : null;
+  if (original?.state === 'posted') {
+    const rows = (diff.upserts['account.move'] ??= []);
+    if (!rows.some((row) => row.id === original.id)) rows.push(read(sent, 'account.move', original.id));
+    const base = ((diff.bases['account.move'] ??= {})[original.id] ??= {});
+    base.state = original.state;
+    base.is_move_sent = original.is_move_sent ?? null;
+  }
   try {
-    return { db: applyDiff(current, diffDb(snapshot, sent), opts) };
+    return { db: applyDiff(current, diff, opts) };
   } catch (e) {
     if (!(e instanceof ConflictError)) throw e;
     if (typeof reconcile === 'function') {

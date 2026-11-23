@@ -2482,6 +2482,7 @@ export const financeModels = {
     fields: {
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       name: { type: 'char', label: 'Budget Name', required: true },
+      budget_type: { type: 'selection', label: 'Budget Type', required: true, options: [['expense', 'Expense'], ['revenue', 'Revenue'], ['both', 'Both']] },
       date_from: { type: 'date', label: 'Start Date' },
       date_to: { type: 'date', label: 'End Date' },
       lines: {
@@ -2492,7 +2493,7 @@ export const financeModels = {
       },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['confirmed', 'Confirmed'], ['done', 'Done']] },
     },
-    defaults: () => ({ state: 'draft', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
+    defaults: () => ({ state: 'draft', budget_type: 'expense', date_from: today().slice(0, 4) + '-01-01', date_to: today().slice(0, 4) + '-12-31', lines: [] }),
     kanban: { title: 'name', lines: ['date_from', 'date_to'], badge: 'state' },
     list: ['name', 'date_from', 'date_to', 'state'],
     form: {
@@ -2500,7 +2501,7 @@ export const financeModels = {
       statusbarClickable: true,
       buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
-      groups: [['date_from', 'company_id'], ['date_to']],
+      groups: [['date_from', 'company_id'], ['date_to', 'budget_type']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],
       chatter: true,
     },
