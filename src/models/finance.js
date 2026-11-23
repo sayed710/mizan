@@ -1,5 +1,7 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
+import { indexGlMatchings, lineKey } from './glMatchIndex.js';
 import { installments } from './terms.js';
+import { normalizePhone, queueSms } from './sms.js';
 import { models } from '../registry.js';
 import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
@@ -1374,7 +1376,13 @@ export function postTaxReturnClosing(db, returnId) {
   return { db: next, ids, payable: round(specs.reduce((s, spec) => s + spec.payable, 0)) };
 }
 
-const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
+export const BUCKETS = (interval = 30) => {
+  const length = Number.isSafeInteger(Number(interval)) && Number(interval) > 0 ? Number(interval) : 30;
+  return [['current', 'At Date', -Infinity, 0], ...Array.from({ length: 4 }, (_, i) => {
+    const from = i * length + 1, to = (i + 1) * length;
+    return [`${from}_${to}`, `${from}-${to}`, from, to];
+  }), ['older', 'Older', 4 * length + 1, Infinity]];
+};
 
 /** Per-tax report row a tax item belongs to: its side and tax, or its tax name when it has no tax. */
 export function taxItemKey(l) {
@@ -1509,23 +1517,59 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   }
 }
 
+/** Include other posted receivable/payable journal lines, with matching effective at the cutoff. */
+function ageOtherEntries(db, kind, at, moves, add) {
+  // Settlement entries and their reversals are already reflected by document/payment residuals.
+  const paymentMoves = new Set(search(db, 'account.payment').map((payment) => payment.move_id).filter(Boolean));
+  for (const move of moves) for (const application of move.payments ?? []) {
+    for (const id of [application.move_id, application.payment_fx_move_id, application.cash_basis_move_id]) if (id) paymentMoves.add(id);
+  }
+  for (const matching of db.records['account.partial.reconcile'] ?? []) if (matching.exchange_move_id) paymentMoves.add(matching.exchange_move_id);
+  for (const move of moves) if (paymentMoves.has(move.reversed_entry_id)) paymentMoves.add(move.id);
+  const matchings = indexGlMatchings(db);
+  const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+  const sign = kind === 'receivable' ? 1 : -1;
+  for (const move of moves) {
+    if (move.state !== 'posted' || move.move_type !== 'entry' || paymentMoves.has(move.id)) continue;
+    const moveDate = move.date ?? move.invoice_date;
+    if (!moveDate || moveDate > at) continue;
+    (move.line_ids ?? []).forEach((line, index) => {
+      const date = line.date ?? moveDate;
+      if (date > at || read(db, 'account.account', line.account_id)?.account_type !== accountType) return;
+      const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
+      const matched = (matchings.byLine.get(lineKey(move.id, index)) ?? []).reduce((sum, link) => {
+        const otherId = link.debit_move_id === move.id ? link.credit_move_id : link.debit_move_id;
+        const other = read(db, 'account.move', otherId);
+        if (!other || other.state !== 'posted' || other.move_type !== 'entry') return sum;
+        const otherIndex = link.debit_move_id === move.id ? link.credit_line_index : link.debit_line_index;
+        const otherDate = other?.line_ids?.[otherIndex]?.date ?? other?.date ?? other?.invoice_date;
+        return otherDate && otherDate <= at && (!link.date || link.date <= at) ? sum + Number(link.amount) : sum;
+      }, 0);
+      const remaining = Math.max(0, round(Math.abs(balance) - matched));
+      if (remaining) add(line.partner_id ?? move.partner_id ?? null, line.date_maturity ?? date, sign * Math.sign(balance) * remaining, move);
+    });
+  }
+}
+
 /** Use the requested reporting cutoff, defaulting to today. */
 export const agedReportDate = (end, now = today()) => end || now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
-export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
+export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date' } = {}) {
+  const buckets = BUCKETS(aging_interval);
   const rows = new Map();
   const add = (partner, date, amount, document = null, source = document) => {
     amount = reportingBookedAmount(db, source, amount);
-    const days = Math.floor((new Date(at) - new Date(date)) / 864e5);
-    const bucket = BUCKETS.find(([, , from, to]) => days >= from && days <= to)[0];
-    const row = rows.get(partner) ?? { partner_id: partner, total: 0, invoices: [], ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+    const ageDate = aging_based_on === 'base_on_invoice_date' ? (document?.invoice_date ?? date) : date;
+    const days = Math.floor((new Date(at) - new Date(ageDate)) / 864e5);
+    const bucket = buckets.find(([, , from, to]) => days >= from && days <= to)[0];
+    const row = rows.get(partner) ?? { partner_id: partner, total: 0, invoices: [], ...Object.fromEntries(buckets.map(([k]) => [k, 0])) };
     row[bucket] = round(row[bucket] + amount);
     row.total = round(row.total + amount);
     if (document) {
       let detail = row.invoices.find((item) => item.move_id === document.id);
       if (!detail) {
-        detail = { move_id: document.id, name: document.name, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+        detail = { move_id: document.id, name: document.name, invoice_date: document.invoice_date ?? null, date: document.date ?? date ?? null, total: 0, ...Object.fromEntries(buckets.map(([k]) => [k, 0])) };
         row.invoices.push(detail);
       }
       detail[bucket] = round(detail[bucket] + amount);
@@ -1536,7 +1580,8 @@ export function agedBalance(db, kind = 'receivable', at = today(), companyId = n
   const moves = search(db, 'account.move').filter((m) => companyId == null || (m.company_id ?? 1) === companyId);
   ageDocumentInstallments(db, kind, at, moves, add);
   ageUnappliedCredits(db, kind, at, moves, add, companyId);
-  return { buckets: BUCKETS.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
+  ageOtherEntries(db, kind, at, moves, add);
+  return { buckets: buckets.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
 
 function lastMonths(at, count = 13) {
@@ -1706,12 +1751,28 @@ export function followUpLevelName(level) {
   return `${days} days ${timing}`;
 }
 
-export function levelChannel(level) {
-  if (!level) return null;
-  if (level.send_email) return 'email';
-  if (level.channel && level.channel !== 'email') return level.channel;
-  if (level.send_sms) return 'sms';
-  return null;
+export function levelChannels(level) {
+  if (!level) return [];
+  const channels = [];
+  if (level.send_email) channels.push('email');
+  if (level.send_sms) channels.push('sms');
+  if (!channels.length && level.channel && !['email', 'sms'].includes(level.channel)) channels.push(level.channel);
+  return channels;
+}
+
+export function levelChannel(level) { return levelChannels(level)[0] ?? null; }
+
+const followUpSmsText = (db, part, level) => String(level?.sms_message ?? '').trim() || followUpText(db, part);
+
+function queueFollowUpSms(db, partner, part, level, at, automatic = false) {
+  if (automatic && search(db, 'sms.campaign').some((campaign) => campaign.followup_sms && campaign.followup_partner_id === partner.id && campaign.followup_company_id === part.company_id && campaign.followup_level_id === level?.id && campaign.followup_oldest === part.oldest)) return db;
+  if (!String(partner.mobile || partner.phone || '').trim()) throw new Error('The customer has no mobile or phone number.');
+  const body = followUpSmsText(db, part, level);
+  const campaign = create(db, 'sms.campaign', {
+    name: 'Payment reminder', mailing_model: 'res.partner', body, followup_sms: true, company_id: part.company_id,
+    ...(automatic ? { followup_partner_id: partner.id, followup_company_id: part.company_id, followup_level_id: level?.id, followup_oldest: part.oldest } : {}),
+  });
+  return queueSms(campaign.db, read(campaign.db, 'sms.campaign', campaign.id), { now: at, partnerId: partner.id });
 }
 
 function resolveFollowUpActivityUser(db, partner, companyId, part, responsibleType = 'followup') {
@@ -2078,14 +2139,25 @@ export function runFollowUps(db, at = today(), deliver = null) {
     const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -Infinity;
 
     if (currentDelay >= Number(level.delay)) return nextDb;
-    const channel = levelChannel(level);
+    const channels = levelChannels(level);
+    let channel = channels.includes('email') ? 'email' : channels[0] ?? null;
     const levelName = followUpLevelName(level);
-    const canDeliverEmail = channel === 'email' && Boolean(partner.email?.trim()) && Boolean(deliver);
+    const canDeliverEmail = channels.includes('email') && Boolean(partner.email?.trim()) && Boolean(deliver);
     const hasPendingActivity = Boolean(level.create_activity && (
       (progress?.followup_oldest_date ?? null) !== (f.oldest ?? null)
       || progress?.followup_activity_level !== level.id
     ));
-    if (!canDeliverEmail && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+    const hasPhone = Boolean(String(partner.mobile || partner.phone || '').trim());
+    const sameDaySmsFailure = Boolean(
+      channels.includes('sms')
+      && !hasPhone
+      && progress?.followup_date === at
+      && (progress?.followup_oldest_date ?? null) === (f.oldest ?? null)
+      && (progress?.followup_last_level === level.id || progress?.followup_level === level.id)
+      && progress?.followup_delivery_outcome === 'failed'
+      && progress?.followup_channel === 'sms'
+    );
+    if (!canDeliverEmail && (!channels.includes('sms') || sameDaySmsFailure) && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
     const sameDayOutboxOnly = Boolean(
       !hasPendingActivity
       && progress?.followup_delivery_state !== 'sent'
@@ -2114,19 +2186,55 @@ export function runFollowUps(db, at = today(), deliver = null) {
         followup_channel: channel ?? null,
         followup_delivery_state: deliveryState,
         followup_delivery_outcome: deliveryOutcome,
+        followup_last_level: level?.id ?? null,
         followup_next_action_date: null,
       });
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
+    let smsFailed = false;
+    let smsQueued = false;
+    const emailAlreadySent = progress?.followup_last_level === level.id && progress?.followup_channel === 'sms'
+      && progress?.followup_delivery_outcome === 'failed' && progress?.followup_oldest_date === (f.oldest ?? null);
+    if (channels.includes('sms')) {
+      if (sameDaySmsFailure) {
+        smsFailed = true;
+        if (!channels.includes('email') || emailAlreadySent) return nextDb;
+      } else {
+        try {
+          nextDb = queueFollowUpSms(nextDb, partner, f, level, at, true);
+          smsQueued = true;
+          if (!channels.includes('email') || emailAlreadySent) return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
+        } catch (error) {
+          smsFailed = true;
+          const msg = error?.message ?? String(error);
+          const previousChannel = channel;
+          channel = 'sms';
+          nextDb = recordFailure(`SMS delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+          channel = previousChannel;
+          if (!channels.includes('email') || emailAlreadySent) return nextDb;
+        }
+      }
+    }
     if (channel === 'email' && partner.email?.trim() && deliver) {
       const message = followUpEmail(nextDb, f, level, partner);
       // Validate the bookkeeping before attempting an irreversible delivery.
       const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
+      const emailSent = () => {
+        if (!smsFailed) return sent;
+        const sentPartner = read(sent, 'res.partner', partner.id);
+        const failure = partnerFollowUp(read(nextDb, 'res.partner', partner.id), companyId);
+        return write(sent, 'res.partner', partner.id, {
+          followup_lines: updatePartnerFollowUp(sentPartner, companyId, {
+            ...failure, followup_level_delay: progress?.followup_level_delay ?? null,
+            followup_level: progress?.followup_level ?? null, followup_last_level: level.id,
+          }).followup_lines,
+        });
+      };
       /** Interpret mail-transport outcome strictly per the single delivery contract. */
       const settleDelivery = (result) => {
-        if (result === undefined || (typeof result === 'number' && Number.isInteger(result) && result >= 0)) return sent;
+        if (result === undefined || (typeof result === 'number' && Number.isInteger(result) && result >= 0)) return emailSent();
         if (result && typeof result === 'object') {
-          if (result.status === 'sent') return sent;
+          if (result.status === 'sent') return emailSent();
           if (result.status === 'outbox_only' && typeof result.reason === 'string' && result.reason.trim()) {
             // Suppress duplicate outbox-only notes within the same day while still keeping state not_sent so live SMTP sends later.
             if (sameDayOutboxOnly) return nextDb;
@@ -2150,6 +2258,19 @@ export function runFollowUps(db, at = today(), deliver = null) {
         const msg = error?.message ?? String(error);
         return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
       }
+    }
+    if (smsQueued) {
+      const emailReason = partner.email?.trim() ? 'Automatic email delivery is not configured.' : 'The customer has no email address.';
+      const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+      nextDb = postNote(
+        nextDb,
+        'res.partner',
+        partner.id,
+        `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${emailReason}`,
+        reminderSource(f),
+        { delivery_channel: 'email', delivery_state: partner.email?.trim() ? 'outbox_only' : 'failed', delivery_error: emailReason },
+      );
+      return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
     }
     if (!channel && level.create_activity) {
       return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, null, f.oldest);
@@ -2244,7 +2365,109 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     throw new Error('A customer email address is required to send an email reminder');
   }
   const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
-  return applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate);
+  const queued = channel === 'sms'
+    ? groups.reduce((state, part) => queueFollowUpSms(state, read(state, 'res.partner', partnerId), part, followUpLevel(scope, part, at), at), db)
+    : db;
+  return applyFollowUpReminder(queued, scope, partnerId, groups, at, channel, nextLevelBaseDate);
+}
+
+const ALLOWED_FOLLOWUP_CAMPAIGN_FIELDS = new Set([
+  'id', 'name', 'mailing_model', 'body', 'followup_sms', 'company_id',
+  'followup_partner_id', 'followup_company_id', 'followup_level_id', 'followup_oldest',
+  'stage_id', 'sent_date', 'sent', 'delivered', 'failed',
+]);
+
+const ALLOWED_FOLLOWUP_TRACE_FIELDS = new Set([
+  'id', 'campaign_id', 'company_id', 'phone', 'name', 'res_model', 'res_id',
+  'state', 'delivery_pending', 'attempted_at', 'error', 'date',
+]);
+
+/**
+ * Whether a diff contains only validated follow-up SMS campaigns and traces.
+ * Used to grant narrowly scoped sync permission to accounting users without granting general SMS Marketing write access.
+ */
+export function isFollowUpSmsDiff(diff, db) {
+  if (!diff || typeof diff !== 'object') return false;
+  if (diff.deletes?.['sms.campaign']?.length || diff.deletes?.['sms.trace']?.length || diff.deletes?.['phone.blacklist']?.length) {
+    return false;
+  }
+  if (diff.upserts?.['phone.blacklist']?.length) return false;
+
+  const campaigns = diff.upserts?.['sms.campaign'] ?? [];
+  const traces = diff.upserts?.['sms.trace'] ?? [];
+  if (!campaigns.length && !traces.length) return false;
+
+  const banned = new Set(search(db, 'phone.blacklist').filter((b) => b.active !== false).map((b) => normalizePhone(b.number)));
+
+  const existingCampaigns = new Map(search(db, 'sms.campaign').map((c) => [c.id, c]));
+  const resultingCampaigns = new Map(existingCampaigns);
+  const touched = new Set();
+  for (const campaign of campaigns) {
+    if (Object.keys(campaign).some((k) => !ALLOWED_FOLLOWUP_CAMPAIGN_FIELDS.has(k))) return false;
+    const prior = existingCampaigns.get(campaign.id);
+    if (campaign.followup_sms !== true || (prior && prior.followup_sms !== true)) return false;
+    if (prior) {
+      if ((campaign.delivered ?? 0) !== (prior.delivered ?? 0)) return false;
+      if ((campaign.failed ?? 0) !== (prior.failed ?? 0)) return false;
+      if ((campaign.sent ?? 0) !== (prior.sent ?? 0)) return false;
+      if (campaign.stage_id !== prior.stage_id) return false;
+      if (campaign.body !== prior.body) return false;
+      if ((campaign.company_id ?? 1) !== (prior.company_id ?? 1)) return false;
+    } else {
+      if (campaign.mailing_model !== 'res.partner') return false;
+      if ((campaign.delivered ?? 0) !== 0 || (campaign.failed ?? 0) !== 0) return false;
+      if (campaign.stage_id !== 'sent') return false;
+    }
+    resultingCampaigns.set(campaign.id, campaign);
+    touched.add(campaign.id);
+  }
+
+  const existingTraces = new Map(search(db, 'sms.trace').map((t) => [t.id, t]));
+  const resultingTraces = new Map(existingTraces);
+  for (const trace of traces) {
+    if (Object.keys(trace).some((k) => !ALLOWED_FOLLOWUP_TRACE_FIELDS.has(k))) return false;
+    const prior = existingTraces.get(trace.id);
+    if (prior) {
+      if (prior.campaign_id !== trace.campaign_id) return false;
+      if (trace.state !== prior.state) return false;
+      if ((trace.delivery_pending ?? false) !== (prior.delivery_pending ?? false)) return false;
+      if ((trace.attempted_at ?? null) !== (prior.attempted_at ?? null)) return false;
+      if ((trace.error ?? '') !== (prior.error ?? '')) return false;
+      if (trace.phone !== prior.phone) return false;
+      if (trace.res_model !== prior.res_model || trace.res_id !== prior.res_id) return false;
+      if (trace.state === 'outgoing' && banned.has(normalizePhone(trace.phone))) return false;
+    } else {
+      if (existingCampaigns.has(trace.campaign_id)) return false;
+      if (trace.state !== 'outgoing') return false;
+      if (trace.delivery_pending !== true) return false;
+      if (trace.attempted_at != null) return false;
+      if (trace.error) return false;
+      if (trace.res_model !== 'res.partner') return false;
+      if (banned.has(normalizePhone(trace.phone))) return false;
+    }
+    resultingTraces.set(trace.id, trace);
+    touched.add(trace.campaign_id);
+  }
+
+  const at = today();
+  const groups = followUps(db, at).flatMap(followUpCompanies);
+  for (const id of touched) {
+    const campaign = resultingCampaigns.get(id);
+    if (!campaign || campaign.followup_sms !== true || campaign.mailing_model !== 'res.partner') return false;
+    const campaignTraces = [...resultingTraces.values()].filter((trace) => trace.campaign_id === id);
+    if (!campaignTraces.length) return false;
+    for (const trace of campaignTraces) {
+      const partner = read(db, 'res.partner', trace.res_id);
+      const group = groups.find((f) => f.partner_id === trace.res_id && f.company_id === (campaign.company_id ?? 1) && !f.upcoming);
+      const level = group && followUpLevel(db, group, at);
+      if (trace.res_model !== 'res.partner' || !partner || !group || !level?.send_sms) return false;
+      const phone = normalizePhone(partner.mobile || partner.phone);
+      if (!phone || trace.phone !== phone || campaign.body !== followUpSmsText(db, group, level)) return false;
+      if (banned.has(phone)) return false;
+    }
+  }
+
+  return true;
 }
 
 
@@ -2322,6 +2545,7 @@ export const financeModels = {
       delay: { type: 'integer', label: 'Days Overdue', hidden: true },
       send_email: { type: 'boolean', label: 'Email' },
       send_sms: { type: 'boolean', label: 'SMS' },
+      sms_message: { type: 'text', label: 'SMS Text', hideWhen: (r) => !r?.send_sms },
       create_activity: { type: 'boolean', label: 'Schedule Activity' },
       activity_default_responsible_type: {
         type: 'selection',
@@ -2448,7 +2672,7 @@ export const financeModels = {
           label: 'Notification',
           groups: [
             { title: 'Actions', fields: ['send_email', 'send_sms'] },
-            { fullWidth: true, fields: ['message'] },
+            { fullWidth: true, fields: ['message', 'sms_message'] },
           ],
         },
         {
