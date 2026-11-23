@@ -1760,6 +1760,7 @@ const ar = {
   'Participants': 'المشاركون',
   'Pass - Fail': 'ناجح - راسب',
   'Payment Method': 'طريقة الدفع',
+  'A Ledger group name must be unique.': 'يجب أن يكون اسم مجموعة دفاتر الأستاذ فريدًا.',
   'Pick up Date': 'تاريخ الاستلام',
   'Pizza': 'بيتزا',
   'Preventive': 'وقائية',

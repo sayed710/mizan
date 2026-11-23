@@ -941,6 +941,7 @@ export const taxModels = {
     filters: [
       [{ id: 'sale', label: 'Sale', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchase', fn: (r) => r.type_tax_use === 'purchase' }],
       [{ id: 'services', label: 'Services', fn: (r) => r.tax_scope === 'service' }, { id: 'goods', label: 'Goods', fn: (r) => r.tax_scope === 'consu' }],
+      [{ id: 'domestic', label: 'Domestic', fn: (r, db) => !(r.fiscal_position_ids ?? []).length || (r.fiscal_position_ids ?? []).includes(read(db, 'res.company', r.company_id ?? 1)?.domestic_fiscal_position_id) }],
       [{ id: 'active', label: 'Active', fn: (r) => r.active !== false }, { id: 'inactive', label: 'Inactive', includeArchived: true, fn: (r) => r.active === false }],
     ],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
