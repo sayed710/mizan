@@ -148,11 +148,12 @@ export async function sendCustomerStatement(cfg, db, { partnerId, companyId, fro
   const partner = read(db, 'res.partner', Number(partnerId));
   if (!partner) throw new Error('Record not found');
   if (!partner.email?.trim()) throw new Error('The customer has no email address');
-  const currency = findCompanyCurrencyRecord(db, company);
+  const statementDb = (db.settings?.current_company_id ?? 1) === company ? db : { ...db, settings: { ...db.settings, current_company_id: company } };
+  const currency = findCompanyCurrencyRecord(statementDb, company);
   if (!currency) throw new Error('Configure the document or company currency before emailing.');
-  const docCompany = documentCompany(db, { company_id: company });
+  const docCompany = documentCompany(statementDb, { company_id: company });
   if (!docCompany) throw new Error('Configure the document company before emailing.');
-  const report = customerStatement(db, partner.id, { from, to, company_id: company, reviewMode: reviewMode === 'all' ? 'all' : 'posted' });
+  const report = customerStatement(statementDb, partner.id, { from, to, company_id: company, reviewMode: reviewMode === 'all' ? 'all' : 'posted' });
   const amount = (value) => formatCurrency(value, currency);
   const rows = report.lines.map((line) => [line.date, line.move_name, line.ref ?? '', amount(line.debit), amount(line.credit), amount(line.balance)]);
   const headings = ['Date', 'Journal Entry', 'Reference', 'Debit', 'Credit', 'Balance'];

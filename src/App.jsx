@@ -72,7 +72,7 @@ export function App() {
 
   if (route.app === 'print' && route.menu === 'followup') return <Suspense fallback={<Loading />}><FollowUpLetter partnerId={route.id} companyId={route.params.get('company') || undefined} /></Suspense>;
   if (route.app === 'followup' && route.menu === 'send') return <Suspense fallback={<Loading />}><FollowUpWizard partnerId={route.id} companyId={route.params.get('company') || undefined} onClose={() => history.back()} /></Suspense>;
-  if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} /></Suspense>;
+  if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} proforma={route.params.get('report') === 'proforma'} /></Suspense>;
   if (route.app === 'open') {
     // #/open/<model>/<id>: jump to the record inside whichever app shows that model.
     location.replace(`${targetOf(route.menu, db.settings?.uninstalled)}/${route.id}`);
