@@ -1321,7 +1321,7 @@ test('Qodo Bug 4 (Round 3): Manual reprint refuses current number and voided num
     payment_method_line_id: checkMethodLine.id,
   });
   db = postPayment(draftPay.db, read(draftPay.db, 'account.payment', draftPay.id));
-  db = sync(db, write(db, 'account.payment', draftPay.id, { check_number: 700 }));
+  db = printCheck(db, read(db, 'account.payment', draftPay.id), 700);
   const printed = read(db, 'account.payment', draftPay.id);
 
   // 1. Attempt manual reprint with equal number (700)

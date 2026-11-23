@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { register } from 'node:module';
 import { models } from './models/index.js';
-import { create, read } from './orm.js';
+import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { budgetReport } from './models/analyticplus.js';
+import { migrate } from './migrations.js';
+
+register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 test('budget line achieved and committed include posted analytic activity', () => {
   let db = seed();
@@ -58,3 +62,36 @@ test('new budgets default to expense', () => {
   const created = create(seed(), 'account.budget', { name: 'New' });
   assert.equal(read(created.db, 'account.budget', created.id).budget_type, 'expense');
 });
+
+test('migration fills budget_type: both on legacy budgets and allows status changes', () => {
+  const seeded = seed();
+  const legacyRecord = {
+    id: 991,
+    name: 'Legacy 2025',
+    company_id: 1,
+    state: 'draft',
+    date_from: '2025-01-01',
+    date_to: '2025-12-31',
+    lines: [],
+  };
+  const unmigrated = {
+    ...seeded,
+    schema_version: 66,
+    records: {
+      ...seeded.records,
+      'account.budget': [...(seeded.records['account.budget'] ?? []), legacyRecord],
+    },
+  };
+  // Before migration, writing or confirming throws because budget_type is missing
+  assert.throws(() => write(unmigrated, 'account.budget', 991, { state: 'confirmed' }), /Budget Type is required/);
+
+  // Migrating upgrades database to schema_version 67 and fills budget_type: 'both'
+  const upgraded = migrate(unmigrated);
+  assert.equal(upgraded.schema_version, 67);
+  assert.equal(read(upgraded, 'account.budget', 991).budget_type, 'both');
+
+  // Status transition on migrated budget succeeds
+  const confirmed = write(upgraded, 'account.budget', 991, { state: 'confirmed' });
+  assert.equal(read(confirmed, 'account.budget', 991).state, 'confirmed');
+});
+
