@@ -291,3 +291,96 @@ test('Finding 7: AgedDetailRow renders invoice date column', async () => {
   assert.equal(cells.length, 6);
   assert.equal(cells[1].props.children, '2025-01-15');
 });
+
+test('Finding 1: aged report retains transaction date for unapplied payment and miscellaneous entry details and AgedDetailRow renders it', async () => {
+  const testDb = {
+    records: {
+      'res.company': [{ id: 1, currency_id: 1 }],
+      'res.currency': [{ id: 1, rounding: 0.01 }],
+      'account.account': [
+        { id: 1, account_type: 'asset_receivable' },
+        { id: 2, account_type: 'income' },
+      ],
+      'account.move': [
+        {
+          id: 501,
+          name: 'PAY/2025/001',
+          state: 'posted',
+          move_type: 'entry',
+          company_id: 1,
+          date: '2025-02-15',
+          line_ids: [{ account_id: 1, partner_id: 7, debit: 0, credit: 50 }],
+        },
+        {
+          id: 502,
+          name: 'MISC/2025/001',
+          state: 'posted',
+          move_type: 'entry',
+          company_id: 1,
+          date: '2025-02-20',
+          line_ids: [{ account_id: 1, partner_id: 7, debit: 70, credit: 0 }],
+        },
+        {
+          id: 503,
+          name: 'INV/2025/001',
+          state: 'posted',
+          move_type: 'out_invoice',
+          partner_id: 7,
+          invoice_date: '2025-02-01',
+          invoice_date_due: '2025-02-28',
+          date: '2025-02-05',
+          line_ids: [{ account_id: 1, partner_id: 7, debit: 100, credit: 0, date_maturity: '2025-02-28' }],
+        },
+      ],
+      'account.payment': [
+        {
+          id: 1,
+          name: 'PAY/2025/001',
+          state: 'posted',
+          payment_type: 'inbound',
+          partner_type: 'customer',
+          partner_id: 7,
+          date: '2025-02-15',
+          move_id: 501,
+        },
+      ],
+      'account.partial.reconcile': [],
+    },
+    settings: { base_currency_id: 1 },
+  };
+
+  const result = agedBalance(testDb, 'receivable', '2025-02-28');
+  assert.equal(result.rows.length, 1);
+  const partnerRow = result.rows[0];
+  assert.equal(partnerRow.partner_id, 7);
+
+  const invDetail = partnerRow.invoices.find((d) => d.move_id === 503);
+  const payDetail = partnerRow.invoices.find((d) => d.move_id === 501);
+  const miscDetail = partnerRow.invoices.find((d) => d.move_id === 502);
+
+  assert.ok(invDetail);
+  assert.ok(payDetail);
+  assert.ok(miscDetail);
+
+  // Invoice preserves invoice_date
+  assert.equal(invDetail.invoice_date, '2025-02-01');
+
+  // Non-invoice details retain transaction date
+  assert.equal(payDetail.date, '2025-02-15');
+  assert.equal(payDetail.invoice_date, null);
+  assert.equal(miscDetail.date, '2025-02-20');
+  assert.equal(miscDetail.invoice_date, null);
+
+  // AgedDetailRow renders transaction date when invoice_date is absent, and preserves invoice_date when present
+  const { AgedDetailRow } = await import('./views/aged-detail-row.js');
+  const buckets = result.buckets;
+
+  const invEl = AgedDetailRow({ buckets, detail: invDetail, money: (v) => `$${v}` });
+  assert.equal(invEl.props.children[1].props.children, '2025-02-01');
+
+  const payEl = AgedDetailRow({ buckets, detail: payDetail, money: (v) => `$${v}` });
+  assert.equal(payEl.props.children[1].props.children, '2025-02-15');
+
+  const miscEl = AgedDetailRow({ buckets, detail: miscDetail, money: (v) => `$${v}` });
+  assert.equal(miscEl.props.children[1].props.children, '2025-02-20');
+});
