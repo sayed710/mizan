@@ -500,12 +500,21 @@ export function FormView({ leaf, id, base, params }) {
   };
   const leave = (hash) => { if (!dirty || save() != null) location.hash = hash; };
 
-  const runButton = async (b) => {
+  /** Where a button sends (server endpoint), whether that integration is live, and the unconfigured channel otherwise. */
+  const sendTarget = (b) => {
     const endpoint = b.server ?? (b.email === 'mailing' ? '/api/mail/mailing' : b.email ? '/api/mail/document' : null);
     const need = b.requires ?? (b.email ? 'smtp' : 'server');
     const live = endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need]);
+    return { endpoint, live, channel: !live && endpoint && SENDING[need] };
+  };
+  const runButton = async (b) => {
+    // Buttons that need input open an in-app dialog; the button runs with what was entered.
+    if (!b.prompt) {
+      const spec = b.wizard?.(getDb(), current);
+      if (spec) { setWizard({ b, spec, error: null }); return; }
+    }
     // Without the integration the button only records the send: say so, ask first and leave a trace.
-    const channel = !live && endpoint && SENDING[need];
+    const { endpoint, live, channel } = sendTarget(b);
     if (channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
     const noteUnsent = (id) => { if (channel) commit(postNote(getDb(), model, id, t('Not sent: {channel} is not configured.', { channel: t(channel) }))); };
     if (live) {
@@ -556,9 +565,6 @@ export function FormView({ leaf, id, base, params }) {
       if (id != null && b.vals.active === false) location.hash = backHash;
       return;
     }
-    // Buttons that need input open an in-app dialog; the button runs with what was entered.
-    const spec = b.wizard?.(getDb(), current);
-    if (spec) { setWizard({ b, spec, error: null }); return; }
     const answers = [];
     for (const q of b.ask ?? []) {
       const text = prompt(t(q.label), q.default?.(current) ?? '');
@@ -604,15 +610,48 @@ export function FormView({ leaf, id, base, params }) {
       fail(e);
     }
   };
-  const confirmWizard = (values) => {
+  const confirmWizard = async (values) => {
     if (wizard.live) { setWizard(null); wizard.live(values); return; }
     try {
+      const b = wizard.b;
+      const hasEmailField = wizard.spec?.fields?.some((f) => f.name === 'email');
+      const shouldEmail = Boolean(b.email && (hasEmailField ? values?.email : true));
+      const { endpoint, live, channel } = sendTarget(b);
+
+      if (shouldEmail && channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
+
       const savedId = wizard.id ?? save();
       if (savedId == null) return;
-      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), values);
-      commit(res.db);
+      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), shouldEmail && live ? { ...values, live: true } : values);
+      await commit(res.db);
+
+      if (shouldEmail) {
+        if (live) {
+          try {
+            const out = await serverAction(endpoint, { model, id: savedId });
+            if (out?.ok === false) throw new Error(out.error ?? t('Could not save changes'));
+            setWizard(null);
+            setError(null);
+            if (out?.message) alert(t(out.message));
+            if (out?.go) location.hash = out.go;
+            else if (res.go) location.hash = res.go;
+            return;
+          } catch (e) {
+            setWizard(null);
+            const prefix = 'The email was sent, but its status could not be recorded: ';
+            if (e.message?.startsWith(prefix)) setError(t('The email was sent, but its status could not be recorded: {reason}', { reason: t(e.message.slice(prefix.length)) }));
+            else fail(e);
+            return;
+          }
+        } else if (channel) {
+          commit(postNote(getDb(), model, savedId, t('Not sent: {channel} is not configured.', { channel: t(channel) })));
+        }
+      }
+
       setWizard(null);
       setError(null);
+
+      if (res.message) alert(res.message);
       if (res.go) location.hash = res.go;
     } catch (e) {
       setWizard((w) => ({ ...w, error: t(e.message) }));
@@ -626,7 +665,7 @@ export function FormView({ leaf, id, base, params }) {
   const resolve = (v) => (typeof v === 'function' ? v(current, db, { leaf, isNew }) : v);
   const statusKey = resolve(def.form.statusbarFor ?? def.form.statusbar);
   const statusField = statusKey && def.fields[statusKey];
-  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())) && (!b.visible || b.visible(current, getDb())));
+  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.app || appOpen(getDb(), getUser(), b.app)) && (!b.when || b.when(current, getDb(), getUser())) && (!b.visible || b.visible(current, getDb(), getUser())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
   const tabs = resolve(def.form.tabs)?.filter((tb) => !tb.when || tb.when(current, db));
@@ -672,9 +711,12 @@ export function FormView({ leaf, id, base, params }) {
           {(buttons.length > 0 || statusField) && (
             <div className="form-header">
               <div className="row">
-                {buttons.map((b) => (
-                  <button key={b.label} type="button" className={`btn ${b.primary ? 'primary' : ''}`} onClick={() => runButton(b)}>{t(b.label)}</button>
-                ))}
+                {buttons.map((b) => {
+                  const isPrimary = typeof b.primary === 'function' ? b.primary(current, getDb()) : Boolean(b.primary);
+                  return (
+                    <button key={b.label} type="button" className={`btn ${isPrimary ? 'primary' : ''}`} onClick={() => runButton(b)}>{t(b.label)}</button>
+                  );
+                })}
               </div>
               {statusField && (() => {
                 const rawOptions = statusField.type === 'selection'

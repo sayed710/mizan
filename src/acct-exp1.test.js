@@ -346,7 +346,7 @@ test('EXP-4: JournalItems and SalesReview export displayed rows to XLSX', async 
     ],
   }).db;
 
-  const prod = create(db, 'product', { name: 'EXP4 Desk', list_price: 100, type: 'goods' });
+  const prod = create(db, 'product', { name: 'EXP4 Desk', list_price: 100, type: 'goods', invoice_policy: 'delivery' });
   const o1 = create(prod.db, 'sale.order', {
     name: 'SO-EXP4-TO-ISSUE',
     partner_id: 1,
@@ -592,7 +592,7 @@ test('EXP-7: Finding 3: Tiny sales quantities with exponent notation export as n
   await store.initStore();
 
   let db = seed();
-  const prod = create(db, 'product', { name: 'EXP7 Precision Product', list_price: 100, type: 'goods' });
+  const prod = create(db, 'product', { name: 'EXP7 Precision Product', list_price: 100, type: 'goods', invoice_policy: 'delivery' });
   const o = create(prod.db, 'sale.order', {
     name: 'SO-EXP7-TINY',
     partner_id: 1,
