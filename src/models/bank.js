@@ -728,6 +728,13 @@ export function setStatementLinePartner(db, line, partnerId) {
   const target = read(db, 'account.bank.statement.line', lineId);
   if (!target) throw new Error('Bank transaction does not exist');
   if (target.state === 'reconciled') throw new Error('A reconciled bank transaction cannot be changed');
+  if (target.statement_id) {
+    const stmt = read(db, 'account.bank.statement', target.statement_id);
+    if (stmt?.state === 'closed') throw new Error('Cannot change lines linked to a closed statement');
+    if (statementHasReconciledLines(db, target.statement_id)) {
+      throw new Error('Cannot change lines of a statement with reconciled lines');
+    }
+  }
   const pid = partnerId ? Number(partnerId) : null;
   if (pid) {
     const partner = read(db, 'res.partner', pid);
@@ -849,7 +856,7 @@ function lineGuard(db, before, after, ctx = null) {
       if (after.statement_id !== before.statement_id) {
         return 'Cannot remove lines from a closed statement';
       }
-      const changed = ['amount', 'date', 'payment_ref', 'ref', 'partner_id', 'journal_id', 'company_id', 'state', 'sequence'].find(
+      const changed = ['amount', 'date', 'payment_ref', 'ref', 'partner_id', 'journal_id', 'company_id', 'state'].find(
         (k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)
       ) || ((before.active !== false) !== (after.active !== false) ? 'active' : null);
       if (changed) return 'Cannot change lines linked to a closed statement';
@@ -863,8 +870,10 @@ function lineGuard(db, before, after, ctx = null) {
     if (statement.journal_id !== after.journal_id || (statement.company_id ?? 1) !== comp) {
       return 'Statement lines must belong to the statement journal and company';
     }
-    if (before && before.statement_id !== after.statement_id && statement.state !== 'closed' && statementHasReconciledLines(db, after.statement_id)) {
-      return 'Cannot add existing lines to a statement with reconciled lines';
+    if ((!before || before.statement_id !== after.statement_id) && statement.state !== 'closed' && statementHasReconciledLines(db, after.statement_id)) {
+      return before
+        ? 'Cannot add existing lines to a statement with reconciled lines'
+        : 'Cannot add lines to a statement with reconciled lines';
     }
     if (statement.state === 'closed' && (!before || before.statement_id !== after.statement_id)) {
       if (before) return 'Cannot add lines to a closed statement';
@@ -893,21 +902,32 @@ function lineGuard(db, before, after, ctx = null) {
   }
 
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'ref', 'sequence', 'company_id', 'journal_id', 'currency_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'ref', 'company_id', 'journal_id', 'currency_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     if (changed) return 'A reconciled bank transaction cannot be changed';
     if (!(before.statement_id && statementHasReconciledLines(db, before.statement_id))) return null;
   }
   if (before?.bank_move_id) {
-    const changed = ['amount', 'date', 'payment_ref', 'ref', 'sequence', 'company_id', 'journal_id', 'bank_move_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['amount', 'date', 'payment_ref', 'ref', 'company_id', 'journal_id', 'bank_move_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     if (changed) return 'A booked bank transaction cannot be changed';
   }
   if (before?.statement_id && statementHasReconciledLines(db, before.statement_id)) {
     if (after.statement_id !== before.statement_id) {
       return 'Cannot remove lines from a statement with reconciled lines';
     }
-    const changed = ['amount', 'date', 'payment_ref', 'ref', 'journal_id', 'company_id', 'currency_id', 'sequence'].find(
+    const partnerChanged = JSON.stringify(before.partner_id ?? null) !== JSON.stringify(after.partner_id ?? null);
+    const authorizedReconcile = partnerChanged
+      && before.partner_id == null
+      && (
+        (after.move_id && read(db, 'account.move', after.move_id)?.state === 'posted')
+        || (after.payment_move_id && read(db, 'account.move', after.payment_move_id)?.state === 'posted')
+        || (after.bank_move_id && read(db, 'account.move', after.bank_move_id)?.state === 'posted')
+        || (after.payment_id && read(db, 'account.payment', after.payment_id)?.state === 'posted')
+        || ((after.allocations ?? []).length > 0 && after.allocations.every((a) => a.payment_move_id || a.invoice_id))
+      );
+    const changed = ['amount', 'date', 'payment_ref', 'ref', 'journal_id', 'company_id', 'currency_id'].find(
       (k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)
-    ) || ((before.active !== false) !== (after.active !== false) ? 'active' : null);
+    ) || (partnerChanged && !authorizedReconcile ? 'partner_id' : null)
+      || ((before.active !== false) !== (after.active !== false) ? 'active' : null);
     if (changed) return 'Cannot change lines of a statement with reconciled lines';
   }
 
@@ -1072,7 +1092,7 @@ export const bankModels = {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       date: { type: 'date', label: 'Date', required: true, readonly: lineStatementLocked },
       payment_ref: { type: 'char', label: 'Label', required: true, readonly: lineStatementLocked },
-      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', readonly: lineStatementLocked },
       amount: { type: 'monetary', label: 'Amount', required: true, readonly: lineStatementLocked },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },

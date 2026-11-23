@@ -4,11 +4,13 @@ import { register } from 'node:module';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
-import { create, read, search, unlink, write } from './orm.js';
+import { create, read, search, unlink, write, writeMany } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor } from './models/index.js';
 import { postMove } from './models/accounting.js';
-import { reconcileWith } from './models/bank.js';
+import { reconcileWith, setStatementLinePartner, bankModels } from './models/bank.js';
+import { autoReconcile, mapStatementPartner } from './models/reconcile.js';
+import { runScheduledJobs } from './models/scheduler.js';
 import { applyDiff, diffDb } from './sync.js';
 import { setupDom, find } from './test-support/dom.js';
 
@@ -327,4 +329,194 @@ test('STM2-2: Guards forbid editing or deleting lines of a statement with reconc
   const rec2Db = reconcileWith(db, read(db, 'account.bank.statement.line', line2.id), inv2.id);
   db = applyDiff(db, diffDb(db, rec2Db), { author: 'Clerk', isAdmin: false });
   assert.equal(read(db, 'account.bank.statement.line', line2.id).state, 'reconciled');
+});
+
+test('STM2-3: Destination statement with reconciled lines rejects newly created transactions', async () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const partner = search(db, 'res.partner')[0];
+
+  const stmtCreated = create(db, 'account.bank.statement', {
+    name: 'STMT/STM2/F1',
+    journal_id: bankJournal.id,
+    date: '2026-06-01',
+    balance_start: 0,
+    balance_end_real: 150,
+    line_ids: [
+      { date: '2026-06-01', payment_ref: 'Line 1', partner_id: partner.id, amount: 150, ref: 'R-1' },
+    ],
+  });
+  db = stmtCreated.db;
+  const line1 = search(db, 'account.bank.statement.line').find((l) => l.statement_id === stmtCreated.id);
+
+  // Reconcile line1
+  const inv1 = makePostedInvoice(db, { partnerId: partner.id, price: 150, date: '2026-06-01' });
+  db = inv1.db;
+  db = reconcileWith(db, line1, inv1.id);
+  assert.equal(read(db, 'account.bank.statement.line', line1.id).state, 'reconciled');
+
+  // Attempting to create a new transaction attached to this statement must fail
+  assert.throws(
+    () => create(db, 'account.bank.statement.line', {
+      statement_id: stmtCreated.id,
+      journal_id: bankJournal.id,
+      date: '2026-06-02',
+      payment_ref: 'Unauthorized Line',
+      amount: 50,
+    }),
+    /Cannot add lines to a statement with reconciled lines/
+  );
+
+  // Attempting to attach an existing line must also fail
+  const standaloneLine = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id,
+    date: '2026-06-02',
+    payment_ref: 'Standalone',
+    amount: 50,
+  });
+  db = standaloneLine.db;
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', standaloneLine.id, { statement_id: stmtCreated.id }),
+    /reconciled lines/i
+  );
+});
+
+test('STM2-4: autoReconcile and mapStatementPartner skip closed statements and runScheduledJobs tolerates errors', async () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const partner = search(db, 'res.partner')[0];
+
+  // Create a partner mapping rule
+  const rule = create(db, 'account.reconcile.model', {
+    name: 'Test Partner Mapping Rule',
+    rule_type: 'writeoff_button',
+    sequence: 1,
+    active: true,
+    partner_mapping_line_ids: [{
+      payment_ref_regex: 'MAP-.*',
+      partner_id: partner.id,
+    }],
+    line_ids: [{ account_id: search(db, 'account.account').find((a) => a.code === '600000')?.id ?? 1, amount_type: 'percentage', amount: 100 }],
+  });
+  db = rule.db;
+
+  // Closed statement with a to_check line matching the rule
+  const closedStmt = create(db, 'account.bank.statement', {
+    name: 'STMT/STM2/CLOSED',
+    journal_id: bankJournal.id,
+    date: '2026-06-01',
+    state: 'closed',
+    balance_start: 0,
+    balance_end_real: 100,
+  });
+  db = closedStmt.db;
+
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.bank.statement.line': [
+        ...(db.records['account.bank.statement.line'] ?? []),
+        { id: 9988, statement_id: closedStmt.id, journal_id: bankJournal.id, date: '2026-06-01', payment_ref: 'MAP-Closed Line', amount: 100, state: 'to_check', partner_id: null },
+      ],
+    },
+  };
+  const targetClosedLine = read(db, 'account.bank.statement.line', 9988);
+
+  // 1. mapStatementPartner on closed statement line returns db unchanged rather than throwing
+  const mapped = mapStatementPartner(db, targetClosedLine);
+  assert.equal(read(mapped, 'account.bank.statement.line', 9988).partner_id, null);
+
+  // 2. autoReconcile runs without throwing
+  assert.doesNotThrow(() => autoReconcile(db));
+
+  // 3. runScheduledJobs does not abort
+  assert.doesNotThrow(() => runScheduledJobs(db, '2026-06-01'));
+});
+
+test('STM2-5: Ordinary partner edits on locked statements are rejected while authorized reconciliation is preserved', async () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const partners = search(db, 'res.partner');
+  const partnerA = partners[0];
+  const partnerB = partners[1] ?? partners[0];
+
+  const stmtCreated = create(db, 'account.bank.statement', {
+    name: 'STMT/STM2/F3',
+    journal_id: bankJournal.id,
+    date: '2026-06-01',
+    balance_start: 0,
+    balance_end_real: 250,
+    line_ids: [
+      { date: '2026-06-01', payment_ref: 'Line 1', partner_id: partnerA.id, amount: 150 },
+      { date: '2026-06-02', payment_ref: 'Line 2', partner_id: null, amount: 100 },
+    ],
+  });
+  db = stmtCreated.db;
+  const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === stmtCreated.id);
+  const line1 = lines.find((l) => l.payment_ref === 'Line 1');
+  const line2 = lines.find((l) => l.payment_ref === 'Line 2');
+
+  // Reconcile line 1 so statement has reconciled lines
+  const inv1 = makePostedInvoice(db, { partnerId: partnerA.id, price: 150, date: '2026-06-01' });
+  db = reconcileWith(inv1.db, line1, inv1.id);
+
+  // 1. setStatementLinePartner on line 2 must throw
+  assert.throws(
+    () => setStatementLinePartner(db, line2.id, partnerB.id),
+    /Cannot change lines of a statement with reconciled lines/
+  );
+
+  // 2. Direct write of partner_id on line 2 must throw
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', line2.id, { partner_id: partnerB.id }),
+    /Cannot change lines of a statement with reconciled lines/
+  );
+
+  // 3. Model field partner_id is readonly for line 2
+  const isReadonly = bankModels['account.bank.statement.line'].fields.partner_id.readonly(read(db, 'account.bank.statement.line', line2.id), db);
+  assert.equal(isReadonly, true);
+
+  // 4. Authorized reconciliation workflow succeeds and assigns invoice partner
+  const inv2 = makePostedInvoice(db, { partnerId: partnerB.id, price: 100, date: '2026-06-02' });
+  db = inv2.db;
+  const recDb = reconcileWith(db, read(db, 'account.bank.statement.line', line2.id), inv2.id);
+  const reconciledLine2 = read(recDb, 'account.bank.statement.line', line2.id);
+  assert.equal(reconciledLine2.state, 'reconciled');
+  assert.equal(reconciledLine2.partner_id, partnerB.id);
+});
+
+test('STM2-6: Reordering transactions updates sequence even when lines are reconciled or locked', async () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const partner = search(db, 'res.partner')[0];
+
+  const stmtCreated = create(db, 'account.bank.statement', {
+    name: 'STMT/STM2/F4',
+    journal_id: bankJournal.id,
+    date: '2026-06-01',
+    balance_start: 0,
+    balance_end_real: 200,
+    line_ids: [
+      { date: '2026-06-01', payment_ref: 'Line A', partner_id: partner.id, amount: 100, sequence: 10 },
+      { date: '2026-06-01', payment_ref: 'Line B', partner_id: partner.id, amount: 100, sequence: 20 },
+    ],
+  });
+  db = stmtCreated.db;
+  const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === stmtCreated.id);
+  const lineA = lines.find((l) => l.payment_ref === 'Line A');
+  const lineB = lines.find((l) => l.payment_ref === 'Line B');
+
+  // Reconcile line A
+  const inv = makePostedInvoice(db, { partnerId: partner.id, price: 100, date: '2026-06-01' });
+  db = reconcileWith(inv.db, lineA, inv.id);
+
+  // Renumbering sequences across all bank lines (as generic List drag handler does) must succeed
+  const updates = new Map([
+    [lineA.id, { sequence: 20 }],
+    [lineB.id, { sequence: 10 }],
+  ]);
+  const updatedDb = writeMany(db, 'account.bank.statement.line', updates);
+  assert.equal(read(updatedDb, 'account.bank.statement.line', lineA.id).sequence, 20);
+  assert.equal(read(updatedDb, 'account.bank.statement.line', lineB.id).sequence, 10);
 });
