@@ -2019,6 +2019,23 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
   };
 } });
 
+MIGRATIONS.push({ version: 68, name: 'analytic-general-account-id', up: (db) => {
+  const unresolved = [];
+  const accounts = db.records['account.account'] ?? [];
+  const lines = (db.records['account.analytic.line'] ?? []).map((line) => {
+    if (typeof line.general_account !== 'string') return line;
+    if (!line.general_account) return { ...line, general_account: null };
+    const matches = accounts.filter((account) => account.code === line.general_account
+      && (!account.company_id || account.company_id === (line.company_id ?? 1)));
+    if (matches.length === 1) return { ...line, general_account: matches[0].id };
+    unresolved.push([line.id, line.general_account]);
+    return { ...line, legacy_general_account: line.general_account, general_account: null };
+  });
+  const next = { ...db, messages: db.messages ?? [], records: { ...db.records, 'account.analytic.line': lines } };
+  return unresolved.reduce((result, [id, code]) => postNote(result, 'account.analytic.line', id,
+    `Upgrade: general account code ${code} could not be uniquely matched in the line company; select the account manually.`), next);
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
