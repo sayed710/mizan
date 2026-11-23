@@ -13,14 +13,19 @@ import { statementUrl } from '../statementNavigation.js';
 const num = (v, fmtMoney = money) => <td className="num">{fmtMoney(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
 
-export function TrialBalance({ db, period, periods, companyId, analyticAccountIds, money: moneyProp }) {
+export function TrialBalance({ db, period, periods, companyId, analyticAccountIds, showInitialBalance = true, showEndBalance = true, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
   const reports = (periods ?? [period]).map((p) => trialBalance(db, { ...p, reviewMode: period.reviewMode, company_id, analyticAccountIds }));
   const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.account.id, row])));
   const accounts = new Map(reports.flatMap((report) => report.rows.map((row) => [row.account.id, row.account])));
   const rows = [...accounts.values()].sort((a, b) => a.code.localeCompare(b.code));
-  const keys = ['initial', 'debit', 'credit', 'end'];
+  const keys = [
+    ...(showInitialBalance ? ['initial'] : []),
+    'debit',
+    'credit',
+    ...(showEndBalance ? ['end'] : []),
+  ];
   return (
     <tbody>
       {rows.map((r) => (
@@ -44,9 +49,10 @@ function FiscalCategoryRows({ rows, money: fmtMoney = money }) {
   </>;
 }
 
-export function FiscalReport({ db, period, periods, analyticAccountIds, money: moneyProp }) {
-  const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
-  const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period.reviewMode, company_id: period.company_id, analyticAccountIds }));
+export function FiscalReport({ db, period, periods, companyId, analyticAccountIds, money: moneyProp }) {
+  const effectiveCompanyId = companyId && companyId !== 'all' ? Number(companyId) : (period?.company_id ?? null);
+  const fmtMoney = moneyProp ?? reportMoney(db, effectiveCompanyId);
+  const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period?.reviewMode, company_id: effectiveCompanyId, analyticAccountIds }));
   const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   const groups = new Map(reports.flatMap((report) => report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   return <tbody>
@@ -56,38 +62,49 @@ export function FiscalReport({ db, period, periods, analyticAccountIds, money: m
 }
 
 /** One partner: a clickable summary row that unfolds its entries with the running balance. */
-function PartnerRows({ db, p, period, companyId, kind, money: fmtMoney = money }) {
+function PartnerRows({ db, p, period, companyId, kind, showJournalAccount = false, money: fmtMoney = money }) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
         <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')} {kind === 'receivable' && p.partner_id && companyId && <a href={statementUrl([p.partner_id], { companyId, ...period })} onClick={(e) => e.stopPropagation()}>{t('Customer Statement')}</a>}</td>
+        {showJournalAccount && <><td /><td /></>}
         <td /><td /><td />
         {num(p.initial, fmtMoney)}{num(p.debit, fmtMoney)}{num(p.credit, fmtMoney)}{num(p.end, fmtMoney)}<td />
       </tr>
-      {open && p.lines.map((l, i) => (
-        <tr key={i} className="rep-detail">
-          <td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a></td>
-          <td>{l.dueDate}</td>
-          <td>{l.matchingNumber ?? ''}</td>
-          <td>{l.label}{l.ref ? ` · ${l.ref}` : ''}</td>
-          <td />
-          {num(l.debit, fmtMoney)}{num(l.credit, fmtMoney)}{num(l.balance, fmtMoney)}
-          <td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td>
-        </tr>
-      ))}
+      {open && p.lines.map((l, i) => {
+        const journal = l.journal_id ? read(db, 'account.journal', l.journal_id) : null;
+        const account = l.account_id ? read(db, 'account.account', l.account_id) : null;
+        return (
+          <tr key={i} className="rep-detail">
+            <td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a></td>
+            {showJournalAccount && (
+              <>
+                <td>{journal?.code ?? ''}</td>
+                <td>{account ? `${account.code} ${account.name}` : ''}</td>
+              </>
+            )}
+            <td>{l.dueDate}</td>
+            <td>{l.matchingNumber ?? ''}</td>
+            <td>{l.label}{l.ref ? ` · ${l.ref}` : ''}</td>
+            <td />
+            {num(l.debit, fmtMoney)}{num(l.credit, fmtMoney)}{num(l.balance, fmtMoney)}
+            <td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td>
+          </tr>
+        );
+      })}
     </>
   );
 }
 
-export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, money: moneyProp }) {
+export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, showJournalAccount = false, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
   const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, kind);
   return (
     <tbody>
-      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} period={period} companyId={company_id} kind={kind} money={fmtMoney} />)}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td />{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{fmtMoney(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
+      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} period={period} companyId={company_id} kind={kind} showJournalAccount={showJournalAccount} money={fmtMoney} />)}
+      <tr className="rep-total strong"><td>{t('Total')}</td>{showJournalAccount && <><td /><td /></>}<td /><td /><td />{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{fmtMoney(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
 };
