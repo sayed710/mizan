@@ -21,9 +21,9 @@ export const normalizePhone = (p) => String(p ?? '').replace(/(?!^\+)[^\d]/g, ''
 const blacklisted = (db) => new Set(search(db, 'phone.blacklist').filter((b) => b.active !== false).map((b) => normalizePhone(b.number)));
 
 /** Recipients with a usable phone: list contacts not opted out, or contacts; deduped and without blacklisted numbers. */
-export function smsRecipients(db, campaign) {
+export function smsRecipients(db, campaign, { partnerId = null } = {}) {
   const raw = campaign.mailing_model === 'res.partner'
-    ? search(db, 'res.partner').filter((p) => !campaign.partner_tag || (p.tag_ids ?? []).includes(campaign.partner_tag)).map((p) => ({ phone: p.mobile || p.phone, name: p.name, res_model: 'res.partner', res_id: p.id }))
+    ? search(db, 'res.partner').filter((p) => (partnerId == null || p.id === partnerId) && (!campaign.partner_tag || (p.tag_ids ?? []).includes(campaign.partner_tag))).map((p) => ({ phone: p.mobile || p.phone, name: p.name, res_model: 'res.partner', res_id: p.id }))
     : search(db, 'mailing.contact').filter((c) => c.list_id === campaign.list_id && !c.opt_out).map((c) => ({ phone: c.phone, name: c.name, res_model: 'mailing.contact', res_id: c.id }));
   const banned = blacklisted(db);
   const seen = new Set();
@@ -35,12 +35,12 @@ export function smsRecipients(db, campaign) {
 }
 
 /** Create one trace per recipient and mark the campaign sent; the server delivers the queued traces. */
-export function queueSms(db, campaign, { now = today() } = {}) {
+export function queueSms(db, campaign, { now = today(), partnerId = null } = {}) {
   if (campaign.stage_id === 'sent') throw new Error('This SMS campaign was already sent');
   if (!String(campaign.body ?? '').trim()) throw new Error('Write the SMS content first');
-  const recipients = smsRecipients(db, campaign);
+  const recipients = smsRecipients(db, campaign, { partnerId });
   if (!recipients.length) throw new Error('No recipient has a valid phone number');
-  const traced = recipients.reduce((acc, r) => create(acc, 'sms.trace', { campaign_id: campaign.id, ...r, state: 'outgoing', delivery_pending: true, date: now }).db, db);
+  const traced = recipients.reduce((acc, r) => create(acc, 'sms.trace', { campaign_id: campaign.id, company_id: campaign.company_id ?? 1, ...r, state: 'outgoing', delivery_pending: true, date: now }).db, db);
   return write(traced, 'sms.campaign', campaign.id, { stage_id: 'sent', sent_date: now, sent: recipients.length, delivered: 0, failed: 0 });
 }
 
@@ -72,6 +72,11 @@ export const smsModels = {
       list_id: { type: 'many2one', relation: 'mailing.list', label: 'Mailing List' },
       partner_tag: { type: 'char', label: 'Contact Tag' },
       body: { type: 'text', label: 'SMS Content' },
+      followup_sms: { type: 'boolean', label: 'Follow-up SMS', hidden: true },
+      followup_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer', hidden: true },
+      followup_company_id: { type: 'many2one', relation: 'res.company', label: 'Company', hidden: true },
+      followup_level_id: { type: 'many2one', relation: 'account.followup.level', label: 'Follow-up Level', hidden: true },
+      followup_oldest: { type: 'date', label: 'Oldest Due Date', hidden: true },
       length: { type: 'integer', label: 'Characters', compute: (r) => smsSegments(r.body).length },
       segments: { type: 'integer', label: 'SMS Parts', compute: (r) => smsSegments(r.body).segments },
       encoding: { type: 'char', label: 'Encoding', compute: (r) => smsSegments(r.body).encoding },

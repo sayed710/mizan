@@ -406,14 +406,7 @@ export function validateAssetIntegrity(db, before, asset, vals) {
       if (total !== cents(asset.sale_value)) return 'Sale price must match the invoice line amount';
       const linkedChildren = (db.records['account.asset'] ?? []).filter((a) => {
         if (a.id === asset.id || rootAssetId(db, a) !== rootId) return false;
-        if (a.disposal_move_id === asset.disposal_move_id) return true;
-        if (!isDisposedAsset(a) && ['open', 'paused', 'close'].includes(a.state)) {
-          const aOrig = cents(a.original_value);
-          return (dispMove.line_ids ?? []).some(
-            (l) => l.account_id === a.account_asset_id && cents(l.credit) === aOrig && (cents(l.debit) || 0) === 0,
-          );
-        }
-        return false;
+        return a.disposal_move_id === asset.disposal_move_id;
       });
       const totalOrig = origCents + linkedChildren.reduce((sum, c) => sum + cents(c.original_value), 0);
       const totalAcc = accumulated + linkedChildren.reduce((sum, c) => sum + postedCents(c) + cents(c.already_depreciated), 0);

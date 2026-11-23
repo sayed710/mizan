@@ -1004,3 +1004,89 @@ test('Finding 3 code review: fully depreciated gross-increase child is cleared o
   assert.ok(dispMove.line_ids.some((l) => l.account_id === childClosed.account_asset_id && l.credit === 200));
   assert.ok(dispMove.line_ids.some((l) => l.account_id === childClosed.account_depreciation_id && l.debit === 200));
 });
+
+test('Finding 1 Qodo review: selling one of two equal-value gross increases through multiple invoice lines does not mistake undisposed sibling', async () => {
+  const { confirmAsset, modifyAsset, disposeAsset } = await import('./models/assets.js');
+  const { postMove } = await import('./models/accounting.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { read, search } = await import('./orm.js');
+  let db = seed();
+  const lossAcc = accountId(db, '680000');
+  const otherIncomeAcc = accountId(db, '700000');
+  const fixedAcc = accountId(db, '151000');
+  const depAcc = accountId(db, '152000');
+  const baseAsset = create(db, 'account.asset', {
+    name: 'Parent Asset',
+    company_id: 1,
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: fixedAcc,
+    account_depreciation_id: depAcc,
+    account_depreciation_expense_id: lossAcc,
+  });
+  db = confirmAsset(baseAsset.db, read(baseAsset.db, 'account.asset', baseAsset.id));
+  db = modifyAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-04-01',
+    valueChange: 200,
+    accountId: lossAcc,
+  });
+  db = modifyAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-05-01',
+    valueChange: 200,
+    accountId: lossAcc,
+  });
+  const children = search(db, 'account.asset').filter((a) => a.parent_id === baseAsset.id);
+  assert.equal(children.length, 2);
+  assert.equal(children[0].original_value, 200);
+  assert.equal(children[1].original_value, 200);
+
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [
+      { name: 'Part 1', qty: 1, price_unit: 60, tax: 0, account_id: lossAcc },
+      { name: 'Part 2', qty: 1, price_unit: 40, tax: 0, account_id: otherIncomeAcc },
+    ],
+  });
+  db = postMove(inv.db, inv.id);
+
+  const disposedDb = disposeAsset(db, read(db, 'account.asset', children[0].id), {
+    date: '2026-06-01',
+    lossAccountId: lossAcc,
+    invoiceLines: [
+      { invoice_id: inv.id, line_index: 0 },
+      { invoice_id: inv.id, line_index: 1 },
+    ],
+  });
+
+  const soldChild = read(disposedDb, 'account.asset', children[0].id);
+  const unsoldChild = read(disposedDb, 'account.asset', children[1].id);
+  const parentAsset = read(disposedDb, 'account.asset', baseAsset.id);
+
+  assert.equal(soldChild.state, 'close');
+  assert.equal(soldChild.sale_value, 100);
+  assert.equal(soldChild.disposal_date, '2026-06-01');
+  assert.deepEqual(soldChild.sale_invoice_line_ids, [
+    { invoice_id: inv.id, line_index: 0 },
+    { invoice_id: inv.id, line_index: 1 },
+  ]);
+
+  assert.equal(unsoldChild.state, 'open');
+  assert.equal(unsoldChild.disposal_date, undefined);
+  assert.equal(unsoldChild.disposal_move_id, undefined);
+
+  assert.equal(parentAsset.state, 'open');
+  assert.equal(parentAsset.disposal_date, undefined);
+
+  const dispMove = read(disposedDb, 'account.move', soldChild.disposal_move_id);
+  // Fixed asset credit must be 200 (soldChild only, not 400 from both children)
+  const fixedCredits = dispMove.line_ids.filter((l) => l.account_id === fixedAcc && l.credit > 0);
+  assert.equal(fixedCredits.reduce((sum, l) => sum + l.credit, 0), 200);
+});
