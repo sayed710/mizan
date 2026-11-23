@@ -91,3 +91,52 @@ test('valuation assigns unowned legacy stock to company 1 even when current comp
   assert.equal(rep2[item.id].qty, 0);
   assert.equal(rep2[item.id].value, 0);
 });
+
+test('past valuation for company 1 retains numeric total when company 2 has its own products', async () => {
+  const base = seed();
+  const branch = createCompany(base, { name: 'Branch', currency_id: read(base, 'res.company', 1).currency_id });
+  const scoped = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
+  const item1 = create(scoped, 'product', { name: 'Comp1 product', type: 'goods', cost: 10, company_id: 1 });
+  const item2 = create(item1.db, 'product', { name: 'Comp2 product', type: 'goods', cost: 20, company_id: branch.id });
+  const sharedItem = create(item2.db, 'product', { name: 'Shared product', type: 'goods', cost: 15, company_id: null });
+  let db = structuredClone(sharedItem.db);
+  db.records['stock.valuation.layer'] = [
+    ...(db.records['stock.valuation.layer'] ?? []),
+    { id: 9991, product_id: item1.id, company_id: 1, date: '2025-01-01', quantity: 5, value: 50, unit_cost: 10, kind: 'in' },
+    { id: 9992, product_id: item2.id, company_id: branch.id, date: '2025-01-01', quantity: 3, value: 60, unit_cost: 20, kind: 'in' },
+    { id: 9993, product_id: sharedItem.id, company_id: 1, date: '2025-01-01', quantity: 2, value: 30, unit_cost: 15, kind: 'in' },
+  ];
+
+  const rep1 = valuationReport(db, { at: '2025-06-01', companyId: 1 });
+  assert.equal(rep1[item1.id]?.value, 50);
+  assert.equal(rep1[sharedItem.id]?.value, 30);
+  assert.equal(rep1[item2.id], undefined, 'company 2 product should not be in company 1 valuation');
+  assert.equal(Object.values(rep1).some((v) => v.qty === null), false, 'company 1 valuation should have no unavailable products');
+
+  const { REPORTS } = await import('./views/Reports.jsx');
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const html = renderToStaticMarkup(React.createElement(REPORTS.valuation.Body, {
+    db,
+    period: { to: '2025-06-01' },
+    companyId: 1,
+  }));
+  assert.doesNotMatch(html, /Historical valuation unavailable/);
+  assert.doesNotMatch(html, /Comp2 product/);
+  assert.match(html, /27,832\.00/);
+
+  const rep2 = valuationReport(db, { at: '2025-06-01', companyId: branch.id });
+  assert.equal(rep2[item2.id]?.value, 60);
+  assert.equal(rep2[item1.id], undefined, 'company 1 product should not be in company 2 valuation');
+  assert.equal(rep2[sharedItem.id]?.qty, 0, 'shared product with no company 2 layers has 0 qty');
+  assert.equal(Object.values(rep2).some((v) => v.qty === null), false, 'company 2 valuation should have no unavailable products');
+
+  const html2 = renderToStaticMarkup(React.createElement(REPORTS.valuation.Body, {
+    db,
+    period: { to: '2025-06-01' },
+    companyId: branch.id,
+  }));
+  assert.doesNotMatch(html2, /Historical valuation unavailable/);
+  assert.doesNotMatch(html2, /Comp1 product/);
+  assert.match(html2, /60\.00/);
+});

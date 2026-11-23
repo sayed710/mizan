@@ -1999,6 +1999,42 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
+  const budgets = db?.records?.['account.budget'];
+  if (!Array.isArray(budgets) || !budgets.length) return db;
+  let changed = false;
+  const nextBudgets = budgets.map((b) => {
+    if (!b || typeof b !== 'object') return b;
+    if (b.budget_type) return b;
+    changed = true;
+    return { ...b, budget_type: 'both' };
+  });
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.budget': nextBudgets,
+    },
+  };
+} });
+
+export function migrateReconcileModelTolerance(db) {
+  const rules = db?.records?.['account.reconcile.model'];
+  if (!Array.isArray(rules) || !rules.length) return db;
+  let changed = false;
+  const nextRules = rules.map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    const tolType = r.payment_tolerance_type || 'percentage';
+    if (tolType === 'percentage' && Number(r.payment_tolerance) > 100) {
+      changed = true;
+      return { ...r, payment_tolerance: 100 };
+    }
+    return r;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
+}
+MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

@@ -332,13 +332,16 @@ export function revalue(db, productId, newUnitCost, { date = today() } = {}) {
     value: round(target - valueOf(ls)), description: 'Stock revaluation', kind: 'revaluation' });
 }
 
+const isProductVisible = (p, companyId) => !companyId || p.company_id == null || p.company_id === false || p.company_id === '' || p.company_id === companyId;
+
 /** Per-product layer totals at a date, including implicit legacy opening stock until first valued. */
 export function valuationReport(db, { at = today(), companyId = companyOf(db) } = {}) {
-  return Object.fromEntries(search(db, 'product').filter((p) => p.type === 'goods').map((p) => {
-    const all = layers(db, p.id, companyId);
+  const targetCompany = companyId && companyId !== 'all' ? Number(companyId) : null;
+  return Object.fromEntries(search(db, 'product').filter((p) => p.type === 'goods' && isProductVisible(p, targetCompany)).map((p) => {
+    const all = layers(db, p.id, targetCompany ?? companyOf(db));
     const ls = all.filter((l) => l.date <= at);
-    const legacyQty = all.length ? 0 : stockQuantity(db, p, companyId);
-    if (!all.length && at < today()) return [p.id, { qty: null, value: null, unitCost: null }];
+    const legacyQty = all.length ? 0 : stockQuantity(db, p, targetCompany ?? companyOf(db));
+    if (!all.length && legacyQty && at < today()) return [p.id, { qty: null, value: null, unitCost: null }];
     const qty = all.length ? quantity(ls) : legacyQty;
     const value = all.length ? valueOf(ls) : round(qty * (Number(p.cost) || 0));
     return [p.id, { qty, value, unitCost: qty ? value / qty : 0 }];
