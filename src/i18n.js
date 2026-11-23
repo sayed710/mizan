@@ -3454,6 +3454,7 @@ const ar = {
   'Payment method must belong to the payment journal': 'يجب أن تنتمي طريقة الدفع إلى دفتر الدفع',
   'Payment method direction must match the payment type': 'يجب أن يطابق اتجاه طريقة الدفع نوع الدفعة',
   'Selected payment method line does not exist': 'بند طريقة الدفع المحدد غير موجود',
+  'Selected payment method line is archived': 'بند طريقة الدفع المحدد مؤرشف',
   'Payment Method is required': 'طريقة الدفع مطلوبة',
   'Invalid payment method lines': 'بنود طرق الدفع غير صالحة',
   'Invalid payment method line': 'بند طريقة الدفع غير صالح',
