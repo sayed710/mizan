@@ -15,6 +15,7 @@ import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
 import { isProtectedAuditMessage } from './models/auditRules.js';
 import { syncJournalMethodLines, unlinkJournalMethodLines } from './models/paymentmethod.js';
+import { syncLinkedPartnerBanks } from './models/resbank.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
@@ -827,6 +828,13 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     if (model === 'account.journal') {
       const submitted = submittedByRecord.get(`${model}:${rec.id}`);
       const nextDb = syncJournalMethodLines({ ...db, records, seq: stagedSeq }, rec, submitted, before);
+      records = nextDb.records;
+      stagedSeq = nextDb.seq;
+      seen.records = records;
+    }
+    if (model === 'res.bank') {
+      const nextDb = syncLinkedPartnerBanks({ ...db, records, seq: stagedSeq }, rec, before);
+      growth += json(nextDb.records['res.partner.bank']) - json(records['res.partner.bank']);
       records = nextDb.records;
       stagedSeq = nextDb.seq;
       seen.records = records;

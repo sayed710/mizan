@@ -663,3 +663,164 @@ test('Finding 12: Depreciation report puts Group By control outside the exportab
     await React.act(async () => root.unmount());
   }
 });
+
+test('Finding 1 regression: gross increase child inherits parent prorata_computation_type and derives prorata_date from increase date', async () => {
+  const { confirmAsset, modifyAsset } = await import('./models/assets.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { read, search } = await import('./orm.js');
+  let db = seed();
+  const baseAsset = create(db, 'account.asset', {
+    name: 'Parent Asset',
+    company_id: 1,
+    acquisition_date: '2026-01-01',
+    prorata_date: '2026-01-01',
+    prorata: true,
+    prorata_computation_type: 'constant_periods',
+    original_value: 1200,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(db, '151000'),
+    account_depreciation_id: accountId(db, '152000'),
+    account_depreciation_expense_id: accountId(db, '680000'),
+  });
+  db = confirmAsset(baseAsset.db, read(baseAsset.db, 'account.asset', baseAsset.id));
+  const increasedDb = modifyAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-07-01',
+    valueChange: 600,
+    accountId: accountId(db, '680000'),
+  });
+  const child = search(increasedDb, 'account.asset').find((a) => a.parent_id === baseAsset.id);
+  assert.ok(child, 'Gross increase child exists');
+  assert.equal(child.prorata_computation_type, 'constant_periods');
+  assert.equal(child.prorata_date, '2026-07-01');
+  assert.equal(child.acquisition_date, '2026-07-01');
+  // Under constant_periods for 2026-07-01 to 2026-12-31, fraction is (12 - 7 + 1)/12 = 0.5.
+  // With 600 over 5 remaining periods (120/yr), first period is 120 * 0.5 = 60.
+  // Under daily_computation (184/365), it would compute a different daily amount.
+  assert.equal(child.depreciation_ids[0].amount, 60);
+});
+
+test('Finding 2 regression: disposing an asset closes and cancels scheduled depreciation on linked gross-increase children', async () => {
+  const { confirmAsset, modifyAsset, disposeAsset } = await import('./models/assets.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { read, search } = await import('./orm.js');
+  let db = seed();
+  const baseAsset = create(db, 'account.asset', {
+    name: 'Parent Asset',
+    company_id: 1,
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: accountId(db, '151000'),
+    account_depreciation_id: accountId(db, '152000'),
+    account_depreciation_expense_id: accountId(db, '680000'),
+  });
+  db = confirmAsset(baseAsset.db, read(baseAsset.db, 'account.asset', baseAsset.id));
+  const increasedDb = modifyAsset(db, read(db, 'account.asset', baseAsset.id), {
+    date: '2026-04-01',
+    valueChange: 200,
+    accountId: accountId(db, '680000'),
+  });
+  const child = search(increasedDb, 'account.asset').find((a) => a.parent_id === baseAsset.id);
+  assert.ok(child, 'Child exists');
+  assert.equal(child.state, 'open');
+  assert.ok((child.depreciation_ids ?? []).some((l) => !l.posted));
+
+  const lossAcc = accountId(increasedDb, '680000');
+  const disposedDb = disposeAsset(increasedDb, read(increasedDb, 'account.asset', baseAsset.id), {
+    date: '2026-06-01',
+    lossAccountId: lossAcc,
+    note: 'Scrapped with gross increase',
+  });
+
+  const parentClosed = read(disposedDb, 'account.asset', baseAsset.id);
+  const childClosed = read(disposedDb, 'account.asset', child.id);
+
+  assert.equal(parentClosed.state, 'close');
+  assert.equal(childClosed.state, 'close');
+  assert.equal(childClosed.disposal_date, '2026-06-01');
+  assert.equal(childClosed.disposal_move_id, parentClosed.disposal_move_id);
+  assert.equal((childClosed.depreciation_ids ?? []).filter((l) => !l.posted).length, 0);
+  assert.ok((childClosed.cancelled_depreciation_ids ?? []).length > 0);
+
+  // Disposal move must clear both parent and child fixed asset accounts and book total remaining book value as loss (1000 + 200 = 1200)
+  const dispMove = read(disposedDb, 'account.move', parentClosed.disposal_move_id);
+  assert.ok(dispMove.line_ids.some((l) => l.account_id === childClosed.account_asset_id && l.credit === 200));
+  assert.ok(dispMove.line_ids.some((l) => l.account_id === parentClosed.account_asset_id && l.credit === 1000));
+  assert.ok(dispMove.line_ids.some((l) => l.account_id === lossAcc && l.debit === 1200));
+});
+
+test('Finding 3 regression: disposal integrity rejects entries debiting sale accounts more than selected invoice amounts', async () => {
+  const { confirmAsset } = await import('./models/assets.js');
+  const { postMove } = await import('./models/accounting.js');
+  const { accountId, postEntry } = await import('./models/ledger.js');
+  const { applyDiff } = await import('./sync.js');
+  const { read, write } = await import('./orm.js');
+  let db = seed();
+  const saleAccount = accountId(db, '101401');
+  const lossAcc = accountId(db, '680000');
+  const fixedAcc = accountId(db, '151000');
+  const depAcc = accountId(db, '152000');
+  const asset = create(db, 'account.asset', {
+    name: 'Sold Machine',
+    company_id: 1,
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 5,
+    method_period: '12',
+    state: 'draft',
+    depreciation_ids: [],
+    account_asset_id: fixedAcc,
+    account_depreciation_id: depAcc,
+    account_depreciation_expense_id: lossAcc,
+  });
+  db = confirmAsset(asset.db, read(asset.db, 'account.asset', asset.id));
+
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-01-15',
+    invoice_line_ids: [{ name: 'Part sale', qty: 1, price_unit: 200, tax: 0, account_id: saleAccount }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  // A balanced disposal entry that debits 300 on saleAccount instead of 200
+  const dispMove = postEntry(db, {
+    journal: 'MISC',
+    date: '2026-02-01',
+    company: 1,
+    lines: [
+      { account: fixedAcc, credit: 1000 },
+      { account: saleAccount, debit: 300 },
+      { account: lossAcc, debit: 700 },
+    ],
+  });
+
+  const disposalVals = {
+    state: 'close',
+    disposal_date: '2026-02-01',
+    sale_value: 200,
+    disposal_move_id: dispMove.id,
+    sale_invoice_line_ids: [{ invoice_id: inv.id, line_index: 0 }],
+  };
+
+  assert.throws(
+    () => write(dispMove.db, 'account.asset', asset.id, disposalVals),
+    /Disposal move must book the sale on the sale invoice line account/
+  );
+  assert.throws(
+    () => applyDiff(dispMove.db, { upserts: { 'account.asset': [{ ...read(dispMove.db, 'account.asset', asset.id), ...disposalVals }] } }, { isAdmin: true }),
+    /Disposal move must book the sale on the sale invoice line account/
+  );
+});

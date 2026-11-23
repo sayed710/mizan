@@ -247,6 +247,16 @@ export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
+const recipientBankDomain = (b, r, db) => {
+  if (b.active === false) return false;
+  const companyId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+  if (b.company_id && b.company_id !== companyId) return false;
+  if (isInbound(r)) {
+    const companyPartnerId = db ? read(db, 'res.company', companyId)?.partner_id : null;
+    return Boolean(b.partner_id && companyPartnerId && b.partner_id === companyPartnerId);
+  }
+  return !b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id);
+};
 export const residual = (r, db) => {
   if (!isInvoice(r)) return 0;
   let curr;
@@ -1513,8 +1523,8 @@ export function creditNote(db, r, options = {}) {
   const docCurr = documentCurrency(db, r);
   const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m, db), 0);
   if (roundCurrency(credited, docCurr) >= roundCurrency(total(r, db), docCurr)) throw new Error(`${r.name} is already fully credited`);
-  if (['cancel', 'modify'].includes(method) && (roundCurrency(credited, docCurr) > 0 || roundCurrency(Number(r.amount_paid) || 0, docCurr) > 0)) {
-    throw new Error('Full refund and modify require an unpaid invoice with no existing credit notes');
+  if (['cancel', 'modify'].includes(method) && roundCurrency(credited, docCurr) > 0) {
+    throw new Error('Full refund and modify require an invoice with no existing credit notes');
   }
   const date = opts.date ?? opts.invoice_date ?? today();
   if (!validDate(date)) {
@@ -1924,6 +1934,11 @@ const {
   ...invoiceLineExtraBase
 } = invoiceLineBase.fields;
 
+const invoiceLineProductDomain = (product, line) => {
+  if (product.active === false) return false;
+  return isPurchase(line) ? product.purchase_ok !== false : product.sale_ok !== false;
+};
+
 const invoiceLineTaxDomain = (tax, line, db) => {
   if (tax.active === false) return false;
   const docCompany = line?.company_id ?? (db ? currentCompany(db) : 1);
@@ -2004,7 +2019,7 @@ const invoiceLineField = {
   fields: {
     line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
     source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true },
-    product_id: invoiceLineProduct,
+    product_id: { ...invoiceLineProduct, domain: invoiceLineProductDomain },
     name: { type: 'char', label: 'Label' },
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
     analytic_account_id: { ...invoiceLineAnalytic, hidden: true },
@@ -3520,7 +3535,7 @@ export const accountingModels = {
         const isEligibleVendorBank = (b) => b.active !== false && (!b.company_id || b.company_id === (r.company_id ?? 1)) && sameCommercialPartner(db, b.partner_id, r.partner_id);
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const eligibleBanks = partnerChange && isPurchase(r) ? search(db, 'res.partner.bank').filter(isEligibleVendorBank).sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment))) : [];
-        const partnerBank = selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
+        const partnerBank = isInbound(r) ? (selectedBank && recipientBankDomain(selectedBank, r, db) ? selectedBank.id : null) : selectedBank && isEligibleVendorBank(selectedBank) && (selectedBank.allow_out_payment || !eligibleBanks[0]?.allow_out_payment)
           ? selectedBank.id : (eligibleBanks[0]?.id ?? null);
         const journal = resolveDocumentJournal(db, r)?.id ?? null;
         const nextContext = { ...r, ...fiscal, journal_id: journal };
@@ -3669,7 +3684,12 @@ export const accountingModels = {
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', tracking: true },
       invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
-      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account', domain: (b, r, db) => (!b.partner_id || (db ? sameCommercialPartner(db, b.partner_id, r?.partner_id) : b.partner_id === r?.partner_id)) && (!b.company_id || b.company_id === (r?.company_id ?? 1)) && b.active !== false },
+      partner_bank_id: {
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        domain: recipientBankDomain,
+      },
       ref: { type: 'char', label: 'Reference', tracking: true },
       date: { type: 'date', label: 'Accounting Date', tracking: true },
       accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
@@ -3811,7 +3831,14 @@ export const accountingModels = {
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
-    menuActions: [{ label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) }],
+    menuActions: [
+      { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+      {
+        label: 'Proforma Invoice',
+        when: (r) => r.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r.move_type),
+        run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=proforma` }),
+      },
+    ],
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
       const moveType = vals.move_type ?? 'out_invoice';
