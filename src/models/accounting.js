@@ -181,7 +181,7 @@ function journalSequenceGuard(db, before, after) {
 }
 
 /** True when the move belongs to a self-billing journal (Odoo: account.move.is_self_billing is related to journal_id.is_self_billing). */
-export const isSelfBillingMove = (db, move) => Boolean(move?.journal_id && read(db, 'account.journal', move.journal_id)?.is_self_billing);
+export const isSelfBillingMove = (db, move) => Boolean(db && move?.journal_id && read(db, 'account.journal', move.journal_id)?.is_self_billing);
 
 /** Resolve the sequence prefix and next number field to use for posting an invoice or credit note. */
 export function journalInvoiceSequence(journal, move, db = null) {
