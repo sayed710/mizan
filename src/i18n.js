@@ -1776,6 +1776,7 @@ const ar = {
   'Participants': 'المشاركون',
   'Pass - Fail': 'ناجح - راسب',
   'Payment Method': 'طريقة الدفع',
+  'A Ledger group name must be unique.': 'يجب أن يكون اسم مجموعة دفاتر الأستاذ فريدًا.',
   'Pick up Date': 'تاريخ الاستلام',
   'Pizza': 'بيتزا',
   'Preventive': 'وقائية',
@@ -2783,6 +2784,7 @@ const ar = {
   'Tax Grid': 'الشبكة الضريبية',
   'Journal Item': 'بند قيد',
   Domestic: 'محلي',
+  'Domestic Fiscal Position': 'الوضع المالي المحلي',
   // Payment Terms parity (Odoo 20)
   'e.g. 30 days': 'مثلاً 30 يوماً',
   '% if paid within': '% إذا دُفِع خلال',
