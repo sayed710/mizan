@@ -352,7 +352,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
   // Reads compute fields (balances, totals) over the companies this user can see only.
-  const scopedDb = () => (companies ? { ...db, records: lazyRestrictedRecords(db, companies) } : db);
+  const scopedDb = (d = db) => (companies ? { ...d, records: lazyRestrictedRecords(d, companies) } : d);
 
   try {
     if (id === null && method === 'GET') {
@@ -368,7 +368,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
       // A limited user's new record belongs to the company they are working in, not to company 1.
       const res = create(db, model, !SHARED_MODELS.has(model) && companies && company && vals.company_id == null ? { ...vals, company_id: company } : vals);
       const { db: saved } = commit(res.db);
-      return { status: 201, body: read(saved, model, res.id), db: saved };
+      return { status: 201, body: read(scopedDb(saved), model, res.id), db: saved };
     }
     const rec = read(db, model, id);
     if (!visible(rec)) return { status: 404, body: { error: `${model} #${id} not found` } };
@@ -377,7 +377,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };
       const { id: _ignored, ...changes } = vals;
       const { db: saved } = commit(write(db, model, id, changes));
-      return { status: 200, body: read(saved, model, id), db: saved };
+      return { status: 200, body: read(scopedDb(saved), model, id), db: saved };
     }
     if (method === 'DELETE') {
       const { db: saved } = commit(unlink(db, model, [id]));

@@ -16,8 +16,10 @@ import { CalendarView } from './CalendarView.jsx';
 import { Gantt } from './Gantt.jsx';
 import { Wizard } from './Wizard.jsx';
 import { actionRecords } from '../companyView.js';
+import { currentCompany, documentCompany } from '../models/company.js';
 import { pageWindow } from './paging.js';
 import { statementImportJournalChoices, withSelectedStatementJournal } from '../models/statements.js';
+import { ReportPrintView } from './FinancialReportPrint.jsx';
 
 export { actionRecords } from '../companyView.js';
 
@@ -67,6 +69,7 @@ export function ActionView({ leaf, base, params }) {
   const [selected, setSelected] = useState(() => new Set());
   const [selectedImportJournalId, setSelectedImportJournalId] = useState('');
   const [wizard, setWizard] = useState(null);
+  const [isPrinting, setIsPrinting] = useState(false);
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => setSelected(new Set()), [companyScope]);
 
@@ -200,6 +203,7 @@ export function ActionView({ leaf, base, params }) {
           setSelected(new Set());
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
+      {(leaf.key === 'draft-entries' || leaf.key === 'to-check') && <button type="button" className="btn sm" onClick={() => { if (leaf.key === 'draft-entries') { setIsPrinting(true); globalThis.print(); } else globalThis.print(); }}>{t('Print')}</button>}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
       <button type="button" className="btn sm" onClick={exportXlsx}>⬇ {t('Export XLSX')}</button>
       {statementImport && !defaults.journal_id && <label className="import-journal-picker">
@@ -214,6 +218,39 @@ export function ActionView({ leaf, base, params }) {
       {pager}
     </>
   ) : pager;
+  if (isPrinting && leaf.key === 'draft-entries') {
+    const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+    const printCompanies = allowedIds.map((id) => documentCompany(db, { company_id: id })).filter(Boolean);
+    const printCompany = printCompanies[0] ?? documentCompany(db, { company_id: currentCompany(db) });
+    return (
+      <ReportPrintView
+        active={true}
+        company={printCompany}
+        companies={printCompanies}
+        title={t(leaf.label)}
+        onBack={() => setIsPrinting(false)}
+      >
+        <List
+          key={leaf.key || model}
+          db={db}
+          model={model}
+          records={records}
+          open={open}
+          selected={selected}
+          setSelected={setSelected}
+          groupBy={groupBy}
+          page={{ start: 0, end: records.length, total: records.length, label: `1-${records.length}` }}
+          list={listCols}
+          optionalList={optionalList}
+          listFields={listFields}
+          listDecoration={listDecoration}
+          optionalStorageKey={leaf.key ? `mizan-list-cols:${leaf.key}` : null}
+          listLabels={listLabels}
+          emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp}
+        />
+      </ReportPrintView>
+    );
+  }
   return (
     <main className="action">
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}

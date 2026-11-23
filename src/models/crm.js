@@ -16,6 +16,47 @@ export function partnerCategoryCompleteName(db, r) {
   return names.join(' / ');
 }
 
+// Reusable inverse index caches per records snapshot for partner tags and child categories
+const categoryPartnerIndexCache = new WeakMap();
+export function partnersByCategory(db) {
+  if (!db?.records || typeof db.records !== 'object') return new Map();
+  let index = categoryPartnerIndexCache.get(db.records);
+  if (!index) {
+    index = new Map();
+    for (const p of db.records['res.partner'] ?? []) {
+      const tags = p?.tag_ids;
+      if (!tags) continue;
+      const list = Array.isArray(tags) ? tags : [tags];
+      for (const t of list) {
+        const id = typeof t === 'object' && t !== null ? t.id : t;
+        if (id != null) {
+          const arr = index.get(id);
+          if (arr) arr.push(p.id); else index.set(id, [p.id]);
+        }
+      }
+    }
+    categoryPartnerIndexCache.set(db.records, index);
+  }
+  return index;
+}
+
+const categoryChildIndexCache = new WeakMap();
+export function childrenByCategory(db) {
+  if (!db?.records || typeof db.records !== 'object') return new Map();
+  let index = categoryChildIndexCache.get(db.records);
+  if (!index) {
+    index = new Map();
+    for (const c of db.records['res.partner.category'] ?? []) {
+      if (c?.parent_id != null) {
+        const arr = index.get(c.parent_id);
+        if (arr) arr.push(c.id); else index.set(c.parent_id, [c.id]);
+      }
+    }
+    categoryChildIndexCache.set(db.records, index);
+  }
+  return index;
+}
+
 export function partnerTagIds(db, names) {
   let currentDb = db;
   const ids = [];
@@ -176,17 +217,14 @@ export const crmModels = {
         relation: 'res.partner',
         label: 'Partners',
         readonly: true,
-        compute: (r, db) => (db?.records?.['res.partner'] ?? []).filter((p) => {
-          const tags = p.tag_ids ?? [];
-          return tags.some((t) => t === r?.id || (typeof t === 'object' && t !== null && t.id === r?.id));
-        }).map((p) => p.id),
+        compute: (r, db) => [...(partnersByCategory(db).get(r?.id) ?? [])],
       },
       child_ids: {
         type: 'many2many',
         relation: 'res.partner.category',
         label: 'Child Tags',
         readonly: true,
-        compute: (r, db) => (db?.records?.['res.partner.category'] ?? []).filter((c) => c.parent_id === r?.id).map((c) => c.id),
+        compute: (r, db) => [...(childrenByCategory(db).get(r?.id) ?? [])],
       },
     },
     defaults: () => ({ active: true, color: 0 }),

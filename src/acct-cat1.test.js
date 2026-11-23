@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
 import { models, menusFor } from './models/index.js';
-import { create, read, emptyDb } from './orm.js';
+import { create, read, search, emptyDb } from './orm.js';
 import { diffDb, applyDiff } from './sync.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { findAnalyticDistribution } from './models/analytic-distribution-models.js';
@@ -83,9 +83,9 @@ test('CAT-1: res.partner.category model, menu, partner tag_ids many2many, comple
     'Cycle in partner category hierarchy must be rejected by applyDiff',
   );
 
-  // 7. Migration 67: migrates existing free-text tag_ids into category records
+  // 7. Migration 71 (partner-tags-res-partner-category): migrates existing free-text tag_ids into category records
   const legacyDb = {
-    schema_version: 66,
+    schema_version: 70,
     records: {
       'res.partner': [
         { id: 101, name: 'Client A', tag_ids: ['VIP', 'Wholesale'] },
@@ -114,6 +114,46 @@ test('CAT-1: res.partner.category model, menu, partner tag_ids many2many, comple
   assert.deepEqual(clientB.tag_ids, [vipCat.id, retailCat.id]);
   assert.deepEqual(clientC.tag_ids, []);
   assert.ok(migrated.seq['res.partner.category'] >= Math.max(vipCat.id, wholesaleCat.id, retailCat.id));
+
+  // 8. Migration deduplication of tags, case/whitespace deduplication, and skipping empty-name objects
+  const legacyDbWithDuplicates = {
+    ...emptyDb(),
+    schema_version: 70,
+    records: {
+      ...emptyDb().records,
+      'res.partner': [
+        { id: 201, name: 'Dupe Case/Whitespace', tag_ids: ['VIP', 'vip', 'VIP '] },
+        { id: 202, name: 'Numeric Dupes', tag_ids: [10, 10] },
+        { id: 203, name: 'Blank Object Tag', tag_ids: [{ name: '   ' }] },
+        { id: 204, name: 'Mixed Dupes', tag_ids: ['Wholesale', { name: 'wholesale' }, { id: 10 }, 10] },
+      ],
+      'res.partner.category': [{ id: 10, name: 'Existing Cat', color: 0, active: true }],
+    },
+    seq: { ...emptyDb().seq, 'res.partner': 204, 'res.partner.category': 10 },
+  };
+
+  const migratedDupes = migrate(legacyDbWithDuplicates, SCHEMA_VERSION);
+  const p201 = migratedDupes.records['res.partner'].find((p) => p.id === 201);
+  const p202 = migratedDupes.records['res.partner'].find((p) => p.id === 202);
+  const p203 = migratedDupes.records['res.partner'].find((p) => p.id === 203);
+  const p204 = migratedDupes.records['res.partner'].find((p) => p.id === 204);
+
+  assert.equal(new Set(p201.tag_ids).size, p201.tag_ids.length);
+  assert.equal(p201.tag_ids.length, 1);
+  assert.deepEqual(p202.tag_ids, [10]);
+  assert.deepEqual(p203.tag_ids, []);
+  assert.equal(new Set(p204.tag_ids).size, p204.tag_ids.length);
+  assert.ok(!migratedDupes.records['res.partner.category'].some((c) => !c.name || !c.name.trim()), 'No blank category created');
+
+  // Verify migrated contacts pass many2many validator via diffDb and applyDiff
+  const updatedDb = {
+    ...migratedDupes,
+    records: {
+      ...migratedDupes.records,
+      'res.partner': migratedDupes.records['res.partner'].map((p) => (p.id === 201 ? { ...p, name: 'Updated Dupe' } : p)),
+    },
+  };
+  assert.doesNotThrow(() => applyDiff(migratedDupes, diffDb(migratedDupes, updatedDb)));
 });
 
 test('CAT-2: account.analytic.distribution.model partner_category_id many2one and matching logic in findAnalyticDistribution', () => {
@@ -177,3 +217,50 @@ test('CAT-2: account.analytic.distribution.model partner_category_id many2one an
     'partner.partner_category_id and partner.category_id fallbacks must not be used',
   );
 });
+
+test('CAT-3: category inverse indexes (partner_ids, child_ids) are cached per db snapshot and scale linearly', () => {
+  let db = emptyDb();
+  const catRecords = [];
+  for (let i = 1; i <= 100; i++) {
+    catRecords.push({ id: i, name: `Tag ${i}`, color: 0, active: true, parent_id: i > 1 ? Math.floor(i / 2) : null });
+  }
+  const partnerRecords = [];
+  for (let p = 1; p <= 1000; p++) {
+    partnerRecords.push({ id: p, name: `Partner ${p}`, tag_ids: [(p % 100) + 1, ((p + 1) % 100) + 1] });
+  }
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.partner.category': catRecords,
+      'res.partner': partnerRecords,
+    },
+    seq: {
+      ...db.seq,
+      'res.partner.category': 100,
+      'res.partner': 1000,
+    },
+  };
+
+  const start = performance.now();
+  const searchResults = search(db, 'res.partner.category');
+  const elapsed = performance.now() - start;
+  assert.equal(searchResults.length, 100);
+  assert.ok(elapsed < 200, `search() on 100 categories and 1000 partners took ${elapsed}ms, should be fast`);
+
+  // Verify correctness on specific records
+  const cat2 = read(db, 'res.partner.category', 2);
+  const cat2FromSearch = searchResults.find((c) => c.id === 2);
+  assert.deepEqual(cat2.partner_ids, cat2FromSearch.partner_ids);
+  assert.deepEqual(cat2.child_ids, cat2FromSearch.child_ids);
+  // Child categories of 2 are 4 and 5 (floor(4/2) = 2, floor(5/2) = 2)
+  assert.deepEqual(cat2.child_ids.sort(), [4, 5]);
+
+  // Read also preserves the exact partner_ids
+  assert.ok(cat2.partner_ids.length > 0);
+  assert.ok(cat2.partner_ids.every((pid) => {
+    const p = db.records['res.partner'].find((x) => x.id === pid);
+    return p.tag_ids.includes(2);
+  }));
+});
+

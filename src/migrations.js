@@ -2067,38 +2067,49 @@ export function migratePartnerTags(db) {
     if (!list.length) return p;
 
     let partnerTagsChanged = false;
-    const newTagIds = [];
+    const tagSet = new Set();
 
     for (const item of list) {
-      if (item == null || item === '') continue;
+      if (item == null || item === '') {
+        partnerTagsChanged = true;
+        continue;
+      }
       const num = Number(typeof item === 'object' ? item.id : item);
       if (typeof item === 'number' && Number.isSafeInteger(num) && num > 0) {
-        newTagIds.push(num);
+        tagSet.add(num);
         continue;
       }
       if (typeof item === 'string') {
         const trimmed = item.trim();
-        if (!trimmed) continue;
+        if (!trimmed) {
+          partnerTagsChanged = true;
+          continue;
+        }
         partnerTagsChanged = true;
         const catId = categoryFor(trimmed);
-        newTagIds.push(catId);
+        tagSet.add(catId);
         continue;
       }
       if (typeof item === 'object') {
         partnerTagsChanged = true;
         if (Number.isSafeInteger(num) && num > 0) {
-          newTagIds.push(num);
+          tagSet.add(num);
         } else if (item.name) {
           const trimmed = String(item.name).trim();
+          if (!trimmed) continue;
           const catId = categoryFor(trimmed);
-          newTagIds.push(catId);
+          tagSet.add(catId);
         }
       }
     }
 
+    if (tagSet.size !== list.length) {
+      partnerTagsChanged = true;
+    }
+
     if (partnerTagsChanged) {
       partnersChanged = true;
-      return { ...p, tag_ids: newTagIds };
+      return { ...p, tag_ids: [...tagSet] };
     }
     return p;
   }) : partners;

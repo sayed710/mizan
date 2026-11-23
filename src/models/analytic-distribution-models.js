@@ -33,7 +33,7 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
   const product = product_id ? read(db, 'product', product_id) : null;
   const code = account_code || (account_id ? read(db, 'account.account', account_id)?.code : '') || '';
 
-  // After migration 67 partner tags and model categories are res.partner.category ids.
+  // After migration 71 (partner-tags-res-partner-category) partner tags and model categories are res.partner.category ids.
   const partnerCategories = partner_category_id != null ? [partner_category_id] : (partner?.tag_ids ?? []);
   const productCat = product_categ_id ?? product?.categ_id ?? product?.product_categ_id ?? product?.category_id ?? product?.categ;
   const categories = categoryHierarchy(db, productCat);
