@@ -148,7 +148,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
       return;
     }
     setMissing(empty);
-    if (!empty.length) onConfirm(values);
+    if (!empty.length) return onConfirm(values);
   };
   // Escape closes; Tab stays inside the dialog.
   const onKeyDown = (e) => handleDialogKeyDown(e, box.current, onCancel);

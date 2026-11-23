@@ -565,19 +565,19 @@ export function Budget({ db, period, companyId = 'all' }) {
             <Fragment key={`${b.id}-${i}`}>
               <tr className="rep-detail">
                 <td>{lineLabel(l)}</td>
-                <BudgetMoneyCell value={l.planned} currency={currency} money={money} />
-                <BudgetMoneyCell value={l.practical} currency={currency} money={money} />
-                <BudgetMoneyCell value={l.committed} currency={currency} money={money} />
-                <BudgetMoneyCell value={l.variance} currency={currency} money={money} />
-                <td className="num">{l.planned ? `${l.achievement}%` : ''}</td>
+                <BudgetMoneyCell value={l.planned_amount ?? l.planned} currency={currency} money={money} />
+                <BudgetMoneyCell value={l.achieved_amount} currency={currency} money={money} />
+                <BudgetMoneyCell value={l.committed_amount} currency={currency} money={money} />
+                <BudgetMoneyCell value={l.budget_variance} currency={currency} money={money} />
+                <td className="num">{(l.budget_theoretical ?? l.theoretical) ? `${l.budget_achievement}%` : ''}</td>
               </tr>
               {l.analytic_lines.map((item) => <tr className="rep-detail" key={item.id}>
                 <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                <td /><BudgetMoneyCell value={item.amount} currency={currency} money={money} /><td /><td /><td />
+                <td /><BudgetMoneyCell value={item.amount * l.budgetSign} currency={currency} money={money} /><td /><td /><td />
               </tr>)}
               {l.commitment_lines.map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
                 <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
-                <td /><td /><BudgetMoneyCell value={item.amount} currency={currency} money={money} /><td /><td />
+                <td /><td /><BudgetMoneyCell value={item.amount * l.budgetSign} currency={currency} money={money} /><td /><td />
               </tr>)}
             </Fragment>
           )),

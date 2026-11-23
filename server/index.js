@@ -836,6 +836,7 @@ async function api(req, res, path) {
     if (path.endsWith('followup') && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
+    let delivered = false;
     try {
       const baseUrl = baseUrlOf(req);
       const snapshot = scopeFor(user);
@@ -845,13 +846,14 @@ async function api(req, res, path) {
         : path.endsWith('followup')
           ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
+      delivered = Boolean(out.db);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
       if (!out.db) return send(res, out.status, out.body);
-      const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed), out.reconcile);
+      const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed), { document: body, reconcile: out.reconcile });
       commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {
-      return send(res, 502, { error: `Email could not be sent: ${e.message}` });
+      return send(res, 502, { error: delivered ? `The email was sent, but its status could not be recorded: ${e.message}` : `Email could not be sent: ${e.message}` });
     }
   }
   const sessionToken = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1] ?? '';
