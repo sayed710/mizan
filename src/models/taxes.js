@@ -581,6 +581,7 @@ export function taxRepartitionSplits(t, line, side, currency) {
   const explicit = rows.length > 0;
   const taxRows = explicit ? rows : [{ repartition_type: 'tax', factor_percent: 100, account_id: t.tax_account_id ?? line.tax_account_id ?? null, tag_ids: t.tax_tag_ids ?? line.tax_tag_ids ?? [], use_in_tax_closing: true }];
   const factors = taxRows.map((r) => Number(r.factor_percent) || 0);
+  const contributing = factors.reduce((best, f, i) => (Math.abs(f) > Math.abs(factors[best]) ? i : best), 0);
   const split = (value) => {
     if (factors.length === 1 && factors[0] === 100) return [value];
     const portions = factors.map(() => 0);
@@ -591,10 +592,16 @@ export function taxRepartitionSplits(t, line, side, currency) {
       const allocated = allocateCents(total, indexes.map((item) => Math.abs(item.factor)), currency, { tieBreak: 'last' });
       indexes.forEach((item, i) => { portions[item.index] = allocated[i]; });
     }
+    const netFactor = factors.reduce((sum, f) => sum + f, 0);
+    const roundedNetTax = roundCurrency(value * netFactor / 100, currency);
+    const currentNet = roundCurrency(portions.reduce((sum, p) => sum + p, 0), currency);
+    const residual = roundCurrency(roundedNetTax - currentNet, currency);
+    if (residual !== 0) {
+      portions[contributing] = roundCurrency(portions[contributing] + residual, currency);
+    }
     return portions;
   };
   const amounts = split(t.amount);
-  const contributing = factors.reduce((best, f, i) => (Math.abs(f) > Math.abs(factors[best]) ? i : best), 0);
   return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: i === contributing ? t.base : 0 })) };
 }
 

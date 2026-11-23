@@ -2020,6 +2020,22 @@ MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db)
   };
 } });
 
+export function migrateReconcileModelTolerance(db) {
+  const rules = db?.records?.['account.reconcile.model'];
+  if (!Array.isArray(rules) || !rules.length) return db;
+  let changed = false;
+  const nextRules = rules.map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    const tolType = r.payment_tolerance_type || 'percentage';
+    if (tolType === 'percentage' && Number(r.payment_tolerance) > 100) {
+      changed = true;
+      return { ...r, payment_tolerance: 100 };
+    }
+    return r;
+  });
+  return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
+}
+MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 function normalizeLegacyCountry(next, country) {
   if (country == null) return null;
   if (Number.isInteger(country)) {
@@ -2106,7 +2122,7 @@ export function migrateCountries(db) {
   }
   return { ...next, records };
 }
-MIGRATIONS.push({ version: 68, name: 'country-records', up: migrateCountries });
+MIGRATIONS.push({ version: 72, name: 'country-records', up: migrateCountries });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

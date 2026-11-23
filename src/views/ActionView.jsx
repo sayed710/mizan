@@ -192,10 +192,12 @@ export function ActionView({ leaf, base, params }) {
           const res = action.run(getDb(), ids, options, { defaults: leaf?.defaults ?? {} });
           if (res?.go) {
             if (res.db) commit(res.db);
+            setSelected(new Set());
             location.hash = res.go;
             return;
           }
           if (res) commit(res.db ?? res);
+          setSelected(new Set());
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>

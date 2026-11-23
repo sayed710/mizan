@@ -1,5 +1,6 @@
 // Model registry + application menus. Every view is rendered from these definitions.
 import { read } from '../orm.js';
+import { statementUrl } from '../statementNavigation.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
@@ -138,7 +139,10 @@ export const viewsOf = (model) => {
   return views.length ? views : ['list'];
 };
 
-const customers = { key: 'customers', label: 'Customers', model: 'res.partner' };
+const customers = { key: 'customers', label: 'Customers', model: 'res.partner', listActions: [{
+  label: 'Customer Statement', requiresSelection: true,
+  run: (db, ids) => ({ go: statementUrl(ids, { companyId: db.settings?.current_company_id ?? 1 }) }),
+}] };
 const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
 const products = { key: 'products', label: 'Products', model: 'product' };
 
