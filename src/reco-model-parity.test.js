@@ -374,7 +374,7 @@ test('guard rejects missing required params, wrong-company/archived accounts, no
 
 test('list, form, statusbar buttons, filters, groupBys, and i18n match Odoo 20 specification', async () => {
   const def = models[MODEL];
-  assert.deepEqual(def.list, ['sequence', 'name', 'trigger', 'match_journal_ids']);
+  assert.deepEqual(def.list, ['sequence', 'name', 'trigger', 'match_journal_ids', 'company_id']);
   assert.equal(def.fields.sequence.widget, 'handle');
   assert.equal(def.fields.match_journal_ids.optional, 'hide');
   assert.equal(def.fields.rule_type.hidden, true);

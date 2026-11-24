@@ -3786,6 +3786,10 @@ const ar = {
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
+  'Company is required': 'الشركة مطلوبة',
+  'Journals in the reconciliation model must belong to the model company': 'يجب أن تنتمي دفاتر اليومية في نموذج التسوية إلى شركة النموذج',
+  'Partner in counterpart item must belong to the model company': 'يجب أن ينتمي الشريك في البند المقابل إلى شركة النموذج',
+  'Reconciliation accounts must be active and belong to the model company': 'يجب أن تكون حسابات التسوية نشطة وتنتمي إلى شركة النموذج',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
