@@ -36,6 +36,13 @@ export function escapeXml(value, { attribute = false } = {}) {
   return out;
 }
 
+/** Canonical Odoo generic tax report total line definitions. */
+export const GENERIC_TAX_TOTALS = [
+  { key: 'output', code: 'TOTAL-OUT', label: 'Total Sales' },
+  { key: 'input', code: 'TOTAL-IN', label: 'Total Purchases' },
+  { key: 'payable', code: 'PAYABLE', label: 'Tax Payable', strong: true },
+];
+
 /** Derive the tax report period object from an account.return record (or period). */
 export function taxReturnPeriod(db, retOrPeriod) {
   if (!retOrPeriod) return {};
@@ -48,6 +55,7 @@ export function taxReturnPeriod(db, retOrPeriod) {
     to: retOrPeriod.date_to,
     company_id: companyId,
     tax_unit_id: taxUnitId,
+    ...(retOrPeriod.taxIds ? { taxIds: retOrPeriod.taxIds } : {}),
   };
 }
 
@@ -80,11 +88,10 @@ function buildGenericBoxes(db, period, taxRows, totals) {
   const boxes = genericTaxRows(taxRows).map((row) => ({ code: row.code, label: row.name, base: round(row.base), tax: round(row.tax), kind: 'detail' }));
   const saleBase = taxBaseTotal(db, period, (item) => item.side === 'sale');
   const purchBase = taxBaseTotal(db, period, (item) => item.side === 'purchase');
-  boxes.push(
-    { code: 'TOTAL-OUT', label: 'Output Tax', base: saleBase, tax: totals.output, kind: 'total' },
-    { code: 'TOTAL-IN', label: 'Input Tax', base: purchBase, tax: totals.input, kind: 'total' },
-    { code: 'PAYABLE', label: 'Tax Payable', base: 0, tax: totals.payable, kind: 'total' },
-  );
+  for (const total of GENERIC_TAX_TOTALS) {
+    const base = total.key === 'output' ? saleBase : total.key === 'input' ? purchBase : 0;
+    boxes.push({ code: total.code, label: total.label, base, tax: totals[total.key], kind: 'total' });
+  }
   return boxes;
 }
 

@@ -848,6 +848,26 @@ export function taxAccounts(db, companyId) {
   return { sale: of('sale'), purchase: of('purchase') };
 }
 
+const normalizeTaxIds = (ids) => {
+  const list = ids instanceof Set ? [...ids] : Array.isArray(ids) ? ids : [];
+  return [...new Set(list.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+};
+
+/** Expand selected `account.tax` IDs (including group children), or null when unfiltered. */
+function selectedTaxIdSet(db, period) {
+  const raw = normalizeTaxIds(period?.taxIds);
+  if (!raw.length) return null;
+  const selected = new Set();
+  const visit = (id) => {
+    if (selected.has(id)) return;
+    selected.add(id);
+    const tax = read(db, 'account.tax', id);
+    for (const childId of tax?.children_tax_ids ?? []) visit(Number(childId));
+  };
+  for (const id of raw) visit(id);
+  return selected;
+}
+
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 export function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
@@ -855,8 +875,10 @@ export function taxItems(db, period) {
   const accounts = taxAccounts(db, companyId);
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
   const transitions = new Set(cashBasisTransitionAccounts(db, companyId));
+  const selectedTaxes = selectedTaxIdSet(db, period);
   return journalItems(db, period).flatMap((l) => {
     if (l.is_closing || l.is_tax_closing || l.is_tax_payment || isNonZeroBaseGridLine(l)) return [];
+    if (selectedTaxes && (l.tax_id == null || !selectedTaxes.has(Number(l.tax_id)))) return [];
     const move = l.tax_name && moves.get(l.move_id);
     const documentSide = ['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null;
     const sale = accounts.sale.has(l.account_id), purchase = accounts.purchase.has(l.account_id);
@@ -1413,11 +1435,27 @@ export function taxRowsFromItems(items) {
 export function taxesByGrid(db, period = {}) {
   const rows = new Map();
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+  const selectedTaxes = selectedTaxIdSet(db, period);
+  const selectedBaseTagIds = selectedTaxes
+    ? new Set([...selectedTaxes].flatMap((id) => {
+        const tax = read(db, 'account.tax', id);
+        return [...(tax?.invoice_repartition_line_ids ?? []), ...(tax?.refund_repartition_line_ids ?? [])]
+          .filter((r) => r.repartition_type === 'base')
+          .flatMap((r) => r.tag_ids ?? []);
+      }))
+    : null;
   const items = period.tax_unit_id
     ? returnCompanies(db, period).flatMap((company_id) => journalItems(db, { ...period, tax_unit_id: null, company_id }))
     : journalItems(db, period);
   for (const line of items) {
     if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
+    if (selectedTaxes) {
+      if (line.tax_id != null) {
+        if (!selectedTaxes.has(Number(line.tax_id))) continue;
+      } else if (!line.tax_grid_base) {
+        continue;
+      }
+    }
     const move = moves.get(line.move_id);
     const side = line.tax_side || (['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null);
     if (!side) continue;
@@ -1425,6 +1463,7 @@ export function taxesByGrid(db, period = {}) {
     const value = side === 'sale' ? -balance : balance;
     const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && isLegacyCashBasisRelease(move));
     for (const id of line.tax_tag_ids ?? []) {
+      if (selectedBaseTagIds && line.tax_grid_base && line.tax_id == null && !selectedBaseTagIds.has(id)) continue;
       const tag = read(db, 'account.account.tag', id);
       if (!tag) continue;
       const row = rows.get(id) ?? { id, name: tag.name, base: 0, tax: 0 };
