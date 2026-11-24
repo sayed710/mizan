@@ -701,9 +701,6 @@ test('Round 2 Bug 1: Register buttons handle errors with feedback and route manu
 
   await React.act(async () => commit(db));
 
-  let alertedMessage = null;
-  globalThis.alert = (msg) => { alertedMessage = msg; };
-
   const host = makeEl('div');
   host.ownerDocument = globalThis.document;
   const root = createRoot(host);
@@ -718,13 +715,13 @@ test('Round 2 Bug 1: Register buttons handle errors with feedback and route manu
     });
     assert.equal(window.location.hash, `#/open/account.payment/${draftPay.id}`);
 
-    // Clicking Void on already-voided batch row should catch error and show alert feedback
+    // Clicking Void on already-voided batch row should catch error and show inline feedback
     const voidBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Void');
     assert.ok(voidBtn, 'Void button exists for batch row');
     await React.act(async () => {
       props(voidBtn).onClick();
     });
-    assert.match(alertedMessage, /already voided/i);
+    assert.match(textOf(find(host, (n) => n.className === 'alert')), /already voided/i);
   } finally {
     await React.act(async () => root.unmount());
   }
