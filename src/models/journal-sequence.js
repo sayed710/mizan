@@ -30,7 +30,7 @@ export function journalSequenceName(db, journal, date, fallback, predicate = () 
     parsed.push({
       move,
       match,
-      seq: Number(groups.seq || 0),
+      seq: BigInt(groups.seq || 0),
       matchesPeriod,
     });
   }
@@ -43,26 +43,26 @@ export function journalSequenceName(db, journal, date, fallback, predicate = () 
   let startSeq;
 
   if (periodMatches.length > 0) {
-    periodMatches.sort((a, b) => b.seq - a.seq || b.move.id - a.move.id);
+    periodMatches.sort((a, b) => (b.seq > a.seq ? 1 : b.seq < a.seq ? -1 : 0) || b.move.id - a.move.id);
     const top = periodMatches[0];
     templateMatch = top.match;
     templateName = top.move.name;
-    startSeq = top.seq + 1;
+    startSeq = top.seq + 1n;
   } else if (parsed.length > 0) {
     parsed.sort((a, b) => b.move.id - a.move.id);
     const latest = parsed[0];
     templateMatch = latest.match;
     templateName = latest.move.name;
-    startSeq = 1;
+    startSeq = 1n;
   } else {
     const match = regex.exec(fallback);
     if (!match?.groups || match.groups.seq == null) throw new Error('The journal entry sequence does not match the journal sequence regex');
     if (!/^\d*$/.test(match.groups.seq)) throw new Error('The sequence group must contain digits');
     templateMatch = match;
     templateName = fallback;
-    startSeq = Number(match.groups.seq || 0);
+    startSeq = BigInt(match.groups.seq || 0);
     if (!existingNames.has(fallback)) return fallback;
-    startSeq += 1;
+    startSeq += 1n;
   }
 
   const groups = templateMatch.groups;
@@ -83,7 +83,7 @@ export function journalSequenceName(db, journal, date, fallback, predicate = () 
   let seq = startSeq;
   let result = generate(seq);
   while (existingNames.has(result)) {
-    seq += 1;
+    seq += 1n;
     result = generate(seq);
   }
   return result;

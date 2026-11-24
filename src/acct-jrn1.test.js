@@ -188,11 +188,11 @@ test('Finding 5: account with company-currency postings cannot adopt foreign cur
     /The account has journal items in another currency/
   );
 
-  // Bank journal prepareWrite trying to sync account to EUR must fail
-  assert.throws(
-    () => create(db, 'account.journal', { name: 'EUR Bank', code: 'EB99', type: 'bank', company_id: 1, default_account_id: account.id, currency_id: eur.id }),
-    /The account has journal items in another currency/
-  );
+  // Creating a foreign bank journal on an account with existing company-currency items keeps the account multi-currency
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const createdJrn = create(db, 'account.journal', { name: 'EUR Bank', code: 'EB99', type: 'bank', company_id: 1, default_account_id: account.id, suspense_account_id: bank.suspense_account_id, currency_id: eur.id });
+  assert.equal(read(createdJrn.db, 'account.account', account.id).currency_id ?? null, null);
+  assert.equal(read(createdJrn.db, 'account.journal', createdJrn.id).currency_id, eur.id);
 });
 
 test('Finding 6: unanchored sequence override regex preserves prefix', () => {
@@ -345,3 +345,69 @@ test('Finding 12: company-currency postings in foreign bank journal do not lock 
   });
   assert.equal(read(db, 'res.currency', eur.id).rounding, 0.05);
 });
+
+test('Finding 13: posting with large sequence numbers above MAX_SAFE_INTEGER produces the next name', () => {
+  let db = seed();
+  const regex = String.raw`^(?P<prefix>.*?)(?P<year>\d{4})/(?P<seq>\d+)$`;
+  const journal = create(db, 'account.journal', {
+    name: 'Large Seq Bank',
+    code: 'LSEQ',
+    type: 'general',
+    company_id: 1,
+    sequence_override_regex: regex,
+  });
+  db = journal.db;
+  const accounts = search(db, 'account.account').filter((a) => !a.company_id || a.company_id === 1);
+  const largeSeq = '9007199254740992';
+  const existingName = `LSEQ/2026/${largeSeq}`;
+
+  const existingMove = create(db, 'account.move', {
+    move_type: 'entry',
+    journal_id: journal.id,
+    name: existingName,
+    state: 'posted',
+    date: '2026-03-01',
+    invoice_date: '2026-03-01',
+    line_ids: [
+      { account_id: accounts[0].id, debit: 10 },
+      { account_id: accounts[1].id, credit: 10 },
+    ],
+  });
+  db = existingMove.db;
+
+  const nextName = journalSequenceName(db, read(db, 'account.journal', journal.id), '2026-03-02', 'LSEQ/2026/0000000000000001');
+  assert.equal(nextName, 'LSEQ/2026/9007199254740993');
+
+  const posted = postEntry(db, {
+    journal_id: journal.id,
+    company: 1,
+    date: '2026-03-02',
+    lines: [
+      { account_id: accounts[0].id, debit: 1 },
+      { account_id: accounts[1].id, credit: 1 },
+    ],
+  });
+  assert.equal(read(posted.db, 'account.move', posted.id).name, 'LSEQ/2026/9007199254740993');
+
+  // Collision loop and zero-padding preservation above MAX_SAFE_INTEGER
+  const padded = {
+    ...posted.db,
+    records: {
+      ...posted.db.records,
+      'account.move': [
+        ...posted.db.records['account.move'],
+        { id: 99991, journal_id: journal.id, state: 'draft', name: 'LSEQ/2026/9007199254740994' },
+        { id: 99992, journal_id: journal.id, state: 'posted', name: 'LSEQ/2025/009007199254740992' },
+      ],
+    },
+  };
+  assert.equal(
+    journalSequenceName(padded, read(padded, 'account.journal', journal.id), '2026-03-03', 'LSEQ/2026/0000000000000001'),
+    'LSEQ/2026/9007199254740995',
+  );
+  assert.equal(
+    journalSequenceName(padded, read(padded, 'account.journal', journal.id), '2025-03-03', 'LSEQ/2025/000000000000000001'),
+    'LSEQ/2025/009007199254740993',
+  );
+});
+

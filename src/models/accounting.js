@@ -2691,6 +2691,13 @@ function moveActivities(r, db) {
 
 const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.journal', r.journal_id)?.type ?? null : null);
 
+/** Mark the selected journal entries as reviewed. */
+export function markAsReviewed(db, moveIds) {
+  const ids = Array.isArray(moveIds) ? moveIds : [moveIds];
+  return ids.reduce((next, id) => read(next, 'account.move', id)?.to_check
+    ? write(next, 'account.move', id, { to_check: false }) : next, db);
+}
+
 export const journalEntriesView = {
   defaults: { move_type: 'entry' },
   list: ['accounting_date', 'display_name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
@@ -2703,6 +2710,11 @@ export const journalEntriesView = {
       requiresSelection: true,
       wizard: (db) => ({ title: 'Reverse Entries', fields: reversalWizardFields(null, db?.settings?.current_company_id ?? 1) }),
       run: (db, ids, values = {}) => reverseEntries(db, ids, values),
+    },
+    {
+      label: 'Mark as reviewed',
+      requiresSelection: true,
+      run: (db, ids) => markAsReviewed(db, ids),
     },
   ],
   filters: [
@@ -2913,6 +2925,20 @@ export function cashMove(db, journalId, { amount, label, date, statementId } = {
 export const putMoneyIn = (db, journalId, args) => cashMove(db, journalId, args, 1);
 export const takeMoneyOut = (db, journalId, args) => cashMove(db, journalId, args, -1);
 
+/** Sync a liquidity journal's default account currency when it does not conflict with existing items or another forced currency. */
+function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwriteExisting = false } = {}) {
+  const account = accountId ? read(db, 'account.account', accountId) : null;
+  if (!account) return db;
+  const nextCurrency = targetCurrencyId ?? null;
+  const currentCurrency = account.currency_id ?? null;
+  if (currentCurrency === nextCurrency) return db;
+  if (currentCurrency && !overwriteExisting) return db;
+  if (nextCurrency && accountCurrencyChangeError(db, account, { ...account, currency_id: nextCurrency })) {
+    return db;
+  }
+  return write(db, 'account.account', accountId, { currency_id: nextCurrency });
+}
+
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
@@ -3091,7 +3117,16 @@ export const accountingModels = {
       const defaultAccountChanged = !before || (before.default_account_id ?? null) !== (after.default_account_id ?? null);
       if (isLiquidityJournal(after) && after.default_account_id && (currencyChanged || defaultAccountChanged)) {
         const account = read(db, 'account.account', after.default_account_id);
-        if (account && (account.currency_id ?? null) !== (after.currency_id ?? null)) return 'The journal and its default account must use the same currency';
+        if (account) {
+          const accountCurrency = account.currency_id ?? null;
+          const journalCurrency = after.currency_id ?? null;
+          if (accountCurrency && accountCurrency !== journalCurrency && (before || journalCurrency)) {
+            return 'The journal and its default account must use the same currency';
+          }
+          if (journalCurrency && !accountCurrency && !accountCurrencyChangeError(db, account, { ...account, currency_id: journalCurrency })) {
+            return 'The journal and its default account must use the same currency';
+          }
+        }
       }
       if (after.sequence_override_regex) {
         try { journalSequenceRegex(after.sequence_override_regex); } catch (error) { return error.message; }
@@ -3331,7 +3366,7 @@ export const accountingModels = {
     prepareCreate: (db, vals) => {
       let nextVals = { ...vals };
       if (isLiquidityJournal(vals) && vals.default_account_id && vals.currency_id) {
-        db = write(db, 'account.account', vals.default_account_id, { currency_id: vals.currency_id });
+        db = syncLiquidityAccountCurrency(db, vals.default_account_id, vals.currency_id);
       }
       for (const [field] of METHOD_LINE_FIELDS) {
         if (Array.isArray(nextVals[field]) && nextVals[field].some((l) => l?.id != null && l.id !== '')) {
@@ -3345,7 +3380,9 @@ export const accountingModels = {
       if (('currency_id' in vals || 'default_account_id' in vals) && isLiquidityJournal({ ...before, ...vals }) && (vals.default_account_id ?? before?.default_account_id)) {
         const targetAccountId = vals.default_account_id ?? before.default_account_id;
         const targetCurrencyId = ('currency_id' in vals ? vals.currency_id : before?.currency_id) ?? null;
-        db = write(db, 'account.account', targetAccountId, { currency_id: targetCurrencyId });
+        db = syncLiquidityAccountCurrency(db, targetAccountId, targetCurrencyId, {
+          overwriteExisting: 'currency_id' in vals && !('default_account_id' in vals),
+        });
       }
       if (nextVals.type !== undefined) {
         if (nextVals.type === 'bank') {
@@ -4332,6 +4369,7 @@ export const accountingModels = {
           },
         },
         { label: 'Lock', when: canLockEntry, run: (db, r) => ({ db: secureEntries(db, { throughMoveId: r.id }) }) },
+        { label: 'Mark as reviewed', when: (r) => Boolean(r?.to_check), run: (db, r) => ({ db: markAsReviewed(db, r.id) }) },
         { label: 'Cancel Entry', when: (r) => r.move_type === 'entry' && r.state === 'draft' && Boolean(r.id) && !r.inalterable_hash, run: cancelMove },
         { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, visible: (r) => isInvoice(r), run: cancelMove },
       ],
