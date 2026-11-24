@@ -49,9 +49,10 @@ function FiscalCategoryRows({ rows, money: fmtMoney = money }) {
   </>;
 }
 
-export function FiscalReport({ db, period, periods, analyticAccountIds, money: moneyProp }) {
-  const fmtMoney = moneyProp ?? reportMoney(db, period?.company_id);
-  const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period.reviewMode, company_id: period.company_id, analyticAccountIds }));
+export function FiscalReport({ db, period, periods, companyId, analyticAccountIds, money: moneyProp }) {
+  const effectiveCompanyId = companyId && companyId !== 'all' ? Number(companyId) : (period?.company_id ?? null);
+  const fmtMoney = moneyProp ?? reportMoney(db, effectiveCompanyId);
+  const reports = (periods ?? [period]).map((p) => fiscalReport(db, { ...p, reviewMode: period?.reviewMode, company_id: effectiveCompanyId, analyticAccountIds }));
   const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   const groups = new Map(reports.flatMap((report) => report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   return <tbody>
@@ -66,7 +67,7 @@ function PartnerRows({ db, p, period, companyId, kind, showJournalAccount = fals
   return (
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')} {kind === 'receivable' && p.partner_id && companyId && <a href={statementUrl([p.partner_id], { companyId, ...period })} onClick={(e) => e.stopPropagation()}>{t('Customer Statement')}</a>}</td>
+        <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')} {kind !== 'payable' && p.partner_id && companyId && <a href={statementUrl([p.partner_id], { companyId, ...period })} onClick={(e) => e.stopPropagation()}>{t('Customer Statement')}</a>}</td>
         {showJournalAccount && <><td /><td /></>}
         <td /><td /><td />
         {num(p.initial, fmtMoney)}{num(p.debit, fmtMoney)}{num(p.credit, fmtMoney)}{num(p.end, fmtMoney)}<td />
@@ -96,17 +97,24 @@ function PartnerRows({ db, p, period, companyId, kind, showJournalAccount = fals
   );
 }
 
-export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, showJournalAccount = false, money: moneyProp }) {
+export function PartnerLedger(props) {
+  if (typeof props === 'string') {
+    const kind = props;
+    return function PartnerLedgerBody(innerProps) {
+      return <PartnerLedger {...innerProps} accountType={innerProps.accountType ?? kind} />;
+    };
+  }
+  const { db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, showJournalAccount = false, accountType, money: moneyProp } = props;
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
-  const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, kind);
+  const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, accountType);
   return (
     <tbody>
-      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} period={period} companyId={company_id} kind={kind} showJournalAccount={showJournalAccount} money={fmtMoney} />)}
+      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} period={period} companyId={company_id} kind={accountType} showJournalAccount={showJournalAccount} money={fmtMoney} />)}
       <tr className="rep-total strong"><td>{t('Total')}</td>{showJournalAccount && <><td /><td /></>}<td /><td /><td />{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{fmtMoney(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
-};
+}
 
 export function CustomerStatement({ db, period, companyId, initialPartnerId, fixedPartner = false, money: moneyProp }) {
   const [partnerId, setPartnerId] = useState(initialPartnerId ?? '');
