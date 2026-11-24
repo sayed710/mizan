@@ -6,7 +6,7 @@ import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
-import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, resolveAgedAsOfDate, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -918,7 +918,10 @@ function ReportPage({ leaf, params }) {
     [sourceDb, companyId, allowAllCompanies],
   );
   const [periodKey, setPeriodKey] = useState(params?.has('from') && params?.get('to') ? 'custom' : DEFAULT_REPORT_PERIOD);
-  const [asOf, setAsOf] = useState(today());
+  const [asOfState, setAsOfState] = useState(() => {
+    const initial = today();
+    return { input: initial, date: initial, error: '' };
+  });
   const isAged = ['agedReceivable', 'agedPayable'].includes(leaf.report);
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
@@ -1011,8 +1014,8 @@ function ReportPage({ leaf, params }) {
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
   const period = useMemo(
-    () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
-    [isAged, asOf, periodKey, customPeriod],
+    () => (isAged ? { from: '', to: agedReportDate(asOfState.date) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
+    [isAged, asOfState.date, periodKey, customPeriod],
   );
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
@@ -1184,7 +1187,8 @@ function ReportPage({ leaf, params }) {
     <div className="control-panel">
       <h1 className="cp-title">{t(title)}</h1>
       {isAged && <>
-        <label>{t('As of Date')}<input aria-label={t('As of')} type="date" value={asOf} onChange={(e) => { if (validDate(e.target.value)) setAsOf(e.target.value); }} /></label>
+        <label>{t('As of Date')}<input aria-label={t('As of')} aria-invalid={Boolean(asOfState.error)} type="date" value={asOfState.input} onChange={(e) => setAsOfState((prev) => resolveAgedAsOfDate(e.target.value, prev.date))} /></label>
+        {asOfState.error && <span className="alert" role="alert">{t(asOfState.error)}</span>}
         <label className="inline-select">{t('Aging period length (days)')}<input type="number" min="1" step="1" value={agingInterval} onChange={(e) => { const n = Number(e.target.value); if (Number.isSafeInteger(n) && n > 0) setAgingInterval(n); }} /></label>
         <label className="inline-select">{t('Based on')}<select value={agingBasis} onChange={(e) => setAgingBasis(e.target.value)}><option value="base_on_maturity_date">{t('Due Date')}</option><option value="base_on_invoice_date">{t('Invoice Date')}</option></select></label>
       </>}

@@ -1552,10 +1552,27 @@ function ageOtherEntries(db, kind, at, moves, add) {
 }
 
 /** Use the requested reporting cutoff, defaulting to today. */
-export const agedReportDate = (end, now = today()) => end || now;
+export const agedReportDate = (end, now = today()) => {
+  const date = end || now;
+  if (!validDate(date)) throw new Error('Enter a valid As of Date');
+  return date;
+};
+
+/** Validate an As of Date edit against the last valid date, keeping it and returning an inline error when empty or invalid. */
+export function resolveAgedAsOfDate(input, lastValidDate) {
+  if (validDate(input)) return { input, date: input, error: '' };
+  if (!validDate(lastValidDate)) throw new Error('Enter a valid As of Date');
+  const raw = input == null ? '' : String(input);
+  return {
+    input: raw,
+    date: lastValidDate,
+    error: raw.trim() === '' ? 'As of Date is required' : 'Enter a valid As of Date',
+  };
+}
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date' } = {}) {
+  if (!validDate(at)) throw new Error('Enter a valid As of Date');
   const buckets = BUCKETS(aging_interval);
   const rows = new Map();
   const add = (partner, date, amount, document = null, source = document) => {
