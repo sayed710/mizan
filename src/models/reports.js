@@ -72,6 +72,60 @@ export function trialBalance(db, { from, to, company_id, analyticAccountIds, inc
   return { rows: list, totals: { initial: total('initial'), debit: total('debit'), credit: total('credit'), end: total('end') } };
 }
 
+/** General ledger: accounts with opening balance, movements inside the period, and ending balance, optionally grouped by partner. */
+export function generalLedger(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, groupByPartner = false } = {}) {
+  const mode = reportReviewMode({ reviewMode, includeUnposted });
+  const items = filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds);
+  const opening = from ? trialOpeningItems(db, filterByAnalytic(journalItems(db, { to: from, company_id, reviewMode: mode }), analyticAccountIds).filter((l) => l.date < from), from) : [];
+
+  // Convert each item to the reporting currency once, then group by key in a single pass (large ledgers stay linear).
+  const converted = (ls) => ls.map((l) => ({ ...l, debit: reportingBookedAmount(db, l, Number(l.debit) || 0), credit: reportingBookedAmount(db, l, Number(l.credit) || 0) }));
+  const groupBy = (ls, key) => { const map = new Map(); for (const l of ls) { const k = key(l); if (!map.has(k)) map.set(k, []); map.get(k).push(l); } return map; };
+  const periodLines = groupBy(converted(items).sort((x, y) => x.date.localeCompare(y.date)), (l) => l.account_id);
+  const openingLines = groupBy(converted(opening), (l) => l.account_id);
+
+  /** Opening balance, totals and running balance of one account or one partner within it. */
+  const section = (lines, openingOf) => {
+    const start = openingOf.reduce((sum, l) => sum + l.debit - l.credit, 0);
+    let run = start;
+    const withBalance = lines.map((l) => { run += l.debit - l.credit; return { ...l, balance: round(run) }; });
+    const debit = lines.reduce((sum, l) => sum + l.debit, 0);
+    const credit = lines.reduce((sum, l) => sum + l.credit, 0);
+    return { initial: round(start), debit: round(debit), credit: round(credit), end: round(start + debit - credit), lines: withBalance };
+  };
+
+  const accounts = [...new Set([...periodLines.keys(), ...openingLines.keys()])]
+    .map((id) => read(db, 'account.account', id))
+    .filter(Boolean)
+    .sort((x, y) => x.code.localeCompare(y.code));
+
+  const rows = accounts.map((account) => {
+    const accLines = periodLines.get(account.id) ?? [];
+    const accOpening = openingLines.get(account.id) ?? [];
+    let partners = [];
+    if (groupByPartner) {
+      const partnerOf = (l) => l.partner_id ?? null;
+      const byPartner = groupBy(accLines, partnerOf);
+      const openingByPartner = groupBy(accOpening, partnerOf);
+      partners = [...new Set([...byPartner.keys(), ...openingByPartner.keys()])].map((pId) => {
+        const partner = pId ? read(db, 'res.partner', pId) : null;
+        return { partner_id: pId, partner, name: partner?.name ?? '', ...section(byPartner.get(pId) ?? [], openingByPartner.get(pId) ?? []) };
+      }).filter((p) => p.lines.length || p.initial)
+        .sort((x, y) => (!x.partner_id ? 1 : !y.partner_id ? -1 : x.name.localeCompare(y.name)));
+    }
+    return { account, ...section(accLines, accOpening), partners };
+  });
+
+  return {
+    rows,
+    totals: {
+      debit: round(rows.reduce((sum, r) => sum + r.debit, 0)),
+      credit: round(rows.reduce((sum, r) => sum + r.credit, 0)),
+      end: round(rows.reduce((sum, r) => sum + r.end, 0)),
+    },
+  };
+}
+
 /** Period movements grouped by the explicit fiscal category on each trial-balance account. */
 export function fiscalReport(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
   const trial = trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode });
@@ -123,6 +177,7 @@ export function cashflowAnalysis(db, { from, to, company_id }) {
 export function partnerLedger(db, { from, to, company_id, analyticAccountIds, partnerIds, unreconciledOnly = false, includeUnposted, reviewMode } = {}, kind = 'receivable') {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const accounts = accountIds(db, kind === 'payable' ? 'liability_payable' : 'asset_receivable');
+  if (kind === 'both') for (const id of accountIds(db, 'liability_payable')) accounts.add(id);
   const partners = partnerIds?.length ? new Set(partnerIds.map(Number)) : null;
   // Odoo's "unreconciled entries only" keeps items with an open residual, in the period and in the opening alike.
   const keep = (l) => accounts.has(l.account_id) && (!partners || partners.has(l.partner_id)) && (!unreconciledOnly || Math.abs(l.amount_residual ?? 0) > 1e-9);
@@ -148,6 +203,7 @@ export function partnerLedger(db, { from, to, company_id, analyticAccountIds, pa
     const dueDate = l.date_maturity ?? read(db, 'account.move', l.move_id)?.invoice_date_due ?? l.date;
     r.lines.push({
       date: l.date, dueDate, move_id: l.move_id, move_name: l.move_name,
+      journal_id: l.journal_id, account_id: l.account_id,
       ...(l.matching_number ? { matchingNumber: l.matching_number } : {}),
       label: l.name ?? '', ...(l.ref ? { ref: l.ref } : {}),
       debit, credit, currency_id: l.currency_id ?? null, amount_currency: l.amount_currency ?? null,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { create, read } from './orm.js';
 import { seed } from './seed.js';
+import { today } from './models/common.js';
 import { valuationReport } from './models/valuation.js';
 import { createCompany, setCompanies } from './models/company.js';
 import { setupDom, find } from './test-support/dom.js';
@@ -148,16 +149,16 @@ test('VAL-1 filter: companyId "all" sums stock across two companies including un
   const legacyCo2 = create(db, 'product', { name: 'Co2 Legacy Item', type: 'goods', cost: 20, company_id: branch.id, qty_available: 5 });
   db = legacyCo2.db;
 
-  const repAll = valuationReport(db, { companyId: 'all', at: '2026-01-31' });
+  const repAll = valuationReport(db, { companyId: 'all', at: today() });
   assert.deepEqual(repAll[shared.id], { qty: 10, value: 150, unitCost: 15 });
   assert.deepEqual(repAll[legacyCo2.id], { qty: 5, value: 100, unitCost: 20 });
 
   // Single-company scope sees only its own stock
-  const repCo1 = valuationReport(db, { companyId: 1, at: '2026-01-31' });
+  const repCo1 = valuationReport(db, { companyId: 1, at: today() });
   assert.deepEqual(repCo1[shared.id], { qty: 4, value: 60, unitCost: 15 });
   assert.equal(repCo1[legacyCo2.id], undefined);
 
-  const repCo2 = valuationReport(db, { companyId: branch.id, at: '2026-01-31' });
+  const repCo2 = valuationReport(db, { companyId: branch.id, at: today() });
   assert.deepEqual(repCo2[shared.id], { qty: 6, value: 90, unitCost: 15 });
   assert.deepEqual(repCo2[legacyCo2.id], { qty: 5, value: 100, unitCost: 20 });
 });

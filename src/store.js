@@ -268,20 +268,41 @@ export async function listAudit(model, limit = 500) {
 }
 
 /** Complete paginated server change log across one or more models (admins only); null when forbidden. */
-export async function listAuditAll(modelsList = []) {
+export async function listAuditAll(modelsListOrFilters = [], maybeFilters = {}) {
+  const isFiltersObj = !Array.isArray(modelsListOrFilters) && typeof modelsListOrFilters === 'object' && modelsListOrFilters !== null;
+  const modelsList = isFiltersObj ? (modelsListOrFilters.models ?? []) : modelsListOrFilters;
+  const filters = isFiltersObj ? modelsListOrFilters : maybeFilters;
   const pageSize = 1000;
   const all = [];
   let before = null;
   const normalizedModels = Array.isArray(modelsList)
     ? [...new Set(modelsList.map((m) => String(m ?? '').trim()).filter(Boolean))]
     : [];
-  const modelsParam = normalizedModels.length
-    ? `models=${encodeURIComponent(normalizedModels.join(','))}&`
-    : '';
+  const queryParts = [];
+  if (filters.model) {
+    queryParts.push(`model=${encodeURIComponent(filters.model)}`);
+  } else if (normalizedModels.length) {
+    queryParts.push(`models=${encodeURIComponent(normalizedModels.join(','))}`);
+  }
+  if (filters.user) queryParts.push(`user=${encodeURIComponent(filters.user)}`);
+  if (filters.record != null && filters.record !== '') {
+    const rawRec = String(filters.record).replace(/^#/, '').trim();
+    if (/^\d+$/.test(rawRec) && Number.isSafeInteger(Number(rawRec))) {
+      queryParts.push(`record=${encodeURIComponent(rawRec)}`);
+    }
+  }
+  if (filters.field) queryParts.push(`field=${encodeURIComponent(filters.field)}`);
+  if (filters.date_from) queryParts.push(`date_from=${encodeURIComponent(filters.date_from)}`);
+  if (filters.date_to) queryParts.push(`date_to=${encodeURIComponent(filters.date_to)}`);
+
+  const baseParam = queryParts.length ? `${queryParts.join('&')}&` : '';
   while (true) {
     const beforeParam = before != null ? `&before=${before}` : '';
-    const r = await api(`/api/audit?${modelsParam}limit=${pageSize}&selected=1${beforeParam}`);
-    if (!r.ok) return null;
+    const r = await api(`/api/audit?${baseParam}limit=${pageSize}&selected=1${beforeParam}`);
+    if (!r.ok) {
+      if (r.status === 401 || r.status === 403) return null;
+      throw new Error(r.data?.error ?? `HTTP ${r.status}`);
+    }
     const batch = Array.isArray(r.data) ? r.data : [];
     all.push(...batch);
     if (batch.length < pageSize) break;

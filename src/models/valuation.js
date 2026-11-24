@@ -22,7 +22,7 @@ const stockQuantity = (db, p, company = companyOf(db)) => {
   const qs = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === p.id);
   if (qs.length) return (company === 'all' ? qs : qs.filter((q) => (q.company_id ?? 1) === company)).reduce((s, q) => s + q.quantity, 0);
   // Unlocated legacy stock is attributed in the same way as ensureQuants.
-  return (company === 'all' || (p.company_id || companyOf(db)) === company) ? Number(p.qty_available) || 0 : 0;
+  return (company === 'all' || (p.company_id || 1) === company) ? Number(p.qty_available) || 0 : 0;
 };
 const product = (db, id) => {
   const p = read(db, 'product', id);
@@ -40,7 +40,7 @@ function prepare(db, id, date, company = companyOf(db)) {
   const ls = layers(db, id, company);
   if (ls.some((l) => l.date > date)) throw new Error('Valuation date cannot precede an existing layer');
   const onHand = stockQuantity(db, p, company);
-  const owned = onHand + ((p.company_id || companyOf(db)) === company ? Number(p.qty_rented || 0) : 0);
+  const owned = onHand + ((p.company_id || 1) === company ? Number(p.qty_rented || 0) : 0);
   if (ls.length && Math.abs(quantity(ls) - owned) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
   if (ls.length || !onHand) return db;
   if (onHand < 0) throw new Error('Reconcile negative opening stock before valuation');
@@ -418,7 +418,10 @@ export function valuationReport(db, {
       const value = round(qty * unitCost);
       rows[p.id] = { qty, value, unitCost: value / qty };
     } else {
-      const qty = all.length ? quantity(ls) : stockQuantity(db, p, comp);
+      const legacyQty = all.length ? 0 : stockQuantity(db, p, comp);
+      // Unvalued legacy stock has no history, so its quantity at a past date is unknown.
+      if (!all.length && legacyQty && at < today()) { rows[p.id] = { qty: null, value: null, unitCost: null }; continue; }
+      const qty = all.length ? quantity(ls) : legacyQty;
       const value = all.length ? valueOf(ls) : round(qty * (Number(p.cost) || 0));
       rows[p.id] = { qty, value, unitCost: qty ? value / qty : 0 };
     }
