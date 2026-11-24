@@ -1,0 +1,165 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import './models/index.js';
+import { models } from './registry.js';
+import { create, read, write } from './orm.js';
+import { seed } from './seed.js';
+import { postMove } from './models/accounting.js';
+import { budgetReport } from './models/analyticplus.js';
+import { createCompany, setCompanies } from './models/company.js';
+import { applyDiff, diffDb } from './sync.js';
+import { invoiceJournalDefaults } from './test-support/accounting-company.js';
+
+register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
+
+const replaceRecord = (db, model, id, values) => ({
+  ...db,
+  records: {
+    ...db.records,
+    [model]: db.records[model].map((record) => (record.id === id ? { ...record, ...values } : record)),
+  },
+});
+
+test('BUD-1: budget report omits inline company selector and relies on company set on the budget record', async () => {
+  let db = seed();
+  const branch = createCompany(db, { name: 'Bud3 Branch', ...invoiceJournalDefaults(db) });
+  db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
+  const created = create(db, 'account.budget', {
+    name: 'Legacy Companyless Budget',
+    company_id: 1,
+    state: 'confirmed',
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    lines: [{ planned: 100 }],
+  });
+  db = replaceRecord(created.db, 'account.budget', created.id, { company_id: null });
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+
+  const bodyHtml = renderToStaticMarkup(
+    React.createElement('table', null, React.createElement(Budget, { db, period: {}, companyId: 'all' })),
+  );
+  assert.doesNotMatch(bodyHtml, /<select\b/);
+  assert.match(bodyHtml, new RegExp(`#/open/account\\.budget/${created.id}`));
+  assert.match(bodyHtml, /Select a company on the budget record to show this budget report\./);
+
+  // Company is set on the budget record itself (draft form) and enforced through diffDb + applyDiff guards.
+  const draft = replaceRecord(db, 'account.budget', created.id, { state: 'draft' });
+  const assigned = write(draft, 'account.budget', created.id, { company_id: branch.id });
+  const confirmed = write(assigned, 'account.budget', created.id, { state: 'confirmed' });
+  const synced = applyDiff(draft, diffDb(draft, confirmed));
+  assert.equal(read(synced, 'account.budget', created.id).company_id, branch.id);
+
+  const draftSynced = replaceRecord(synced, 'account.budget', created.id, { state: 'draft' });
+  const cleared = replaceRecord(draftSynced, 'account.budget', created.id, { company_id: null });
+  assert.throws(
+    () => applyDiff(draftSynced, diffDb(draftSynced, cleared)),
+    /Company is required/,
+  );
+  const invalidCompany = replaceRecord(draftSynced, 'account.budget', created.id, { company_id: 99999 });
+  assert.throws(
+    () => applyDiff(draftSynced, diffDb(draftSynced, invalidCompany)),
+    /Select an existing company for the budget/,
+  );
+
+  const updatedHtml = renderToStaticMarkup(
+    React.createElement('table', null, React.createElement(Budget, { db: synced, period: {}, companyId: 'all' })),
+  );
+  assert.match(updatedHtml, /Bud3 Branch/);
+  assert.doesNotMatch(updatedHtml, /Select a company on the budget record/);
+});
+
+test('BUD-2: Planned, Actual and Achievement use one period time basis matching Odoo budget.line achieved_percentage', async () => {
+  let db = seed();
+  const analytic = create(db, 'account.analytic.account', { name: 'Marketing Bud3' });
+  db = analytic.db;
+
+  // Post a $155 vendor bill and a $31 confirmed unbilled PO in January 2026, plus a $500 bill in June 2026.
+  const janBill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_date: '2026-01-10',
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 155, tax: 0, analytic_distribution: { [analytic.id]: 100 } }],
+  });
+  db = postMove(janBill.db, janBill.id);
+
+  const junBill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: 2,
+    company_id: 1,
+    invoice_date: '2026-06-15',
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 500, tax: 0, analytic_distribution: { [analytic.id]: 100 } }],
+  });
+  db = postMove(junBill.db, junBill.id);
+
+  const po = create(db, 'purchase.order', {
+    partner_id: 2,
+    company_id: 1,
+    date_order: '2026-01-12',
+    order_line: [{ product_id: 5, qty: 1, price_unit: 31, tax: 0, analytic_distribution: { [analytic.id]: 100 } }],
+  });
+  const confirmOrder = models['purchase.order'].form.buttons.find((b) => b.label === 'Confirm Order');
+  db = confirmOrder.run(po.db, read(po.db, 'purchase.order', po.id)).db;
+
+  // Annual expense budget over 365 days ($10/day -> $3650/yr, $310 for 31-day January).
+  const budget = create(db, 'account.budget', {
+    name: 'Annual Marketing Budget',
+    budget_type: 'expense',
+    company_id: 1,
+    state: 'confirmed',
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    lines: [{ analytic_account_id: analytic.id, planned: 3650 }],
+  });
+  db = budget.db;
+
+  // Full budget period at mid-year atDate: Achievement uses full-period achieved_amount / budget_amount * 100 (17.95%), not theoretical.
+  const [fullYear] = budgetReport(db, budget.id, '2026-03-01');
+  assert.equal(fullYear.planned_amount, 3650);
+  assert.equal(fullYear.achieved_amount, 655);
+  assert.equal(fullYear.committed_amount, 686);
+  assert.equal(fullYear.budget_variance, -2995);
+  assert.equal(fullYear.budget_achievement, 17.95);
+
+  // January period filter: Planned, Actual, Committed, Variance, Achievement all share the 2026-01-01..2026-01-31 time basis.
+  const janPeriod = { from: '2026-01-01', to: '2026-01-31' };
+  const [jan] = budgetReport(db, budget.id, '2026-01-15', { period: janPeriod });
+  assert.equal(jan.planned_amount, 310);
+  assert.equal(jan.achieved_amount, 155);
+  assert.equal(jan.committed_amount, 186);
+  assert.equal(jan.budget_variance, -155);
+  assert.equal(jan.budget_achievement, 50);
+
+  // Verify the rendered Budget report cells match the single-time-basis values, even when atDate < budget start (theoretical = 0).
+  const futureBudget = create(db, 'account.budget', {
+    name: 'Future Budget',
+    budget_type: 'expense',
+    company_id: 1,
+    state: 'confirmed',
+    date_from: '2099-01-01',
+    date_to: '2099-12-31',
+    lines: [{ analytic_account_id: analytic.id, planned: 1200 }],
+  });
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+
+  const janHtml = renderToStaticMarkup(
+    React.createElement('table', null, React.createElement(Budget, { db, period: janPeriod, companyId: '1' })),
+  );
+  assert.match(janHtml, /\$310\.00/);
+  assert.match(janHtml, /\$155\.00/);
+  assert.match(janHtml, /\$186\.00/);
+  assert.match(janHtml, /-\$155\.00/);
+  assert.match(janHtml, />50%</);
+
+  const futureHtml = renderToStaticMarkup(
+    React.createElement('table', null, React.createElement(Budget, { db: futureBudget.db, period: { from: '2099-01-01', to: '2099-12-31' }, companyId: '1' })),
+  );
+  assert.match(futureHtml, /Future Budget/);
+  assert.match(futureHtml, />0%</);
+});

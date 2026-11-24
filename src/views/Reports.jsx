@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { read, search, write } from '../orm.js';
+import { read, search } from '../orm.js';
 import { models } from '../registry.js';
 import { today, validDate } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
@@ -592,17 +592,11 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
 }
 
 export function Budget({ db, period, companyId = 'all' }) {
-  const availableCompanies = companiesOf(db);
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
     const acc = read(db, 'account.account', l.account_id);
     const general = acc ? `${acc.code} ${acc.name}` : l.general_account;
     return [analytic, general].filter(Boolean).join(' · ') || '—';
-  };
-  const selectCompany = (budgetId, value) => {
-    const companyId = Number(value);
-    if (!companyId || !availableCompanies.some((company) => company.id === companyId)) return;
-    commit(write(getDb(), 'account.budget', budgetId, { company_id: companyId }));
   };
   return (
     <tbody>
@@ -623,16 +617,9 @@ export function Budget({ db, period, companyId = 'all' }) {
         return [
           <tr key={b.id} className="rep-section"><td colSpan={6}>
             <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
-            {companyMissing
-              ? <label className="inline-select">{t('Company')}
-                <select aria-label={`${t('Company')} for ${b.name}`} value="" onChange={(event) => selectCompany(b.id, event.target.value)}>
-                  <option value="">{t('Select a company')}</option>
-                  {availableCompanies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-              </label>
-              : <span className="muted"> · {company.name}</span>}
+            {company && <span className="muted"> · {company.name}</span>}
           </td></tr>,
-          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={6} className="muted">{t('Select a company to show this budget report.')}</td></tr>] : []),
+          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={6} className="muted">{t('Select a company on the budget record to show this budget report.')}</td></tr>] : []),
           ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={6} className="muted" role="alert">{reportError}</td></tr>] : []),
           ...reportLines.map((l, i) => (
             <Fragment key={`${b.id}-${i}`}>
@@ -642,7 +629,7 @@ export function Budget({ db, period, companyId = 'all' }) {
                 <BudgetMoneyCell value={l.achieved_amount} currency={currency} money={money} />
                 <BudgetMoneyCell value={l.committed_amount} currency={currency} money={money} />
                 <BudgetMoneyCell value={l.budget_variance} currency={currency} money={money} />
-                <td className="num">{(l.budget_theoretical ?? l.theoretical) ? `${l.budget_achievement}%` : ''}</td>
+                <td className="num">{(l.planned_amount ?? l.planned) ? `${l.budget_achievement}%` : ''}</td>
               </tr>
               {l.analytic_lines.map((item) => <tr className="rep-detail" key={item.id}>
                 <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>

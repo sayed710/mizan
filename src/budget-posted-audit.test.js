@@ -34,7 +34,7 @@ test('budget report uses posted analytic lines for each company and line period,
   assert.deepEqual(row.analytic_lines.map((line) => line.move_id).sort(), [invoice, refund].sort());
   assert.equal(row.analytic_lines.every((line) => search(db, 'account.move').some((move) => move.id === line.move_id && move.state === 'posted')), true);
   assert.equal(budgetReport(db, budget.id, '2026-01-31', { period: { from: '2026-01-15', to: '2026-01-31' } })[0].practical, -30);
-  assert.equal(budgetReport(db, budget.id, '2026-01-15')[0].achievement, 144.66);
+  assert.equal(budgetReport(db, budget.id, '2026-01-15')[0].achievement, 70);
   const otherBudget = create(db, 'account.budget', { name: 'Other', company_id: company.id, date_from: '2026-01-01', date_to: '2026-01-31', lines: [
     { analytic_account_id: analytic.id, planned: 1000 },
   ] });
