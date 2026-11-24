@@ -1,6 +1,5 @@
 import { read, search } from '../orm.js';
-
-export const planOf = (account) => account?.plan_id ? `plan:${account.plan_id}` : `legacy:${account?.plan || 'project'}`;
+import { planOf } from '../analytic_distribution.js';
 
 // A category reference is an id (legacy rules stored it as text); names are never matched.
 const toCategoryId = (val) => {

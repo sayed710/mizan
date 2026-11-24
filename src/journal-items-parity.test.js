@@ -119,7 +119,7 @@ function buildRichJournalItemsDb() {
   const vatSale = search(db, 'account.tax').find((tx) => tx.type_tax_use === 'sale' && tx.amount > 0);
   const tagRes = create(db, 'account.account.tag', { name: 'VAT Output Grid', applicability: 'taxes' });
   db = tagRes.db;
-  const analyticRes = create(db, 'account.analytic.account', { name: 'R&D Dept', code: 'RD' });
+  const analyticRes = create(db, 'account.analytic.account', { name: 'R&D Dept', code: 'RD', plan_id: db.records['account.analytic.plan'][0].id });
   db = analyticRes.db;
   const splitTermRes = create(db, 'account.payment.term', {
     name: '50/50 Split with Early Discount',

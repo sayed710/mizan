@@ -39,7 +39,8 @@ test('analytic report shows foreign-company analytic lines in the reporting comp
   await initStore();
   const euro = euroCompany(seed());
   const year = new Date().getFullYear();
-  const account = create(analyticBase(euro.db), 'account.analytic.account', { name: 'Shared project', company_id: 1 });
+  const base = analyticBase(euro.db);
+  const account = create(base, 'account.analytic.account', { name: 'Shared project', company_id: 1, plan_id: base.records['account.analytic.plan'][0].id });
   let db = account.db;
   for (const [amount, companyId, date] of [[123, 1, `${year}-06-15`], [100, euro.id, `${year}-06-16`]]) {
     db = create(db, 'account.analytic.line', { name: `Line ${amount}`, account_id: account.id, amount, company_id: companyId, date }).db;

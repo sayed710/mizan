@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { models } from './models/index.js';
-import { read } from './orm.js';
+import { create, read } from './orm.js';
+import { seed } from './seed.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { diffDb, applyDiff } from './sync.js';
+import { planOf } from './analytic_distribution.js';
 import {
   completePlanName,
   planAccountCount,
@@ -273,6 +275,66 @@ test('ANA-3: account.analytic.plan description, complete_name, account_count, al
       assert.ok(translated, `translation must exist for ${key}`);
       assert.notEqual(translated, key, `Arabic translation must differ from English key for ${key}`);
     }
+  } finally {
+    globalThis.localStorage = prevStorage;
+  }
+});
+
+// ANA-4: account.analytic.account.plan_id is required (create and diffDb+applyDiff) and planOf has no legacy fallback.
+test('ANA-4: account.analytic.account requires plan_id through create and diffDb + applyDiff, and planOf always uses plan:<plan_id>', async () => {
+  const model = models['account.analytic.account'];
+  assert.equal(model.fields.plan_id?.required, true, 'plan_id must be required on account.analytic.account');
+
+  const db = seed();
+  assert.throws(
+    () => create(db, 'account.analytic.account', { name: 'Missing Plan' }),
+    /Analytic Plan is required/
+  );
+
+  const newId = (db.seq['account.analytic.account'] ?? 0) + 1;
+  const createWithoutPlanDb = {
+    ...db,
+    seq: { ...db.seq, 'account.analytic.account': newId },
+    records: {
+      ...db.records,
+      'account.analytic.account': [
+        ...(db.records['account.analytic.account'] ?? []),
+        { id: newId, name: 'Missing Plan', color: 0, active: true },
+      ],
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, createWithoutPlanDb), { isAdmin: true }),
+    /Analytic Plan is required/,
+    'creating analytic account without plan_id must be rejected by applyDiff'
+  );
+
+  const existing = db.records['account.analytic.account'][0];
+  const clearedPlanDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.analytic.account': db.records['account.analytic.account'].map((a) =>
+        a.id === existing.id ? { ...a, plan_id: null } : a
+      ),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, clearedPlanDb), { isAdmin: true }),
+    /Analytic Plan is required/,
+    'clearing plan_id on an existing analytic account must be rejected by applyDiff'
+  );
+
+  assert.equal(planOf({ id: 1, plan_id: 7 }), 'plan:7');
+  assert.throws(() => planOf({ id: 1, plan: 'project' }), /Analytic Plan is required/);
+  assert.throws(() => planOf(null), /Analytic Plan is required/);
+
+  const prevStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem() {} };
+  try {
+    const { t } = await import(`./i18n.js?t=${Date.now()}`);
+    const translated = t('Analytic Plan is required');
+    assert.ok(translated && translated !== 'Analytic Plan is required');
   } finally {
     globalThis.localStorage = prevStorage;
   }

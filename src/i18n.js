@@ -2851,6 +2851,7 @@ const ar = {
   'Associated Partner': 'الشريك المرتبط',
   'e.g. Project XYZ': 'مثال: مشروع XYZ',
   'A plan cannot be its own ancestor': 'لا يمكن أن تكون الخطة سلفاً لنفسها',
+  'Analytic Plan is required': 'الخطة التحليلية مطلوبة',
   // Multi-Ledger & Invoice Reminders (Odoo 20 parity)
   'Ledger group': 'مجموعة الدفتر',
   'e.g. CONSO, IFRS, ...': 'مثال: CONSO, IFRS, ...',

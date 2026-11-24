@@ -13,7 +13,7 @@ export function normalizeDistribution(distribution, db) {
     if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0) throw new Error('Analytic percentages must be non-negative numbers');
     const account = db && (db.records['account.analytic.account'] ?? []).find((r) => r.id === Number(id));
     if (db && !account) throw new Error('Analytic account not found');
-    const plan = db ? analyticPlanKey(account) : 'all';
+    const plan = db ? planOf(account) : 'all';
     totals.set(plan, (totals.get(plan) ?? 0) + percent);
     return [id, percent];
   });
@@ -35,9 +35,10 @@ export function storedLineDistribution(line) {
   return line?.analytic_account_id ? { [line.analytic_account_id]: 100 } : null;
 }
 
-/** One plan key per analytic account: its plan record, else its legacy plan selection. */
-export function analyticPlanKey(account) {
-  return account.plan_id ? `plan:${account.plan_id}` : `legacy:${account.plan || 'project'}`;
+/** Canonical plan key for an analytic account (`plan:<plan_id>`). */
+export function planOf(account) {
+  if (!account?.plan_id) throw new Error('Analytic Plan is required');
+  return `plan:${account.plan_id}`;
 }
 
 /** Convert a distribution object { [accountId]: percent } to ordered editor rows. */
@@ -101,7 +102,7 @@ export function planTotals(rows, db) {
   for (const row of rows ?? []) {
     const account = (db.records['account.analytic.account'] ?? []).find((r) => r.id === Number(row.accountId));
     if (!account) continue;
-    const key = analyticPlanKey(account);
+    const key = planOf(account);
     const current = totals.get(key) ?? { key, account, total: 0, rows: [] };
     current.total += Number.isFinite(row.percent) ? row.percent : 0;
     current.rows.push(row);
@@ -113,7 +114,7 @@ export function planTotals(rows, db) {
 
 /** What is left of `account`'s plan after the other rows: the default for a row that just picked it. */
 export function remainingInPlan(otherRows, account, db) {
-  const used = planTotals(otherRows, db).find((g) => g.key === analyticPlanKey(account))?.total ?? 0;
+  const used = planTotals(otherRows, db).find((g) => g.key === planOf(account))?.total ?? 0;
   return Math.max(0, Number((100 - used).toFixed(2)));
 }
 

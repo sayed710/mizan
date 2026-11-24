@@ -2693,7 +2693,7 @@ export const financeModels = {
     fields: {
       name: { type: 'char', label: 'Analytic Account', required: true },
       code: { type: 'char', label: 'Reference' },
-      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan' },
+      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan', required: true },
       color: { type: 'integer', label: 'Color' },
       balance: { type: 'monetary', label: 'Balance', readonly: true },
     },

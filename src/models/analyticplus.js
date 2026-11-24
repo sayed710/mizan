@@ -11,7 +11,7 @@ import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, rou
 import { hasMultiCurrency } from './money.js';
 import { currentCompany } from './company.js';
 import { isSectionOrNote } from './taxes.js';
-import { categoryHierarchy, findAnalyticDistribution, planOf } from './analytic-distribution-models.js';
+import { categoryHierarchy, findAnalyticDistribution } from './analytic-distribution-models.js';
 export { isSectionOrNote } from './taxes.js';
 
 const accountModel = financeModels['account.analytic.account'];
@@ -36,7 +36,7 @@ const allocatedShares = (db, distribution, base) => {
   return entries.map(([id], index) => [id, amounts[index]]);
 };
 export { normalizeDistribution } from '../analytic_distribution.js';
-import { normalizeDistribution, storedLineDistribution } from '../analytic_distribution.js';
+import { normalizeDistribution, planOf, storedLineDistribution } from '../analytic_distribution.js';
 export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
 const canonicalDistribution = (distribution) => Object.entries(distribution ?? {})
@@ -681,7 +681,7 @@ export const analyticPlusModels = {
     fields: {
       ...accountModel.fields,
       name: { ...accountModel.fields.name, placeholder: 'e.g. Project XYZ' },
-      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan' },
+      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan', required: true },
       color: { type: 'integer', label: 'Color', optional: 'hide' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, placeholder: 'Visible to all' },
