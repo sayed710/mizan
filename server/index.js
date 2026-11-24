@@ -19,6 +19,7 @@ import { scopeAuditRows } from '../src/companyView.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { claimWriter, loadRepaired, openStorage } from './storage.js';
 import { runPosting } from './posting.js';
+import { applyDigitizedBill } from './digitized-store.js';
 import { openBlobs, RASTER, referencesBlob } from './blobs.js';
 import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -27,11 +28,11 @@ import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, 
 import { smtpConfig } from './smtp.js';
 import { createMailTransport } from './mailTransport.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
-import { recordSent, sendDocument, sendFollowUp, sendMailing } from './mail.js';
+import { recordSent, sendDocument, sendFollowUp, sendMailing, sendCustomerStatement } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
-import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
+import { aiDraft, finishDigitizedBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
@@ -44,7 +45,7 @@ const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
 const ACTIONS = {
   '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u, _store, view) => aiDraft(view, u, b) },
-  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, _store, view) => digitizeBill(view, b) },
+  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, store) => finishDigitizedBill(store, b) },
   // Sending also logs a WhatsApp message, so the store may write that model on top of the user's own.
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, extra: ['whatsapp.message'], run: (b, u, store) => sendWhatsApp(ENV, store, u, b) },
   '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b, u, store) => sendSmsCampaign(ENV, store, b) },
@@ -64,8 +65,55 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { menuModelsForApps, models, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
+import { menuModelsForApps, models, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps, scopedWritableModels } from '../src/models/index.js';
 const MAX_AUDIT_MODELS = 20;
+
+function parseAuditDateBound(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s) return null;
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (dateMatch) {
+    const [, y, m, d] = dateMatch;
+    const year = Number(y), month = Number(m), day = Number(d);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const dt = new Date(Date.UTC(year, month - 1, day));
+    if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return null;
+    return {
+      type: 'date',
+      raw: s,
+      startMs: dt.getTime(),
+      endMs: dt.getTime() + 86400000 - 1,
+    };
+  }
+  const tsMatch = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$/.exec(s);
+  if (tsMatch) {
+    const [, y, m, d, hh, mm, ss] = tsMatch;
+    const year = Number(y), month = Number(m), day = Number(d);
+    const hour = Number(hh), min = Number(mm), sec = Number(ss);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    if (hour > 23 || min > 59 || sec > 59) return null;
+    const utcDate = new Date(Date.UTC(year, month - 1, day));
+    if (utcDate.getUTCFullYear() !== year || utcDate.getUTCMonth() !== month - 1 || utcDate.getUTCDate() !== day) return null;
+    let fullIso = s.includes('T') ? s : s.replace(' ', 'T');
+    if (!tsMatch[8]) {
+      fullIso += 'Z';
+    } else if (/^[+-]\d{4}$/.test(tsMatch[8])) {
+      const idx = fullIso.lastIndexOf(tsMatch[8]);
+      fullIso = fullIso.slice(0, idx) + tsMatch[8].slice(0, 3) + ':' + tsMatch[8].slice(3);
+    }
+    const dt = new Date(fullIso);
+    if (!Number.isFinite(dt.getTime())) return null;
+    return {
+      type: 'timestamp',
+      raw: s,
+      startMs: dt.getTime(),
+      endMs: dt.getTime(),
+      iso: dt.toISOString(),
+    };
+  }
+  return null;
+}
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, scopeAuditChanges, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
@@ -237,6 +285,7 @@ const storeFor = (opts, actor = opts.author, view = (d) => d) => {
   return {
     get: () => { base = view(db); at = epoch; return base; },
     commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts), { actor }); base = view(db); },
+    commitDigitizedBill: (next, id) => { sameEpoch(at); commitDb(applyDigitizedBill(db, base, next, id, opts), { actor }); base = view(db); },
     check: ownLease,
   };
 };
@@ -367,7 +416,7 @@ const publicImagesOf = () => {
 
 const readOnlyFor = (u) => (u.isAdmin || !u.apps?.length ? null : readOnlyForApps(u.apps));
 /** Models a session/API user may change (null = everything). */
-const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsForApps(u.apps));
+const allowedFor = (u, diff = null) => (u.isAdmin || !u.apps?.length ? null : diff ? scopedWritableModels(u.apps, diff, db) : writableModelsForApps(u.apps));
 /** Models on a user's own app menus (null = everything): who may share portal links or run booking operations, never via a relation. */
 const menuModelsFor = (u) => (u.isAdmin || !u.apps?.length ? null : menuModelsForApps(u.apps));
 /** Models a session/API user may read (null = everything). */
@@ -788,21 +837,23 @@ async function api(req, res, path) {
       return send(res, 400, { error: e.message });
     }
   }
-  if ((path === '/api/mail/document' || path === '/api/mail/mailing' || path === '/api/mail/followup') && req.method === 'POST') {
+  if ((path === '/api/mail/document' || path === '/api/mail/mailing' || path === '/api/mail/followup' || path === '/api/mail/statement') && req.method === 'POST') {
     if (!SMTP) return send(res, 400, { error: 'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)' });
     const body = await readJson(req);
-    const model = path.endsWith('mailing') ? 'mailing.mailing' : path.endsWith('followup') ? 'res.partner' : String(body.model ?? '');
-    if (path.endsWith('followup') && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
+    const model = path.endsWith('mailing') ? 'mailing.mailing' : (path.endsWith('followup') || path.endsWith('statement')) ? 'res.partner' : String(body.model ?? '');
+    if ((path.endsWith('followup') || path.endsWith('statement')) && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     let delivered = false;
     try {
       const baseUrl = baseUrlOf(req);
-      const snapshot = scopeFor(user);
+      const snapshot = path.endsWith('statement') ? visibleDb(user, { models: false }) : scopeFor(user);
       const at = epoch;
       const out = path.endsWith('mailing')
         ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), user.login, () => scopeFor(user)), body, baseUrl)
-        : path.endsWith('followup')
+        : path.endsWith('statement')
+          ? await sendCustomerStatement(SMTP, snapshot, body)
+          : path.endsWith('followup')
           ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
       delivered = Boolean(out.db);
@@ -856,23 +907,135 @@ async function api(req, res, path) {
     if (before !== null && !Number.isSafeInteger(before)) return send(res, 400, { error: 'before must be an audit entry id' });
     const id = q.has('id') ? Number(q.get('id')) : null;
     if (q.has('id') && (!/^\d+$/.test(q.get('id')) || !Number.isSafeInteger(id))) return send(res, 400, { error: 'id must be a nonnegative record id' });
+    let recordId = id;
+    if (q.has('record')) {
+      const raw = q.get('record').trim().replace(/^#/, '');
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+        return send(res, 400, { error: 'record must be a nonnegative record id' });
+      }
+      recordId = Number(raw);
+    } else if (q.has('res_id')) {
+      const raw = q.get('res_id').trim().replace(/^#/, '');
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+        return send(res, 400, { error: 'res_id must be a nonnegative record id' });
+      }
+      recordId = Number(raw);
+    }
     const granted = companiesFor(user);
     const selected = q.get('selected') === '1' ? selectionFor(user).allowed_company_ids.filter((company) => !granted || granted.has(company)) : user.companies;
     const filterCompanies = granted ? (selected ? new Set(selected) : granted) : null;
+    const isKnownAuditModel = (m) => Object.hasOwn(models, m) || ['mail.message', 'auth.user', 'auth.api_key', 'settings', '*'].includes(m);
+    let singleModel = null;
+    if (q.has('model')) {
+      const raw = q.get('model').trim();
+      if (!raw || !isKnownAuditModel(raw)) {
+        return send(res, 400, { error: `Unknown audit model: ${raw}` });
+      }
+      singleModel = raw;
+    }
     let modelList = [];
     if (q.has('models')) {
       const parts = q.get('models').split(',').map((m) => m.trim());
       if (!parts.length || parts.some((m) => !m)) return send(res, 400, { error: 'models must be a non-empty comma-separated list' });
       if (parts.length > MAX_AUDIT_MODELS) return send(res, 400, { error: `At most ${MAX_AUDIT_MODELS} models allowed` });
-      const unknown = parts.find((m) => !Object.hasOwn(models, m));
+      const unknown = parts.find((m) => !isKnownAuditModel(m));
       if (unknown) return send(res, 400, { error: `Unknown audit model: ${unknown}` });
       modelList = [...new Set(parts)];
     }
-    const modelClause = modelList.length ? `AND model IN (${modelList.map((_, i) => `?${i + 6}`).join(',')})` : '';
-    const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log
-      WHERE (?1 IS NULL OR model = ?1) ${modelClause} AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
-        AND audit_visible(company_id, model, res_id, changes, ?5) = 1 ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), id, limit, before, selected === null ? null : JSON.stringify(selected), ...modelList);
+    const actor = (q.get('user') ?? q.get('actor') ?? '').trim() || null;
+    const fromRaw = (q.get('date_from') ?? q.get('from') ?? '').trim() || null;
+    let dateFrom = null;
+    if (fromRaw) {
+      dateFrom = parseAuditDateBound(fromRaw);
+      if (!dateFrom) return send(res, 400, { error: 'date_from must be a valid date or timestamp' });
+    }
+    const toRaw = (q.get('date_to') ?? q.get('to') ?? '').trim() || null;
+    let dateTo = null;
+    if (toRaw) {
+      dateTo = parseAuditDateBound(toRaw);
+      if (!dateTo) return send(res, 400, { error: 'date_to must be a valid date or timestamp' });
+    }
+    if (dateFrom && dateTo && dateFrom.startMs > dateTo.endMs) {
+      return send(res, 400, { error: 'date_from must be before or equal to date_to' });
+    }
+    const fieldParam = (q.get('field') ?? q.get('field_changed') ?? '').trim() || null;
+    const fieldCandidates = [];
+    if (fieldParam) {
+      const lower = fieldParam.toLowerCase();
+      const matched = new Set();
+      for (const m of Object.values(models)) {
+        for (const [k, f] of Object.entries(m.fields ?? {})) {
+          if (k.toLowerCase().includes(lower) || f?.label?.toLowerCase().includes(lower)) {
+            matched.add(k.toLowerCase());
+          }
+        }
+      }
+      fieldCandidates.push(...matched);
+    }
+
+    const conditions = [];
+    const params = [];
+    if (singleModel) {
+      conditions.push('model = ?');
+      params.push(singleModel);
+    } else if (modelList.length) {
+      conditions.push(`model IN (${modelList.map(() => '?').join(',')})`);
+      params.push(...modelList);
+    }
+    if (recordId !== null) {
+      conditions.push('res_id = ?');
+      params.push(recordId);
+    }
+    if (before !== null) {
+      conditions.push('id < ?');
+      params.push(before);
+    }
+    if (actor) {
+      conditions.push('INSTR(LOWER(actor), LOWER(?)) > 0');
+      params.push(actor);
+    }
+    if (dateFrom) {
+      if (dateFrom.type === 'date') {
+        conditions.push('substr(at, 1, 10) >= ?');
+        params.push(dateFrom.raw);
+      } else {
+        conditions.push('at >= ?');
+        params.push(dateFrom.iso);
+      }
+    }
+    if (dateTo) {
+      if (dateTo.type === 'date') {
+        conditions.push('substr(at, 1, 10) <= ?');
+        params.push(dateTo.raw);
+      } else {
+        conditions.push('at <= ?');
+        params.push(dateTo.iso);
+      }
+    }
+    if (fieldParam) {
+      const lowerField = fieldParam.toLowerCase();
+      const subConds = [
+        'INSTR(LOWER(changes), ?) > 0',
+        'INSTR(LOWER(action), ?) > 0',
+      ];
+      const subParams = [lowerField, lowerField];
+      if (fieldCandidates.length) {
+        subConds.push(`(json_valid(changes) AND EXISTS (SELECT 1 FROM json_each(changes) WHERE INSTR(LOWER(key), ?) > 0 OR LOWER(key) IN (${fieldCandidates.map(() => '?').join(',')})))`);
+        subParams.push(lowerField, ...fieldCandidates);
+      } else {
+        subConds.push('(json_valid(changes) AND EXISTS (SELECT 1 FROM json_each(changes) WHERE INSTR(LOWER(key), ?) > 0))');
+        subParams.push(lowerField);
+      }
+      conditions.push(`(${subConds.join(' OR ')})`);
+      params.push(...subParams);
+    }
+    conditions.push('audit_visible(company_id, model, res_id, changes, ?) = 1');
+    params.push(selected === null ? null : JSON.stringify(selected));
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sqlQuery = `SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log ${whereClause} ORDER BY id DESC LIMIT ?`;
+    params.push(limit);
+    const rows = sql.prepare(sqlQuery).all(...params);
     return send(res, 200, rows.map((r) => {
       const parsed = JSON.parse(r.changes);
       const changes = filterCompanies ? scopeAuditChanges(r.model, parsed, filterCompanies) : parsed;
@@ -914,7 +1077,7 @@ async function api(req, res, path) {
         }
         diff.settings = rest;
       }
-      commitDb(applyDiff(db, diff, writeOptions(user)), { actor: user.login });
+      commitDb(applyDiff(db, diff, writeOptions(user, allowedFor(user, diff))), { actor: user.login });
       if (selection) saveSelection(user, selection);
     } catch (e) {
       return send(res, e.conflict ? 409 : 400, { error: e.message, db: visibleDb(user) }, stamp());
@@ -1162,6 +1325,11 @@ const runJobs = async () => {
     };
     const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP }), commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+    if (integrationStatus(ENV).sms) {
+      const store = storeFor({ author: 'Scheduler', isAdmin: true }, 'scheduler');
+      const pending = search(db, 'sms.campaign').filter((campaign) => campaign.followup_sms && search(db, 'sms.trace').some((trace) => trace.campaign_id === campaign.id && trace.state === 'outgoing'));
+      for (const campaign of pending) await sendSmsCampaign(ENV, store, { id: campaign.id });
+    }
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });
   } finally {
