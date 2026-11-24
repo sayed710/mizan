@@ -5,6 +5,7 @@ import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } fro
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
+import { currentCompany } from './company.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
 
@@ -605,6 +606,7 @@ export function suggestRule(db, line) {
 }
 
 function guardReconcileModel(db, _before, rule) {
+  if (!rule.company_id) return 'Company is required';
   if (['greater', 'between'].includes(rule.match_amount) && isBlank(rule.match_amount_min)) {
     return 'Minimum amount is required for the selected amount condition';
   }
@@ -675,7 +677,7 @@ export const reconcileModels = {
     label: 'Reconciliation Models',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       trigger: {
         type: 'selection',
@@ -781,6 +783,9 @@ export const reconcileModels = {
       },
       active: { type: 'boolean', label: 'Active' },
     },
+    createDefaults: (db) => ({
+      company_id: currentCompany(db),
+    }),
     defaults: () => ({
       sequence: 10,
       trigger: 'manual',
@@ -834,6 +839,8 @@ export const reconcileModels = {
       ],
       groups: (r) => [
         [
+          'name',
+          'company_id',
           'match_journal_ids',
           'match_partner_ids',
           'sequence',

@@ -98,6 +98,7 @@ test('BANK-20: counterpart lines of reconciliation models declare analytic_distr
         sequence: 10,
         trigger: 'manual',
         rule_type: 'reco_model',
+        company_id: 1,
         line_ids: [{ sequence: 10, account_id: feeAcc, amount_type: 'percentage', amount_string: '100', analytic_distribution: { [analyticAcc.id]: 60, [secondAcc.id]: 60 } }],
       }],
     },
@@ -148,6 +149,7 @@ test('BANK-23: regex conditions are applied by the autoReconcile runner and inva
         sequence: 10,
         trigger: 'manual',
         rule_type: 'reco_model',
+        company_id: 1,
         match_label: 'match_regex',
         match_label_param: '*bad',
         line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }],
@@ -206,12 +208,12 @@ test('an underpayment written off within a matching rule tolerance keeps the cou
 test('a label regex with a repeated group around a repeat is rejected on save and never matched', () => {
   const base = seed();
   const feeAcc = accountId(base, '600000');
-  const rule = { id: 9901, name: 'Runaway', active: true, trigger: 'auto_reconcile', rule_type: 'reco_model', match_label: 'match_regex', match_label_param: '(a+)+$', line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }] };
+  const rule = { id: 9901, name: 'Runaway', company_id: 1, active: true, trigger: 'auto_reconcile', rule_type: 'reco_model', match_label: 'match_regex', match_label_param: '(a+)+$', line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }] };
   const staged = { ...base, records: { ...base.records, [MODEL]: [...(base.records[MODEL] ?? []), rule] } };
   assert.throws(() => applyDiff(base, diffDb(base, staged), { isAdmin: true }), /Invalid regular expression in label parameter/);
 
   // Overlapping alternation in repeated group, e.g. ^(a|aa)+$, also backtracks exponentially and must be rejected on save
-  const ruleAlt = { id: 9902, name: 'Runaway Alternation', active: true, trigger: 'auto_reconcile', rule_type: 'reco_model', match_label: 'match_regex', match_label_param: '^(a|aa)+$', line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }] };
+  const ruleAlt = { id: 9902, name: 'Runaway Alternation', company_id: 1, active: true, trigger: 'auto_reconcile', rule_type: 'reco_model', match_label: 'match_regex', match_label_param: '^(a|aa)+$', line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }] };
   const stagedAlt = { ...base, records: { ...base.records, [MODEL]: [...(base.records[MODEL] ?? []), ruleAlt] } };
   assert.throws(() => applyDiff(base, diffDb(base, stagedAlt), { isAdmin: true }), /Invalid regular expression in label parameter/);
 

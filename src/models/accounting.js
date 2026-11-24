@@ -2995,7 +2995,7 @@ export const accountingModels = {
       if (after.asset_model_id) {
         const model = read(db, 'account.asset.model', after.asset_model_id);
         if (!model) return 'Select an existing asset model';
-        if (model.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
+        if (model.company_id && after.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
       }
       if (after.create_asset === 'validate') {
         const model = after.asset_model_id ? read(db, 'account.asset.model', after.asset_model_id) : null;
@@ -4476,7 +4476,7 @@ Object.assign(accountingModels, {
     defaults: () => ({ active: true }),
     views: ['list'],
     list: ['code', 'name'],
-    searchFields: ['name'],
+    searchFields: ['code', 'name'],
     form: {
       title: 'name',
       hideTitle: true,
@@ -4533,6 +4533,16 @@ Object.assign(accountingModels, {
   'account.account.tag': {
     label: 'Account Tags',
     guard: (db, before, after) => {
+      const normCountry = (c) => (c ? String(c).trim() : null);
+      const duplicate = Boolean(after.country) && (db.records['account.account.tag'] ?? []).some((r) =>
+        r.id !== after.id
+        && r.name === after.name
+        && r.applicability === after.applicability
+        && Boolean(r.country)
+        && normCountry(r.country) === normCountry(after.country),
+      );
+      if (duplicate) return 'A tag with the same name and applicability already exists in this country.';
+
       if (!before || before.applicability === after.applicability) return null;
       const inAccounts = (db.records['account.account'] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id));
       const inTaxes = (db.records['account.tax'] ?? []).some((r) =>
@@ -4560,6 +4570,11 @@ Object.assign(accountingModels, {
     },
     defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
     views: ['list'],
+    filters: [
+      [
+        { id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false },
+      ],
+    ],
     list: ['name', 'applicability', 'country', 'color'],
     searchFields: ['name'],
     form: {
@@ -4575,6 +4590,7 @@ Object.assign(accountingModels, {
   'account.asset.model': {
     label: 'Depreciation Models',
     guard: (db, before, after, ctx) => {
+      if (!after.company_id) return 'Company is required';
       if (before && before.company_id !== after.company_id && after.company_id
         && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.company_id && a.company_id !== after.company_id)) {
         return 'Asset model must belong to the account company';
@@ -4593,7 +4609,7 @@ Object.assign(accountingModels, {
     },
     fields: {
       name: { type: 'char', label: 'Model Name', required: true },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       method: {
         type: 'selection',
         label: 'Depreciation Method',
@@ -4627,8 +4643,20 @@ Object.assign(accountingModels, {
       account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Legacy Expense Account', readonly: true, compute: (r) => r.account_depreciation_expense_id ?? null },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
+      notes: { type: 'html', label: 'Notes' },
     },
-    defaults: () => ({ method: 'linear', method_mode: 'duration', method_number: 5, method_rate: 0.2, method_period: '12', method_progress_factor: 0.3, prorata: false }),
+    createDefaults: (db) => ({
+      company_id: currentCompany(db),
+    }),
+    defaults: () => ({
+      method: 'linear',
+      method_mode: 'duration',
+      method_number: 5,
+      method_rate: 0.2,
+      method_period: '12',
+      method_progress_factor: 0.3,
+      prorata: false,
+    }),
     onchange: (r, key) => syncMethodRateAndDuration(r, key),
     list: ['name', 'method', 'method_number', 'method_period', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
     form: {
@@ -4636,6 +4664,9 @@ Object.assign(accountingModels, {
       groups: [
         ['name', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
         ['method', 'method_mode', 'method_rate', 'method_number', 'method_period', 'method_progress_factor', 'prorata_computation_type', 'prorata_date', 'analytic_distribution'],
+      ],
+      tabs: [
+        { label: 'Notes', fields: ['notes'] },
       ],
     },
   },

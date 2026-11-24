@@ -285,7 +285,7 @@ test('depreciation model form save and server sync reject invalid analytic distr
   for (const value of bad) {
     assert.throws(() => saveFormRecord(db, leaf.model, null, { name: 'Invalid', analytic_distribution: value }), /Analytic|analytic/);
     if (Number.isNaN(value)) continue; // JSON cannot transport NaN; malformed text is stopped by the form save.
-    const raw = { ...models[leaf.model].defaults(), id: (db.seq[leaf.model] ?? 0) + 1, name: 'Invalid', analytic_distribution: value };
+    const raw = { ...models[leaf.model].defaults(), id: (db.seq[leaf.model] ?? 0) + 1, company_id: 1, name: 'Invalid', analytic_distribution: value };
     assert.throws(() => applyDiff(db, { upserts: { [leaf.model]: [raw] }, deletes: {} }, { isAdmin: true }), /Analytic|analytic|Invalid value/);
   }
   const good = saveFormRecord(db, leaf.model, null, { name: 'Valid', analytic_distribution: parseDistributionInput(`{"${analytic.id}":100}`) });

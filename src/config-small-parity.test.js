@@ -87,7 +87,7 @@ test('incoterms: list-first view, columns, form layout, archived ribbon, and sea
   const def = models['account.incoterm'];
   assert.deepEqual(viewsOf('account.incoterm'), ['list']);
   assert.deepEqual(def.list, ['code', 'name']);
-  assert.deepEqual(def.searchFields, ['name']);
+  assert.deepEqual(def.searchFields, ['code', 'name']);
   assert.equal(def.fields.name.required, true);
   assert.equal(def.fields.code.required, true);
   assert.equal(
