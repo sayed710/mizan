@@ -3732,6 +3732,8 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  'Save the document before previewing': 'احفظ المستند قبل المعاينة',
+  'Only customer invoices and credit notes can be previewed': 'يمكن فقط معاينة فواتير العملاء وإشعارات الدائن',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -289,19 +289,20 @@ function printCell(db, model, k, f, l, rec) {
 }
 
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */
-export function PrintDoc({ model, id, proforma = false }) {
+export function PrintDoc({ model, id, proforma = false, preview = false }) {
   const db = useDb();
   const def = models[model];
   const layout = LAYOUTS[model];
   const rec = read(db, model, Number(id));
   const recId = rec?.id;
+  const isPreview = preview;
   const isProformaInvoice = model === 'account.move' && isProformaMove(rec, proforma);
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
-    if (!recId || isDraftInboundBatch) return undefined;
+    if (!recId || isDraftInboundBatch || isPreview) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
-  }, [recId, isDraftInboundBatch]);
+  }, [recId, isDraftInboundBatch, isPreview]);
   if (rec && model === 'account.batch.payment') {
     if (rec.batch_type === 'inbound') {
       if (rec.state !== 'posted') {

@@ -17,7 +17,7 @@ const tokenFor = (secret, model, r) => createHmac('sha256', secret).update(`${mo
 const tokenMatches = (secret, model, r, given) => /^[a-f0-9]{64}$/.test(given ?? '') && timingSafeEqual(Buffer.from(given, 'hex'), Buffer.from(tokenFor(secret, model, r), 'hex'));
 const documentOf = (db, model, id) => {
   const r = paths[model] && read(db, model, id);
-  return r?.partner_id && (model === ORDER || r.move_type === 'out_invoice') ? r : null;
+  return r?.partner_id && (model === ORDER || ['out_invoice', 'out_refund'].includes(r.move_type)) ? r : null;
 };
 
 /** Build a customer URL without putting a token or secret in the record. */
@@ -90,7 +90,7 @@ const redirectWithMessage = (back, message) => `${back}${back.includes('?') ? '&
 
 function documentPage(db, model, r, url, query, env) {
   const isOrder = model === ORDER;
-  const title = isOrder ? r.state === 'sale' ? 'Sales Order' : 'Quotation' : 'Invoice';
+  const title = isOrder ? r.state === 'sale' ? 'Sales Order' : 'Quotation' : (r.move_type === 'out_refund' ? 'Credit Note' : 'Invoice');
   const partner = read(db, 'res.partner', r.partner_id);
   const comp = read(db, 'res.company', r.company_id ?? 1);
   const compName = comp?.name ?? (typeof db.settings?.company === 'object' ? db.settings?.company?.name : db.settings?.company) ?? 'My Company';
@@ -130,7 +130,7 @@ function homePage(db, user, urlFor) {
   // The current users table has no portal role or verified partner relation. Never infer ownership from email/login.
   const partnerId = user?.isPortal === true && Number.isSafeInteger(user.partnerId) && user.partnerId > 0 ? user.partnerId : null;
   const orders = partnerId ? search(db, ORDER).filter((r) => r.partner_id === partnerId) : [];
-  const invoices = partnerId ? search(db, INVOICE).filter((r) => r.partner_id === partnerId && r.move_type === 'out_invoice') : [];
+  const invoices = partnerId ? search(db, INVOICE).filter((r) => r.partner_id === partnerId && ['out_invoice', 'out_refund'].includes(r.move_type)) : [];
   const groups = [['Quotations', ORDER, orders.filter((r) => ['draft', 'sent'].includes(r.state))], ['Sales orders', ORDER, orders.filter((r) => r.state === 'sale')], ['Invoices', INVOICE, invoices]];
   return page('My documents', `<h1>My documents</h1>${!partnerId ? '<p>Open the secure link provided by your salesperson to view a document. Portal login is not configured.</p>' : ''}${groups.map(([label, model, records]) => `<h2>${label} (${records.length})</h2><ul>${records.map((r) => `<li><a href="${escape(urlFor(model, r))}">${escape(r.name)}</a> — ${money(r.amount_total, documentCurrency(db, r))}</li>`).join('')}</ul>`).join('')}`);
 }
