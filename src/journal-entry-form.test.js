@@ -636,7 +636,7 @@ test('invoices/bills keep their form untouched and Arabic i18n covers every new 
   const db = seed();
   const invCtx = await mountMoveForm({ leaf: invLeaf, id: 'new', db });
   try {
-    assert.deepEqual(headerButtonLabels(invCtx.host), ['Confirm', 'Cancel']);
+    assert.deepEqual(headerButtonLabels(invCtx.host), ['Confirm', 'Preview', 'Cancel']);
     assert.deepEqual(smartButtonsOf(invCtx.host), []);
     const invTabs = allFind(invCtx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab').map((n) => n.textContent.trim());
     assert.deepEqual(invTabs, ['Invoice Lines', 'Journal Items', 'Payments', 'Other Info']);

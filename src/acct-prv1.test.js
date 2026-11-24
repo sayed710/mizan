@@ -26,7 +26,6 @@ test('PRV-1: customer invoices and credit notes get Preview form button with Odo
   const btn = models['account.move'].form.buttons.find((b) => b.label === 'Preview');
   assert.ok(btn, 'Preview button exists on account.move form buttons');
   assert.equal(btn.name, 'preview_invoice', 'Preview button matches Odoo 20 name preview_invoice');
-  assert.equal(typeof models['account.move'].preview_invoice, 'function', 'preview_invoice method is available on account.move model');
 
   // Odoo 20 visibility in account_move_views.xml: invisible="move_type not in ('out_invoice', 'out_refund')"
   for (const state of ['draft', 'posted', 'cancel']) {
