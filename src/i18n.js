@@ -3732,6 +3732,10 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  'All Categories': 'جميع الفئات',
+  'All Products': 'جميع المنتجات',
+  'All Warehouses': 'جميع المستودعات',
+  'All Locations': 'جميع المواقع',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

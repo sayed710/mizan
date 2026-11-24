@@ -14,15 +14,15 @@ export { stockAccount } from './stock-accounts.js';
 const companyOf = (db) => getActiveCompany() ?? db.settings?.current_company_id ?? 1;
 export { isPeriodicValuation } from './productconfig-helpers.js';
 
-const layers = (db, id, company = companyOf(db)) => (db.records['stock.valuation.layer'] ?? []).filter((l) => l.product_id === id && (l.company_id ?? 1) === company);
+const layers = (db, id, company = companyOf(db)) => (db.records['stock.valuation.layer'] ?? []).filter((l) => l.product_id === id && (company === 'all' || (l.company_id ?? 1) === company));
 const quantity = (ls) => ls.reduce((s, l) => s + l.quantity, 0);
 const valueOf = (ls) => round(ls.reduce((s, l) => s + l.value, 0));
 // Product totals are shared across companies; scoped valuation must consume only that company's stock.
 const stockQuantity = (db, p, company = companyOf(db)) => {
   const qs = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === p.id);
-  if (qs.length) return qs.filter((q) => (q.company_id ?? 1) === company).reduce((s, q) => s + q.quantity, 0);
+  if (qs.length) return (company === 'all' ? qs : qs.filter((q) => (q.company_id ?? 1) === company)).reduce((s, q) => s + q.quantity, 0);
   // Unlocated legacy stock is attributed in the same way as ensureQuants.
-  return (p.company_id || companyOf(db)) === company ? Number(p.qty_available) || 0 : 0;
+  return (company === 'all' || (p.company_id || companyOf(db)) === company) ? Number(p.qty_available) || 0 : 0;
 };
 const product = (db, id) => {
   const p = read(db, 'product', id);
@@ -332,15 +332,98 @@ export function revalue(db, productId, newUnitCost, { date = today() } = {}) {
     value: round(target - valueOf(ls)), description: 'Stock revaluation', kind: 'revaluation' });
 }
 
+function descendantIds(db, model, rootIds) {
+  const ids = new Set((Array.isArray(rootIds) ? rootIds : [rootIds]).map(Number).filter(Boolean));
+  if (!ids.size) return ids;
+  const rows = search(db, model);
+  let size;
+  do {
+    size = ids.size;
+    for (const row of rows) {
+      if (row.parent_id && ids.has(row.parent_id)) ids.add(row.id);
+    }
+  } while (size !== ids.size);
+  return ids;
+}
+
 /** Per-product layer totals at a date, including implicit legacy opening stock until first valued. */
-export function valuationReport(db, { at = today() } = {}) {
-  return Object.fromEntries(search(db, 'product').filter((p) => p.type === 'goods').map((p) => {
-    const all = layers(db, p.id);
+export function valuationReport(db, {
+  at = today(),
+  companyId,
+  categoryId,
+  productId,
+  warehouseId,
+  locationId,
+} = {}) {
+  const comp = companyId === 'all'
+    ? 'all'
+    : (companyId != null && companyId !== '' ? Number(companyId) : companyOf(db));
+
+  const catIds = Array.isArray(categoryId)
+    ? categoryId.map(Number).filter(Boolean)
+    : (categoryId != null && categoryId !== '' ? [Number(categoryId)] : null);
+
+  const prodIds = Array.isArray(productId)
+    ? productId.map(Number).filter(Boolean)
+    : (productId != null && productId !== '' ? [Number(productId)] : null);
+
+  const whId = warehouseId != null && warehouseId !== '' ? Number(warehouseId) : null;
+  const locId = locationId != null && locationId !== '' ? Number(locationId) : null;
+
+  const allowedCatIds = catIds?.length ? descendantIds(db, 'product.category', catIds) : null;
+
+  let allowedLocIds = null;
+  if (whId != null || locId != null) {
+    let whLocs = null;
+    if (whId != null) {
+      const wh = read(db, 'stock.warehouse', whId);
+      if (!wh) {
+        whLocs = new Set();
+      } else {
+        const locFields = ['lot_stock_id', 'wh_input_stock_loc_id', 'wh_qc_stock_loc_id', 'wh_pack_stock_loc_id', 'wh_output_stock_loc_id'];
+        const root = wh.lot_stock_id ? read(db, 'stock.location', wh.lot_stock_id)?.parent_id : null;
+        whLocs = descendantIds(db, 'stock.location', [root, ...locFields.map((f) => wh[f])].filter(Boolean));
+      }
+    }
+    const explicitLocs = locId != null ? descendantIds(db, 'stock.location', locId) : null;
+    const rawLocs = whLocs && explicitLocs
+      ? new Set([...explicitLocs].filter((id) => whLocs.has(id)))
+      : (whLocs ?? explicitLocs);
+    allowedLocIds = new Set([...rawLocs].filter((id) => read(db, 'stock.location', id)?.usage === 'internal'));
+  }
+
+  const products = search(db, 'product').filter((p) => {
+    if (p.type !== 'goods') return false;
+    if (comp !== 'all' && p.company_id && p.company_id !== comp) return false;
+    if (prodIds && !prodIds.includes(p.id)) return false;
+    if (allowedCatIds && !allowedCatIds.has(p.categ_id)) return false;
+    return true;
+  });
+
+  const rows = {};
+  for (const p of products) {
+    const all = layers(db, p.id, comp);
     const ls = all.filter((l) => l.date <= at);
-    const qty = all.length ? quantity(ls) : stockQuantity(db, p);
-    const value = all.length ? valueOf(ls) : round(qty * (Number(p.cost) || 0));
-    return [p.id, { qty, value, unitCost: qty ? value / qty : 0 }];
-  }));
+    if (allowedLocIds) {
+      // Mirrors Odoo's stock_account product value with warehouse/location context:
+      // quantity is the sum of stock.quant quantities in the allowed internal locations
+      // (omitting products with no quantity there), and value = qty × unit cost from the
+      // product's company valuation layers at the valuation date.
+      const qty = (db.records['stock.quant'] ?? [])
+        .filter((q) => q.product_id === p.id && (comp === 'all' || (q.company_id ?? 1) === comp) && allowedLocIds.has(q.location_id))
+        .reduce((s, q) => s + q.quantity, 0);
+      if (Math.abs(qty) <= 1e-8) continue;
+      const layerQty = quantity(ls);
+      const unitCost = layerQty ? valueOf(ls) / layerQty : 0;
+      const value = round(qty * unitCost);
+      rows[p.id] = { qty, value, unitCost: value / qty };
+    } else {
+      const qty = all.length ? quantity(ls) : stockQuantity(db, p, comp);
+      const value = all.length ? valueOf(ls) : round(qty * (Number(p.cost) || 0));
+      rows[p.id] = { qty, value, unitCost: qty ? value / qty : 0 };
+    }
+  }
+  return rows;
 }
 
 /** Snapshot selected goods for a physical inventory, defaulting counted quantities to theoretical. */

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
 import { today, validDate } from '../models/common.js';
+import { categoryPath } from '../models/productconfig-helpers.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport, trialOpeningItems } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
@@ -624,9 +625,16 @@ function AuditRows({ db, rows }) {
 }
 
 /** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
-function Valuation({ db, period, money: fmtMoney = money }) {
-  const report = valuationReport(db, { at: period.to || today() });
-  const rows = Object.entries(report).filter(([, v]) => v.qty)
+function Valuation({ db, period, companyId, categoryId, productId, warehouseId, locationId, money: fmtMoney = money }) {
+  const report = valuationReport(db, {
+    at: period.to || today(),
+    companyId,
+    categoryId,
+    productId,
+    warehouseId,
+    locationId,
+  });
+  const rows = Object.entries(report).filter(([, v]) => Math.abs(v.qty) > 1e-8)
     .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
   return (
     <tbody>
@@ -774,6 +782,11 @@ function ReportPage({ leaf }) {
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [asOf, setAsOf] = useState(today());
   const isAged = ['agedReceivable', 'agedPayable'].includes(leaf.report);
+  const isValuation = leaf.report === 'valuation';
+  const [valuationCategoryId, setValuationCategoryId] = useState('');
+  const [valuationProductId, setValuationProductId] = useState('');
+  const [valuationWarehouseId, setValuationWarehouseId] = useState('');
+  const [valuationLocationId, setValuationLocationId] = useState('');
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
@@ -841,7 +854,7 @@ function ReportPage({ leaf }) {
     ? taxVariant
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
-  const period = isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
+  const period = isAged || isValuation ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
@@ -925,24 +938,53 @@ function ReportPage({ leaf }) {
         ? companies.map((c) => documentCompany(companyDb, { company_id: c.id }) || c)
         : (printCompany ? [printCompany] : []))
     : null;
+  const valuationFiltersList = [];
+  if (isValuation) {
+    valuationFiltersList.push(`≤ ${period.to}`);
+    if (selectedCompany !== 'all') {
+      const c = read(companyDb, 'res.company', Number(selectedCompany));
+      if (c) valuationFiltersList.push(`${t('Company')}: ${c.name}`);
+    }
+    if (valuationCategoryId) {
+      const cat = read(companyDb, 'product.category', Number(valuationCategoryId));
+      if (cat) valuationFiltersList.push(`${t('Product Category')}: ${categoryPath(companyDb, cat.id) || cat.name}`);
+    }
+    if (valuationProductId) {
+      const prod = read(scopedCompanyDb, 'product', Number(valuationProductId));
+      const label = prod ? `${prod.default_code ? `[${prod.default_code}] ` : ''}${prod.name}` : valuationProductId;
+      valuationFiltersList.push(`${t('Product')}: ${label}`);
+    }
+    if (valuationWarehouseId) {
+      const wh = read(scopedCompanyDb, 'stock.warehouse', Number(valuationWarehouseId));
+      if (wh) valuationFiltersList.push(`${t('Warehouse')}: ${wh.name}`);
+    }
+    if (valuationLocationId) {
+      const loc = read(scopedCompanyDb, 'stock.location', Number(valuationLocationId));
+      if (loc) valuationFiltersList.push(`${t('Location')}: ${loc.name}`);
+    }
+  }
+  const valuationFilterSummary = valuationFiltersList.join(' · ');
+
   const subtitle = leaf.report === 'inalterability'
     ? t('Chain verification always covers all secured entries.')
-    : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
+    : isValuation
+      ? valuationFilterSummary
+      : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
   const controls = (
     <div className="control-panel">
       <h1 className="cp-title">{t(title)}</h1>
-      {isAged && <label>{t('As of')}<input aria-label={t('As of')} type="date" value={period.to} onChange={(e) => setAsOf(agedReportDate(e.target.value))} /></label>}
-      {leaf.report !== 'inalterability' && !isAged && <label className="inline-select">
+      {(isAged || isValuation) && <label>{t('As of')}<input aria-label={t('As of')} type="date" value={period.to} onChange={(e) => setAsOf(agedReportDate(e.target.value))} /></label>}
+      {leaf.report !== 'inalterability' && !isAged && !isValuation && <label className="inline-select">
         {t('Period')}
         <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
           <option value="month">{t('This Month')}</option>
           <option value="quarter">{t('This Quarter')}</option>
           <option value="year">{t('This Year')}</option>
           {!isDeferred && <option value="all">{t('All Dates')}</option>}
-          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'valuation', 'budget', 'deferredRevenue', 'deferredExpense'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
         </select>
       </label>}
-      {!isAged && periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+      {!isAged && !isValuation && periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
       {LEDGER_REPORTS.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
         <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
           <option value="">{t('All Ledgers')}</option>
@@ -968,6 +1010,80 @@ function ReportPage({ leaf }) {
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
         <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={allowAllCompanies} />
+      )}
+      {isValuation && (
+        <>
+          <label className="inline-select">
+            {t('Product Category')}
+            <select
+              aria-label={t('Product Category')}
+              value={valuationCategoryId}
+              onChange={(e) => setValuationCategoryId(e.target.value)}
+            >
+              <option value="">{t('All Categories')}</option>
+              {search(companyDb, 'product.category').map((c) => (
+                <option key={c.id} value={c.id}>
+                  {categoryPath(companyDb, c.id) || c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Product')}
+            <select
+              aria-label={t('Product')}
+              value={valuationProductId}
+              onChange={(e) => setValuationProductId(e.target.value)}
+            >
+              <option value="">{t('All Products')}</option>
+              {search(scopedCompanyDb, 'product')
+                .filter((p) => p.type === 'goods' && (selectedCompany === 'all' || !p.company_id || p.company_id === Number(selectedCompany)))
+                .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.default_code ? `[${p.default_code}] ` : ''}{p.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Warehouse')}
+            <select
+              aria-label={t('Warehouse')}
+              value={valuationWarehouseId}
+              onChange={(e) => {
+                setValuationWarehouseId(e.target.value);
+                setValuationLocationId('');
+              }}
+            >
+              <option value="">{t('All Warehouses')}</option>
+              {search(scopedCompanyDb, 'stock.warehouse')
+                .filter((w) => selectedCompany === 'all' || !w.company_id || w.company_id === Number(selectedCompany))
+                .map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name} ({w.code})
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Location')}
+            <select
+              aria-label={t('Location')}
+              value={valuationLocationId}
+              onChange={(e) => setValuationLocationId(e.target.value)}
+            >
+              <option value="">{t('All Locations')}</option>
+              {search(scopedCompanyDb, 'stock.location')
+                .filter((l) => l.usage === 'internal' && (selectedCompany === 'all' || !l.company_id || l.company_id === Number(selectedCompany)))
+                .map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+        </>
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">
@@ -1053,8 +1169,17 @@ function ReportPage({ leaf }) {
     >
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
-          <thead><tr><th>{t(reportFirstCol ?? '')}</th>{(periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`))) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
+          <thead>
+            {isValuation && (
+              <tr className="rep-filter-header">
+                <th colSpan={reportCols.length + 1} className="rep-active-filters">
+                  {valuationFilterSummary}
+                </th>
+              </tr>
+            )}
+            <tr><th>{t(reportFirstCol ?? '')}</th>{(periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} ${t(c)}`))) : data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : reportCols).map((c) => <th key={c} className={c === 'Description' ? undefined : 'num'}>{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr>
+          </thead>
+          {periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} money={fmtMoney} /> : data ? <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={effectivePeriod} companyId={selectedCompany} categoryId={valuationCategoryId} productId={valuationProductId} warehouseId={valuationWarehouseId} locationId={valuationLocationId} analyticAccountIds={analyticAccountIds} partnerIds={partnerFilterIds} unreconciledOnly={unreconciledOnly} variant={activeTaxVariant} sort={auditSort} kind={deferredKind} journalId={availableJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : ''} agedData={agedData} money={fmtMoney} />}
         </table>
       </div>
     </ReportPrintView>
