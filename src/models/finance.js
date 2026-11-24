@@ -2468,14 +2468,15 @@ export const financeModels = {
     fields: {
       name: { type: 'char', label: 'Analytic Account', required: true },
       code: { type: 'char', label: 'Reference' },
-      plan: { type: 'selection', label: 'Plan', options: [['project', 'Projects'], ['department', 'Departments'], ['region', 'Regions']] },
+      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan' },
+      color: { type: 'integer', label: 'Color' },
       balance: { type: 'monetary', label: 'Balance', readonly: true },
     },
-    defaults: () => ({ plan: 'project' }),
-    groupBys: ['plan'],
-    kanban: { title: 'name', lines: ['code', 'plan'] },
-    list: ['code', 'name', 'plan'],
-    form: { title: 'name', groups: [['code', 'plan'], []], chatter: true },
+    defaults: () => ({ color: 0 }),
+    groupBys: ['plan_id'],
+    kanban: { title: 'name', lines: ['code', 'plan_id'] },
+    list: ['code', 'name', 'plan_id'],
+    form: { title: 'name', groups: [['code', 'plan_id'], []], chatter: true },
   },
 
   'account.budget': {

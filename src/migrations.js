@@ -2036,6 +2036,65 @@ export function migrateReconcileModelTolerance(db) {
 }
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 
+export function migrateAnalyticAccountPlanToPlanId(db) {
+  const accounts = db?.records?.['account.analytic.account'];
+  if (!Array.isArray(accounts) || !accounts.length) return db;
+  const legacyAccounts = accounts.filter((a) => a && typeof a === 'object' && a.plan_id == null && a.plan);
+  if (!legacyAccounts.length) return db;
+
+  const LEGACY_PLAN_NAMES = {
+    project: 'Projects',
+    department: 'Departments',
+    region: 'Regions',
+  };
+
+  const plans = [...(db.records?.['account.analytic.plan'] ?? [])];
+  let plansChanged = false;
+  let maxPlanId = plans.reduce((max, p) => Math.max(max, Number(p.id) || 0), 0);
+  let maxSeq = plans.reduce((max, p) => Math.max(max, Number(p.sequence) || 0), 0);
+
+  const getOrCreatePlan = (planKey) => {
+    const targetName = LEGACY_PLAN_NAMES[planKey] || (String(planKey).charAt(0).toUpperCase() + String(planKey).slice(1));
+    let found = plans.find((p) => p.name && p.name.toLowerCase() === targetName.toLowerCase());
+    if (!found) {
+      maxPlanId += 1;
+      maxSeq += 10;
+      found = {
+        id: maxPlanId,
+        name: targetName,
+        sequence: maxSeq,
+        default_applicability: 'optional',
+        color: 0,
+        description: '',
+        applicability_ids: [],
+      };
+      plans.push(found);
+      plansChanged = true;
+    }
+    return found.id;
+  };
+
+  let accountsChanged = false;
+  const nextAccounts = accounts.map((a) => {
+    if (!a || typeof a !== 'object' || a.plan_id != null || !a.plan) return a;
+    accountsChanged = true;
+    const planId = getOrCreatePlan(a.plan);
+    const { plan: _legacy, ...rest } = a;
+    return { ...rest, plan_id: planId };
+  });
+
+  if (!accountsChanged && !plansChanged) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(plansChanged ? { 'account.analytic.plan': plans } : {}),
+      'account.analytic.account': nextAccounts,
+    },
+  };
+}
+MIGRATIONS.push({ version: 76, name: 'analytic-account-plan-to-plan-id', up: migrateAnalyticAccountPlanToPlanId });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
