@@ -96,7 +96,9 @@ test('reports exclude legacy company-less assets and budgets when another compan
   try {
     for (const [report, included, excluded] of [['depreciation', 'Second asset', 'Legacy asset'], ['budget', 'Second budget', 'Legacy budget'], ['valuation', 'Second stock', 'Legacy stock']]) {
       await React.act(async () => root.render(React.createElement(Reports, { leaf: { report } })));
-      assert.ok(textOf(host).includes(included)); assert.ok(!textOf(host).includes(excluded));
+      // Shared (company-less) products stay selectable in the valuation Product filter, like Odoo; only the report rows are checked.
+      const reportText = (node) => node.nodeType === 3 ? node.nodeValue : node.tagName === 'SELECT' ? '' : (node.childNodes ?? []).map(reportText).join('');
+      assert.ok(reportText(host).includes(included)); assert.ok(!reportText(host).includes(excluded));
     }
     await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'analytic' } })));
     assert.match(textOf(host), /Second analytic/); assert.match(textOf(host), /222\.00/); assert.doesNotMatch(textOf(host), /999\.00|1,221\.00/);
