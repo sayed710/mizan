@@ -1,7 +1,18 @@
 import { createElement } from 'react';
-import { today } from '../models/common.js';
+import { today, validDate } from '../models/common.js';
 
 export const DEFAULT_REPORT_PERIOD = 'year';
+
+/** Validate a custom report period range (From/To); returns an English error message or null when valid. */
+export function customPeriodError(periodKey, period) {
+  if (periodKey !== 'custom') return null;
+  const from = period?.from;
+  const to = period?.to;
+  if (!from || !to) return 'Enter both From and To dates';
+  if (!validDate(from) || !validDate(to)) return 'Enter valid From and To dates';
+  if (from > to) return 'From date cannot be after To date';
+  return null;
+}
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
 
