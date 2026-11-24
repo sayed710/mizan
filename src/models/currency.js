@@ -254,9 +254,31 @@ function isNonBaseCompanyCurrency(record, db) {
   return Boolean(own && base && own.id === record.id && own.id !== base.id);
 }
 
+/** Stamp `write_date` on newly added or modified rate rows while keeping untouched rows unchanged. */
+function stampRateWriteDates(beforeRows = null, afterRows = []) {
+  if (!Array.isArray(afterRows)) return afterRows;
+  const now = new Date().toISOString();
+  const isPlainRow = (row) => Boolean(row && typeof row === 'object' && !Array.isArray(row));
+  const rowKey = (row) => `${row.date ?? ''}:${row.company_id == null || row.company_id === '' ? 'all' : String(Number(row.company_id))}:${row.rate}`;
+  const unchangedKeys = beforeRows ? new Set(beforeRows.filter(isPlainRow).map(rowKey)) : null;
+  return afterRows.map((row) => {
+    if (!isPlainRow(row)) return row;
+    if (unchangedKeys) {
+      return unchangedKeys.has(rowKey(row)) ? row : { ...row, write_date: now };
+    }
+    return { ...row, write_date: row.write_date || now };
+  });
+}
+
 export const currencyModels = {
   'res.currency': {
     label: 'Currencies',
+    prepareCreate: (db, vals) => (Array.isArray(vals.rate_ids)
+      ? { db, vals: { ...vals, rate_ids: stampRateWriteDates(null, vals.rate_ids) } }
+      : null),
+    prepareWrite: (db, vals, before) => (Array.isArray(vals.rate_ids)
+      ? { db, vals: { ...vals, rate_ids: stampRateWriteDates(before?.rate_ids ?? [], vals.rate_ids) } }
+      : null),
     guard: (db, before, after) => {
       const rounding = Number(after.rounding ?? 0.01);
       if (!Number.isFinite(rounding) || rounding <= 0) return 'Currency rounding must be positive';
@@ -360,6 +382,7 @@ export const currencyModels = {
             },
           },
           rate: { type: 'float', label: 'Technical Rate', digits: [6, 6], optional: 'hide' },
+          write_date: { type: 'datetime', label: 'Last Updated on', readonly: true, optional: 'hide' },
         },
         newLine: (record, db) => ({ date: today(), rate: 1, company_id: db?.settings?.current_company_id ?? null }),
         onchange: (line, changed, db) => {
@@ -429,7 +452,6 @@ export const currencyModels = {
           ...(isBase ? { readonly: true, help: 'The base currency rate is fixed at 1.' } : {}),
         }];
       },
-      chatter: true,
     },
   },
 };
