@@ -2525,6 +2525,7 @@ export const financeModels = {
     }, db),
     onUnlink: (db, group) => (db.records['account.journal'] ?? []).reduce((next, journal) => journal.journal_group_id === group.id ? write(next, 'account.journal', journal.id, { journal_group_id: null }) : next, db),
     guard: (db, before, record, _ctx, vals) => {
+      if ((!before || record.name !== before.name) && (db.records['account.journal.group'] ?? []).some((group) => group.id !== record.id && group.name === record.name)) return 'A Ledger group name must be unique.';
       const journalIds = vals?.journal_ids !== undefined ? vals.journal_ids : includedJournalIds(record, db);
       return journalIds.some((id) => {
         const journal = read(db, 'account.journal', id);
