@@ -63,7 +63,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels } from './finance.js';
+import { financeModels, isFollowUpSmsDiff } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -254,7 +254,7 @@ const allApps = [
             optionalList: ['ref', 'general_account', 'move_id', 'product_id', 'unit_amount', 'product_uom_id', 'partner_id'], listLabels: { unit_amount: 'Quantity' },
             groupBy: ['account_id'], groupBys: ['date', 'account_id', 'general_account', 'category', 'product_id', 'partner_id'],
             defaults: { category: 'other', employee_id: null, unit_amount: 0 },
-            form: { title: 'name', groups: [['account_id', 'date', 'company_id'], ['amount', 'ref', 'partner_id', { field: 'unit_amount', label: 'Quantity' }, 'product_id', 'product_uom_id'], ['move_id', 'general_account', 'legacy_general_account']], chatter: false },
+            form: { title: 'name', groups: [['account_id', 'date', 'company_id'], ['amount', 'ref', 'partner_id', { field: 'unit_amount', label: 'Quantity' }, 'product_id', 'product_uom_id'], ['move_id', 'general_account', 'legacy_general_account']], chatter: true },
           },
           { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
           { key: 'statements', label: 'Bank Statements', model: 'account.bank.statement' },
@@ -277,9 +277,17 @@ const allApps = [
       { label: 'Review', children: [
         { label: 'Control', children: [
           { key: 'journal-items', label: 'Journal Items', type: 'report', report: 'journalItems' },
-          { key: 'to-check', label: 'To Check', model: 'account.bank.statement.line', domain: (r) => r.state === 'to_check', defaults: { state: 'to_check' } },
+          { key: 'to-check', label: 'To Check', model: 'account.bank.statement.line', domain: (r) => r.state === 'to_check', defaults: { state: 'to_check' }, groupBy: ['journal_id'] },
           { key: 'unreconciled', label: 'Unreconciled', type: 'report', report: 'unreconciledItems', reviewMode: 'unreconciled' },
-          { key: 'draft-entries', label: 'Draft Entries', model: 'account.move', ...entriesSearch, domain: (r) => r.state === 'draft', defaults: { state: 'draft' } },
+          {
+            key: 'draft-entries',
+            label: 'Draft Entries',
+            model: 'account.move',
+            ...entriesSearch,
+            listActions: journalEntriesView.listActions.filter((a) => a.label === 'Mark as reviewed'),
+            domain: (r) => r.state === 'draft',
+            defaults: { state: 'draft' },
+          },
           { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
           { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
           { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
@@ -324,7 +332,6 @@ const allApps = [
           { key: 'customer-statement', label: 'Customer Statement', type: 'report', report: 'customerStatement' },
           { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
           { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
-          { key: 'partner-ledger-payable', label: 'Partner Ledger (Payable)', type: 'report', report: 'partnerPayable' },
           { key: 'follow-ups', label: 'Follow-up Reports', type: 'report', report: 'followups' },
         ] },
                 { label: 'Taxes & Fiscal', children: [
@@ -699,7 +706,7 @@ const allApps = [
       { key: 'report', label: 'Report', model: 'livechat.session', view: 'pivot' },
     ],
   },
-  { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign' }, { key: 'traces', label: 'SMS Traces', model: 'sms.trace' }, { key: 'blacklist', label: 'Blacklisted Numbers', model: 'phone.blacklist' }] },
+  { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign', domain: (r) => !r.followup_sms }, { key: 'traces', label: 'SMS Traces', model: 'sms.trace' }, { key: 'blacklist', label: 'Blacklisted Numbers', model: 'phone.blacklist' }] },
   {
     id: 'whatsapp', name: 'WhatsApp', color: ['#22c55e', '#0f766e'],
     menus: [
@@ -778,7 +785,7 @@ export const leavesOf = (app) => {
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
-  'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+  'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];
 /** Protected models without their own menu, explicitly owned by an app. */
 const OWNED_PROTECTED = { accounting: ['account.partial.reconcile', 'payment.transaction', 'account.payment.method', 'account.payment.method.line'] };
 const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
@@ -818,6 +825,18 @@ export function writableModelsForApps(appIds) {
   return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || owned.has(m) || !PROTECTED.includes(m)));
 }
 
+/**
+ * Models a user restricted to `appIds` may write for a specific diff: extends writable models
+ * with narrowly scoped models (such as validated follow-up SMS campaigns/traces for accounting users).
+ */
+export function scopedWritableModels(appIds, diff, db) {
+  const base = writableModelsForApps(appIds);
+  if (appIds?.includes('accounting') && isFollowUpSmsDiff(diff, db)) {
+    return new Set([...base, 'sms.campaign', 'sms.trace']);
+  }
+  return base;
+}
+
 /** `db` without the private employee fields the apps in `appIds` may not see. */
 export function redactForApps(db, appIds) {
   const base = menuModelsForApps(appIds);
@@ -826,6 +845,21 @@ export function redactForApps(db, appIds) {
     const hidden = Object.keys(fields).filter((f) => !fields[f].some((m) => base.has(m)));
     if (!hidden.length || !records[model]) continue;
     records = { ...records, [model]: records[model].map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !hidden.includes(k)))) };
+  }
+  if (appIds && !appIds.includes('sms') && appIds.includes('accounting')) {
+    if (records['sms.campaign']) {
+      const campaigns = records['sms.campaign'].filter((c) => Boolean(c.followup_sms));
+      const campaignIds = new Set(campaigns.map((c) => c.id));
+      records = {
+        ...records,
+        'sms.campaign': campaigns,
+        ...(records['sms.trace'] ? { 'sms.trace': records['sms.trace'].filter((t) => campaignIds.has(t.campaign_id)) } : {}),
+      };
+      // Accounting users only see the follow-up SMS campaigns, so only their chatter.
+      const traceIds = new Set((records['sms.trace'] ?? []).map((t) => t.id));
+      const messages = (db.messages ?? []).filter((m) => (m.model === 'sms.campaign' ? campaignIds.has(m.res_id) : m.model === 'sms.trace' ? traceIds.has(m.res_id) : true));
+      return { ...db, records, messages };
+    }
   }
   return records === db.records ? db : { ...db, records };
 }
@@ -836,6 +870,10 @@ export function modelsForApps(appIds) {
   const out = new Set(base);
   // Barcode counts update located stock through the same quantity path as inventory operations.
   if (appIds.includes('barcode')) out.add('stock.quant');
+  if (appIds.includes('accounting')) {
+    out.add('sms.campaign');
+    out.add('sms.trace');
+  }
   for (const id of appIds) for (const m of OWNED_PROTECTED[id] ?? []) out.add(m);
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {

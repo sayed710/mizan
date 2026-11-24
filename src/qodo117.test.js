@@ -267,12 +267,13 @@ test('Finding 3: configured follow-up activity is created even when notification
   const inv = makePostedInvoice(partner.db, { partnerId: partner.id, invoiceDate: '2026-04-01', dueDate: '2026-04-10', amount: 250 });
   db = inv.db;
 
-  // At 2026-04-16 (6 days overdue -> hits SMS + Activity level): activity must be created even though SMS cannot auto-send
+  // At 2026-04-16 (6 days overdue -> hits SMS + Activity level): trace queued, level advances, activity created
   db = runFollowUps(db, '2026-04-16');
   let activities = search(db, 'mail.activity').filter((a) => a.res_model === 'res.partner' && a.res_id === partner.id);
   assert.equal(activities.length, 1);
   assert.equal(activities[0].summary, 'SMS follow-up call');
-  assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_level_delay ?? null, null);
+  assert.ok(search(db, 'sms.trace').some((t) => t.res_id === partner.id && t.state === 'outgoing'));
+  assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_level_delay, 5);
 
   // Repeating while still in SMS level must not duplicate the activity
   db = runFollowUps(db, '2026-04-17');
