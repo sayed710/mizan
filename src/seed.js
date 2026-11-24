@@ -11,7 +11,7 @@ import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
-import { ensurePaymentMethods } from './models/paymentmethod.js';
+import { ensureOnlinePaymentMethods, ensurePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
@@ -596,6 +596,6 @@ export function seed() {
   const seeded = { ...db, messages: [] };
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
-  const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(ensureOnlinePaymentMethods(opened)))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
   return { ...ensureCalendars(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))), schema_version: SCHEMA_VERSION };
 }

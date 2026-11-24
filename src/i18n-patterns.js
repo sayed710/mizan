@@ -217,6 +217,8 @@ const patterns = {
   '{1} reminder(s) failed: {2}': 'فشل إرسال {1} من التذكيرات: {2}',
   'Invalid recipient {1}': 'مستلم غير صالح {1}',
   'SMTP {1}: {2}': 'خادم البريد {1}: {2}',
+  "You can't deactivate a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): {1}": 'لا يمكنك إلغاء تفعيل طريقة دفع مرتبطة بمزود في حالة مُفعّل أو اختبار.\nالمزودون المرتبطون: {1}',
+  "You can't delete a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): {1}": 'لا يمكنك حذف طريقة دفع مرتبطة بمزود في حالة مُفعّل أو اختبار.\nالمزودون المرتبطون: {1}',
 };
 
 // Short English words and phrases that the code puts inside the messages above.

@@ -10,6 +10,12 @@ export const SEEDED_PAYMENT_METHODS = [
   { code: 'sepa_ct', payment_type: 'outbound', name: 'SEPA Credit Transfer' },
 ];
 
+export const ONLINE_PAYMENT_METHOD_SEEDS = [
+  { code: 'wire_transfer', name: 'Wire Transfer', providerCode: 'wire', sequence: 10 },
+  { code: 'cod', name: 'Cash on Delivery', providerCode: 'cod', sequence: 20 },
+  { code: 'demo', name: 'Demo', providerCode: 'demo', sequence: 30 },
+];
+
 const METHOD_LINE_JOURNAL_TYPES = ['bank', 'cash'];
 export const METHOD_LINE_FIELDS = [
   ['inbound_payment_method_line_ids', 'inbound'],
@@ -354,7 +360,102 @@ export function unlinkJournalMethodLines(db, journal) {
   return lineIds.length ? unlink(db, 'account.payment.method.line', lineIds) : db;
 }
 
+/** Seed standard active `payment.method` records for the payment providers present in `db`. */
+export function ensureOnlinePaymentMethods(db) {
+  let next = db;
+  const existing = search(next, 'payment.method', { includeArchived: true });
+  const providers = next.records?.['payment.provider'] ?? [];
+  for (const spec of ONLINE_PAYMENT_METHOD_SEEDS) {
+    if (existing.some((m) => m.code === spec.code)) continue;
+    const provider = providers.find((p) => p.code === spec.providerCode);
+    if (!provider) continue;
+    next = create(next, 'payment.method', {
+      name: spec.name,
+      code: spec.code,
+      sequence: spec.sequence,
+      active: true,
+      primary_payment_method_id: null,
+      provider_ids: [provider.id],
+      supported_country_ids: [],
+      supported_currency_ids: [],
+    }).db;
+  }
+  return next;
+}
+
+function activeProviderBlockMessage(db, rec, actionVerb) {
+  const providersById = new Map((db.records?.['payment.provider'] ?? []).map((p) => [p.id, p]));
+  const linked = (rec.provider_ids ?? [])
+    .map((id) => providersById.get(id))
+    .filter((p) => p && p.state !== 'disabled');
+  if (!linked.length) return null;
+  const names = linked.map((p) => p.name).join(', ');
+  return `You can't ${actionVerb} a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): ${names}`;
+}
+
+/** Validate `payment.method` invariants: prevent archiving while linked to enabled providers. */
+export function onlinePaymentMethodGuard(db, before, after) {
+  if (after.primary_payment_method_id && after.id && after.primary_payment_method_id === after.id) {
+    return 'A payment method cannot be its own primary payment method';
+  }
+  if (after.active === false && (!before || before.active !== false)) {
+    return activeProviderBlockMessage(db, after, 'deactivate');
+  }
+  return null;
+}
+
 export const paymentMethodModels = {
+  'payment.method': {
+    label: 'Payment Methods',
+    views: ['list', 'form'],
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      code: { type: 'char', label: 'Code', required: true },
+      sequence: { type: 'integer', label: 'Sequence' },
+      active: { type: 'boolean', label: 'Active' },
+      primary_payment_method_id: {
+        type: 'many2one',
+        relation: 'payment.method',
+        label: 'Primary Payment Method',
+        domain: (m, rec) => !m.primary_payment_method_id && (!rec?.id || m.id !== rec.id),
+      },
+      provider_ids: { type: 'many2many', relation: 'payment.provider', label: 'Providers', widget: 'many2many_tags' },
+      supported_country_ids: { type: 'tags', label: 'Supported Countries' },
+      supported_currency_ids: { type: 'many2many', relation: 'res.currency', label: 'Supported Currencies', widget: 'many2many_tags' },
+    },
+    defaults: () => ({
+      sequence: 1,
+      active: true,
+      primary_payment_method_id: null,
+      provider_ids: [],
+      supported_country_ids: [],
+      supported_currency_ids: [],
+    }),
+    guard: onlinePaymentMethodGuard,
+    protectDelete: (db, rec, staged) => activeProviderBlockMessage(staged ?? db, rec, 'delete'),
+    sort: (a, b) => (a.sequence ?? 1) - (b.sequence ?? 1) || (a.id ?? 0) - (b.id ?? 0),
+    searchFields: ['name', 'code', 'provider_ids'],
+    list: ['sequence', 'name', 'provider_ids', 'code', 'active'],
+    listFields: {
+      sequence: { widget: 'handle' },
+      code: { optional: 'hide' },
+      active: { widget: 'toggle' },
+    },
+    editableList: ['active'],
+    listDecoration: (r) => (r.active === false ? 'muted' : ''),
+    form: {
+      title: 'name',
+      groups: [
+        ['code', 'sequence'],
+        ['primary_payment_method_id', 'active'],
+      ],
+      tabs: [
+        { label: 'Providers', fields: ['provider_ids'] },
+        { label: 'Configuration', fields: ['supported_country_ids', 'supported_currency_ids'] },
+      ],
+    },
+  },
+
   'account.payment.method': {
     label: 'Payment Methods',
     views: ['list'],
@@ -376,10 +477,6 @@ export const paymentMethodModels = {
     defaults: () => ({ code: 'manual', payment_type: 'inbound' }),
     searchFields: ['name', 'code', 'payment_type'],
     list: ['name', 'code', 'payment_type'],
-    form: {
-      title: 'name',
-      groups: [['name', 'code', 'payment_type']],
-    },
   },
 
   'account.payment.method.line': {
