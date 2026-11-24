@@ -8,9 +8,10 @@ export function customPeriodError(periodKey, period) {
   if (periodKey !== 'custom') return null;
   const from = period?.from;
   const to = period?.to;
-  if (!from || !to) return 'Enter both From and To dates';
-  if (!validDate(from) || !validDate(to)) return 'Enter valid From and To dates';
-  if (from > to) return 'From date cannot be after To date';
+  // An empty From means "from the beginning" (as-of reports, statements opened from aged balances).
+  if (!to) return 'Enter a To date';
+  if ((from && !validDate(from)) || !validDate(to)) return 'Enter valid From and To dates';
+  if (from && from > to) return 'From date cannot be after To date';
   return null;
 }
 

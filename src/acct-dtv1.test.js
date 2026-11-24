@@ -30,8 +30,8 @@ test('DTV-1: canonical reportNavigation customPeriodError validates custom range
   assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '2026-12-31' }), null);
   assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '2026-12-31' }), null);
 
-  assert.equal(customPeriodError('custom', { from: '', to: '2026-12-31' }), 'Enter both From and To dates');
-  assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '' }), 'Enter both From and To dates');
+  assert.equal(customPeriodError('custom', { from: '', to: '2026-12-31' }), null);
+  assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '' }), 'Enter a To date');
   assert.equal(customPeriodError('custom', { from: '2026-02-30', to: '2026-03-01' }), 'Enter valid From and To dates');
   assert.equal(customPeriodError('custom', { from: '2026-01-01', to: 'not-a-date' }), 'Enter valid From and To dates');
   assert.equal(customPeriodError('custom', { from: '2026-12-31', to: '2026-01-01' }), 'From date cannot be after To date');
@@ -87,7 +87,7 @@ test('DTV-1: ConfigurableReportPage (P&L, Balance Sheet, custom report) shows in
     await React.act(async () => props(periodSelect).onChange({ target: { value: 'custom' } }));
 
     for (const [badFrom, badTo, expectedMsg] of [
-      ['', `${yr}-12-31`, 'Enter both From and To dates'],
+      [`${yr}-01-01`, '', 'Enter a To date'],
       [`${yr}-02-30`, `${yr}-12-31`, 'Enter valid From and To dates'],
       [`${yr}-12-31`, `${yr}-01-01`, 'From date cannot be after To date'],
     ]) {
@@ -115,9 +115,9 @@ test('DTV-1: ConfigurableReportPage (P&L, Balance Sheet, custom report) shows in
     await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { key: 'bs', statementKind: 'balance', title: 'Balance Sheet' })));
     const bsPeriod = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
     await React.act(async () => props(bsPeriod).onChange({ target: { value: 'custom' } }));
-    const [bsFrom] = findDateInputs(host);
-    await React.act(async () => props(bsFrom).onChange({ target: { value: '' } }));
-    assert.equal(textOf(findAlert(host)), 'Enter both From and To dates');
+    const [, bsTo] = findDateInputs(host);
+    await React.act(async () => props(bsTo).onChange({ target: { value: '' } }));
+    assert.equal(textOf(findAlert(host)), 'Enter a To date');
     assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
 
     // 3. Custom configurable report (always custom dates)
@@ -171,7 +171,7 @@ test('DTV-1: Reports.jsx (General Ledger, Trial Balance, Cash Flow, and other pe
     await React.act(async () => props(ledgerPeriod).onChange({ target: { value: 'custom' } }));
 
     for (const [badFrom, badTo, expectedMsg] of [
-      ['', `${yr}-12-31`, 'Enter both From and To dates'],
+      [`${yr}-01-01`, '', 'Enter a To date'],
       [`${yr}-02-30`, `${yr}-12-31`, 'Enter valid From and To dates'],
       [`${yr}-06-01`, `${yr}-02-01`, 'From date cannot be after To date'],
     ]) {

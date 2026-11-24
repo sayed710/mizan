@@ -3786,7 +3786,7 @@ const ar = {
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
-  'Enter both From and To dates': 'أدخل تاريخَي البداية والنهاية',
+  'Enter a To date': 'أدخل تاريخ النهاية',
   'Enter valid From and To dates': 'أدخل تاريخَي بداية ونهاية صالحين',
   'From date cannot be after To date': 'لا يمكن أن يكون تاريخ البداية بعد تاريخ النهاية',
   'Could not compute report': 'تعذّر حساب التقرير',
