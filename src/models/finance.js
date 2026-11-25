@@ -2707,7 +2707,7 @@ export function analyticActualLines(db, period = {}) {
     if (!line.account_id || (period.from && line.date < period.from) || (period.to && line.date > period.to)) return false;
     if (period.company_id != null && (line.company_id ?? 1) !== period.company_id) return false;
     if (period.account_id != null && line.account_id !== period.account_id) return false;
-    if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) return false;
+    if (period.general_account && !(read(db, 'account.account', line.general_account)?.code ?? '').startsWith(period.general_account)) return false;
     const move = line.move_id && read(db, 'account.move', line.move_id);
     return (!line.move_id && !period.posted_only) || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
   });

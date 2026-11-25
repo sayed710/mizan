@@ -179,7 +179,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
     return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
     name: line.name || move.name || '/', date: move.date || move.invoice_date || today(), account_id: Number(id),
     amount,
-    general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
+    general_account: line.account_id ?? null, move_id: move.id,
     partner_id: line.partner_id ?? move.partner_id ?? null, category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
     }));
   });
@@ -203,7 +203,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
       return {
         name: line.name || product?.name || move.name || '/', date: move.date ?? move.invoice_date ?? today(),
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
-        general_account: read(db, 'account.account', account)?.code || '',
+        general_account: account ?? null,
         move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
         category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
       };
@@ -394,7 +394,7 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
     if (line.account_id && !targetAccount) throw new Error('Budget account not found');
     const analytic_lines = line.analytic_account_id
       ? analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account, posted_only: true })
-          .filter((item) => !targetAccount || item.general_account === targetAccount.code)
+          .filter((item) => !targetAccount || item.general_account === targetAccount.id)
       : (line.account_id || line.general_account)
         ? journalItems(db, { from, to, company_id: companyId })
             .filter((item) => !item.is_closing
@@ -748,8 +748,12 @@ export const analyticPlusModels = {
       ...timesheetModel.fields,
       amount: { type: 'monetary', label: 'Amount' },
       account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic Account' },
-      general_account: { type: 'char', label: 'General Account Code' },
+      general_account: { type: 'many2one', relation: 'account.account', label: 'General Account', readonly: (r) => !!r.move_id },
+      legacy_general_account: { type: 'char', label: 'General Account Code', readonly: true, hideWhen: (r) => !r.legacy_general_account },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice / Bill' },
+      ref: { type: 'char', label: 'Reference' },
+      product_uom_id: { type: 'many2one', relation: 'uom.uom', label: 'Unit of Measure' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       product_id: { type: 'many2one', relation: 'product', label: 'Product' },
       category: { type: 'selection', label: 'Category', options: [['invoice', 'Invoice'], ['vendor_bill', 'Vendor Bill'], ['journal_entry', 'Journal Entry'], ['timesheet', 'Timesheet'], ['other', 'Other']] },
