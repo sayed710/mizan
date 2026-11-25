@@ -10,7 +10,8 @@ import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, post
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
-import { migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
+import { migrateCountries, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
+import { countryIdFor, ensureCountries } from './models/country.js';
 import { ensurePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
@@ -103,6 +104,9 @@ export function seed() {
     rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }],
   });
   db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrency } };
+  add('res.currency', { name: 'EUR', full_name: 'Euro', symbol: '€', currency_unit_label: 'Euros', currency_subunit_label: 'Cents', position: 'after', active: true, rate_ids: [{ date: addDays(today(), -60), rate: 0.92, company_id: null }, { date: addDays(today(), -1), rate: 0.9, company_id: null }] });
+  add('res.currency', { name: 'SAR', full_name: 'Saudi Riyal', symbol: '﷼', currency_unit_label: 'Saudi Riyals', currency_subunit_label: 'Halalas', position: 'after', active: true, rate_ids: [{ date: addDays(today(), -60), rate: 3.75, company_id: null }] });
+  db = ensureCountries(db);
   const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }));
   const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '131000')) }));
 
@@ -178,7 +182,7 @@ export function seed() {
       ...vals,
     });
   };
-  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', account_ids: [] });
+  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country_id: countryIdFor(db, 'EG'), account_ids: [] });
   const exportFp = add('account.fiscal.position', {
     name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.', account_ids: [],
   });
@@ -546,8 +550,6 @@ export function seed() {
   add('account.payment.term', { name: '10 Days after End of Next Month', sequence: 7, line_ids: [line(100, 10, 'percent', 'days_after_end_of_next_month')] });
   add('account.payment.term', { name: '90 days, on the 10th', sequence: 10, line_ids: [line(100, 90, 'percent', 'days_end_of_month_on_the', { days_next_month: 10 })] });
   set('res.partner', 3, { property_payment_term_id: t30 });
-  add('res.currency', { name: 'EUR', full_name: 'Euro', symbol: '€', currency_unit_label: 'Euros', currency_subunit_label: 'Cents', position: 'after', active: true, rate_ids: [{ date: addDays(today(), -60), rate: 0.92, company_id: null }, { date: addDays(today(), -1), rate: 0.9, company_id: null }] });
-  add('res.currency', { name: 'SAR', full_name: 'Saudi Riyal', symbol: '﷼', currency_unit_label: 'Saudi Riyals', currency_subunit_label: 'Halalas', position: 'after', active: true, rate_ids: [{ date: addDays(today(), -60), rate: 3.75, company_id: null }] });
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {
@@ -596,5 +598,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))))), schema_version: SCHEMA_VERSION };
+  return { ...migrateCountries(ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready)))))))), schema_version: SCHEMA_VERSION };
 }

@@ -1,5 +1,6 @@
 import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
+import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
@@ -4691,6 +4692,8 @@ Object.assign(accountingModels, {
   'account.account.tag': {
     label: 'Account Tags',
     guard: (db, before, after) => {
+      const countryError = countryReferenceError(db, after);
+      if (countryError) return countryError;
       if (!before || before.applicability === after.applicability) return null;
       const inAccounts = (db.records['account.account'] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id));
       const inTaxes = (db.records['account.tax'] ?? []).some((r) =>
@@ -4713,18 +4716,18 @@ Object.assign(accountingModels, {
       color: { type: 'integer', label: 'Color' },
       cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating'], ['investing', 'Investing'], ['financing', 'Financing']] },
       active: { type: 'boolean', label: 'Active', help: 'Set active to false to hide the Account Tag without removing it.' },
-      country: { type: 'char', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
+      country_id: { type: 'many2one', relation: 'res.country', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
       balance_negate: { type: 'boolean', label: 'Negate Balance' },
     },
     defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
     views: ['list'],
-    list: ['name', 'applicability', 'country', 'color'],
+    list: ['name', 'applicability', 'country_id', 'color'],
     searchFields: ['name'],
     form: {
       title: 'name',
       hideTitle: true,
       groups: (r) => [
-        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country'] : [])],
+        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country_id'] : [])],
         ['cash_flow_activity'],
       ],
     },
