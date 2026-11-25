@@ -90,9 +90,9 @@ test('REP4-2 Budget vs Actual: report-level company, analytic account filters an
   }
 
   // Create analytic accounts
-  const an1 = create(db, 'account.analytic.account', { name: 'Project Alpha', company_id: 1 });
+  const an1 = create(db, 'account.analytic.account', { name: 'Project Alpha', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = applyDiff(db, diffDb(db, an1.db), { isAdmin: true });
-  const an2 = create(db, 'account.analytic.account', { name: 'Project Beta', company_id: 1 });
+  const an2 = create(db, 'account.analytic.account', { name: 'Project Beta', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = applyDiff(db, diffDb(db, an2.db), { isAdmin: true });
 
   // Create budget in company 1 with lines for an1 and an2
@@ -214,7 +214,7 @@ test('REP4-4 Budget comparison displays period headers and the same amounts as s
 test('REP4-5 Current unfinished budget period evaluates achievement against full period plan', async () => {
   let db = seed();
   const currentYear = today().slice(0, 4);
-  const an = create(db, 'account.analytic.account', { name: 'Unfinished Project', company_id: 1 });
+  const an = create(db, 'account.analytic.account', { name: 'Unfinished Project', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = an.db;
   const posted = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: 1, company_id: 1, date: `${currentYear}-01-01`, invoice_date: `${currentYear}-01-01`,
@@ -308,7 +308,7 @@ test('REP4-6 Budget starting in current period displays zero metrics for nonover
 
 test('REP4-7 Analytic filter retains companyless budgets and failed reports', async () => {
   let db = seed();
-  const an = create(db, 'account.analytic.account', { name: 'Active Filter Account', company_id: 1 });
+  const an = create(db, 'account.analytic.account', { name: 'Active Filter Account', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = an.db;
 
   const b1 = create(db, 'account.budget', {
@@ -405,7 +405,7 @@ test('REP4-8 Later comparison period failure renders unavailable cells and does 
 
 test('REP4-9 Expense budget unbilled purchase commitment detail matches committed summary sign', async () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Expense Project', company_id: 1 });
+  const analytic = create(db, 'account.analytic.account', { name: 'Expense Project', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
   const budget = create(db, 'account.budget', {
     name: 'Expense Commitment Budget',

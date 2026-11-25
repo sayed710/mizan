@@ -29,7 +29,7 @@ test('Finding 8: Product-category distribution rules match category IDs consiste
   });
   db = product.db;
 
-  const analytic = create(db, 'account.analytic.account', { name: 'Hardware Project' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Hardware Project', plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
 
   // Create distribution model with string category ID (as entered in text input)
@@ -215,7 +215,7 @@ test('Finding 8: Product-category rule matches child categories and handles nume
   });
   db = productInChild.db;
 
-  const analytic = create(db, 'account.analytic.account', { name: 'Parent Cat Account' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Parent Cat Account', plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
 
   // Rule defined on parent category using numeric ID

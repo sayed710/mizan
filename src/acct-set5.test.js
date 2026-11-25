@@ -25,7 +25,7 @@ test('SET5-1: analytic accounting defaults off and is an administrator-controlle
 test('SET5-2: menus and move line fields follow setting without changing distributions', () => {
   let db = seed();
   db = create(db, 'account.analytic.plan', { name: 'Projects' }).db;
-  const analytic = create(db, 'account.analytic.account', { name: 'Project' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Project', plan_id: search(db, 'account.analytic.plan')[0].id }); db = analytic.db;
   const move = create(db, 'account.move', { move_type: 'out_invoice', invoice_line_ids: [{ name: 'Work', qty: 1, price_unit: 10, analytic_distribution: { [analytic.id]: 100 } }] }); db = move.db;
   const menus = apps.find((app) => app.id === 'accounting').menus;
   const keys = ['analytic-items', 'analytic-report', 'analytic-distribution-models', 'analytic', 'analytic-plans'];

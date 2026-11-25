@@ -12,7 +12,7 @@ register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 test('budget line achieved and committed include posted analytic activity', () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Project' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Project', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const move = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: 1, invoice_date: '2026-01-10',
     invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0, analytic_distribution: { [analytic.id]: 100 } }] });
   db = postMove(move.db, move.id);
@@ -33,7 +33,7 @@ test('budget line achieved and committed include posted analytic activity', () =
 for (const [type, expected] of [['expense', 100], ['revenue', -100], ['both', -100]]) {
   test(`${type} budget signs achieved and committed amounts`, () => {
     let db = seed();
-    const analytic = create(db, 'account.analytic.account', { name: 'Project' }); db = analytic.db;
+    const analytic = create(db, 'account.analytic.account', { name: 'Project', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
     const move = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, company_id: 1, invoice_date: '2026-01-10',
       invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0, analytic_distribution: { [analytic.id]: 100 } }] });
     db = postMove(move.db, move.id);
@@ -85,9 +85,9 @@ test('migration fills budget_type: both on legacy budgets and allows status chan
   // Before migration, writing or confirming throws because budget_type is missing
   assert.throws(() => write(unmigrated, 'account.budget', 991, { state: 'confirmed' }), /Budget Type is required/);
 
-  // Migrating upgrades database to schema_version 74 and fills budget_type: 'both'
+  // Migrating upgrades database to schema_version 77 and fills budget_type: 'both'
   const upgraded = migrate(unmigrated);
-  assert.equal(upgraded.schema_version, 75);
+  assert.equal(upgraded.schema_version, 77);
   assert.equal(read(upgraded, 'account.budget', 991).budget_type, 'both');
 
   // Status transition on migrated budget succeeds

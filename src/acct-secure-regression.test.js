@@ -85,7 +85,7 @@ import { postMove } from './models/accounting.js';
 test('depreciation model creates assets directly and on a bill account with server persistence', () => {
   let { db, company } = setup();
   const account = db.records['account.account'].find((a) => a.account_type === 'expense');
-  const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const model = create(db, 'account.asset.model', { name: 'Equipment', method: 'degressive_then_linear', method_number: 4, method_period: '12', prorata: true, account_asset_id: account.id, analytic_distribution: { [analytic.id]: 100 } }); db = model.db;
   db = write(db, 'account.account', account.id, { asset_model_id: model.id });
   const asset = create(db, 'account.asset', { name: 'Direct', model_id: model.id, original_value: 500, company_id: company }); db = asset.db;
@@ -234,7 +234,7 @@ test('empty secure wizard leaves the hard lock unchanged and explains why', () =
 
 test('depreciation model action posts allocated expense and analytic lines with server persistence', () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const distribution = { [analytic.id]: 100 };
   const model = create(db, 'account.asset.model', { ...assetAccounts(db), name: 'Annual equipment', method: 'linear', method_number: 2, method_period: '12', analytic_distribution: distribution }); db = model.db;
   const asset = create(db, 'account.asset', { name: 'Equipment', model_id: model.id, original_value: 1200, acquisition_date: '2020-01-01' }); db = asset.db;
@@ -251,7 +251,7 @@ test('depreciation model action posts allocated expense and analytic lines with 
 });
 
 test('asset disposal and deferred expense and revenue actions allocate profit and loss lines', () => {
-  let db = seed(); const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'PROJ' }); db = analytic.db;
+  let db = seed(); const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'PROJ', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const distribution = { [analytic.id]: 100 };
   const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Disposal', original_value: 1200, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', analytic_distribution: distribution }); db = asset.db;
   const buttons = models['account.asset'].form.buttons;
@@ -277,8 +277,9 @@ test('asset disposal and deferred expense and revenue actions allocate profit an
 
 test('depreciation model form save and server sync reject invalid analytic distributions', () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'VALID' }); db = analytic.db;
-  const second = create(db, 'account.analytic.account', { name: 'Second', code: 'VALID2' }); db = second.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'VALID', plan_id: planId }); db = analytic.db;
+  const second = create(db, 'account.analytic.account', { name: 'Second', code: 'VALID2', plan_id: planId }); db = second.db;
   const leaf = leavesOf(apps.find((app) => app.id === 'accounting')).find((item) => item.key === 'depreciation-models');
   assert.ok(models[leaf.model].form.groups.flat().includes('analytic_distribution'));
   const bad = [parseDistributionInput('{'), parseDistributionInput('null'), parseDistributionInput('[]'), [], '', 'not JSON', { 999999: 100 }, { [analytic.id]: '50' }, { [analytic.id]: -1 }, { [analytic.id]: 60, [second.id]: 50 }];
@@ -297,7 +298,7 @@ test('depreciation model form save and server sync reject invalid analytic distr
 });
 
 test('shared validation rejects invalid distributions on assets, deferrals, invoice and journal lines', () => {
-  let db = seed(); const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'PLAN' }); db = analytic.db;
+  let db = seed(); const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'PLAN', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const invalid = { [analytic.id]: 101 };
   for (const [model, vals] of [
     ['account.asset', { name: 'Asset', analytic_distribution: invalid }],
@@ -315,10 +316,11 @@ test('server remaps analytic accounts in top-level and line distributions for qu
   const db = seed();
   const accountId = (db.seq['account.analytic.account'] ?? 0) + 1;
   const modelId = (db.seq['account.asset.model'] ?? 0) + 1;
-  const account = create(db, 'account.analytic.account', { name: 'Queued', code: 'QUEUED' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const account = create(db, 'account.analytic.account', { name: 'Queued', code: 'QUEUED', plan_id: planId });
   const model = create(account.db, 'account.asset.model', { name: 'Queued model', analytic_distribution: { [accountId]: 100 } });
   const invoice = create(model.db, 'account.move', { move_type: 'out_invoice', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 10, analytic_distribution: { [accountId]: 100 } }] });
-  const collision = create(db, 'account.analytic.account', { name: 'Other', code: 'OTHER' }).db;
+  const collision = create(db, 'account.analytic.account', { name: 'Other', code: 'OTHER', plan_id: planId }).db;
   const assigned = assignIds(collision, diffDb(db, invoice.db));
   const saved = applyDiff(collision, assigned.diff, { isAdmin: true });
   const remappedId = assigned.remapped['account.analytic.account'][accountId];
@@ -331,10 +333,11 @@ test('server remaps analytic accounts in top-level and line distributions for qu
 
 test('server ID assignment rejects malformed analytic keys and remapping collisions on models and journal lines', () => {
   const client = seed();
-  const queued = create(client, 'account.analytic.account', { name: 'Queued', code: 'QUEUED' });
+  const planId = client.records['account.analytic.plan'][0].id;
+  const queued = create(client, 'account.analytic.account', { name: 'Queued', code: 'QUEUED', plan_id: planId });
   const model = create(queued.db, 'account.asset.model', { name: 'Model' });
   const invoice = create(model.db, 'account.move', { move_type: 'out_invoice', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 10 }] });
-  const competing = create(client, 'account.analytic.account', { name: 'Other', code: 'OTHER' }).db;
+  const competing = create(client, 'account.analytic.account', { name: 'Other', code: 'OTHER', plan_id: planId }).db;
   const oldId = queued.id, newId = oldId + 1;
   for (const place of ['model', 'line']) {
     for (const [label, distribution, error] of [
