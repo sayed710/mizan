@@ -2398,6 +2398,31 @@ export function migrateCountries(db) {
 }
 MIGRATIONS.push({ version: 72, name: 'country-records', up: migrateCountries });
 
+MIGRATIONS.push({ version: 73, name: 'analytic-general-account-id', up: (db) => {
+  const unresolved = [];
+  const accounts = db.records['account.account'] ?? [];
+  const lines = (db.records['account.analytic.line'] ?? []).map((line) => {
+    if (typeof line.general_account !== 'string') return line;
+    if (!line.general_account) return { ...line, general_account: null };
+    const matches = accounts.filter((account) => account.code === line.general_account
+      && (!account.company_id || account.company_id === (line.company_id ?? 1)));
+    if (matches.length === 1) return { ...line, general_account: matches[0].id };
+    unresolved.push([line.id, line.general_account]);
+    return { ...line, legacy_general_account: line.general_account, general_account: null };
+  });
+  const next = { ...db, messages: db.messages ?? [], records: { ...db.records, 'account.analytic.line': lines } };
+  return unresolved.reduce((result, [id, code]) => postNote(result, 'account.analytic.line', id,
+    `Upgrade: general account code ${code} could not be uniquely matched in the line company; select the account manually.`), next);
+} });
+
+MIGRATIONS.push({ version: 74, name: 'preserve-legacy-analytic-accounting', up: (db) => {
+  const companies = db.records?.['res.company'];
+  if (!Array.isArray(companies)) return db;
+  return { ...db, records: { ...db.records, 'res.company': companies.map((company) => (
+    company && company.group_analytic_accounting == null ? { ...company, group_analytic_accounting: true } : company
+  )) } };
+} });
+
 export function migrateJournalGroups(db) {
   const groups = [...(db.records['account.journal.group'] ?? [])].sort(
     (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id

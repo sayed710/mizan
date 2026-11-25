@@ -415,7 +415,7 @@ let refusedNew = null;
 export function FormView({ leaf, id, base, params }) {
   const db = useDb();
   const model = leaf.model;
-  const def = models[model];
+  const def = leaf.form ? { ...models[model], form: { ...models[model].form, ...leaf.form } } : models[model];
   const isNew = id === 'new';
   const rec = isNew ? null : read(db, model, Number(id));
   const [restored] = useState(() => {

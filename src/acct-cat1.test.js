@@ -4,7 +4,10 @@ import './models/index.js';
 import { models, menusFor } from './models/index.js';
 import { create, read, search, emptyDb } from './orm.js';
 import { diffDb, applyDiff } from './sync.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate, MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
+
+// Databases saved just before the partner-tags migration, whatever migrations come later.
+const BEFORE_TAGS = MIGRATIONS.find((m) => m.name === 'partner-tags-res-partner-category').version - 1;
 import { findAnalyticDistribution } from './models/analytic-distribution-models.js';
 
 test('CAT-1: res.partner.category model, menu, partner tag_ids many2many, complete_name, inverse partner_ids, cycle guard and migration', () => {
@@ -85,7 +88,7 @@ test('CAT-1: res.partner.category model, menu, partner tag_ids many2many, comple
 
   // 7. Migration 71 (partner-tags-res-partner-category): migrates existing free-text tag_ids into category records
   const legacyDb = {
-    schema_version: 70,
+    schema_version: BEFORE_TAGS,
     records: {
       'res.partner': [
         { id: 101, name: 'Client A', tag_ids: ['VIP', 'Wholesale'] },
@@ -98,7 +101,7 @@ test('CAT-1: res.partner.category model, menu, partner tag_ids many2many, comple
   };
 
   const migrated = migrate(legacyDb, SCHEMA_VERSION);
-  assert.equal(migrated.schema_version, 75);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
   const cats = migrated.records['res.partner.category'];
   assert.ok(cats.length >= 3, 'Must create res.partner.category records for VIP, Wholesale, Retail');
   const vipCat = cats.find((c) => c.name === 'VIP');
@@ -118,7 +121,7 @@ test('CAT-1: res.partner.category model, menu, partner tag_ids many2many, comple
   // 8. Migration deduplication of tags, case/whitespace deduplication, and skipping empty-name objects
   const legacyDbWithDuplicates = {
     ...emptyDb(),
-    schema_version: 70,
+    schema_version: BEFORE_TAGS,
     records: {
       ...emptyDb().records,
       'res.partner': [

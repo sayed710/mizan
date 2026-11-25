@@ -57,7 +57,8 @@ test('legacy invalid terms can only be archived without other changes', () => {
   const archived = write(db, model, made.id, { active: false });
   assert.equal(read(archived, model, made.id).active, false);
   assert.throws(() => write(archived, model, made.id, { active: true }), /sum of the percent/);
-  assert.throws(() => write(db, model, made.id, { active: false, name: 'Changed' }), /sum of the percent/);
+  assert.equal(read(write(db, model, made.id, { active: false, name: 'Changed' }), model, made.id).name, 'Changed');
+  assert.throws(() => write(db, model, made.id, { active: false, line_ids: [{ value_type: 'percent', value: 80 }] }), /sum of the percent/);
   assert.equal(read(sync(db, patch(db, made.id, { active: false })), model, made.id).active, false);
 });
 
