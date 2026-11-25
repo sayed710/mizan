@@ -358,7 +358,7 @@ const allApps = [
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
           { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list', defaultFilters: ['sale', 'purchase'], includeArchived: true },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
-          { key: 'journals', label: 'Journals', model: 'account.journal' },
+          { key: 'journals', label: 'Journals', model: 'account.journal', view: 'list' },
           { key: 'multi-ledger', label: 'Multi-Ledger', model: 'account.journal.group' },
           { key: 'currencies', label: 'Currencies', model: 'res.currency' },
           { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position', view: 'list' },
