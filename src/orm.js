@@ -337,20 +337,20 @@ function prepareWrite(db, model, before, vals, ctx = undefined) {
   const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx, vals);
   if (err) throw new Error(err);
   checkDeclared(model, result.after);
-  return { ...result, db };
+  return { ...result, db, vals };
 }
 
 export function write(db, model, id, vals, ctx = undefined) {
   assertWritable(model);
   const before = (db.records[model] ?? []).find((r) => r.id === id);
   if (!before) throw new Error(`${model} #${id} not found`);
-  const { after, clean, db: nextDb = db } = prepareWrite(db, model, before, vals, ctx);
+  const { after, clean, db: nextDb = db, vals: nextVals = vals } = prepareWrite(db, model, before, vals, ctx);
   const next = {
     ...nextDb,
     records: { ...nextDb.records, [model]: nextDb.records[model].map((r) => (r.id === id ? after : r)) },
     messages: [...nextDb.messages, ...trackingMessages(nextDb, model, before, after, clean)],
   };
-  return models[model].onWrite?.(next, after, before, clean) ?? next;
+  return models[model].onWrite?.(next, after, before, { ...clean, ...nextVals }) ?? next;
 }
 
 /** Validate simultaneous updates against their complete final state, then apply them immutably. */
@@ -591,6 +591,7 @@ export function matches(db, model, rec, terms, searchFields = null) {
           .join(' ');
       }
       if (f.type === 'tags') return (rec[k] ?? []).join(' ');
+      if (explicitSearch && (f.type === 'date' || f.type === 'datetime')) return String(rec[k] ?? '');
       if (explicitSearch && ['monetary', 'float', 'integer'].includes(f.type)) {
         const val = f.compute ? f.compute(rec, db) : rec[k];
         if (val == null || val === '') return '';

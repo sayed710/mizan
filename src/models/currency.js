@@ -300,7 +300,7 @@ export const currencyModels = {
       const id = before.id;
       const used = (db.records['res.company'] ?? []).some((company) => company.currency_id === id)
         || (db.records['account.payment'] ?? []).some((payment) => payment.state === 'posted' && payment.currency_id === id)
-        || (db.records['account.move'] ?? []).some((move) => (move.state === 'posted' && move.currency_id === id)
+        || (db.records['account.move'] ?? []).some((move) => (move.state === 'posted' && (move.move_type === 'entry' ? (move.line_ids ?? []).some((line) => line.currency_id === id) : move.currency_id === id))
           || (move.line_ids ?? []).some((line) => line.currency_id === id));
       return used ? 'Currency rounding cannot be changed while the currency is in use' : null;
     },

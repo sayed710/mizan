@@ -2402,6 +2402,17 @@ const ar = {
   'Analytic Distribution Models': 'نماذج التوزيع التحليلي',
   'Multi-Ledger': 'دفاتر الأستاذ المتعددة',
   'Included Journals': 'اليوميات المشمولة',
+  'Sequence Override Regex': 'التعبير النمطي لتجاوز التسلسل',
+  'The sequence regex must contain a seq group': 'يجب أن يحتوي التعبير النمطي للتسلسل على مجموعة seq',
+  'Invalid sequence regex': 'التعبير النمطي للتسلسل غير صالح',
+  'The sequence group must contain digits': 'يجب أن تحتوي مجموعة التسلسل على أرقام',
+  'The journal entry sequence does not match the journal sequence regex': 'لا يتطابق تسلسل القيد مع التعبير النمطي لليومية',
+  'The journal currency must be active': 'يجب أن تكون عملة اليومية نشطة',
+  'The journal and its default account must use the same currency': 'يجب أن تستخدم اليومية وحسابها الافتراضي العملة نفسها',
+  'Another journal uses this default account with a different currency': 'تستخدم يومية أخرى هذا الحساب الافتراضي بعملة مختلفة',
+  'The ledger must belong to the journal company': 'يجب أن ينتمي دفتر الأستاذ إلى شركة اليومية',
+  'Select journals belonging to this company or shared journals': 'اختر دفاتر يومية تنتمي إلى هذه الشركة أو دفاتر مشتركة',
+  'Payment currency must match the bank journal currency': 'يجب أن تطابق عملة الدفعة عملة يومية البنك',
   'Ledger': 'دفتر الأستاذ',
   'Partner Category': 'فئة الشريك',
   'Accounts Prefix': 'بادئة الحسابات',
@@ -3925,6 +3936,9 @@ const ar = {
   'Securing these entries will create at least one gap in the sequence.': 'تأمين هذه القيود سيُنشئ فجوة واحدة على الأقل في التسلسل.',
   'Securing these entries will also secure entries after the selected date.': 'تأمين هذه القيود سيؤمّن أيضاً قيوداً بعد التاريخ المحدد.',
   'Set a date. The moves will be secured up to including this date.': 'حدّد تاريخاً. سيتم تأمين القيود حتى هذا التاريخ شاملاً.',
+  'Later prefixes in the same journal are also deferred until those earlier entries are reconciled: {prefixes}': 'كما تم تأجيل البادئات اللاحقة في نفس الدفتر حتى تتم مطابقة تلك القيود السابقة: {prefixes}',
+  'Later prefixes cannot be secured while earlier prefixes still have unsecured entries after the selected date: {prefixes}': 'لا يمكن تأمين البادئات اللاحقة ما دامت البادئات السابقة تحتوي على قيود غير مؤمّنة بعد التاريخ المحدد: {prefixes}',
+  Empty: 'فارغ',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

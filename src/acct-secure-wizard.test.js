@@ -9,7 +9,8 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postEntry } from './models/ledger.js';
 import { bookToAccount } from './models/bank.js';
-import { analyzeJournalChains } from './models/hash_chain.js';
+import { analyzeJournalChains, checkInalterability, computeMoveHash } from './models/hash_chain.js';
+import { applyDiff, diffDb } from './sync.js';
 import { createCompany } from './models/company.js';
 import { invoiceJournalDefaults } from './test-support/accounting-company.js';
 
@@ -366,7 +367,201 @@ test('Arabic translations exist for all new Secure Entries wizard strings', asyn
     const parameterized = t('There are still unreconciled bank transactions before the selected date. The entries from journal prefixes containing them will not be secured: {prefixes}', { prefixes: 'BNK1' });
     assert.notEqual(parameterized, 'There are still unreconciled bank transactions before the selected date. The entries from journal prefixes containing them will not be secured: BNK1');
     assert.ok(parameterized.includes('BNK1'));
+    for (const tpl of [
+      'Later prefixes in the same journal are also deferred until those earlier entries are reconciled: {prefixes}',
+      'Later prefixes cannot be secured while earlier prefixes still have unsecured entries after the selected date: {prefixes}',
+    ]) {
+      const translated = t(tpl, { prefixes: 'BNK1/2026/' });
+      assert.notEqual(translated, tpl.replace('{prefixes}', 'BNK1/2026/'));
+      assert.ok(translated.includes('BNK1/2026/'));
+    }
   } finally {
     globalThis.localStorage = previousStorage;
   }
+});
+
+test('confirming Secure Entries succeeds while the cannot-be-hashed warning is present and passes server sync', () => {
+  let db = seed();
+  const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
+  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
+  const accounts = search(db, 'account.account');
+  const lines = [
+    { account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 },
+    { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 },
+  ];
+
+  const m1 = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-05', name: 'INV/2026/0001', line_ids: lines });
+  const m2Draft = create(m1.db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-10', name: 'INV/2026/0002', line_ids: lines });
+  const m2Hash = computeMoveHash(read(m2Draft.db, 'account.move', m2Draft.id), '', 3);
+  db = {
+    ...m2Draft.db,
+    records: {
+      ...m2Draft.db.records,
+      'account.move': m2Draft.db.records['account.move'].map((m) => (
+        m.id === m2Draft.id ? { ...m, inalterable_hash: m2Hash, secure_sequence_number: 1, inalterable_hash_version: 3 } : m
+      )),
+    },
+  };
+  db = write(db, 'account.journal', saleJournal.id, {
+    restrict_mode_hash_table: true,
+    secure_chain_heads: [{ company_id: 1, count: 1, last_sequence: 1, last_hash: m2Hash, last_move_id: m2Draft.id, last_move_name: 'INV/2026/0002' }],
+  });
+  const m3 = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-15', name: 'INV/2026/0003', line_ids: lines });
+  db = m3.db;
+
+  const analysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(analysis.warning_items.some((w) => w.key === 'account_not_hashable_unlocked_moves'), 'cannot-be-hashed warning shown');
+  assert.deepEqual(analysis.move_to_hash_ids, [m3.id], 'only later entry m3 is offered');
+
+  const wizModel = models['account.secure.entries.wizard'];
+  const wiz = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-31' });
+  const secureBtn = wizModel.form.buttons.find((b) => b.label === 'Secure Entries');
+  const res = secureBtn.run(wiz.db, read(wiz.db, 'account.secure.entries.wizard', wiz.id));
+
+  assert.equal(read(res.db, 'account.move', m1.id).inalterable_hash ?? null, null, 'm1 remains unhashed');
+  assert.equal(read(res.db, 'account.move', m3.id).secure_sequence_number, 2, 'm3 extends chain from m2');
+  assert.equal(read(res.db, 'res.company', 1).hard_lock_date, '2026-01-15', 'hard lock protects m1');
+
+  const synced = applyDiff(db, diffDb(db, res.db), { isAdmin: true });
+  assert.equal(checkInalterability(synced, { journalId: saleJournal.id, companyId: 1 })[0].status, 'ok');
+});
+
+test('unreconciled older-year prefix defers later-year prefix in same journal while allowing other journals to secure', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].filter((m) => m.journal_id !== bankJournal.id && m.journal_id !== saleJournal.id),
+    },
+  };
+  db = write(db, 'account.journal', bankJournal.id, { restrict_mode_hash_table: true });
+  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
+
+  const accounts = search(db, 'account.account');
+  const lines = [
+    { account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 },
+    { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 },
+  ];
+
+  // 2025 bank entry linked to an unreconciled bank statement line
+  const b2025 = create(db, 'account.move', {
+    move_type: 'entry', state: 'posted', journal_id: bankJournal.id, date: '2025-12-20', invoice_date: '2025-12-20', name: 'BNK1/2025/0001', line_ids: lines,
+  });
+  const stmt2025 = create(b2025.db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id, date: '2025-12-20', payment_ref: 'Open 2025 line', amount: -100, bank_move_id: b2025.id, company_id: 1,
+  });
+  // 2026 bank entry (same journal, newer year prefix)
+  const b2026 = create(stmt2025.db, 'account.move', {
+    move_type: 'entry', state: 'posted', journal_id: bankJournal.id, date: '2026-01-10', invoice_date: '2026-01-10', name: 'BNK1/2026/0001', line_ids: lines,
+  });
+  // Eligible entry in sales journal
+  const inv2026 = create(b2026.db, 'account.move', {
+    move_type: 'entry', state: 'posted', journal_id: saleJournal.id, date: '2026-01-10', invoice_date: '2026-01-10', name: 'INV/2026/0001', line_ids: lines,
+  });
+  db = inv2026.db;
+
+  const analysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(!analysis.move_to_hash_ids.includes(b2025.id), 'unreconciled 2025 entry excluded');
+  assert.ok(!analysis.move_to_hash_ids.includes(b2026.id), 'later 2026 prefix in same journal deferred');
+  assert.ok(analysis.move_to_hash_ids.includes(inv2026.id), 'other journal remains eligible');
+  const dangerWarn = analysis.warning_items.find((w) => w.key === 'account_unreconciled_bank_statement_line_ids');
+  assert.ok(dangerWarn?.message.includes('BNK1/2025/'), 'warns on unreconciled prefix');
+  assert.ok(dangerWarn?.message.includes('BNK1/2026/'), 'explains deferred later prefix');
+
+  const wizModel = models['account.secure.entries.wizard'];
+  const wiz = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-31' });
+  const secureBtn = wizModel.form.buttons.find((b) => b.label === 'Secure Entries');
+  const res = secureBtn.run(wiz.db, read(wiz.db, 'account.secure.entries.wizard', wiz.id));
+
+  assert.ok(read(res.db, 'account.move', inv2026.id).inalterable_hash, 'sales entry secured');
+  assert.equal(read(res.db, 'account.move', b2025.id).inalterable_hash ?? null, null, '2025 bank entry left unsecured');
+  assert.equal(read(res.db, 'account.move', b2026.id).inalterable_hash ?? null, null, '2026 bank entry left unsecured');
+
+  const synced = applyDiff(db, diffDb(db, res.db), { isAdmin: true });
+  assert.equal(checkInalterability(synced, { journalId: saleJournal.id, companyId: 1 })[0].status, 'ok');
+});
+
+test('securing an entry dated after hash_date caps hard_lock_date and draft checks at hash_date', () => {
+  let db = seed();
+  const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
+  const generalJournal = search(db, 'account.journal').find((j) => j.type === 'general' && !j.restrict_mode_hash_table);
+  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
+  const accounts = search(db, 'account.account');
+  const lines = [
+    { account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 },
+    { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 },
+  ];
+
+  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
+  const m1 = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-20', name: 'INV/2026/0001', line_ids: lines });
+  const m2 = create(m1.db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-10', name: 'INV/2026/0002', line_ids: lines });
+  // Draft dated between chosen hash_date (2026-01-10) and m1's date (2026-01-20)
+  const draftMid = create(m2.db, 'account.move', {
+    move_type: 'entry', state: 'draft', journal_id: generalJournal.id, date: '2026-01-15', invoice_date: '2026-01-15', line_ids: lines,
+  });
+  db = draftMid.db;
+
+  const analysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-10' });
+  assert.ok(analysis.move_to_hash_ids.includes(m1.id) && analysis.move_to_hash_ids.includes(m2.id));
+  assert.ok(!analysis.not_hashable_unlocked_move_ids.includes(draftMid.id), 'draft after hash_date is not blocking');
+
+  const wizModel = models['account.secure.entries.wizard'];
+  const wiz = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-10' });
+  const secureBtn = wizModel.form.buttons.find((b) => b.label === 'Secure Entries');
+  const res = secureBtn.run(wiz.db, read(wiz.db, 'account.secure.entries.wizard', wiz.id));
+
+  assert.ok(read(res.db, 'account.move', m1.id).inalterable_hash, 'm1 secured');
+  assert.ok(read(res.db, 'account.move', m2.id).inalterable_hash, 'm2 secured');
+  assert.equal(read(res.db, 'res.company', 1).hard_lock_date, '2026-01-10', 'hard_lock_date capped at chosen hash_date');
+
+  const afterPost = postEntry(res.db, {
+    journal: generalJournal.code, date: '2026-01-15', company: 1, lines: [{ account: '600000', debit: 50 }, { account: '211000', credit: 50 }],
+  });
+  assert.equal(read(afterPost.db, 'account.move', afterPost.id).state, 'posted', 'entries after chosen hash_date remain unlocked');
+});
+
+test('unreconciled bank lines in unrestricted journals do not trigger danger warnings or skip hard_lock_date', () => {
+  let db = seed();
+  const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id && m.journal_id !== bankJournal.id),
+    },
+  };
+  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
+  db = write(db, 'account.journal', bankJournal.id, { restrict_mode_hash_table: false });
+
+  const accounts = search(db, 'account.account');
+  const lines = [
+    { account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 },
+    { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 },
+  ];
+  const inv = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-10', name: 'INV/2026/0001', line_ids: lines });
+  const expAcc = accounts.find((a) => a.account_type === 'expense' && (a.company_id ?? 1) === 1);
+  // Both an unbooked and a partially-booked unreconciled statement line on the UNRESTRICTED bank journal
+  const stmtUnbooked = create(inv.db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id, date: '2026-01-05', payment_ref: 'Unrestricted unbooked', amount: 50, company_id: 1,
+  });
+  const stmtPartial = create(stmtUnbooked.db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id, date: '2026-01-06', payment_ref: 'Unrestricted partial', amount: -100, counterpart_account_id: expAcc.id, company_id: 1,
+  });
+  db = bookToAccount(stmtPartial.db, read(stmtPartial.db, 'account.bank.statement.line', stmtPartial.id), { amount: 40 }).db;
+
+  const analysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.deepEqual(analysis.unreconciled_bank_statement_line_ids, [], 'unrestricted bank lines ignored');
+  assert.equal(analysis.warning_items.some((w) => w.key === 'account_unreconciled_bank_statement_line_ids'), false, 'no danger warning emitted');
+
+  const wizModel = models['account.secure.entries.wizard'];
+  const wiz = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-31' });
+  const secureBtn = wizModel.form.buttons.find((b) => b.label === 'Secure Entries');
+  const res = secureBtn.run(wiz.db, read(wiz.db, 'account.secure.entries.wizard', wiz.id));
+
+  assert.ok(read(res.db, 'account.move', inv.id).inalterable_hash, 'sales entry secured');
+  assert.equal(read(res.db, 'res.company', 1).hard_lock_date, '2026-01-10', 'hard_lock_date updated despite unreconciled line in unrestricted journal');
 });

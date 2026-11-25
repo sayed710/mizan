@@ -124,17 +124,16 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   const maxDate = postedDates.length ? postedDates.sort().at(-1) : today();
   const targetDate = hashDate || maxDate;
 
-  const companyUnhashedPosted = (db.records['account.move'] ?? []).filter(
-    (m) => (m.company_id ?? 1) === company && m.state === 'posted' && !m.inalterable_hash && (m.invoice_date ?? m.date ?? '') <= targetDate,
+  const companyUnhashedPosted = allMoves.filter(
+    (m) => m.state === 'posted' && !m.inalterable_hash && (m.invoice_date ?? m.date ?? '') <= targetDate,
   );
   const companyUnhashedMoveMap = new Map(companyUnhashedPosted.map((m) => [m.id, m]));
-  const companyUnhashedJournalIds = new Set(companyUnhashedPosted.map((m) => m.journal_id).filter(Boolean));
 
   const unreconciledLines = (db.records['account.bank.statement.line'] ?? []).filter((l) => {
     if ((l.company_id ?? 1) !== company) return false;
     if (l.state === 'reconciled' || l.is_reconciled === true) return false;
     if (l.bank_move_id && companyUnhashedMoveMap.has(l.bank_move_id)) return true;
-    return (l.date ?? '') <= targetDate && (restrictedIds.has(l.journal_id) || companyUnhashedJournalIds.has(l.journal_id));
+    return (l.date ?? '') <= targetDate && restrictedIds.has(l.journal_id);
   });
 
   const ignoredChainKeys = new Set();
@@ -143,7 +142,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   for (const line of unreconciledLines) {
     const linkedMove = line.bank_move_id ? (companyUnhashedMoveMap.get(line.bank_move_id) ?? read(db, 'account.move', line.bank_move_id)) : null;
     if (linkedMove) {
-      const jId = linkedMove.journal_id ?? line.journal_id;
+      const jId = linkedMove.journal_id ?? resolveDocumentJournal(db, linkedMove)?.id ?? line.journal_id;
       const prefix = moveSequencePrefix(linkedMove, journalById.get(jId));
       ignoredChainKeys.add(`${jId}:${prefix}`);
       if (prefix) ignoredPrefixList.push(prefix);
@@ -160,22 +159,28 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   const gapMoveIds = [];
   const notHashablePostedIds = [];
   const unhashedPostedMoves = [];
+  const deferredByUnreconciledPrefixes = [];
+  const deferredByLaterEntryPrefixes = [];
 
   for (const journal of restrictedJournals) {
     if (ignoredJournalIds.has(journal.id)) continue;
     const journalMoves = allMoves
       .filter((m) => (m.journal_id ?? resolveDocumentJournal(db, m)?.id) === journal.id)
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
+    const journalPosted = journalMoves.filter((m) => m.state === 'posted');
+    const journalLastHashed = journalPosted.filter((m) => Boolean(m.inalterable_hash)).at(-1);
+
     const byPrefix = new Map();
     for (const m of journalMoves) {
       const prefix = moveSequencePrefix(m, journal);
       if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
       byPrefix.get(prefix).push(m);
     }
+    const prefixCandidates = [];
     for (const [prefix, allChainMoves] of byPrefix.entries()) {
       if (ignoredChainKeys.has(`${journal.id}:${prefix}`)) continue;
       const postedChain = allChainMoves.filter((m) => m.state === 'posted');
-      const lastHashed = postedChain.filter((m) => Boolean(m.inalterable_hash)).at(-1);
+      const lastHashed = journalLastHashed ?? postedChain.filter((m) => Boolean(m.inalterable_hash)).at(-1);
       const localNotHashable = new Set();
       if (lastHashed) {
         for (const m of postedChain) {
@@ -200,10 +205,29 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
             && (!lastHashed || (m.name ?? '').localeCompare(lastHashed.name ?? '') > 0),
         )
         : [];
-      for (const m of chainMovesToHash) unhashedPostedMoves.push(m);
-      const chainToHashSet = new Set(chainMovesToHash.map((m) => m.id));
+      prefixCandidates.push({ prefix, allChainMoves, chainMovesToHash });
+    }
+    const candidateIds = new Set(prefixCandidates.flatMap((c) => c.chainMovesToHash.map((m) => m.id)));
+    const firstBlocker = journalPosted.find(
+      (m) => !m.inalterable_hash
+        && (!journalLastHashed || (m.name ?? '').localeCompare(journalLastHashed.name ?? '') > 0)
+        && !candidateIds.has(m.id),
+    );
+    const blockerPrefix = firstBlocker ? moveSequencePrefix(firstBlocker, journal) : '';
+    const blockedByUnreconciled = Boolean(firstBlocker && ignoredChainKeys.has(`${journal.id}:${blockerPrefix}`));
+
+    for (const { prefix, allChainMoves, chainMovesToHash } of prefixCandidates) {
+      const kept = firstBlocker
+        ? chainMovesToHash.filter((m) => (m.name ?? '').localeCompare(firstBlocker.name ?? '') < 0)
+        : chainMovesToHash;
+      if (kept.length < chainMovesToHash.length && prefix) {
+        (blockedByUnreconciled ? deferredByUnreconciledPrefixes : deferredByLaterEntryPrefixes).push(prefix);
+      }
+      if (!kept.length) continue;
+      for (const m of kept) unhashedPostedMoves.push(m);
+      const keptSet = new Set(kept.map((m) => m.id));
       const gapScope = allChainMoves.filter(
-        (m) => (m.invoice_date ?? m.date ?? '') <= targetDate || chainToHashSet.has(m.id),
+        (m) => (m.invoice_date ?? m.date ?? '') <= targetDate || keptSet.has(m.id),
       );
       const gaps = findSequenceGaps(gapScope);
       if (gaps.length) {
@@ -214,7 +238,8 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   }
 
   const unhashedDates = unhashedPostedMoves.map((m) => m.invoice_date ?? m.date ?? '').filter(Boolean);
-  const proposedLockDate = unhashedDates.length ? unhashedDates.sort().at(-1) : '';
+  const rawLockDate = unhashedDates.length ? unhashedDates.sort().at(-1) : '';
+  const proposedLockDate = rawLockDate && rawLockDate > targetDate ? targetDate : rawLockDate;
 
   const draftMoves = (db.records['account.move'] ?? []).filter((m) => {
     if ((m.company_id ?? 1) !== company || m.state !== 'draft') return false;
@@ -228,12 +253,17 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
 
   const warnings = [];
   const warningItems = [];
+  const deferredUnreconciled = [...new Set(deferredByUnreconciledPrefixes)];
+  const deferredLater = [...new Set(deferredByLaterEntryPrefixes)];
 
   if (unreconciledLines.length) {
-    const msg = t(
+    const baseMsg = t(
       'There are still unreconciled bank transactions before the selected date. The entries from journal prefixes containing them will not be secured: {prefixes}',
       { prefixes: ignoredPrefixes.join(', ') },
     );
+    const msg = deferredUnreconciled.length
+      ? `${baseMsg} ${t('Later prefixes in the same journal are also deferred until those earlier entries are reconciled: {prefixes}', { prefixes: deferredUnreconciled.join(', ') })}`
+      : baseMsg;
     warnings.push(msg);
     warningItems.push({
       key: 'account_unreconciled_bank_statement_line_ids',
@@ -241,6 +271,18 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
       message: msg,
       action_text: 'Review Statements',
       go: `#/accounting/bank?view=list&rel=id:${unreconciledLines.map((l) => l.id).join(',')}`,
+    });
+  }
+  if (deferredLater.length) {
+    const msg = t(
+      'Later prefixes cannot be secured while earlier prefixes still have unsecured entries after the selected date: {prefixes}',
+      { prefixes: deferredLater.join(', ') },
+    );
+    warnings.push(msg);
+    warningItems.push({
+      key: 'account_deferred_prefixes',
+      level: 'warning',
+      message: msg,
     });
   }
   if (draftMoves.length) {
@@ -342,7 +384,7 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   for (const journal of restrictedJournals) {
     const journalMoves = (next.records['account.move'] ?? [])
       .filter((m) => (m.company_id ?? 1) === company && m.journal_id === journal.id && m.state === 'posted')
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
     const moves = journalMoves.filter(inScope);
     const securedMoves = journalMoves.filter((m) => m.inalterable_hash);
     if (checkChainHeadCorruption(journal, company, securedMoves)) throw new Error('Cannot extend a corrupted secure entry chain');
@@ -351,7 +393,12 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
     let lastSeqNum = lastSecured ? (lastSecured.secure_sequence_number || 0) : 0;
 
     const unhashed = moves.filter((m) => !m.inalterable_hash);
-    if (unhashed.length && journalMoves.some((m) => !m.inalterable_hash && !unhashed.includes(m) && (m.name ?? '').localeCompare(unhashed.at(-1).name ?? '') < 0)) throw new Error('Cannot secure entries while an earlier sequence remains unsecured');
+    if (unhashed.length && journalMoves.some((m) => !m.inalterable_hash
+      && !unhashed.includes(m)
+      && (!lastSecured || (m.name ?? '').localeCompare(lastSecured.name ?? '') > 0)
+      && (m.name ?? '').localeCompare(unhashed.at(-1).name ?? '') < 0)) {
+      throw new Error('Cannot secure entries while an earlier sequence remains unsecured');
+    }
     if (lastSecured && unhashed.some((m) => (m.name ?? '').localeCompare(lastSecured.name ?? '') <= 0)) throw new Error('Cannot secure an entry before the last secured sequence');
     for (const move of unhashed) {
       lastSeqNum += 1;
@@ -377,12 +424,13 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   const currentComp = read(next, 'res.company', company);
   if (!currentComp) throw new Error('Select an existing company');
   if (through) return next;
-  if (securedThrough) {
-    const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (m.invoice_date ?? m.date ?? '') <= securedThrough);
+  const lockDate = hashDate && securedThrough > hashDate ? hashDate : securedThrough;
+  if (lockDate) {
+    const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (m.invoice_date ?? m.date ?? '') <= lockDate);
     if (drafts.length) throw new Error('Cannot secure entries while draft entries exist on or before the secured date');
   }
-  if (!skipHardLock && securedThrough && (!currentComp.hard_lock_date || securedThrough > currentComp.hard_lock_date)) {
-    next = write(next, 'res.company', company, { hard_lock_date: securedThrough });
+  if (!skipHardLock && lockDate && (!currentComp.hard_lock_date || lockDate > currentComp.hard_lock_date)) {
+    next = write(next, 'res.company', company, { hard_lock_date: lockDate });
   }
 
   return next;
@@ -419,7 +467,8 @@ export function secureMoveInvariant(db, after, before) {
   let sawUnsecured = false;
   for (const move of all) {
     if (!move.inalterable_hash) { sawUnsecured = true; continue; }
-    if (sawUnsecured || move.secure_sequence_number !== ++sequence || !validMoveHash(move, previous)) return 'Invalid secure entry hash chain';
+    if ((sawUnsecured && move.id === after.id) || move.secure_sequence_number !== ++sequence || !validMoveHash(move, previous)) return 'Invalid secure entry hash chain';
+    sawUnsecured = false;
     previous = move.inalterable_hash;
   }
   const head = (journal.secure_chain_heads ?? []).find((h) => h.company_id === company);
