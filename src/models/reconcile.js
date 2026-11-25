@@ -3,6 +3,7 @@ import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { statementHasReconciledLines } from './bankstatement.js';
 import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
@@ -553,6 +554,10 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 /** Apply the first configured partner mapping before evaluating reconciliation rules. */
 export function mapStatementPartner(db, line) {
   if (!line || line.partner_id || line.state === 'reconciled') return db;
+  if (line.statement_id) {
+    const stmt = read(db, 'account.bank.statement', line.statement_id);
+    if (stmt?.state === 'closed' || statementHasReconciledLines(db, line.statement_id)) return db;
+  }
   if (line.bank_move_id || line.move_id) {
     const lock = recordLockDate(db, line);
     if (lock && String(line.date ?? today()) <= lock) return db;

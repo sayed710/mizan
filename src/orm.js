@@ -321,7 +321,7 @@ function writeValues(db, model, before, vals) {
   // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
   const derived = Object.fromEntries(
     Object.keys(onchangeInput)
-      .flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...onchangeInput }, k, db) ?? {}))
+      .flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...onchangeInput }, k, db, { previous: before }) ?? {}))
       .filter(([k]) => !(k in onchangeInput)),
   );
   const clean = { ...base, ...stripComputed(model, derived) };
