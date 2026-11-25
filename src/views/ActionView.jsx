@@ -5,7 +5,7 @@ import { display, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { commit, getDb, serverAction, useDb } from '../store.js';
-import { confirmUnconfiguredSend, postUnsentNote, sendTarget, shouldSendEmail } from './documentSend.js';
+import { classifySendError, confirmUnconfiguredSend, postUnsentNote, sendTarget, shouldSendEmail } from './documentSend.js';
 import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
@@ -70,9 +70,10 @@ export function ActionView({ leaf, base, params }) {
   const [selected, setSelected] = useState(() => new Set());
   const [selectedImportJournalId, setSelectedImportJournalId] = useState('');
   const [wizard, setWizard] = useState(null);
+  const [error, setError] = useState(null);
   const [isPrinting, setIsPrinting] = useState(false);
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
-  useEffect(() => setSelected(new Set()), [companyScope]);
+  useEffect(() => { setSelected(new Set()); setError(null); }, [companyScope]);
 
   // Back to the first page whenever the search, grouping or view changes.
   const pageKey = JSON.stringify([search, view]);
@@ -148,6 +149,7 @@ export function ActionView({ leaf, base, params }) {
   const listActions = leaf?.listActions ?? def.listActions ?? [];
   const confirmWizard = async (values) => {
     try {
+      setError(null);
       const hasEmail = shouldSendEmail(wizard.action, wizard.spec, values);
       const { endpoint, live, channel } = sendTarget(wizard.action);
       if (hasEmail && channel && !confirmUnconfiguredSend(channel)) return;
@@ -159,23 +161,70 @@ export function ActionView({ leaf, base, params }) {
         { defaults: leaf?.defaults ?? {} },
       );
       const nextDb = res?.db ?? (res && !('db' in res) && !('go' in res) && !('message' in res) ? res : null);
-      if (nextDb) await commit(nextDb);
+      if (nextDb) {
+        const saved = await commit(nextDb, { quiet: true });
+        if (!saved.ok) throw new Error(saved.error || 'Could not save changes');
+      }
 
+      let hadRecordingError = Boolean(wizard.hasRecordingError);
+      let recordingText = wizard.recordingError ?? '';
       if (hasEmail) {
         if (live) {
+          const retryableIds = [];
+          const retryableErrors = [];
+          const recordingErrors = [];
+          const multi = wizard.ids.length > 1 || (wizard.allIds?.length ?? 0) > 1;
           for (const id of wizard.ids) {
-            const out = await serverAction(endpoint, { model, id });
-            if (out?.ok === false) throw new Error(out.error ?? 'Could not save changes');
+            const recName = read(getDb(), model, id)?.name || `#${id}`;
+            try {
+              const out = await serverAction(endpoint, { model, id });
+              if (out?.ok === false) throw new Error(out.error ?? 'Could not save changes');
+            } catch (e) {
+              const classified = classifySendError(e);
+              const label = multi ? `${recName}: ${classified.message}` : classified.message;
+              if (classified.retryable) {
+                retryableIds.push(id);
+                retryableErrors.push(label);
+              } else {
+                hadRecordingError = true;
+                recordingErrors.push(label);
+              }
+            }
+          }
+          if (recordingErrors.length) {
+            recordingText = [recordingText, ...recordingErrors].filter(Boolean).join('\n');
+          }
+          if (retryableIds.length) {
+            const combinedError = [...recordingErrors, ...retryableErrors].join('\n');
+            if (recordingText) setError(recordingText);
+            setWizard((w) => (w ? {
+              ...w,
+              ids: retryableIds,
+              go: w.go ?? res?.go,
+              hasRecordingError: hadRecordingError,
+              recordingError: recordingText || null,
+              error: combinedError,
+            } : null));
+            return;
+          }
+          if (hadRecordingError) {
+            setWizard(null);
+            setSelected(new Set());
+            if (recordingText) setError(recordingText);
+            return;
           }
         } else if (channel) {
-          await commit(wizard.ids.reduce((acc, id) => postUnsentNote(acc, model, id, channel), getDb()));
+          const noted = await commit(wizard.ids.reduce((acc, id) => postUnsentNote(acc, model, id, channel), getDb()), { quiet: true });
+          if (!noted.ok) throw new Error(noted.error || 'Could not save changes');
         }
       }
 
+      // A retry runs only the failed records; the route from the first run covers the whole batch.
+      const go = wizard.go ?? res?.go;
       setWizard(null);
       setSelected(new Set());
       if (res?.message) alert(t(res.message));
-      if (res?.go) location.hash = res.go;
+      if (go) location.hash = go;
     } catch (e) {
       setWizard((w) => (w ? { ...w, error: t(e.message) } : null));
     }
@@ -184,6 +233,7 @@ export function ActionView({ leaf, base, params }) {
     <>
       {listActions.map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
         try {
+          setError(null);
           const visibleSelection = records.filter((r) => selected.has(r.id)).map((r) => r.id);
           // Actions that change each record never fall back to "every filtered record".
           if (action.requiresSelection && !visibleSelection.length) throw new Error(selected.size ? 'None of the selected records match the current filter' : 'Select at least one record first');
@@ -192,7 +242,7 @@ export function ActionView({ leaf, base, params }) {
           if (action.wizard) {
             const spec = typeof action.wizard === 'function' ? action.wizard(getDb(), ids) : action.wizard;
             if (spec) {
-              setWizard({ action, ids, spec, error: null });
+              setWizard({ action, ids, allIds: ids, spec, error: null, hasRecordingError: false, recordingError: null });
               return;
             }
           }
@@ -280,6 +330,7 @@ export function ActionView({ leaf, base, params }) {
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}
         view={view} search={search} setSearch={setSearch} extra={extra} filters={filters} groupBys={groupBys} listLabels={listLabels} groupByLabels={groupByLabels} listFields={listFields} />
       <SimulatedNote text={def.simulated} />
+      {error && <div className="alert" role="alert">{error}</div>}
       {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
       {view === 'list' && <List key={leaf.key || model} db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} list={listCols} optionalList={optionalList} listFields={listFields} listDecoration={listDecoration} optionalStorageKey={leaf.key ? `mizan-list-cols:${leaf.key}` : null} listLabels={listLabels} emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}

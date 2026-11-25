@@ -298,7 +298,7 @@ function DocumentPaper({ db, model, def, layout, rec, proforma = false }) {
   const cols = Object.entries(lineDef.fields).filter(([, f]) => !f.hidden);
   const priced = 'price_unit' in lineDef.fields;
   return (
-    <article className="paper">
+    <article className="paper paper-doc">
       {isProformaInvoice && (
         <div className="paper-watermark" aria-label={t('Proforma Invoice')}>
           {t('PRO-FORMA')}
@@ -410,21 +410,32 @@ export function PrintDoc({ model, id, proforma = false }) {
   const db = useDb();
   const def = models[model];
   const layout = LAYOUTS[model];
-  const rawIds = String(id || '').split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
+  const idTokens = String(id ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const rawIds = idTokens.map(Number).filter((n) => Number.isFinite(n) && n > 0);
   const rec = read(db, model, rawIds[0] ?? Number(id));
   const multiPayments = model === 'account.payment' && rawIds.length > 1
     ? rawIds.map((pid) => read(db, 'account.payment', pid)).filter((p) => p && p.state === 'posted' && p.payment_type === 'outbound' && p.check_number != null)
     : null;
-  const multiMoves = model === 'account.move' && rawIds.length > 1
-    ? rawIds.map((mid) => read(db, 'account.move', mid)).filter(Boolean)
+  const requestedMoves = model === 'account.move' && idTokens.length > 1
+    ? idTokens.map((tok) => {
+      const mid = Number(tok);
+      return { token: Number.isFinite(mid) && mid > 0 ? `#${mid}` : tok, doc: Number.isFinite(mid) && mid > 0 ? read(db, 'account.move', mid) : null };
+    })
+    : null;
+  const missingMoveIds = requestedMoves
+    ? requestedMoves.filter((item) => !item.doc).map((item) => item.token)
+    : [];
+  const hasMissingMoves = missingMoveIds.length > 0;
+  const multiMoves = requestedMoves && !hasMissingMoves
+    ? requestedMoves.map((item) => item.doc)
     : null;
   const recId = multiPayments?.length ? multiPayments[0].id : multiMoves?.length ? multiMoves[0].id : rec?.id;
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
-    if (!recId || isDraftInboundBatch) return undefined;
+    if (!recId || isDraftInboundBatch || hasMissingMoves) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
-  }, [recId, isDraftInboundBatch]);
+  }, [recId, isDraftInboundBatch, hasMissingMoves]);
   if (rec && model === 'account.batch.payment') {
     if (rec.batch_type === 'inbound') {
       if (rec.state !== 'posted') {
@@ -461,6 +472,15 @@ export function PrintDoc({ model, id, proforma = false }) {
       >
         <div className="annual-report-body"><SafeHtml html={rec.body} /></div>
       </ReportPrintView>
+    );
+  }
+  if (hasMissingMoves) {
+    return (
+      <main className="action">
+        <p className="empty" role="alert">
+          {t('Some selected documents could not be found ({ids}).', { ids: missingMoveIds.join(', ') })}
+        </p>
+      </main>
     );
   }
   const docs = multiMoves?.length ? multiMoves : (rec ? [rec] : []);

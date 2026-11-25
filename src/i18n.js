@@ -2774,6 +2774,7 @@ const ar = {
   'You can only generate sales documents or purchase documents for self-billing.': 'يمكنك إنشاء مستندات المبيعات أو مستندات المشتريات للفوترة الذاتية فقط.',
   'Only invoices, credit notes, bills, and refunds can be downloaded': 'يمكن تنزيل الفواتير والإشعارات الدائنة وفواتير الموردين والمرتجعات فقط',
   'Journal entry not found': 'القيد المحاسبي غير موجود',
+  'Some selected documents could not be found ({ids}).': 'تعذّر العثور على بعض المستندات المحددة ({ids}).',
   'Accounting Date: This Month': 'تاريخ القيد: هذا الشهر',
   'Accounting Date: This Year': 'تاريخ القيد: هذه السنة',
   'Due Date: This Month': 'تاريخ الاستحقاق: هذا الشهر',

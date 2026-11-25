@@ -18,7 +18,7 @@ import { saveFormRecord } from './formSave.js';
 import { changeFormValue, newDefaults } from './formDefaults.js';
 import { RecordAnalysis } from './Analysis.jsx';
 
-import { confirmUnconfiguredSend, postUnsentNote, sendTarget, shouldSendEmail } from './documentSend.js';
+import { classifySendError, confirmUnconfiguredSend, postUnsentNote, sendTarget, shouldSendEmail } from './documentSend.js';
 import { Wizard } from './Wizard.jsx';
 import { TaxReportTable } from './Reports.jsx';
 
@@ -632,7 +632,8 @@ export function FormView({ leaf, id, base, params }) {
       const savedId = wizard.id ?? save();
       if (savedId == null) return;
       const res = wizard.b.run(getDb(), read(getDb(), model, savedId), shouldEmail && live ? { ...values, live: true } : values);
-      await commit(res.db);
+      const saved = await commit(res.db, { quiet: true });
+      if (!saved.ok) throw new Error(saved.error || 'Could not save changes');
 
       if (shouldEmail) {
         if (live) {
@@ -647,13 +648,12 @@ export function FormView({ leaf, id, base, params }) {
             return;
           } catch (e) {
             setWizard(null);
-            const prefix = 'The email was sent, but its status could not be recorded: ';
-            if (e.message?.startsWith(prefix)) setError(t('The email was sent, but its status could not be recorded: {reason}', { reason: t(e.message.slice(prefix.length)) }));
-            else fail(e);
+            setError(classifySendError(e).message);
             return;
           }
         } else if (channel) {
-          commit(postUnsentNote(getDb(), model, savedId, channel));
+          const noted = await commit(postUnsentNote(getDb(), model, savedId, channel), { quiet: true });
+          if (!noted.ok) throw new Error(noted.error || 'Could not save changes');
         }
       }
 

@@ -130,6 +130,8 @@ export async function initStore() {
     }
     return { mode, user };
   }
+  mode = 'local';
+  user = null;
   db = await loadLocal();
   applyContext();
   return { mode, user };

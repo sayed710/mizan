@@ -464,10 +464,372 @@ test('INV-14: Arabic translations cover new currency labels, header actions, fil
       'You can only generate sales documents or purchase documents for self-billing.',
       'Only invoices, credit notes, bills, and refunds can be downloaded',
       'Journal entry not found',
+      'Some selected documents could not be found ({ids}).',
     ]) {
       assert.notEqual(t(key), key, `Missing Arabic translation for: ${key}`);
     }
   } finally {
     globalThis.localStorage = prevStorage;
+  }
+});
+
+test('INV-14: ActionView confirmWizard stops on failed commit for status or unsent-note saves', async () => {
+  let baseDb = cleanMovesDb();
+  const partner = create(baseDb, 'res.partner', { name: 'Commit Fail Cust', email: 'fail@example.com' });
+  baseDb = partner.db;
+  const inv = create(baseDb, 'account.move', {
+    move_type: 'out_invoice', partner_id: partner.id, invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  baseDb = postMove(inv.db, inv.id);
+
+  const prevStorage = globalThis.localStorage;
+  const mem = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, String(v)),
+    removeItem: (k) => mem.delete(k),
+    clear: () => mem.clear(),
+  };
+  const { makeEl } = setupDom();
+  globalThis.document.createElementNS ??= (_, tag) => makeEl(tag);
+  const origSetInterval = globalThis.setInterval;
+  globalThis.setInterval = () => ({ unref() {} });
+  globalThis.confirm = () => true;
+  globalThis.alert = () => {};
+  globalThis.location = { hash: '#/accounting/invoices' };
+
+  const React = (await import('react')).default;
+  const { act } = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb } = await import('./store.js');
+  const { ActionView } = await import('./views/ActionView.jsx');
+
+  let diffCall = 0;
+  let rejectDiffOnCall = 1;
+  let mailCalls = 0;
+  let serverDb = baseDb;
+  globalThis.fetch = async (url, init) => {
+    if (url === '/api/session') {
+      return new Response(JSON.stringify({ name: 'Admin', isAdmin: true, integrations: {} }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/db') {
+      return new Response(JSON.stringify(serverDb), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/diff') {
+      diffCall++;
+      if (diffCall === rejectDiffOnCall) {
+        return new Response(JSON.stringify({ error: 'Database locked' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      serverDb = applyDiff(serverDb, JSON.parse(init.body), { isAdmin: true });
+      return new Response(JSON.stringify(serverDb), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/mail/document') {
+      mailCalls++;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await act(async () => { await initStore(); });
+    await act(async () => {
+      root.render(React.createElement(ActionView, { leaf: leafFor('Customers', 'invoices'), base: '#/accounting/invoices', params: new URLSearchParams('view=list') }));
+    });
+
+    // 1. Reject the initial status save (is_move_sent)
+    const checkboxes = () => allFind(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox');
+    await act(async () => props(checkboxes()[1]).onChange());
+    const sendBtn = allFind(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.trim() === 'Send');
+    await actClick(act, sendBtn);
+    const dlCheckbox = find(host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'w-download');
+    await act(async () => props(dlCheckbox).onChange({ target: { checked: true } }));
+    await act(async () => {
+      const form = find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+      await props(form).onSubmit({ preventDefault() {} });
+    });
+
+    assert.equal(globalThis.location.hash, '#/accounting/invoices', 'Must not navigate when status commit fails');
+    assert.equal(mailCalls, 0, 'Must not send mail when status commit fails');
+    assert.equal(read(getDb(), 'account.move', inv.id).is_move_sent, false, 'Status must roll back when commit fails');
+    const openDialog1 = find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+    assert.ok(openDialog1, 'Wizard must remain open after status commit failure');
+    assert.match(find(openDialog1, (n) => hasClass(n, 'alert')).textContent, /Database locked/);
+
+    // 2. Allow status commit to succeed, reject the unsent-note commit
+    diffCall = 0;
+    rejectDiffOnCall = 2;
+    await act(async () => {
+      await props(openDialog1).onSubmit({ preventDefault() {} });
+    });
+    assert.equal(globalThis.location.hash, '#/accounting/invoices', 'Must not navigate when unsent-note commit fails');
+    const openDialog2 = find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+    assert.ok(openDialog2, 'Wizard must remain open after unsent-note commit failure');
+    assert.match(find(openDialog2, (n) => hasClass(n, 'alert')).textContent, /Database locked/);
+  } finally {
+    globalThis.fetch = () => Promise.reject(new Error('offline'));
+    await act(async () => root.unmount());
+    globalThis.setInterval = origSetInterval;
+    globalThis.localStorage = prevStorage;
+    await initStore();
+  }
+});
+
+test('INV-14: bulk Send retry skips already-emailed records and refuses retry on unrecorded-status errors', async () => {
+  let baseDb = cleanMovesDb();
+  const partner = create(baseDb, 'res.partner', { name: 'Bulk Retry Cust', email: 'retry@example.com' });
+  baseDb = partner.db;
+  const inv1 = create(baseDb, 'account.move', {
+    move_type: 'out_invoice', partner_id: partner.id, invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  baseDb = postMove(inv1.db, inv1.id);
+  const inv2 = create(baseDb, 'account.move', {
+    move_type: 'out_invoice', partner_id: partner.id, invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 200, tax: 0 }],
+  });
+  baseDb = postMove(inv2.db, inv2.id);
+
+  const prevStorage = globalThis.localStorage;
+  const mem = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, String(v)),
+    removeItem: (k) => mem.delete(k),
+    clear: () => mem.clear(),
+  };
+  const { makeEl } = setupDom();
+  globalThis.document.createElementNS ??= (_, tag) => makeEl(tag);
+  const origSetInterval = globalThis.setInterval;
+  globalThis.setInterval = () => ({ unref() {} });
+  globalThis.confirm = () => true;
+  globalThis.alert = () => {};
+  globalThis.location = { hash: '#/accounting/invoices' };
+
+  const React = (await import('react')).default;
+  const { act } = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, getDb } = await import('./store.js');
+  const { ActionView } = await import('./views/ActionView.jsx');
+  const { write } = await import('./orm.js');
+
+  let serverDb = baseDb;
+  const mailAttempted = [];
+  let failModeById = { [inv2.id]: 'smtp' };
+
+  globalThis.fetch = async (url, init) => {
+    if (url === '/api/session') {
+      return new Response(JSON.stringify({ name: 'Admin', isAdmin: true, integrations: { smtp: true } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/db') {
+      return new Response(JSON.stringify(serverDb), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/diff') {
+      return new Response(JSON.stringify(serverDb), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/mail/document') {
+      const body = JSON.parse(init.body);
+      mailAttempted.push(body.id);
+      const failMode = failModeById[body.id];
+      if (failMode === 'smtp') {
+        return new Response(JSON.stringify({ error: 'SMTP delivery failed' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (failMode === 'recording') {
+        return new Response(JSON.stringify({ error: 'The email was sent, but its status could not be recorded: access denied' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      serverDb = write(serverDb, 'account.move', body.id, { is_move_sent: true });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await act(async () => { await initStore(); });
+    await act(async () => {
+      root.render(React.createElement(ActionView, { leaf: leafFor('Customers', 'invoices'), base: '#/accounting/invoices', params: new URLSearchParams('view=list') }));
+    });
+
+    const checkboxes = () => allFind(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox');
+    await act(async () => props(checkboxes()[1]).onChange());
+    await act(async () => props(checkboxes()[2]).onChange());
+    const sendBtn = allFind(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.trim() === 'Send');
+    await actClick(act, sendBtn);
+    const dlCheckbox = find(host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'w-download');
+    await act(async () => props(dlCheckbox).onChange({ target: { checked: true } }));
+
+    // First submit: inv1 succeeds, inv2 fails with SMTP error
+    await act(async () => {
+      const form = find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+      await props(form).onSubmit({ preventDefault() {} });
+    });
+    assert.deepEqual(mailAttempted, [inv1.id, inv2.id]);
+    assert.equal(read(getDb(), 'account.move', inv1.id).is_move_sent, true);
+    assert.equal(read(getDb(), 'account.move', inv2.id).is_move_sent, false);
+    assert.equal(globalThis.location.hash, '#/accounting/invoices');
+    const retryDialog = find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+    assert.ok(retryDialog, 'Wizard stays open for retryable failure');
+    assert.match(find(retryDialog, (n) => hasClass(n, 'alert')).textContent, /SMTP delivery failed/);
+
+    // Retry: only inv2 should be emailed, inv1 must NOT be emailed a second time
+    failModeById = {};
+    await act(async () => {
+      await props(retryDialog).onSubmit({ preventDefault() {} });
+    });
+    assert.deepEqual(mailAttempted, [inv1.id, inv2.id, inv2.id], 'Retry must only email pending inv2, not inv1');
+    assert.equal(read(getDb(), 'account.move', inv2.id).is_move_sent, true);
+    assert.equal(find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard')), null);
+    assert.equal(globalThis.location.hash, `#/print/account.move/${inv1.id},${inv2.id}`);
+
+    // Unrecorded status error must close the wizard (not retryable) and stop print navigation
+    mailAttempted.length = 0;
+    failModeById = { [inv2.id]: 'recording' };
+    globalThis.location.hash = '#/accounting/invoices';
+    await act(async () => props(checkboxes()[1]).onChange());
+    await act(async () => props(checkboxes()[2]).onChange());
+    await actClick(act, allFind(host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.trim() === 'Send'));
+    const dlCheckbox2 = find(host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'w-download');
+    await act(async () => props(dlCheckbox2).onChange({ target: { checked: true } }));
+    await act(async () => {
+      const form = find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+      await props(form).onSubmit({ preventDefault() {} });
+    });
+    assert.equal(find(host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard')), null, 'Wizard must close on non-retryable status-recording failure');
+    assert.equal(globalThis.location.hash, '#/accounting/invoices', 'Must not navigate to print on status-recording failure');
+    assert.match(find(host, (n) => hasClass(n, 'alert')).textContent, /status could not be recorded/);
+  } finally {
+    globalThis.fetch = () => Promise.reject(new Error('offline'));
+    await act(async () => root.unmount());
+    globalThis.setInterval = origSetInterval;
+    globalThis.localStorage = prevStorage;
+    await initStore();
+  }
+});
+
+test('INV-14: PrintDoc errors without auto-printing when batch has missing moves and adds batch page-break class', async () => {
+  const { readFileSync } = await import('node:fs');
+  let db = cleanMovesDb();
+  const partner = create(db, 'res.partner', { name: 'Print Cust', email: 'print@example.com' });
+  db = partner.db;
+  const inv1 = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: partner.id, invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(inv1.db, inv1.id);
+  const inv2 = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: partner.id, invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 200, tax: 0 }],
+  });
+  db = postMove(inv2.db, inv2.id);
+
+  const { makeEl } = setupDom();
+  globalThis.document.createElementNS ??= (_, tag) => makeEl(tag);
+  const React = (await import('react')).default;
+  const { act } = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+  await initStore();
+  await commit(db);
+
+  let printCalls = 0;
+  const prevPrint = globalThis.window.print;
+  globalThis.window.print = () => { printCalls++; };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await act(async () => {
+      root.render(React.createElement(PrintDoc, { model: 'account.move', id: `${inv1.id},999999` }));
+    });
+    await new Promise((r) => setTimeout(r, 350));
+    assert.equal(printCalls, 0, 'Must not auto-print when any batch move is missing');
+    assert.equal(allFind(host, (n) => n.tagName === 'ARTICLE' && hasClass(n, 'paper')).length, 0);
+    const alertEl = find(host, (n) => props(n)?.role === 'alert');
+    assert.ok(alertEl, 'Must render an alert when a move in the batch is missing');
+    assert.match(alertEl.textContent, /#999999/);
+
+    await act(async () => {
+      root.render(React.createElement(PrintDoc, { model: 'account.move', id: `${inv1.id},${inv2.id}` }));
+    });
+    const papers = allFind(host, (n) => n.tagName === 'ARTICLE' && hasClass(n, 'paper'));
+    assert.equal(papers.length, 2);
+    assert.ok(papers.every((p) => hasClass(p, 'paper-doc')), 'DocumentPaper articles carry paper-doc class');
+  } finally {
+    globalThis.window.print = prevPrint;
+    await act(async () => root.unmount());
+  }
+
+  const css = readFileSync(new URL('./views.css', import.meta.url), 'utf8');
+  assert.match(css, /@media print[\s\S]*?\.paper\.paper-doc:not\(:last-child\)\s*\{\s*break-after:\s*page;/);
+});
+
+test('INV-14: App updates comma-separated batch print route when mizan:remapped fires', async () => {
+  setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore } = await import('./store.js');
+  const { App } = await import('./App.jsx');
+  await initStore();
+  globalThis.location.hash = '#/print/account.move/1001,1002?report=proforma';
+  const host = globalThis.document.createElement('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(App)));
+    await React.act(async () => {
+      globalThis.window.dispatchEvent(new globalThis.CustomEvent('mizan:remapped', {
+        detail: { 'account.move': { 1001: 55 } },
+      }));
+    });
+    assert.equal(globalThis.location.hash, '#/print/account.move/55,1002?report=proforma');
+
+    await React.act(async () => {
+      globalThis.window.dispatchEvent(new globalThis.CustomEvent('mizan:remapped', {
+        detail: { 'account.move': { 1002: 56 } },
+      }));
+    });
+    assert.equal(globalThis.location.hash, '#/print/account.move/55,56?report=proforma');
+  } finally {
+    await React.act(async () => root.unmount());
   }
 });

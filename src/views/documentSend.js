@@ -28,3 +28,22 @@ export function confirmUnconfiguredSend(channel) {
 export function postUnsentNote(db, model, id, channel) {
   return postNote(db, model, id, t('Not sent: {channel} is not configured.', { channel: t(channel) }));
 }
+
+const STATUS_NOT_RECORDED_PREFIX = 'The email was sent, but its status could not be recorded: ';
+
+/**
+ * Classify a document-send failure: delivered emails whose status could not be recorded are
+ * non-retryable and formatted with their translated reason.
+ */
+export function classifySendError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (message.startsWith(STATUS_NOT_RECORDED_PREFIX)) {
+    return {
+      retryable: false,
+      message: t('The email was sent, but its status could not be recorded: {reason}', {
+        reason: t(message.slice(STATUS_NOT_RECORDED_PREFIX.length)),
+      }),
+    };
+  }
+  return { retryable: true, message: t(message) };
+}

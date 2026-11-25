@@ -59,9 +59,27 @@ export function App() {
     const follow = (e) => {
       const { app: appId, menu, id, query } = parseHash();
       const model = appId === 'print' ? menu : apps.find((a) => a.id === appId) && findLeaf(apps.find((a) => a.id === appId), menu)?.model;
-      const moved = model && (e.detail[model]?.[Number(id)] ?? e.detail[model]?.[id]);
-      if (moved) {
-        const next = `#/${appId}/${menu}/${moved}${query ? `?${query}` : ''}`;
+      const map = model && e.detail?.[model];
+      if (!map || !id) return;
+      let nextId = null;
+      if (appId === 'print' && id.includes(',')) {
+        let changed = false;
+        const remappedIds = id.split(',').map((part) => {
+          const trimmed = part.trim();
+          const mapped = map[Number(trimmed)] ?? map[trimmed];
+          if (mapped != null && String(mapped) !== trimmed) {
+            changed = true;
+            return String(mapped);
+          }
+          return trimmed;
+        });
+        if (changed) nextId = remappedIds.join(',');
+      } else {
+        const moved = map[Number(id)] ?? map[id];
+        if (moved != null) nextId = String(moved);
+      }
+      if (nextId != null) {
+        const next = `#/${appId}/${menu}/${nextId}${query ? `?${query}` : ''}`;
         if (typeof location.replace === 'function') location.replace(next);
         else location.hash = next;
       }
