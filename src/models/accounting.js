@@ -3512,7 +3512,9 @@ export const accountingModels = {
     }),
     prepareCreate: (db, vals) => {
       let nextVals = { ...vals };
-      const forcedCurrency = journalForcedCurrencyId(db, vals);
+      // createDefaults gives liquidity journals the active company only after this hook runs.
+      const company_id = vals.company_id === undefined && isLiquidityJournal(vals) ? currentCompany(db) : vals.company_id;
+      const forcedCurrency = journalForcedCurrencyId(db, { ...vals, company_id });
       if (isLiquidityJournal(vals) && vals.default_account_id && forcedCurrency) {
         db = syncLiquidityAccountCurrency(db, vals.default_account_id, forcedCurrency);
       }

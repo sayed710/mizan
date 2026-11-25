@@ -702,3 +702,17 @@ test('Archiving and unarchiving a foreign-currency bank journal with an unrestri
 });
 
 
+
+test('JRN-3: a foreign-currency bank journal created without company_id uses the active company currency', () => {
+  let db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const usd = read(db, 'res.company', 1).currency_id;
+  const company2 = create(db, 'res.company', { name: 'Euro Co', currency_id: eur.id });
+  db = { ...company2.db, settings: { ...company2.db.settings, current_company_id: company2.id } };
+  const account = create(db, 'account.account', { name: 'USD bank', code: '199997', account_type: 'asset_cash', company_id: company2.id });
+  db = account.db;
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const journal = create(db, 'account.journal', { name: 'USD Bank', code: 'USDB', type: 'bank', default_account_id: account.id, suspense_account_id: bank.suspense_account_id, currency_id: usd });
+  assert.equal(read(journal.db, 'account.journal', journal.id).company_id, company2.id);
+  assert.equal(read(journal.db, 'account.account', account.id).currency_id, usd);
+});
