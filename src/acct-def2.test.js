@@ -268,6 +268,7 @@ test('DEF-1: Arabic i18n translates confirmation dialog strings non-identically 
       'Period End Date',
       'Confirm',
       'Cancel',
+      'Saving...',
       'Grouped deferral generation requires a company configured for grouped posting',
       'Grouped recognition entries and their next-day reversals will be generated for this date.',
       'Configure an active deferred revenue journal on the company',
@@ -281,5 +282,217 @@ test('DEF-1: Arabic i18n translates confirmation dialog strings non-identically 
     }
   } finally {
     globalThis.localStorage = prevStorage;
+  }
+});
+
+test('DEF-1: Wizard blocks repeat submit, dismissal, and field edits while async confirmation is pending', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { Wizard } = await import('./views/Wizard.jsx');
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  const spec = {
+    title: 'Generate Entries',
+    fields: [{ name: 'date', type: 'date', label: 'Period End Date', required: true, default: '2026-01-31' }],
+  };
+
+  let confirmCalls = 0;
+  let cancelCalls = 0;
+  let resolveConfirm;
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(Wizard, {
+        db: setupDeferredFixture(),
+        spec,
+        onConfirm: () => {
+          confirmCalls += 1;
+          return new Promise((resolve) => { resolveConfirm = resolve; });
+        },
+        onCancel: () => { cancelCalls += 1; },
+      }));
+    });
+
+    const form = find(host, (n) => n.tagName === 'FORM');
+    const backdrop = find(host, (n) => reactProps(n)?.className === 'wizard-backdrop');
+    assert.ok(form && backdrop);
+
+    // Start async confirmation (do not resolve yet).
+    await React.act(async () => {
+      reactProps(form).onSubmit({ preventDefault: () => {} });
+    });
+    assert.equal(confirmCalls, 1, 'Initial confirm runs once');
+
+    const submitBtn = find(form, (n) => n.tagName === 'BUTTON' && reactProps(n)?.type === 'submit');
+    const cancelBtn = find(form, (n) => n.tagName === 'BUTTON' && reactProps(n)?.type === 'button');
+    const dateInput = find(form, (n) => n.tagName === 'INPUT');
+    assert.equal(reactProps(form)['aria-busy'], true, 'Dialog marks aria-busy while saving');
+    assert.equal(reactProps(submitBtn).disabled, true, 'Submit button disabled while saving');
+    assert.equal(textOf(submitBtn), 'Saving...', 'Submit button shows saving state');
+    assert.equal(reactProps(cancelBtn).disabled, true, 'Cancel button disabled while saving');
+    assert.equal(reactProps(dateInput).disabled, true, 'Fields disabled while saving');
+
+    // Repeat submission, Cancel click, Escape key, and backdrop mousedown must all be ignored while saving.
+    await React.act(async () => {
+      reactProps(form).onSubmit({ preventDefault: () => {} });
+      reactProps(cancelBtn).onClick();
+      reactProps(form).onKeyDown({ key: 'Escape', stopPropagation: () => {} });
+      reactProps(backdrop).onMouseDown({ target: backdrop, currentTarget: backdrop });
+    });
+    assert.equal(confirmCalls, 1, 'Repeat submit must not trigger another confirmation while pending');
+    assert.equal(cancelCalls, 0, 'Cancel, Escape, and backdrop must not dismiss while pending');
+
+    // Once the confirmation promise settles, controls re-enable and Cancel works again.
+    await React.act(async () => {
+      resolveConfirm();
+    });
+    assert.equal(reactProps(submitBtn).disabled, false, 'Submit button re-enables after pending confirmation settles');
+    assert.equal(textOf(submitBtn), 'Confirm');
+    assert.equal(reactProps(cancelBtn).disabled, false, 'Cancel button re-enables after pending confirmation settles');
+
+    await React.act(async () => {
+      reactProps(cancelBtn).onClick();
+    });
+    assert.equal(cancelCalls, 1, 'Cancel works again once save is no longer pending');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('DEF-1: pending server save in Generate Entries blocks dismissal and stale responses never affect a replacement wizard', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore } = await import('./store.js');
+  const { Reports } = await import('./views/Reports.jsx');
+
+  const initialDb = setupDeferredFixture();
+  const origFetch = globalThis.fetch;
+  const origLocation = globalThis.location;
+  const origSetInterval = globalThis.setInterval;
+  globalThis.setInterval = () => 0;
+  globalThis.location = { hash: '#/accounting/deferred-revenue-report' };
+
+  let serverDb = initialDb;
+  const diffRequests = [];
+  globalThis.fetch = async (url, opts) => {
+    if (url === '/api/session') {
+      return new Response(JSON.stringify({ name: 'Admin', isAdmin: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/db') {
+      return new Response(JSON.stringify(serverDb), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === '/api/diff') {
+      return new Promise((resolve) => {
+        diffRequests.push({ body: JSON.parse(opts.body), resolve });
+      });
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      await initStore();
+    });
+    await React.act(async () => {
+      root.render(React.createElement(Reports, { leaf: { report: 'deferredRevenue' } }));
+    });
+
+    // Open wizard 1 and submit it; /api/diff stays pending.
+    const generateBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Generate Entries');
+    await React.act(async () => {
+      reactProps(generateBtn).onClick();
+    });
+    const dialog1 = find(host, (n) => reactProps(n)?.role === 'dialog');
+    const backdrop1 = find(host, (n) => reactProps(n)?.className === 'wizard-backdrop');
+    assert.ok(dialog1 && backdrop1);
+
+    await React.act(async () => {
+      reactProps(dialog1).onSubmit({ preventDefault: () => {} });
+    });
+    assert.equal(diffRequests.length, 1, 'One server save is in flight');
+
+    // While server save is pending, Cancel / Escape / backdrop / repeat submit must neither dismiss nor post again.
+    const submitBtn1 = find(dialog1, (n) => n.tagName === 'BUTTON' && reactProps(n)?.type === 'submit');
+    const cancelBtn1 = find(dialog1, (n) => n.tagName === 'BUTTON' && reactProps(n)?.type === 'button');
+    assert.equal(reactProps(submitBtn1).disabled, true);
+    assert.equal(textOf(submitBtn1), 'Saving...');
+    assert.equal(reactProps(cancelBtn1).disabled, true);
+
+    await React.act(async () => {
+      reactProps(dialog1).onSubmit({ preventDefault: () => {} });
+      reactProps(cancelBtn1).onClick();
+      reactProps(dialog1).onKeyDown({ key: 'Escape', stopPropagation: () => {} });
+      reactProps(backdrop1).onMouseDown({ target: backdrop1, currentTarget: backdrop1 });
+    });
+    assert.equal(diffRequests.length, 1, 'Repeat submit blocked while pending');
+    assert.ok(find(host, (n) => reactProps(n)?.role === 'dialog'), 'Dialog must remain open while save is pending');
+
+    // Switch context period so activeGenerateWizard changes, then open a replacement wizard (wizard 2).
+    const periodSelect = find(host, (n) => n.tagName === 'SELECT' && reactProps(n)?.value === 'year');
+    await React.act(async () => {
+      reactProps(periodSelect).onChange({ target: { value: 'month' } });
+    });
+    const generateBtn2 = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Generate Entries');
+    await React.act(async () => {
+      reactProps(generateBtn2).onClick();
+    });
+    const dialog2 = find(host, (n) => reactProps(n)?.role === 'dialog');
+    assert.ok(dialog2, 'Replacement wizard opened in new period context');
+
+    // Stale error response from wizard 1 must NOT appear inside wizard 2.
+    await React.act(async () => {
+      diffRequests[0].resolve(new Response(JSON.stringify({ error: 'Stale wizard 1 failure', db: serverDb }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+    const dialog2AfterErr = find(host, (n) => reactProps(n)?.role === 'dialog');
+    assert.ok(dialog2AfterErr, 'Replacement wizard stays open after stale error');
+    assert.equal(find(dialog2AfterErr, (n) => reactProps(n)?.role === 'alert'), null, 'Stale error must not populate replacement wizard');
+
+    // Repeat the isolation check for a stale SUCCESS response: start save in 'month', switch to 'custom', open wizard 3, resolve wizard 2 with 200 OK.
+    await React.act(async () => {
+      reactProps(dialog2AfterErr).onSubmit({ preventDefault: () => {} });
+    });
+    assert.equal(diffRequests.length, 2, 'Wizard 2 started its own server save');
+
+    await React.act(async () => {
+      reactProps(periodSelect).onChange({ target: { value: 'custom' } });
+    });
+    const generateBtn3 = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Generate Entries');
+    await React.act(async () => {
+      reactProps(generateBtn3).onClick();
+    });
+    const dialog3 = find(host, (n) => reactProps(n)?.role === 'dialog');
+    assert.ok(dialog3, 'Wizard 3 opened in custom period context');
+
+    const savedDb = applyDiff(serverDb, diffRequests[1].body, { isAdmin: true, author: 'Admin' });
+    serverDb = savedDb;
+    await React.act(async () => {
+      diffRequests[1].resolve(new Response(JSON.stringify(savedDb), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+    const dialog3AfterOk = find(host, (n) => reactProps(n)?.role === 'dialog');
+    assert.ok(dialog3AfterOk, 'Stale success response from wizard 2 must NOT close replacement wizard 3');
+  } finally {
+    await React.act(async () => root.unmount());
+    globalThis.fetch = origFetch;
+    globalThis.location = origLocation;
+    globalThis.setInterval = origSetInterval;
   }
 });
