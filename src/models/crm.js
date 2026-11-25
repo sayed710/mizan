@@ -1,4 +1,4 @@
-import { create, getActiveCompany, read, search, write, writeMany } from '../orm.js';
+import { create, getActiveCompany, read, write, writeMany } from '../orm.js';
 import { commercialPartnerId, today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
 import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
