@@ -911,13 +911,18 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     growth += json(numbered.records[model].find((r) => r.id === id)) - json(records[model].find((r) => r.id === id));
   }
   records = numbered.records;
-  const finalRecords = Object.fromEntries(Object.entries(records).map(([model, rows]) => [model, rows.filter((row) => !(d.deletes?.[model] ?? []).includes(row.id))]));
+  const allDeletes = Object.fromEntries(
+    Object.entries(d.deletes ?? {}).map(([m, ids]) => [m, new Set(Array.isArray(ids) ? ids : [])])
+  );
+  const stagedRecords = Object.fromEntries(
+    Object.entries(records).map(([m, recs]) => [m, recs.filter((r) => !allDeletes[m]?.has(r.id))])
+  );
   for (const [model, ids] of Object.entries(d.deletes ?? {})) {
     check(model);
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records }, { ...baseCtx, finalRecords })).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records: stagedRecords }, { ...baseCtx, finalRecords: stagedRecords })).find(Boolean);
     if (blocked) throw new Error(blocked);
     const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
     if (unauthorized) throw new Error(unauthorized);

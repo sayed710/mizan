@@ -122,7 +122,7 @@ test('ANI-3 migration resolves exact company codes and reports unmatched or ambi
   ];
   const old = { ...base, schema_version: 67, records: { ...base.records, 'account.account': [...base.records['account.account'], ...accounts], [model]: lines } };
   const db = migrate(old);
-  assert.equal(SCHEMA_VERSION, 73);
+  assert.equal(SCHEMA_VERSION, 74);
   assert.deepEqual(db.records[model].map((r) => r.general_account), [7001, 7002, null, null]);
   assert.deepEqual(db.records[model].slice(2).map((r) => r.legacy_general_account), ['UNKNOWN', 'DUP']);
   assert.equal(db.messages.filter((m) => m.model === model && [8003, 8004].includes(m.res_id)).length, 2);

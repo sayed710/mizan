@@ -19,7 +19,7 @@ test('payment terms reject an incomplete percentage split', () => {
 });
 
 test('mandatory analytic plan requires full allocation', () => {
-  const db = { records: { 'account.analytic.plan': [{ id: 1, name: 'Project', default_applicability: 'mandatory' }], 'account.analytic.account': [{ id: 1, plan_id: 1 }] } };
+  const db = { records: { 'res.company': [{ id: 1, group_analytic_accounting: true }], 'account.analytic.plan': [{ id: 1, name: 'Project', default_applicability: 'mandatory' }], 'account.analytic.account': [{ id: 1, plan_id: 1 }] } };
   assert.throws(() => checkMandatoryPlans(db, { move_type: 'entry', line_ids: [{ analytic_distribution: { 1: 1 } }] }), /mandatory/i);
 });
 

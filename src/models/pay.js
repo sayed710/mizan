@@ -5,7 +5,7 @@ import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, i
 import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payWithDiscount, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
-import { checkPaymentCurrency, companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
+import { checkPaymentCurrency, companyCurrencyRecord, documentCurrency, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
@@ -1260,6 +1260,7 @@ function undoPaymentToState(db, paymentOrId, targetState, ctx = null) {
     move_id: null,
     destination_move_id: null,
     unapplied: 0,
+    is_sent: false,
   });
   if (paired && paired.state !== targetState) {
     next = write(next, 'account.payment', paired.id, {
@@ -1267,6 +1268,7 @@ function undoPaymentToState(db, paymentOrId, targetState, ctx = null) {
       move_id: null,
       destination_move_id: null,
       unapplied: 0,
+      is_sent: false,
     });
   }
 
@@ -1299,7 +1301,7 @@ export function cancelPayment(db, paymentOrId, ctx = null) {
   const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
   if (!payment) throw new Error('Payment not found');
   if (payment.state === 'draft') {
-    return write(db, 'account.payment', payment.id, { state: 'cancel' });
+    return write(db, 'account.payment', payment.id, { state: 'cancel', is_sent: false });
   }
   if (payment.state === 'posted' && !isPaymentMatched(db, payment) && payment.is_sent) {
     return undoPaymentToState(db, payment, 'cancel', ctx);
@@ -1310,13 +1312,22 @@ export function cancelPayment(db, paymentOrId, ctx = null) {
 /** True when `payment` is in Odoo's paid (not bank-matched) state. */
 const isPaidUnmatched = (db, payment) => Boolean(payment && payment.state === 'posted' && !(db && isPaymentMatched(db, payment)));
 
+/** Propagate `is_sent` onto a paired manual internal-transfer payment when eligible. */
+function syncPairedSentFlag(db, payment, sent) {
+  if (!payment?.paired_internal_transfer_payment_id) return db;
+  const paired = read(db, 'account.payment', payment.paired_internal_transfer_payment_id);
+  if (!paired || Boolean(paired.is_sent) === sent) return db;
+  if (!isPaidUnmatched(db, paired) || paymentMethodCode(db, paired) !== 'manual') return db;
+  return write(db, 'account.payment', paired.id, { is_sent: sent });
+}
+
 /** Mark a manual, paid, unreconciled payment as sent (Odoo 20 `mark_as_sent`). */
 export function markAsSent(db, paymentOrId) {
   const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
   if (!isPaidUnmatched(db, payment)) throw new Error('Only paid, unreconciled payments can be marked as sent');
   if (paymentMethodCode(db, payment) !== 'manual') throw new Error('Only manual payments can be marked as sent');
-  if (payment.is_sent) return db;
-  return write(db, 'account.payment', payment.id, { is_sent: true });
+  let next = payment.is_sent ? db : write(db, 'account.payment', payment.id, { is_sent: true });
+  return syncPairedSentFlag(next, payment, true);
 }
 
 /** Unmark a manual, paid, unreconciled payment as sent (Odoo 20 `unmark_as_sent`). */
@@ -1324,8 +1335,8 @@ export function unmarkAsSent(db, paymentOrId) {
   const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
   if (!isPaidUnmatched(db, payment)) throw new Error('Only paid, unreconciled payments can be unmarked as sent');
   if (paymentMethodCode(db, payment) !== 'manual') throw new Error('Only manual payments can be unmarked as sent');
-  if (!payment.is_sent) return db;
-  return write(db, 'account.payment', payment.id, { is_sent: false });
+  let next = !payment.is_sent ? db : write(db, 'account.payment', payment.id, { is_sent: false });
+  return syncPairedSentFlag(next, payment, false);
 }
 
 /** Reject a sent, paid, unreconciled payment (Odoo 20 `action_reject`). */
@@ -1662,6 +1673,9 @@ export function printPaymentReceipts(db, ids) {
   const uniqueIds = [...new Set(ids)];
   const payments = uniqueIds.map((id) => read(db, 'account.payment', id)).filter(Boolean);
   if (payments.length !== uniqueIds.length) throw new Error('Payment not found');
+  if (payments.some((p) => p.state !== 'posted')) {
+    throw new Error('Payment receipts can only be printed for posted payments.');
+  }
   return { db, go: `#/print/account.payment/${uniqueIds.join(',')}?report=receipt` };
 }
 
@@ -1725,14 +1739,18 @@ export function isPaymentReconciled(db, payment) {
     return isReconcilableAccount(account);
   });
   if (!reconcileLines.length) return true;
-  const curr = documentCurrency(db, payment) ?? companyCurrencyRecord(db, payment.company_id);
-  const isCompanyCurr = !curr || curr.id === companyCurrencyRecord(db, payment.company_id)?.id;
-  const totalResidual = reconcileLines.reduce(
-    (sum, line) => sum + (Number(isCompanyCurr ? line.amount_residual : (line.amount_residual_currency ?? line.amount_residual)) || 0),
-    0,
-  );
-  const step = Number(curr?.rounding ?? 0.01);
-  return Math.abs(totalResidual) < step / 2;
+  const companyCurr = companyCurrencyRecord(db, payment.company_id);
+  const curr = documentCurrency(db, payment) ?? companyCurr;
+  const isCompanyCurr = !curr || curr.id === companyCurr?.id;
+  return reconcileLines.every((line) => {
+    if (line.reconciled) return true;
+    const rawResidual = isCompanyCurr ? line.amount_residual : (line.amount_residual_currency ?? line.amount_residual);
+    if (rawResidual == null) return false;
+    const lineCurr = isCompanyCurr
+      ? companyCurr
+      : ((line.currency_id ? read(db, 'res.currency', line.currency_id) : null) ?? curr);
+    return isCurrencyZero(Number(rawResidual), lineCurr);
+  });
 }
 
 /** Odoo 20 `_compute_payment_receipt_title`: Payment Receipt, Remittance Advice, or Refund Confirmation. */
@@ -1773,12 +1791,19 @@ export function paymentReceiptData(db, payment) {
       const amountInvoice = Number(row.amount) || 0;
       let amountPayment = amountInvoice;
       if (payCurr && invCurr && payCurr.id !== invCurr.id) {
-        const companyAmt = row.payment_company_amount != null
-          ? Number(row.payment_company_amount)
-          : toCompany(db, invCurr.id, amountInvoice, row.date ?? inv.invoice_date, inv.company_id);
-        amountPayment = payCurr.id === companyCurr?.id
-          ? roundCurrency(companyAmt, payCurr)
-          : roundCurrency(companyAmt * rateAt(db, payCurr.id, row.date ?? inv.invoice_date, inv.company_id), payCurr);
+        const convDate = row.date ?? inv.invoice_date;
+        const knownCompanyAmount = row.payment_company_amount != null;
+        const invoiceToCompany = knownCompanyAmount ? 1 : conversionRate(db, invCurr.id, companyCurr.id, convDate, inv.company_id);
+        const companyToPayment = conversionRate(db, companyCurr.id, payCurr.id, convDate, inv.company_id);
+        // Without a rate on the settlement date the receipt leaves "Amount In Currency" empty.
+        if (invoiceToCompany == null || companyToPayment == null) {
+          amountPayment = null;
+        } else {
+          const companyAmt = knownCompanyAmount
+            ? Number(row.payment_company_amount)
+            : roundCurrency(amountInvoice * invoiceToCompany, companyCurr);
+          amountPayment = roundCurrency(companyAmt * companyToPayment, payCurr);
+        }
       }
       return {
         date: row.date,
@@ -2055,7 +2080,11 @@ export const payModels = {
         }
       }
       if (before && after.state === 'rejected' && before.state !== 'rejected') {
-        if (before.state !== 'posted' || !before.is_sent || isPaymentMatched(db, before)) {
+        const pairedSentOrRejected = Boolean(before.paired_internal_transfer_payment_id && (() => {
+          const paired = read(db, 'account.payment', before.paired_internal_transfer_payment_id);
+          return paired && (paired.is_sent || paired.state === 'rejected');
+        })());
+        if (before.state !== 'posted' || (!before.is_sent && !pairedSentOrRejected) || isPaymentMatched(db, before)) {
           return 'Only sent, paid, unreconciled payments can be rejected';
         }
       }
@@ -2176,13 +2205,12 @@ export const payModels = {
         label: 'Status',
         options: DISPLAY_STATES,
         badge: { draft: 'info', posted: 'warning', reconciled: 'success', cancel: 'muted', reversed: 'muted', rejected: 'muted' },
-        badgeFor: (r, db) => (r.state === 'posted' && db && isPaymentReconciled(db, r) ? 'success' : null),
         compute: (r, db) => (r.state === 'posted' && db && isPaymentMatched(db, r) ? 'reconciled' : r.state),
       },
     },
     defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0, is_internal_transfer: false, check_printed: false, is_sent: false }),
     menuActions: [
-      { label: 'Payment Receipt', when: (r) => Boolean(r?.id), run: (db, r) => ({ db, go: `#/print/account.payment/${r.id}?report=receipt` }) },
+      { label: 'Payment Receipt', when: (r) => Boolean(r?.id && r.state === 'posted'), run: (db, r) => printPaymentReceipts(db, [r.id]) },
     ],
     createDefaults: (db, vals = {}) => {
       const companyId = vals.company_id ?? getActiveCompany() ?? currentCompany(db);

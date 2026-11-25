@@ -352,7 +352,7 @@ function PaymentReceipt({ db, payment }) {
                     <td>{row.ref || ''}</td>
                     {data.otherCurrency && (
                       <td className="num">
-                        {row.currencyPayment && currency && row.currencyPayment.id !== currency.id
+                        {row.amountPayment != null && row.currencyPayment && currency && row.currencyPayment.id !== currency.id
                           ? formatCurrency(row.amountPayment, row.currencyPayment)
                           : ''}
                       </td>
@@ -387,14 +387,24 @@ export function PrintDoc({ model, id, proforma = false, report = null }) {
   const multiPayments = model === 'account.payment' && rawIds.length > 1
     ? rawIds.map((pid) => read(db, 'account.payment', pid)).filter((p) => p && p.state === 'posted' && p.payment_type === 'outbound' && p.check_number != null)
     : null;
+  const receiptIds = model === 'account.payment' ? (rawIds.length ? rawIds : [Number(id)].filter((n) => Number.isFinite(n) && n > 0)) : [];
+  const receiptPayments = receiptIds.map((pid) => read(db, 'account.payment', pid));
+  const isCheckPrint = model === 'account.payment' && report !== 'receipt' && (
+    Boolean(multiPayments?.length)
+    || Boolean(rec && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null)
+  );
+  const isBlockedPaymentReceipt = model === 'account.payment' && !isCheckPrint && (
+    !receiptPayments.length
+    || receiptPayments.some((p) => !p || p.state !== 'posted')
+  );
   const recId = multiPayments?.length ? multiPayments[0].id : rec?.id;
   const isProformaInvoice = model === 'account.move' && isProformaMove(rec, proforma);
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
-    if (!recId || isDraftInboundBatch) return undefined;
+    if (!recId || isDraftInboundBatch || isBlockedPaymentReceipt) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
-  }, [recId, isDraftInboundBatch]);
+  }, [recId, isDraftInboundBatch, isBlockedPaymentReceipt]);
   if (rec && model === 'account.batch.payment') {
     if (rec.batch_type === 'inbound') {
       if (rec.state !== 'posted') {
@@ -420,10 +430,14 @@ export function PrintDoc({ model, id, proforma = false, report = null }) {
         return <Checks db={db} batch={batch} />;
       }
     }
-    const receiptPayments = (rawIds.length ? rawIds : [Number(id)])
-      .map((pid) => read(db, 'account.payment', pid))
-      .filter(Boolean);
-    if (receiptPayments.length) {
+    if (receiptPayments.length && receiptPayments.every(Boolean)) {
+      if (receiptPayments.some((p) => p.state !== 'posted')) {
+        return (
+          <main className="action">
+            <p className="empty" role="alert">{t('Payment receipts can only be printed for posted payments.')}</p>
+          </main>
+        );
+      }
       return (
         <main className="print-page">
           <div className="no-print print-toolbar">
@@ -552,10 +566,12 @@ export function PrintDoc({ model, id, proforma = false, report = null }) {
           const note = invoiceTermNote(db, rec) && <p className="paper-note">{invoiceTermNote(db, rec)}</p>;
           if (!term?.display_on_invoice) return note;
           const currency = documentCurrency(db, rec);
+          const baseDate = validDate(rec.invoice_date) ? rec.invoice_date : today();
+          const canComputeInstallments = !termScheduleError(term, rec.amount_total, currency, baseDate) && !dueTermLinesError(term);
           const rows = rec.state === 'posted'
-            ? (invoiceInstallments(db, rec, term) ?? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency))
-            : rec.state === 'draft' && !termScheduleError(term, rec.amount_total, currency) && !dueTermLinesError(term)
-              ? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency)
+            ? (invoiceInstallments(db, rec, term) ?? (canComputeInstallments ? installments(term, rec.amount_total, baseDate, currency) : null))
+            : rec.state === 'draft' && canComputeInstallments
+              ? installments(term, rec.amount_total, baseDate, currency)
               : null;
           if (!rows?.length) return note;
           return <>{note}<table><thead><tr><th>{t('Due Date')}</th><th>{t('Amount')}</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><td>{formatDate(row.date)}</td><td className="num">{formatCurrency(row.amount, currency)}</td></tr>)}</tbody></table></>;

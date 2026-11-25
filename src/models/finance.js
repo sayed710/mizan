@@ -1650,12 +1650,13 @@ function ageDocumentInstallments(db, kind, at, moves, add) {
 function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   for (const payment of search(db, 'account.payment')) {
     if (companyId != null && (payment.company_id ?? 1) !== companyId) continue;
-    if (!payment.move_id || !['posted', 'reversed'].includes(payment.state) || payment.date > at) continue;
+    if (!payment.move_id || !['posted', 'reversed', 'rejected'].includes(payment.state) || payment.date > at) continue;
     if (payment.partner_type !== (kind === 'receivable' ? 'customer' : 'supplier')) continue;
     const sign = (kind === 'receivable' ? payment.payment_type === 'inbound' : payment.payment_type === 'outbound') ? -1 : 1;
     const reversal = moves.find((m) => m.state === 'posted' && m.reversed_entry_id === payment.move_id && m.move_type === 'entry');
     if (reversal && (reversal.date ?? reversal.invoice_date) <= at) continue;
     const entry = read(db, 'account.move', payment.move_id);
+    if (!entry || entry.state !== 'posted') continue;
     const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
     const bookedCredit = (entry?.line_ids ?? []).filter((l) => l.partner_id === payment.partner_id && read(db, 'account.account', l.account_id)?.account_type === accountType)
       .reduce((sum, l) => sum + (kind === 'receivable' ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0);

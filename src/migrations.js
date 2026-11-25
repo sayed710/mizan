@@ -2415,6 +2415,14 @@ MIGRATIONS.push({ version: 73, name: 'analytic-general-account-id', up: (db) => 
     `Upgrade: general account code ${code} could not be uniquely matched in the line company; select the account manually.`), next);
 } });
 
+MIGRATIONS.push({ version: 74, name: 'preserve-legacy-analytic-accounting', up: (db) => {
+  const companies = db.records?.['res.company'];
+  if (!Array.isArray(companies)) return db;
+  return { ...db, records: { ...db.records, 'res.company': companies.map((company) => (
+    company && company.group_analytic_accounting == null ? { ...company, group_analytic_accounting: true } : company
+  )) } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

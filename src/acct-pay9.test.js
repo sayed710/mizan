@@ -2,19 +2,22 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { applyFilters, create, read, search, write } from './orm.js';
+import { applyFilters, create, groupRecords, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { menusFor, models } from './models/index.js';
+import { models, menusFor } from './models/index.js';
 import { duplicateValues } from './duplicate.js';
 import { applyDiff, diffDb } from './sync.js';
 import { today } from './models/common.js';
 import { postMove, payMove } from './models/accounting.js';
+import { agedBalance } from './models/finance.js';
+import { partnerLedger } from './models/reports.js';
 import {
   cancelPayment,
   customerPaymentView,
   isPaymentReconciled,
   markAsSent,
   paymentMethodCode,
+  paymentReceiptData,
   paymentReceiptTitle,
   postPayment,
   printPaymentReceipts,
@@ -305,12 +308,14 @@ test('Payment Receipt print: form menuActions, listAction, titles, settled invoi
   const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
   db = write(db, 'res.currency', eur.id, { rate_ids: [{ date: '2026-01-01', rate: 0.5 }] });
 
-  // Form menuAction & listActions
+  // Form menuAction & listActions: Payment Receipt requires state === 'posted'
   const menuPrint = models['account.payment'].menuActions.find((a) => a.label === 'Payment Receipt');
   assert.ok(menuPrint, 'account.payment exposes Payment Receipt in form menuActions');
   assert.equal(menuPrint.when({}), false);
-  assert.equal(menuPrint.when({ id: 5 }), true);
-  assert.deepEqual(menuPrint.run(db, { id: 5 }), { db, go: '#/print/account.payment/5?report=receipt' });
+  assert.equal(menuPrint.when({ id: 5, state: 'draft' }), false);
+  assert.equal(menuPrint.when({ id: 5, state: 'cancel' }), false);
+  assert.equal(menuPrint.when({ id: 5, state: 'rejected' }), false);
+  assert.equal(menuPrint.when({ id: 5, state: 'posted' }), true);
 
   for (const target of [customerPaymentView, vendorPaymentView, models['account.payment']]) {
     const la = target.listActions.find((a) => a.label === 'Print Payment Receipt');
@@ -366,6 +371,35 @@ test('Payment Receipt print: form menuActions, listAction, titles, settled invoi
     db,
     go: `#/print/account.payment/${custPay.id},${vendPay.id}?report=receipt`,
   });
+  assert.deepEqual(menuPrint.run(db, custPay), {
+    db,
+    go: `#/print/account.payment/${custPay.id}?report=receipt`,
+  });
+
+  // Draft, cancelled, and mixed selections are rejected by printPaymentReceipts
+  const draftForPrint = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 45,
+    date: '2026-02-04',
+    journal_id: bank.id,
+    company_id: 1,
+  });
+  db = draftForPrint.db;
+  const cancRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 35,
+    date: '2026-02-04',
+    journal_id: bank.id,
+    company_id: 1,
+  });
+  db = cancelPayment(cancRes.db, cancRes.id);
+  assert.throws(() => printPaymentReceipts(db, [draftForPrint.id]), /posted payments/i);
+  assert.throws(() => printPaymentReceipts(db, [cancRes.id]), /posted payments/i);
+  assert.throws(() => printPaymentReceipts(db, [custPay.id, draftForPrint.id]), /posted payments/i);
 
   const { makeEl } = setupDom();
   const React = await import('react');
@@ -398,6 +432,19 @@ test('Payment Receipt print: form menuActions, listAction, titles, settled invoi
     assert.match(text2, new RegExp(`Remittance Advice: ${vendPay.name}`));
     assert.match(text2, /Vendor:/);
     assert.doesNotMatch(text2, /Check #777/);
+
+    // 3. Direct URL visit to draft, cancelled, or mixed receipt selection shows alert instead of printing
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: draftForPrint.id, report: 'receipt' })));
+    assert.equal(allFind(host, (n) => n.tagName === 'ARTICLE').length, 0);
+    assert.match(textOf(host), /posted payments/i);
+
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: `${custPay.id},${draftForPrint.id}`, report: 'receipt' })));
+    assert.equal(allFind(host, (n) => n.tagName === 'ARTICLE').length, 0);
+    assert.match(textOf(host), /posted payments/i);
+
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: `${custPay.id},999999`, report: 'receipt' })));
+    assert.equal(allFind(host, (n) => n.tagName === 'ARTICLE').length, 0);
+    assert.match(textOf(host), /Record not found/i);
   } finally {
     await React.act(async () => root.unmount());
   }
@@ -423,7 +470,7 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
   assert.equal(isPaymentReconciled(db, read(db, 'account.payment', pUnrec.id)), false);
   assert.equal(customerPaymentView.listDecoration(read(db, 'account.payment', pUnrec.id), db), 'warning');
 
-  // 2. Paid & invoice-reconciled -> is_reconciled true, NO warning row, badge-success
+  // 2. Paid & invoice-reconciled -> is_reconciled true, NO warning row; display_state & badge remain Paid (warning) until bank-matched
   const inv = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: partner.id,
@@ -434,7 +481,36 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
   db = payMove(db, inv.id, 65, d0, { journalId: bank.id });
   const pInvRec = db.records['account.payment'].at(-1);
   assert.equal(isPaymentReconciled(db, pInvRec), true);
+  assert.equal(read(db, 'account.payment', pInvRec.id).display_state, 'posted');
   assert.equal(customerPaymentView.listDecoration(pInvRec, db), null);
+
+  // 2b. Paid & bank-matched -> display_state 'reconciled' (Reconciled) + badge-success
+  const pMatchedRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 85,
+    date: d0,
+    journal_id: bank.id,
+    company_id: 1,
+  });
+  db = postPayment(pMatchedRes.db, read(pMatchedRes.db, 'account.payment', pMatchedRes.id));
+  const stmtMatch = create(db, 'account.bank.statement.line', {
+    journal_id: bank.id,
+    date: d0,
+    payment_ref: 'MATCH-BADGE',
+    partner_id: partner.id,
+    amount: 85,
+    payment_id: pMatchedRes.id,
+    company_id: 1,
+  });
+  db = models['account.bank.statement.line'].form.buttons.find((b) => b.label === 'Match Payment')
+    .run(stmtMatch.db, read(stmtMatch.db, 'account.bank.statement.line', stmtMatch.id)).db;
+  const pMatched = read(db, 'account.payment', pMatchedRes.id);
+  assert.equal(pMatched.display_state, 'reconciled');
+  const byDisplayState = groupRecords(db, 'account.payment', [read(db, 'account.payment', pInvRec.id), pMatched], 'display_state');
+  assert.deepEqual(byDisplayState.find((g) => g.key === 'posted')?.records.map((r) => r.id), [pInvRec.id]);
+  assert.deepEqual(byDisplayState.find((g) => g.key === 'reconciled')?.records.map((r) => r.id), [pMatched.id]);
 
   // 3. Rejected payment -> no warning row
   const pRej = create(db, 'account.payment', {
@@ -472,11 +548,17 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
     const rowFor = (name) => rows.find((tr) => textOf(tr).includes(name));
     const unrecRow = rowFor(read(db, 'account.payment', pUnrec.id).name);
     const invRecRow = rowFor(pInvRec.name);
+    const matchedRow = rowFor(pMatched.name);
     const rejRow = rowFor(read(db, 'account.payment', pRej.id).name);
     assert.ok(hasClass(unrecRow, 'warning'), 'paid unreconciled row has warning class');
     assert.ok(find(unrecRow, (n) => hasClass(n, 'badge-warning')), 'paid unreconciled badge has badge-warning');
     assert.ok(!hasClass(invRecRow, 'warning'), 'paid invoice-reconciled row has no warning class');
-    assert.ok(find(invRecRow, (n) => hasClass(n, 'badge-success')), 'paid invoice-reconciled badge has badge-success');
+    const invRecBadge = find(invRecRow, (n) => hasClass(n, 'badge'));
+    assert.ok(hasClass(invRecBadge, 'badge-warning'), 'invoice-settled unmatched payment badge matches display_state Paid');
+    assert.equal(textOf(invRecBadge).trim(), 'Paid');
+    const matchedBadge = find(matchedRow, (n) => hasClass(n, 'badge'));
+    assert.ok(hasClass(matchedBadge, 'badge-success'), 'bank-matched payment badge has badge-success');
+    assert.equal(textOf(matchedBadge).trim(), 'Reconciled');
     assert.ok(!hasClass(rejRow, 'warning'), 'rejected row has no warning class');
     assert.ok(find(rejRow, (n) => hasClass(n, 'badge-muted')), 'rejected badge has badge-muted');
   } finally {
@@ -497,10 +579,268 @@ test('Arabic translations cover all new payment action, state, receipt, and erro
       'Amount In Currency', 'Due Amount for {name}',
       'Only paid, unreconciled payments can be marked as sent',
       'Only sent payments can be rejected',
+      'Payment receipts can only be printed for posted payments.',
     ]) {
       assert.notEqual(t(key), key, `Missing Arabic translation for ${key}`);
     }
   } finally {
     globalThis.localStorage = prevStorage;
+  }
+});
+
+test('Regression 1: Rejected unapplied prepayment remains in aged receivables matching partner ledger', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partner = search(db, 'res.partner')[0];
+  const d0 = today();
+
+  const pRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 250,
+    date: d0,
+    journal_id: bank.id,
+    company_id: 1,
+  });
+  db = postPayment(pRes.db, read(pRes.db, 'account.payment', pRes.id));
+  db = markAsSent(db, pRes.id);
+  db = rejectPayment(db, pRes.id);
+
+  const ledger = partnerLedger(db, { from: d0, to: d0, company_id: 1, partnerIds: [partner.id] }, 'receivable');
+  const aging = agedBalance(db, 'receivable', d0, 1);
+  const ledgerPartner = ledger.find((r) => r.partner_id === partner.id);
+  const agingPartner = aging.rows.find((r) => r.partner_id === partner.id);
+  assert.equal(ledgerPartner?.end, -250);
+  assert.equal(agingPartner?.total, ledgerPartner?.end);
+});
+
+test('Regression 2: Rejecting a sent internal transfer marks paired payment sent and rejects both cleanly', () => {
+  let db = seed();
+  const transferAcc = create(db, 'account.account', {
+    code: '101799',
+    name: 'Internal Transfers',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+  const banks = search(db, 'account.journal').filter((j) => j.type === 'bank' || j.type === 'cash');
+  assert.ok(banks.length >= 2);
+  const [srcJournal, dstJournal] = banks;
+  const d0 = today();
+
+  const xferRes = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    payment_type: 'outbound',
+    amount: 300,
+    date: d0,
+    journal_id: srcJournal.id,
+    destination_journal_id: dstJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(xferRes.db, read(xferRes.db, 'account.payment', xferRes.id));
+  const srcPosted = read(db, 'account.payment', xferRes.id);
+  const dstId = srcPosted.paired_internal_transfer_payment_id;
+  assert.ok(dstId);
+
+  const sentDb = markAsSent(db, srcPosted.id);
+  assert.equal(read(sentDb, 'account.payment', srcPosted.id).is_sent, true);
+  assert.equal(read(sentDb, 'account.payment', dstId).is_sent, true);
+
+  const unmarkedDb = unmarkAsSent(sentDb, srcPosted.id);
+  assert.equal(read(unmarkedDb, 'account.payment', srcPosted.id).is_sent, false);
+  assert.equal(read(unmarkedDb, 'account.payment', dstId).is_sent, false);
+
+  const resentDb = markAsSent(unmarkedDb, srcPosted.id);
+  const rejDb = rejectPayment(resentDb, srcPosted.id);
+  assert.equal(read(rejDb, 'account.payment', srcPosted.id).state, 'rejected');
+  assert.equal(read(rejDb, 'account.payment', dstId).state, 'rejected');
+
+  const synced = applyDiff(resentDb, diffDb(resentDb, rejDb), { isAdmin: true });
+  assert.equal(read(synced, 'account.payment', srcPosted.id).state, 'rejected');
+  assert.equal(read(synced, 'account.payment', dstId).state, 'rejected');
+
+  // Even when paired leg has is_sent: false (e.g. non-manual paired method), rejecting the sent leg succeeds
+  const asymRes = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    payment_type: 'outbound',
+    amount: 120,
+    date: d0,
+    journal_id: srcJournal.id,
+    destination_journal_id: dstJournal.id,
+    company_id: 1,
+  });
+  let asymDb = postPayment(asymRes.db, read(asymRes.db, 'account.payment', asymRes.id));
+  const asymDstId = read(asymDb, 'account.payment', asymRes.id).paired_internal_transfer_payment_id;
+  asymDb = write(asymDb, 'account.payment', asymRes.id, { is_sent: true });
+  const asymRejDb = rejectPayment(asymDb, asymRes.id);
+  assert.equal(read(asymRejDb, 'account.payment', asymRes.id).state, 'rejected');
+  assert.equal(read(asymRejDb, 'account.payment', asymDstId).state, 'rejected');
+});
+
+test('Regression 4: isPaymentReconciled requires every reconcilable line to be zero, not just signed sum', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partner = search(db, 'res.partner')[0];
+  const recvAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_receivable' && (a.company_id ?? 1) === 1);
+  const d0 = today();
+
+  const moveRes = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'posted',
+    name: 'BNK1/2026/0099',
+    date: d0,
+    journal_id: bank.id,
+    company_id: 1,
+    line_ids: [
+      { account_id: bank.default_account_id, debit: 100, credit: 0 },
+      { account_id: recvAcc.id, partner_id: partner.id, debit: 0, credit: 100 },
+      { account_id: recvAcc.id, partner_id: partner.id, debit: 60, credit: 0 },
+      { account_id: recvAcc.id, partner_id: partner.id, debit: 0, credit: 60 },
+    ],
+  });
+  db = moveRes.db;
+  const pRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 100,
+    date: d0,
+    journal_id: bank.id,
+    state: 'posted',
+    name: 'PAY-OPEN-2',
+    move_id: moveRes.id,
+    outstanding_account_id: bank.default_account_id,
+    company_id: 1,
+  });
+  db = pRes.db;
+  const pay = read(db, 'account.payment', pRes.id);
+  assert.equal(isPaymentReconciled(db, pay), false);
+});
+
+test('Regression 6: Reset to draft and cancel clear is_sent so re-confirm starts unsent even after method change', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partner = search(db, 'res.partner')[0];
+  const d0 = today();
+  const manualLine = bank.inbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'manual',
+  );
+  const checkLine = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'check_printing',
+  );
+
+  // 1. Sent payment -> Reset to Draft -> switch to check_printing -> Confirm -> stays unsent
+  const p1 = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'supplier',
+    payment_type: 'outbound',
+    amount: 90,
+    date: d0,
+    journal_id: bank.id,
+    payment_method_line_id: bank.outbound_payment_method_line_ids.find(
+      (l) => read(db, 'account.payment.method', l.payment_method_id)?.code === 'manual',
+    ).id,
+    company_id: 1,
+  });
+  db = postPayment(p1.db, read(p1.db, 'account.payment', p1.id));
+  db = markAsSent(db, p1.id);
+  const p1MoveId = read(db, 'account.payment', p1.id).move_id;
+  const resetDb = resetPaymentToDraft(db, p1.id);
+  assert.equal(read(resetDb, 'account.payment', p1.id).is_sent, false);
+  const p1Step1 = write(
+    write(db, 'account.move', p1MoveId, { state: 'draft' }),
+    'account.payment',
+    p1.id,
+    { state: 'draft', move_id: null, destination_move_id: null, unapplied: 0, is_sent: false },
+  );
+  const p1Synced1 = applyDiff(db, diffDb(db, p1Step1), { isAdmin: true });
+  const syncedReset = applyDiff(p1Synced1, diffDb(p1Synced1, resetDb), { isAdmin: true });
+  assert.equal(read(syncedReset, 'account.payment', p1.id).is_sent, false);
+
+  db = write(syncedReset, 'account.payment', p1.id, { payment_method_line_id: checkLine.id });
+  db = postPayment(db, read(db, 'account.payment', p1.id));
+  const reconfirmed = read(db, 'account.payment', p1.id);
+  assert.equal(reconfirmed.is_sent, false);
+  assert.equal(btn('Reject').when(reconfirmed, db), false);
+  assert.equal(btn('Cancel').when(reconfirmed, db), false);
+  assert.equal(btn('Unmark as Sent').when(reconfirmed, db), false);
+
+  // 2. Sent payment -> Cancel -> Reset to Draft -> Confirm -> stays unsent
+  const p2 = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 40,
+    date: d0,
+    journal_id: bank.id,
+    payment_method_line_id: manualLine.id,
+    company_id: 1,
+  });
+  db = postPayment(p2.db, read(p2.db, 'account.payment', p2.id));
+  db = markAsSent(db, p2.id);
+  const p2MoveId = read(db, 'account.payment', p2.id).move_id;
+  const cancDb = cancelPayment(db, p2.id);
+  assert.equal(read(cancDb, 'account.payment', p2.id).is_sent, false);
+  const p2Step1 = write(
+    write(db, 'account.move', p2MoveId, { state: 'draft' }),
+    'account.payment',
+    p2.id,
+    { state: 'cancel', move_id: null, destination_move_id: null, unapplied: 0, is_sent: false },
+  );
+  const p2Synced1 = applyDiff(db, diffDb(db, p2Step1), { isAdmin: true });
+  const syncedCanc = applyDiff(p2Synced1, diffDb(p2Synced1, cancDb), { isAdmin: true });
+  assert.equal(read(syncedCanc, 'account.payment', p2.id).is_sent, false);
+  db = resetPaymentToDraft(syncedCanc, p2.id);
+  db = postPayment(db, read(db, 'account.payment', p2.id));
+  assert.equal(read(db, 'account.payment', p2.id).is_sent, false);
+});
+
+test('Regression 7: Missing exchange rate on an invoice partial does not break Payment Receipt printing', async () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  db = write(db, 'res.currency', eur.id, { rate_ids: [{ date: '2026-02-01', rate: 0.5 }] });
+
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    currency_id: usd.id,
+    invoice_date: '2026-02-01',
+    invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 200, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+  db = payMove(db, inv.id, 100, '2026-02-02', { journalId: bank.id, currencyId: eur.id, paymentAmount: 50, memo: 'WITH-RATE' });
+  const pay = db.records['account.payment'].at(-1);
+
+  // Remove EUR rates so conversion on 2026-02-02 throws inside rateAt()
+  db = write(db, 'res.currency', eur.id, { rate_ids: [] });
+  const data = paymentReceiptData(db, pay);
+  assert.equal(data.invoices.length, 1);
+  assert.equal(data.invoices[0].rows[0].amountPayment, null);
+
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+  await initStore();
+  await React.act(async () => commit(db));
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(PrintDoc, { model: 'account.payment', id: pay.id, report: 'receipt' })));
+    const text = textOf(host);
+    assert.match(text, new RegExp(`Payment Receipt: ${pay.name}`));
+    assert.match(text, /WITH-RATE/);
+    // Amount In Currency cell must stay empty rather than rendering 0.00 €
+    const tds = allFind(host, (n) => n.tagName === 'TD');
+    assert.ok(!tds.some((td) => /0\.00\s*€|€\s*0\.00/.test(textOf(td))));
+  } finally {
+    await React.act(async () => root.unmount());
   }
 });
