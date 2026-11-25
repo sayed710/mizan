@@ -3842,6 +3842,18 @@ const ar = {
   'Configure the deferred expense account on the company': 'حدّد حساب المصروفات المؤجلة على الشركة',
   'Configure the recognition account on the source line': 'حدّد حساب الاعتراف على البند المصدر',
   'Saving...': 'جارٍ الحفظ...',
+  'Hash All Entries': 'تأمين جميع القيود',
+  'Not hashed': 'غير مؤمّن',
+  'inclusive, to make them immutable': 'شاملاً، لجعلها غير قابلة للتعديل',
+  'Unreconciled Bank Transactions': 'حركات بنكية غير مطابقة',
+  'Review Statements': 'مراجعة كشوف الحساب',
+  'Review Entries': 'مراجعة القيود',
+  'There are still unreconciled bank transactions before the selected date. The entries from journal prefixes containing them will not be secured: {prefixes}': 'لا تزال هناك حركات بنكية غير مطابقة قبل التاريخ المحدد. لن يتم تأمين القيود من بادئات دفاتر اليومية التي تحتوي عليها: {prefixes}',
+  'There are still draft entries before the selected date.': 'لا تزال هناك قيود مسودة قبل التاريخ المحدد.',
+  'There are entries that cannot be hashed. They can be protected by the Hard Lock Date.': 'توجد قيود لا يمكن تجزئتها. يمكن حمايتها عبر تاريخ الإقفال الصارم.',
+  'Securing these entries will create at least one gap in the sequence.': 'تأمين هذه القيود سيُنشئ فجوة واحدة على الأقل في التسلسل.',
+  'Securing these entries will also secure entries after the selected date.': 'تأمين هذه القيود سيؤمّن أيضاً قيوداً بعد التاريخ المحدد.',
+  'Set a date. The moves will be secured up to including this date.': 'حدّد تاريخاً. سيتم تأمين القيود حتى هذا التاريخ شاملاً.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
