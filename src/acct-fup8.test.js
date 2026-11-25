@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { find, setupDom } from './test-support/dom.js';
-import { applyFilters, create, messagesOf, read, search } from './orm.js';
+import { applyFilters, create, messagesOf, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
 import { postMove } from './models/accounting.js';
@@ -449,4 +449,67 @@ test('Arabic translations cover new follow-up batch and postpone strings', async
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('res.partner followup_status avoids recursion with 3-way matched bills, nets credits, and tolerates missing currency', () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.followup.level': [], 'account.move': [], 'account.payment': [] } };
+  db = write(db, 'res.company', 1, { three_way_matching: true });
+  db = create(db, 'account.followup.level', {
+    display_delay: 5,
+    reminder_timing: 'after',
+    send_email: false,
+    channel: 'letter',
+  }).db;
+
+  const vendor = create(db, 'res.partner', { name: 'Matched Vendor', supplier_rank: 1 });
+  const prod = create(vendor.db, 'product', { name: '3WM Product', type: 'goods', purchase_method: 'receive' });
+  const po = create(prod.db, 'purchase.order', {
+    company_id: 1,
+    partner_id: vendor.id,
+    state: 'purchase',
+    order_line: [{ product_id: prod.id, qty: 1, qty_delivered: 0, price_unit: 50 }],
+  });
+  const bill = create(po.db, 'account.move', {
+    company_id: 1,
+    move_type: 'in_invoice',
+    partner_id: vendor.id,
+    purchase_id: po.id,
+    invoice_line_ids: [{ product_id: prod.id, qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = bill.db;
+
+  const due = addDays(today(), -15);
+  const custOverdue = create(db, 'res.partner', { name: 'Overdue Customer', customer_rank: 1 });
+  const custNetted = create(custOverdue.db, 'res.partner', { name: 'Netted Customer', customer_rank: 1 });
+  db = makeOverdueInvoice(custNetted.db, { partnerId: custOverdue.id, dueDate: due, amount: 100 }).db;
+  db = makeOverdueInvoice(db, { partnerId: custNetted.id, dueDate: due, amount: 100 }).db;
+  const cn = create(db, 'account.move', {
+    move_type: 'out_refund',
+    company_id: 1,
+    partner_id: custNetted.id,
+    invoice_date: addDays(due, -1),
+    invoice_date_due: due,
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(cn.db, cn.id);
+
+  // Reading/searching res.partner with a 3-way matched vendor bill must not recurse
+  const partners = search(db, 'res.partner');
+  const byId = new Map(partners.map((p) => [p.id, p]));
+  assert.equal(byId.get(vendor.id).followup_status, 'no_action_needed');
+  assert.equal(byId.get(custOverdue.id).followup_status, 'in_need_of_action');
+  assert.equal(byId.get(custNetted.id).followup_status, 'no_action_needed');
+  assert.equal(read(db, 'res.partner', custOverdue.id).followup_status, 'in_need_of_action');
+
+  // Unconfigured company currency must not crash res.partner reads or searches
+  const noCurrDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, currency_id: null } : c)),
+    },
+  };
+  assert.equal(read(noCurrDb, 'res.partner', custOverdue.id).followup_status, 'no_action_needed');
+  assert.ok(search(noCurrDb, 'res.partner').length > 0);
 });
