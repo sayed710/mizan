@@ -12,11 +12,14 @@ const REPARTITION_REFS = { account_id: 'account.account', tag_ids: 'account.acco
 /** Resolve the top-level commercial partner id for `partnerId` by walking `parent_id`, guarding cycles. */
 export function commercialPartnerId(db, partnerId) {
   let partner = read(db, 'res.partner', partnerId);
+  if (!partner) return null;
   const seen = new Set();
   while (partner?.parent_id) {
     if (seen.has(partner.id)) return null;
     seen.add(partner.id);
-    partner = read(db, 'res.partner', partner.parent_id);
+    const parent = read(db, 'res.partner', partner.parent_id);
+    if (!parent) break;
+    partner = parent;
   }
   return partner?.id ?? null;
 }
@@ -302,3 +305,12 @@ export const monthFilters = (field, labelPrefix = '', value = (r) => r[field]) =
   { id: `${field}_month`, label: labelPrefix ? `${labelPrefix}: This Month` : 'This Month', fn: (r) => value(r)?.slice(0, 7) === today().slice(0, 7) },
   { id: `${field}_year`, label: labelPrefix ? `${labelPrefix}: This Year` : 'This Year', fn: (r) => value(r)?.slice(0, 4) === today().slice(0, 4) },
 ];
+
+/** Whether the form's onchange context marks `field` as edited by the user (editedFields: Set, array or object). */
+export function isFieldEdited(field, context) {
+  const edited = context?.editedFields;
+  if (!edited) return false;
+  if (edited instanceof Set) return edited.has(field);
+  if (Array.isArray(edited)) return edited.includes(field);
+  return Object.hasOwn(edited, field);
+}

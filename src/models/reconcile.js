@@ -5,6 +5,7 @@ import { currentCompany } from './company.js';
 import { distributionModelCompanyError } from './analyticplus.js';
 import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { statementHasReconciledLines } from './bankstatement.js';
 import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
@@ -371,9 +372,9 @@ export function counterpartTaxLines(db, {
 function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
   const company = line.company_id ?? 1;
-  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
-  const foreign = journalCurrency && journalCurrency !== companyCurrencyRecord(db, company)?.id;
-  const currency = read(db, 'res.currency', journalCurrency);
+  const lineCurrencyId = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const foreign = lineCurrencyId && lineCurrencyId !== companyCurrencyRecord(db, company)?.id;
+  const currency = read(db, 'res.currency', lineCurrencyId);
   const balance = line.open_amount != null
     ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency)
     : roundCurrency(Math.abs(line.amount), currency);
@@ -400,7 +401,7 @@ function writeOff(db, rule, line) {
   const side = (value, debit, extra = {}) => ({
     ...extra,
     [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency),
-    ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}),
+    ...(foreign ? { currency_id: lineCurrencyId, amount_currency: (debit ? 1 : -1) * value } : {}),
   });
   const items = counterparts.flatMap((l) => {
     const sameAsCounterpart = l.value > 0;
@@ -411,7 +412,7 @@ function writeOff(db, rule, line) {
       account_id: l.account_id,
       incoming: sameAsCounterpart ? incoming : !incoming,
       currency,
-      foreignCurrency: foreign ? journalCurrency : null,
+      foreignCurrency: foreign ? lineCurrencyId : null,
       companyValue,
       balance,
       date: line.date,
@@ -454,7 +455,7 @@ function writeOff(db, rule, line) {
       account: bookedBank.suspense,
       partner_id,
       [incoming ? 'debit' : 'credit']: counterpartTotal,
-      ...(foreign ? { currency_id: journalCurrency, amount_currency: -itemCurrency } : {}),
+      ...(foreign ? { currency_id: lineCurrencyId, amount_currency: -itemCurrency } : {}),
     }, ...items];
   }
   const { db: booked, id } = postEntry(current, {
@@ -555,6 +556,10 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 /** Apply the first configured partner mapping before evaluating reconciliation rules. */
 export function mapStatementPartner(db, line) {
   if (!line || line.partner_id || line.state === 'reconciled') return db;
+  if (line.statement_id) {
+    const stmt = read(db, 'account.bank.statement', line.statement_id);
+    if (stmt?.state === 'closed' || statementHasReconciledLines(db, line.statement_id)) return db;
+  }
   if (line.bank_move_id || line.move_id) {
     const lock = recordLockDate(db, line);
     if (lock && String(line.date ?? today()) <= lock) return db;

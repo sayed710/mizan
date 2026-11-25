@@ -1,7 +1,8 @@
+import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
@@ -53,12 +54,7 @@ function invoiceCompanyDefaults(db, move, previous, context = {}) {
   const termsEligible = ['out_invoice', 'out_refund'].includes(move.move_type);
   const result = {};
 
-  const isEdited = (field) => {
-    if (!context?.editedFields) return false;
-    if (context.editedFields instanceof Set) return context.editedFields.has(field);
-    if (Array.isArray(context.editedFields)) return context.editedFields.includes(field);
-    return Object.hasOwn(context.editedFields, field);
-  };
+  const isEdited = (field) => isFieldEdited(field, context);
 
   const oldTerms = oldCompany?.use_invoice_terms ? (oldCompany.invoice_terms ?? '') : null;
   const termsUntouched = context?.editedFields ? !isEdited('narration') : (move.narration === undefined || (previous && oldTerms !== null && move.narration === oldTerms));
@@ -879,6 +875,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
         : {});
   const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
   let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  if (r.move_type === 'out_invoice' || r.move_type === 'in_invoice') posted = incrementPartnerRank(posted, r.partner_id, r.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -3195,6 +3192,8 @@ export const accountingModels = {
 
   'account.journal': {
     label: 'Journals',
+    views: ['list', 'kanban'],
+    searchFields: ['name', 'code'],
     guard: (db, before, after, _ctx, vals) => {
       const companyId = after.company_id ?? 1;
       if (before?.id) {
@@ -3206,6 +3205,12 @@ export const accountingModels = {
           const blockedOwner = companies.find((c) => c[field] === before.id && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id)));
           if (blockedOwner) {
             return `Clear the ${label} of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+          }
+        }
+        if ((before.currency_id ?? null) !== (after.currency_id ?? null)) {
+          const statementLines = (db.records['account.bank.statement.line'] ?? []).filter((l) => l.journal_id === before.id);
+          if (statementLines.some((l) => !l.currency_id || !read(db, 'res.currency', l.currency_id))) {
+            return 'Cannot change journal currency when existing transactions cannot be safely interpreted in their original currency';
           }
         }
       }
@@ -3265,6 +3270,7 @@ export const accountingModels = {
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', optional: 'hide' },
       refund_sequence: {
         type: 'boolean', label: 'Dedicated Credit Note Sequence',
         help: 'Check this box if you don\'t want to share the same sequence for invoices and credit notes made from this journal',
@@ -3475,16 +3481,16 @@ export const accountingModels = {
     onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
     onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
-    views: ['list', 'kanban'],
-    searchFields: ['name', 'code'],
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },
       { id: 'liquidity', label: 'Liquidity', fn: (r) => isLiquidityJournal(r) },
       { id: 'miscellaneous', label: 'Miscellaneous', fn: (r) => r.type === 'general' },
+    ], [
+      { id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false },
     ]],
     kanban: { title: 'name', lines: ['code', 'type'], counter: { label: 'Entries', model: 'account.move', field: 'journal_id' } },
-    list: ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id'],
+    list: ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id'],
     form: {
       title: 'name',
       chatter: true,
@@ -3510,7 +3516,7 @@ export const accountingModels = {
           },
         },
       ],
-      smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
+      smart: [{ label: 'Journal Items', value: (db, j) => journalItems(db).filter((line) => line.journal_id === j.id).length, target: (j) => `accounting/journal-items?journal=${j.id}` }],
       groups: [['type', 'code']],
       tabs: (j) => {
         const liquidity = isLiquidityJournal(j);
@@ -3525,6 +3531,7 @@ export const accountingModels = {
         }[j.type];
         const entries = [
           { field: 'default_account_id', label: accountLabel },
+          'currency_id',
           ...(liquidity ? ['suspense_account_id'] : []),
           ...(j.type === 'purchase' ? ['non_deductible_account_id'] : []),
           ...(cashOrBank ? ['profit_account_id', 'loss_account_id'] : []),
@@ -4423,7 +4430,7 @@ export const accountingModels = {
       banner: (r, db) => suggestBillAutopost(db, r) ? 'Automatically post future digitized bills from this vendor?' : null,
       warning: (r, db) => {
         const base = r.move_type === 'out_invoice'
-          ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r)
+          ? ((!r.state || r.state === 'draft') ? creditWarning(db, r.partner_id, total(r, db), r) : '')
           : ['in_invoice', 'in_refund'].includes(r.move_type)
             ? duplicateBillWarning(db, r)
             : unbalancedEntryWarning(db, r);
