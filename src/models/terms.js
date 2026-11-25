@@ -1,4 +1,4 @@
-import { addDays, isoDate, today, validDate } from './common.js';
+import { addDays, isFieldEdited, isoDate, today, validDate } from './common.js';
 import { currencyUnits, documentCurrency, roundCurrency } from '../money.js';
 import { companyCurrency } from './currency.js';
 import { t } from '../i18n.js';
@@ -108,11 +108,14 @@ export function termScheduleError(term, total, currency = null) {
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
   const hasPercent = lines.some((line) => line.value_type === 'percent');
   const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
+  const percentSum = lines.filter((line) => line.value_type === 'percent').reduce((sum, line) => sum + (Number(line.value) || 0), 0);
+  const percentIs100 = Math.round(percentSum * 100) === 10000;
+  const allocatesExactTotal = Math.abs(requestedTotal - totalCents) <= lines.length / 2;
   if (balanceIndex >= 0) {
     if (requestedTotal > totalCents + lines.length / 2) {
       return 'Payment terms must allocate 100% of the total';
     }
-  } else if (hasFixed && hasPercent ? Math.round(lines.filter((line) => line.value_type === 'percent').reduce((sum, line) => sum + (Number(line.value) || 0), 0) * 100) !== 10000 : Math.abs(requestedTotal - totalCents) > lines.length / 2) {
+  } else if (!allocatesExactTotal && !(hasFixed && hasPercent && percentIs100)) {
     return 'Payment terms must allocate 100% of the total';
   }
   return null;
@@ -205,9 +208,10 @@ function termConfigurationError(term) {
 
 function defaultDiscountTaxComputation(db, companyId) {
   if (!db) return 'included';
-  const company = read(db, 'res.company', companyId || db.settings?.current_company_id || 1);
-  const current = read(db, 'res.company', db.settings?.current_company_id || 1);
-  const code = company?.country_code || current?.country_code;
+  const targetCompany = companyId
+    ? read(db, 'res.company', companyId)
+    : read(db, 'res.company', db.settings?.current_company_id || 1);
+  const code = targetCompany?.country_code;
   return code === 'BE' ? 'mixed' : code === 'NL' ? 'excluded' : 'included';
 }
 
@@ -313,7 +317,23 @@ export const termModels = {
     },
     defaults: () => ({ sequence: 10, active: true, display_on_invoice: true, early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
     createDefaults: (db, vals) => ({ discount_tax_computation: defaultDiscountTaxComputation(db, vals?.company_id) }),
-    onchange: (r, key, db) => (key === 'company_id' || (key === 'early_discount' && r.early_discount && !r.discount_tax_computation) ? { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) } : {}),
+    onchange: (r, key, db, context) => {
+      if (key === 'company_id') {
+        const isExplicit = isFieldEdited('discount_tax_computation', context);
+        const oldDefault = context?.previous ? defaultDiscountTaxComputation(db, context.previous.company_id) : null;
+        const isDefaultedOrUnset = context?.editedFields
+          ? !isExplicit
+          : (r.discount_tax_computation == null || (oldDefault !== null && r.discount_tax_computation === oldDefault));
+        if (isDefaultedOrUnset) {
+          return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+        }
+        return {};
+      }
+      if (key === 'early_discount' && r.early_discount && !r.discount_tax_computation) {
+        return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+      }
+      return {};
+    },
     guard: (_db, before, after, _ctx, vals) => {
       if (before && after.active === false && before.active !== false && Object.keys(after).every((key) => key === 'active' || JSON.stringify(after[key]) === JSON.stringify(before[key])) && Object.keys(before).every((key) => key === 'active' || Object.hasOwn(after, key))) return null;
       const exampleErr = exampleInputsError(vals);

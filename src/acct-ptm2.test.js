@@ -5,6 +5,8 @@ import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { installments, termModels } from './models/terms.js';
+import { changeFormValue } from './views/formDefaults.js';
+import { postMove } from './models/accounting.js';
 
 const model = 'account.payment.term';
 const sync = (db, next) => applyDiff(db, diffDb(db, next), { isAdmin: true });
@@ -76,4 +78,106 @@ test('mixed schedules require 100 percent and balance-only discounts are rejecte
   assert.throws(() => installments({ line_ids: lines }, 100, '2026-01-01'), /allocate 100%/);
   assert.deepEqual(installments({ line_ids: [lines[0], { ...lines[1], value: 100 }] }, 100, '2026-01-01').map((r) => r.amount), [60, 40]);
   assert.throws(() => create(seed(), model, { name: 'Bad discount', early_discount: true, discount_percent: 2, discount_days: 10, line_ids: [{ value_type: 'balance' }] }), /single 100% line/);
+});
+
+test('legacy mixed-term invoices can post when fixed plus percentage exactly cover total', () => {
+  const base = seed();
+  const mixedLines = [
+    { value_type: 'fixed', value: 50, nb_days: 0, delay_type: 'days_after' },
+    { value_type: 'percent', value: 50, nb_days: 30, delay_type: 'days_after' },
+  ];
+  const term = create(base, model, { name: 'Legacy Mixed 50-50' });
+  const dbWithTerm = patch(term.db, term.id, { line_ids: mixedLines });
+
+  // 1) Post draft invoice for 100: exactly covered (50 fixed + 50% of 100 = 100)
+  const inv = create(dbWithTerm, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-03-01',
+    invoice_payment_term_id: term.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  const postedDb = postMove(inv.db, inv.id);
+  const postedInv = read(postedDb, 'account.move', inv.id);
+  assert.equal(postedInv.state, 'posted');
+  assert.deepEqual(installments(read(postedDb, model, term.id), 100, '2026-03-01'), [
+    { date: '2026-03-01', amount: 50 },
+    { date: '2026-03-31', amount: 50 },
+  ]);
+
+  // 2) Underallocated schedule throws (e.g. 150 invoice: 50 + 75 = 125 != 150)
+  const underInv = create(dbWithTerm, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-03-01',
+    invoice_payment_term_id: term.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 150, tax: 0 }],
+  });
+  assert.throws(() => postMove(underInv.db, underInv.id), /allocate 100%/);
+
+  // 3) Overallocated schedule throws (e.g. 80 invoice: 50 + 40 = 90 != 80)
+  const overInv = create(dbWithTerm, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-03-01',
+    invoice_payment_term_id: term.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 80, tax: 0 }],
+  });
+  assert.throws(() => postMove(overInv.db, overInv.id), /allocate 100%/);
+
+  // 4) Save-time requirement still rejects saving new mixed terms whose percents don't total 100%
+  assert.throws(
+    () => create(base, model, { name: 'New Mixed 50-50', line_ids: mixedLines }),
+    /sum of the percent must be 100%/,
+  );
+});
+
+test('changing company preserves explicitly selected discount tax mode', () => {
+  const base = seed();
+  const comp2 = create(base, 'res.company', { name: 'NL Co', country_code: 'NL' });
+  const db = comp2.db;
+
+  const initial = { name: 'Discount Term', early_discount: true, discount_percent: 2, discount_days: 10, company_id: 1, discount_tax_computation: 'included' };
+  const editedFields = new Set();
+
+  // User explicitly selects 'mixed' mode
+  const change1 = changeFormValue(model, initial, {}, 'discount_tax_computation', 'mixed', db, false, editedFields);
+  assert.equal(change1.discount_tax_computation, 'mixed');
+
+  // User then changes company to Company 2 (NL)
+  const change2 = changeFormValue(model, initial, change1, 'company_id', comp2.id, db, false, editedFields);
+  assert.equal(change2.discount_tax_computation, 'mixed', 'explicitly selected mode is preserved when company changes');
+
+  // Conversely, when discount_tax_computation was NOT explicitly edited, changing company updates the mode
+  const untouchedFields = new Set();
+  const changeCompanyOnly = changeFormValue(model, initial, {}, 'company_id', comp2.id, db, false, untouchedFields);
+  assert.equal(changeCompanyOnly.discount_tax_computation, 'excluded', 'defaulted mode is recomputed on company change');
+});
+
+test('terms for company without country code default to included and do not inherit current company mode', () => {
+  const base = seed();
+  // Set current company (id: 1) to Belgium (country_code: 'BE', default 'mixed')
+  const dbWithBE = {
+    ...base,
+    settings: { ...base.settings, current_company_id: 1 },
+    records: {
+      ...base.records,
+      'res.company': base.records['res.company'].map((c) => (c.id === 1 ? { ...c, country_code: 'BE' } : c)),
+    },
+  };
+  // Create Company 2 without a country code
+  const compNoCountry = create(dbWithBE, 'res.company', { name: 'No Country Co', country_code: null });
+  const db = compNoCountry.db;
+
+  // 1) Creating a term explicitly selecting Company 2 derives 'included', NOT current company's 'mixed'
+  const termForComp2 = create(db, model, { name: 'Term Co 2', company_id: compNoCountry.id });
+  assert.equal(read(termForComp2.db, model, termForComp2.id).discount_tax_computation, 'included');
+
+  // 2) Company onchange to Company 2 derives 'included'
+  const onchangeResult = termModels[model].onchange({ company_id: compNoCountry.id }, 'company_id', db);
+  assert.equal(onchangeResult.discount_tax_computation, 'included');
+
+  // 3) Creating a term without selected company falls back to current company (BE -> 'mixed')
+  const termNoComp = create(db, model, { name: 'Term Shared', company_id: null });
+  assert.equal(read(termNoComp.db, model, termNoComp.id).discount_tax_computation, 'mixed');
 });

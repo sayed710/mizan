@@ -27,7 +27,7 @@ test('30% now and 70% in 60 days round to the exact invoice total', () => {
 });
 
 test('a fixed installment and a percentage balance sum to the total', () => {
-  const schedule = installments(term(line(125, 'fixed'), line(100, 'percent', 15)), 1000.01, '2025-05-01');
+  const schedule = installments(term(line(125, 'fixed'), line(87.5, 'percent', 15)), 1000.01, '2025-05-01');
   assert.deepEqual(schedule.map((row) => row.amount), [125, 875.01]);
   assert.equal(schedule.reduce((sum, row) => sum + row.amount, 0), 1000.01);
 });
