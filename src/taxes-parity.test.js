@@ -286,7 +286,7 @@ test('taxes search fields, filter groups, and group-by options match Odoo 20', a
     const panel = find(singleCtx.host, (n) => hasClass(n, 'search-panel'));
     const sections = allFind(panel, (n) => n.tagName === 'SECTION');
     const filterButtons = allFind(sections[0], (n) => n.tagName === 'BUTTON').map((b) => b.textContent.trim());
-    assert.deepEqual(filterButtons, ['Sale', 'Purchase', 'Services', 'Goods', 'Active', 'Inactive', 'Archived']);
+    assert.deepEqual(filterButtons, ['Sale', 'Purchase', 'Services', 'Goods', 'Domestic', 'Active', 'Inactive', 'Archived']);
     const groupButtons = allFind(sections[1], (n) => n.tagName === 'BUTTON').map((b) => b.textContent.trim());
     assert.deepEqual(groupButtons, ['Tax Type', 'Tax Scope', 'Fiscal Position']);
   } finally {

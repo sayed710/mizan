@@ -329,8 +329,8 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
  */
 export function autoFiscalPosition(db, address, companyId = null) {
   const p = address ?? {};
-  const country = countryIdFor(db, p.country_id ?? p.country);
-  const state = stateIdFor(db, p.state_id ?? p.state, country);
+  const country = countryIdFor(db, p.country_id || p.country);
+  const state = stateIdFor(db, p.state_id || p.state, country);
   const pZip = String(p.zip ?? '').trim();
   const isNumericZip = (s) => /^\d+$/.test(s);
   const zipMatches = (fp) => {
@@ -346,7 +346,8 @@ export function autoFiscalPosition(db, address, companyId = null) {
     return (!from || pZip >= from) && (!to || pZip <= to);
   };
   const hasZip = (fp) => Boolean(String(fp.zip_from ?? '').trim() || String(fp.zip_to ?? '').trim());
-  const fpStates = (fp) => (fp.state_ids ?? []);
+  const fpCountryFor = (fp) => fp.country_id || countryIdFor(db, fp.country);
+  const fpStates = (fp, fpCountry = fpCountryFor(fp)) => (fp.state_ids ?? []).map((id) => stateIdFor(db, id, fpCountry)).filter(Boolean);
   const matchesCountryGroup = (groupId) => {
     const group = groupId ? read(db, 'res.country.group', groupId) : null;
     if (!group || group.active === false || !country) return false;
@@ -358,19 +359,27 @@ export function autoFiscalPosition(db, address, companyId = null) {
     if (fp.unresolved_targeting) return false;
     if (fp.vat_required && !String(p.vat ?? '').trim()) return false;
     if (!zipMatches(fp)) return false;
-    const fpCountry = fp.country_id ?? countryIdFor(db, fp.country);
+    const hasRawCountry = typeof fp.country === 'string' && fp.country.trim().length > 0;
+    const fpCountry = fpCountryFor(fp);
+    if (hasRawCountry && !fpCountry) return false;
     if (fpCountry && fpCountry !== country) return false;
     if (fp.country_group_id && !matchesCountryGroup(fp.country_group_id)) return false;
-    const states = fpStates(fp);
-    if (states.length && (!state || !states.includes(state))) return false;
+    const rawStates = fp.state_ids ?? [];
+    const hasRawStates = Array.isArray(fp.states) ? fp.states.length > 0 : Boolean(String(fp.states ?? '').trim());
+    const states = fpStates(fp, fpCountry);
+    if (hasRawStates && !states.length) return false;
+    if (rawStates.length && (!state || !states.includes(state))) return false;
     return true;
   };
-  const specificity = (fp) => [
-    Number(Boolean(fp.country_id ?? countryIdFor(db, fp.country))),
-    Number(Boolean(fp.country_group_id)),
-    Number(fpStates(fp).length > 0),
-    Number(hasZip(fp)),
-  ];
+  const specificity = (fp) => {
+    const fpCountry = fpCountryFor(fp);
+    return [
+      Number(Boolean(fpCountry)),
+      Number(Boolean(fp.country_group_id)),
+      Number(fpStates(fp, fpCountry).length > 0),
+      Number(hasZip(fp)),
+    ];
+  };
   const bySpecificityThenSeq = (a, b) => {
     const sa = specificity(a);
     const sb = specificity(b);
@@ -705,9 +714,34 @@ export function isDomesticRecord(record, db) {
   if (!db || !record) return false;
   const companyId = record.company_id ?? db.settings?.current_company_id ?? 1;
   const company = read(db, 'res.company', companyId);
-  const recordCountry = record.country_id ?? countryIdFor(db, record.country);
-  const companyCountry = company?.country_id ?? countryIdFor(db, company?.country);
+  const recordCountry = record.country_id || countryIdFor(db, record.country);
+  const companyCountry = company?.country_id || countryIdFor(db, company?.country);
   return Boolean(recordCountry && companyCountry && recordCountry === companyCountry);
+}
+
+/**
+ * Whether a tax is domestic for its company (or the active company if shared).
+ * A tax without fiscal positions applies domestically. If assigned to fiscal positions,
+ * at least one must match the company's domestic fiscal position or country.
+ */
+export function isDomesticTax(tax, db) {
+  if (!db || !tax) return false;
+  const fps = tax.fiscal_position_ids ?? [];
+  if (!fps.length) return true;
+  const companyId = tax.company_id ?? db.settings?.current_company_id ?? 1;
+  const company = read(db, 'res.company', companyId);
+  const companyCountryId = company?.country_id || countryIdFor(db, company?.country);
+  const companyCountry = String(company?.country ?? '').trim().toLowerCase();
+  return fps.some((fpId) => {
+    if (company?.domestic_fiscal_position_id && fpId === company.domestic_fiscal_position_id) return true;
+    const fp = read(db, 'account.fiscal.position', fpId);
+    if (!fp) return false;
+    if (fp.company_id && fp.company_id !== companyId) return false;
+    const fpCountryId = fp.country_id || countryIdFor(db, fp.country);
+    if (companyCountryId && fpCountryId) return companyCountryId === fpCountryId;
+    const fpCountry = String(fp.country ?? '').trim().toLowerCase();
+    return Boolean(companyCountry && fpCountry && companyCountry === fpCountry);
+  });
 }
 
 export const taxModels = {
@@ -954,6 +988,7 @@ export const taxModels = {
     filters: [
       [{ id: 'sale', label: 'Sale', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchase', fn: (r) => r.type_tax_use === 'purchase' }],
       [{ id: 'services', label: 'Services', fn: (r) => r.tax_scope === 'service' }, { id: 'goods', label: 'Goods', fn: (r) => r.tax_scope === 'consu' }],
+      [{ id: 'domestic', label: 'Domestic', fn: isDomesticTax }],
       [{ id: 'active', label: 'Active', fn: (r) => r.active !== false }, { id: 'inactive', label: 'Inactive', includeArchived: true, fn: (r) => r.active === false }],
     ],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
@@ -990,10 +1025,51 @@ export const taxModels = {
 
   'account.fiscal.position': {
     label: 'Fiscal Positions',
+    prepareWrite: (db, vals, before) => {
+      if (!before || (!before.unresolved_targeting && !before.country && !before.states)) return null;
+      const nextVals = { ...vals };
+      const after = { ...before, ...nextVals };
+      const hasCountryEdit = 'country_id' in nextVals || ('country_group_id' in nextVals && Boolean(nextVals.country_group_id)) || ('country' in nextVals && !nextVals.country);
+      const hasStateEdit = 'state_ids' in nextVals || ('states' in nextVals && !(Array.isArray(nextVals.states) ? nextVals.states.length : nextVals.states));
+      const hasTargetingEdit = ['country_id', 'country_group_id', 'state_ids'].some((k) => k in nextVals);
+      const hasAnyTarget = Boolean(after.country_id || after.country_group_id || (after.state_ids?.length ?? 0) > 0);
+      const completeWithAutoApply = Boolean(after.auto_apply && hasTargetingEdit && hasAnyTarget);
+
+      if (before.country && (hasCountryEdit || completeWithAutoApply)) {
+        nextVals.country = null;
+      }
+      if (before.states && (hasStateEdit || completeWithAutoApply)) {
+        nextVals.states = null;
+      }
+
+      const unresolvedCountry = Boolean(before.country && nextVals.country !== null);
+      const unresolvedStates = Boolean(before.states && nextVals.states !== null);
+      if (before.unresolved_targeting && !unresolvedCountry && !unresolvedStates && (hasTargetingEdit || hasAnyTarget)) {
+        nextVals.unresolved_targeting = false;
+      }
+      return { db, vals: nextVals };
+    },
+    onWrite: (db, after) => {
+      const dropUnresolved = 'unresolved_targeting' in after && !after.unresolved_targeting;
+      const dropCountry = 'country' in after && !after.country;
+      const dropStates = 'states' in after && !(Array.isArray(after.states) ? after.states.length : after.states);
+      if (!dropUnresolved && !dropCountry && !dropStates) return db;
+      const cleaned = { ...after };
+      if (dropUnresolved) delete cleaned.unresolved_targeting;
+      if (dropCountry) delete cleaned.country;
+      if (dropStates) delete cleaned.states;
+      return {
+        ...db,
+        records: {
+          ...db.records,
+          'account.fiscal.position': (db.records['account.fiscal.position'] ?? []).map((r) => (r.id === after.id ? cleaned : r)),
+        },
+      };
+    },
     guard: (db, _before, after) => {
       const countryError = countryReferenceError(db, after);
       if (countryError) return countryError;
-      if ((after.state_ids ?? []).some((id) => !stateIdFor(db, id, after.country_id))) {
+      if ((after.state_ids ?? []).some((id) => !Number.isInteger(id) || !stateIdFor(db, id, after.country_id))) {
         return after.country_id ? 'Select states belonging to the selected country' : 'Selected state does not exist';
       }
       if (after.country_group_id && !read(db, 'res.country.group', after.country_group_id)) {

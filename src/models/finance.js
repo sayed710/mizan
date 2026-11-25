@@ -1,6 +1,7 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { indexGlMatchings, lineKey } from './glMatchIndex.js';
 import { installments } from './terms.js';
+import { normalizePhone, queueSms } from './sms.js';
 import { models } from '../registry.js';
 import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
@@ -1750,12 +1751,28 @@ export function followUpLevelName(level) {
   return `${days} days ${timing}`;
 }
 
-export function levelChannel(level) {
-  if (!level) return null;
-  if (level.send_email) return 'email';
-  if (level.channel && level.channel !== 'email') return level.channel;
-  if (level.send_sms) return 'sms';
-  return null;
+export function levelChannels(level) {
+  if (!level) return [];
+  const channels = [];
+  if (level.send_email) channels.push('email');
+  if (level.send_sms) channels.push('sms');
+  if (!channels.length && level.channel && !['email', 'sms'].includes(level.channel)) channels.push(level.channel);
+  return channels;
+}
+
+export function levelChannel(level) { return levelChannels(level)[0] ?? null; }
+
+const followUpSmsText = (db, part, level) => String(level?.sms_message ?? '').trim() || followUpText(db, part);
+
+function queueFollowUpSms(db, partner, part, level, at, automatic = false) {
+  if (automatic && search(db, 'sms.campaign').some((campaign) => campaign.followup_sms && campaign.followup_partner_id === partner.id && campaign.followup_company_id === part.company_id && campaign.followup_level_id === level?.id && campaign.followup_oldest === part.oldest)) return db;
+  if (!String(partner.mobile || partner.phone || '').trim()) throw new Error('The customer has no mobile or phone number.');
+  const body = followUpSmsText(db, part, level);
+  const campaign = create(db, 'sms.campaign', {
+    name: 'Payment reminder', mailing_model: 'res.partner', body, followup_sms: true, company_id: part.company_id,
+    ...(automatic ? { followup_partner_id: partner.id, followup_company_id: part.company_id, followup_level_id: level?.id, followup_oldest: part.oldest } : {}),
+  });
+  return queueSms(campaign.db, read(campaign.db, 'sms.campaign', campaign.id), { now: at, partnerId: partner.id });
 }
 
 function resolveFollowUpActivityUser(db, partner, companyId, part, responsibleType = 'followup') {
@@ -2122,14 +2139,25 @@ export function runFollowUps(db, at = today(), deliver = null) {
     const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -Infinity;
 
     if (currentDelay >= Number(level.delay)) return nextDb;
-    const channel = levelChannel(level);
+    const channels = levelChannels(level);
+    let channel = channels.includes('email') ? 'email' : channels[0] ?? null;
     const levelName = followUpLevelName(level);
-    const canDeliverEmail = channel === 'email' && Boolean(partner.email?.trim()) && Boolean(deliver);
+    const canDeliverEmail = channels.includes('email') && Boolean(partner.email?.trim()) && Boolean(deliver);
     const hasPendingActivity = Boolean(level.create_activity && (
       (progress?.followup_oldest_date ?? null) !== (f.oldest ?? null)
       || progress?.followup_activity_level !== level.id
     ));
-    if (!canDeliverEmail && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+    const hasPhone = Boolean(String(partner.mobile || partner.phone || '').trim());
+    const sameDaySmsFailure = Boolean(
+      channels.includes('sms')
+      && !hasPhone
+      && progress?.followup_date === at
+      && (progress?.followup_oldest_date ?? null) === (f.oldest ?? null)
+      && (progress?.followup_last_level === level.id || progress?.followup_level === level.id)
+      && progress?.followup_delivery_outcome === 'failed'
+      && progress?.followup_channel === 'sms'
+    );
+    if (!canDeliverEmail && (!channels.includes('sms') || sameDaySmsFailure) && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
     const sameDayOutboxOnly = Boolean(
       !hasPendingActivity
       && progress?.followup_delivery_state !== 'sent'
@@ -2158,19 +2186,55 @@ export function runFollowUps(db, at = today(), deliver = null) {
         followup_channel: channel ?? null,
         followup_delivery_state: deliveryState,
         followup_delivery_outcome: deliveryOutcome,
+        followup_last_level: level?.id ?? null,
         followup_next_action_date: null,
       });
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
+    let smsFailed = false;
+    let smsQueued = false;
+    const emailAlreadySent = progress?.followup_last_level === level.id && progress?.followup_channel === 'sms'
+      && progress?.followup_delivery_outcome === 'failed' && progress?.followup_oldest_date === (f.oldest ?? null);
+    if (channels.includes('sms')) {
+      if (sameDaySmsFailure) {
+        smsFailed = true;
+        if (!channels.includes('email') || emailAlreadySent) return nextDb;
+      } else {
+        try {
+          nextDb = queueFollowUpSms(nextDb, partner, f, level, at, true);
+          smsQueued = true;
+          if (!channels.includes('email') || emailAlreadySent) return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
+        } catch (error) {
+          smsFailed = true;
+          const msg = error?.message ?? String(error);
+          const previousChannel = channel;
+          channel = 'sms';
+          nextDb = recordFailure(`SMS delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+          channel = previousChannel;
+          if (!channels.includes('email') || emailAlreadySent) return nextDb;
+        }
+      }
+    }
     if (channel === 'email' && partner.email?.trim() && deliver) {
       const message = followUpEmail(nextDb, f, level, partner);
       // Validate the bookkeeping before attempting an irreversible delivery.
       const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
+      const emailSent = () => {
+        if (!smsFailed) return sent;
+        const sentPartner = read(sent, 'res.partner', partner.id);
+        const failure = partnerFollowUp(read(nextDb, 'res.partner', partner.id), companyId);
+        return write(sent, 'res.partner', partner.id, {
+          followup_lines: updatePartnerFollowUp(sentPartner, companyId, {
+            ...failure, followup_level_delay: progress?.followup_level_delay ?? null,
+            followup_level: progress?.followup_level ?? null, followup_last_level: level.id,
+          }).followup_lines,
+        });
+      };
       /** Interpret mail-transport outcome strictly per the single delivery contract. */
       const settleDelivery = (result) => {
-        if (result === undefined || (typeof result === 'number' && Number.isInteger(result) && result >= 0)) return sent;
+        if (result === undefined || (typeof result === 'number' && Number.isInteger(result) && result >= 0)) return emailSent();
         if (result && typeof result === 'object') {
-          if (result.status === 'sent') return sent;
+          if (result.status === 'sent') return emailSent();
           if (result.status === 'outbox_only' && typeof result.reason === 'string' && result.reason.trim()) {
             // Suppress duplicate outbox-only notes within the same day while still keeping state not_sent so live SMTP sends later.
             if (sameDayOutboxOnly) return nextDb;
@@ -2194,6 +2258,19 @@ export function runFollowUps(db, at = today(), deliver = null) {
         const msg = error?.message ?? String(error);
         return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
       }
+    }
+    if (smsQueued) {
+      const emailReason = partner.email?.trim() ? 'Automatic email delivery is not configured.' : 'The customer has no email address.';
+      const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+      nextDb = postNote(
+        nextDb,
+        'res.partner',
+        partner.id,
+        `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${emailReason}`,
+        reminderSource(f),
+        { delivery_channel: 'email', delivery_state: partner.email?.trim() ? 'outbox_only' : 'failed', delivery_error: emailReason },
+      );
+      return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
     }
     if (!channel && level.create_activity) {
       return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, null, f.oldest);
@@ -2288,7 +2365,109 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     throw new Error('A customer email address is required to send an email reminder');
   }
   const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate });
-  return applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate);
+  const queued = channel === 'sms'
+    ? groups.reduce((state, part) => queueFollowUpSms(state, read(state, 'res.partner', partnerId), part, followUpLevel(scope, part, at), at), db)
+    : db;
+  return applyFollowUpReminder(queued, scope, partnerId, groups, at, channel, nextLevelBaseDate);
+}
+
+const ALLOWED_FOLLOWUP_CAMPAIGN_FIELDS = new Set([
+  'id', 'name', 'mailing_model', 'body', 'followup_sms', 'company_id',
+  'followup_partner_id', 'followup_company_id', 'followup_level_id', 'followup_oldest',
+  'stage_id', 'sent_date', 'sent', 'delivered', 'failed',
+]);
+
+const ALLOWED_FOLLOWUP_TRACE_FIELDS = new Set([
+  'id', 'campaign_id', 'company_id', 'phone', 'name', 'res_model', 'res_id',
+  'state', 'delivery_pending', 'attempted_at', 'error', 'date',
+]);
+
+/**
+ * Whether a diff contains only validated follow-up SMS campaigns and traces.
+ * Used to grant narrowly scoped sync permission to accounting users without granting general SMS Marketing write access.
+ */
+export function isFollowUpSmsDiff(diff, db) {
+  if (!diff || typeof diff !== 'object') return false;
+  if (diff.deletes?.['sms.campaign']?.length || diff.deletes?.['sms.trace']?.length || diff.deletes?.['phone.blacklist']?.length) {
+    return false;
+  }
+  if (diff.upserts?.['phone.blacklist']?.length) return false;
+
+  const campaigns = diff.upserts?.['sms.campaign'] ?? [];
+  const traces = diff.upserts?.['sms.trace'] ?? [];
+  if (!campaigns.length && !traces.length) return false;
+
+  const banned = new Set(search(db, 'phone.blacklist').filter((b) => b.active !== false).map((b) => normalizePhone(b.number)));
+
+  const existingCampaigns = new Map(search(db, 'sms.campaign').map((c) => [c.id, c]));
+  const resultingCampaigns = new Map(existingCampaigns);
+  const touched = new Set();
+  for (const campaign of campaigns) {
+    if (Object.keys(campaign).some((k) => !ALLOWED_FOLLOWUP_CAMPAIGN_FIELDS.has(k))) return false;
+    const prior = existingCampaigns.get(campaign.id);
+    if (campaign.followup_sms !== true || (prior && prior.followup_sms !== true)) return false;
+    if (prior) {
+      if ((campaign.delivered ?? 0) !== (prior.delivered ?? 0)) return false;
+      if ((campaign.failed ?? 0) !== (prior.failed ?? 0)) return false;
+      if ((campaign.sent ?? 0) !== (prior.sent ?? 0)) return false;
+      if (campaign.stage_id !== prior.stage_id) return false;
+      if (campaign.body !== prior.body) return false;
+      if ((campaign.company_id ?? 1) !== (prior.company_id ?? 1)) return false;
+    } else {
+      if (campaign.mailing_model !== 'res.partner') return false;
+      if ((campaign.delivered ?? 0) !== 0 || (campaign.failed ?? 0) !== 0) return false;
+      if (campaign.stage_id !== 'sent') return false;
+    }
+    resultingCampaigns.set(campaign.id, campaign);
+    touched.add(campaign.id);
+  }
+
+  const existingTraces = new Map(search(db, 'sms.trace').map((t) => [t.id, t]));
+  const resultingTraces = new Map(existingTraces);
+  for (const trace of traces) {
+    if (Object.keys(trace).some((k) => !ALLOWED_FOLLOWUP_TRACE_FIELDS.has(k))) return false;
+    const prior = existingTraces.get(trace.id);
+    if (prior) {
+      if (prior.campaign_id !== trace.campaign_id) return false;
+      if (trace.state !== prior.state) return false;
+      if ((trace.delivery_pending ?? false) !== (prior.delivery_pending ?? false)) return false;
+      if ((trace.attempted_at ?? null) !== (prior.attempted_at ?? null)) return false;
+      if ((trace.error ?? '') !== (prior.error ?? '')) return false;
+      if (trace.phone !== prior.phone) return false;
+      if (trace.res_model !== prior.res_model || trace.res_id !== prior.res_id) return false;
+      if (trace.state === 'outgoing' && banned.has(normalizePhone(trace.phone))) return false;
+    } else {
+      if (existingCampaigns.has(trace.campaign_id)) return false;
+      if (trace.state !== 'outgoing') return false;
+      if (trace.delivery_pending !== true) return false;
+      if (trace.attempted_at != null) return false;
+      if (trace.error) return false;
+      if (trace.res_model !== 'res.partner') return false;
+      if (banned.has(normalizePhone(trace.phone))) return false;
+    }
+    resultingTraces.set(trace.id, trace);
+    touched.add(trace.campaign_id);
+  }
+
+  const at = today();
+  const groups = followUps(db, at).flatMap(followUpCompanies);
+  for (const id of touched) {
+    const campaign = resultingCampaigns.get(id);
+    if (!campaign || campaign.followup_sms !== true || campaign.mailing_model !== 'res.partner') return false;
+    const campaignTraces = [...resultingTraces.values()].filter((trace) => trace.campaign_id === id);
+    if (!campaignTraces.length) return false;
+    for (const trace of campaignTraces) {
+      const partner = read(db, 'res.partner', trace.res_id);
+      const group = groups.find((f) => f.partner_id === trace.res_id && f.company_id === (campaign.company_id ?? 1) && !f.upcoming);
+      const level = group && followUpLevel(db, group, at);
+      if (trace.res_model !== 'res.partner' || !partner || !group || !level?.send_sms) return false;
+      const phone = normalizePhone(partner.mobile || partner.phone);
+      if (!phone || trace.phone !== phone || campaign.body !== followUpSmsText(db, group, level)) return false;
+      if (banned.has(phone)) return false;
+    }
+  }
+
+  return true;
 }
 
 
@@ -2332,7 +2511,8 @@ export const financeModels = {
     },
     defaults: () => ({ sequence: 10, journal_ids: [] }),
     createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
-    guard: (db, before, record) => (record.journal_ids ?? []).some((id) => {
+    guard: (db, before, record) => ((!before || record.name !== before.name) && (db.records['account.journal.group'] ?? []).some((group) => group.id !== record.id && group.name === record.name))
+      ? 'A Ledger group name must be unique.' : (record.journal_ids ?? []).some((id) => {
       const journal = read(db, 'account.journal', id);
       return !journal || (journal.company_id && journal.company_id !== record.company_id);
     }) ? 'Select journals belonging to this company or shared journals' : null,
@@ -2366,6 +2546,7 @@ export const financeModels = {
       delay: { type: 'integer', label: 'Days Overdue', hidden: true },
       send_email: { type: 'boolean', label: 'Email' },
       send_sms: { type: 'boolean', label: 'SMS' },
+      sms_message: { type: 'text', label: 'SMS Text', hideWhen: (r) => !r?.send_sms },
       create_activity: { type: 'boolean', label: 'Schedule Activity' },
       activity_default_responsible_type: {
         type: 'selection',
@@ -2492,7 +2673,7 @@ export const financeModels = {
           label: 'Notification',
           groups: [
             { title: 'Actions', fields: ['send_email', 'send_sms'] },
-            { fullWidth: true, fields: ['message'] },
+            { fullWidth: true, fields: ['message', 'sms_message'] },
           ],
         },
         {

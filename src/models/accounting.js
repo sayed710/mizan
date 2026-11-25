@@ -2691,6 +2691,13 @@ function moveActivities(r, db) {
 
 const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.journal', r.journal_id)?.type ?? null : null);
 
+/** Mark the selected journal entries as reviewed. */
+export function markAsReviewed(db, moveIds) {
+  const ids = Array.isArray(moveIds) ? moveIds : [moveIds];
+  return ids.reduce((next, id) => read(next, 'account.move', id)?.to_check
+    ? write(next, 'account.move', id, { to_check: false }) : next, db);
+}
+
 export const journalEntriesView = {
   defaults: { move_type: 'entry' },
   list: ['accounting_date', 'display_name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
@@ -2703,6 +2710,11 @@ export const journalEntriesView = {
       requiresSelection: true,
       wizard: (db) => ({ title: 'Reverse Entries', fields: reversalWizardFields(null, db?.settings?.current_company_id ?? 1) }),
       run: (db, ids, values = {}) => reverseEntries(db, ids, values),
+    },
+    {
+      label: 'Mark as reviewed',
+      requiresSelection: true,
+      run: (db, ids) => markAsReviewed(db, ids),
     },
   ],
   filters: [
@@ -3147,14 +3159,14 @@ export const accountingModels = {
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       name: { type: 'char', label: 'Journal', required: true },
-      code: { type: 'char', label: 'Sequence Prefix', required: true },
+      code: { type: 'char', label: 'Sequence Prefix', required: true, optional: 'show' },
       type: {
         type: 'selection', label: 'Type', required: true,
         options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['cash', 'Cash'], ['bank', 'Bank'], ['credit', 'Credit Card'], ['general', 'Miscellaneous']],
         help: 'Select "Sales" for customer invoices journals; "Purchase" for vendor bills journals; "Cash", "Bank" or "Credit Card" for customer or vendor payments; "Miscellaneous" for everything else.',
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
       refund_sequence: {
         type: 'boolean', label: 'Dedicated Credit Note Sequence',
         help: 'Check this box if you don\'t want to share the same sequence for invoices and credit notes made from this journal',
@@ -3168,7 +3180,7 @@ export const accountingModels = {
       refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
       refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
       default_account_id: {
-        type: 'many2one', relation: 'account.account', label: 'Default Account',
+        type: 'many2one', relation: 'account.account', label: 'Default Account', optional: 'show',
         required: (r, _db, { isNew } = {}) => ['sale', 'purchase'].includes(r?.type) || (!isNew && isLiquidityJournal(r)),
       },
       suspense_account_id: {
@@ -3365,6 +3377,8 @@ export const accountingModels = {
     onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
     onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    views: ['list', 'kanban'],
+    searchFields: ['name', 'code'],
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },
@@ -4294,6 +4308,7 @@ export const accountingModels = {
           },
         },
         { label: 'Lock', when: canLockEntry, run: (db, r) => ({ db: secureEntries(db, { throughMoveId: r.id }) }) },
+        { label: 'Mark as reviewed', when: (r) => Boolean(r?.to_check), run: (db, r) => ({ db: markAsReviewed(db, r.id) }) },
         { label: 'Cancel Entry', when: (r) => r.move_type === 'entry' && r.state === 'draft' && Boolean(r.id) && !r.inalterable_hash, run: cancelMove },
         { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, visible: (r) => isInvoice(r), run: cancelMove },
       ],

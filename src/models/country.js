@@ -1,20 +1,41 @@
 import { COUNTRY_DATA, CURRENCY_DATA, STATE_DATA } from './country-data.js';
 
-// Legacy address fields are text; only an unambiguous exact name or code is a match.
+const COUNTRY_ALIASES = {
+  uae: 'ae',
+  ksa: 'sa',
+  usa: 'us',
+  uk: 'gb',
+};
+
+const normText = (value) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
+
+// Address fields may hold free-form text, codes, or common abbreviations; keep integer-ID matching strict.
 export function countryIdFor(db, value) {
   if (Number.isInteger(value)) return (db.records['res.country'] ?? []).some((r) => r.id === value) ? value : null;
-  const matches = (db.records['res.country'] ?? []).filter((r) => value && (r.name === value || r.code === value));
-  return matches.length === 1 ? matches[0].id : null;
+  const norm = normText(value);
+  if (!norm) return null;
+  const countries = db.records['res.country'] ?? [];
+  const matches = countries.filter((r) => normText(r.name) === norm || normText(r.code) === norm);
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) return null;
+  const alias = COUNTRY_ALIASES[norm];
+  if (!alias) return null;
+  const aliasMatches = countries.filter((r) => normText(r.code) === alias);
+  return aliasMatches.length === 1 ? aliasMatches[0].id : null;
 }
 
 export function stateIdFor(db, value, countryId) {
   if (Number.isInteger(value)) return (db.records['res.country.state'] ?? []).some((r) => r.id === value && (countryId == null || r.country_id === countryId)) ? value : null;
-  const matches = (db.records['res.country.state'] ?? []).filter((r) => (countryId == null || r.country_id === countryId) && value && (r.name === value || r.code === value));
+  const norm = normText(value);
+  if (!norm) return null;
+  const matches = (db.records['res.country.state'] ?? []).filter(
+    (r) => (countryId == null || r.country_id === countryId) && (normText(r.name) === norm || normText(r.code) === norm),
+  );
   return matches.length === 1 ? matches[0].id : null;
 }
 
 export function countryReferenceError(db, record) {
-  return record.country_id && !countryIdFor(db, record.country_id) ? 'Selected country does not exist' : null;
+  return record.country_id && !(Number.isInteger(record.country_id) && countryIdFor(db, record.country_id)) ? 'Selected country does not exist' : null;
 }
 
 export function ensureCountries(db) {

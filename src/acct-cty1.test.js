@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
-import { autoFiscalPosition } from './models/taxes.js';
+import { autoFiscalPosition, fiscalPositionFor, isDomesticTax } from './models/taxes.js';
+import { countryIdFor, stateIdFor } from './models/country.js';
 import { models } from './models/index.js';
-import { create } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { importCsvRows } from './csv.js';
+import { cartTotals } from './models/shop.js';
+import { publicCart, publicOrder } from '../server/api.js';
+import { priceLines } from './models/pos.js';
 
 const update = (db, model, records) => ({ ...db, records: { ...db.records, [model]: records } });
 
@@ -243,4 +247,153 @@ test('Finding 5: CSV import maps explicit ISO code columns and codes to record I
     () => importCsvRows(db, 'account.fiscal.position', models['account.fiscal.position'].defaults(), nameRows),
     /Enter an existing record ID for Country/
   );
+});
+
+test('Qodo 1: repaired migrated fiscal positions clear unresolved_targeting and auto-apply once targeting is valid', () => {
+  const db = seed();
+  const egypt = db.records['res.country'].find((c) => c.code === 'EG');
+  const saudi = db.records['res.country'].find((c) => c.code === 'SA');
+  const giza = db.records['res.country.state'].find((s) => s.country_id === egypt.id && s.name === 'Giza');
+  const alex = db.records['res.country.state'].find((s) => s.country_id === egypt.id && s.name === 'Alexandria');
+
+  const old = {
+    ...db,
+    schema_version: SCHEMA_VERSION - 1,
+    records: {
+      ...db.records,
+      'account.fiscal.position': [
+        { id: 20, name: 'Unresolved Country FP', country: 'UnknownLand', auto_apply: true, sequence: 1 },
+        { id: 21, name: 'Unresolved State FP', state_ids: ['UnknownState'], auto_apply: true, sequence: 2 },
+        { id: 22, name: 'Unresolved Both FP', country: 'Nowhere', state_ids: ['NoState'], auto_apply: true, sequence: 3 },
+      ],
+    },
+  };
+
+  let migrated = migrate(old);
+  assert.equal(autoFiscalPosition(migrated, { country_id: egypt.id }), null);
+
+  // Unrelated edits or enabling auto_apply without repairing targeting keep the position excluded
+  let partial = write(migrated, 'account.fiscal.position', 20, { name: 'Renamed Unresolved' });
+  partial = write(partial, 'account.fiscal.position', 20, { auto_apply: true });
+  assert.equal(read(partial, 'account.fiscal.position', 20).unresolved_targeting, true);
+  assert.equal(autoFiscalPosition(partial, { country_id: egypt.id }), null);
+  assert.equal(autoFiscalPosition(partial, { country_id: saudi.id }), null);
+
+  // Completing country repair clears unresolved_targeting and legacy country, and allows auto-apply
+  let repairedCountry = write(partial, 'account.fiscal.position', 20, { country_id: egypt.id });
+  const fp20 = read(repairedCountry, 'account.fiscal.position', 20);
+  assert.equal(fp20.unresolved_targeting, undefined);
+  assert.equal(fp20.country, undefined);
+  assert.equal(autoFiscalPosition(repairedCountry, { country_id: egypt.id }), 20);
+  assert.equal(autoFiscalPosition(repairedCountry, { country_id: saudi.id }), null);
+
+  // Repairing an unresolved state position with state_ids + auto_apply selects it only for that state
+  let repairedState = write(migrated, 'account.fiscal.position', 21, { state_ids: [giza.id], auto_apply: true });
+  const fp21 = read(repairedState, 'account.fiscal.position', 21);
+  assert.equal(fp21.unresolved_targeting, undefined);
+  assert.equal(fp21.states, undefined);
+  assert.equal(autoFiscalPosition(repairedState, { country_id: egypt.id, state_id: giza.id }), 21);
+  assert.equal(autoFiscalPosition(repairedState, { country_id: egypt.id, state_id: alex.id }), null);
+
+  // Two-step repair on both-unresolved position keeps it excluded until both country and state are repaired
+  let step1 = write(migrated, 'account.fiscal.position', 22, { country_id: egypt.id });
+  assert.equal(read(step1, 'account.fiscal.position', 22).unresolved_targeting, true);
+  assert.equal(autoFiscalPosition(step1, { country_id: egypt.id, state_id: giza.id }), null);
+  let step2 = write(step1, 'account.fiscal.position', 22, { state_ids: [giza.id], auto_apply: true });
+  assert.equal(read(step2, 'account.fiscal.position', 22).unresolved_targeting, undefined);
+  assert.equal(autoFiscalPosition(step2, { country_id: egypt.id, state_id: giza.id }), 22);
+});
+
+test('Qodo 2: lowercase, whitespace-padded, and alias country/state addresses match fiscal positions across partners, POS, and checkout', () => {
+  let db = seed();
+  const egypt = search(db, 'res.country').find((c) => c.code === 'EG');
+  const uae = search(db, 'res.country').find((c) => c.code === 'AE');
+  const ksa = search(db, 'res.country').find((c) => c.code === 'SA');
+  const us = search(db, 'res.country').find((c) => c.code === 'US');
+  const gb = search(db, 'res.country').find((c) => c.code === 'GB');
+  const giza = search(db, 'res.country.state').find((s) => s.country_id === egypt.id && s.name === 'Giza');
+
+  // Helper normalization & alias resolution, with strict integer ID checks
+  assert.equal(countryIdFor(db, 'egypt'), egypt.id);
+  assert.equal(countryIdFor(db, ' Egypt '), egypt.id);
+  assert.equal(countryIdFor(db, ' eg '), egypt.id);
+  assert.equal(countryIdFor(db, 'UAE'), uae.id);
+  assert.equal(countryIdFor(db, ' uae '), uae.id);
+  assert.equal(countryIdFor(db, 'KSA'), ksa.id);
+  assert.equal(countryIdFor(db, 'USA'), us.id);
+  assert.equal(countryIdFor(db, 'UK'), gb.id);
+  assert.equal(countryIdFor(db, 999999), null);
+  assert.equal(countryIdFor(db, 1.5), null);
+  assert.equal(stateIdFor(db, ' giza ', egypt.id), giza.id);
+  assert.equal(stateIdFor(db, ' gz ', egypt.id), giza.id);
+  assert.equal(stateIdFor(db, giza.id, ksa.id), null);
+
+  const saleTax = db.records['account.tax'].find((t) => t.type_tax_use === 'sale' && Number(t.amount) === 14 && !t.price_include);
+  const gccGroup = create(db, 'res.country.group', { name: 'GCC', country_ids: ['ae', ' KSA '] });
+  db = gccGroup.db;
+  const fpGiza = create(db, 'account.fiscal.position', { name: 'Giza Zone', auto_apply: true, sequence: 1, country_id: egypt.id, state_ids: [giza.id] });
+  db = fpGiza.db;
+  const fpEgypt = create(db, 'account.fiscal.position', { name: 'Egypt Domestic', auto_apply: true, sequence: 2, country_id: egypt.id });
+  db = fpEgypt.db;
+  const fpGcc = create(db, 'account.fiscal.position', { name: 'GCC Group', auto_apply: true, sequence: 3, country_group_id: gccGroup.id });
+  db = fpGcc.db;
+  const fpUae = create(db, 'account.fiscal.position', { name: 'UAE Export', auto_apply: true, sequence: 4, country_id: uae.id });
+  db = fpUae.db;
+
+  const taxGiza = create(db, 'account.tax', { name: 'Giza 0%', amount_type: 'percent', amount: 0, type_tax_use: 'sale', fiscal_position_ids: [fpGiza.id], original_tax_ids: [saleTax.id] });
+  db = taxGiza.db;
+  const taxUae = create(db, 'account.tax', { name: 'UAE 0%', amount_type: 'percent', amount: 0, type_tax_use: 'sale', fiscal_position_ids: [fpUae.id], original_tax_ids: [saleTax.id] });
+  db = taxUae.db;
+  db = write(db, 'product', 1, { tax_id: saleTax.id });
+
+  // Lowercase and padded partner addresses resolve state + country and country-only positions
+  const pLowerEgypt = create(db, 'res.partner', { name: 'Lower Buyer', country: 'egypt' });
+  db = pLowerEgypt.db;
+  const pPaddedGiza = create(db, 'res.partner', { name: 'Padded Giza Buyer', country: ' Egypt ', state: ' giza ' });
+  db = pPaddedGiza.db;
+  const pKsaAlias = create(db, 'res.partner', { name: 'KSA Alias Buyer', country: 'ksa' });
+  db = pKsaAlias.db;
+
+  assert.equal(fiscalPositionFor(db, pLowerEgypt.id), fpEgypt.id);
+  assert.equal(fiscalPositionFor(db, pPaddedGiza.id), fpGiza.id);
+  assert.equal(fiscalPositionFor(db, pKsaAlias.id), fpGcc.id);
+
+  // Seeded partner "Gulf Interiors" (id 4, country: 'UAE') resolves to UAE position (which beats GCC group by specificity)
+  const gulfPartner = read(db, 'res.partner', 4);
+  assert.equal(gulfPartner.country, 'UAE');
+  assert.equal(fiscalPositionFor(db, gulfPartner.id), fpUae.id);
+
+  // POS priceLines uses fiscalPositionFor on the UAE partner
+  const posPriced = priceLines(db, [{ product_id: 1, qty: 1 }], gulfPartner.id);
+  assert.equal(posPriced[0].tax_id, taxUae.id);
+
+  // Website cartTotals, publicCart, and publicOrder handle lowercase, padded, and alias addresses
+  assert.equal(cartTotals(db, [{ product_id: 1, qty: 1 }], { partnerCountry: 'egypt', partnerState: ' giza ' }).fiscalPositionId, fpGiza.id);
+  assert.equal(cartTotals(db, [{ product_id: 1, qty: 1 }], { partnerCountry: ' Egypt ' }).fiscalPositionId, fpEgypt.id);
+  assert.equal(cartTotals(db, [{ product_id: 1, qty: 1 }], { partnerCountry: 'UAE' }).fiscalPositionId, fpUae.id);
+  assert.equal(cartTotals(db, [{ product_id: 1, qty: 1 }], { partnerCountry: 'France' }).fiscalPositionId, null);
+
+  const cartPreview = publicCart(db, { lines: [{ product_id: 1, qty: 1 }], country: ' Egypt ', state: ' giza ' });
+  assert.equal(cartPreview.status, 200);
+  assert.equal(cartPreview.body.tax, 0);
+
+  const checkout = publicOrder(db, {
+    name: 'UAE Visitor',
+    email: 'uae@example.com',
+    street: '1 Sheikh Zayed Rd',
+    city: 'Dubai',
+    country: 'UAE',
+    lines: [{ product_id: 1, qty: 1 }],
+    carrier_id: 1,
+    provider_code: 'wire',
+  });
+  assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+  const sale = search(checkout.db, 'sale.order').find((o) => o.name === checkout.body.order);
+  assert.equal(sale.fiscal_position_id, fpUae.id);
+  assert.equal(sale.order_line.find((l) => l.product_id === 1).tax_id, taxUae.id);
+
+  // Domestic tax filter also works with country_id-based fiscal positions and alias company country
+  const dbCompanyUae = write(db, 'res.company', 1, { country: 'UAE' });
+  assert.equal(isDomesticTax(read(dbCompanyUae, 'account.tax', taxUae.id), dbCompanyUae), true);
+  assert.equal(isDomesticTax(read(dbCompanyUae, 'account.tax', taxGiza.id), dbCompanyUae), false);
 });
