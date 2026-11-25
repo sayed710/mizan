@@ -232,7 +232,7 @@ test('shared reconciliation models allow company-specific partners on save and o
   assert.equal(fieldDomain(read(db, 'res.partner', pC2.id), { company_id: 1 }), false);
   assert.equal(fieldDomain(read(db, 'res.partner', pC2.id), { company_id: c2.id }), true);
 
-  // Creating a model for company 2 with a company-2 partner succeeds
+  // Creating a company-2 model with a company-2 partner succeeds
   const sharedRule = create(db, model, {
     name: 'Shared Partner Mapping',
     company_id: c2.id,

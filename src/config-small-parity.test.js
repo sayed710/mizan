@@ -272,12 +272,13 @@ test('account tags: single definition, list columns, conditional Country, ribbon
 
   const def = models['account.account.tag'];
   assert.deepEqual(viewsOf('account.account.tag'), ['list']);
-  assert.deepEqual(def.list, ['name', 'applicability', 'country', 'color']);
+  assert.deepEqual(def.list, ['name', 'applicability', 'country_id', 'color']);
   assert.deepEqual(def.searchFields, ['name']);
   assert.equal(def.fields.applicability.required, true);
   assert.equal(def.fields.active.help, 'Set active to false to hide the Account Tag without removing it.');
-  assert.equal(def.fields.country.type, 'char');
-  assert.equal(def.fields.country.help, 'Country for which this tag is available, when applied on taxes.');
+  assert.equal(def.fields.country_id.type, 'many2one');
+  assert.equal(def.fields.country_id.relation, 'res.country');
+  assert.equal(def.fields.country_id.help, 'Country for which this tag is available, when applied on taxes.');
 
   let db = seed();
   const accTag = create(db, 'account.account.tag', { name: 'Audit Tag', applicability: 'accounts', color: 3 });
@@ -286,7 +287,8 @@ test('account tags: single definition, list columns, conditional Country, ribbon
   db = write(db, 'account.account', account.id, { tag_ids: [accTag.id] });
   assert.throws(() => write(db, 'account.account.tag', accTag.id, { applicability: 'taxes' }), /cannot change applicability/);
 
-  const archivedTag = create(db, 'account.account.tag', { name: 'Archived Tax Tag', applicability: 'taxes', country: 'EG', active: false, color: 5 });
+  const egypt = search(db, 'res.country').find((c) => c.code === 'EG');
+  const archivedTag = create(db, 'account.account.tag', { name: 'Archived Tax Tag', applicability: 'taxes', country_id: egypt.id, active: false, color: 5 });
   db = archivedTag.db;
 
   const { ActionView } = await import('./views/ActionView.jsx');

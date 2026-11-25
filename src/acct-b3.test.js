@@ -95,10 +95,10 @@ test('BANK-20: counterpart lines of reconciliation models declare analytic_distr
       [MODEL]: [...(secondAcc.db.records[MODEL] ?? []), {
         id: 9998,
         name: 'Invalid Plan Total',
+        company_id: 1,
         sequence: 10,
         trigger: 'manual',
         rule_type: 'reco_model',
-        company_id: 1,
         line_ids: [{ sequence: 10, account_id: feeAcc, amount_type: 'percentage', amount_string: '100', analytic_distribution: { [analyticAcc.id]: 60, [secondAcc.id]: 60 } }],
       }],
     },
@@ -146,10 +146,10 @@ test('BANK-23: regex conditions are applied by the autoReconcile runner and inva
       [MODEL]: [...(base.records[MODEL] ?? []), {
         id: 9998,
         name: 'Forged Bad Regex',
+        company_id: 1,
         sequence: 10,
         trigger: 'manual',
         rule_type: 'reco_model',
-        company_id: 1,
         match_label: 'match_regex',
         match_label_param: '*bad',
         line_ids: [{ account_id: feeAcc, amount_type: 'percentage', amount_string: '100' }],

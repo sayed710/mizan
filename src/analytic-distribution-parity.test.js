@@ -190,7 +190,8 @@ test('account.analytic.distribution.model form layout, labels, help texts, hidde
     def.fields.partner_id.help,
     'Select a partner for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this partner, it will automatically take this as an analytic account)',
   );
-  assert.equal(def.fields.partner_category_id.type, 'char');
+  assert.equal(def.fields.partner_category_id.type, 'many2one');
+  assert.equal(def.fields.partner_category_id.relation, 'res.partner.category');
   assert.equal(def.fields.partner_category_id.label, 'Partner Category');
   assert.equal(
     def.fields.partner_category_id.help,

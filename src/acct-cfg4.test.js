@@ -168,23 +168,26 @@ test('CFG-4: Account Tags list search has Archived filter and rejects duplicates
   );
   assert.deepEqual(filtered.map((t) => t.id), [tArchived.id], 'applying Archived filter yields only inactive tags');
 
+  const saId = db.records['res.country'].find((c) => c.code === 'SA').id;
+  const aeId = db.records['res.country'].find((c) => c.code === 'AE').id;
+
   // Duplicate guard: saving a tag whose name, applicability and country equal an existing tag's is rejected
-  const t1 = create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'taxes', country: 'SA' });
+  const t1 = create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'taxes', country_id: saId });
   db = t1.db;
 
   // Direct create rejects duplicate
   assert.throws(
-    () => create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'taxes', country: 'SA' }),
+    () => create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'taxes', country_id: saId }),
     /A tag with the same name and applicability already exists in this country\./,
     'Duplicate tag create must be rejected with Odoo message',
   );
 
   // Different country is allowed
-  const tDiffCountry = create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'taxes', country: 'AE' });
+  const tDiffCountry = create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'taxes', country_id: aeId });
   assert.ok(tDiffCountry.id, 'Same name and applicability in different country is allowed');
 
   // Different applicability is allowed
-  const tDiffApp = create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'accounts', country: 'SA' });
+  const tDiffApp = create(db, 'account.account.tag', { name: 'Operating Tax', applicability: 'accounts', country_id: saId });
   assert.ok(tDiffApp.id, 'Same name in same country with different applicability is allowed');
 
   // Guard tested through diffDb + applyDiff
@@ -194,7 +197,7 @@ test('CFG-4: Account Tags list search has Archived filter and rejects duplicates
       ...db.records,
       'account.account.tag': [
         ...(db.records['account.account.tag'] ?? []),
-        { id: (db.seq['account.account.tag'] ?? 0) + 1, name: 'Operating Tax', applicability: 'taxes', country: 'SA', active: true },
+        { id: (db.seq['account.account.tag'] ?? 0) + 1, name: 'Operating Tax', applicability: 'taxes', country_id: saId, active: true },
       ],
     },
   };
@@ -282,8 +285,9 @@ test('Finding 1 regression: upgrade assigns company 1 to company-less reconcile 
 
 test('Finding 2 regression: legacy duplicate tags can be archived and edited without altering key fields, while new collisions are blocked', () => {
   const base = seed();
-  const dup1 = { id: 9601, name: 'Legacy Dup', applicability: 'taxes', country: 'SA', active: true, color: 1, balance_negate: false };
-  const dup2 = { id: 9602, name: 'Legacy Dup', applicability: 'taxes', country: 'SA', active: true, color: 2, balance_negate: false };
+  const saId = base.records['res.country'].find((c) => c.code === 'SA').id;
+  const dup1 = { id: 9601, name: 'Legacy Dup', applicability: 'taxes', country_id: saId, active: true, color: 1, balance_negate: false };
+  const dup2 = { id: 9602, name: 'Legacy Dup', applicability: 'taxes', country_id: saId, active: true, color: 2, balance_negate: false };
   const dbWithDups = {
     ...base,
     records: {
@@ -300,7 +304,7 @@ test('Finding 2 regression: legacy duplicate tags can be archived and edited wit
   assert.equal(read(db, 'account.account.tag', dup1.id).color, 7);
 
   // Changing identifying fields of another tag into a collision still fails
-  const other = create(db, 'account.account.tag', { name: 'Unique Tag', applicability: 'taxes', country: 'SA' });
+  const other = create(db, 'account.account.tag', { name: 'Unique Tag', applicability: 'taxes', country_id: saId });
   assert.throws(
     () => write(other.db, 'account.account.tag', other.id, { name: 'Legacy Dup' }),
     /A tag with the same name and applicability already exists in this country\./,

@@ -1,8 +1,9 @@
 import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
+import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
@@ -54,12 +55,7 @@ function invoiceCompanyDefaults(db, move, previous, context = {}) {
   const termsEligible = ['out_invoice', 'out_refund'].includes(move.move_type);
   const result = {};
 
-  const isEdited = (field) => {
-    if (!context?.editedFields) return false;
-    if (context.editedFields instanceof Set) return context.editedFields.has(field);
-    if (Array.isArray(context.editedFields)) return context.editedFields.includes(field);
-    return Object.hasOwn(context.editedFields, field);
-  };
+  const isEdited = (field) => isFieldEdited(field, context);
 
   const oldTerms = oldCompany?.use_invoice_terms ? (oldCompany.invoice_terms ?? '') : null;
   const termsUntouched = context?.editedFields ? !isEdited('narration') : (move.narration === undefined || (previous && oldTerms !== null && move.narration === oldTerms));
@@ -399,6 +395,8 @@ export function paymentGuard(db, before, after, ctx) {
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
   if (leavesPosted && before.move_type === 'in_invoice' && (db.records['account.asset'] ?? []).some((asset) => asset.bill_id === before.id
     && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the bill\'s running or depreciated assets before resetting it';
+  if (leavesPosted && (db.records['account.asset'] ?? []).some((asset) => asset.source_move_id === before.id
+    && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the entry\'s running or depreciated assets before resetting it';
   // A posted credit may have enabled an advance; resetting it must not undo that protection.
   if (leavesPosted && before.move_type === 'out_refund' && before.sale_id) {
     const order = read(db, 'sale.order', before.sale_id);
@@ -1034,38 +1032,27 @@ function offsetCreditNote(db, noteId) {
 }
 
 /** Bill lines booked on an account configured to create assets generate draft or validated assets (once per bill line). */
-function draftAssetsFromBill(db, bill) {
-  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
-  const existing = billAssets.filter((a) => a.state === 'draft');
-  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
-  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
-  const retained = new Set();
-  // Without a model journal, assets use the company's configured general journal.
-  const defaultJournal = read(db, 'res.company', bill.company_id ?? 1)?.default_general_journal_id ?? null;
-  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
-    const booked = postedBillLine(bill, index);
-    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
-    const account = read(next, 'account.account', booked.account);
-    const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
-    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
-    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
-    if (mode === 'no') return next;
-    if (model?.company_id && model.company_id !== (bill.company_id ?? 1)) {
-      throw new Error('Asset model must belong to the bill company');
-    }
-    const rawModelJournal = model?.journal_id ? read(next, 'account.journal', model.journal_id) : null;
-    const modelJournal = rawModelJournal?.type === 'general' && (!rawModelJournal.company_id || rawModelJournal.company_id === (bill.company_id ?? 1))
-      ? model.journal_id
-      : null;
-    const product = read(next, 'product', line.product_id);
-    const acquisitionDate = bill.invoice_date ?? today();
-    const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
-    const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
-    const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
-    const values = {
-      name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: acquisitionDate,
-      partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-      account_asset_id: booked.account,
+export function assetDraftValues(db, move, line, { amount, accountId, date }) {
+  const account = read(db, 'account.account', accountId);
+  const model = account?.asset_model_id ? read(db, 'account.asset.model', account.asset_model_id) : null;
+  const company = move.company_id ?? 1;
+  if (model?.company_id && model.company_id !== company) {
+    throw new Error('Asset model must belong to the bill company');
+  }
+  const defaultJournal = read(db, 'res.company', company)?.default_general_journal_id ?? null;
+  const rawModelJournal = model?.journal_id ? read(db, 'account.journal', model.journal_id) : null;
+  const modelJournal = rawModelJournal?.type === 'general' && (!rawModelJournal.company_id || rawModelJournal.company_id === company)
+    ? model.journal_id
+    : null;
+  const product = read(db, 'product', line.product_id);
+  const acquisitionDate = date;
+  const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
+  const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
+  const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
+  return {
+    name: line.name || product?.name || move.name, original_value: amount, acquisition_date: date,
+    partner_id: line.partner_id ?? move.partner_id ?? null, company_id: company,
+    account_asset_id: accountId,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
@@ -1091,6 +1078,23 @@ function draftAssetsFromBill(db, bill) {
         analytic_distribution: null,
       }),
     };
+}
+
+function draftAssetsFromBill(db, bill) {
+  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
+  const existing = billAssets.filter((a) => a.state === 'draft');
+  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
+  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
+  const retained = new Set();
+  // Without a model journal, assets use the company's configured general journal.
+  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
+    const booked = postedBillLine(bill, index);
+    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
+    const account = read(next, 'account.account', booked.account);
+    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
+    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
+    if (mode === 'no') return next;
+    const values = { ...assetDraftValues(next, bill, { ...line, partner_id: bill.partner_id }, { amount: booked.amount, accountId: booked.account, date: bill.invoice_date ?? today() }), bill_id: bill.id, bill_line: index };
     const asset = existing.find((a) => a.bill_line === index);
     let assetId;
     let nextDb;
@@ -3702,7 +3706,15 @@ export const accountingModels = {
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
       return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
-    invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
+    invariant: (db, after, before, stored, ctx) => {
+      const err = secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
+      if (err) return err;
+      if (before?.state === 'posted' && after.state !== 'posted'
+        && (db.records['account.asset'] ?? []).some((a) => a.source_move_id === after.id && a.state !== 'cancel')) {
+        return "Handle the entry's draft assets before resetting it";
+      }
+      return null;
+    },
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
@@ -3716,11 +3728,20 @@ export const accountingModels = {
       if (before.state === 'posted' && after.state !== 'posted') {
         db = reverseInvoiceDeferrals(db, before);
         db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry, attemptAutoPostMove);
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === before.id && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
+        }
       }
       if (after.state === 'cancel' && before?.state !== 'cancel') {
-        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === (before?.id ?? after.id) && a.state === 'draft').map((a) => a.id);
+        const moveId = before?.id ?? after.id;
+        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === moveId && a.state === 'draft').map((a) => a.id);
         if (draftAssets.length) {
           db = unlink(db, 'account.asset', draftAssets);
+        }
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === moveId && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
         }
       }
       if (before?.state !== after.state) {
@@ -4683,20 +4704,20 @@ Object.assign(accountingModels, {
   'account.account.tag': {
     label: 'Account Tags',
     guard: (db, before, after) => {
-      const normCountry = (c) => (c ? String(c).trim() : null);
+      const countryError = countryReferenceError(db, after);
+      if (countryError) return countryError;
       const keyChanged = !before
         || before.name !== after.name
         || before.applicability !== after.applicability
-        || normCountry(before.country) !== normCountry(after.country);
-      const duplicate = keyChanged && Boolean(after.country) && (db.records['account.account.tag'] ?? []).some((r) =>
+        || (before.country_id ?? null) !== (after.country_id ?? null);
+      const duplicate = keyChanged && Boolean(after.country_id) && (db.records['account.account.tag'] ?? []).some((r) =>
         r.id !== after.id
         && r.name === after.name
         && r.applicability === after.applicability
-        && Boolean(r.country)
-        && normCountry(r.country) === normCountry(after.country),
+        && Boolean(r.country_id)
+        && r.country_id === after.country_id,
       );
       if (duplicate) return 'A tag with the same name and applicability already exists in this country.';
-
       if (!before || before.applicability === after.applicability) return null;
       const inAccounts = (db.records['account.account'] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id));
       const inTaxes = (db.records['account.tax'] ?? []).some((r) =>
@@ -4719,7 +4740,7 @@ Object.assign(accountingModels, {
       color: { type: 'integer', label: 'Color' },
       cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating'], ['investing', 'Investing'], ['financing', 'Financing']] },
       active: { type: 'boolean', label: 'Active', help: 'Set active to false to hide the Account Tag without removing it.' },
-      country: { type: 'char', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
+      country_id: { type: 'many2one', relation: 'res.country', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
       balance_negate: { type: 'boolean', label: 'Negate Balance' },
     },
     defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
@@ -4729,13 +4750,13 @@ Object.assign(accountingModels, {
         { id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false },
       ],
     ],
-    list: ['name', 'applicability', 'country', 'color'],
+    list: ['name', 'applicability', 'country_id', 'color'],
     searchFields: ['name'],
     form: {
       title: 'name',
       hideTitle: true,
       groups: (r) => [
-        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country'] : [])],
+        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country_id'] : [])],
         ['cash_flow_activity'],
       ],
     },

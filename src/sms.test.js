@@ -48,3 +48,22 @@ test('a STOP reply blacklists the number once; other replies do nothing', () => 
   assert.equal(handleInbound(once, '+201001112222', 'STOP'), once);
   assert.equal(handleInbound(db, '+201001112222', 'thanks'), db);
 });
+
+test('partner-tag SMS campaigns resolve numeric res.partner.category IDs to names', () => {
+  const seeded = seed();
+  const vipCat = search(seeded, 'res.partner.category').find((c) => c.name === 'VIP');
+  assert.equal(typeof vipCat?.id, 'number');
+  const vipRecipients = smsRecipients(seeded, { mailing_model: 'res.partner', partner_tag: 'VIP' });
+  assert.deepEqual(vipRecipients.map((r) => [r.name, r.phone]), [['Nile Furniture Co.', '+20223456789']]);
+  assert.deepEqual(smsRecipients(seeded, { mailing_model: 'res.partner', partner_tag: ' vip ' }).map((r) => r.name), ['Nile Furniture Co.']);
+
+  const tag = create(seeded, 'res.partner.category', { name: 'Gold Tier' });
+  const other = create(tag.db, 'res.partner.category', { name: 'Silver Tier' });
+  let db = create(other.db, 'res.partner', { name: 'Gold Contact', phone: '+20 101 555 0001', tag_ids: [tag.id] }).db;
+  db = create(db, 'res.partner', { name: 'Silver Contact', phone: '+20 101 555 0002', tag_ids: [other.id] }).db;
+  const camp = create(db, 'sms.campaign', { name: 'Gold Promo', mailing_model: 'res.partner', partner_tag: 'Gold Tier', body: 'Exclusive offer!' });
+  const queued = queueSms(camp.db, read(camp.db, 'sms.campaign', camp.id), { now: '2026-06-01' });
+  const traces = search(queued, 'sms.trace').filter((t) => t.campaign_id === camp.id);
+  assert.deepEqual(traces.map((t) => [t.name, t.phone, t.res_model]), [['Gold Contact', '+201015550001', 'res.partner']]);
+  assert.equal(read(queued, 'sms.campaign', camp.id).sent, 1);
+});

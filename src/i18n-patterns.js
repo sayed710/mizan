@@ -13,6 +13,7 @@ const patterns = {
   'Invalid {1} #{2} in the backup: {3} has the wrong structure': 'السجل {1} رقم {2} غير صالح في النسخة الاحتياطية: بنية {3} خاطئة',
   'Invalid settings.{1} in the backup': 'الإعداد {1} غير صالح في النسخة الاحتياطية',
   'Enter an existing record ID for {1}': 'أدخل معرّف سجل موجود للحقل {1*}',
+  'Enter existing record IDs for {1}': 'أدخل معرّفات سجلات موجودة للحقل {1*}',
   '{1} cannot be duplicated; use its payment workflow': 'لا يمكن تكرار {1*}؛ استخدم مسار الدفع الخاص به',
   'Configure the {1} sequence prefix on the selected journal': 'حدّد بادئة تسلسل {1*} على دفتر اليومية المحدد',
   'Configure a positive next {1} sequence number on the selected journal': 'حدّد رقماً تالياً موجباً لتسلسل {1*} على دفتر اليومية المحدد',
