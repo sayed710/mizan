@@ -7,7 +7,7 @@ import { rateAt, toCompany } from './currency.js';
 import { markAsReviewed, payMove, settleWriteoff } from './accounting.js';
 import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
-import { roundStatementAmount } from './bankstatement.js';
+import { isCashDifferenceCloseContext, statementHasReconciledLines, statementLineOrder, validateCashDifferenceLine } from './bankstatement.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
@@ -730,6 +730,13 @@ export function setStatementLinePartner(db, line, partnerId) {
   const target = read(db, 'account.bank.statement.line', lineId);
   if (!target) throw new Error('Bank transaction does not exist');
   if (target.state === 'reconciled') throw new Error('A reconciled bank transaction cannot be changed');
+  if (target.statement_id) {
+    const stmt = read(db, 'account.bank.statement', target.statement_id);
+    if (stmt?.state === 'closed') throw new Error('Cannot change lines linked to a closed statement');
+    if (statementHasReconciledLines(db, target.statement_id)) {
+      throw new Error('Cannot change lines of a statement with reconciled lines');
+    }
+  }
   const pid = partnerId ? Number(partnerId) : null;
   if (pid) {
     const partner = read(db, 'res.partner', pid);
@@ -840,10 +847,86 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
   return null;
 }
 
+/**
+ * Validate a cash difference line created when closing a cash statement with an ending count gap.
+ */
+function isAuthorizedCashDifferenceLine(db, statement, before, after, ctx = null) {
+  if (before) return false;
+  if (!isCashDifferenceCloseContext(ctx, after.id)) return false;
+  return validateCashDifferenceLine(db, statement, after).ok;
+}
+
+/**
+ * Whether a partner update on a statement line is part of a validated reconciliation or payment allocation
+ * establishing that partner, rather than an arbitrary partner change or unrelated move reference.
+ */
+function partnerIdentifiedByReconciliation(db, before, after) {
+  if (before?.partner_id != null || after.partner_id == null) return false;
+  const targetPartner = after.partner_id;
+
+  const beforeAllocations = before?.allocations ?? [];
+  const afterAllocations = after.allocations ?? [];
+  const newAllocations = afterAllocations.slice(beforeAllocations.length);
+  if (newAllocations.length > 0) {
+    const allocationIdentifies = newAllocations.some((a) => {
+      if (a.invoice_id) {
+        const inv = read(db, 'account.move', a.invoice_id);
+        return inv?.state === 'posted' && sameCommercialPartner(db, inv.partner_id, targetPartner);
+      }
+      if (a.payment_ids?.length) {
+        return a.payment_ids.some((pid) => {
+          const p = read(db, 'account.payment', pid);
+          return p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner);
+        });
+      }
+      if (a.payment_id) {
+        const p = read(db, 'account.payment', a.payment_id);
+        return p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner);
+      }
+      if (a.payment_move_id) {
+        const p = (db.records['account.payment'] ?? []).find((pay) => pay.move_id === a.payment_move_id);
+        if (p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner)) return true;
+        const pm = read(db, 'account.move', a.payment_move_id);
+        return pm?.state === 'posted' && sameCommercialPartner(db, pm.partner_id, targetPartner);
+      }
+      return false;
+    });
+    if (allocationIdentifies) return true;
+  }
+
+  if (before?.state !== 'reconciled' && after.state === 'reconciled') {
+    if (after.move_id) {
+      const m = read(db, 'account.move', after.move_id);
+      if (m?.state === 'posted' && sameCommercialPartner(db, m.partner_id, targetPartner)) return true;
+    }
+    if (after.payment_id) {
+      const p = read(db, 'account.payment', after.payment_id);
+      if (p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner)) return true;
+    }
+    if (after.payment_ids?.length) {
+      if (after.payment_ids.some((pid) => {
+        const p = read(db, 'account.payment', pid);
+        return p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner);
+      })) return true;
+    }
+    if (after.payment_move_id) {
+      const p = (db.records['account.payment'] ?? []).find((pay) => pay.move_id === after.payment_move_id);
+      if (p?.state === 'posted' && sameCommercialPartner(db, p.partner_id, targetPartner)) return true;
+      const pm = read(db, 'account.move', after.payment_move_id);
+      if (pm?.state === 'posted' && sameCommercialPartner(db, pm.partner_id, targetPartner)) return true;
+    }
+  }
+
+  return false;
+}
+
 /** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
 function lineGuard(db, before, after, ctx = null) {
   const clearingBooking = before?.bank_move_id && (!after.bank_move_id || after.open_amount == null || (after.allocations ?? []).length < (before.allocations ?? []).length);
   if (before && after.state === 'to_check' && !after.move_id && (before.state === 'reconciled' || clearingBooking)) return unreconcileError(db, before, after, ctx);
+  if (before && Boolean(before.is_cash_difference) !== Boolean(after.is_cash_difference)) {
+    return 'Cash difference provenance cannot be changed';
+  }
 
   if (before?.statement_id) {
     const prevStmt = read(db, 'account.bank.statement', before.statement_id);
@@ -851,9 +934,9 @@ function lineGuard(db, before, after, ctx = null) {
       if (after.statement_id !== before.statement_id) {
         return 'Cannot remove lines from a closed statement';
       }
-      const changed = ['amount', 'date', 'journal_id', 'company_id', 'active', 'state'].find(
+      const changed = ['amount', 'date', 'payment_ref', 'ref', 'partner_id', 'journal_id', 'company_id', 'state'].find(
         (k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)
-      );
+      ) || ((before.active !== false) !== (after.active !== false) ? 'active' : null);
       if (changed) return 'Cannot change lines linked to a closed statement';
     }
   }
@@ -865,39 +948,48 @@ function lineGuard(db, before, after, ctx = null) {
     if (statement.journal_id !== after.journal_id || (statement.company_id ?? 1) !== comp) {
       return 'Statement lines must belong to the statement journal and company';
     }
+    const isCashDiff = isAuthorizedCashDifferenceLine(db, statement, before, after, ctx);
+    if ((!before || before.statement_id !== after.statement_id) && statement.state !== 'closed' && statementHasReconciledLines(db, after.statement_id)) {
+      if (!isCashDiff) {
+        return before
+          ? 'Cannot add existing lines to a statement with reconciled lines'
+          : 'Cannot add lines to a statement with reconciled lines';
+      }
+    }
     if (statement.state === 'closed' && (!before || before.statement_id !== after.statement_id)) {
-      if (before) return 'Cannot add lines to a closed statement';
-      const journal = read(db, 'account.journal', after.journal_id);
-      const isCash = journal?.type === 'cash';
-      const expectedAccount = after.amount > 0 ? journal?.profit_account_id : journal?.loss_account_id;
-      const validAccount = expectedAccount && after.counterpart_account_id === expectedAccount;
-      if (!isCash || !validAccount) return 'Cannot add lines to a closed statement';
-      const otherLines = search(db, 'account.bank.statement.line').filter(
-        (l) => l.statement_id === statement.id && l.id !== after.id
-      );
-      const hasExistingDiff = otherLines.some(
-        (l) => l.counterpart_account_id === journal?.profit_account_id || l.counterpart_account_id === journal?.loss_account_id
-      );
-      if (hasExistingDiff) return 'Cannot add lines to a closed statement';
-      const otherSum = otherLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
-      const expectedDiff = roundStatementAmount(
-        db,
-        statement,
-        Number(statement.balance_end_real || 0) - (Number(statement.balance_start || 0) + otherSum)
-      );
-      if (roundStatementAmount(db, statement, after.amount) !== expectedDiff) {
+      if (!isCashDiff) {
         return 'Cannot add lines to a closed statement';
       }
     }
+    if (!before && after.is_cash_difference && !isCashDiff) {
+      return 'Cash difference provenance can only be set when closing a cash statement';
+    }
+  } else if (!before && after.is_cash_difference) {
+    return 'Cash difference provenance can only be set when closing a cash statement';
   }
 
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
-    return changed ? 'A reconciled bank transaction cannot be changed' : null;
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_analytic_distribution', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'ref', 'company_id', 'journal_id', 'currency_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    if (changed) return 'A reconciled bank transaction cannot be changed';
+    if (!(before.statement_id && statementHasReconciledLines(db, before.statement_id))) return null;
   }
   if (before?.bank_move_id) {
-    const changed = ['amount', 'date', 'payment_ref', 'company_id', 'journal_id', 'bank_move_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['amount', 'date', 'payment_ref', 'ref', 'company_id', 'journal_id', 'bank_move_id', 'statement_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     if (changed) return 'A booked bank transaction cannot be changed';
+  }
+  if (before?.statement_id && statementHasReconciledLines(db, before.statement_id)) {
+    if (after.statement_id !== before.statement_id) {
+      return 'Cannot remove lines from a statement with reconciled lines';
+    }
+    const partnerChanged = JSON.stringify(before.partner_id ?? null) !== JSON.stringify(after.partner_id ?? null);
+    const authorizedReconcile = partnerChanged
+      && before.partner_id == null
+      && partnerIdentifiedByReconciliation(db, before, after);
+    const changed = ['amount', 'date', 'payment_ref', 'ref', 'journal_id', 'company_id', 'currency_id'].find(
+      (k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null)
+    ) || (partnerChanged && !authorizedReconcile ? 'partner_id' : null)
+      || ((before.active !== false) !== (after.active !== false) ? 'active' : null);
+    if (changed) return 'Cannot change lines of a statement with reconciled lines';
   }
 
   const company = after.company_id ?? 1;
@@ -962,6 +1054,9 @@ function lineGuard(db, before, after, ctx = null) {
     const move = read(db, 'account.move', id);
     if (move?.state !== 'posted') return 'A bank transaction can only be reconciled against a posted journal entry';
     if ((move.company_id ?? 1) !== company) return 'The matched entry belongs to another company';
+    if (after.partner_id && move.partner_id && !sameCommercialPartner(db, move.partner_id, after.partner_id)) {
+      return 'The matched entry belongs to another partner';
+    }
     const journal = read(db, 'account.journal', move.journal_id);
     if (journal?.company_id && journal.company_id !== company) return 'The matched entry journal belongs to another company';
     if ((move.line_ids ?? []).some((l) => {
@@ -980,7 +1075,11 @@ export const isStatementLineWithoutJournal = (line) => line.state === 'to_check'
 export const statementLinesWithoutJournal = (db) => (db.records['account.bank.statement.line'] ?? []).filter(isStatementLineWithoutJournal);
 
 /** Canonical display and running-balance order of bank statement lines: date, then sequence, then id. */
-export const statementLineOrder = (a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id;
+export { statementLineOrder };
+
+const lineStatementLocked = (r, db) => Boolean(
+  r?.statement_id && db && (read(db, 'account.bank.statement', r.statement_id)?.state === 'closed' || statementHasReconciledLines(db, r.statement_id)),
+);
 
 const runningBalanceCache = new WeakMap();
 
@@ -1042,23 +1141,29 @@ export const bankModels = {
         const stmt = read(db, 'account.bank.statement', l.statement_id);
         if (stmt?.state === 'closed') return 'Cannot remove lines from a closed statement';
       }
-      return datedLockDelete((r) => r.state === 'reconciled' || Boolean(r.bank_move_id) || Boolean(r.move_id))(db, l, staged, ctx) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null);
+      const lockErr = datedLockDelete((r) => r.state === 'reconciled' || Boolean(r.bank_move_id) || Boolean(r.move_id))(db, l, staged, ctx);
+      if (lockErr) return lockErr;
+      if (l.state === 'reconciled' || l.bank_move_id) return 'A reconciled or booked bank transaction cannot be deleted';
+      if (l.statement_id && (statementHasReconciledLines(db, l.statement_id) || statementHasReconciledLines(staged, l.statement_id))) {
+        return 'Cannot delete lines of a statement with reconciled lines';
+      }
+      return null;
     },
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
     importFile: { accept: '.ofx,.qfx,.xml,.qif', run: importStatement },
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
-      date: { type: 'date', label: 'Date', required: true },
-      payment_ref: { type: 'char', label: 'Label', required: true },
-      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
-      amount: { type: 'monetary', label: 'Amount', required: true },
+      date: { type: 'date', label: 'Date', required: true, readonly: lineStatementLocked },
+      payment_ref: { type: 'char', label: 'Label', required: true, readonly: lineStatementLocked },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', readonly: lineStatementLocked },
+      amount: { type: 'monetary', label: 'Amount', required: true, readonly: lineStatementLocked },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },
-      statement_id: { type: 'many2one', relation: 'account.bank.statement', label: 'Statement' },
+      statement_id: { type: 'many2one', relation: 'account.bank.statement', label: 'Statement', readonly: lineStatementLocked },
       running_balance: { type: 'monetary', label: 'Running Balance', readonly: true, sum: false, compute: computeRunningBalance },
       state: { type: 'selection', label: 'Status', tracking: true, optional: 'hide', badge: { to_check: 'info', reconciled: 'success' }, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
-      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true, domain: (j) => isLiquidityJournal(j) },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true, domain: (j) => isLiquidityJournal(j), readonly: lineStatementLocked },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Existing Payment' },
       payment_ids: { type: 'many2many', relation: 'account.payment', label: 'Existing Payments' },
@@ -1072,7 +1177,7 @@ export const bankModels = {
       bank_move_id: { type: 'many2one', relation: 'account.move', label: 'Bank Entry', readonly: true, optional: 'hide' },
       account_number: { type: 'char', label: 'Account Number', optional: 'hide' },
       narration: { type: 'char', label: 'Notes', optional: 'hide' },
-      ref: { type: 'char', label: 'Reference', optional: 'hide' },
+      ref: { type: 'char', label: 'Reference', optional: 'hide', readonly: lineStatementLocked },
       transaction_type: { type: 'char', label: 'Transaction Type', optional: 'hide' },
       open_amount: { type: 'monetary', label: 'Open Amount', readonly: true },
       allocations: { type: 'one2many', label: 'Matched Documents', readonly: true, fields: {
@@ -1086,6 +1191,7 @@ export const bankModels = {
       } },
       unique_import_id: { type: 'char', label: 'Import ID', readonly: true },
       counterpart_account_id: { type: 'many2one', relation: 'account.account', label: 'Book to Account', domain: (account, record) => eligibleCounterpart(account, record?.company_id ?? 1) },
+      is_cash_difference: { type: 'boolean', label: 'Cash Difference', readonly: true, hidden: true },
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
     defaults: () => ({ sequence: 10, date: today(), state: 'to_check' }),
