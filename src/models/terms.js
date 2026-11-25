@@ -1,4 +1,4 @@
-import { addDays, isoDate, today, validDate } from './common.js';
+import { addDays, isFieldEdited, isoDate, today, validDate } from './common.js';
 import { currencyUnits, documentCurrency, roundCurrency } from '../money.js';
 import { companyCurrency } from './currency.js';
 import { t } from '../i18n.js';
@@ -39,7 +39,7 @@ export function invoiceInstallments(db, move, term = null) {
 
   const currency = documentCurrency(db, move);
   const baseDate = validDate(move?.invoice_date) ? move.invoice_date : today();
-  const error = termScheduleError(termRecord, move?.amount_total, currency) ?? dueTermLinesError(termRecord);
+  const error = termScheduleError(termRecord, move?.amount_total, currency, baseDate) ?? dueTermLinesError(termRecord);
   if (error) return null;
   return installments(termRecord, move?.amount_total, baseDate, currency);
 }
@@ -65,6 +65,10 @@ function lineDate(line, invoiceDate) {
   }
   return addDays(base, days);
 }
+
+const isBalanceLine = (line) => line?.value_type === 'balance' || (!line?.value_type && line?.value === 'balance');
+const isPercentLine = (line) => line?.value_type === 'percent';
+const roundPercent = (value) => Math.round(value * 1e6) / 1e6;
 
 /** Return an error message when transient preview inputs (`example_amount`, `example_date`) are invalid, or null. */
 export function exampleInputsError(vals) {
@@ -94,21 +98,73 @@ export function dueTermLinesError(term) {
   return null;
 }
 
-/** Return the first validation error for a payment term schedule against `total`, or null when valid. */
-export function termScheduleError(term, total, currency = null) {
+/** Validate payment term line percentages, balance line placement, and early-discount rules (Odoo _check_lines/_check_percent). */
+export function paymentTermLinesError(term) {
   const lines = term?.line_ids ?? [];
   if (!lines.length) return 'Add at least one due term';
+  const balanceIndex = lines.findIndex(isBalanceLine);
+  if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) return 'The balance due term must be the last one';
+
+  let totalPercent = 0;
+  let hasPercent = false;
+  for (const line of lines) {
+    if (!isPercentLine(line)) continue;
+    hasPercent = true;
+    const pct = Number(line.value ?? 0);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      return 'Percentages on the Payment Terms lines must be between 0 and 100.';
+    }
+    totalPercent += pct;
+  }
+  totalPercent = roundPercent(totalPercent);
+
+  if (balanceIndex < 0) {
+    if (!hasPercent || totalPercent !== 100) {
+      return 'The Payment Term must have at least one percent line and the sum of the percent must be 100%.';
+    }
+  } else if (totalPercent > 100) {
+    return 'Payment terms must allocate 100% of the total';
+  }
+
+  if (term?.early_discount) {
+    if (lines.length !== 1 || !isPercentLine(lines[0]) || totalPercent !== 100) {
+      return 'The Early Payment Discount functionality can only be used with payment terms using a single 100% line.';
+    }
+    const discountPercent = Number(term.discount_percent);
+    if (!Number.isFinite(discountPercent) || discountPercent <= 0) {
+      return 'The Early Payment Discount must be strictly positive.';
+    }
+    const discountDays = Number(term.discount_days);
+    if (!Number.isFinite(discountDays) || discountDays <= 0) {
+      return 'The Early Payment Discount days must be strictly positive.';
+    }
+  }
+  return null;
+}
+
+/** Return the first validation error for a payment term schedule against `total`, or null when valid. */
+export function termScheduleError(term, total, currency = null, invoiceDate = null) {
+  const rawLines = term?.line_ids ?? [];
+  if (!rawLines.length) return 'Add at least one due term';
+
+  const baseDate = validDate(invoiceDate) ? invoiceDate : today();
+  const lines = [...rawLines].sort((a, b) => lineDate(a, baseDate).localeCompare(lineDate(b, baseDate)));
 
   const totalCents = Math.abs(currencyUnits(total, currency));
   const fixed = lines.map((line) => (line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0));
   const fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
   if (fixedRemaining > totalCents) return 'Fixed amounts exceed the total';
-  const balanceIndex = lines.findIndex((line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance'));
-  if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) return 'The balance due term must be the last one';
+  const balanceIndex = rawLines.findIndex(isBalanceLine);
+  if (balanceIndex >= 0 && balanceIndex !== rawLines.length - 1) return 'The balance due term must be the last one';
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
-  const hasPercent = lines.some((line) => line.value_type === 'percent');
-  const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
-  if (balanceIndex >= 0 || (hasFixed && hasPercent)) {
+  const hasPercent = lines.some(isPercentLine);
+  const percentSum = lines.filter(isPercentLine).reduce((sum, line) => sum + (Number(line.value) || 0), 0);
+  const percentIs100 = roundPercent(percentSum) === 100;
+  const lastPercentIndex = balanceIndex < 0 && hasFixed && hasPercent && percentIs100 ? lines.findLastIndex(isPercentLine) : -1;
+  const requestedTotal = lines.reduce((sum, line, index) => sum + (
+    line.value_type === 'fixed' ? fixed[index] : isPercentLine(line) && index !== lastPercentIndex ? totalCents * (Number(line.value) || 0) / 100 : 0
+  ), 0);
+  if (balanceIndex >= 0 || (hasFixed && hasPercent && percentIs100)) {
     if (requestedTotal > totalCents + lines.length / 2) {
       return 'Payment terms must allocate 100% of the total';
     }
@@ -120,7 +176,7 @@ export function termScheduleError(term, total, currency = null) {
 
 /** Split an invoice total into dated installments according to a payment term. */
 export function installments(term, total, invoiceDate, currency = null) {
-  const error = termScheduleError(term, total, currency);
+  const error = termScheduleError(term, total, currency, invoiceDate);
   if (error) throw new Error(error);
 
   const baseDate = validDate(invoiceDate) ? invoiceDate : today();
@@ -132,9 +188,8 @@ export function installments(term, total, invoiceDate, currency = null) {
   const fixed = lines.map((line) => (line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0));
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
 
-  const isBalanceLine = (line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance');
   const hasBalance = lines.some(isBalanceLine);
-  const lastPercentIndex = lines.findLastIndex((line) => line.value_type === 'percent');
+  const lastPercentIndex = lines.findLastIndex(isPercentLine);
   const isResidualLine = (line, index) => (hasBalance ? isBalanceLine(line) : index === lastPercentIndex);
 
   let remaining = totalCents;
@@ -190,6 +245,15 @@ export function mixedDiscountFactor(term) {
   return term?.early_discount && discountTaxComputation(term) === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
 }
 
+function defaultDiscountTaxComputation(db, companyId) {
+  if (!db) return 'included';
+  const targetCompany = companyId
+    ? read(db, 'res.company', companyId)
+    : read(db, 'res.company', db.settings?.current_company_id || 1);
+  const code = targetCompany?.country_code;
+  return code === 'BE' ? 'mixed' : code === 'NL' ? 'excluded' : 'included';
+}
+
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });
 
 /** Format the payment-term preview lines from its example amount/date without hiding unexpected errors. */
@@ -200,7 +264,7 @@ export function formatTermPreview(r) {
   if (inputError) return t(inputError);
 
   const total = Number(rawAmount);
-  const validationError = termScheduleError(r, total) ?? dueTermLinesError(r);
+  const validationError = termScheduleError(r, total, null, date) ?? dueTermLinesError(r);
   if (validationError) return t(validationError);
   if (r?.display_on_invoice === false) return '';
 
@@ -291,9 +355,27 @@ export const termModels = {
       },
     },
     defaults: () => ({ sequence: 10, active: true, display_on_invoice: true, early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
-    createDefaults: (_db, vals) => (vals?.early_discount ? { discount_tax_computation: 'included' } : {}),
-    onchange: (r, key) => (key === 'early_discount' && r.early_discount && !r.discount_tax_computation ? { discount_tax_computation: 'included' } : {}),
+    createDefaults: (db, vals) => ({ discount_tax_computation: defaultDiscountTaxComputation(db, vals?.company_id) }),
+    onchange: (r, key, db, context) => {
+      if (key === 'company_id') {
+        const previous = context?.previous;
+        const isExplicit = isFieldEdited('discount_tax_computation', context);
+        const oldDefault = previous ? defaultDiscountTaxComputation(db, previous.company_id) : null;
+        const isDefaultedOrUnset = context?.editedFields
+          ? !isExplicit
+          : (r.discount_tax_computation == null || (oldDefault !== null && r.discount_tax_computation === oldDefault && previous.discount_tax_computation === oldDefault));
+        if (isDefaultedOrUnset) {
+          return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+        }
+        return {};
+      }
+      if (key === 'early_discount' && r.early_discount && !r.discount_tax_computation) {
+        return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+      }
+      return {};
+    },
     guard: (_db, before, after, _ctx, vals) => {
+      if (before && after.active === false && before.active !== false && Object.keys(after).every((key) => key === 'active' || JSON.stringify(after[key]) === JSON.stringify(before[key])) && Object.keys(before).every((key) => key === 'active' || Object.hasOwn(after, key))) return null;
       const exampleErr = exampleInputsError(vals);
       if (exampleErr) return exampleErr;
       // Terms saved before the mode existed keep reading as 'included' (discountTaxComputation) and stay editable.
@@ -301,11 +383,22 @@ export const termModels = {
       if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) && !legacyUnset) {
         return 'Select a discount tax computation mode';
       }
-      return dueTermLinesError(after);
+      // Legacy terms that predate these rules stay archivable/renamable until re-activated or until lines or discount fields change.
+      const shouldValidateLines = !before
+        || (before.active === false && after.active !== false)
+        || ['line_ids', 'early_discount', 'discount_percent', 'discount_days'].some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+      if (shouldValidateLines) {
+        return paymentTermLinesError(after) ?? dueTermLinesError(after);
+      }
+      return null;
     },
+    protectDelete: (db, term, staged = db, context = {}) => (((context?.finalRecords ?? staged?.records ?? db.records)['account.move'] ?? []).some((move) => move.invoice_payment_term_id === term.id)
+      ? "Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them. How about archiving them instead?"
+      : null),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     views: ['list', 'kanban'],
-    kanban: { title: 'name', lines: ['early_discount'] },
+    kanban: { title: 'name', lines: ['note'] },
+    filters: [[{ id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false }]],
     list: ['sequence', 'name', 'company_id'],
     listDecoration: (r) => (r.active === false ? 'muted' : ''),
     searchFields: ['name'],

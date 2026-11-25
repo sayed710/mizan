@@ -97,7 +97,7 @@ test('RP-4 list wizard default amount accounts for credit note application on di
     early_discount: true,
     discount_percent: 2,
     discount_days: 10,
-    line_ids: [{ value: 'balance', days: 30 }],
+    line_ids: [{ value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
   });
   db = term.db;
   const d = '2026-05-01';

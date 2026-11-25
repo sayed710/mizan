@@ -15,10 +15,22 @@ const groupByLabel = (def, g, listLabels, groupByLabels) => t(groupByLabels?.[g]
 function Facets({ model, search, setSearch, filters = null, listLabels = null, groupByLabels = null }) {
   const def = models[model];
   const fields = def.fields;
+  const modelFilters = (filters ?? def?.filters ?? []).flat();
+  const hasArchivedFilter = modelFilters.some((f) => f.id === 'archived' || f.label === 'Archived');
   const facets = [
     ...(search.rel ? [{ key: 'rel', icon: '⇢', label: `${t(search.rel.fieldLabel ?? fields[search.rel.field]?.label)}: ${search.rel.label}`, clear: { rel: null } }] : []),
-    ...(search.filters.length ? [{ key: 'f', icon: <Icon name="filter" size={11} />, label: search.filters.map((id) => filterLabel(model, id, filters)).join(` ${t('or')} `), clear: { filters: [] } }] : []),
-    ...(search.archived ? [{ key: 'a', icon: <Icon name="filter" size={11} />, label: t('Archived'), clear: { archived: false } }] : []),
+    ...(search.filters.length ? [{
+      key: 'f',
+      icon: <Icon name="filter" size={11} />,
+      label: search.filters.map((id) => filterLabel(model, id, filters)).join(` ${t('or')} `),
+      clear: { filters: [], ...(hasArchivedFilter ? { archived: false } : {}) },
+    }] : []),
+    ...(search.archived && !search.filters.some((id) => modelFilters.find((f) => f.id === id && (f.id === 'archived' || f.label === 'Archived'))) ? [{
+      key: 'a',
+      icon: <Icon name="filter" size={11} />,
+      label: t('Archived'),
+      clear: { archived: false, ...(hasArchivedFilter ? { filters: search.filters.filter((id) => id !== 'archived') } : {}) },
+    }] : []),
     ...(search.groupBy.length ? [{ key: 'g', icon: '≡', label: search.groupBy.map((g) => groupByLabel(def, g, listLabels, groupByLabels)).join(' › '), clear: { groupBy: [] } }] : []),
     ...search.terms.map((term, i) => ({ key: `s${i}`, icon: t('Search'), label: term, clear: { terms: search.terms.filter((_, j) => j !== i) } })),
   ];
@@ -36,6 +48,8 @@ function SearchPanel({ model, search, setSearch, onClose, filters = null, groupB
   const db = getDb();
   const multiCompany = companiesOf(db).length > 1;
   const favorites = db.settings?.favorites?.[model] ?? [];
+  const modelFilters = (filters ?? def?.filters ?? []).flat();
+  const hasArchivedFilter = modelFilters.some((f) => f.id === 'archived' || f.label === 'Archived');
   const visibleGroupBy = (g) => {
     const meta = { ...fields[g], ...(listFields ?? def.listFields)?.[g] };
     if (meta.multiCompanyOnly && !multiCompany) return false;
@@ -67,11 +81,13 @@ function SearchPanel({ model, search, setSearch, onClose, filters = null, groupB
             ))}
           </ul>
         ))}
-        <ul>
-          <li>
-            <button type="button" aria-pressed={!!search.archived} onClick={() => setSearch({ ...search, archived: !search.archived })}>{t('Archived')}</button>
-          </li>
-        </ul>
+        {!hasArchivedFilter && (
+          <ul>
+            <li>
+              <button type="button" aria-pressed={!!search.archived} onClick={() => setSearch({ ...search, archived: !search.archived })}>{t('Archived')}</button>
+            </li>
+          </ul>
+        )}
       </section>
       <section>
         <h3>≡ {t('Group By')}</h3>

@@ -96,11 +96,14 @@ test('posted invoice installment schedule is derived from posted lines even afte
 
 test('invalid payment term schedule does not throw during invoice rendering', () => {
   const db0 = seed();
-  // Term with fixed installment of 500
+  // Term with fixed installment of 500 plus 100% remainder line (valid in Odoo, but exceeds a 100 invoice total)
   const term = create(db0, 'account.payment.term', {
     name: 'Fixed 500',
     display_on_invoice: true,
-    line_ids: [{ value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' }],
+    line_ids: [
+      { value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' },
+    ],
   });
   // Draft invoice total is only 100 (fixed 500 exceeds 100)
   const inv = create(term.db, 'account.move', {
@@ -118,7 +121,7 @@ test('invalid payment term schedule does not throw during invoice rendering', ()
   // But invoiceInstallments returns null without throwing, allowing PrintDoc to render
   assert.equal(invoiceInstallments(inv.db, draftInv), null);
 
-  // For a posted invoice where term was edited to become invalid, it still returns the recorded schedule
+  // For a posted invoice where term was edited to become invalid for a 100 invoice, it still returns the recorded schedule
   const validTerm = create(db0, 'account.payment.term', {
     name: 'Valid term',
     display_on_invoice: true,
@@ -132,9 +135,12 @@ test('invalid payment term schedule does not throw during invoice rendering', ()
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
   });
   let postedDb = postMove(inv2.db, inv2.id);
-  // Edit the term to an invalid fixed amount
+  // Edit the term to an invalid fixed amount exceeding the 100 invoice total
   postedDb = write(postedDb, 'account.payment.term', validTerm.id, {
-    line_ids: [{ value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' }],
+    line_ids: [
+      { value_type: 'fixed', value: 500, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' },
+    ],
   });
   const postedInv2 = read(postedDb, 'account.move', inv2.id);
   assert.doesNotThrow(() => {
@@ -144,10 +150,10 @@ test('invalid payment term schedule does not throw during invoice rendering', ()
 });
 
 test('fixed installment preserves configured amount when earlier percentage line is sorted first', () => {
-  // 50% due at day 0, fixed 100 due at day 30, total 1000
+  // 100% residual due at day 0, fixed 100 due at day 30, total 1000
   const term = {
     line_ids: [
-      { value_type: 'percent', value: 50, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 100, nb_days: 0, delay_type: 'days_after' },
       { value_type: 'fixed', value: 100, nb_days: 30, delay_type: 'days_after' },
     ],
   };
@@ -161,7 +167,7 @@ test('fixed installment preserves configured amount when earlier percentage line
   const termReverseDef = {
     line_ids: [
       { value_type: 'fixed', value: 100, nb_days: 30, delay_type: 'days_after' },
-      { value_type: 'percent', value: 50, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 100, nb_days: 0, delay_type: 'days_after' },
     ],
   };
   assert.deepEqual(installments(termReverseDef, 1000, '2026-01-01'), [
