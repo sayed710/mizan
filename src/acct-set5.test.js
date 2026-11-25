@@ -49,7 +49,7 @@ test('SET5: migration preserves analytics for existing companies while fresh dat
   const { group_analytic_accounting: _setting, ...legacyCompany } = read(fresh, 'res.company', 1);
   const legacy = { ...fresh, schema_version: 67, records: { ...fresh.records, 'res.company': [legacyCompany, { id: 2 }, { id: 3, group_analytic_accounting: null }, { id: 4, group_analytic_accounting: false }, { id: 5, group_analytic_accounting: true }] } };
   const upgraded = migrate(legacy);
-  assert.equal(upgraded.schema_version, 74);
+  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
   assert.deepEqual(upgraded.records['res.company'].map((company) => company.group_analytic_accounting), [true, true, true, false, true]);
   assert.equal(analyticAccountingEnabled(upgraded), true);
   assert.ok(leaves(visibleAccountingMenus(apps.find((app) => app.id === 'accounting').menus, upgraded)).includes('analytic-items'));

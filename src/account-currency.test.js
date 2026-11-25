@@ -147,15 +147,15 @@ test('a currency change and a new entry are judged against the final change set'
 });
 
 test('a bank journal account forced to USD: reconciling a USD statement line produces lines in USD with correct amount_currency; a payment through that journal too', async () => {
-  const { createCompanyWithDefaultInvoiceJournals, withDefaultBankJournal } = await import('./test-support/accounting-company.js');
+  const { createCompanyWithDefaultInvoiceJournals } = await import('./test-support/accounting-company.js');
   let db = seed();
   const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
   const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
   const coEur = createCompanyWithDefaultInvoiceJournals(db, { name: 'EUR Co', currency_id: eur.id });
-  db = withDefaultBankJournal(coEur.db, coEur.id);
+  db = coEur.db;
 
   const journal = search(db, 'account.journal').find((j) => j.company_id === coEur.id && j.type === 'bank');
-  db = write(db, 'account.account', journal.default_account_id, { currency_id: usd.id });
+  db = write(db, 'account.journal', journal.id, { currency_id: usd.id });
   const bank = read(db, 'account.account', journal.default_account_id);
 
   const partner = search(db, 'res.partner').find((p) => p.is_company);
@@ -435,7 +435,7 @@ test('revaluation on a USD-forced account: adjustment line has currency_id USD a
 
   const bnkJournal = search(db, 'account.journal').find((j) => j.company_id === co2.id && j.type === 'bank');
   const usdAccount = bnkJournal.default_account_id;
-  db = write(db, 'account.account', usdAccount, { currency_id: usd.id });
+  db = write(db, 'account.journal', bnkJournal.id, { currency_id: usd.id });
 
   const initial = postEntry(db, {
     journal: bnkJournal.code,
