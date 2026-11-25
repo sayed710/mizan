@@ -1,11 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { register } from 'node:module';
+import { startServer } from './test-server.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -85,7 +84,8 @@ async function renderSettingsView(initialDb) {
 
 async function withTestServer(env, fn) {
   const directory = await mkdtemp(join(tmpdir(), 'mizan-rates-test-'));
-  const runnerScript = `
+  const preloadPath = join(directory, 'stub-ecb.mjs');
+  await writeFile(preloadPath, `
     const SAMPLE = ${JSON.stringify(SAMPLE_ECB_XML)};
     const orig = globalThis.fetch;
     globalThis.fetch = async (url, ...args) => {
@@ -94,34 +94,23 @@ async function withTestServer(env, fn) {
       }
       return orig(url, ...args);
     };
-    import('./server/index.js');
-  `;
-  const child = spawn(process.execPath, ['--input-type=module', '-e', runnerScript], {
-    cwd: new URL('..', import.meta.url),
-    env: {
-      ...process.env,
-      PORT: '0',
-      MIZAN_DB: join(directory, 'test.sqlite'),
-      MIZAN_ADMIN_PASSWORD: 'admin-rates-password',
-      MIZAN_SECURE_COOKIE: '0',
-      MIZAN_SMTP_HOST: '',
-      NODE_ENV: '',
-      ...env,
-    },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  `);
+  let server;
   try {
-    const origin = await new Promise((resolve, reject) => {
-      let output = '';
-      const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
-      child.stdout.on('data', (chunk) => {
-        output += chunk;
-        const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
-        if (match) { clearTimeout(timeout); resolve(match[1]); }
-      });
-      child.stderr.on('data', (chunk) => { output += chunk; });
-      child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
+    server = await startServer({
+      preload: preloadPath,
+      env: {
+        ...process.env,
+        PORT: '0',
+        MIZAN_DB: join(directory, 'test.sqlite'),
+        MIZAN_ADMIN_PASSWORD: 'admin-rates-password',
+        MIZAN_SECURE_COOKIE: '0',
+        MIZAN_SMTP_HOST: '',
+        NODE_ENV: '',
+        ...env,
+      },
     });
+    const { origin } = server;
     const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
     const res = await fetch(`${origin}/api/login`, {
       method: 'POST',
@@ -131,12 +120,8 @@ async function withTestServer(env, fn) {
     const adminHeaders = { ...headers, Cookie: res.headers.get('set-cookie').split(';')[0] };
     await fn(origin, adminHeaders, directory);
   } finally {
-    if (child.exitCode === null) {
-      const exited = once(child, 'exit');
-      child.send('shutdown');
-      await exited;
-    }
-    await rm(directory, { recursive: true, force: true });
+    await server?.stop();
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
