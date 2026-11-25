@@ -220,7 +220,10 @@ export async function serverAction(path, body) {
     }
     const payload = body && typeof body === 'object' && 'id' in body && id !== body.id ? { ...body, id } : body;
     const r = await api(path, payload);
-    if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
+    if (!r.ok) {
+      // `delivered` marks an email that went out although the server could not record it; it must not be resent.
+      throw Object.assign(new Error(r.data?.error ?? 'Action failed'), r.data?.delivered ? { delivered: true } : {});
+    }
     // Keep the refresh serialized too: a stale action response must not replace a newer snapshot.
     // The action already happened, so a refresh failure must not invite the user to repeat it.
     let refreshError = null;

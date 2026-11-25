@@ -45,5 +45,5 @@ export function classifySendError(error) {
       }),
     };
   }
-  return { retryable: true, message: t(message) };
+  return { retryable: error?.delivered !== true, message: t(message) };
 }

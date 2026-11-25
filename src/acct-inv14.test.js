@@ -833,3 +833,12 @@ test('INV-14: App updates comma-separated batch print route when mizan:remapped 
     await React.act(async () => root.unmount());
   }
 });
+
+test('INV-14: an email delivered during a restore is never offered for resend', async () => {
+  const { classifySendError } = await import('./views/documentSend.js');
+  const restored = Object.assign(new Error('The email was sent, but the data was restored meanwhile, so the send was not recorded'), { delivered: true });
+  assert.equal(classifySendError(restored).retryable, false);
+  const unrecorded = Object.assign(new Error('The email was sent, but its status could not be recorded: disk full'), { delivered: true });
+  assert.equal(classifySendError(unrecorded).retryable, false);
+  assert.equal(classifySendError(new Error('Email could not be sent: SMTP timeout')).retryable, true);
+});
