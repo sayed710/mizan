@@ -223,6 +223,9 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
   }
+  if (vals.quick_edit_mode !== undefined && vals.quick_edit_mode !== null && vals.quick_edit_mode !== '' && !['out_invoices', 'in_invoices', 'out_and_in_invoices'].includes(vals.quick_edit_mode)) {
+    return 'Select a valid quick encoding mode';
+  }
   if (vals.account_check_printing_layout !== undefined && vals.account_check_printing_layout !== null && !['none', 'top', 'middle', 'bottom'].includes(vals.account_check_printing_layout)) {
     return 'Select a valid check layout';
   }
@@ -278,6 +281,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const priceIncludeOptions = fields.account_price_include?.options ?? [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']];
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
   const periodicityOptions = fields.tax_periodicity?.options ?? [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']];
+  const quickEditOptions = fields.quick_edit_mode?.options ?? [['out_invoices', 'Customer Invoices'], ['in_invoices', 'Vendor Bills'], ['out_and_in_invoices', 'Customer Invoices and Vendor Bills']];
   const generalJournals = (db.records['account.journal'] ?? [])
     .filter((j) => j.active !== false && j.type === 'general' && (!j.company_id || !company || j.company_id === company.id));
   const companyAccounts = (db.records['account.account'] ?? [])
@@ -562,6 +566,19 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
                 onChange={(e) => onWriteCompany({ three_way_matching: e.target.checked })} />
             </SettingRow>
           )}
+        </div>
+      )}
+
+      {hasField('quick_edit_mode') && (
+        <div className="settings-block" data-block="quick_encoding">
+          <h3>{t('Quick Encoding')}</h3>
+          <SettingRow id="quick_edit_mode" label="Quick encoding" description="Enter the tax-included total on draft invoices and bills to prefill new lines with the remaining amount.">
+            <select id="quick_edit_mode" disabled={readOnly || !company} value={company?.quick_edit_mode ?? ''}
+              onChange={(e) => onWriteCompany({ quick_edit_mode: e.target.value || null })}>
+              <option value="">{t('None')}</option>
+              {quickEditOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+            </select>
+          </SettingRow>
         </div>
       )}
 
