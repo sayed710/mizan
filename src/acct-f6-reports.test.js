@@ -317,8 +317,9 @@ test('a custom account.report respects the analytic filter', async () => {
   db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
   const yr = Number(today().slice(0, 4));
 
-  const aAlpha = create(db, 'account.analytic.account', { name: 'Alpha Project', company_id: 1 }); db = aAlpha.db;
-  const aBeta = create(db, 'account.analytic.account', { name: 'Beta Project', company_id: 1 }); db = aBeta.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const aAlpha = create(db, 'account.analytic.account', { name: 'Alpha Project', company_id: 1, plan_id: planId }); db = aAlpha.db;
+  const aBeta = create(db, 'account.analytic.account', { name: 'Beta Project', company_id: 1, plan_id: planId }); db = aBeta.db;
 
   const cashAcc = search(db, 'account.account').find((a) => a.code === '101401');
   const revAcc = search(db, 'account.account').find((a) => a.code === '400000');

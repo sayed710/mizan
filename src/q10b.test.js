@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postEntry } from './models/ledger.js';
 import { closeFiscalYear, reopenFiscalYear } from './models/closing.js';
@@ -94,7 +94,7 @@ test('Qodo 1: mandatory analytic plans do not block fiscal closing, reopening, o
 });
 
 test('Qodo 2: automatic analytic allocations are persisted on business entries and expenses, not lost', () => {
-  let db = seed();
+  let db = write(seed(), 'res.company', 1, { group_analytic_accounting: true });
 
   const plan = create(db, 'account.analytic.plan', {
     name: 'Cost Plan',

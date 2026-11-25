@@ -5,16 +5,14 @@ import { seed } from './seed.js';
 import { aggregate, applyFilters, create, groupRecords, search } from './orm.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
-import { find, setupDom } from './test-support/dom.js';
+import { find, setupDom, waitFor } from './test-support/dom.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
 const textOf = (node) => (node.nodeType === 3 ? node.nodeValue : (node.childNodes ?? []).map(textOf).join(''));
 
 async function rendered(React, container, needle) {
-  for (let i = 0; i < 30 && !textOf(container).includes(needle); i++) {
-    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
-  }
+  await waitFor(React, () => textOf(container).includes(needle));
   assert.ok(textOf(container).includes(needle), `expected "${needle}" in rendered output`);
 }
 

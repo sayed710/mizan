@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import './models/index.js';
 import { menusFor, models } from './models/index.js';
-import { create, read, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { budgetReport } from './models/analyticplus.js';
@@ -75,7 +75,7 @@ test('BUD-1: budget report omits inline company selector and relies on company s
 
 test('BUD-2: Planned, Actual and Achievement use one period time basis matching Odoo budget.line achieved_percentage', async (t) => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Marketing Bud3' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Marketing Bud3', plan_id: search(db, 'account.analytic.plan')[0].id });
   db = analytic.db;
 
   // Post a $155 vendor bill and a $31 confirmed unbilled PO in January 2026, plus a $500 bill in June 2026.
@@ -179,7 +179,7 @@ test('BUD-2: Planned, Actual and Achievement use one period time basis matching 
 
 test('BUD-3: multi-year budget prorates each yearly period across full line duration without exhausting plan early', async () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Multi-Year Project' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Multi-Year Project', plan_id: search(db, 'account.analytic.plan')[0].id });
   db = analytic.db;
 
   const budget = create(db, 'account.budget', {
@@ -218,7 +218,7 @@ test('BUD-3: multi-year budget prorates each yearly period across full line dura
 
 test('BUD-4: refund-only expense budget reports negative achieved amount and negative achievement percentage', async () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Refund Budget Account' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Refund Budget Account', plan_id: search(db, 'account.analytic.plan')[0].id });
   db = analytic.db;
 
   const refund = create(db, 'account.move', {

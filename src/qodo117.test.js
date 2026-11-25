@@ -375,8 +375,9 @@ test('Finding 5: account.followup.level form exposes editable email message fiel
 
 test('Finding 6: postAnalytic does not duplicate allocations on pre-upgrade in_refund moves', () => {
   let db = seed();
-  const a1 = create(db, 'account.analytic.account', { name: 'Analytic One' });
-  const a2 = create(a1.db, 'account.analytic.account', { name: 'Analytic Two' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a1 = create(db, 'account.analytic.account', { name: 'Analytic One', plan_id: planId });
+  const a2 = create(a1.db, 'account.analytic.account', { name: 'Analytic Two', plan_id: planId });
   const vendor = create(a2.db, 'res.partner', { name: 'Refund Vendor', supplier: true });
   const product = search(vendor.db, 'product')[0];
   const refund = create(vendor.db, 'account.move', {
