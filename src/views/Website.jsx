@@ -5,6 +5,7 @@ import { commit, currentCompany, getDb, useDb } from '../store.js';
 import { lang, t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { menuTree, pageFor, resolveUrl } from '../models/websiteplus.js';
+import { partnerTagIds } from '../models/crm.js';
 
 /** Nested native links remain keyboard accessible; only HTTP and local destinations are navigable. */
 export function SiteMenu({ items, onPage }) {
@@ -83,7 +84,8 @@ function Checkout({ db, cart, onDone }) {
     let next = getDb();
     let partnerId = existing?.id;
     if (!partnerId) {
-      const res = create(next, 'res.partner', { name: form.name.trim(), email: form.email.trim(), phone: form.phone.trim(), city: form.city.trim(), tag_ids: ['Website'] });
+      const { db: withTags, ids } = partnerTagIds(next, ['Website']);
+      const res = create(withTags, 'res.partner', { name: form.name.trim(), email: form.email.trim(), phone: form.phone.trim(), city: form.city.trim(), tag_ids: ids });
       next = res.db;
       partnerId = res.id;
     }

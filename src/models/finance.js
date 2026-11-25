@@ -844,6 +844,7 @@ export function moveDeleteGuard(db, move, staged = db, ctx = null) {
   const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
   if (audited && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
+  if ((db.records['account.asset'] ?? []).some((a) => a.source_move_id === move.id && a.state !== 'cancel')) return "Handle the entry's linked assets before deleting it";
   if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
 }
@@ -1580,10 +1581,27 @@ function ageOtherEntries(db, kind, at, moves, add) {
 }
 
 /** Use the requested reporting cutoff, defaulting to today. */
-export const agedReportDate = (end, now = today()) => end || now;
+export const agedReportDate = (end, now = today()) => {
+  const date = end || now;
+  if (!validDate(date)) throw new Error('Enter a valid As of Date');
+  return date;
+};
+
+/** Validate an As of Date edit against the last valid date, keeping it and returning an inline error when empty or invalid. */
+export function resolveAgedAsOfDate(input, lastValidDate) {
+  if (validDate(input)) return { input, date: input, error: '' };
+  if (!validDate(lastValidDate)) throw new Error('Enter a valid As of Date');
+  const raw = input == null ? '' : String(input);
+  return {
+    input: raw,
+    date: lastValidDate,
+    error: raw.trim() === '' ? 'As of Date is required' : 'Enter a valid As of Date',
+  };
+}
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date' } = {}) {
+  if (!validDate(at)) throw new Error('Enter a valid As of Date');
   const buckets = BUCKETS(aging_interval);
   const rows = new Map();
   const add = (partner, date, amount, document = null, source = document) => {
