@@ -99,7 +99,8 @@ test('valuation selects the current company and excludes other company stock', a
   const html = await page('valuation', db);
   assert.ok(html.includes('Stock branch'));
   assert.ok(!html.includes('All Companies'));
-  const row = html.split('Scoped valuation widget')[1].split('</tr>')[0];
+  const tbody = html.split('<tbody>')[1] ?? html;
+  const row = tbody.split('Scoped valuation widget')[1].split('</tr>')[0];
   assert.match(row, />2<\/td>/);
   assert.ok(!row.includes('700'));
 });

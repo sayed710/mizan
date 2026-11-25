@@ -370,9 +370,9 @@ export function counterpartTaxLines(db, {
 function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
   const company = line.company_id ?? 1;
-  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
-  const foreign = journalCurrency && journalCurrency !== companyCurrencyRecord(db, company)?.id;
-  const currency = read(db, 'res.currency', journalCurrency);
+  const lineCurrencyId = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const foreign = lineCurrencyId && lineCurrencyId !== companyCurrencyRecord(db, company)?.id;
+  const currency = read(db, 'res.currency', lineCurrencyId);
   const balance = line.open_amount != null
     ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency)
     : roundCurrency(Math.abs(line.amount), currency);
@@ -399,7 +399,7 @@ function writeOff(db, rule, line) {
   const side = (value, debit, extra = {}) => ({
     ...extra,
     [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency),
-    ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}),
+    ...(foreign ? { currency_id: lineCurrencyId, amount_currency: (debit ? 1 : -1) * value } : {}),
   });
   const items = counterparts.flatMap((l) => {
     const sameAsCounterpart = l.value > 0;
@@ -410,7 +410,7 @@ function writeOff(db, rule, line) {
       account_id: l.account_id,
       incoming: sameAsCounterpart ? incoming : !incoming,
       currency,
-      foreignCurrency: foreign ? journalCurrency : null,
+      foreignCurrency: foreign ? lineCurrencyId : null,
       companyValue,
       balance,
       date: line.date,
@@ -453,7 +453,7 @@ function writeOff(db, rule, line) {
       account: bookedBank.suspense,
       partner_id,
       [incoming ? 'debit' : 'credit']: counterpartTotal,
-      ...(foreign ? { currency_id: journalCurrency, amount_currency: -itemCurrency } : {}),
+      ...(foreign ? { currency_id: lineCurrencyId, amount_currency: -itemCurrency } : {}),
     }, ...items];
   }
   const { db: booked, id } = postEntry(current, {

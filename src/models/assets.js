@@ -1305,7 +1305,8 @@ export const assetModels = {
       const company = vals?.company_id ?? (db ? currentCompany(db) : 1);
       const rawModel = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
       const model = rawModel && (!rawModel.company_id || rawModel.company_id === company) ? rawModel : null;
-      const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
+      const rawJournal = model?.journal_id ? read(db, 'account.journal', model.journal_id) : null;
+      const modelJournal = rawJournal?.type === 'general' && (!rawJournal.company_id || rawJournal.company_id === company) ? model.journal_id : null;
       const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'method_mode', 'method_rate', 'prorata', 'prorata_computation_type', 'prorata_date', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
       if (modelJournal) modelDefaults.journal_id = modelJournal;
       const defaultJournal = !vals?.journal_id && !modelDefaults.journal_id ? (journalId(db, 'MISC', company) ?? null) : null;
@@ -1348,7 +1349,9 @@ export const assetModels = {
       if (key === 'model_id' && r.model_id) {
         const model = read(db, 'account.asset.model', r.model_id);
         if (model) {
-          const modelJournal = model.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : undefined;
+          const company = r.company_id ?? (db ? currentCompany(db) : 1);
+          const rawJournal = model.journal_id ? read(db, 'account.journal', model.journal_id) : null;
+          const modelJournal = rawJournal?.type === 'general' && (!rawJournal.company_id || rawJournal.company_id === company) ? model.journal_id : undefined;
           const computation = assetProrataComputation(model);
           const period = model.method_period ?? r.method_period ?? '12';
           const methodNumber = model.method_number ?? r.method_number;

@@ -546,3 +546,107 @@ test('migration 78 gives a company-less depreciation model the company of the as
   assert.equal(models.find((m) => m.id === 902).company_id, undefined);
   assert.equal(models.find((m) => m.id === 903).company_id, 1);
 });
+
+test('Qodo regression: migration 78 keeps models linked by a shared account company-less so company-2 bills keep posting', () => {
+  let db = seed();
+  const c2 = createCompany(db, { name: 'Branch 2', ...invoiceJournalDefaults(db) });
+  const c2GeneralJournal = create(c2.db, 'account.journal', { name: 'Misc C2', code: 'MISC2', type: 'general', company_id: c2.id });
+  db = write(c2GeneralJournal.db, 'res.company', c2.id, { default_general_journal_id: c2GeneralJournal.id });
+
+  const sharedAssetAcc = create(db, 'account.account', { code: '151980', name: 'Shared Legacy Asset', account_type: 'asset_fixed', company_id: null, create_asset: 'draft' });
+  const sharedDepAcc = create(sharedAssetAcc.db, 'account.account', { code: '152980', name: 'Shared Legacy Dep', account_type: 'asset_fixed', company_id: null });
+  const sharedExpAcc = create(sharedDepAcc.db, 'account.account', { code: '680980', name: 'Shared Legacy Exp', account_type: 'expense', company_id: null });
+  const c2OnlyAcc = create(sharedExpAcc.db, 'account.account', { code: '151981', name: 'C2 Only Asset Acc', account_type: 'asset_fixed', company_id: c2.id, create_asset: 'draft' });
+  db = c2OnlyAcc.db;
+
+  const c1ScopedGeneralJournal = create(db, 'account.journal', { name: 'Misc C1', code: 'MISC1', type: 'general', company_id: 1 });
+  db = c1ScopedGeneralJournal.db;
+  const legacySharedModel = {
+    id: 9801,
+    name: 'Legacy Shared Account Model',
+    company_id: null,
+    method: 'linear',
+    method_mode: 'duration',
+    method_number: 5,
+    method_rate: 0.2,
+    method_period: '12',
+    method_progress_factor: 0.3,
+    prorata: false,
+    journal_id: c1ScopedGeneralJournal.id,
+    account_asset_id: sharedAssetAcc.id,
+    account_depreciation_id: sharedDepAcc.id,
+    account_depreciation_expense_id: sharedExpAcc.id,
+  };
+  const legacyC2Model = {
+    id: 9802,
+    name: 'Legacy C2 Account Model',
+    company_id: null,
+    method: 'linear',
+    method_mode: 'duration',
+    method_number: 3,
+    method_rate: 1 / 3,
+    method_period: '12',
+    method_progress_factor: 0.3,
+    prorata: false,
+  };
+
+  let legacyDb = {
+    ...db,
+    schema_version: 77,
+    records: {
+      ...db.records,
+      'account.account': db.records['account.account'].map((a) => {
+        if (a.id === sharedAssetAcc.id) return { ...a, create_asset: 'validate', asset_model_id: legacySharedModel.id };
+        if (a.id === c2OnlyAcc.id) return { ...a, asset_model_id: legacyC2Model.id };
+        return a;
+      }),
+      'account.asset.model': [...(db.records['account.asset.model'] ?? []), legacySharedModel, legacyC2Model],
+    },
+    seq: { ...db.seq, 'account.asset.model': Math.max(db.seq['account.asset.model'] ?? 0, 9802) },
+  };
+
+  const upgraded = migrate(legacyDb);
+  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
+
+  // Company-less account reference keeps the model company-less; company-2 account reference assigns company 2
+  const migratedShared = read(upgraded, 'account.asset.model', legacySharedModel.id);
+  assert.equal(migratedShared.company_id ?? null, null);
+  assert.equal(read(upgraded, 'account.asset.model', legacyC2Model.id).company_id, c2.id);
+
+  // Posting a company-2 bill through the shared account succeeds and creates a company-2 asset with the legacy model
+  const billC2 = create(upgraded, 'account.move', {
+    move_type: 'in_invoice',
+    company_id: c2.id,
+    partner_id: 2,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ name: 'C2 Shared Equipment', qty: 1, price_unit: 2000, tax: 0, account_id: sharedAssetAcc.id }],
+  });
+  const afterC2 = postMove(billC2.db, billC2.id);
+  const assetC2 = search(afterC2, 'account.asset').find((a) => a.bill_id === billC2.id);
+  assert.ok(assetC2, 'company-2 bill through shared account must generate a validated asset');
+  assert.equal(assetC2.company_id, c2.id);
+  assert.equal(assetC2.model_id, legacySharedModel.id);
+  assert.equal(assetC2.state, 'open');
+  assert.equal(assetC2.journal_id, c2GeneralJournal.id);
+
+  // Posting a company-1 bill through the same shared account also succeeds
+  const billC1 = create(afterC2, 'account.move', {
+    move_type: 'in_invoice',
+    company_id: 1,
+    partner_id: 2,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ name: 'C1 Shared Equipment', qty: 1, price_unit: 1200, tax: 0, account_id: sharedAssetAcc.id }],
+  });
+  const afterC1 = postMove(billC1.db, billC1.id);
+  const assetC1 = search(afterC1, 'account.asset').find((a) => a.bill_id === billC1.id);
+  assert.ok(assetC1);
+  assert.equal(assetC1.company_id, 1);
+  assert.equal(assetC1.model_id, legacySharedModel.id);
+
+  // Explicit update path for a model left company-less: editing without company_id fails; setting company_id validates ownership
+  assert.throws(() => write(upgraded, 'account.asset.model', legacySharedModel.id, { name: 'Renamed' }), /Company is required/);
+  assert.throws(() => write(afterC2, 'account.asset.model', legacySharedModel.id, { company_id: 1 }), /Depreciation model must belong to the asset company/);
+  const assignedC1 = write(upgraded, 'account.asset.model', legacySharedModel.id, { company_id: 1, name: 'Scoped to C1' });
+  assert.equal(read(assignedC1, 'account.asset.model', legacySharedModel.id).company_id, 1);
+  assert.equal(read(assignedC1, 'account.asset.model', legacySharedModel.id).name, 'Scoped to C1');
+});
