@@ -1,13 +1,14 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
 import { models } from '../registry.js';
-import { today, validDate } from '../models/common.js';
+import { today } from '../models/common.js';
+import { categoryPath } from '../models/productconfig-helpers.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
 import { Wizard } from './Wizard.jsx';
-import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, BUCKETS, companyReceivableLines, followUpCompanies, followUpLevel, followUps, followUpText, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerReceivableLines, resolveAgedAsOfDate, taxesByGrid, taxesByTax, taxItemKey, taxReport } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -20,7 +21,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { money, PagerButtons } from '../ui.jsx';
-import { companyCurrencyRecord, findCompanyCurrencyRecord } from '../money.js';
+import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency } from '../money.js';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
@@ -28,7 +29,7 @@ import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowAnalyticColumns, cashflowColumns, detailReportColumns, executiveColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
-import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage, updateReportParam } from './reportNavigation.js';
+import { customPeriodError, DEFAULT_REPORT_PERIOD, PERIODS, reportPage, updateReportParam } from './reportNavigation.js';
 import { statementUrl } from '../statementNavigation.js';
 export { PERIODS };
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -536,6 +537,59 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
     }
   }
 
+  const companyBalances = new Map();
+  for (const cId of allowed) {
+    companyBalances.set(cId, companyReceivableLines(db, cId));
+  }
+
+  const renderCustomerLines = (f, cId) => {
+    const compCurr = companyCurrencyRecord(db, cId);
+    const info = companyBalances.get(cId)?.get(f.partner_id) ?? partnerReceivableLines(db, f.partner_id, cId);
+    return (
+      <Fragment key={`${cId}-${f.partner_id}`}>
+        <tr className="rep-detail">
+          <td>
+            <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
+            <FollowUpActions db={db} reminder={f} companyId={cId} />
+          </td>
+          <td className="num">{f.oldest ?? '—'}</td>
+          <td className="num">{formatCurrency(info.total_due, compCurr)}</td>
+          <td className="num">{formatCurrency(info.total_overdue, compCurr)}</td>
+        </tr>
+        {info.lines.length > 0 && (
+          <tr className="rep-detail no-export">
+            <td colSpan={4} style={{ paddingLeft: '1.5rem', paddingBottom: '1rem' }}>
+              <table className="list report" style={{ margin: '0.25rem 0', width: '100%' }}>
+                <thead>
+                  <tr>
+                    <th>{t('Invoice Date')}</th>
+                    <th>{t('Due Date')}</th>
+                    <th>{t('Number')}</th>
+                    <th>{t('Reference')}</th>
+                    <th className="num">{t('Residual Amount')}</th>
+                    <th>{t('Overdue')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {info.lines.map((l, i) => (
+                    <tr key={l.move_id ? `${l.move_id}-${i}` : i}>
+                      <td>{l.invoice_date}</td>
+                      <td>{l.due_date}</td>
+                      <td><a href={`#/open/account.move/${l.move_id}`}>{l.number}</a></td>
+                      <td>{l.reference}</td>
+                      <td className="num">{formatCurrency(l.residual_amount, compCurr)}</td>
+                      <td>{l.is_credit ? '—' : (l.is_overdue ? t('Overdue') : '—')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </td>
+          </tr>
+        )}
+      </Fragment>
+    );
+  };
+
   if (multiCompany) {
     const sections = allowed
       .map((cId) => ({
@@ -549,21 +603,9 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
         {sections.map(({ company, items }) => (
           <Fragment key={company.id}>
             <tr className="rep-section">
-              <td colSpan={3}><strong>{company.name}</strong></td>
+              <td colSpan={4}><strong>{company.name}</strong></td>
             </tr>
-            {items.map((f) => {
-              return (
-                <tr key={`${company.id}-${f.partner_id}`} className="rep-detail">
-                  <td>
-                    <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
-                    <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-                    <FollowUpActions db={db} reminder={f} companyId={company.id} />
-                  </td>
-                  <td className="num">{f.oldest}</td>
-                  <td className="num">{formatFollowUpTotals(f)}</td>
-                </tr>
-              );
-            })}
+            {items.map((f) => renderCustomerLines(f, company.id))}
           </Fragment>
         ))}
       </tbody>
@@ -575,19 +617,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
 
   return (
     <tbody>
-      {singleItems.map((f) => {
-        return (
-          <tr key={f.partner_id} className="rep-detail">
-            <td>
-              <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
-              <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              <FollowUpActions db={db} reminder={f} companyId={singleCompanyId} />
-            </td>
-            <td className="num">{f.oldest}</td>
-            <td className="num">{formatFollowUpTotals(f)}</td>
-          </tr>
-        );
-      })}
+      {singleItems.map((f) => renderCustomerLines(f, singleCompanyId))}
     </tbody>
   );
 }
@@ -860,11 +890,18 @@ function AuditRows({ db, rows }) {
 }
 
 /** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
-function Valuation({ db, period, companyId, money: fmtMoney = money }) {
-  const report = valuationReport(db, { at: period.to || today(), companyId: Number(companyId) });
+function Valuation({ db, period, companyId, categoryId, productId, warehouseId, locationId, money: fmtMoney = money }) {
+  const report = valuationReport(db, {
+    at: period.to || today(),
+    companyId,
+    categoryId,
+    productId,
+    warehouseId,
+    locationId,
+  });
   const unavailable = Object.values(report).some((v) => v.qty === null);
-  const rows = Object.entries(report).filter(([, v]) => v.qty !== 0)
-    .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
+  const rows = Object.entries(report).filter(([, v]) => v.qty === null || Math.abs(v.qty) > 1e-8)
+    .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
   return (
     <tbody>
       {rows.map(({ p, value }) => (
@@ -971,7 +1008,7 @@ export const REPORTS = {
   tax: { title: 'Tax Report', Body: Tax, cols: ['Base', 'Tax'] },
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: [] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: [] },
-  followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
+  followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Total Due', 'Total Overdue'] },
   budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Committed', 'Variance', 'Achievement'] },
   analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
   pnl: { title: 'Profit and Loss', cols: ['Balance'] },
@@ -1017,8 +1054,24 @@ function ReportPage({ leaf, params }) {
     [sourceDb, companyId, allowAllCompanies],
   );
   const [periodKey, setPeriodKey] = useState(params?.has('from') && params?.get('to') ? 'custom' : DEFAULT_REPORT_PERIOD);
-  const [asOf, setAsOf] = useState(today());
+  const asOfErrorId = useId();
+  const [asOfState, setAsOfState] = useState(() => {
+    const initial = today();
+    return { input: initial, date: initial, error: '' };
+  });
   const isAged = ['agedReceivable', 'agedPayable'].includes(leaf.report);
+  const isValuation = leaf.report === 'valuation';
+  const [valuationCategoryId, setValuationCategoryId] = useState('');
+  const [valuationProductId, setValuationProductId] = useState('');
+  const [valuationWarehouseId, setValuationWarehouseId] = useState('');
+  const [valuationLocationId, setValuationLocationId] = useState('');
+  const [valuationCompany, setValuationCompany] = useState(selectedCompany);
+  if (valuationCompany !== selectedCompany) {
+    setValuationCompany(selectedCompany);
+    setValuationProductId('');
+    setValuationWarehouseId('');
+    setValuationLocationId('');
+  }
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
@@ -1080,6 +1133,22 @@ function ReportPage({ leaf, params }) {
         }, selectedCompany).companyDb
       : companyDb
   ), [sourceDb, selectedCompanyId, selectedCompany, companyDb]);
+  const { valuationProducts, valuationWarehouses, valuationLocations } = useMemo(() => {
+    if (!isValuation) return { valuationProducts: [], valuationWarehouses: [], valuationLocations: [] };
+    const targetCompId = selectedCompany === 'all' ? null : Number(selectedCompany);
+    const products = search(scopedCompanyDb, 'product')
+      .filter((p) => p.type === 'goods' && (selectedCompany === 'all' || p.company_id === targetCompId || !p.company_id))
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+    const warehouses = search(scopedCompanyDb, 'stock.warehouse')
+      .filter((w) => selectedCompany === 'all' || !w.company_id || w.company_id === targetCompId);
+    const locations = search(scopedCompanyDb, 'stock.location')
+      .filter((l) => l.usage === 'internal' && (selectedCompany === 'all' || !l.company_id || l.company_id === targetCompId));
+    return { valuationProducts: products, valuationWarehouses: warehouses, valuationLocations: locations };
+  }, [isValuation, scopedCompanyDb, selectedCompany]);
+  const companyChanged = valuationCompany !== selectedCompany;
+  const activeValuationProductId = !companyChanged && valuationProducts.some((p) => p.id === Number(valuationProductId)) ? valuationProductId : '';
+  const activeValuationWarehouseId = !companyChanged && valuationWarehouses.some((w) => w.id === Number(valuationWarehouseId)) ? valuationWarehouseId : '';
+  const activeValuationLocationId = !companyChanged && valuationLocations.some((l) => l.id === Number(valuationLocationId)) ? valuationLocationId : '';
   const fmtMoney = useMemo(() => reportMoney(scopedCompanyDb, selectedCompany), [scopedCompanyDb, selectedCompany]);
   const db = useMemo(() => (
     targetJournalIds
@@ -1110,14 +1179,19 @@ function ReportPage({ leaf, params }) {
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
   const period = useMemo(
-    () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
-    [isAged, asOf, periodKey, customPeriod],
+    () => (isAged || isValuation ? { from: '', to: agedReportDate(asOfState.date) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
+    [isAged, isValuation, asOfState.date, periodKey, customPeriod],
   );
+  const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all';
+  const periodError = !isAged && !['inalterability', 'valuation'].includes(leaf.report)
+    ? customPeriodError(periodKey, period, { requireFrom: comparable && comparison !== 'none' })
+    : null;
   const deferredCompanyId = Number(selectedCompany) || 1;
   const deferredGrouped = isDeferred && deferredSettings(db, deferredCompanyId, deferredKind).isGrouped;
   const generateContextKey = `${deferredKind}:${deferredCompanyId}:${period.to}`;
   const activeGenerateWizard = generateWizard?.key === generateContextKey ? generateWizard : null;
   const openGenerateWizard = () => {
+    if (periodError) return;
     if (!deferredSettings(getDb(), deferredCompanyId, deferredKind).isGrouped) {
       setGenerationError('Grouped deferral generation requires a company configured for grouped posting');
       return;
@@ -1185,7 +1259,6 @@ function ReportPage({ leaf, params }) {
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
   const isTrial = leaf.report === 'trial';
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
-  const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement', 'depreciation'].includes(leaf.report);
   const effectivePeriod = useMemo(
     () => (showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period),
@@ -1196,14 +1269,14 @@ function ReportPage({ leaf, params }) {
     return rootAnalyticPlans(db);
   }, [db, leaf.report]);
   const hasUnassigned = useMemo(() => {
-    if (leaf.report !== 'analytic' || rootPlans.length === 0) return false;
+    if (leaf.report !== 'analytic' || rootPlans.length === 0 || periodError) return false;
     const actual = analyticActuals(db, effectivePeriod);
     const rootPlanIds = new Set(rootPlans.map((p) => p.id));
     const planRoots = rootPlanMap(db);
     const accounts = (db.records?.['account.analytic.account'] ?? [])
       .filter((a) => a.active !== false || actual.has(a.id));
     return accounts.some((a) => !a.plan_id || !rootPlanIds.has(planRoots.get(a.plan_id)));
-  }, [db, leaf.report, rootPlans, effectivePeriod]);
+  }, [db, leaf.report, rootPlans, effectivePeriod, periodError]);
   const reportCols = isTaxBoxes
     ? ['Description', 'Base', 'Tax']
     : isAged
@@ -1229,7 +1302,7 @@ function ReportPage({ leaf, params }) {
   const horizontalGroups = leaf.report === 'cashflow'
     ? search(companyDb, 'account.report.horizontal.group').filter((g) => (g.company_id ?? 1) === primaryCompanyId && !(g.report_ids ?? []).length)
     : [];
-  const canComputePeriods = periodKey !== 'custom' || (validDate(period.from) && validDate(period.to) && period.from <= period.to);
+  const canComputePeriods = !periodError;
   const periods = comparable && comparison !== 'none' && canComputePeriods ? periodsFor(periodKey, comparison, period) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
   const agedKind = leaf.report === 'agedPayable' ? 'payable' : 'receivable';
@@ -1240,20 +1313,22 @@ function ReportPage({ leaf, params }) {
   const agedPartnerIds = agedData ? new Set(agedData.rows.map((row) => row.partner_id)) : null;
   const partnerChoices = isPartnerLedger || isAged ? search(scopedCompanyDb, 'res.partner', { includeArchived: true }).filter((p) => !isAged || !agedPartnerIds || agedPartnerIds.has(p.id)).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const horizontalGroup = horizontalGroups.find((g) => g.id === Number(horizontalGroupId));
-  const data = periods && leaf.report === 'cashflow'
-    ? cashflowColumns(db, periods, {
-      analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
-    })
-    : periods && leaf.report === 'executive'
-      ? executiveColumns(db, periods, {
+  const data = periodError ? null : (
+    periods && leaf.report === 'cashflow'
+      ? cashflowColumns(db, periods, {
         analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
       })
-      : horizontalGroup && leaf.report === 'cashflow'
-        ? cashflowAnalyticColumns(db, horizontalGroup, period, {
+      : periods && leaf.report === 'executive'
+        ? executiveColumns(db, periods, {
           analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
         })
-        : null;
-  const detailComparison = periods && ['tax', 'fiscal'].includes(leaf.report)
+        : horizontalGroup && leaf.report === 'cashflow'
+          ? cashflowAnalyticColumns(db, horizontalGroup, period, {
+            analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
+          })
+          : null
+  );
+  const detailComparison = !periodError && periods && ['tax', 'fiscal'].includes(leaf.report)
     ? detailReportColumns(db, leaf.report, periods, { company_id: selectedCompany === 'all' ? null : Number(selectedCompany), analyticAccountIds, includeUnposted, variant: activeTaxVariant }) : null;
   const tableRef = useRef(null);
   const isAudit = leaf.report === 'audit';
@@ -1274,7 +1349,7 @@ function ReportPage({ leaf, params }) {
   const auditFiltersKey = `${auditUser}:${auditModel}:${auditRecord}:${auditField}:${period.from ?? ''}:${period.to ?? ''}`;
   useEffect(() => {
     let active = true;
-    if (isAudit && isServer()) {
+    if (isAudit && isServer() && !periodError) {
       setServerAuditLog(undefined);
       setAuditError(null);
       const rawRec = auditRecord ? auditRecord.replace(/^#/, '').trim() : '';
@@ -1302,14 +1377,14 @@ function ReportPage({ leaf, params }) {
         });
     }
     return () => { active = false; };
-  }, [isAudit, auditScopeKey, auditUser, auditModel, auditRecord, auditField, period.from, period.to]);
+  }, [isAudit, auditScopeKey, auditUser, auditModel, auditRecord, auditField, period.from, period.to, periodError]);
   const auditFilters = useMemo(() => ({
     user: auditUser,
     model: auditModel,
     record: auditRecord ? auditRecord.replace(/^#/, '').trim() : '',
     field: auditField,
   }), [auditUser, auditModel, auditRecord, auditField]);
-  const auditAllRows = isAudit && (!isServer() || Array.isArray(serverAuditLog))
+  const auditAllRows = isAudit && !periodError && (!isServer() || Array.isArray(serverAuditLog))
     ? collectAuditTrailRows(db, sourceDb, period, isServer() ? serverAuditLog : null, auditFilters)
     : [];
   const auditPageKey = `${auditScopeKey}:${periodKey}:${period.from ?? ''}:${period.to ?? ''}:${auditFiltersKey}`;
@@ -1317,6 +1392,7 @@ function ReportPage({ leaf, params }) {
   const auditWin = pageWindow(auditAllRows.length, auditOffset, PAGE_SIZE);
   const auditPagedRows = auditAllRows.slice(auditWin.start, auditWin.end);
   const exportCsv = () => {
+    if (periodError) return;
     if (isAudit) {
       downloadCsv('audit.csv', auditTrailToCsv(auditAllRows));
       return;
@@ -1324,6 +1400,7 @@ function ReportPage({ leaf, params }) {
     downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
   };
   const exportXlsx = () => {
+    if (periodError) return;
     if (isAudit) {
       downloadXlsx('audit.xlsx', auditTrailToCsv(auditAllRows), { sheetName: 'Audit Trail', columnTypes: Array(8).fill('text') });
       return;
@@ -1341,30 +1418,67 @@ function ReportPage({ leaf, params }) {
         ? companies.map((c) => documentCompany(companyDb, { company_id: c.id }) || c)
         : (printCompany ? [printCompany] : []))
     : null;
+  const valuationFiltersList = [];
+  if (isValuation) {
+    valuationFiltersList.push(`≤ ${period.to}`);
+    if (selectedCompany !== 'all') {
+      const c = read(companyDb, 'res.company', Number(selectedCompany));
+      if (c) valuationFiltersList.push(`${t('Company')}: ${c.name}`);
+    }
+    if (valuationCategoryId) {
+      const cat = read(companyDb, 'product.category', Number(valuationCategoryId));
+      if (cat) valuationFiltersList.push(`${t('Product Category')}: ${categoryPath(companyDb, cat.id) || cat.name}`);
+    }
+    if (activeValuationProductId) {
+      const prod = read(scopedCompanyDb, 'product', Number(activeValuationProductId));
+      const label = prod ? `${prod.default_code ? `[${prod.default_code}] ` : ''}${prod.name}` : activeValuationProductId;
+      valuationFiltersList.push(`${t('Product')}: ${label}`);
+    }
+    if (activeValuationWarehouseId) {
+      const wh = read(scopedCompanyDb, 'stock.warehouse', Number(activeValuationWarehouseId));
+      if (wh) valuationFiltersList.push(`${t('Warehouse')}: ${wh.name}`);
+    }
+    if (activeValuationLocationId) {
+      const loc = read(scopedCompanyDb, 'stock.location', Number(activeValuationLocationId));
+      if (loc) valuationFiltersList.push(`${t('Location')}: ${loc.name}`);
+    }
+  }
+  const valuationFilterSummary = valuationFiltersList.join(' · ');
+
   const subtitle = isAged
     ? `${t('As of Date')}: ${period.to} · ${t('Aging period length (days)')}: ${agingInterval} · ${t('Based on')}: ${t(agingBasis === 'base_on_invoice_date' ? 'Invoice Date' : 'Due Date')}`
     : leaf.report === 'inalterability'
       ? t('Chain verification always covers all secured entries.')
-      : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
+      : periodError
+        ? ''
+        : isValuation
+          ? valuationFilterSummary
+        : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
   const controls = (
-    <div className="control-panel">
-      <h1 className="cp-title">{t(title)}</h1>
+    <>
+      <div className="control-panel">
+        <h1 className="cp-title">{t(title)}</h1>
       {isAged && <>
-        <label>{t('As of Date')}<input aria-label={t('As of')} type="date" value={asOf} onChange={(e) => { if (validDate(e.target.value)) setAsOf(e.target.value); }} /></label>
+        <label>{t('As of Date')}<input aria-label={t('As of')} aria-invalid={Boolean(asOfState.error)} aria-describedby={asOfState.error ? asOfErrorId : undefined} type="date" value={asOfState.input} onChange={(e) => setAsOfState((prev) => resolveAgedAsOfDate(e.target.value, prev.date))} /></label>
+        {asOfState.error && <span id={asOfErrorId} className="alert" role="alert">{t(asOfState.error)}</span>}
         <label className="inline-select">{t('Aging period length (days)')}<input type="number" min="1" step="1" value={agingInterval} onChange={(e) => { const n = Number(e.target.value); if (Number.isSafeInteger(n) && n > 0) setAgingInterval(n); }} /></label>
         <label className="inline-select">{t('Based on')}<select value={agingBasis} onChange={(e) => setAgingBasis(e.target.value)}><option value="base_on_maturity_date">{t('Due Date')}</option><option value="base_on_invoice_date">{t('Invoice Date')}</option></select></label>
       </>}
-      {leaf.report !== 'inalterability' && !isAged && <label className="inline-select">
+      {isValuation && <>
+        <label>{t('As of')}<input aria-label={t('As of')} aria-invalid={Boolean(asOfState.error)} aria-describedby={asOfState.error ? asOfErrorId : undefined} type="date" value={asOfState.input} onChange={(e) => setAsOfState((prev) => resolveAgedAsOfDate(e.target.value, prev.date))} /></label>
+        {asOfState.error && <span id={asOfErrorId} className="alert" role="alert">{t(asOfState.error)}</span>}
+      </>}
+      {leaf.report !== 'inalterability' && !isAged && !isValuation && <label className="inline-select">
         {t('Period')}
         <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
           <option value="month">{t('This Month')}</option>
           <option value="quarter">{t('This Quarter')}</option>
           <option value="year">{t('This Year')}</option>
           {!isDeferred && <option value="all">{t('All Dates')}</option>}
-          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'valuation', 'budget', 'deferredRevenue', 'deferredExpense', 'audit'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense', 'audit'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
         </select>
       </label>}
-      {!isAged && periodKey === 'custom' && <><label>{t('From')}<input aria-label={t('From')} type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input aria-label={t('To')} type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+      {!isAged && !isValuation && periodKey === 'custom' && <><label>{t('From')}<input aria-label={t('From')} type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input aria-label={t('To')} type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
       {isAudit && (
         <>
           <label className="inline-select">
@@ -1439,6 +1553,73 @@ function ReportPage({ leaf, params }) {
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
         <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={allowAllCompanies} />
+      )}
+      {isValuation && (
+        <>
+          <label className="inline-select">
+            {t('Product Category')}
+            <select
+              aria-label={t('Product Category')}
+              value={valuationCategoryId}
+              onChange={(e) => setValuationCategoryId(e.target.value)}
+            >
+              <option value="">{t('All Categories')}</option>
+              {search(companyDb, 'product.category').map((c) => (
+                <option key={c.id} value={c.id}>
+                  {categoryPath(companyDb, c.id) || c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Product')}
+            <select
+              aria-label={t('Product')}
+              value={activeValuationProductId}
+              onChange={(e) => setValuationProductId(e.target.value)}
+            >
+              <option value="">{t('All Products')}</option>
+              {valuationProducts.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.default_code ? `[${p.default_code}] ` : ''}{p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Warehouse')}
+            <select
+              aria-label={t('Warehouse')}
+              value={activeValuationWarehouseId}
+              onChange={(e) => {
+                setValuationWarehouseId(e.target.value);
+                setValuationLocationId('');
+              }}
+            >
+              <option value="">{t('All Warehouses')}</option>
+              {valuationWarehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name} ({w.code})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Location')}
+            <select
+              aria-label={t('Location')}
+              value={activeValuationLocationId}
+              onChange={(e) => setValuationLocationId(e.target.value)}
+            >
+              <option value="">{t('All Locations')}</option>
+              {valuationLocations.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">
@@ -1524,9 +1705,9 @@ function ReportPage({ leaf, params }) {
       {showUnpostedOption && <label className="inline-select">
         <input type="checkbox" aria-label={t(leaf.report === 'depreciation' ? 'Include Draft Assets' : 'Include Unposted Entries')} checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t(leaf.report === 'depreciation' ? 'Include Draft Assets' : 'Include Unposted Entries')}
       </label>}
-      <span className="muted">{subtitle}</span>
+      {subtitle && <span className="muted">{subtitle}</span>}
       <span className="spacer" />
-      {isDeferred && <button type="button" className="btn sm" disabled={!deferredGrouped || Boolean(activeGenerateWizard?.pending)} title={!deferredGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={openGenerateWizard}>{t('Generate Entries')}</button>}
+      {isDeferred && <button type="button" className="btn sm" disabled={Boolean(periodError) || !deferredGrouped || Boolean(activeGenerateWizard?.pending)} title={!deferredGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={openGenerateWizard}>{t('Generate Entries')}</button>}
       {generationError && <span role="alert">{t(generationError)}</span>}
       {isAudit && (
         <span className="pager" role="group" aria-label={t('Pager')}>
@@ -1534,7 +1715,8 @@ function ReportPage({ leaf, params }) {
           <PagerButtons prevLabel={t('Previous page')} nextLabel={t('Next page')} prevDisabled={auditWin.prev == null} nextDisabled={auditWin.next == null} onPrev={() => setAuditPage({ key: auditPageKey, offset: auditWin.prev })} onNext={() => setAuditPage({ key: auditPageKey, offset: auditWin.next })} />
         </span>
       )}
-      {statementIds.length > 0 && <button type="button" className="btn sm" disabled={sending || sentPartners.length === statementIds.length} onClick={async () => {
+      {statementIds.length > 0 && <button type="button" className="btn sm" disabled={Boolean(periodError) || sending || sentPartners.length === statementIds.length} onClick={async () => {
+        if (periodError) return;
         setSending(true); setSendError('');
         try {
           if (!isServer()) throw new Error('Email requires the server.');
@@ -1548,81 +1730,100 @@ function ReportPage({ leaf, params }) {
       }}>{t('Send')}</button>}
       {sentPartners.length > 0 && <span aria-live="polite">{t('Sent')}: {sentPartners.length} / {statementIds.length}</span>}
       {sendError && <span role="alert">{t(sendError)}</span>}
-      <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
-      <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
-      <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
-    </div>
+      <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+      <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={exportCsv}>{t('Download CSV')}</button>
+      <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={exportXlsx}>{t('Export XLSX')}</button>
+      </div>
+      {periodError && (
+        <div className="alert" role="alert" style={{ margin: '0 16px 12px' }}>
+          {t(periodError)}
+        </div>
+      )}
+    </>
   );
   return (
     <ReportPrintView
-      active={isPrinting}
+      active={isPrinting && !periodError}
       company={printCompany}
       companies={printCompanies}
       title={t(title)}
       subtitle={subtitle}
       controls={controls}
       onBack={() => setIsPrinting(false)}
-      documents={isPrinting && statementIds.length ? statementIds.map((partnerId) => ({ key: partnerId, content: <table className="list report"><thead><tr><th /><th>{t('Debit')}</th><th>{t('Credit')}</th><th>{t('Balance')}</th></tr></thead><CustomerStatement db={db} period={effectivePeriod} companyId={selectedCompany} initialPartnerId={partnerId} fixedPartner money={fmtMoney} /></table> })) : null}
+      documents={isPrinting && !periodError && statementIds.length ? statementIds.map((partnerId) => ({ key: partnerId, content: <table className="list report"><thead><tr><th /><th>{t('Debit')}</th><th>{t('Credit')}</th><th>{t('Balance')}</th></tr></thead><CustomerStatement db={db} period={effectivePeriod} companyId={selectedCompany} initialPartnerId={partnerId} fixedPartner money={fmtMoney} /></table> })) : null}
     >
-      <div className="list-wrap">
-        <table className="list report" ref={tableRef}>
-          <thead>
-            <tr>
-              <th>{t(reportFirstCol ?? '')}</th>
-              {isTaxBoxes && detailComparison && <th>{t('Description')}</th>}
-              {(detailComparison
-                ? periods.flatMap((p) => (leaf.report === 'tax' ? ['Base', 'Tax'] : ['Debit', 'Credit', 'Balance']).map((label) => `${p.label} - ${t(label)}`))
-                : periods && PERIODIC_BODY_REPORTS.has(leaf.report)
-                  ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} - ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} - ${t(typeof c === 'object' && c ? c.label : c)}`)))
-                  : data
-                    ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])]
-                    : reportCols
-              ).map((c) => {
-                const isRaw = typeof c === 'object' && c !== null && c.raw;
-                const label = typeof c === 'object' && c !== null ? c.label : c;
-                const text = isRaw ? label : (data ? label.split(' ').map((part) => t(part)).join(' ') : t(label));
-                return <th key={label} className={label === 'Description' ? undefined : 'num'}>{text}</th>;
-              })}
-            </tr>
-          </thead>
-          {detailComparison ? (
-            <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} money={fmtMoney} />
-          ) : periods && PERIODIC_BODY_REPORTS.has(leaf.report) ? (
-            <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} money={fmtMoney} />
-          ) : data ? (
-            <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} />
-          ) : isAudit ? (
-            <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} error={auditError} />
-          ) : statementIds.length ? (
-            statementIds.map((partnerId) => <CustomerStatement key={partnerId} db={db} period={effectivePeriod} companyId={selectedCompany} initialPartnerId={partnerId} fixedPartner money={fmtMoney} />)
-          ) : (
-            <Body
-              db={leaf.report === 'valuation' ? companyDb : db}
-              sourceDb={sourceDb}
-              period={effectivePeriod}
-              companyId={selectedCompany}
-              analyticAccountIds={analyticAccountIds}
-              partnerIds={partnerFilterIds}
-              unreconciledOnly={unreconciledOnly}
-              variant={activeTaxVariant}
-              sort={auditSort}
-              kind={deferredKind}
-              journalId={leaf.report === 'inalterability' ? activeInalterabilityJournalId : undefined}
-              agedData={agedData}
-              agingOptions={agingOptions}
-              rootPlans={rootPlans}
-              hasUnassigned={hasUnassigned}
-              money={fmtMoney}
-              includeDraft={leaf.report === 'depreciation' && includeUnposted}
-              accountType={accountType}
-              groupByPartner={groupByPartner}
-              showJournalAccount={showJournalAccount}
-              showInitialBalance={showInitialBalance}
-              showEndBalance={showEndBalance}
-            />
-          )}
-        </table>
-      </div>
+      {!periodError && (
+        <div className="list-wrap">
+          <table className="list report" ref={tableRef}>
+            <thead>
+              {isValuation && (
+                <tr className="rep-filter-header">
+                  <th colSpan={reportCols.length + 1} className="rep-active-filters">
+                    {valuationFilterSummary}
+                  </th>
+                </tr>
+              )}
+              <tr>
+                <th>{t(reportFirstCol ?? '')}</th>
+                {isTaxBoxes && detailComparison && <th>{t('Description')}</th>}
+                {(detailComparison
+                  ? periods.flatMap((p) => (leaf.report === 'tax' ? ['Base', 'Tax'] : ['Debit', 'Credit', 'Balance']).map((label) => `${p.label} - ${t(label)}`))
+                  : periods && PERIODIC_BODY_REPORTS.has(leaf.report)
+                    ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} - ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} - ${t(typeof c === 'object' && c ? c.label : c)}`)))
+                    : data
+                      ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])]
+                      : reportCols
+                ).map((c) => {
+                  const isRaw = typeof c === 'object' && c !== null && c.raw;
+                  const label = typeof c === 'object' && c !== null ? c.label : c;
+                  const text = isRaw ? label : (data ? label.split(' ').map((part) => t(part)).join(' ') : t(label));
+                  return <th key={label} className={label === 'Description' ? undefined : 'num'}>{text}</th>;
+                })}
+              </tr>
+            </thead>
+            {detailComparison ? (
+              <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} money={fmtMoney} />
+            ) : periods && PERIODIC_BODY_REPORTS.has(leaf.report) ? (
+              <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} money={fmtMoney} />
+            ) : data ? (
+              <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} />
+            ) : isAudit ? (
+              <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} error={auditError} />
+            ) : statementIds.length ? (
+              statementIds.map((partnerId) => <CustomerStatement key={partnerId} db={db} period={effectivePeriod} companyId={selectedCompany} initialPartnerId={partnerId} fixedPartner money={fmtMoney} />)
+            ) : (
+              <Body
+                db={leaf.report === 'valuation' ? companyDb : db}
+                sourceDb={sourceDb}
+                period={effectivePeriod}
+                companyId={selectedCompany}
+                categoryId={valuationCategoryId}
+                productId={activeValuationProductId}
+                warehouseId={activeValuationWarehouseId}
+                locationId={activeValuationLocationId}
+                analyticAccountIds={analyticAccountIds}
+                partnerIds={partnerFilterIds}
+                unreconciledOnly={unreconciledOnly}
+                variant={activeTaxVariant}
+                sort={auditSort}
+                kind={deferredKind}
+                journalId={leaf.report === 'inalterability' ? activeInalterabilityJournalId : undefined}
+                agedData={agedData}
+                agingOptions={agingOptions}
+                rootPlans={rootPlans}
+                hasUnassigned={hasUnassigned}
+                money={fmtMoney}
+                includeDraft={leaf.report === 'depreciation' && includeUnposted}
+                accountType={accountType}
+                groupByPartner={groupByPartner}
+                showJournalAccount={showJournalAccount}
+                showInitialBalance={showInitialBalance}
+                showEndBalance={showEndBalance}
+              />
+            )}
+          </table>
+        </div>
+      )}
       {!isPrinting && activeGenerateWizard && (
         <Wizard
           key={activeGenerateWizard.id}
