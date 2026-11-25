@@ -73,7 +73,7 @@ test('BUD-1: budget report omits inline company selector and relies on company s
   assert.doesNotMatch(updatedHtml, /Select a company on the budget record/);
 });
 
-test('BUD-2: Planned, Actual and Achievement use one period time basis matching Odoo budget.line achieved_percentage', async () => {
+test('BUD-2: Planned, Actual and Achievement use one period time basis matching Odoo budget.line achieved_percentage', async (t) => {
   let db = seed();
   const analytic = create(db, 'account.analytic.account', { name: 'Marketing Bud3' });
   db = analytic.db;
@@ -134,8 +134,9 @@ test('BUD-2: Planned, Actual and Achievement use one period time basis matching 
   assert.equal(jan.committed_amount, 186);
   assert.equal(jan.budget_variance, -155);
   assert.equal(jan.budget_achievement, 50);
+  assert.equal(jan.achievement, 50);
 
-  // Verify the rendered Budget report cells match the single-time-basis values, even when atDate < budget start (theoretical = 0).
+  // Verify the rendered Budget report cells match the single-time-basis values, including mid-January (2026-01-15) and when atDate < budget start (theoretical = 0).
   const futureBudget = create(db, 'account.budget', {
     name: 'Future Budget',
     budget_type: 'expense',
@@ -158,11 +159,103 @@ test('BUD-2: Planned, Actual and Achievement use one period time basis matching 
   assert.match(janHtml, /-\$155\.00/);
   assert.match(janHtml, />50%</);
 
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-15T12:00:00Z') });
+  try {
+    const midJanHtml = renderToStaticMarkup(
+      React.createElement('table', null, React.createElement(Budget, { db, period: janPeriod, companyId: '1' })),
+    );
+    assert.match(midJanHtml, />50%</);
+    assert.doesNotMatch(midJanHtml, /103/);
+  } finally {
+    t.mock.timers.reset();
+  }
+
   const futureHtml = renderToStaticMarkup(
     React.createElement('table', null, React.createElement(Budget, { db: futureBudget.db, period: { from: '2099-01-01', to: '2099-12-31' }, companyId: '1' })),
   );
   assert.match(futureHtml, /Future Budget/);
   assert.match(futureHtml, />0%</);
+});
+
+test('BUD-3: multi-year budget prorates each yearly period across full line duration without exhausting plan early', async () => {
+  let db = seed();
+  const analytic = create(db, 'account.analytic.account', { name: 'Multi-Year Project' });
+  db = analytic.db;
+
+  const budget = create(db, 'account.budget', {
+    name: 'Two-Year Budget',
+    budget_type: 'expense',
+    company_id: 1,
+    state: 'confirmed',
+    date_from: '2026-01-01',
+    date_to: '2027-12-31',
+    lines: [{ analytic_account_id: analytic.id, planned: 7300 }],
+  });
+  db = budget.db;
+
+  const [y1] = budgetReport(db, budget.id, '2026-12-31', { period: { from: '2026-01-01', to: '2026-12-31' } });
+  const [y2] = budgetReport(db, budget.id, '2027-12-31', { period: { from: '2027-01-01', to: '2027-12-31' } });
+  const [before] = budgetReport(db, budget.id, '2025-12-31', { period: { from: '2025-01-01', to: '2025-12-31' } });
+
+  assert.equal(y1.planned_amount, 3650);
+  assert.equal(y2.planned_amount, 3650);
+  assert.equal(y1.planned_amount + y2.planned_amount, 7300);
+  assert.equal(before.planned_amount, 0);
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+  const periods = [
+    { label: '2026', from: '2026-01-01', to: '2026-12-31' },
+    { label: '2027', from: '2027-01-01', to: '2027-12-31' },
+  ];
+  const html = renderToStaticMarkup(
+    React.createElement('table', null, React.createElement(Budget, { db, period: periods[0], periods, companyId: '1' })),
+  );
+  assert.equal((html.match(/>\$3,650\.00</g) ?? []).length, 2);
+  assert.doesNotMatch(html, />\$7,300\.00</);
+});
+
+test('BUD-4: refund-only expense budget reports negative achieved amount and negative achievement percentage', async () => {
+  let db = seed();
+  const analytic = create(db, 'account.analytic.account', { name: 'Refund Budget Account' });
+  db = analytic.db;
+
+  const refund = create(db, 'account.move', {
+    move_type: 'in_refund',
+    partner_id: 2,
+    company_id: 1,
+    invoice_date: '2026-02-10',
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 25, tax: 0, analytic_distribution: { [analytic.id]: 100 } }],
+  });
+  db = postMove(refund.db, refund.id);
+
+  const budget = create(db, 'account.budget', {
+    name: 'Refund Expense Budget',
+    budget_type: 'expense',
+    company_id: 1,
+    state: 'confirmed',
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    lines: [{ analytic_account_id: analytic.id, planned: 100 }],
+  });
+  db = budget.db;
+
+  const [row] = budgetReport(db, budget.id, '2026-06-30', { period: { from: '2026-01-01', to: '2026-12-31' } });
+  assert.equal(row.practical, 25);
+  assert.equal(row.achieved_amount, -25);
+  assert.equal(row.budget_achievement, -25);
+  assert.equal(row.achievement, -25);
+
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Budget } = await import('./views/Reports.jsx');
+  const html = renderToStaticMarkup(
+    React.createElement('table', null, React.createElement(Budget, { db, period: { from: '2026-01-01', to: '2026-12-31' }, companyId: '1' })),
+  );
+  assert.match(html, />-\$25\.00</);
+  assert.match(html, />-25%</);
+  assert.doesNotMatch(html, />25%</);
 });
 
 const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];

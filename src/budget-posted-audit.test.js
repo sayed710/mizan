@@ -26,7 +26,7 @@ test('budget report uses posted analytic lines for each company and line period,
     invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 800, tax: 0, analytic_distribution: { [analytic.id]: 100 } }] }).db;
   const draft = create(db, 'account.move', { move_type: 'entry', company_id: 1, invoice_date: '2026-01-12' }); db = draft.db;
   db = create(db, 'account.analytic.line', { account_id: analytic.id, date: '2026-01-12', amount: 999, company_id: 1, move_id: draft.id }).db;
-  const budget = create(db, 'account.budget', { name: 'Annual', company_id: 1, date_from: '2026-01-01', date_to: '2026-12-31', lines: [
+  const budget = create(db, 'account.budget', { name: 'Annual', budget_type: 'revenue', company_id: 1, date_from: '2026-01-01', date_to: '2026-12-31', lines: [
     { analytic_account_id: analytic.id, date_from: '2026-01-01', date_to: '2026-01-31', planned: 100 },
   ] }); db = budget.db;
   const [row] = budgetReport(db, budget.id, '2026-01-31');

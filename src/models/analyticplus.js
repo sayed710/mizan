@@ -337,15 +337,13 @@ function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
  * Compute budget line metrics on one `[from, to]` period basis following Odoo 20 `budget.line`:
  * `achieved_percentage = achieved_amount / budget_amount * 100` (0 when `budget_amount` is 0).
  */
-function budgetLineMetrics(rawPlanned, practical, committed, budgetSign, periodFraction, elapsedFraction, currency, isUnfinishedPeriod = false) {
+function budgetLineMetrics(rawPlanned, practical, committed, budgetSign, periodFraction, elapsedFraction, currency) {
   const planned = periodFraction === 1 ? rawPlanned : roundCurrency(rawPlanned * periodFraction, currency);
   const theoretical = roundCurrency(planned * elapsedFraction, currency);
   const achieved_amount = roundCurrency(practical * budgetSign, currency);
   const committed_amount = roundCurrency((practical + committed) * budgetSign, currency);
   const pct = (actual, target) => (target ? round((actual / target) * 100) : 0);
-  const achievement = isUnfinishedPeriod && theoretical
-    ? round(Math.abs(practical / theoretical) * 100)
-    : (planned ? round(Math.abs(practical / planned) * 100) : 0);
+  const budget_achievement = pct(achieved_amount, planned);
   return {
     planned,
     practical,
@@ -357,9 +355,9 @@ function budgetLineMetrics(rawPlanned, practical, committed, budgetSign, periodF
     committed_amount,
     theoretical,
     variance: roundCurrency(practical - planned, currency),
-    achievement,
+    achievement: budget_achievement,
     budget_variance: roundCurrency(achieved_amount - planned, currency),
-    budget_achievement: pct(achieved_amount, planned),
+    budget_achievement,
   };
 }
 
@@ -388,8 +386,7 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
     const to = [budget.date_to, line.date_to, period.to].filter(Boolean).sort()[0];
     const fromDay = day(from);
     const toDay = day(to);
-    const totalLineDays = lineEnd - lineStart + 1;
-    const lineDays = Math.min(365, totalLineDays);
+    const lineDays = lineEnd - lineStart + 1;
     const periodDays = Math.max(0, toDay - fromDay + 1);
     const periodFraction = Math.min(1, periodDays / lineDays);
     const elapsedFraction = periodDays ? Math.min(1, Math.max(0, (day(atDate) - fromDay + 1) / periodDays)) : 0;
@@ -420,8 +417,7 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
       ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
     const committed = roundCurrency(commitment_lines.reduce((sum, item) => sum + item.amount, 0), companyCurrency);
     const budgetSign = budget.budget_type === 'expense' ? -1 : 1;
-    const isUnfinishedPeriod = Boolean((period.from || period.to) && to > atDate);
-    const metrics = budgetLineMetrics(rawPlanned, practical, committed, budgetSign, periodFraction, elapsedFraction, companyCurrency, isUnfinishedPeriod);
+    const metrics = budgetLineMetrics(rawPlanned, practical, committed, budgetSign, periodFraction, elapsedFraction, companyCurrency);
     return { ...line, ...metrics, analytic_lines, commitment_lines };
   });
 }
