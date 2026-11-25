@@ -2,7 +2,7 @@ import { Fragment, useRef, useState } from 'react';
 import { search } from '../orm.js';
 import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, targetCompanyIds } from '../models/configurableReports.js';
 import { currentCompany, documentCompany } from '../models/company.js';
-import { today, validDate } from '../models/common.js';
+import { today } from '../models/common.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -10,7 +10,7 @@ import { downloadCsv, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { periodsFor, selectedOptionIds } from './reportCompare.js';
-import { DEFAULT_REPORT_PERIOD, PERIODS } from './reportNavigation.js';
+import { customPeriodError, DEFAULT_REPORT_PERIOD, PERIODS } from './reportNavigation.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
 import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 
@@ -91,6 +91,8 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     setCompanyId(nextCompany);
     if (!statementKind) return;
     const nextIds = selectedCompanyIds(companies, nextCompany);
+    const nextPrimaryId = nextCompany === 'all' ? currentCompany(companyDb) : Number(nextCompany);
+    const nextReport = findStatementReport(companyDb, statementKind, nextPrimaryId) ?? findStatementReport(companyDb, statementKind);
     const nextLedger = scopedLedgers(companyDb, nextIds).find((item) => item.id === Number(ledgerId)) ?? null;
     if (!nextLedger && ledgerId) setLedgerId('');
     const allowedJournalIds = new Set(scopedJournals(companyDb, nextIds, nextLedger).map((j) => j.id));
@@ -98,6 +100,13 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     const nextAnalytic = search(companyDb, 'account.analytic.account').filter((a) => !a.company_id || nextIds.includes(a.company_id));
     const allowedAnalyticIds = new Set(nextAnalytic.map((a) => a.id));
     setAnalyticAccountIds((prev) => prev.filter((id) => allowedAnalyticIds.has(id)));
+    if (groupId && nextReport) {
+      const nextGroups = search(companyDb, 'account.report.horizontal.group').filter((g) => (
+        (g.company_id ?? 1) === nextPrimaryId
+        && ((g.report_ids ?? []).includes(nextReport.id) || !(g.report_ids ?? []).length)
+      ));
+      if (!nextGroups.some((g) => g.id === Number(groupId))) setGroupId('');
+    }
   };
   const db = targetJournalIds
     ? {
@@ -114,6 +123,8 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const period = statementKind ? (periodKey === 'custom' ? { from, to } : PERIODS[periodKey]()) : { from, to };
   const comparable = !statementKind || periodKey !== 'all';
   const activePeriodKey = statementKind ? periodKey : 'custom';
+  const periodError = customPeriodError(activePeriodKey, period, { requireFrom: comparable && comparison !== 'none' });
+  const canComputePeriods = !periodError;
   const reportCompany = report.company_id ?? 1;
   const groups = comparable
     ? search(companyDb, 'account.report.horizontal.group').filter((g) => (
@@ -121,32 +132,50 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
       && ((g.report_ids ?? []).includes(report.id) || (statementKind && !(g.report_ids ?? []).length))
     ))
     : [];
-  const group = groups.find((g) => g.id === Number(groupId)) ?? null;
+  const hasGroupSelection = comparable && String(groupId ?? '').trim() !== '';
+  const group = hasGroupSelection ? (groups.find((g) => g.id === Number(groupId)) ?? null) : null;
+  const groupSelectionError = hasGroupSelection && !group ? 'Horizontal group is not available for this report' : null;
   const analyticAccounts = search(companyDb, 'account.analytic.account').filter(
     (a) => !a.company_id || (statementKind ? companyIds.includes(a.company_id) : a.company_id === reportCompany),
   );
-  const canComputePeriods = activePeriodKey !== 'custom' || (validDate(period.from) && validDate(period.to) && period.from <= period.to);
-  const periods = comparable && comparison !== 'none' && canComputePeriods
-    ? periodsFor(activePeriodKey, comparison, period)
-    : [{ ...period, label: '' }];
-  const data = compareConfigurableReport(
-    db,
-    report,
-    periods,
-    period,
-    group,
-    { companyIds, analyticAccountIds, includeUnposted },
-  );
+  let data = null;
+  let computeError = null;
+  if (!periodError && !groupSelectionError) {
+    try {
+      const periods = comparable && comparison !== 'none' && canComputePeriods
+        ? periodsFor(activePeriodKey, comparison, period)
+        : [{ ...period, label: '' }];
+      data = compareConfigurableReport(
+        db,
+        report,
+        periods,
+        period,
+        group,
+        { companyIds, analyticAccountIds, includeUnposted },
+      );
+    } catch (error) {
+      console.error('Could not compute configurable report:', error, {
+        reportId: report.id,
+        statementKind,
+        period,
+        comparison,
+      });
+      computeError = error?.message || 'Could not compute report';
+    }
+  }
+  const inlineError = periodError ?? groupSelectionError ?? computeError;
 
-  const expandableCodes = data.rows.filter(isExpandableLine).map((line) => line.code);
+  const expandableCodes = data ? data.rows.filter(isExpandableLine).map((line) => line.code) : [];
   const toggle = (code) => setOpenCodes((prev) => toggleReportFold(prev, code));
 
   const exportCsv = () => {
+    if (!data) return;
     const baseName = statementKind || report.code || report.name || 'report';
     downloadCsv(`${String(baseName).toLowerCase().replace(/\s+/g, '_')}.csv`, tableToRows(tableRef.current));
   };
 
   const exportXlsx = () => {
+    if (!data) return;
     const baseName = statementKind || report.code || report.name || 'report';
     const sheetName = title || report.name || baseName;
     const columnTypes = [
@@ -171,186 +200,195 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
         : (printCompany ? [printCompany] : []))
     : null;
   const controls = (
-    <div className="control-panel">
-      <h1 className="cp-title">{statementKind ? t(title || report.name) : report.name}</h1>
-      {statementKind ? (
-        <>
-          <label className="inline-select">
-            {t('Period')}
-            <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
-              <option value="month">{t('This Month')}</option>
-              <option value="quarter">{t('This Quarter')}</option>
-              <option value="year">{t('This Year')}</option>
-              <option value="all">{t('All Dates')}</option>
-              <option value="custom">{t('Custom Period')}</option>
-            </select>
-          </label>
-          {periodKey === 'custom' && (
-            <>
-              <label>{t('From')}<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
-              <label>{t('To')}<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-            </>
-          )}
-          <label className="inline-select">
-            {t('Ledger')}
-            <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
-              <option value="">{t('All Ledgers')}</option>
-              {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
-          </label>
-          <label className="inline-select">
-            {t('Journals')}
-            <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
-              {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
-            </select>
-          </label>
-          {availableCompanies.length > 1 && (
-            <CompanySelect companies={companies} value={selectedCompany} onChange={onCompanyChange} allowAll />
-          )}
-          {analyticAccounts.length > 0 && (
+    <>
+      <div className="control-panel">
+        <h1 className="cp-title">{statementKind ? t(title || report.name) : report.name}</h1>
+        {statementKind ? (
+          <>
             <label className="inline-select">
-              {t('Analytic Accounts')}
-              <select
-                aria-label={t('Analytic Accounts')}
-                multiple
-                value={analyticAccountIds}
-                onChange={(e) => setAnalyticAccountIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}
-              >
-                {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              {t('Period')}
+              <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
+                <option value="month">{t('This Month')}</option>
+                <option value="quarter">{t('This Quarter')}</option>
+                <option value="year">{t('This Year')}</option>
+                <option value="all">{t('All Dates')}</option>
+                <option value="custom">{t('Custom Period')}</option>
               </select>
             </label>
-          )}
-          {comparable && (
+            {periodKey === 'custom' && (
+              <>
+                <label>{t('From')}<input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+                <label>{t('To')}<input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+              </>
+            )}
             <label className="inline-select">
-              {t('Comparison')}
-              <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setGroupId(''); }}>
-                <option value="none">{t('No comparison')}</option>
-                <option value="previous">{t('Previous Period')}</option>
-                <option value="lastYear">{t('Same Period Last Year')}</option>
-                <option value="last3">{t('Last 3 Periods')}</option>
+              {t('Ledger')}
+              <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
+                <option value="">{t('All Ledgers')}</option>
+                {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
             </label>
-          )}
-          {comparable && groups.length > 0 && (
             <label className="inline-select">
+              {t('Journals')}
+              <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
+                {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
+              </select>
+            </label>
+            {availableCompanies.length > 1 && (
+              <CompanySelect companies={companies} value={selectedCompany} onChange={onCompanyChange} allowAll />
+            )}
+            {analyticAccounts.length > 0 && (
+              <label className="inline-select">
+                {t('Analytic Accounts')}
+                <select
+                  aria-label={t('Analytic Accounts')}
+                  multiple
+                  value={analyticAccountIds}
+                  onChange={(e) => setAnalyticAccountIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}
+                >
+                  {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              </label>
+            )}
+            {comparable && (
+              <label className="inline-select">
+                {t('Comparison')}
+                <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setGroupId(''); }}>
+                  <option value="none">{t('No comparison')}</option>
+                  <option value="previous">{t('Previous Period')}</option>
+                  <option value="lastYear">{t('Same Period Last Year')}</option>
+                  <option value="last3">{t('Last 3 Periods')}</option>
+                </select>
+              </label>
+            )}
+            {comparable && (groups.length > 0 || hasGroupSelection) && (
+              <label className="inline-select">
+                {t('Horizontal Group')}
+                <select aria-label={t('Horizontal Group')} value={group ? String(group.id) : String(groupId)} onChange={(e) => { setGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
+                  <option value="">{t('None')}</option>
+                  {groups.map((g) => <option value={g.id} key={g.id}>{g.name}</option>)}
+                </select>
+              </label>
+            )}
+            {!periodError && <span className="muted">{period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`}</span>}
+          </>
+        ) : (
+          <>
+            <label>{t('From')}<input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+            <label>{t('To')}<input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+            <label>
               {t('Horizontal Group')}
-              <select aria-label={t('Horizontal Group')} value={group?.id ?? ''} onChange={(e) => { setGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
-                <option value="">{t('None')}</option>
+              <select aria-label={t('Horizontal Group')} value={group ? String(group.id) : String(groupId)} onChange={(e) => { setGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
+                <option value="">{t('No Group')}</option>
                 {groups.map((g) => <option value={g.id} key={g.id}>{g.name}</option>)}
               </select>
             </label>
-          )}
-          <span className="muted">{period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`}</span>
-        </>
-      ) : (
-        <>
-          <label>{t('From')}<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
-          <label>{t('To')}<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-          <label>
-            {t('Horizontal Group')}
-            <select aria-label={t('Horizontal Group')} value={group?.id ?? ''} onChange={(e) => { setGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
-              <option value="">{t('No Group')}</option>
-              {groups.map((g) => <option value={g.id} key={g.id}>{g.name}</option>)}
-            </select>
-          </label>
-          {comparable && (
-            <label className="inline-select">
-              {t('Comparison')}
-              <select aria-label={t('Comparison')} value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setGroupId(''); }}>
-                <option value="none">{t('No comparison')}</option>
-                <option value="previous">{t('Previous Period')}</option>
-                <option value="lastYear">{t('Same Period Last Year')}</option>
-                <option value="last3">{t('Last 3 Periods')}</option>
-              </select>
-            </label>
-          )}
-          {analyticAccounts.length > 0 && (
-            <label className="inline-select">
-              {t('Analytic Accounts')}
-              <select
-                aria-label={t('Analytic Accounts')}
-                multiple
-                value={analyticAccountIds}
-                onChange={(e) => setAnalyticAccountIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}
-              >
-                {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-            </label>
-          )}
-        </>
+            {comparable && (
+              <label className="inline-select">
+                {t('Comparison')}
+                <select aria-label={t('Comparison')} value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setGroupId(''); }}>
+                  <option value="none">{t('No comparison')}</option>
+                  <option value="previous">{t('Previous Period')}</option>
+                  <option value="lastYear">{t('Same Period Last Year')}</option>
+                  <option value="last3">{t('Last 3 Periods')}</option>
+                </select>
+              </label>
+            )}
+            {analyticAccounts.length > 0 && (
+              <label className="inline-select">
+                {t('Analytic Accounts')}
+                <select
+                  aria-label={t('Analytic Accounts')}
+                  multiple
+                  value={analyticAccountIds}
+                  onChange={(e) => setAnalyticAccountIds(Array.from(e.target.selectedOptions).map((o) => Number(o.value)))}
+                >
+                  {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              </label>
+            )}
+          </>
+        )}
+        <label className="inline-select">
+          <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
+        </label>
+        <span className="spacer" />
+        <ReportFoldAll keys={expandableCodes} open={openCodes} onToggle={() => setOpenCodes((prev) => toggleAllReportFolds(prev, expandableCodes))} />
+        <button type="button" className="btn sm" disabled={!data} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
+        <button type="button" className="btn sm" disabled={!data} onClick={exportCsv}>{t('Download CSV')}</button>
+        <button type="button" className="btn sm" disabled={!data} onClick={exportXlsx}>{t('Export XLSX')}</button>
+      </div>
+      {inlineError && (
+        <div className="alert" role="alert" style={{ margin: '0 16px 12px' }}>
+          {t(inlineError)}
+        </div>
       )}
-      <label className="inline-select">
-        <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
-      </label>
-      <span className="spacer" />
-      <ReportFoldAll keys={expandableCodes} open={openCodes} onToggle={() => setOpenCodes((prev) => toggleAllReportFolds(prev, expandableCodes))} />
-      <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
-      <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
-      <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
-    </div>
+    </>
   );
 
   return (
     <ReportPrintView
-      active={isPrinting}
+      active={isPrinting && Boolean(data)}
       company={printCompany}
       companies={printCompanies}
       title={statementKind ? t(title || report.name) : report.name}
-      subtitle={period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`}
+      subtitle={periodError ? '' : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}
       controls={controls}
       onBack={() => setIsPrinting(false)}
     >
-      <div className="list-wrap">
-        <table className="list report" ref={tableRef}>
-          <thead>
-            <tr>
-              <th>{t('Report Lines')}</th>
-              {[...data.headers, ...(data.showVariance ? ['Variance', '%'] : [])].map((header) => (
-                <th className="num" key={header}>{header.split(' ').map((part) => t(part)).join(' ')}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {data.rows.map((line) => {
-              const canExpand = isExpandableLine(line);
-              const isOpen = canExpand && openCodes.has(line.code);
-              const rowClass = [line.strong ? 'rep-total strong' : canExpand ? 'rep-section' : ''].filter(Boolean).join(' ');
-              return (
-                <Fragment key={line.code}>
-                  <tr
-                    className={rowClass || undefined}
-                    onClick={canExpand && !isPrinting ? () => toggle(line.code) : undefined}
-                    aria-expanded={canExpand && !isPrinting ? isOpen : undefined}
-                  >
-                    <td style={{ paddingInlineStart: `${line.depth * 1.5 + 0.75}rem` }}>
-                      {canExpand && !isPrinting && <span className={isOpen ? 'caret fold-caret open' : 'caret fold-caret'} aria-hidden="true" />}
-                      {t(line.name)}
-                    </td>
-                    <RowCells values={line.values} variance={line.variance} showVariance={data.showVariance} />
-                  </tr>
-                  {isOpen && line.accountRows.map((acc) => (
+      {data && (
+        <div className="list-wrap">
+          <table className="list report" ref={tableRef}>
+            <thead>
+              <tr>
+                <th>{t('Report Lines')}</th>
+                {[...data.headers, ...(data.showVariance ? ['Variance', '%'] : [])].map((header) => (
+                  <th className="num" key={header}>{header.split(' ').map((part) => t(part)).join(' ')}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((line) => {
+                const canExpand = isExpandableLine(line);
+                const isOpen = canExpand && openCodes.has(line.code);
+                const rowClass = [line.strong ? 'rep-total strong' : canExpand ? 'rep-section' : ''].filter(Boolean).join(' ');
+                return (
+                  <Fragment key={line.code}>
                     <tr
-                      key={`${line.code}:${acc.account.id}`}
-                      className="rep-detail"
-                      onClick={isPrinting ? undefined : () => { globalThis.location.hash = accountJournalItemsHref(acc.account.id); }}
+                      className={rowClass || undefined}
+                      onClick={canExpand && !isPrinting ? () => toggle(line.code) : undefined}
+                      aria-expanded={canExpand && !isPrinting ? isOpen : undefined}
                     >
-                      <td style={{ paddingInlineStart: `${(line.depth + 1) * 1.5 + 0.75}rem` }}>
-                        {isPrinting ? `${acc.account.code} ${acc.account.name}` : (
-                          <>
-                            <a href={accountJournalItemsHref(acc.account.id)}>{acc.account.code} {acc.account.name}</a>
-                            {' '}<a className="muted no-export" href={`#/open/account.account/${acc.account.id}`} aria-label={t('Open Account')} title={t('Open Account')} onClick={(e) => e.stopPropagation()}>↗</a>
-                          </>
-                        )}
+                      <td style={{ paddingInlineStart: `${line.depth * 1.5 + 0.75}rem` }}>
+                        {canExpand && !isPrinting && <span className={isOpen ? 'caret fold-caret open' : 'caret fold-caret'} aria-hidden="true" />}
+                        {t(line.name)}
                       </td>
-                      <RowCells values={acc.values} variance={acc.variance} showVariance={data.showVariance} />
+                      <RowCells values={line.values} variance={line.variance} showVariance={data.showVariance} />
                     </tr>
-                  ))}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                    {isOpen && line.accountRows.map((acc) => (
+                      <tr
+                        key={`${line.code}:${acc.account.id}`}
+                        className="rep-detail"
+                        onClick={isPrinting ? undefined : () => { globalThis.location.hash = accountJournalItemsHref(acc.account.id); }}
+                      >
+                        <td style={{ paddingInlineStart: `${(line.depth + 1) * 1.5 + 0.75}rem` }}>
+                          {isPrinting ? `${acc.account.code} ${acc.account.name}` : (
+                            <>
+                              <a href={accountJournalItemsHref(acc.account.id)}>{acc.account.code} {acc.account.name}</a>
+                              {' '}<a className="muted no-export" href={`#/open/account.account/${acc.account.id}`} aria-label={t('Open Account')} title={t('Open Account')} onClick={(e) => e.stopPropagation()}>↗</a>
+                            </>
+                          )}
+                        </td>
+                        <RowCells values={acc.values} variance={acc.variance} showVariance={data.showVariance} />
+                      </tr>
+                    ))}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </ReportPrintView>
   );
 }

@@ -1,20 +1,21 @@
+import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
 import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
-import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
+import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, resolveLineTaxes, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxRowsFactor, taxSnapshot, validateTaxCompany } from './taxes.js';
+import { discountTaxComputation, dueDate, earlyDiscount, mixedDiscountFactor } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
 import { billableLines, checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
-import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, isCurrencyZero, roundCurrency, round as round2 } from '../money.js';
 import { hasMultiCurrency } from './money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
@@ -92,6 +93,9 @@ function accountTypeGuard(db, before, after) {
 }
 
 function accountCodeGuard(db, before, after) {
+  if (after.code && /[^A-Za-z0-9.-]/.test(after.code)) {
+    return `The account code can only contain alphanumeric characters, dots, and dashes. (account code: ${after.code})`;
+  }
   const codeOrCompanyChanged = !before || before.code !== after.code || (before.company_id ?? null) !== (after.company_id ?? null);
   if (codeOrCompanyChanged && (db.records['account.account'] ?? []).some((account) => account.id !== after.id
     && account.code === after.code && (account.company_id ?? null) === (after.company_id ?? null))) {
@@ -877,6 +881,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
         : {});
   const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
   let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  if (r.move_type === 'out_invoice' || r.move_type === 'in_invoice') posted = incrementPartnerRank(posted, r.partner_id, r.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -1980,7 +1985,12 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 
 const invoiceLineField = {
   ...invoiceLineBase,
-  newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
+  newLine: (move, db) => {
+    const baseLine = (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db);
+    const mismatch = move && db ? quickEditMismatch(db, move) : null;
+    if (!mismatch) return baseLine;
+    return { ...baseLine, price_unit: quickEditLinePriceUnit(db, move, baseLine, mismatch.remaining, mismatch.docCurr) };
+  },
   onchange: (line, key, db, move, context = {}) => {
     const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: resolveDocumentJournal(db, move)?.id } : move);
     const base = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
@@ -2639,6 +2649,97 @@ function unbalancedEntryWarning(db, r) {
   return t('Journal entry is not balanced: total debit must equal total credit.');
 }
 
+/** Whether Quick Encoding applies to `r` under its company's `quick_edit_mode` (draft covered invoices/bills only). */
+export function isQuickEditEnabled(r, db) {
+  if (!r || !isInvoice(r) || (r.state && r.state !== 'draft') || !db) return false;
+  const companyId = r.company_id ?? currentCompany(db);
+  const mode = read(db, 'res.company', companyId)?.quick_edit_mode;
+  if (mode === 'out_invoices') return ['out_invoice', 'out_refund'].includes(r.move_type);
+  if (mode === 'in_invoices') return ['in_invoice', 'in_refund'].includes(r.move_type);
+  if (mode === 'out_and_in_invoices') return true;
+  return false;
+}
+
+/** Compute quick-edit remaining amount and document currency when quick encoding is active with a non-zero target. */
+function quickEditMismatch(db, r) {
+  if (!isQuickEditEnabled(r, db)) return null;
+  const target = Number(r.quick_edit_total_amount);
+  if (r.quick_edit_total_amount == null || r.quick_edit_total_amount === '' || !Number.isFinite(target) || target === 0) return null;
+  // A company without a configured currency has no total to compare yet.
+  const docCurr = (db.records['res.currency'] ?? []).find((c) => c.id === r.currency_id) ?? findCompanyCurrencyRecord(db, r.company_id ?? null);
+  if (!docCurr) return null;
+  const currentTotal = total(r, db);
+  if (currentTotal == null) return null;
+  const expected = roundCurrency(target, docCurr);
+  const actual = roundCurrency(currentTotal, docCurr);
+  const remaining = roundCurrency(expected - actual, docCurr);
+  if (isCurrencyZero(remaining, docCurr)) return null;
+  return { docCurr, expected, actual, remaining };
+}
+
+/** Convert a tax-included remaining amount to the line's `price_unit` via `computeLineTaxes`. */
+function quickEditLinePriceUnit(db, move, line, remaining, docCurr) {
+  const specs = resolveLineTaxes(line);
+  const term = db && move?.invoice_payment_term_id ? read(db, 'account.payment.term', move.invoice_payment_term_id) : null;
+  const discountFactor = mixedDiscountFactor(term);
+  if (!specs.length || (specs.every((t) => t.tax_include) && discountFactor === 1)) {
+    return roundCurrency(remaining, docCurr);
+  }
+  const side = isRefund(move) ? 'refund' : 'invoice';
+  const roundingMethod = companyRoundingMethod(db, move?.company_id);
+  const forcedBreakdown = Array.isArray(line.tax_breakdown) && line.tax_breakdown.length
+    ? line.tax_breakdown.map((t) => ({ ...t, tax_include: true }))
+    : line.tax_breakdown;
+  const probe = {
+    ...line,
+    qty: 1,
+    price_unit: remaining,
+    discount: 0,
+    tax_include: true,
+    ...(forcedBreakdown ? { tax_breakdown: forcedBreakdown } : {}),
+  };
+  const computed = computeLineTaxes(probe, { currency: docCurr, roundingMethod, side });
+  const includedTax = specs.some((t) => t.tax_include)
+    ? computed.taxes.filter((t) => t.tax_include).reduce((s, t) => s + t.amount * taxRowsFactor(t, side), 0)
+    : 0;
+  const baseRawPrice = computed.untaxed + includedTax;
+  const effectiveTotal = discountFactor !== 1
+    ? computed.untaxed + discountFactor * computed.tax
+    : remaining;
+  const rawPrice = Math.abs(effectiveTotal) > 1e-12 && Number.isFinite(effectiveTotal)
+    ? (baseRawPrice * remaining) / effectiveTotal
+    : baseRawPrice;
+  const rounded = roundCurrency(rawPrice, docCurr);
+  const expectedTotal = roundCurrency((Number(total(move, db)) || 0) + remaining, docCurr);
+  const totalWith = (price) => total({ ...move, invoice_line_ids: [...(move.invoice_line_ids ?? []), { ...line, qty: 1, discount: 0, price_unit: price }] }, db);
+  if (totalWith(rounded) === expectedTotal) return rounded;
+  const precise = Math.round(rawPrice * 1e6) / 1e6;
+  if (totalWith(precise) === expectedTotal) return precise;
+  const step = Number(docCurr?.rounding ?? 0.01);
+  let low = rawPrice - step * 2;
+  let high = rawPrice + step * 2;
+  for (let i = 0; i < 20; i++) {
+    const mid = Math.round(((low + high) / 2) * 1e6) / 1e6;
+    const roundedMid = roundCurrency(mid, docCurr);
+    if (totalWith(roundedMid) === expectedTotal) return roundedMid;
+    const t = totalWith(mid);
+    if (t === expectedTotal) return mid;
+    if (t < expectedTotal) low = mid;
+    else high = mid;
+  }
+  return rounded;
+}
+
+/** Non-blocking form warning when Quick Encoding target differs from the computed invoice total. */
+function quickEditWarning(db, r) {
+  const mismatch = quickEditMismatch(db, r);
+  if (!mismatch) return '';
+  return t('The entered total ({entered}) does not match the computed total ({computed}).', {
+    entered: formatCurrency(mismatch.expected, mismatch.docCurr),
+    computed: formatCurrency(mismatch.actual, mismatch.docCurr),
+  });
+}
+
 /** Whether a move can be reset back to draft under Mizan's settlement, hash, bank, and lock rules. */
 function canResetMove(r, db, ctx = null) {
   if (!r || r.state === 'draft' || r.inalterable_hash || Number(r.amount_paid) > 0) return false;
@@ -2925,6 +3026,14 @@ export function cashMove(db, journalId, { amount, label, date, statementId } = {
 export const putMoneyIn = (db, journalId, args) => cashMove(db, journalId, args, 1);
 export const takeMoneyOut = (db, journalId, args) => cashMove(db, journalId, args, -1);
 
+/** Foreign currency forced by a liquidity journal on its default account, or null for company-currency journals. */
+function journalForcedCurrencyId(db, journal) {
+  const currencyId = journal?.currency_id ?? null;
+  if (!currencyId) return null;
+  const companyCurrencyId = findCompanyCurrencyRecord(db, journal?.company_id ?? 1)?.id ?? null;
+  return currencyId === companyCurrencyId ? null : currencyId;
+}
+
 /** Sync a liquidity journal's default account currency when it does not conflict with existing items or another forced currency. */
 function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwriteExisting = false, journalId = null } = {}) {
   const account = accountId ? read(db, 'account.account', accountId) : null;
@@ -3049,7 +3158,13 @@ export const accountingModels = {
             && isLiquidityJournal(j)
             && j.default_account_id === after.id,
         );
-        if (linkedLiquidity.some((j) => j.currency_id && j.currency_id !== nextCurrency)) {
+        const conflictsWithJournal = (j) => {
+          if (j.currency_id) return j.currency_id !== nextCurrency;
+          if (!nextCurrency) return false;
+          const journalCompanyCurrencyId = findCompanyCurrencyRecord(db, j.company_id ?? after.company_id ?? 1)?.id ?? null;
+          return nextCurrency !== journalCompanyCurrencyId;
+        };
+        if (linkedLiquidity.some(conflictsWithJournal)) {
           return 'Another journal uses this default account with a different currency';
         }
       }
@@ -3123,6 +3238,8 @@ export const accountingModels = {
 
   'account.journal': {
     label: 'Journals',
+    views: ['list', 'kanban'],
+    searchFields: ['name', 'code'],
     guard: (db, before, after, _ctx, vals) => {
       const companyId = after.company_id ?? 1;
       const currencyChanged = !before || (before.currency_id ?? null) !== (after.currency_id ?? null);
@@ -3134,10 +3251,13 @@ export const accountingModels = {
         if (account) {
           const accountCurrency = account.currency_id ?? null;
           const journalCurrency = after.currency_id ?? null;
-          if (accountCurrency && accountCurrency !== journalCurrency && (before || journalCurrency)) {
+          const companyCurrencyId = findCompanyCurrencyRecord(db, companyId)?.id ?? null;
+          const effectiveJournalCurrency = journalCurrency ?? companyCurrencyId;
+          const forcedJournalCurrency = journalForcedCurrencyId(db, after);
+          if (accountCurrency && accountCurrency !== effectiveJournalCurrency && (before || journalCurrency)) {
             return 'The journal and its default account must use the same currency';
           }
-          if (journalCurrency && !accountCurrency && !accountCurrencyChangeError(db, account, { ...account, currency_id: journalCurrency })) {
+          if (forcedJournalCurrency && !accountCurrency && !accountCurrencyChangeError(db, account, { ...account, currency_id: forcedJournalCurrency })) {
             return 'The journal and its default account must use the same currency';
           }
         }
@@ -3162,6 +3282,12 @@ export const accountingModels = {
           const blockedOwner = companies.find((c) => c[field] === before.id && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id)));
           if (blockedOwner) {
             return `Clear the ${label} of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+          }
+        }
+        if ((before.currency_id ?? null) !== (after.currency_id ?? null)) {
+          const statementLines = (db.records['account.bank.statement.line'] ?? []).filter((l) => l.journal_id === before.id);
+          if (statementLines.some((l) => !l.currency_id || !read(db, 'res.currency', l.currency_id))) {
+            return 'Cannot change journal currency when existing transactions cannot be safely interpreted in their original currency';
           }
         }
       }
@@ -3221,7 +3347,7 @@ export const accountingModels = {
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', domain: (currency) => currency.active !== false },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', optional: 'hide', domain: (currency) => currency.active !== false },
       journal_group_id: { type: 'many2one', relation: 'account.journal.group', label: 'Ledger' },
       sequence_override_regex: { type: 'text', label: 'Sequence Override Regex', hidden: true },
       refund_sequence: {
@@ -3379,8 +3505,9 @@ export const accountingModels = {
     }),
     prepareCreate: (db, vals) => {
       let nextVals = { ...vals };
-      if (isLiquidityJournal(vals) && vals.default_account_id && vals.currency_id) {
-        db = syncLiquidityAccountCurrency(db, vals.default_account_id, vals.currency_id);
+      const forcedCurrency = journalForcedCurrencyId(db, vals);
+      if (isLiquidityJournal(vals) && vals.default_account_id && forcedCurrency) {
+        db = syncLiquidityAccountCurrency(db, vals.default_account_id, forcedCurrency);
       }
       for (const [field] of METHOD_LINE_FIELDS) {
         if (Array.isArray(nextVals[field]) && nextVals[field].some((l) => l?.id != null && l.id !== '')) {
@@ -3395,9 +3522,10 @@ export const accountingModels = {
       const currencyChanged = 'currency_id' in vals && (vals.currency_id ?? null) !== (before?.currency_id ?? null);
       const defaultAccountChanged = 'default_account_id' in vals && (vals.default_account_id ?? null) !== (before?.default_account_id ?? null);
       const becameLiquidity = !isLiquidityJournal(before) && isLiquidityJournal(nextRecord);
-      if ((currencyChanged || defaultAccountChanged || becameLiquidity) && isLiquidityJournal(nextRecord) && nextRecord.default_account_id) {
+      const unarchived = before?.active === false && nextRecord.active !== false;
+      if ((currencyChanged || defaultAccountChanged || becameLiquidity || unarchived) && isLiquidityJournal(nextRecord) && nextRecord.default_account_id) {
         const targetAccountId = nextRecord.default_account_id;
-        const targetCurrencyId = nextRecord.currency_id ?? null;
+        const targetCurrencyId = journalForcedCurrencyId(db, nextRecord);
         db = syncLiquidityAccountCurrency(db, targetAccountId, targetCurrencyId, {
           overwriteExisting: currencyChanged && !defaultAccountChanged && !becameLiquidity,
           journalId: before?.id ?? null,
@@ -3449,16 +3577,16 @@ export const accountingModels = {
     onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
     onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
-    views: ['list', 'kanban'],
-    searchFields: ['name', 'code'],
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },
       { id: 'liquidity', label: 'Liquidity', fn: (r) => isLiquidityJournal(r) },
       { id: 'miscellaneous', label: 'Miscellaneous', fn: (r) => r.type === 'general' },
+    ], [
+      { id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false },
     ]],
     kanban: { title: 'name', lines: ['code', 'type'], counter: { label: 'Entries', model: 'account.move', field: 'journal_id' } },
-    list: ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id'],
+    list: ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id'],
     form: {
       title: 'name',
       chatter: true,
@@ -3484,8 +3612,11 @@ export const accountingModels = {
           },
         },
       ],
-      smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['type', 'code', 'currency_id', 'journal_group_id']],
+      smart: [
+        { label: 'Journal Items', value: (db, j) => journalItems(db).filter((line) => line.journal_id === j.id).length, target: (j) => `accounting/journal-items?journal=${j.id}` },
+        { label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' },
+      ],
+      groups: [['type', 'code', 'journal_group_id']],
       tabs: (j) => {
         const liquidity = isLiquidityJournal(j);
         const invoiced = ['sale', 'purchase'].includes(j.type);
@@ -3499,6 +3630,7 @@ export const accountingModels = {
         }[j.type];
         const entries = [
           { field: 'default_account_id', label: accountLabel },
+          'currency_id',
           ...(liquidity ? ['suspense_account_id'] : []),
           ...(j.type === 'purchase' ? ['non_deductible_account_id'] : []),
           ...(cashOrBank ? ['profit_account_id', 'loss_account_id'] : []),
@@ -3993,6 +4125,12 @@ export const accountingModels = {
       },
       auto_post_until: { type: 'date', label: 'Repeat Until', copy: false },
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
+      quick_edit_total_amount: {
+        type: 'monetary',
+        label: 'Total (Tax inc.)',
+        copy: false,
+        hideWhen: (r, db) => !isQuickEditEnabled(r, db),
+      },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
@@ -4399,10 +4537,17 @@ export const accountingModels = {
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
       banner: (r, db) => suggestBillAutopost(db, r) ? 'Automatically post future digitized bills from this vendor?' : null,
-      warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : ['in_invoice', 'in_refund'].includes(r.move_type) ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
+      warning: (r, db) => {
+        const base = r.move_type === 'out_invoice'
+          ? ((!r.state || r.state === 'draft') ? creditWarning(db, r.partner_id, total(r, db), r) : '')
+          : ['in_invoice', 'in_refund'].includes(r.move_type)
+            ? duplicateBillWarning(db, r)
+            : unbalancedEntryWarning(db, r);
+        return [base, quickEditWarning(db, r)].filter(Boolean).join(' · ') || '';
+      },
       groups: (r) => (isInvoice(r)
         ? [
-          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? ['purchase_id', { field: 'ref', label: 'Bill Reference' }] : [])],
+          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? ['purchase_id', { field: 'ref', label: 'Bill Reference' }] : []), 'quick_edit_total_amount'],
           [
             { field: 'invoice_date', label: isPurchase(r) ? 'Bill Date' : 'Invoice Date' },
             { label: 'Due Date', fields: ['invoice_date_due', 'invoice_payment_term_id'], join: 'or' },

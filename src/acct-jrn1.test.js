@@ -7,6 +7,7 @@ import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { journalSequenceName } from './models/journal-sequence.js';
 import { postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
+import { postPayment } from './models/pay.js';
 import { today } from './models/common.js';
 import './models/index.js';
 
@@ -462,4 +463,242 @@ test('Shared liquidity default account rejects currency change that conflicts wi
   });
 
 });
+
+test('Direct foreign-currency edit on company-currency bank default account is rejected and payments still succeed', () => {
+  let db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const gbp = search(db, 'res.currency').find((c) => c.name === 'GBP');
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const unusedBankAcc = create(db, 'account.account', {
+    name: 'Unused Company Bank Acc',
+    code: '111440',
+    account_type: 'asset_cash',
+    company_id: 1,
+    currency_id: null,
+  });
+  db = unusedBankAcc.db;
+
+  const companyBankJrn = create(db, 'account.journal', {
+    name: 'Company Currency Bank',
+    code: 'CCBK',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: unusedBankAcc.id,
+    suspense_account_id: bank.suspense_account_id,
+    currency_id: null,
+  });
+  db = companyBankJrn.db;
+
+  // Directly assigning a foreign currency to the unused default account must be blocked
+  assert.throws(
+    () => write(db, 'account.account', unusedBankAcc.id, { currency_id: eur.id }),
+    /Another journal uses this default account with a different currency/,
+  );
+  assert.equal(read(db, 'account.account', unusedBankAcc.id).currency_id ?? null, null);
+
+  // Forged diff doing the same over sync must also be rejected
+  const forged = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.account': db.records['account.account'].map((a) => (a.id === unusedBankAcc.id ? { ...a, currency_id: eur.id } : a)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, forged), { isAdmin: true }),
+    /Another journal uses this default account with a different currency/,
+  );
+
+  // Subsequent payment using this company-currency bank journal succeeds (including foreign payment currency)
+  const paymentCurrency = gbp ?? eur;
+  const partner = search(db, 'res.partner').find((p) => p.is_company);
+  const pay = create(db, 'account.payment', {
+    company_id: 1,
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: partner.id,
+    amount: 75,
+    currency_id: paymentCurrency.id,
+    date: today(),
+    journal_id: companyBankJrn.id,
+  });
+  assert.doesNotThrow(() => {
+    db = postPayment(pay.db, read(pay.db, 'account.payment', pay.id));
+  });
+  assert.equal(read(db, 'account.payment', pay.id).state, 'posted');
+
+  // Editing the journal itself preserves syncFromJournalId context for an exclusive journal
+  const soloAcc = create(db, 'account.account', {
+    name: 'Solo Company Bank Acc',
+    code: '111441',
+    account_type: 'asset_cash',
+    company_id: 1,
+    currency_id: null,
+  });
+  db = soloAcc.db;
+  const soloJrn = create(db, 'account.journal', {
+    name: 'Solo Bank',
+    code: 'SLBK',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: soloAcc.id,
+    suspense_account_id: bank.suspense_account_id,
+    currency_id: null,
+  });
+  db = write(soloJrn.db, 'account.journal', soloJrn.id, { currency_id: eur.id });
+  assert.equal(read(db, 'account.journal', soloJrn.id).currency_id, eur.id);
+  assert.equal(read(db, 'account.account', soloAcc.id).currency_id, eur.id);
+});
+
+test('Archiving and unarchiving a foreign-currency bank journal with an unrestricted default account synchronizes the account', () => {
+  let db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const gbp = search(db, 'res.currency').find((c) => c.name === 'GBP');
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+
+  // 1. Existing foreign-currency bank journal whose unused default account has no currency
+  const acc = create(db, 'account.account', {
+    name: 'Legacy EUR Bank Acc',
+    code: '111450',
+    account_type: 'asset_cash',
+    company_id: 1,
+    currency_id: null,
+  });
+  db = acc.db;
+  const jrn = create(db, 'account.journal', {
+    name: 'Legacy EUR Bank',
+    code: 'LEBK',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: acc.id,
+    suspense_account_id: bank.suspense_account_id,
+    currency_id: eur.id,
+  });
+  // Simulate a pre-sync existing journal whose default_account_id has no currency_id
+  db = {
+    ...jrn.db,
+    records: {
+      ...jrn.db.records,
+      'account.account': jrn.db.records['account.account'].map((a) => (a.id === acc.id ? { ...a, currency_id: null } : a)),
+    },
+  };
+
+  db = write(db, 'account.journal', jrn.id, { active: false });
+  assert.equal(read(db, 'account.journal', jrn.id).active, false);
+
+  assert.doesNotThrow(() => {
+    db = write(db, 'account.journal', jrn.id, { active: true });
+  });
+  assert.equal(read(db, 'account.journal', jrn.id).active, true);
+  assert.equal(read(db, 'account.account', acc.id).currency_id, eur.id);
+
+  // 2. Unarchiving retains item-conflict check (account with company-currency items stays unrestricted)
+  const usedAcc = create(db, 'account.account', {
+    name: 'Used Multi-Currency Acc',
+    code: '111451',
+    account_type: 'asset_cash',
+    company_id: 1,
+    currency_id: null,
+  });
+  db = usedAcc.db;
+  const otherAcc = search(db, 'account.account').find((a) => a.code === '301000' && (!a.company_id || a.company_id === 1));
+  const miscJrn = search(db, 'account.journal').find((j) => j.type === 'general');
+  db = postEntry(db, {
+    journal_id: miscJrn.id,
+    company: 1,
+    date: '2026-01-15',
+    lines: [
+      { account_id: usedAcc.id, debit: 25 },
+      { account_id: otherAcc.id, credit: 25 },
+    ],
+  }).db;
+  const usedJrn = create(db, 'account.journal', {
+    name: 'Used EUR Bank',
+    code: 'UEBK',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: usedAcc.id,
+    suspense_account_id: bank.suspense_account_id,
+    currency_id: eur.id,
+    active: false,
+  });
+  db = write(usedJrn.db, 'account.journal', usedJrn.id, { active: true });
+  assert.equal(read(db, 'account.journal', usedJrn.id).active, true);
+  assert.equal(read(db, 'account.account', usedAcc.id).currency_id ?? null, null);
+
+  // 3. Unarchiving retains conflict check against other active linked liquidity journals
+  const sharedAcc = create(db, 'account.account', {
+    name: 'Shared Company Bank Acc',
+    code: '111452',
+    account_type: 'asset_cash',
+    company_id: 1,
+    currency_id: null,
+  });
+  db = sharedAcc.db;
+  const activeCompanyJrn = create(db, 'account.journal', {
+    name: 'Active Company Bank',
+    code: 'ACBK',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: sharedAcc.id,
+    suspense_account_id: bank.suspense_account_id,
+    currency_id: null,
+  });
+  db = activeCompanyJrn.db;
+  const archivedEurJrn = create(db, 'account.journal', {
+    name: 'Archived EUR Bank',
+    code: 'AEBK',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: sharedAcc.id,
+    suspense_account_id: bank.suspense_account_id,
+    currency_id: null,
+    active: false,
+  });
+  db = {
+    ...archivedEurJrn.db,
+    records: {
+      ...archivedEurJrn.db.records,
+      'account.journal': archivedEurJrn.db.records['account.journal'].map((j) => (j.id === archivedEurJrn.id ? { ...j, currency_id: eur.id } : j)),
+    },
+  };
+  assert.throws(
+    () => write(db, 'account.journal', archivedEurJrn.id, { active: true }),
+    /Another journal uses this default account with a different currency/,
+  );
+
+  // 4. Unarchiving must not overwrite an existing conflicting forced currency on the account
+  const conflictAcc = create(db, 'account.account', {
+    name: 'Conflict Currency Acc',
+    code: '111453',
+    account_type: 'asset_cash',
+    company_id: 1,
+    currency_id: (gbp ?? eur).id,
+  });
+  db = conflictAcc.db;
+  const archivedConflictJrn = create(db, 'account.journal', {
+    name: 'Archived Conflict Bank',
+    code: 'ACFB',
+    type: 'bank',
+    company_id: 1,
+    default_account_id: conflictAcc.id,
+    suspense_account_id: bank.suspense_account_id,
+    currency_id: (gbp ?? eur).id,
+    active: false,
+  });
+  const otherForeignId = gbp ? eur.id : search(db, 'res.currency').find((c) => c.id !== eur.id).id;
+  db = {
+    ...archivedConflictJrn.db,
+    records: {
+      ...archivedConflictJrn.db.records,
+      'account.journal': archivedConflictJrn.db.records['account.journal'].map((j) => (j.id === archivedConflictJrn.id ? { ...j, currency_id: otherForeignId } : j)),
+    },
+  };
+  assert.throws(
+    () => write(db, 'account.journal', archivedConflictJrn.id, { active: true }),
+    /The journal and its default account must use the same currency/,
+  );
+  assert.equal(read(db, 'account.account', conflictAcc.id).currency_id, (gbp ?? eur).id);
+});
+
 

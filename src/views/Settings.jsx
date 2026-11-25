@@ -223,6 +223,9 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
   }
+  if (vals.quick_edit_mode !== undefined && vals.quick_edit_mode !== null && vals.quick_edit_mode !== '' && !['out_invoices', 'in_invoices', 'out_and_in_invoices'].includes(vals.quick_edit_mode)) {
+    return 'Select a valid quick encoding mode';
+  }
   if (vals.account_check_printing_layout !== undefined && vals.account_check_printing_layout !== null && !['none', 'top', 'middle', 'bottom'].includes(vals.account_check_printing_layout)) {
     return 'Select a valid check layout';
   }
@@ -260,6 +263,15 @@ export function validateCompanySettingWrite(db, company, vals) {
       return 'Enter a valid date';
     }
   }
+  if (vals.account_use_credit_limit !== undefined && typeof vals.account_use_credit_limit !== 'boolean') {
+    return 'Invalid Sales Credit Limit setting';
+  }
+  if (vals.account_default_credit_limit !== undefined && vals.account_default_credit_limit !== null) {
+    const n = Number(vals.account_default_credit_limit);
+    if (!Number.isFinite(n) || n < 0) {
+      return 'Default Credit Limit must be non-negative';
+    }
+  }
   return null;
 }
 
@@ -278,6 +290,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const priceIncludeOptions = fields.account_price_include?.options ?? [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']];
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
   const periodicityOptions = fields.tax_periodicity?.options ?? [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']];
+  const quickEditOptions = fields.quick_edit_mode?.options ?? [['out_invoices', 'Customer Invoices'], ['in_invoices', 'Vendor Bills'], ['out_and_in_invoices', 'Customer Invoices and Vendor Bills']];
   const generalJournals = (db.records['account.journal'] ?? [])
     .filter((j) => j.active !== false && j.type === 'general' && (!j.company_id || !company || j.company_id === company.id));
   const companyAccounts = (db.records['account.account'] ?? [])
@@ -544,6 +557,36 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
         </div>
       )}
 
+      {(hasField('account_use_credit_limit') || hasField('account_default_credit_limit')) && (
+        <div className="settings-block" data-block="credit_limit">
+          <h3>{t('Credit Limit')}</h3>
+          {hasField('account_use_credit_limit') && (
+            <SettingRow id="account_use_credit_limit" label="Sales Credit Limit" description="Trigger a warning when creating invoices and sales orders for partners whose total receivable exceeds the credit limit.">
+              <input
+                id="account_use_credit_limit"
+                type="checkbox"
+                checked={!!company?.account_use_credit_limit}
+                disabled={readOnly || !company}
+                onChange={(e) => onWriteCompany({ account_use_credit_limit: e.target.checked })}
+              />
+            </SettingRow>
+          )}
+          {hasField('account_default_credit_limit') && !!company?.account_use_credit_limit && (
+            <SettingRow id="account_default_credit_limit" label="Default Credit Limit" description="Default credit limit applied to partners without an individual limit.">
+              <input
+                id="account_default_credit_limit"
+                type="number"
+                min="0"
+                step="any"
+                disabled={readOnly || !company}
+                value={company?.account_default_credit_limit ?? 0}
+                onChange={(e) => onWriteCompany({ account_default_credit_limit: e.target.value === '' ? 0 : Number(e.target.value) })}
+              />
+            </SettingRow>
+          )}
+        </div>
+      )}
+
       {showVendorBills && (
         <div className="settings-block" data-block="vendor_bills">
           <h3>{t('Vendor Bills')}</h3>
@@ -559,6 +602,19 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
                 onChange={(e) => onWriteCompany({ three_way_matching: e.target.checked })} />
             </SettingRow>
           )}
+        </div>
+      )}
+
+      {hasField('quick_edit_mode') && (
+        <div className="settings-block" data-block="quick_encoding">
+          <h3>{t('Quick Encoding')}</h3>
+          <SettingRow id="quick_edit_mode" label="Quick encoding" description="Enter the tax-included total on draft invoices and bills to prefill new lines with the remaining amount.">
+            <select id="quick_edit_mode" disabled={readOnly || !company} value={company?.quick_edit_mode ?? ''}
+              onChange={(e) => onWriteCompany({ quick_edit_mode: e.target.value || null })}>
+              <option value="">{t('None')}</option>
+              {quickEditOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+            </select>
+          </SettingRow>
         </div>
       )}
 
