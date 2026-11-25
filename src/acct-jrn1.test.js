@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { create, read, search, unlink, write } from './orm.js';
 import { diffDb, applyDiff } from './sync.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate, MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
+
+// Databases saved just before the journal-ledger-direction migration, whatever migrations come later.
+const BEFORE_JOURNAL_DIRECTION = MIGRATIONS.find((m) => m.name === 'journal-ledger-direction').version - 1;
 import { journalSequenceName } from './models/journal-sequence.js';
 import { postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
@@ -47,7 +50,7 @@ test('JRN-1 journal currency and sequence behavior survive synchronization', () 
 test('JRN-2 migrates ledger membership to the journal', () => {
   const db = seed();
   const journal = search(db, 'account.journal')[0];
-  const old = { ...db, schema_version: SCHEMA_VERSION - 1, records: { ...db.records, 'account.journal.group': [{ id: 1, name: 'IFRS', company_id: 1, journal_ids: [journal.id] }] } };
+  const old = { ...db, schema_version: BEFORE_JOURNAL_DIRECTION, records: { ...db.records, 'account.journal.group': [{ id: 1, name: 'IFRS', company_id: 1, journal_ids: [journal.id] }] } };
   const migrated = migrate(old);
   assert.equal(read(migrated, 'account.journal', journal.id).journal_group_id, 1);
   assert.deepEqual(read(migrated, 'account.journal.group', 1).included_journal_ids, [journal.id]);
@@ -147,7 +150,7 @@ test('Finding 4: migration 68 skips missing journals and deterministically resol
   const j1 = search(db, 'account.journal')[0];
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: BEFORE_JOURNAL_DIRECTION,
     records: {
       ...db.records,
       'account.journal.group': [

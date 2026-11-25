@@ -136,9 +136,9 @@ test('manual journal entry form (Accounting > Accounting > Journal Entries): mai
     const tabLabels = allFind(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab').map((n) => n.textContent.trim());
     assert.deepEqual(tabLabels, ['Journal Items', 'Other Info']);
 
-    // Journal Items columns: Account, Partner, Label, Due Date, Taxes, Debit, Credit, Analytic Distribution; optional Tax Grids and Discount Date hidden.
+    // Journal Items columns: Account, Partner, Label, Due Date, Taxes, Debit, Credit; optional Tax Grids and Discount Date hidden.
     const ths = () => allFind(ctx.host, (n) => n.tagName === 'TH' && !hasClass(n, 'o2m-cols-th')).map((n) => n.textContent.trim());
-    assert.deepEqual(ths(), ['Account', 'Partner', 'Label', 'Due Date', 'Taxes', 'Debit', 'Credit', 'Analytic Distribution']);
+    assert.deepEqual(ths(), ['Account', 'Partner', 'Label', 'Due Date', 'Taxes', 'Debit', 'Credit']);
 
     const optToggle = find(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.['aria-label'] === 'Optional columns');
     assert.ok(optToggle, 'optional columns menu present on Journal Items lines');
@@ -147,7 +147,7 @@ test('manual journal entry form (Accounting > Accounting > Journal Entries): mai
     assert.deepEqual(optItems.map((n) => n.textContent.trim()), ['Currency', 'Amount in Currency', 'Tax Grids', 'Discount Date']);
     assert.deepEqual(optItems.map((n) => props(n)?.['aria-checked']), [false, false, false, false]);
     await ctx.React.act(async () => props(optItems[2]).onClick());
-    assert.deepEqual(ths(), ['Account', 'Partner', 'Label', 'Due Date', 'Taxes', 'Debit', 'Credit', 'Analytic Distribution', 'Tax Grids']);
+    assert.deepEqual(ths(), ['Account', 'Partner', 'Label', 'Due Date', 'Taxes', 'Debit', 'Credit', 'Tax Grids']);
 
     // Journal Items editable in draft.
     assert.ok(find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Add a line')));
