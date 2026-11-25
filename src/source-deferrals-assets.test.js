@@ -362,7 +362,7 @@ test('migration 56 keeps draft asset creation on accounts that created assets be
   const expense = db.records['account.account'].find((a) => a.account_type === 'expense');
   const legacy = { ...db, schema_version: 55, records: { ...db.records, 'account.account': db.records['account.account'].map(strip) } };
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 68);
+  assert.equal(migrated.schema_version, 69);
   assert.equal(migrated.records['account.account'].find((a) => a.id === fixed.id).create_asset, 'draft');
   assert.equal(migrated.records['account.account'].find((a) => a.id === expense.id).create_asset, 'no');
 });

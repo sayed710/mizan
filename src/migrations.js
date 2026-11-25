@@ -1999,6 +1999,63 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+/** Customer and vendor ranks marked from posted invoices and confirmed orders, per commercial partner. */
+export function migratePartnerRanks(db) {
+  const partners = db.records['res.partner'] ?? [];
+  const partnerById = new Map(partners.map((p) => [p.id, p]));
+  const commercialIdCache = new Map();
+  const commercialId = (partnerId) => {
+    if (partnerId == null) return null;
+    if (commercialIdCache.has(partnerId)) return commercialIdCache.get(partnerId);
+    let p = partnerById.get(partnerId);
+    if (!p) {
+      commercialIdCache.set(partnerId, null);
+      return null;
+    }
+    const seen = new Set();
+    while (p?.parent_id) {
+      if (seen.has(p.id)) { p = null; break; }
+      seen.add(p.id);
+      const parent = partnerById.get(p.parent_id);
+      if (!parent) break;
+      p = parent;
+    }
+    const cid = p?.id ?? null;
+    commercialIdCache.set(partnerId, cid);
+    return cid;
+  };
+
+  const hasCustomerActivity = new Set();
+  const hasSupplierActivity = new Set();
+  const markActivity = (set, partnerId) => {
+    const cid = commercialId(partnerId);
+    if (cid != null) set.add(cid);
+  };
+
+  for (const move of db.records['account.move'] ?? []) {
+    if (move.state === 'posted') {
+      if (move.move_type === 'out_invoice') markActivity(hasCustomerActivity, move.partner_id);
+      else if (move.move_type === 'in_invoice') markActivity(hasSupplierActivity, move.partner_id);
+    }
+  }
+  for (const order of db.records['sale.order'] ?? []) {
+    if (order.state === 'sale' || order.state === 'done') markActivity(hasCustomerActivity, order.partner_id);
+  }
+  for (const order of db.records['purchase.order'] ?? []) {
+    if (order.state === 'purchase' || order.state === 'done') markActivity(hasSupplierActivity, order.partner_id);
+  }
+
+  const updatedPartners = partners.map((p) => {
+    const currentCust = Number(p.customer_rank) || 0;
+    const currentSupp = Number(p.supplier_rank) || 0;
+    return {
+      ...p,
+      customer_rank: currentCust > 0 ? currentCust : (hasCustomerActivity.has(p.id) ? 1 : 0),
+      supplier_rank: currentSupp > 0 ? currentSupp : (hasSupplierActivity.has(p.id) ? 1 : 0),
+    };
+  });
+  return { ...db, records: { ...db.records, 'res.partner': updatedPartners } };
+}
 MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
   const budgets = db?.records?.['account.budget'];
   if (!Array.isArray(budgets) || !budgets.length) return db;
@@ -2035,6 +2092,7 @@ export function migrateReconcileModelTolerance(db) {
   return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
 }
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
+MIGRATIONS.push({ version: 69, name: 'partner-ranks', up: migratePartnerRanks });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

@@ -12,11 +12,14 @@ const REPARTITION_REFS = { account_id: 'account.account', tag_ids: 'account.acco
 /** Resolve the top-level commercial partner id for `partnerId` by walking `parent_id`, guarding cycles. */
 export function commercialPartnerId(db, partnerId) {
   let partner = read(db, 'res.partner', partnerId);
+  if (!partner) return null;
   const seen = new Set();
   while (partner?.parent_id) {
     if (seen.has(partner.id)) return null;
     seen.add(partner.id);
-    partner = read(db, 'res.partner', partner.parent_id);
+    const parent = read(db, 'res.partner', partner.parent_id);
+    if (!parent) break;
+    partner = parent;
   }
   return partner?.id ?? null;
 }
