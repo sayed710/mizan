@@ -58,8 +58,9 @@ export async function startServer({ env = process.env, preload, timeoutMs = DEFA
 
   const origin = await waitForListening().catch(async (err) => {
     // Never hand back a failed start while the process may still hold the caller's temp directory.
-    await stopChild(child, () => closed);
     err.child = child;
+    // stopChild kills and awaits `close` even when the IPC shutdown fails; keep that failure on the startup error.
+    await stopChild(child, () => closed).catch((stopErr) => { err.cause ??= stopErr; });
     throw err;
   });
 
