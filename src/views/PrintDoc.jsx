@@ -384,10 +384,12 @@ function DocumentPaper({ db, model, def, layout, rec, proforma = false }) {
         const note = invoiceTermNote(db, rec) && <p className="paper-note">{invoiceTermNote(db, rec)}</p>;
         if (!term?.display_on_invoice) return note;
         const currency = documentCurrency(db, rec);
+        const baseDate = validDate(rec.invoice_date) ? rec.invoice_date : today();
+        const canComputeInstallments = !termScheduleError(term, rec.amount_total, currency, baseDate) && !dueTermLinesError(term);
         const rows = rec.state === 'posted'
-          ? (invoiceInstallments(db, rec, term) ?? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency))
-          : rec.state === 'draft' && !termScheduleError(term, rec.amount_total, currency) && !dueTermLinesError(term)
-            ? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency)
+          ? (invoiceInstallments(db, rec, term) ?? (canComputeInstallments ? installments(term, rec.amount_total, baseDate, currency) : null))
+          : rec.state === 'draft' && canComputeInstallments
+            ? installments(term, rec.amount_total, baseDate, currency)
             : null;
         if (!rows?.length) return note;
         return <>{note}<table><thead><tr><th>{t('Due Date')}</th><th>{t('Amount')}</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><td>{formatDate(row.date)}</td><td className="num">{formatCurrency(row.amount, currency)}</td></tr>)}</tbody></table></>;

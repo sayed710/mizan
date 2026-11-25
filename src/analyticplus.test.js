@@ -12,8 +12,10 @@ import { analyticPlusModels, normalizeDistribution, distributionOfLine, analytic
 const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
 
 const setup = () => {
-  const first = create(seed(), 'account.analytic.account', { name: 'Consulting' });
-  const second = create(first.db, 'account.analytic.account', { name: 'Support' });
+  const db0 = seed();
+  const planId = search(db0, 'account.analytic.plan')[0].id;
+  const first = create(db0, 'account.analytic.account', { name: 'Consulting', plan_id: planId });
+  const second = create(first.db, 'account.analytic.account', { name: 'Support', plan_id: planId });
   return { db: second.db, a: first.id, b: second.id };
 };
 const moveValues = (a, b, move_type = 'out_invoice') => ({
@@ -34,13 +36,14 @@ test('analytic distributions are copied and reject invalid percentages, accounts
   assert.throws(() => normalizeDistribution({ 99999: 100 }, seed()), /not found/);
 });
 
-test('distribution totals are independent per plan, including legacy plan selections', () => {
+test('distribution totals are independent per plan', () => {
   const { db, a, b } = setup();
   assert.throws(() => normalizeDistribution({ [a]: 100, [b]: 100 }, db), /100%/);
   const p = create(db, 'account.analytic.plan', { name: 'Departments' });
   const otherPlan = write(p.db, 'account.analytic.account', b, { plan_id: p.id });
   assert.deepEqual(normalizeDistribution({ [a]: 100, [b]: 100 }, otherPlan), { [a]: 100, [b]: 100 });
-  assert.deepEqual(normalizeDistribution({ [a]: 100, [b]: 100 }, write(db, 'account.analytic.account', b, { plan: 'region' })), { [a]: 100, [b]: 100 });
+  const regions = search(db, 'account.analytic.plan').find((r) => r.name === 'Regions');
+  assert.deepEqual(normalizeDistribution({ [a]: 100, [b]: 100 }, write(db, 'account.analytic.account', b, { plan_id: regions.id })), { [a]: 100, [b]: 100 });
 });
 
 test('legacy analytic allocation falls back to 100%, while explicit empty distribution wins', () => {
@@ -61,7 +64,7 @@ test('invoices and bills allocate discounted untaxed amounts 60/40 with opposite
     assert.deepEqual(lines.map((l) => [l.account_id, l.amount]), [[a, 108 * sign], [b, 72 * sign]]);
     for (const line of lines) {
       assert.equal(line.category, category);
-      assert.equal(line.general_account, code);
+      assert.equal(line.general_account, search(db, 'account.account').find((a) => a.code === code).id);
       assert.equal(line.partner_id, 1);
       assert.equal(line.product_id, 1);
       assert.equal(line.move_id, 999);
@@ -81,7 +84,7 @@ test('analytic allocations respect tax-included prices and explicit general acco
   const line = { ...move.invoice_line_ids[0], qty: 1, price_unit: 114, discount: 0, tax_include: true, account_id: account.id };
   const lines = analyticLinesForMove(db, { ...move, invoice_line_ids: [line] });
   assert.deepEqual(lines.map((l) => l.amount), [60, 40]);
-  assert.ok(lines.every((l) => l.general_account === '450000'));
+  assert.ok(lines.every((l) => l.general_account === account.id));
 });
 
 test('analytic posting is immutable, idempotent and removable without deleting linked timesheets', () => {
@@ -119,13 +122,14 @@ test('analytic balances include date boundaries and exclude other accounts', () 
 test('budget reports filter account prefixes and periods and prorate inclusive days with achievement', () => {
   const { db: base, a, b } = setup();
   const posted = create(base, 'account.move', { move_type: 'out_invoice', partner_id: 1, date: '2026-01-01', invoice_date: '2026-01-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 200, tax: 0 }] });
+  const extra = create(postMove(posted.db, posted.id), 'account.account', { name: 'Additional expense', code: '600100', account_type: 'expense' });
   const actuals = [
     { date: '2026-01-01', amount: -120, general_account: '600000' },
     { date: '2026-01-10', amount: -80, general_account: '600100' },
     { date: '2026-01-05', amount: 30, general_account: '400000' },
     { date: '2026-01-11', amount: -500, general_account: '600000' },
     { date: '2026-01-02', amount: -999, general_account: '600000', account_id: b },
-  ].reduce((next, vals) => create(next, 'account.analytic.line', { account_id: a, move_id: posted.id, ...vals }).db, postMove(posted.db, posted.id));
+  ].reduce((next, vals) => create(next, 'account.analytic.line', { account_id: a, move_id: posted.id, ...vals, general_account: search(next, 'account.account').find((account) => account.code === vals.general_account).id }).db, extra.db);
   const { db, id } = create(actuals, 'account.budget', { name: 'Ten days', budget_type: 'both', date_from: '2026-01-01', date_to: '2026-01-10', lines: [
     { analytic_account_id: a, general_account: '600', planned: -1000 },
     { analytic_account_id: a, planned: 0 },
@@ -145,7 +149,7 @@ test('budget reports filter account prefixes and periods and prorate inclusive d
 
 test('mandatory plans require positive allocations per product line; unavailable plans reject allocations', () => {
   const { db: base, a, b } = setup();
-  const plan = create(base, 'account.analytic.plan', { name: 'Projects', default_applicability: 'mandatory' });
+  const plan = create(write(base, 'res.company', 1, { group_analytic_accounting: true }), 'account.analytic.plan', { name: 'Projects', default_applicability: 'mandatory' });
   const db = write(plan.db, 'account.analytic.account', a, { plan_id: plan.id });
   // A mandatory plan needs the full 100% of each product line.
   const base0 = moveValues(a, b);
@@ -172,8 +176,11 @@ test('budget buttons enforce transitions and retain the existing report action',
 
 test('seed and timesheet fields, defaults, views and hours remain compatible', () => {
   const db = seed();
-  assert.equal(search(db, 'account.analytic.plan').length, 0);
-  assert.ok(search(db, 'account.analytic.account').some((r) => r.plan === 'region'));
+  const plans = search(db, 'account.analytic.plan');
+  assert.deepEqual(plans.map((p) => p.name), ['Projects', 'Regions']);
+  const accounts = search(db, 'account.analytic.account');
+  assert.ok(accounts.length >= 2);
+  assert.ok(accounts.every((r) => r.plan_id && plans.some((p) => p.id === r.plan_id)));
   assert.ok(search(db, 'account.budget').length);
   assert.ok(search(db, 'account.analytic.line').length);
   const def = analyticPlusModels['account.analytic.line'];

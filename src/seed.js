@@ -12,7 +12,7 @@ import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { migrateCountries, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { countryIdFor, ensureCountries } from './models/country.js';
-import { ensurePaymentMethods } from './models/paymentmethod.js';
+import { ensureOnlinePaymentMethods, ensurePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
@@ -526,8 +526,10 @@ export function seed() {
   set('product', 2, { route: 'mto_make' });
   add('iot.device', { name: 'Warehouse scale', device_type: 'scale', location: 'Warehouse A', unit: 'kg' });
   add('marketplace.connector', { name: 'Amazon.eg store', platform: 'amazon' });
-  const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan: 'project' });
-  add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
+  const projectsPlan = add('account.analytic.plan', { name: 'Projects', sequence: 10, default_applicability: 'optional', color: 0 });
+  const regionsPlan = add('account.analytic.plan', { name: 'Regions', sequence: 20, default_applicability: 'optional', color: 0 });
+  const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan_id: projectsPlan });
+  add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan_id: regionsPlan });
   add('account.budget', { name: `Budget ${today().slice(0, 4)}`, company_id: mainCompanyId, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
@@ -597,6 +599,6 @@ export function seed() {
   const seeded = { ...db, messages: [] };
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
-  const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(ensureOnlinePaymentMethods(opened)))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
   return { ...migrateCountries(ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready)))))))), schema_version: SCHEMA_VERSION };
 }

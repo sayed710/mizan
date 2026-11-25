@@ -19,9 +19,10 @@ const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__r
 
 test('grouped balance sheets include prior-period opening balances and sum to the ungrouped closing balance', () => {
   let db = seed();
-  const a1 = create(db, 'account.analytic.account', { name: 'Alpha', code: 'ALP', plan: 'project' });
+  const projectPlan = search(db, 'account.analytic.plan').find((p) => p.name === 'Projects');
+  const a1 = create(db, 'account.analytic.account', { name: 'Alpha', code: 'ALP', plan_id: projectPlan.id });
   db = a1.db;
-  const a2 = create(db, 'account.analytic.account', { name: 'Beta', code: 'BET', plan: 'project' });
+  const a2 = create(db, 'account.analytic.account', { name: 'Beta', code: 'BET', plan_id: projectPlan.id });
   db = a2.db;
 
   // Prior-period entry before the selected period's start date
@@ -261,7 +262,8 @@ test('horizontal group reports exclude entries from other allowed companies and 
   const other = createCompanyWithDefaultInvoiceJournals(db, { name: 'Sister Firm', currency_id: db.records['res.company'][0].currency_id });
   db = updateSettings(other.db, { current_company_id: 1, allowed_company_ids: [1, other.id] });
 
-  const a1 = create(db, 'account.analytic.account', { name: 'Main Project', code: 'MP', plan: 'project' });
+  const projectPlan = search(db, 'account.analytic.plan').find((p) => p.name === 'Projects');
+  const a1 = create(db, 'account.analytic.account', { name: 'Main Project', code: 'MP', plan_id: projectPlan.id });
   db = a1.db;
   const date = `${today().slice(0, 4)}-02-15`;
   const period = { from: `${today().slice(0, 4)}-01-01`, to: `${today().slice(0, 4)}-12-31` };

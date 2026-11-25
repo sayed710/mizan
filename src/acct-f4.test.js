@@ -290,7 +290,7 @@ test('FIN-12: horizontal groups store real record ids validated against chosen m
   const co2Journal = search(db, 'account.journal').find((j) => j.company_id === co2.id);
   const co2Partner = create(db, 'res.partner', { name: 'Co2 Private Partner', company_id: co2.id });
   db = co2Partner.db;
-  const co2Analytic = create(db, 'account.analytic.account', { name: 'Co2 Analytic', company_id: co2.id });
+  const co2Analytic = create(db, 'account.analytic.account', { name: 'Co2 Analytic', company_id: co2.id, plan_id: db.records['account.analytic.plan'][0].id });
   db = co2Analytic.db;
 
   // Server-side guard tests through diffDb + applyDiff
@@ -635,7 +635,7 @@ test('Qodo 3: Legacy horizontal-group rule migration and normalization moves ids
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 72);
+  assert.equal(migrated.schema_version, 78);
   const upgradedGroup = migrated.records['account.report.horizontal.group'].find((g) => g.id === 991);
   assert.deepEqual(upgradedGroup.rule_ids[0].partner_ids, [1, 2]);
   assert.equal(upgradedGroup.rule_ids[0].ids, '');
