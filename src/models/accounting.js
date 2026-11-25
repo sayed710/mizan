@@ -5052,11 +5052,12 @@ Object.assign(accountingModels, {
     label: 'Secure Entries',
     fields: {
       company: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
-      hash_date: { type: 'date', label: 'Secure entries up to', required: true },
+      hash_date: { type: 'date', label: 'Hash All Entries', placeholder: 'Not hashed', required: true },
       max_hash_date: { type: 'date', label: 'Max Hash Date', readonly: true },
       warnings: { type: 'text', label: 'Warnings', readonly: true },
       entries_count: { type: 'integer', label: 'Number of Entries to Secure', readonly: true },
       move_to_hash_ids: { type: 'many2many', relation: 'account.move', label: 'Entries to Secure', readonly: true },
+      unreconciled_bank_statement_line_ids: { type: 'many2many', relation: 'account.bank.statement.line', label: 'Unreconciled Bank Transactions', readonly: true, openDirect: true },
       not_hashable_unlocked_move_ids: { type: 'many2many', relation: 'account.move', label: 'Draft Entries', readonly: true, openDirect: true },
       chains_to_hash_with_gaps: { type: 'char', label: 'Chains with Gaps', readonly: true },
     },
@@ -5067,6 +5068,7 @@ Object.assign(accountingModels, {
           warnings: analysis.warnings,
           entries_count: analysis.entries_count,
           move_to_hash_ids: analysis.move_to_hash_ids,
+          unreconciled_bank_statement_line_ids: analysis.unreconciled_bank_statement_line_ids,
           not_hashable_unlocked_move_ids: analysis.not_hashable_unlocked_move_ids,
           chains_to_hash_with_gaps: analysis.chains_to_hash_with_gaps,
           max_hash_date: analysis.max_hash_date,
@@ -5083,35 +5085,74 @@ Object.assign(accountingModels, {
         warnings: analysis.warnings,
         entries_count: analysis.entries_count,
         move_to_hash_ids: analysis.move_to_hash_ids,
+        unreconciled_bank_statement_line_ids: analysis.unreconciled_bank_statement_line_ids,
         not_hashable_unlocked_move_ids: analysis.not_hashable_unlocked_move_ids,
         chains_to_hash_with_gaps: analysis.chains_to_hash_with_gaps,
       };
     },
-    defaults: () => ({ move_to_hash_ids: [], not_hashable_unlocked_move_ids: [] }),
+    defaults: () => ({ move_to_hash_ids: [], unreconciled_bank_statement_line_ids: [], not_hashable_unlocked_move_ids: [] }),
     list: ['company', 'hash_date', 'max_hash_date', 'chains_to_hash_with_gaps'],
     form: {
       title: 'hash_date',
       hideTitle: true,
+      warnings: (r, db) => (r.hash_date ? analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date }).warning_items : []),
       buttons: [
         {
-          label: 'Confirm',
+          label: 'Secure Entries',
           primary: true,
-          when: (r, db) => !analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date }).not_hashable_unlocked_move_ids?.length,
+          when: (r, db) => !r.hash_date || !analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date }).not_hashable_unlocked_move_ids?.length,
           run: (db, r) => {
+            if (!r.hash_date) {
+              throw new Error('Set a date. The moves will be secured up to including this date.');
+            }
             const analysis = analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date });
             if (analysis.not_hashable_unlocked_move_ids?.length) {
-              throw new Error(t('Cannot secure entries while draft entries exist on or before the secured date'));
+              const hasDateDraft = analysis.not_hashable_unlocked_move_ids.some((id) => {
+                const m = read(db, 'account.move', id);
+                return (m?.invoice_date ?? m?.date ?? '') <= r.hash_date;
+              });
+              throw new Error(
+                hasDateDraft
+                  ? 'Cannot secure entries while draft entries exist on or before the secured date'
+                  : 'Cannot secure entries while numbered draft entries precede entries to be secured',
+              );
             }
             const count = analysis.entries_count;
-            return { db: secureEntries(db, { companyId: r.company, hashDate: r.hash_date }), ...(count ? { go: '#/accounting/entries' } : { message: t('No entries were secured; the hard lock date was not changed.') }) };
+            const unreconciledIds = analysis.unreconciled_bank_statement_line_ids ?? [];
+            const maxSecuredDate = analysis.move_to_hash_ids.reduce((max, id) => {
+              const m = read(db, 'account.move', id);
+              const d = m?.invoice_date ?? m?.date ?? '';
+              return d > max ? d : max;
+            }, '');
+            const lockCeiling = maxSecuredDate && r.hash_date && maxSecuredDate > r.hash_date ? r.hash_date : maxSecuredDate;
+            const blocksUnreconciled = unreconciledIds.some((id) => {
+              const line = read(db, 'account.bank.statement.line', id);
+              return line && lockCeiling && (line.date ?? '') <= lockCeiling;
+            });
+            const securedDb = secureEntries(db, {
+              companyId: r.company,
+              hashDate: r.hash_date,
+              moveIds: analysis.move_to_hash_ids,
+              skipHardLock: blocksUnreconciled,
+            });
+            return { db: securedDb, ...(count ? { go: '#/accounting/entries' } : { message: t('No entries were secured; the hard lock date was not changed.') }) };
           },
         },
         { label: 'Cancel', run: (db) => ({ db, go: '#/accounting/entries' }) },
       ],
-      groups: [['company', 'hash_date', 'max_hash_date', 'entries_count'], ['chains_to_hash_with_gaps', 'warnings']],
+      groups: [
+        [
+          'company',
+          { label: 'Secure entries up to', fields: ['hash_date'], suffix: 'inclusive, to make them immutable', inline: true },
+          'max_hash_date',
+          'entries_count',
+        ],
+        ['chains_to_hash_with_gaps', 'warnings'],
+      ],
       tabs: [
         { label: 'Entries to Secure', fields: ['move_to_hash_ids'] },
         { label: 'Draft Entries', fields: ['not_hashable_unlocked_move_ids'] },
+        { label: 'Unreconciled Bank Transactions', fields: ['unreconciled_bank_statement_line_ids'] },
       ],
     },
   },
