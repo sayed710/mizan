@@ -1270,7 +1270,7 @@ test('16. A bill line with a deferred account where the analytic plan is mandato
   db = rawExpense.db;
   const deferredExpense = create(db, 'account.account', { code: '211001', name: 'Deferred Expense Account', account_type: 'asset_current', company_id: 1 });
   db = deferredExpense.db;
-  db = write(db, 'res.company', 1, { deferred_expense_account_id: deferredExpense.id });
+  db = write(db, 'res.company', 1, { deferred_expense_account_id: deferredExpense.id, group_analytic_accounting: true });
   const product = create(db, 'product', {
     name: 'Prepaid Cloud Hosting',
     type: 'service',

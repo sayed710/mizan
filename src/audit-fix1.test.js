@@ -140,7 +140,7 @@ test('PKG-01: migration 49 infers journal company_id only when provable and logs
 
   const migrated = migrate(synthetic);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 73);
+  assert.equal(SCHEMA_VERSION, 78);
 
   assert.equal(read(migrated, 'account.journal', 901).company_id, co2.id);
   assert.equal(read(migrated, 'account.journal', 902).company_id, co2.id);
@@ -166,8 +166,9 @@ test('PKG-01: migration 49 infers journal company_id only when provable and logs
 
 test('PKG-03 item 1: postAnalytic is idempotent on in_refund and keeps 120/80 across re-posts', () => {
   let db = seed();
-  const a1 = create(db, 'account.analytic.account', { name: 'Plan Alpha' });
-  const a2 = create(a1.db, 'account.analytic.account', { name: 'Plan Beta' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a1 = create(db, 'account.analytic.account', { name: 'Plan Alpha', plan_id: planId });
+  const a2 = create(a1.db, 'account.analytic.account', { name: 'Plan Beta', plan_id: planId });
   const vendor = create(a2.db, 'res.partner', { name: 'Analytic Vendor', supplier: true });
   db = vendor.db;
   const product = search(db, 'product')[0];

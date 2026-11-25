@@ -482,9 +482,9 @@ test('wizard-to-posting regression: confirmation is blocked while drafts exist o
   // Draft invoice is detected in not_hashable_unlocked_move_ids
   assert.ok(wizRecord.not_hashable_unlocked_move_ids.includes(draftInv.id));
 
-  // The Confirm button must be BLOCKED while draft entries exist
-  const confirmBtn = (wizModel.form?.buttons ?? []).find((b) => b.label === 'Confirm');
-  assert.ok(confirmBtn, 'Confirm button exists');
+  // The Secure Entries button must be BLOCKED while draft entries exist
+  const confirmBtn = (wizModel.form?.buttons ?? []).find((b) => b.label === 'Secure Entries');
+  assert.ok(confirmBtn, 'Secure Entries button exists');
   assert.equal(confirmBtn.when?.(wizRecord, db), false, 'confirmation is blocked (when returns false)');
   assert.throws(() => confirmBtn.run(db, wizRecord), /not available/i, 'run throws if called with draft entries present');
   assert.throws(() => secureEntries(db, { companyId, hashDate: '2026-02-15' }), /draft/i, 'secureEntries directly blocks with draft entries');
@@ -591,8 +591,8 @@ test('wizard-to-posting regression with the draft in an unrestricted journal', a
   assert.ok(!wizRecord.not_hashable_unlocked_move_ids.includes(draftLater.id), 'draft after proposed lock date is not listed');
 
   // Confirmation must be BLOCKED while draft entries exist on or before proposed lock date
-  const confirmBtn = (wizModel.form?.buttons ?? []).find((b) => b.label === 'Confirm');
-  assert.ok(confirmBtn, 'Confirm button exists');
+  const confirmBtn = (wizModel.form?.buttons ?? []).find((b) => b.label === 'Secure Entries');
+  assert.ok(confirmBtn, 'Secure Entries button exists');
   assert.equal(confirmBtn.when?.(wizRecord, db), false, 'confirmation is blocked');
   assert.throws(() => confirmBtn.run(db, wizRecord), /not available/i, 'confirm run throws with draft present in unrestricted journal');
   assert.throws(() => secureEntries(db, { companyId, hashDate: '2026-02-20' }), /draft/i, 'secureEntries directly blocks with draft in unrestricted journal');

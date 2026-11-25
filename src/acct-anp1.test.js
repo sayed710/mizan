@@ -98,10 +98,13 @@ test('ANP-1: Analytic Plans description, parent/children hierarchy, complete_nam
   assert.equal(planAccountCount(baseDb, plan20), 3, 'Logistics subtree has 101 + Fleet (102, 103)');
   assert.equal(planAccountCount(baseDb, plan30), 2, 'Fleet plan has 102, 103');
   assert.equal(planAccountCount(baseDb, plan40), 1, 'Commercial has 104');
-  assert.equal(plan10.account_count, 3);
-  assert.equal(plan20.account_count, 3);
+  // Odoo 20: account_count counts the plan's own accounts; all_account_count includes subplans.
+  assert.equal(plan10.account_count, 0);
+  assert.equal(plan20.account_count, 1);
   assert.equal(plan30.account_count, 2);
   assert.equal(plan40.account_count, 1);
+  assert.equal(plan10.all_account_count, 3);
+  assert.equal(plan20.all_account_count, 3);
 
   // Guards tested through diffDb + applyDiff
   // 1. Direct cycle: self-parenting

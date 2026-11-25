@@ -1,18 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startServer } from './test-server.js';
 
 async function start(path) {
-  const child = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, PORT: '0', MIZAN_DB: path, MIZAN_ADMIN_PASSWORD: 'epoch-password', MIZAN_ALLOW_RESET: '1' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  const url = await new Promise((resolve, reject) => {
-    let output = '';
-    child.stdout.on('data', (b) => { output += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output); if (m) resolve(m[1]); });
-    child.once('exit', (code) => reject(new Error(`server exited ${code}: ${output}`)));
-  });
+  const server = await startServer({ env: { ...process.env, PORT: '0', MIZAN_DB: path, MIZAN_ADMIN_PASSWORD: 'epoch-password', MIZAN_ALLOW_RESET: '1' } });
+  const url = server.url;
   let cookie = '';
   const call = async (path, body, epoch) => {
     const res = await fetch(url + path, { method: body ? 'POST' : 'GET', headers: { cookie, 'content-type': 'application/json', 'x-requested-with': 'mizan', ...(epoch ? { 'x-mizan-epoch': epoch } : {}) }, body: body ? JSON.stringify(body) : undefined });
@@ -20,7 +15,7 @@ async function start(path) {
     return res;
   };
   await call('/api/login', { login: 'admin', password: 'epoch-password' });
-  return { call, stop: async () => { if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; } } };
+  return { call, stop: server.stop };
 }
 
 test('database generation survives restart, but changes durably after reset', async () => {

@@ -103,7 +103,7 @@ test('activation transfers the remaining value after posted depreciation and syn
 
 test('activation retains analytic allocation on posted child depreciation', () => {
   const initial = running();
-  const analytic = create(initial.db, 'account.analytic.account', { name: 'Asset project' });
+  const analytic = create(initial.db, 'account.analytic.account', { name: 'Asset project', plan_id: search(initial.db, 'account.analytic.plan')[0].id });
   const allocated = write(analytic.db, 'account.asset', initial.id, { analytic_distribution: { [analytic.id]: 100 } });
   const activated = sync(allocated, activateDepreciation(allocated, read(allocated, 'account.asset', initial.id), { date: '2026-02-01', newAccountAssetId: accountId(allocated, '151000') }));
   const child = search(activated, 'account.asset').find((asset) => asset.origin_asset_id === initial.id);

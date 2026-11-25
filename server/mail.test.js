@@ -2,8 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { create, read, search, write } from '../src/orm.js';
 import { seed } from '../src/seed.js';
 import { sendDocument, sendMailing } from './mail.js';
+import { startServer } from './test-server.js';
 
 /** Minimal SMTP server accepting every message; resolves with what it received. */
 function fakeSmtp() {
@@ -94,26 +93,22 @@ test('a request with a forged Host header does not persist mail_base_url for fut
   const dir = mkdtempSync(join(tmpdir(), 'mizan-mail-'));
   const dbPath = join(dir, 'test.sqlite');
   const password = 'test-admin-password';
-  const child = spawn(process.execPath, ['server/index.js'], {
-    env: {
-      ...process.env,
-      PORT: '0',
-      MIZAN_DB: dbPath,
-      MIZAN_ADMIN_PASSWORD: password,
-      MIZAN_SMTP_HOST: cfg.host,
-      MIZAN_SMTP_PORT: String(cfg.port),
-      MIZAN_SMTP_FROM: cfg.from,
-      MIZAN_PUBLIC_URL: '',
-      MIZAN_SECURE_COOKIE: '0',
-    },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  let appServer;
   try {
-    const origin = await new Promise((resolve, reject) => {
-      let out = '';
-      child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
-      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
+    appServer = await startServer({
+      env: {
+        ...process.env,
+        PORT: '0',
+        MIZAN_DB: dbPath,
+        MIZAN_ADMIN_PASSWORD: password,
+        MIZAN_SMTP_HOST: cfg.host,
+        MIZAN_SMTP_PORT: String(cfg.port),
+        MIZAN_SMTP_FROM: cfg.from,
+        MIZAN_PUBLIC_URL: '',
+        MIZAN_SECURE_COOKIE: '0',
+      },
     });
+    const { origin } = appServer;
     const loginRes = await fetch(`${origin}/api/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' },
@@ -150,7 +145,7 @@ test('a request with a forged Host header does not persist mail_base_url for fut
     sql.close();
     assert.equal(saved, undefined, 'mail_base_url should not be persisted from request Host header');
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+    await appServer?.stop();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     server.close();
   }

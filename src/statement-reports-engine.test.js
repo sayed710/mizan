@@ -195,7 +195,7 @@ test('Probe 5 ledger ties exactly (BS diff 0, Net Profit = Current Year Earnings
 test('comparison, horizontal groups, analytic filter, depreciation, and multi-company match ledger.js results', () => {
   let db = seed();
   const yr = new Date().getUTCFullYear();
-  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Project', company_id: 1 });
+  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Project', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = a1.db;
   const depAcc = create(db, 'account.account', { code: '681000', name: 'Depreciation Exp', account_type: 'expense_depreciation', company_id: 1 });
   db = depAcc.db;
@@ -289,7 +289,7 @@ test('migration 50 creates standard statement reports once and is idempotent', (
   };
   const upgraded = migrate(legacyDb);
   assert.equal(upgraded.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 73);
+  assert.equal(SCHEMA_VERSION, 78);
   for (const cId of [1, company2.id]) {
     assert.ok(findStatementReport(upgraded, 'balance', cId));
     assert.ok(findStatementReport(upgraded, 'pnl', cId));

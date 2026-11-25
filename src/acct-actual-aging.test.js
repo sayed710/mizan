@@ -10,8 +10,9 @@ import { budgetReport } from './models/analyticplus.js';
 
 test('analytic actuals and budgets include posted distributions, refunds and manual items with filters', () => {
   let db = seed();
-  const a = create(db, 'account.analytic.account', { name: 'A' });
-  const b = create(a.db, 'account.analytic.account', { name: 'B' }); db = b.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a = create(db, 'account.analytic.account', { name: 'A', plan_id: planId });
+  const b = create(a.db, 'account.analytic.account', { name: 'B', plan_id: planId }); db = b.db;
   const post = (type, date, value) => {
     const m = create(db, 'account.move', { move_type: type, partner_id: 1, invoice_date: date, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: value, tax: 0, analytic_distribution: { [a.id]: 60, [b.id]: 40 } }] });
     db = postMove(m.db, m.id);
