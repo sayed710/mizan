@@ -180,50 +180,92 @@ test('JRN-2: journal search limits text matching to name/code and exposes Odoo t
   }
 });
 
-test('JRN-3: form smart button opens the journal entries and list optional/group-gated columns match Odoo', async () => {
+test('JRN-3: form smart button opens the journal items and list optional/group-gated columns match Odoo', async () => {
   const def = models['account.journal'];
-  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id']);
+  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id']);
   assert.equal(def.fields.sequence.widget, 'handle');
   assert.equal(def.fields.code.optional, 'show');
   assert.equal(def.fields.default_account_id.optional, 'show');
   assert.equal(def.fields.active.optional, 'hide');
   assert.equal(def.fields.company_id.multiCompanyOnly, true);
   assert.equal(def.fields.company_id.optional, 'hide');
-  // currency_id is declared on account.journal; journal_group_id is not declared yet (skipped)
+  // jcf1 adds the optional journal currency column; journal_group_id is still not declared on account.journal
   assert.equal(def.fields.currency_id.type, 'many2one');
   assert.equal(def.fields.currency_id.relation, 'res.currency');
+  assert.equal(def.fields.currency_id.optional, 'hide');
   assert.equal(Object.hasOwn(def.fields, 'journal_group_id'), false);
 
   let db = seed();
   const saleJ = search(db, 'account.journal').find((j) => j.code === 'INV');
+  const purchJ = search(db, 'account.journal').find((j) => j.code === 'BILL');
   const inv = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: search(db, 'res.partner')[0].id,
     journal_id: saleJ.id,
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
   });
-  db = inv.db;
+  const otherBill = create(inv.db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: search(inv.db, 'res.partner')[0].id,
+    journal_id: purchJ.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 0 }],
+  });
+  const { postMove } = await import('./models/accounting.js');
+  const { journalItems } = await import('./models/ledger.js');
+  db = postMove(otherBill.db, inv.id);
+  db = postMove(db, otherBill.id);
 
   const { FormView } = await import('./views/FormView.jsx');
-  const { ActionView, actionRecords } = await import('./views/ActionView.jsx');
+  const { ActionView } = await import('./views/ActionView.jsx');
+  const { JournalItems } = await import('./views/JournalItems.jsx');
 
-  // Form smart button renders 'Entries' and filters journal moves
+  // Form smart button opens the journal's items (jcf1), like Odoo's Journal Items action
   const formCtx = await mountView(
     (React) => React.createElement(FormView, { leaf: journalsLeaf(), id: String(saleJ.id), base: '#/accounting/journals', params: new URLSearchParams('view=list') }),
     db,
   );
+  let smartHref;
+  let expectedLines;
   try {
     const smart = find(formCtx.host, (n) => n.tagName === 'A' && hasClass(n, 'smart'));
     assert.ok(smart, 'Journal form renders smart button');
-    assert.equal(find(smart, (n) => n.tagName === 'SPAN')?.textContent, 'Entries');
-    const href = props(smart)?.href ?? '';
-    assert.equal(href, `#/accounting/entries?view=list&rel=journal_id:${saleJ.id}`);
-    const entriesLeaf = findLeafByKey(menusFor('accounting'), 'entries');
-    const opened = actionRecords(db, entriesLeaf, { field: 'journal_id', id: saleJ.id }, false);
-    assert.ok(opened.some((m) => m.id === inv.id));
-    assert.ok(opened.every((m) => (m.journal_id ?? null) === saleJ.id || m.state === 'draft'));
+    assert.ok(smart.textContent.includes('Journal Items'));
+    smartHref = props(smart)?.href ?? '';
+    assert.equal(smartHref, `#/accounting/journal-items?journal=${saleJ.id}`);
+
+    const targetParams = new URLSearchParams(smartHref.split('?')[1]);
+    const journalParam = Number(targetParams.get('journal'));
+    assert.equal(journalParam, saleJ.id);
+
+    expectedLines = journalItems(db).filter((line) => line.journal_id === journalParam);
+    const smartCount = Number(find(smart, (n) => n.tagName === 'B')?.textContent);
+    assert.equal(smartCount, expectedLines.length);
+    assert.ok(expectedLines.some((line) => line.move_id === inv.id), 'Invoice line for saleJ is present');
+    assert.ok(expectedLines.every((line) => line.journal_id === saleJ.id), 'Every returned line belongs to saleJ');
   } finally {
     await formCtx.done();
+  }
+
+  // Destination view checks: journal-items filtered by journal= lists the journal lines and excludes others
+  const previousLocation = globalThis.location;
+  globalThis.location = { hash: smartHref };
+  const itemsCtx = await mountView(
+    (React) => React.createElement(JournalItems),
+    db,
+  );
+  try {
+    const invMove = read(db, 'account.move', inv.id);
+    const otherMove = read(db, 'account.move', otherBill.id);
+    const tbody = find(itemsCtx.host, (n) => n.tagName === 'TBODY');
+    const renderedRows = allFind(tbody, (n) => n.tagName === 'TR');
+    assert.equal(renderedRows.length, expectedLines.length, 'Rendered JournalItems rows match only the selected journal lines');
+    assert.ok(itemsCtx.host.textContent.includes(invMove.name), 'Invoice line is displayed in JournalItems');
+    assert.equal(itemsCtx.host.textContent.includes(otherMove.name), false, 'Other journal entries are excluded from JournalItems');
+    const facet = find(itemsCtx.host, (n) => n.tagName === 'SPAN' && n.textContent.includes(`Journal: ${saleJ.name}`));
+    assert.ok(facet, 'Journal facet is shown in JournalItems');
+  } finally {
+    globalThis.location = previousLocation;
+    await itemsCtx.done();
   }
 
   // Single-company optional columns menu excludes Company and defaults Active off
@@ -239,6 +281,7 @@ test('JRN-3: form smart button opens the journal entries and list optional/group
     assert.deepEqual(items, [
       ['Sequence Prefix', true],
       ['Default Account', true],
+      ['Currency', false],
       ['Active', false],
     ]);
   } finally {
@@ -264,6 +307,7 @@ test('JRN-3: form smart button opens the journal entries and list optional/group
     assert.deepEqual(items.map((b) => [b.textContent.replace('✓', '').trim(), props(b)['aria-checked']]), [
       ['Sequence Prefix', true],
       ['Default Account', true],
+      ['Currency', false],
       ['Active', false],
       ['Company', false],
     ]);
@@ -283,7 +327,7 @@ test('Arabic translations exist for journal list, search filters, and smart butt
   globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem: () => {}, removeItem: () => {}, clear: () => {} };
   try {
     const { t } = await import('./i18n.js?lang=ar-acct-jrn3');
-    for (const s of ['Journals', 'Journal', 'Type', 'Sequence Prefix', 'Default Account', 'Active', 'Company', 'Sales', 'Purchases', 'Liquidity', 'Miscellaneous', 'Archived', 'Entries']) {
+    for (const s of ['Journals', 'Journal', 'Type', 'Sequence Prefix', 'Default Account', 'Active', 'Company', 'Sales', 'Purchases', 'Liquidity', 'Miscellaneous', 'Archived', 'Journal Items']) {
       assert.notEqual(t(s), s, `missing Arabic translation for "${s}"`);
     }
   } finally {

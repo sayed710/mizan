@@ -371,9 +371,9 @@ export function counterpartTaxLines(db, {
 function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
   const company = line.company_id ?? 1;
-  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
-  const foreign = journalCurrency && journalCurrency !== companyCurrencyRecord(db, company)?.id;
-  const currency = read(db, 'res.currency', journalCurrency);
+  const lineCurrencyId = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const foreign = lineCurrencyId && lineCurrencyId !== companyCurrencyRecord(db, company)?.id;
+  const currency = read(db, 'res.currency', lineCurrencyId);
   const balance = line.open_amount != null
     ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency)
     : roundCurrency(Math.abs(line.amount), currency);
@@ -406,7 +406,7 @@ function writeOff(db, rule, line) {
       account_id: l.account_id,
       incoming: sameAsCounterpart ? incoming : !incoming,
       currency,
-      foreignCurrency: foreign ? journalCurrency : null,
+      foreignCurrency: foreign ? lineCurrencyId : null,
       companyValue,
       balance,
       date: line.date,
@@ -448,8 +448,8 @@ function writeOff(db, rule, line) {
     const bankLines = (bankMove?.line_ids ?? []).filter((l) => l.account_id !== suspenseId);
     const externalAllocated = (line.allocations ?? []).filter((a) => a.payment_move_id && a.payment_move_id !== bankMoveId).reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
     const suspLine = externalAllocated > 0 ? (incoming
-      ? { account_id: suspenseId, debit: 0, credit: externalAllocated, ...(foreign ? { currency_id: journalCurrency, amount_currency: -roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }
-      : { account_id: suspenseId, debit: externalAllocated, credit: 0, ...(foreign ? { currency_id: journalCurrency, amount_currency: roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }) : null;
+      ? { account_id: suspenseId, debit: 0, credit: externalAllocated, ...(foreign ? { currency_id: lineCurrencyId, amount_currency: -roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }
+      : { account_id: suspenseId, debit: externalAllocated, credit: 0, ...(foreign ? { currency_id: lineCurrencyId, amount_currency: roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }) : null;
     const newLines = [...bankLines, ...items, ...(suspLine ? [suspLine] : [])];
     current = writeBankStatementMove(current, bankMoveId, newLines);
     if (items.some((l) => l.analytic_distribution)) {
@@ -470,7 +470,7 @@ function writeOff(db, rule, line) {
     account: bookedBank.suspense,
     partner_id,
     [incoming ? 'debit' : 'credit']: counterpartTotal,
-    ...(foreign ? { currency_id: journalCurrency, amount_currency: -itemCurrency } : {}),
+    ...(foreign ? { currency_id: lineCurrencyId, amount_currency: -itemCurrency } : {}),
   }, ...items];
   const { db: booked, id } = postEntry(current, {
     journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,

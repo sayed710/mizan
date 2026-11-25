@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { diffDb, applyDiff } from './sync.js';
-import { migrate, migrateReconcileModelTolerance, SCHEMA_VERSION } from './migrations.js';
+import { migrate, migrateReconcileModelTolerance } from './migrations.js';
 
 const MODEL = 'account.reconcile.model';
 const rule = (vals) => ({ name: 'Tolerance rule', rule_type: 'matching_rule', trigger: 'manual', payment_tolerance_type: 'percentage', ...vals });
@@ -41,7 +41,7 @@ test('upgrade brings percentage tolerances above 100 down to 100, leaving amount
 
   // Upgrade the database
   const upgraded = migrate(legacyDb);
-  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
+  assert.equal(upgraded.schema_version, 79);
 
   const r1 = read(upgraded, MODEL, 801);
   const r2 = read(upgraded, MODEL, 802);

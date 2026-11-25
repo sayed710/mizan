@@ -291,6 +291,7 @@ const CONTROL_FIELDS = [
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
   'transfer_account_id', 'account_storno', 'account_check_printing_layout',
+  'account_use_credit_limit', 'account_default_credit_limit',
   'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
 
@@ -340,6 +341,10 @@ function companyGuard(db, before, r, ctx) {
   }
   if (r.currency_next_execution_date != null && r.currency_next_execution_date !== '' && !validDate(r.currency_next_execution_date)) {
     return 'Currency next execution date must be a valid date';
+  }
+  if (r.account_default_credit_limit != null && r.account_default_credit_limit !== '') {
+    const n = Number(r.account_default_credit_limit);
+    if (!Number.isFinite(n) || n < 0) return 'Default Credit Limit must be non-negative';
   }
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
@@ -798,6 +803,8 @@ export const companyModels = {
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       autopost_bills: { type: 'boolean', label: 'Auto-post bills', default: false },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
+      account_use_credit_limit: { type: 'boolean', label: 'Sales Credit Limit' },
+      account_default_credit_limit: { type: 'monetary', label: 'Default Credit Limit' },
       fiscalyear_last_day: { type: 'integer', label: 'Fiscal Year End Day' },
       fiscalyear_last_month: { type: 'integer', label: 'Fiscal Year End Month' },
       currency_provider: {

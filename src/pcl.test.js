@@ -8,7 +8,7 @@ import { taxLockFor } from './models/finance.js';
 import { createCompany } from './models/company.js';
 import { reviewReturn, submitReturn, resetReturnToDraft } from './models/taxreturn.js';
 import { applyDiff } from './sync.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 
 test('pcl: lock dates live on res.company and isolate between companies', () => {
   let db = seed();
@@ -288,7 +288,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 79);
 
   // Company 1 has migrated values
   const comp1 = read(migrated, 'res.company', 1);
@@ -326,7 +326,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
 
   // Migration is idempotent
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, SCHEMA_VERSION);
+  assert.equal(twice.schema_version, 79);
   assert.equal(read(twice, 'res.company', 1).lock_date, '2025-06-30');
   assert.equal(read(twice, 'res.company', 1).tax_lock_date, '2025-02-28');
 });

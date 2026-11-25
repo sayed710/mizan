@@ -288,7 +288,8 @@ test('migration 50 creates standard statement reports once and is idempotent', (
     },
   };
   const upgraded = migrate(legacyDb);
-  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
+  assert.equal(upgraded.schema_version, 79);
+  assert.equal(SCHEMA_VERSION, 79);
   for (const cId of [1, company2.id]) {
     assert.ok(findStatementReport(upgraded, 'balance', cId));
     assert.ok(findStatementReport(upgraded, 'pnl', cId));

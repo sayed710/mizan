@@ -144,6 +144,11 @@ test('regression: blocked installments are not counted as overdue in letter', ()
   const invRow = data.invoices.find((m) => m.id === inv.id);
   assert.equal(invRow.overdueAmount, 60);
   assert.equal(invRow.amount_residual, 100);
+  const details = finance.partnerReceivableLines(db, p.id, 1, '2026-03-01');
+  assert.equal(details.total_due, data.due[0].amount);
+  assert.equal(details.total_overdue, data.overdue[0].amount);
+  assert.equal(details.lines.filter((line) => line.is_overdue).reduce((sum, line) => sum + line.residual_amount, 0), invRow.overdueAmount);
+  assert.equal(details.lines.filter((line) => !line.is_overdue).reduce((sum, line) => sum + line.residual_amount, 0), 40);
 });
 
 test('regression: customer with future next-action date can send and log manual follow-up', async () => {
@@ -232,4 +237,35 @@ test('regression: concurrent edit during sendFollowUp preserves partner progress
   assert.ok(line, 'Partner follow-up line must be recorded');
   assert.equal(line.followup_date, '2026-03-01', 'Follow-up date must be preserved');
   assert.equal(line.followup_channel, 'email');
+});
+
+
+test('upcoming reminder with credit has no overdue totals', () => {
+  const p = create(seed(), 'res.partner', { name: 'Upcoming customer' });
+  const level = create(p.db, 'account.followup.level', { display_delay: 5, reminder_timing: 'before' });
+  const inv = create(level.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: p.id, invoice_date: '2026-01-01', invoice_date_due: '2026-02-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });
+  let db = postMove(inv.db, inv.id);
+  const credit = create(db, 'account.move', { move_type: 'out_refund', company_id: 1, partner_id: p.id, invoice_date: '2026-01-15', invoice_date_due: '2026-01-15', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 30, tax: 0 }] });
+  db = postMove(credit.db, credit.id);
+  const letter = finance.followUpLetter(db, p.id, 1, '2026-01-27');
+  const details = finance.partnerReceivableLines(db, p.id, 1, '2026-01-27');
+  assert.equal(letter.reminder.upcoming, true);
+  assert.deepEqual(letter.overdue, []);
+  assert.deepEqual(details.overdue, []);
+  assert.equal(details.total_overdue, 0);
+  assert.equal(details.total_due, 70);
+  assert.equal(letter.due[0].amount, details.total_due);
+});
+
+test('future-dated invoices do not appear in partner balances or letters', () => {
+  const { db: initial, partner } = fixture();
+  const future = create(initial, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: partner, invoice_date: '2026-04-01', invoice_date_due: '2026-04-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 75, tax: 0 }] });
+  const db = postMove(future.db, future.id);
+  const letter = finance.followUpLetter(db, partner, 1, '2026-03-01');
+  const details = finance.partnerReceivableLines(db, partner, 1, '2026-03-01');
+  assert.ok(!letter.invoices.some((row) => row.id === future.id));
+  assert.ok(!details.lines.some((row) => row.move_id === future.id));
+  assert.equal(details.total_due, 150);
+  assert.equal(details.total_due, letter.due[0].amount);
+  assert.equal(details.total_overdue, letter.overdue[0].amount);
 });

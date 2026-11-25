@@ -998,19 +998,19 @@ export function outstandingAccount(db, journal, company, inbound, methodLine = n
   return id;
 }
 
-/** Statement amounts use the journal currency; open allocations use company currency. */
+/** Statement amounts use the line's recorded currency or the journal currency; open allocations use company currency. */
 export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount)), { allowUnavailable = false } = {}) {
   const company = line.company_id ?? 1;
   if (allowUnavailable) {
     const own = findCompanyCurrencyRecord(db, company);
-    const currencyId = read(db, 'account.journal', line.journal_id)?.currency_id ?? own?.id;
+    const currencyId = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? own?.id;
     if (!own || !read(db, 'res.currency', currencyId)) return null;
     if (currencyId !== own.id) {
       const baseId = db?.settings?.base_currency_id;
       if (!baseId || !read(db, 'res.currency', baseId) || conversionRate(db, own.id, currencyId, line.date ?? today(), company) == null) return null;
     }
   }
-  const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const currency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
 

@@ -10,7 +10,7 @@ import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, post
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
-import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
+import { migratePartnerRanks, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { ensurePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
@@ -18,8 +18,8 @@ import { migrateProductCategories } from './models/productconfig.js';
 import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 const partners = [
-  { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
-  { name: 'Delta Office Supplies', is_company: true, email: 'info@deltaoffice.example', phone: '+20 3 456 7890', city: 'Alexandria', country: 'Egypt', tag_ids: ['Vendor'] },
+  { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'], customer_rank: 1 },
+  { name: 'Delta Office Supplies', is_company: true, email: 'info@deltaoffice.example', phone: '+20 3 456 7890', city: 'Alexandria', country: 'Egypt', tag_ids: ['Vendor'], supplier_rank: 1 },
   { name: 'Sara Hassan', email: 'sara.h@mail.example', phone: '+20 100 123 4567', city: 'Giza', country: 'Egypt', tag_ids: ['Retail'] },
   { name: 'Gulf Interiors', is_company: true, email: 'contact@gulfinteriors.example', phone: '+971 4 555 0101', city: 'Dubai', country: 'UAE', tag_ids: ['Wholesale'] },
   { name: 'Omar Khaled', email: 'omar.k@mail.example', phone: '+966 55 123 4567', city: 'Riyadh', country: 'Saudi Arabia', tag_ids: [] },
@@ -525,7 +525,6 @@ export function seed() {
   const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan: 'project' });
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
   add('account.budget', { name: `Budget ${today().slice(0, 4)}`, company_id: mainCompanyId, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
-  set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
   add('account.followup.level', { display_delay: 15, reminder_timing: 'after', delay: 15, send_email: true, send_sms: false, create_activity: false, activity_default_responsible_type: 'followup', channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
@@ -597,5 +596,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...ensureCalendars(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))), schema_version: SCHEMA_VERSION };
+  return { ...ensureCalendars(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready)))))), schema_version: SCHEMA_VERSION };
 }

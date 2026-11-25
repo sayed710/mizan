@@ -13,7 +13,7 @@ import { postMove } from './models/accounting.js';
 import { applyDiff, diffDb } from './sync.js';
 import { changeFormValue } from './views/formDefaults.js';
 import { saveFormRecord } from './views/formSave.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 
 function fixture(due = '2026-01-01') {
   const partner = create(seed(), 'res.partner', { name: 'Follow-up customer', email: 'followup@example.test' });
@@ -192,7 +192,7 @@ test('migration moves stored partner-level followup_next_action_date to the curr
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 79);
   const rawPartner = migrated.records['res.partner'].find((p) => p.id === f.partner);
   assert.equal('followup_next_action_date' in rawPartner, false);
   const compLine = partnerFollowUp(rawPartner, 1);
@@ -216,7 +216,7 @@ test('migration retains existing company next reminder date when partner has a c
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 79);
   const rawPartner = migrated.records['res.partner'].find((p) => p.id === f.partner);
   assert.equal('followup_next_action_date' in rawPartner, false);
   const compLine = partnerFollowUp(rawPartner, 1);
@@ -240,7 +240,7 @@ test('migration backfills automatic reminder type for partners where absent and 
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 79);
   const p1 = migrated.records['res.partner'].find((p) => p.id === 901);
   const p2 = migrated.records['res.partner'].find((p) => p.id === 902);
   const p3 = migrated.records['res.partner'].find((p) => p.id === 903);
