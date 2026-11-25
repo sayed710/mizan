@@ -242,9 +242,9 @@ test('9. Modifying an asset settles due depreciation before recalculating the re
 });
 
 test('10. Mixed-currency billing converts linked invoice totals into the order currency for credit exposure', () => {
-  let db = seed();
+  let db = write(seed(), 'res.company', 1, { account_use_credit_limit: true });
   const partner = search(db, 'res.partner')[0];
-  db = write(db, 'res.partner', partner.id, { credit_limit: 80 });
+  db = write(db, 'res.partner', partner.id, { use_partner_credit_limit: true, credit_limit: 80 });
 
   const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
   const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
@@ -283,7 +283,7 @@ test('10. Mixed-currency billing converts linked invoice totals into the order c
   // Total exposure is 50 + 50 = 100 USD > 80 USD credit limit, so form.warning must still trigger.
   const order = read(db, 'sale.order', orderId);
   const warning = models['sale.order'].form.warning(order, db);
-  assert.match(warning, /exceed the credit limit \(100 > 80\)/);
+  assert.match(warning, /has reached its credit limit of: \$80\.00\. Total amount due \(including this document\): \$100\.00/);
 });
 
 test('13. Dispute flag (blocked) can be toggled on posted entries in a locked period or with an inalterability hash', () => {

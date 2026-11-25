@@ -1,7 +1,7 @@
 import { create, read, write } from '../orm.js';
 import { commercialPartnerId, today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 
 /** Mark a commercial partner as a customer or vendor. Sets the rank to 1 only when it is 0 (activity flag), so concurrent postings never write conflicting ranks. */
@@ -123,6 +123,7 @@ export const crmModels = {
       customer_rank: { type: 'integer', label: 'Customer Rank', readonly: true },
       supplier_rank: { type: 'integer', label: 'Vendor Rank', readonly: true },
       is_company: { type: 'boolean', label: 'Company' },
+      parent_id: { type: 'many2one', relation: 'res.partner', label: 'Parent Contact', hidden: true },
       email: { type: 'char', label: 'Email' },
       phone: { type: 'char', label: 'Phone' },
       city: { type: 'char', label: 'City' },
@@ -130,7 +131,13 @@ export const crmModels = {
       country: { type: 'char', label: 'Country' },
       vat: { type: 'char', label: 'Tax ID' },
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
-      credit_limit: { type: 'monetary', label: 'Credit Limit' },
+      use_partner_credit_limit: { type: 'boolean', label: 'Partner Limit', hideWhen: (_r, db) => !creditLimitEnabled(db) },
+      credit_limit: {
+        type: 'monetary',
+        label: 'Credit Limit',
+        hideWhen: (_r, db) => !creditLimitEnabled(db),
+        readonly: (r) => !r?.use_partner_credit_limit,
+      },
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       autopost_bills: { type: 'selection', label: 'Auto-post bills', options: [['always', 'Always'], ['ask', 'Ask after 3 validations without edits'], ['never', 'Never']], default: 'ask', hideWhen: (_r, db) => !read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.autopost_bills },
       property_supplier_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Supplier Payment Terms' },
@@ -205,6 +212,10 @@ export const crmModels = {
     },
     defaults: () => ({ tag_ids: [], customer_rank: 0, supplier_rank: 0, followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
     onchange: (r, key, db) => {
+      if (key === 'use_partner_credit_limit') {
+        const comp = db ? read(db, 'res.company', db.settings?.current_company_id ?? 1) : null;
+        return { credit_limit: r.use_partner_credit_limit ? (comp?.account_default_credit_limit ?? 0) : null };
+      }
       if (key === 'followup_next_action_date') {
         const cId = db?.settings?.current_company_id ?? 1;
         return {
@@ -216,27 +227,42 @@ export const crmModels = {
       return {};
     },
     prepareWrite: (db, vals, before) => {
-      if (vals && 'followup_next_action_date' in vals) {
+      let nextVals = vals;
+      if (nextVals?.use_partner_credit_limit === false && nextVals.credit_limit !== null) {
+        nextVals = { ...nextVals, credit_limit: null };
+      }
+      if (nextVals && 'followup_next_action_date' in nextVals) {
         const cId = db?.settings?.current_company_id ?? 1;
-        const base = { ...before, ...vals };
+        const base = { ...before, ...nextVals };
         const nextPartner = updatePartnerFollowUp(base, cId, {
           followup_next_action_date: vals.followup_next_action_date || null,
         });
-        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+        return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
-      return null;
+      return nextVals !== vals ? { db, vals: nextVals } : null;
     },
     prepareCreate: (db, vals) => {
-      if (vals && 'followup_next_action_date' in vals) {
-        const cId = db?.settings?.current_company_id ?? 1;
-        const nextPartner = updatePartnerFollowUp(vals, cId, {
-          followup_next_action_date: vals.followup_next_action_date || null,
-        });
-        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+      let nextVals = vals;
+      if (nextVals && !nextVals.use_partner_credit_limit && 'credit_limit' in nextVals) {
+        const { credit_limit: _cl, ...rest } = nextVals;
+        nextVals = rest;
       }
-      return null;
+      if (nextVals && 'followup_next_action_date' in nextVals) {
+        const cId = db?.settings?.current_company_id ?? 1;
+        const nextPartner = updatePartnerFollowUp(nextVals, cId, {
+          followup_next_action_date: nextVals.followup_next_action_date || null,
+        });
+        return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
+      }
+      return nextVals !== vals ? { db, vals: nextVals } : null;
     },
-    guard: (db, before, after) => validatePartnerBankLines(db, after?.id, after?.bank_ids),
+    guard: (db, before, after) => {
+      if (after?.credit_limit != null && after?.credit_limit !== '') {
+        const n = Number(after.credit_limit);
+        if (!Number.isFinite(n) || n < 0) return 'Credit Limit must be non-negative';
+      }
+      return validatePartnerBankLines(db, after?.id, after?.bank_ids);
+    },
     onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
       { id: 'customers', label: 'Customers', fn: (r) => (r.customer_rank ?? 0) > 0 },
@@ -249,6 +275,7 @@ export const crmModels = {
     list: ['name', 'email', 'phone', 'city', 'country'],
     form: {
       title: 'name',
+      prepare: (r, db) => (!r?.use_partner_credit_limit && creditLimitEnabled(db) ? { ...r, credit_limit: read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.account_default_credit_limit ?? 0 } : r),
       smart: [
         { label: 'Opportunities', model: 'crm.lead', field: 'partner_id', target: 'crm/pipeline' },
         { label: 'Sales', model: 'sale.order', field: 'partner_id', target: 'sales/quotations' },
@@ -266,6 +293,7 @@ export const crmModels = {
         {
           label: 'Accounting',
           fields: ['autopost_bills', 'property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
+          groups: [['use_partner_credit_limit']],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
       ],
