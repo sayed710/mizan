@@ -3880,6 +3880,7 @@ const ar = {
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
   'The Early Payment Discount functionality can only be used with payment terms using a single 100% line.': 'لا يمكن استخدام ميزة خصم السداد المبكر إلا مع شروط دفع تستخدم بنداً واحداً بنسبة 100%.',
   'You can not delete payment terms as other records still reference it. However, you can archive it.': 'لا يمكنك حذف شروط الدفع لأن سجلات أخرى ما زالت تشير إليها. يمكنك أرشفتها بدلاً من ذلك.',
+  'Select a company on the budget record to show this budget report.': 'اختر شركة في سجل الموازنة لعرض تقرير هذه الموازنة.',
   'Company is required': 'الشركة مطلوبة',
   'Company cannot be changed once assigned': 'لا يمكن تغيير الشركة بعد تعيينها',
   'Journals in the reconciliation model must belong to the model company': 'يجب أن تنتمي دفاتر اليومية في نموذج التسوية إلى شركة النموذج',

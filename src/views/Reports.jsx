@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { read, search, write } from '../orm.js';
+import { read, search } from '../orm.js';
 import { models } from '../registry.js';
 import { today } from '../models/common.js';
 import { categoryPath } from '../models/productconfig-helpers.js';
@@ -622,8 +622,8 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   );
 }
 
-export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money }) {
-  const availableCompanies = companiesOf(db);
+export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money: moneyProp }) {
+  const fmtMoney = moneyProp ?? money;
   const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
@@ -631,17 +631,23 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
     const general = acc ? `${acc.code} ${acc.name}` : l.general_account;
     return [analytic, general].filter(Boolean).join(' · ') || '—';
   };
-  const selectCompany = (budgetId, value) => {
-    const companyId = Number(value);
-    if (!companyId || !availableCompanies.some((company) => company.id === companyId)) return;
-    commit(write(getDb(), 'account.budget', budgetId, { company_id: companyId }));
-  };
   const targetPeriods = periods?.length ? periods : [period];
   const minFrom = targetPeriods.map((p) => p.from).filter(Boolean).sort()[0];
   const maxTo = targetPeriods.map((p) => p.to).filter(Boolean).sort().at(-1);
   const datesOverlap = (from1, to1, from2, to2) =>
     (!to1 || !from2 || to1 >= from2) && (!from1 || !to2 || from1 <= to2);
-
+  const zeroBudgetLine = (line) => ({
+    ...line,
+    planned_amount: 0,
+    achieved_amount: 0,
+    committed_amount: 0,
+    budget_variance: 0,
+    achievement: 0,
+    budget_achievement: 0,
+    budget_theoretical: 0,
+    analytic_lines: [],
+    commitment_lines: [],
+  });
   return (
     <tbody>
       {search(db, 'account.budget').filter((b) => {
@@ -673,18 +679,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
             for (const p of targetPeriods) {
               const budgetOverlaps = datesOverlap(b.date_from, b.date_to, p.from, p.to);
               if (!budgetOverlaps) {
-                const zeroLines = baseBudgetLines.map((line) => ({
-                  ...line,
-                  planned_amount: 0,
-                  achieved_amount: 0,
-                  committed_amount: 0,
-                  budget_variance: 0,
-                  budget_achievement: 0,
-                  budget_theoretical: 0,
-                  analytic_lines: [],
-                  commitment_lines: [],
-                }));
-                periodReports.push({ period: p, lines: zeroLines, error: null });
+                periodReports.push({ period: p, lines: baseBudgetLines.map(zeroBudgetLine), error: null });
               } else {
                 try {
                   const asOfDate = p.to && p.to < today() ? p.to : today();
@@ -694,20 +689,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                   const lines = rawLines.map((line) => {
                     const lineFrom = line.date_from || b.date_from;
                     const lineTo = line.date_to || b.date_to;
-                    if (!datesOverlap(lineFrom, lineTo, p.from, p.to)) {
-                      return {
-                        ...line,
-                        planned_amount: 0,
-                        achieved_amount: 0,
-                        committed_amount: 0,
-                        budget_variance: 0,
-                        budget_achievement: 0,
-                        budget_theoretical: 0,
-                        analytic_lines: [],
-                        commitment_lines: [],
-                      };
-                    }
-                    return line;
+                    return !datesOverlap(lineFrom, lineTo, p.from, p.to) ? zeroBudgetLine(line) : line;
                   });
                   periodReports.push({ period: p, lines, error: null });
                 } catch (error) {
@@ -727,16 +709,9 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
         return [
           <tr key={b.id} className="rep-section"><td colSpan={colSpan}>
             <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
-            {companyMissing
-              ? <label className="inline-select">{t('Company')}
-                <select aria-label={`${t('Company')} for ${b.name}`} value="" onChange={(event) => selectCompany(b.id, event.target.value)}>
-                  <option value="">{t('Select a company')}</option>
-                  {availableCompanies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-              </label>
-              : <span className="muted"> · {company.name}</span>}
+            {company && <span className="muted"> · {company.name}</span>}
           </td></tr>,
-          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company to show this budget report.')}</td></tr>] : []),
+          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company on the budget record to show this budget report.')} {t('Select a company to show this budget report.')}</td></tr>] : []),
           ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{reportError}</td></tr>] : []),
           ...firstReportLines.map((l, i) => {
             const pr0Line = periodReports[0]?.lines?.[i];
@@ -757,21 +732,21 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                     }
                     const pLine = pr.lines[i];
                     return [
-                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={money} />,
-                      <td key={`${pIdx}-a`} className="num">{pLine.budget_theoretical ? `${pLine.budget_achievement}%` : ''}</td>,
+                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount ?? pLine.planned} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={fmtMoney} />,
+                      <td key={`${pIdx}-a`} className="num">{(pLine.planned_amount ?? pLine.planned) ? `${pLine.budget_achievement ?? pLine.achievement}%` : ''}</td>,
                     ];
                   })}
                 </tr>
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.analytic_lines ?? []).map((item) => <tr className="rep-detail" key={item.id}>
                   <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td /><td />
+                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td /><td />
                 </tr>)}
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.commitment_lines ?? []).map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
                   <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
-                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td />
+                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td />
                 </tr>)}
               </Fragment>
             );
