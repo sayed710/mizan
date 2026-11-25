@@ -367,7 +367,7 @@ test('Qodo 12: budget amount cells use the assigned company currency', () => {
   db = companyRes.db;
   const eurCompany = read(db, 'res.company', companyRes.id);
 
-  const analytic = create(db, 'account.analytic.account', { name: 'EUR Project', company_id: eurCompany.id });
+  const analytic = create(db, 'account.analytic.account', { name: 'EUR Project', company_id: eurCompany.id, plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
 
   const budget = create(db, 'account.budget', {

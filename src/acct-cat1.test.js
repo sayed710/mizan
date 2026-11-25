@@ -194,7 +194,9 @@ test('CAT-2: account.analytic.distribution.model partner_category_id many2one an
     },
   };
 
-  const analyticAccRes = create(db, 'account.analytic.account', { name: 'Test Analytic' });
+  const planRes = create(db, 'account.analytic.plan', { name: 'Test Plan' });
+  db = planRes.db;
+  const analyticAccRes = create(db, 'account.analytic.account', { name: 'Test Analytic', plan_id: planRes.id });
   db = analyticAccRes.db;
   const modelDist = { [analyticAccRes.id]: 100 };
   const distModel = create(db, 'account.analytic.distribution.model', {

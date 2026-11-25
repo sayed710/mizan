@@ -1,5 +1,6 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
+import { journalSequenceName } from './journal-sequence.js';
 import { create, read, search } from '../orm.js';
 import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
@@ -508,10 +509,11 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
         }
         const tax_name = taxLabel(t);
         const tax_id = t.tax_id ?? null;
+        const tax_group_id = t.tax_group_id ?? (db && tax_id ? read(db, 'account.tax', tax_id)?.tax_group_id ?? null : null);
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
         const use_in_tax_closing = t.tax_cash_basis ? false : (row.use_in_tax_closing === true);
-        const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}|${use_in_tax_closing}`;
-        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, use_in_tax_closing, cash_basis: !!t.tax_cash_basis, document_base: 0, document_amount: 0 };
+        const key = `${account_id}|${tax_id ?? `label:${tax_name}`}|${tax_group_id ?? ''}|${tax_tag_ids.join(',')}|${use_in_tax_closing}`;
+        const g = by.get(key) ?? { account_id, tax_id, tax_group_id, tax_name, tax_tag_ids, use_in_tax_closing, cash_basis: !!t.tax_cash_basis, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + docBase, document_amount: g.document_amount + docAmt });
       }
     }
@@ -894,9 +896,10 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   const isDraft = state === 'draft';
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;
-  const name = isDraft ? '/' : nextName(db, 'account.move', prefix);
+  const name = isDraft ? '/' : journalSequenceName(db, j, date, nextName(db, 'account.move', prefix), (move) => move.move_type === 'entry');
   const made = create(db, 'account.move', {
     move_type: 'entry', state: isDraft ? 'draft' : 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
+    ...(j.currency_id && line_ids.some((l) => l.currency_id === j.currency_id) ? { currency_id: j.currency_id } : { currency_id: null }),
     name, line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
     ...(auto_post ? { auto_post } : {}),
     ...(is_tax_payment ? { is_tax_payment: true } : {}),

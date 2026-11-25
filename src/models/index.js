@@ -417,8 +417,11 @@ const allApps = [
           { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
           { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
         ] },
+        { label: 'Payments', children: [
+          { key: 'payment-providers', label: 'Payment Providers', model: 'payment.provider' },
+          { key: 'payment-methods', label: 'Payment Methods', model: 'payment.method' },
+        ] },
         { key: 'online-sync', label: 'Online Synchronization', model: 'account.online.link' },
-        { key: 'online-payments', label: 'Online Payments', model: 'payment.provider' },
       ] },
     ],
   },
@@ -843,7 +846,7 @@ const PRIVATE_FIELDS = {
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
 export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.category', 'account.fiscal.year',
-  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.asset.group', 'account.payment.method', 'account.payment.method.line', 'res.country.group'];
+  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.asset.group', 'account.payment.method', 'account.payment.method.line', 'payment.method', 'res.country.group'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
 export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));

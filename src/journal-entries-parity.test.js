@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
 import { postMove } from './models/accounting.js';
@@ -368,6 +368,7 @@ test('Journal Entries filters, group-bys and search fields cover all Odoo 20 opt
 
 test('Journal Items shows default/optional columns, all filters on seed data, group-bys, totals, ?account filter, and actions', async () => {
   let db = seed();
+  db = write(db, 'res.company', 1, { group_analytic_accounting: true });
   const dateNow = today();
   const [partner, vendor] = search(db, 'res.partner');
   const saleJ = search(db, 'account.journal').find((j) => j.type === 'sale');

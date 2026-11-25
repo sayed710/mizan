@@ -1,3 +1,4 @@
+import { anyAnalyticAccountingEnabled } from '../models/analytic-setting.js';
 import { Fragment, useRef, useState } from 'react';
 import { canCreateAssetFromJournalItem, createAssetsFromJournalItems } from '../models/assets.js';
 import { companyViewDb } from '../companyView.js';
@@ -331,7 +332,12 @@ export function JournalItems({ leaf = {} } = {}) {
     return lines[0][group] || t('Undefined');
   };
 
-  const availableCols = ITEM_COLUMNS.filter((c) => (!c.multiCompanyOnly || multiCompany) && (!c.multiCurrencyOnly || multiCurrency));
+  const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  const actualCompanyIds = [...new Set(rows.map((l) => l.company_id).filter(Boolean))];
+  const scopedCompanyIds = filterCompany
+    ? [filterCompany]
+    : (actualCompanyIds.length > 0 ? actualCompanyIds : allowedIds);
+  const availableCols = ITEM_COLUMNS.filter((c) => (c.key !== 'analytic_distribution' || anyAnalyticAccountingEnabled(db, scopedCompanyIds)) && (!c.multiCompanyOnly || multiCompany) && (!c.multiCurrencyOnly || multiCurrency));
   const visibleCols = availableCols.filter((c) => !c.optional || isVisible(c.key, c.optional !== 'hide'));
   const optionalCols = availableCols.filter((c) => c.optional);
   const sumCurrency = companyCurrencyRecord(db, db.settings?.current_company_id);
@@ -456,8 +462,6 @@ export function JournalItems({ leaf = {} } = {}) {
     );
   };
 
-  const allowedIds = db.settings?.allowed_company_ids ?? [currentCompany(db)];
-  const actualCompanyIds = [...new Set(rows.map((l) => l.company_id).filter(Boolean))];
   const printCompanies = filterCompany
     ? null
     : (multiCompany

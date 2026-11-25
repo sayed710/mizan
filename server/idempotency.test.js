@@ -1,37 +1,31 @@
 // REST creates honour Idempotency-Key: a retry returns the first record instead of creating another.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { startServer as spawnTestServer } from './test-server.js';
 
 async function startServer() {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-idem-'));
-  const proc = spawn(process.execPath, ['server/index.js'], {
-    env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: 'idem-test-pass-1', NODE_ENV: 'test' },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-  const port = await new Promise((ok, fail) => {
-    let output = '';
-    proc.on('message', (msg) => {
-      if (msg?.type === 'ready' && msg.port > 0) ok(Number(msg.port));
+  const dbPath = join(dir, 'db.sqlite');
+  try {
+    const server = await spawnTestServer({
+      env: { ...process.env, PORT: '0', MIZAN_DB: dbPath, MIZAN_ADMIN_PASSWORD: 'idem-test-pass-1', NODE_ENV: 'test' },
     });
-    proc.stdout.on('data', (d) => {
-      output += d;
-      const m = /Mizan listening on http:\/\/(?:localhost|127\.0\.0\.1):([1-9]\d*)/.exec(output);
-      if (m) ok(Number(m[1]));
-    });
-    proc.stderr.on('data', (d) => { output += d; });
-    proc.on('error', fail);
-    proc.on('exit', (code) => fail(new Error(`server exited ${code}: ${output}`)));
-  });
-  return { base: `http://127.0.0.1:${port}`, dbPath: join(dir, 'db.sqlite'), stop: async () => {
-    proc.send('shutdown');
-    await new Promise((ok) => (proc.exitCode !== null ? ok() : proc.once('exit', ok)));
+    return {
+      base: server.origin,
+      dbPath,
+      stop: async () => {
+        await server.stop();
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      },
+    };
+  } catch (err) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  } };
+    throw err;
+  }
 }
 
 test('a retried POST with the same Idempotency-Key creates one record', async (t) => {

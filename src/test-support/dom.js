@@ -101,3 +101,14 @@ export function find(node, predicate) {
   return null;
 }
 
+/** Poll `check()` inside `React.act` until it returns truthy or `timeoutMs` elapses. */
+export async function waitFor(React, check, { timeoutMs = 30_000, intervalMs = 10 } = {}) {
+  const deadline = performance.now() + timeoutMs;
+  for (;;) {
+    const value = check();
+    if (value || performance.now() >= deadline) return value;
+    await React.act(() => new Promise((resolve) => setTimeout(resolve, intervalMs)));
+  }
+}
+
+
