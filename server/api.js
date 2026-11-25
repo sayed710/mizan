@@ -10,6 +10,7 @@ import { payQuote } from '../src/models/quoteplus.js';
 import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/models/shop.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
+import { partnerTagIds } from '../src/models/crm.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
 import { lazyRestrictedRecords, visibleTo } from '../src/models/company.js';
 import { referFromLink } from '../src/models/skillsplus.js';
@@ -89,7 +90,9 @@ const openEvents = (db) => search(db, 'event.event').filter((e) => ['booked', 'a
 /** Visitor contact, matched by email or created (tagged Website). */
 function websitePartner(db, { name, email, phone }) {
   const known = search(db, 'res.partner').find((p) => p.email?.toLowerCase() === email.toLowerCase());
-  return known ? { db, id: known.id } : create(db, 'res.partner', { name, email, phone, tag_ids: ['Website'] });
+  if (known) return { db, id: known.id };
+  const { db: withTags, ids } = partnerTagIds(db, ['Website']);
+  return create(withTags, 'res.partner', { name, email, phone, tag_ids: ids });
 }
 
 const visitor = (b) => ({ name: String(b.name ?? '').trim().slice(0, 120), email: String(b.email ?? '').trim().slice(0, 254), phone: String(b.phone ?? '').slice(0, 40) });
@@ -236,7 +239,9 @@ const tokenMatches = (token, hash) => {
  */
 function checkoutPartners(db, v, address) {
   const known = search(db, 'res.partner').some((p) => p.email?.toLowerCase() === v.email.toLowerCase());
-  const res = create(db, 'res.partner', { ...v, ...address, tag_ids: known ? ['Website', 'To Merge'] : ['Website'] });
+  const tagNames = known ? ['Website', 'To Merge'] : ['Website'];
+  const { db: withTags, ids } = partnerTagIds(db, tagNames);
+  const res = create(withTags, 'res.partner', { ...v, ...address, tag_ids: ids });
   return { db: res.db, partnerId: res.id, shippingId: res.id };
 }
 
@@ -347,7 +352,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
   // Reads compute fields (balances, totals) over the companies this user can see only.
-  const scopedDb = () => (companies ? { ...db, records: lazyRestrictedRecords(db, companies) } : db);
+  const scopedDb = (d = db) => (companies ? { ...d, records: lazyRestrictedRecords(d, companies) } : d);
 
   try {
     if (id === null && method === 'GET') {
@@ -363,7 +368,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
       // A limited user's new record belongs to the company they are working in, not to company 1.
       const res = create(db, model, !SHARED_MODELS.has(model) && companies && company && vals.company_id == null ? { ...vals, company_id: company } : vals);
       const { db: saved } = commit(res.db);
-      return { status: 201, body: read(saved, model, res.id), db: saved };
+      return { status: 201, body: read(scopedDb(saved), model, res.id), db: saved };
     }
     const rec = read(db, model, id);
     if (!visible(rec)) return { status: 404, body: { error: `${model} #${id} not found` } };
@@ -372,7 +377,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };
       const { id: _ignored, ...changes } = vals;
       const { db: saved } = commit(write(db, model, id, changes));
-      return { status: 200, body: read(saved, model, id), db: saved };
+      return { status: 200, body: read(scopedDb(saved), model, id), db: saved };
     }
     if (method === 'DELETE') {
       const { db: saved } = commit(unlink(db, model, [id]));

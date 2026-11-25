@@ -3,6 +3,7 @@ import { nextSequence, read, search } from '../orm.js';
 import { allocateCents, roundCurrency } from '../money.js';
 
 import { configuredAccount } from './configured-account.js';
+import { countryIdFor, countryReferenceError, stateIdFor } from './country.js';
 
 /** Whether a cash-basis release move pre-dates separate tax_grid_base lines. */
 export const isLegacyCashBasisRelease = (move) => Boolean(move && !move.cash_basis_base_grid && !(move.line_ids ?? []).some((l) => l.tax_grid_base));
@@ -328,9 +329,8 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
  */
 export function autoFiscalPosition(db, address, companyId = null) {
   const p = address ?? {};
-  const norm = (v) => String(v ?? '').trim().toLowerCase();
-  const country = norm(p.country);
-  const state = norm(p.state);
+  const country = countryIdFor(db, p.country_id || p.country);
+  const state = stateIdFor(db, p.state_id || p.state, country);
   const pZip = String(p.zip ?? '').trim();
   const isNumericZip = (s) => /^\d+$/.test(s);
   const zipMatches = (fp) => {
@@ -346,30 +346,50 @@ export function autoFiscalPosition(db, address, companyId = null) {
     return (!from || pZip >= from) && (!to || pZip <= to);
   };
   const hasZip = (fp) => Boolean(String(fp.zip_from ?? '').trim() || String(fp.zip_to ?? '').trim());
-  const fpStates = (fp) => (fp.state_ids ?? []).map(norm).filter(Boolean);
+  const fpCountryFor = (fp) => fp.country_id || countryIdFor(db, fp.country);
+  const fpStates = (fp, fpCountry = fpCountryFor(fp)) => (fp.state_ids ?? []).map((id) => stateIdFor(db, id, fpCountry)).filter(Boolean);
   const matchesCountryGroup = (groupId) => {
     const group = groupId ? read(db, 'res.country.group', groupId) : null;
     if (!group || group.active === false || !country) return false;
-    return (group.country_ids ?? []).map(norm).filter(Boolean).includes(country);
+    return (group.country_ids ?? []).some((value) => countryIdFor(db, value) === country);
   };
   const matchesPosition = (fp) => {
     if (companyId && fp.company_id && fp.company_id !== companyId) return false;
     if (!fp.auto_apply) return false;
+    if (fp.unresolved_targeting) return false;
     if (fp.vat_required && !String(p.vat ?? '').trim()) return false;
     if (!zipMatches(fp)) return false;
-    const fpCountry = norm(fp.country);
-    if (fpCountry && fpCountry !== country) return false;
+    const fpCountry = fpCountryFor(fp);
+    if (fpCountry) {
+      if (fpCountry !== country) return false;
+    } else if (fp.country) {
+      const pNorm = typeof p.country === 'string' ? p.country.trim().toLowerCase() : '';
+      const fpNorm = typeof fp.country === 'string' ? fp.country.trim().toLowerCase() : '';
+      if (!fpNorm || fpNorm !== pNorm) return false;
+    }
     if (fp.country_group_id && !matchesCountryGroup(fp.country_group_id)) return false;
-    const states = fpStates(fp);
-    if (states.length && (!state || !states.includes(state))) return false;
+    const states = fpStates(fp, fpCountry);
+    if ((fp.state_ids ?? []).length) {
+      if (!state || !states.includes(state)) return false;
+    } else if (fp.states) {
+      const rawStates = Array.isArray(fp.states) ? fp.states : [fp.states];
+      if (rawStates.length) {
+        const pStateNorm = typeof p.state === 'string' ? p.state.trim().toLowerCase() : '';
+        const matchesLegacy = rawStates.some((s) => typeof s === 'string' && s.trim().toLowerCase() === pStateNorm);
+        if (!pStateNorm || !matchesLegacy) return false;
+      }
+    }
     return true;
   };
-  const specificity = (fp) => [
-    Number(Boolean(norm(fp.country))),
-    Number(Boolean(fp.country_group_id)),
-    Number(fpStates(fp).length > 0),
-    Number(hasZip(fp)),
-  ];
+  const specificity = (fp) => {
+    const fpCountry = fpCountryFor(fp);
+    return [
+      Number(Boolean(fpCountry)),
+      Number(Boolean(fp.country_group_id)),
+      Number(fpStates(fp, fpCountry).length > 0),
+      Number(hasZip(fp)),
+    ];
+  };
   const bySpecificityThenSeq = (a, b) => {
     const sa = specificity(a);
     const sb = specificity(b);
@@ -704,8 +724,8 @@ export function isDomesticRecord(record, db) {
   if (!db || !record) return false;
   const companyId = record.company_id ?? db.settings?.current_company_id ?? 1;
   const company = read(db, 'res.company', companyId);
-  const recordCountry = String(record.country ?? '').trim().toLowerCase();
-  const companyCountry = String(company?.country ?? '').trim().toLowerCase();
+  const recordCountry = record.country_id || countryIdFor(db, record.country);
+  const companyCountry = company?.country_id || countryIdFor(db, company?.country);
   return Boolean(recordCountry && companyCountry && recordCountry === companyCountry);
 }
 
@@ -720,12 +740,15 @@ export function isDomesticTax(tax, db) {
   if (!fps.length) return true;
   const companyId = tax.company_id ?? db.settings?.current_company_id ?? 1;
   const company = read(db, 'res.company', companyId);
+  const companyCountryId = company?.country_id || countryIdFor(db, company?.country);
   const companyCountry = String(company?.country ?? '').trim().toLowerCase();
   return fps.some((fpId) => {
     if (company?.domestic_fiscal_position_id && fpId === company.domestic_fiscal_position_id) return true;
     const fp = read(db, 'account.fiscal.position', fpId);
     if (!fp) return false;
     if (fp.company_id && fp.company_id !== companyId) return false;
+    const fpCountryId = fp.country_id || countryIdFor(db, fp.country);
+    if (companyCountryId && fpCountryId) return companyCountryId === fpCountryId;
     const fpCountry = String(fp.country ?? '').trim().toLowerCase();
     return Boolean(companyCountry && fpCountry && companyCountry === fpCountry);
   });
@@ -735,6 +758,8 @@ export const taxModels = {
   'account.tax.group': {
     label: 'Tax Groups',
     guard: (db, _before, after) => {
+      const countryError = countryReferenceError(db, after);
+      if (countryError) return countryError;
       const companyId = after.company_id ?? 1;
       const checks = [
         ['tax_payable_account_id', 'Tax payable', 'liability_'],
@@ -755,7 +780,7 @@ export const taxModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
-      country: { type: 'char', label: 'Country', help: 'The country for which this tax group is applicable.' },
+      country_id: { type: 'many2one', relation: 'res.country', label: 'Country', help: 'The country for which this tax group is applicable.' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, multiCompanyOnly: true },
       tax_payable_account_id: {
         type: 'many2one',
@@ -785,11 +810,11 @@ export const taxModels = {
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     views: ['list'],
     searchFields: ['name'],
-    list: ['sequence', 'name', 'country', 'company_id', 'preceding_subtotal'],
+    list: ['sequence', 'name', 'country_id', 'company_id', 'preceding_subtotal'],
     form: {
       title: 'name',
       hideTitle: true,
-      groups: [['name', 'country', 'company_id', 'sequence', 'pos_receipt_label'], ['preceding_subtotal']],
+      groups: [['name', 'country_id', 'company_id', 'sequence', 'pos_receipt_label'], ['preceding_subtotal']],
       tabs: [
         { label: 'Tax Closing', fields: ['tax_payable_account_id', 'tax_receivable_account_id'] },
       ],
@@ -800,6 +825,8 @@ export const taxModels = {
     label: 'Taxes',
     auditDelete: true,
     guard: (db, before, after) => {
+      const countryError = countryReferenceError(db, after);
+      if (countryError) return countryError;
       // An on-payment tax cannot post without its transition account, so it is required when saving.
       if (after.cash_basis_transition_account_id || after.tax_exigibility === 'on_payment') {
         try { configuredAccount(db, after.cash_basis_transition_account_id, after.company_id, 'cash basis transition', after.name); } catch (error) { return error.message; }
@@ -889,6 +916,7 @@ export const taxModels = {
         hideWhen: (r) => r?.tax_exigibility !== 'on_payment',
       },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group', domain: (g, tax) => !g.company_id || g.company_id === (tax?.company_id ?? 1) },
+      country_id: { type: 'many2one', relation: 'res.country', label: 'Country' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       invoice_repartition_line_ids: repartitionField('Distribution for Invoices'),
       refund_repartition_line_ids: repartitionField('Distribution for Refunds'),
@@ -996,7 +1024,7 @@ export const taxModels = {
         {
           label: 'Advanced Options',
           groups: [
-            ['invoice_label', 'description', 'invoice_legal_notes', 'tax_group_id'],
+            ['invoice_label', 'description', 'invoice_legal_notes', 'tax_group_id', 'country_id'],
             ['price_include_override', 'include_base_amount', 'is_base_affected', 'active', 'tax_exigibility', 'cash_basis_transition_account_id'],
           ],
         },
@@ -1007,7 +1035,58 @@ export const taxModels = {
 
   'account.fiscal.position': {
     label: 'Fiscal Positions',
+    prepareWrite: (db, vals, before) => {
+      if (!before || (!before.unresolved_targeting && !before.country && !before.states)) return null;
+      const nextVals = { ...vals };
+      const after = { ...before, ...nextVals };
+      const hasCountryEdit = 'country_id' in nextVals || ('country_group_id' in nextVals && Boolean(nextVals.country_group_id)) || ('country' in nextVals && !nextVals.country);
+      const hasStateEdit = 'state_ids' in nextVals || ('states' in nextVals && !(Array.isArray(nextVals.states) ? nextVals.states.length : nextVals.states));
+      const hasTargetingEdit = ['country_id', 'country_group_id', 'state_ids', 'country', 'states'].some((k) => k in nextVals);
+      const hasAnyTarget = Boolean(after.country_id || after.country_group_id || (after.state_ids?.length ?? 0) > 0);
+
+      if (before.country && hasCountryEdit) {
+        nextVals.country = null;
+      }
+      if (before.states && hasStateEdit) {
+        nextVals.states = null;
+      }
+
+      const unresolvedCountry = Boolean(before.country && nextVals.country !== null);
+      const unresolvedStates = Boolean(before.states && nextVals.states !== null);
+      const hasUnresolved = unresolvedCountry || unresolvedStates;
+
+      if (hasUnresolved) {
+        if (after.auto_apply || before.unresolved_targeting) {
+          nextVals.unresolved_targeting = true;
+        }
+      } else if (before.unresolved_targeting && (hasTargetingEdit || hasAnyTarget)) {
+        nextVals.unresolved_targeting = false;
+      }
+      return { db, vals: nextVals };
+    },
+    onWrite: (db, after) => {
+      const dropUnresolved = 'unresolved_targeting' in after && !after.unresolved_targeting;
+      const dropCountry = 'country' in after && !after.country;
+      const dropStates = 'states' in after && !(Array.isArray(after.states) ? after.states.length : after.states);
+      if (!dropUnresolved && !dropCountry && !dropStates) return db;
+      const cleaned = { ...after };
+      if (dropUnresolved) delete cleaned.unresolved_targeting;
+      if (dropCountry) delete cleaned.country;
+      if (dropStates) delete cleaned.states;
+      return {
+        ...db,
+        records: {
+          ...db.records,
+          'account.fiscal.position': (db.records['account.fiscal.position'] ?? []).map((r) => (r.id === after.id ? cleaned : r)),
+        },
+      };
+    },
     guard: (db, _before, after) => {
+      const countryError = countryReferenceError(db, after);
+      if (countryError) return countryError;
+      if ((after.state_ids ?? []).some((id) => !Number.isInteger(id) || !stateIdFor(db, id, after.country_id))) {
+        return after.country_id ? 'Select states belonging to the selected country' : 'Selected state does not exist';
+      }
       if (after.country_group_id && !read(db, 'res.country.group', after.country_group_id)) {
         return 'Selected country group does not exist';
       }
@@ -1028,9 +1107,9 @@ export const taxModels = {
       auto_apply: { type: 'boolean', label: 'Detect Automatically' },
       vat_required: { type: 'boolean', label: 'VAT Required' },
       foreign_vat: { type: 'char', label: 'Foreign Tax ID' },
-      country: { type: 'char', label: 'Country' },
+      country_id: { type: 'many2one', relation: 'res.country', label: 'Country' },
       country_group_id: { type: 'many2one', relation: 'res.country.group', label: 'Country Group' },
-      state_ids: { type: 'tags', label: 'Federal States' },
+      state_ids: { type: 'many2many', relation: 'res.country.state', label: 'Federal States', domain: (s, fp) => !fp?.country_id || s.country_id === fp.country_id },
       zip_from: { type: 'char', label: 'Zip From' },
       zip_to: { type: 'char', label: 'Zip To' },
       note: { type: 'text', label: 'Legal Notes' },
@@ -1048,11 +1127,11 @@ export const taxModels = {
     views: ['list', 'kanban'],
     searchFields: ['name'],
     filters: [[{ id: 'domestic', label: 'Domestic', fn: isDomesticRecord }]],
-    kanban: { title: 'name', lines: ['country'] },
+    kanban: { title: 'name', lines: ['country_id'] },
     list: ['sequence', 'name', 'company_id'],
     form: {
       title: 'name',
-      groups: [['auto_apply', 'vat_required', 'foreign_vat', 'country', { label: 'Zip Range', fields: ['zip_from', 'zip_to'] }], ['country_group_id', 'state_ids']],
+      groups: [['auto_apply', 'vat_required', 'foreign_vat', 'country_id', { label: 'Zip Range', fields: ['zip_from', 'zip_to'] }], ['country_group_id', 'state_ids']],
       // Odoo 20 has no removal rules; only positions upgraded with one show their excluded taxes.
       tabs: (r) => [{ label: 'Account Mapping', fields: ['account_ids'] }, ...(r?.excluded_tax_ids?.length ? [{ label: 'Excluded Taxes', fields: ['excluded_tax_ids'] }] : []), { label: 'Legal Notes', fields: ['note'] }],
       chatter: true,

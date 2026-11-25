@@ -91,7 +91,7 @@ test('account.tax.group list columns, handle, multi-company gating, optional col
   const def = models['account.tax.group'];
   const leaf = taxGroupsLeaf();
   assert.equal(viewsOf('account.tax.group')[0], 'list');
-  assert.deepEqual(def.list, ['sequence', 'name', 'country', 'company_id', 'preceding_subtotal']);
+  assert.deepEqual(def.list, ['sequence', 'name', 'country_id', 'company_id', 'preceding_subtotal']);
   assert.equal(def.fields.sequence.widget, 'handle');
   assert.equal(def.fields.company_id.multiCompanyOnly, true);
   assert.equal(def.fields.company_id.required, true);
@@ -101,16 +101,17 @@ test('account.tax.group list columns, handle, multi-company gating, optional col
   const { visibleListColumns } = await import('./views/List.jsx');
   const { ActionView } = await import('./views/ActionView.jsx');
   let db = seed();
-  assert.deepEqual(visibleListColumns(def, db, {}).cols, ['sequence', 'name', 'country']);
+  assert.deepEqual(visibleListColumns(def, db, {}).cols, ['sequence', 'name', 'country_id']);
   assert.deepEqual(
     visibleListColumns(def, db, { preceding_subtotal: true }).cols,
-    ['sequence', 'name', 'country', 'preceding_subtotal'],
+    ['sequence', 'name', 'country_id', 'preceding_subtotal'],
   );
 
   // New group defaults sequence after existing groups and defaults company_id to current company.
   const existing = search(db, 'account.tax.group');
   const maxSeq = Math.max(...existing.map((g) => g.sequence));
-  const added = create(db, 'account.tax.group', { name: 'Luxury Tax', country: 'Egypt', preceding_subtotal: 'Before Luxury' });
+  const egypt = search(db, 'res.country').find((c) => c.code === 'EG');
+  const added = create(db, 'account.tax.group', { name: 'Luxury Tax', country_id: egypt.id, preceding_subtotal: 'Before Luxury' });
   db = added.db;
   const addedRec = read(db, 'account.tax.group', added.id);
   assert.ok(addedRec.sequence > maxSeq, 'new group goes last');
@@ -143,7 +144,7 @@ test('account.tax.group list columns, handle, multi-company gating, optional col
   assert.equal(read(db, 'account.tax.group', branchGroup.id).company_id, branch.id);
   assert.deepEqual(
     visibleListColumns(def, db, { preceding_subtotal: true }).cols,
-    ['sequence', 'name', 'country', 'company_id', 'preceding_subtotal'],
+    ['sequence', 'name', 'country_id', 'company_id', 'preceding_subtotal'],
   );
 
   const multiCtx = await mountView(
@@ -463,8 +464,8 @@ test('migration 45 backfills tax group company_id from owning taxes (else main c
   };
 
   const migrated = migrate(legacy);
-  assert.equal(SCHEMA_VERSION, 70);
-  assert.equal(migrated.schema_version, 70);
+  assert.equal(SCHEMA_VERSION, 72);
+  assert.equal(migrated.schema_version, 72);
 
   const migratedBranchGroup = read(migrated, 'account.tax.group', groupBranch.id);
   const migratedUnownedGroup = read(migrated, 'account.tax.group', groupUnowned.id);
@@ -479,7 +480,7 @@ test('migration 45 backfills tax group company_id from owning taxes (else main c
 
   // Idempotent rerun preserves assignments
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, 70);
+  assert.equal(twice.schema_version, 72);
   assert.deepEqual(read(twice, 'account.tax.group', groupBranch.id), migratedBranchGroup);
   assert.deepEqual(read(twice, 'account.cash.rounding', r.id), migratedRounding);
 });
