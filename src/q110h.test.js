@@ -360,8 +360,9 @@ test('Finding 24: analytic weights resolve distribution models using the documen
   const branch = createCompany(seed(), { name: 'Branch Co' });
   let db = updateSettings(branch.db, { current_company_id: 1, allowed_company_ids: [1, branch.id] });
 
-  const analytic1 = create(db, 'account.analytic.account', { name: 'Plan C1', company_id: 1 }); db = analytic1.db;
-  const analytic2 = create(db, 'account.analytic.account', { name: 'Plan C2', company_id: branch.id }); db = analytic2.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const analytic1 = create(db, 'account.analytic.account', { name: 'Plan C1', company_id: 1, plan_id: planId }); db = analytic1.db;
+  const analytic2 = create(db, 'account.analytic.account', { name: 'Plan C2', company_id: branch.id, plan_id: planId }); db = analytic2.db;
 
   // Distribution models for account code 600000
   db = create(db, 'account.analytic.distribution.model', {

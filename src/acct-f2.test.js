@@ -207,9 +207,10 @@ test('FIN-13: Custom account.report renders Analytic Accounts filter and filters
   await initStore();
 
   let db = seed();
-  const a1 = create(db, 'account.analytic.account', { name: 'Custom Analytic Alpha', company_id: 1 });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a1 = create(db, 'account.analytic.account', { name: 'Custom Analytic Alpha', company_id: 1, plan_id: planId });
   db = a1.db;
-  const a2 = create(db, 'account.analytic.account', { name: 'Custom Analytic Beta', company_id: 1 });
+  const a2 = create(db, 'account.analytic.account', { name: 'Custom Analytic Beta', company_id: 1, plan_id: planId });
   db = a2.db;
 
   const inv = create(db, 'account.move', {
@@ -368,9 +369,10 @@ test('Switching company prunes analyticAccountIds that do not exist in the new c
   db = co2.db;
   db = { ...db, settings: { ...db.settings, allowed_company_ids: [1, co2.id] } };
 
-  const a1 = create(db, 'account.analytic.account', { name: 'Analytic Co 1', company_id: 1 });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a1 = create(db, 'account.analytic.account', { name: 'Analytic Co 1', company_id: 1, plan_id: planId });
   db = a1.db;
-  const a2 = create(db, 'account.analytic.account', { name: 'Analytic Co 2', company_id: co2.id });
+  const a2 = create(db, 'account.analytic.account', { name: 'Analytic Co 2', company_id: co2.id, plan_id: planId });
   db = a2.db;
 
   const yr = Number(today().slice(0, 4));

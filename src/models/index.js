@@ -251,7 +251,24 @@ const allApps = [
       { label: 'Accounting', children: [
                 { label: 'Transactions', children: [
           { key: 'entries', label: 'Journal Entries', model: 'account.move', ...journalEntriesView },
-          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line' },
+          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line',
+            list: ['date', 'name', 'account_id', 'company_id', 'amount'],
+            optionalList: ['ref', 'general_account', 'move_id', 'product_id', 'unit_amount', 'product_uom_id', 'partner_id'], listLabels: { unit_amount: 'Quantity' },
+            groupBy: ['account_id'], groupBys: ['date', 'account_id', 'general_account', 'category', 'product_id', 'partner_id'],
+            defaults: { category: 'other', employee_id: null, unit_amount: 0 },
+            form: {
+              title: 'name',
+              groups: [
+                ['account_id', 'date', 'company_id'],
+                ['amount', 'ref', 'partner_id', { field: 'unit_amount', label: 'Quantity' }, 'product_id', 'product_uom_id'],
+                ['move_id', 'general_account', 'legacy_general_account', 'category'],
+                ['employee_id', 'project_id', 'task_id'],
+                ['billable', 'so_id', 'so_line_index', 'invoiced'],
+                ['validated', 'validated_by', 'validated_on', 'timer_start'],
+              ],
+              chatter: true,
+            },
+          },
           { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
           { key: 'statements', label: 'Bank Statements', model: 'account.bank.statement' },
           { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
@@ -384,8 +401,11 @@ const allApps = [
           { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
           { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
         ] },
+        { label: 'Payments', children: [
+          { key: 'payment-providers', label: 'Payment Providers', model: 'payment.provider' },
+          { key: 'payment-methods', label: 'Payment Methods', model: 'payment.method' },
+        ] },
         { key: 'online-sync', label: 'Online Synchronization', model: 'account.online.link' },
-        { key: 'online-payments', label: 'Online Payments', model: 'payment.provider' },
       ] },
     ],
   },
@@ -810,7 +830,7 @@ const PRIVATE_FIELDS = {
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
 export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.category', 'account.fiscal.year',
-  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.asset.group', 'account.payment.method', 'account.payment.method.line', 'res.country.group'];
+  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.asset.group', 'account.payment.method', 'account.payment.method.line', 'payment.method', 'res.country.group'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
 export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));

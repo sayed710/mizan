@@ -1,4 +1,5 @@
 import { purchaseLineId } from './models/purchase-links.js';
+import { ensureOnlinePaymentMethods, ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
 import { ensureCountries } from './models/country.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
@@ -24,7 +25,6 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
-import { ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
 import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 
@@ -2397,6 +2397,117 @@ export function migrateCountries(db) {
   return { ...next, records };
 }
 MIGRATIONS.push({ version: 72, name: 'country-records', up: migrateCountries });
+
+MIGRATIONS.push({ version: 73, name: 'analytic-general-account-id', up: (db) => {
+  const unresolved = [];
+  const accounts = db.records['account.account'] ?? [];
+  const lines = (db.records['account.analytic.line'] ?? []).map((line) => {
+    if (typeof line.general_account !== 'string') return line;
+    if (!line.general_account) return { ...line, general_account: null };
+    const matches = accounts.filter((account) => account.code === line.general_account
+      && (!account.company_id || account.company_id === (line.company_id ?? 1)));
+    if (matches.length === 1) return { ...line, general_account: matches[0].id };
+    unresolved.push([line.id, line.general_account]);
+    return { ...line, legacy_general_account: line.general_account, general_account: null };
+  });
+  const next = { ...db, messages: db.messages ?? [], records: { ...db.records, 'account.analytic.line': lines } };
+  return unresolved.reduce((result, [id, code]) => postNote(result, 'account.analytic.line', id,
+    `Upgrade: general account code ${code} could not be uniquely matched in the line company; select the account manually.`), next);
+} });
+
+MIGRATIONS.push({ version: 74, name: 'preserve-legacy-analytic-accounting', up: (db) => {
+  const companies = db.records?.['res.company'];
+  if (!Array.isArray(companies)) return db;
+  return { ...db, records: { ...db.records, 'res.company': companies.map((company) => (
+    company && company.group_analytic_accounting == null ? { ...company, group_analytic_accounting: true } : company
+  )) } };
+} });
+
+export function migrateJournalGroups(db) {
+  const groups = [...(db.records['account.journal.group'] ?? [])].sort(
+    (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id
+  );
+  const knownJournals = new Set((db.records['account.journal'] ?? []).map((j) => j.id));
+  const memberships = new Map();
+  for (const group of groups) {
+    for (const id of group.journal_ids ?? []) {
+      if (!knownJournals.has(id)) continue;
+      if (!memberships.has(id)) {
+        memberships.set(id, group.id);
+      }
+    }
+  }
+  const journals = (db.records['account.journal'] ?? []).map((journal) => {
+    const groupId = memberships.get(journal.id) ?? journal.journal_group_id ?? null;
+    return groupId != null ? { ...journal, journal_group_id: groupId } : journal;
+  });
+  const cleanGroups = groups.map(({ journal_ids: _old, ...group }) => group);
+  return { ...db, records: { ...db.records, 'account.journal': journals, 'account.journal.group': cleanGroups } };
+}
+MIGRATIONS.push({ version: 75, name: 'journal-ledger-direction', up: migrateJournalGroups });
+
+export function migrateAnalyticAccountPlanToPlanId(db) {
+  const accounts = db?.records?.['account.analytic.account'];
+  if (!Array.isArray(accounts) || !accounts.length) return db;
+  const legacyAccounts = accounts.filter((a) => a && typeof a === 'object' && !a.plan_id);
+  if (!legacyAccounts.length) return db;
+
+  const LEGACY_PLAN_NAMES = {
+    project: 'Projects',
+    department: 'Departments',
+    region: 'Regions',
+  };
+
+  const plans = [...(db.records?.['account.analytic.plan'] ?? [])];
+  let plansChanged = false;
+  let maxPlanId = Math.max(Number(db.seq?.['account.analytic.plan']) || 0, ...plans.map((p) => Number(p.id) || 0));
+  let maxSeq = plans.reduce((max, p) => Math.max(max, Number(p.sequence) || 0), 0);
+
+  const getOrCreatePlan = (planKey) => {
+    const targetName = LEGACY_PLAN_NAMES[planKey] || (String(planKey).charAt(0).toUpperCase() + String(planKey).slice(1));
+    let found = plans.find((p) => p.name && p.name.toLowerCase() === targetName.toLowerCase());
+    if (!found) {
+      maxPlanId += 1;
+      maxSeq += 10;
+      found = {
+        id: maxPlanId,
+        name: targetName,
+        sequence: maxSeq,
+        default_applicability: 'optional',
+        color: 0,
+        description: '',
+        applicability_ids: [],
+      };
+      plans.push(found);
+      plansChanged = true;
+    }
+    return found.id;
+  };
+
+  let accountsChanged = false;
+  const nextAccounts = accounts.map((a) => {
+    if (!a || typeof a !== 'object' || a.plan_id) return a;
+    accountsChanged = true;
+    const legacyPlan = typeof a.plan === 'string' ? a.plan.trim() : a.plan;
+    const planId = getOrCreatePlan(legacyPlan || 'project');
+    const { plan: _legacy, ...rest } = a;
+    return { ...rest, plan_id: planId };
+  });
+
+  if (!accountsChanged && !plansChanged) return db;
+  return {
+    ...db,
+    ...(plansChanged ? { seq: { ...(db.seq ?? {}), 'account.analytic.plan': maxPlanId } } : {}),
+    records: {
+      ...db.records,
+      ...(plansChanged ? { 'account.analytic.plan': plans } : {}),
+      'account.analytic.account': nextAccounts,
+    },
+  };
+}
+MIGRATIONS.push({ version: 76, name: 'analytic-account-plan-to-plan-id', up: migrateAnalyticAccountPlanToPlanId });
+
+MIGRATIONS.push({ version: 77, name: 'online-payment-methods', up: ensureOnlinePaymentMethods });
 
 export function migrateReconcileAndAssetModelCompany(db) {
   // A company-less model takes the one company whose records use it; a model shared by several companies or linked

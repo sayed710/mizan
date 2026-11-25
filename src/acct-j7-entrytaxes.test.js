@@ -9,6 +9,7 @@ import { taxesByGrid } from './models/finance.js';
 
 test('1. JE-16: analytic_distribution is a visible column on manual entry lines with distribution widget when analytic plans exist', () => {
   let db = seed();
+  db = write(db, 'res.company', 1, { group_analytic_accounting: true });
   db = create(db, 'account.analytic.plan', { name: 'Projects' }).db;
   const moveDef = models['account.move'];
   const lineItem = moveDef.fields.line_ids;

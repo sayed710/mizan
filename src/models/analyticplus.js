@@ -10,8 +10,9 @@ import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, invoiceLineA
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { hasMultiCurrency } from './money.js';
 import { currentCompany } from './company.js';
+import { analyticAccountingEnabled } from './analytic-setting.js';
 import { isSectionOrNote } from './taxes.js';
-import { categoryHierarchy, findAnalyticDistribution, planOf } from './analytic-distribution-models.js';
+import { categoryHierarchy, findAnalyticDistribution } from './analytic-distribution-models.js';
 export { isSectionOrNote } from './taxes.js';
 
 const accountModel = financeModels['account.analytic.account'];
@@ -36,7 +37,7 @@ const allocatedShares = (db, distribution, base) => {
   return entries.map(([id], index) => [id, amounts[index]]);
 };
 export { normalizeDistribution } from '../analytic_distribution.js';
-import { normalizeDistribution, storedLineDistribution } from '../analytic_distribution.js';
+import { normalizeDistribution, planOf, storedLineDistribution } from '../analytic_distribution.js';
 export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
 const canonicalDistribution = (distribution) => Object.entries(distribution ?? {})
@@ -139,6 +140,7 @@ export function checkMandatoryPlans(db, move, { systemGenerated = false } = {}) 
   const isEntry = move?.move_type === 'entry';
   if (!isInvoiceDoc && !isEntry) return;
   if (isEntry && systemGenerated) return;
+  if (!analyticAccountingEnabled(db, move?.company_id ?? 1)) return;
 
   const plans = search(db, 'account.analytic.plan');
   if (!plans.length) return;
@@ -179,7 +181,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
     return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
     name: line.name || move.name || '/', date: move.date || move.invoice_date || today(), account_id: Number(id),
     amount,
-    general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
+    general_account: line.account_id ?? null, move_id: move.id,
     partner_id: line.partner_id ?? move.partner_id ?? null, category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
     }));
   });
@@ -203,7 +205,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
       return {
         name: line.name || product?.name || move.name || '/', date: move.date ?? move.invoice_date ?? today(),
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
-        general_account: read(db, 'account.account', account)?.code || '',
+        general_account: account ?? null,
         move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
         category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
       };
@@ -282,6 +284,9 @@ const budgetCompanyError = (db, budget, selectedCompanyId = null) => {
   return !companyId || !read(db, 'res.company', companyId) ? 'Select an existing company for the budget' : null;
 };
 
+/** Whether a budget record is missing a valid existing company (eligible for guarded company assignment). */
+export const isCompanylessBudget = (db, budget) => Boolean(budget && (!db ? !budget.company_id : budgetCompanyError(db, budget)));
+
 /** Posted bills consume commitments only through explicit order-line links, never product or reference guesses. */
 function postedPurchaseQuantities(db, order) {
   const billed = new Map();
@@ -330,7 +335,35 @@ function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
   });
 }
 
-/** Report full-period actuals and inclusive elapsed-day planned amounts as of atDate. */
+/**
+ * Compute budget line metrics on one `[from, to]` period basis following Odoo 20 `budget.line`:
+ * `achieved_percentage = achieved_amount / budget_amount * 100` (0 when `budget_amount` is 0).
+ */
+function budgetLineMetrics(rawPlanned, practical, committed, budgetSign, periodFraction, elapsedFraction, currency) {
+  const planned = periodFraction === 1 ? rawPlanned : roundCurrency(rawPlanned * periodFraction, currency);
+  const theoretical = roundCurrency(planned * elapsedFraction, currency);
+  const achieved_amount = roundCurrency(practical * budgetSign, currency);
+  const committed_amount = roundCurrency((practical + committed) * budgetSign, currency);
+  const pct = (actual, target) => (target ? round((actual / target) * 100) : 0);
+  const budget_achievement = pct(achieved_amount, planned);
+  return {
+    planned,
+    practical,
+    committed,
+    budgetSign,
+    planned_amount: planned,
+    budget_theoretical: theoretical,
+    achieved_amount,
+    committed_amount,
+    theoretical,
+    variance: roundCurrency(practical - planned, currency),
+    achievement: budget_achievement,
+    budget_variance: roundCurrency(achieved_amount - planned, currency),
+    budget_achievement,
+  };
+}
+
+/** Report budget line planned, actual, committed, variance and achievement on one [from, to] period basis. */
 export function budgetReport(db, budgetId, atDate = today(), { period = {}, company_id: selectedCompanyId = null, analyticAccountIds = null } = {}) {
   const budget = read(db, 'account.budget', budgetId);
   if (!budget) throw new Error('Budget not found');
@@ -347,18 +380,23 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
     return line.analytic_account_id && filterAnalyticIds.includes(line.analytic_account_id);
   });
   return lines.map((line) => {
-    const planned = Number(line.planned) || 0;
+    const rawPlanned = Number(line.planned) || 0;
     const lineStart = line.date_from ? day(line.date_from) : start;
     const lineEnd = line.date_to ? day(line.date_to) : end;
     if (lineEnd < lineStart) throw new Error('Budget end date must be on or after its start date');
-    const fraction = Math.min(1, Math.max(0, (day(atDate) - lineStart + 1) / (lineEnd - lineStart + 1)));
     const from = [budget.date_from, line.date_from, period.from].filter(Boolean).sort().at(-1);
     const to = [budget.date_to, line.date_to, period.to].filter(Boolean).sort()[0];
+    const fromDay = day(from);
+    const toDay = day(to);
+    const lineDays = lineEnd - lineStart + 1;
+    const periodDays = Math.max(0, toDay - fromDay + 1);
+    const periodFraction = Math.min(1, periodDays / lineDays);
+    const elapsedFraction = periodDays ? Math.min(1, Math.max(0, (day(atDate) - fromDay + 1) / periodDays)) : 0;
     const targetAccount = line.account_id ? read(db, 'account.account', line.account_id) : null;
     if (line.account_id && !targetAccount) throw new Error('Budget account not found');
     const analytic_lines = line.analytic_account_id
       ? analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account, posted_only: true })
-          .filter((item) => !targetAccount || item.general_account === targetAccount.code)
+          .filter((item) => !targetAccount || item.general_account === targetAccount.id)
       : (line.account_id || line.general_account)
         ? journalItems(db, { from, to, company_id: companyId })
             .filter((item) => !item.is_closing
@@ -379,14 +417,10 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
     const practical = roundCurrency(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0), companyCurrency);
     const commitment_lines = line.analytic_account_id || line.account_id || line.general_account
       ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
-    const committed = roundCurrency(commitment_lines.reduce((sum, line) => sum + line.amount, 0), companyCurrency);
-    const theoretical = roundCurrency(planned * fraction, companyCurrency);
-    const isExpense = budget.budget_type === 'expense';
-    const planned_amount = planned;
-    const budget_theoretical = roundCurrency(planned_amount * fraction, companyCurrency);
-    const budgetSign = isExpense ? -1 : 1;
-    const achieved_amount = roundCurrency(practical * budgetSign, companyCurrency);
-    return { ...line, planned, practical, committed, budgetSign, planned_amount, budget_theoretical, achieved_amount, committed_amount: roundCurrency((practical + committed) * budgetSign, companyCurrency), theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, budget_variance: roundCurrency(achieved_amount - planned_amount, companyCurrency), budget_achievement: budget_theoretical ? round(achieved_amount / budget_theoretical * 100) : 0, analytic_lines, commitment_lines };
+    const committed = roundCurrency(commitment_lines.reduce((sum, item) => sum + item.amount, 0), companyCurrency);
+    const budgetSign = budget.budget_type === 'expense' ? -1 : 1;
+    const metrics = budgetLineMetrics(rawPlanned, practical, committed, budgetSign, periodFraction, elapsedFraction, companyCurrency);
+    return { ...line, ...metrics, analytic_lines, commitment_lines };
   });
 }
 
@@ -643,6 +677,10 @@ export const analyticPlusModels = {
       },
       account_count: {
         type: 'integer', label: 'Analytic Accounts', readonly: true,
+        compute: (r, db) => (db?.records?.['account.analytic.account'] ?? []).filter((a) => a.active !== false && a.plan_id === r.id).length,
+      },
+      all_account_count: {
+        type: 'integer', label: 'All Analytic Accounts', readonly: true,
         compute: (r, db) => planAccountCount(db, r),
       },
       applicability_ids: {
@@ -682,7 +720,8 @@ export const analyticPlusModels = {
     fields: {
       ...accountModel.fields,
       name: { ...accountModel.fields.name, placeholder: 'e.g. Project XYZ' },
-      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan' },
+      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan', required: true },
+      color: { type: 'integer', label: 'Color', optional: 'hide' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, placeholder: 'Visible to all' },
       currency_id: {
@@ -695,7 +734,7 @@ export const analyticPlusModels = {
       credit: { type: 'monetary', label: 'Credit', readonly: true, compute: (r, db) => analyticStat(db, r, 'credit') },
       balance: { ...accountModel.fields.balance, compute: (r, db) => analyticStat(db, r, 'balance') },
     },
-    defaults: () => ({ ...accountModel.defaults(), active: true }),
+    defaults: () => ({ ...accountModel.defaults(), active: true, color: 0 }),
     views: ['list', 'kanban'],
     list: ['name', 'code', 'partner_id', 'plan_id', 'company_id', 'balance'],
     listLabels: { name: 'Name' },
@@ -716,8 +755,12 @@ export const analyticPlusModels = {
       ...timesheetModel.fields,
       amount: { type: 'monetary', label: 'Amount' },
       account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic Account' },
-      general_account: { type: 'char', label: 'General Account Code' },
+      general_account: { type: 'many2one', relation: 'account.account', label: 'General Account', readonly: (r) => !!r.move_id },
+      legacy_general_account: { type: 'char', label: 'General Account Code', readonly: true, hideWhen: (r) => !r.legacy_general_account },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice / Bill' },
+      ref: { type: 'char', label: 'Reference' },
+      product_uom_id: { type: 'many2one', relation: 'uom.uom', label: 'Unit of Measure' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       product_id: { type: 'many2one', relation: 'product', label: 'Product' },
       category: { type: 'selection', label: 'Category', options: [['invoice', 'Invoice'], ['vendor_bill', 'Vendor Bill'], ['journal_entry', 'Journal Entry'], ['timesheet', 'Timesheet'], ['other', 'Other']] },
@@ -736,6 +779,10 @@ export const analyticPlusModels = {
     },
     form: {
       ...budgetModel.form, statusbarClickable: false, lockedWhen: (r) => r.state !== 'draft',
+      unlockedFields: (r, db) => {
+        const stored = r?.id && db ? (db.records?.['account.budget'] ?? []).find((b) => b.id === r.id) : null;
+        return isCompanylessBudget(db, stored ?? r) ? ['company_id'] : [];
+      },
       buttons: [
         transition('Confirm', ['draft'], 'confirmed'), transition('Approve', ['confirmed'], 'validated'),
         transition('Done', ['validated'], 'done'), transition('Cancel', ['draft', 'confirmed', 'validated'], 'cancel'),

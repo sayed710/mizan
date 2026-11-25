@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor } from './models/index.js';
 import { taxSnapshot } from './models/taxes.js';
@@ -32,7 +32,7 @@ const leafFor = (sectionLabel, key) => {
   return null;
 };
 
-async function mountMoveForm({ leaf, id }) {
+async function mountMoveForm({ leaf, id, initialDb = seed() }) {
   const prevStorage = globalThis.localStorage;
   const mem = new Map();
   globalThis.localStorage = {
@@ -47,7 +47,7 @@ async function mountMoveForm({ leaf, id }) {
   const { initStore, commit, getDb } = await import('./store.js');
   const { FormView } = await import('./views/FormView.jsx');
   await initStore();
-  let db = seed();
+  let db = initialDb;
   await commit(db);
   const host = globalThis.document.createElement('div');
   host.ownerDocument = globalThis.document;
@@ -149,7 +149,8 @@ test('customer invoice form matches Odoo 20 main sheet, tabs, and Other Info gro
 
 test('invoice lines show Odoo 20 default columns, persist optional toggles in localStorage, and add sections/notes', async () => {
   const leaf = leafFor('Customers', 'invoices');
-  const ctx = await mountMoveForm({ leaf, id: 'new' });
+  const initialDb = write(seed(), 'res.company', 1, { group_analytic_accounting: true });
+  const ctx = await mountMoveForm({ leaf, id: 'new', initialDb });
   try {
     const headerTexts = () => allFind(ctx.host, (n) => n.tagName === 'TH')
       .map((n) => n.textContent.trim())
