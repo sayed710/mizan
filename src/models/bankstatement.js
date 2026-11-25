@@ -538,6 +538,7 @@ export const bankStatementModels = {
       },
       is_complete: { type: 'boolean', label: 'Complete', readonly: true, compute: computeIsComplete },
       is_valid: { type: 'boolean', label: 'Valid', readonly: true, compute: computeIsValid },
+      // Declared after is_complete and is_valid so materialization reuses them without rescanning statements.
       problem_description: { type: 'text', label: 'Problem Description', readonly: true, hidden: true, compute: computeProblemDescription },
       state: { type: 'selection', label: 'Status', options: [['open', 'Open'], ['closed', 'Closed']], default: 'open' },
     },
