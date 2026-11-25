@@ -1,7 +1,7 @@
 import { create, read, write } from '../orm.js';
-import { commercialPartnerId, today } from './common.js';
+import { commercialPartnerId, today, validDate } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 
 export function partnerCategoryCompleteName(db, r) {
@@ -287,6 +287,18 @@ export const crmModels = {
       },
       last_reminder: { type: 'date', label: 'Last Reminder Date', readonly: true, compute: (r, db) => r.followup_lines?.find((line) => line.company_id === (db.settings?.current_company_id ?? 1))?.followup_date ?? null },
       followup_line_id: { type: 'many2one', relation: 'account.followup.level', label: 'Reminder Level', readonly: true, compute: (r, db) => r.followup_lines?.find((line) => line.company_id === (db.settings?.current_company_id ?? 1))?.followup_last_level ?? null },
+      followup_status: {
+        type: 'selection',
+        label: 'Follow-up Status',
+        options: [
+          ['in_need_of_action', 'In need of action'],
+          ['with_overdue_invoices', 'With overdue invoices'],
+          ['no_action_needed', 'No action needed'],
+        ],
+        badge: { in_need_of_action: 'warn', with_overdue_invoices: 'info', no_action_needed: 'ok' },
+        hidden: true,
+        compute: (r, db) => partnerFollowUpStatus(db, r, db?.settings?.current_company_id ?? 1),
+      },
       followup_lines: {
         type: 'one2many',
         label: 'Follow-up Progress',
@@ -393,15 +405,27 @@ export const crmModels = {
         const n = Number(after.credit_limit);
         if (!Number.isFinite(n) || n < 0) return 'Credit Limit must be non-negative';
       }
+      for (const line of after?.followup_lines ?? []) {
+        if (line?.followup_next_action_date != null && line.followup_next_action_date !== '' && !validDate(line.followup_next_action_date)) {
+          return 'Next reminder date must be a valid date';
+        }
+      }
       return validatePartnerBankLines(db, after?.id, after?.bank_ids);
     },
     onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
-    filters: [[
-      { id: 'customers', label: 'Customers', fn: (r) => (r.customer_rank ?? 0) > 0 },
-      { id: 'vendors', label: 'Vendors', fn: (r) => (r.supplier_rank ?? 0) > 0 },
-      { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
-      { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
-    ]],
+    filters: [
+      [
+        { id: 'customers', label: 'Customers', fn: (r) => (r.customer_rank ?? 0) > 0 },
+        { id: 'vendors', label: 'Vendors', fn: (r) => (r.supplier_rank ?? 0) > 0 },
+        { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
+        { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
+      ],
+      [
+        { id: 'in_need_of_action', label: 'In need of action', fn: (r, db) => partnerFollowUpStatus(db, r) === 'in_need_of_action' },
+        { id: 'overdue_invoices', label: 'With overdue invoices', fn: (r, db) => ['in_need_of_action', 'with_overdue_invoices'].includes(partnerFollowUpStatus(db, r)) },
+        { id: 'postponed', label: 'Postponed', fn: (r, db) => isPartnerFollowUpPostponed(db, r) },
+      ],
+    ],
     groupBys: ['country', 'city', 'is_company'],
     kanban: { title: 'name', lines: ['email', 'city', 'country'], tags: 'tag_ids', avatar: true },
     list: ['name', 'email', 'phone', 'city', 'country'],

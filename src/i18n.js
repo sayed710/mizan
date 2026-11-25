@@ -3903,6 +3903,23 @@ const ar = {
   'Configure the deferred expense account on the company': 'حدّد حساب المصروفات المؤجلة على الشركة',
   'Configure the recognition account on the source line': 'حدّد حساب الاعتراف على البند المصدر',
   'Saving...': 'جارٍ الحفظ...',
+  'Process follow-ups': 'معالجة المتابعات',
+  'Postpone': 'تأجيل',
+  'Postpone Follow-ups': 'تأجيل المتابعات',
+  'Postponed': 'مؤجّل',
+  'All Overdue': 'كل المتأخرات',
+  'Skipped': 'تم التخطي',
+  'Print Letters': 'طباعة الخطابات',
+  'Follow-up Processing Report': 'تقرير معالجة المتابعات',
+  'Customer not found': 'العميل غير موجود',
+  'Excluded from follow-ups': 'مستبعد من المتابعات',
+  'Select at least one customer first': 'اختر عميلاً واحداً على الأقل أولاً',
+  'Next reminder date must be a valid date': 'يجب أن يكون تاريخ التذكير التالي تاريخاً صالحاً',
+  'Choose a future date to postpone the reminder': 'اختر تاريخاً مستقبلياً لتأجيل التذكير',
+  'Already processed for current follow-up level': 'تمت المعالجة مسبقاً لمستوى المتابعة الحالي',
+  'Automatically execute this follow-up level when due.': 'تنفيذ مستوى المتابعة هذا تلقائياً عند الاستحقاق.',
+  'No delivery action is configured for this follow-up level.': 'لم يتم تكوين إجراء إرسال لمستوى المتابعة هذا.',
+  'Automatic email delivery is not configured.': 'الإرسال التلقائي للبريد الإلكتروني غير مُعدّ.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

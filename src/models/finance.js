@@ -2080,12 +2080,14 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
     return group;
   };
 
+  const partnersById = new Map((db.records?.['res.partner'] ?? []).map((p) => [p.id, p]));
+
   for (const m of search(db, 'account.move')) {
     const compId = m.company_id ?? 1;
     if ((companyId != null && compId !== companyId) || m.state !== 'posted' || m.move_type !== 'out_invoice') continue;
     if (m.invoice_date && m.invoice_date > at) continue;
     if (m.exclude_from_followup) continue;
-    const partner = read(db, 'res.partner', m.partner_id);
+    const partner = partnersById.get(m.partner_id);
     if (!partner) continue;
     const compLine = partnerFollowUp(partner, compId);
     if (compLine?.no_followup || compLine?.followup_status === 'no_action_needed') continue;
@@ -2381,7 +2383,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
     const companyId = f.invoices[0].company_id ?? 1;
     const level = followUpLevel(nextDb, f, at);
     const partner = partners.get(f.partner_id);
-    if (!level || !partner || partner.followup_reminder_type === 'manual') return nextDb;
+    if (!level || !partner || partner.followup_reminder_type === 'manual' || level.auto_execute === false) return nextDb;
 
     const currentPartner = read(nextDb, 'res.partner', partner.id) ?? partner;
     const progress = partnerFollowUp(currentPartner, companyId);
@@ -2601,6 +2603,268 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
   return applyFollowUpReminder(queued, scope, partnerId, groups, at, channel, nextLevelBaseDate);
 }
 
+const followUpStatusIndexCache = new WeakMap();
+
+function followUpReminderMap(db, companyId, at) {
+  if (!db?.records || typeof db.records !== 'object') return new Map();
+  let byKey = followUpStatusIndexCache.get(db.records);
+  if (!byKey) {
+    byKey = new Map();
+    followUpStatusIndexCache.set(db.records, byKey);
+  }
+  const key = `${companyId}:${at}`;
+  let map = byKey.get(key);
+  if (!map) {
+    map = new Map();
+    for (const part of followUps(db, at, { ignoreNextActionDate: true, companyId }).flatMap(followUpCompanies)) {
+      if (part.company_id === companyId) map.set(part.partner_id, part);
+    }
+    byKey.set(key, map);
+  }
+  return map;
+}
+
+/** Whether a partner's follow-up reminder for `companyId` is postponed beyond `at`. */
+export function isPartnerFollowUpPostponed(db, partner, companyId = null, at = today()) {
+  if (!partner) return false;
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const line = partnerFollowUp(partner, cId);
+  return Boolean(line?.followup_next_action_date && line.followup_next_action_date > at);
+}
+
+/**
+ * Compute a partner's Odoo follow-up status for `companyId` at `at`:
+ * `'in_need_of_action' | 'with_overdue_invoices' | 'no_action_needed'`.
+ */
+export function partnerFollowUpStatus(db, partner, companyId = null, at = today()) {
+  if (!partner || !db) return 'no_action_needed';
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const compLine = partnerFollowUp(partner, cId);
+  if (compLine?.no_followup || compLine?.followup_status === 'no_action_needed') return 'no_action_needed';
+  const reminder = followUpReminderMap(db, cId, at).get(partner.id);
+  if (!reminder) return 'no_action_needed';
+  if (compLine?.followup_next_action_date && compLine.followup_next_action_date > at) return 'with_overdue_invoices';
+  const level = followUpLevel(db, reminder, at);
+  if (!level) return 'with_overdue_invoices';
+  const sameCycle = (compLine?.followup_oldest_date ?? null) === (reminder.oldest ?? null);
+  const alreadySentLevel = sameCycle && compLine?.followup_level_delay != null
+    && Number(compLine.followup_level_delay) >= Number(level.delay)
+    && compLine?.followup_delivery_state === 'sent';
+  return alreadySentLevel ? 'with_overdue_invoices' : 'in_need_of_action';
+}
+
+const normalizePartnerIds = (partnerIds) => {
+  const list = Array.isArray(partnerIds) ? partnerIds : [partnerIds];
+  return [...new Set(list.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+};
+
+/** Postpone the next reminder date for one or more partners on `companyId`. */
+export function postponeFollowUp(db, partnerIds, nextActionDate, { companyId = null, at = today() } = {}) {
+  const ids = normalizePartnerIds(partnerIds);
+  if (!ids.length) throw new Error('Select at least one customer first');
+  const date = String(nextActionDate ?? '').trim();
+  if (!validDate(date)) throw new Error('Next reminder date must be a valid date');
+  if (date <= at) throw new Error('Choose a future date to postpone the reminder');
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  let nextDb = db;
+  for (const id of ids) {
+    const partner = read(nextDb, 'res.partner', id);
+    if (!partner) throw new Error('Customer not found');
+    const prevDate = partnerFollowUp(partner, cId)?.followup_next_action_date ?? null;
+    nextDb = write(nextDb, 'res.partner', id, {
+      followup_lines: updatePartnerFollowUp(partner, cId, { followup_next_action_date: date }).followup_lines,
+    });
+    if (prevDate !== date) {
+      nextDb = postNote(nextDb, 'res.partner', id, `Follow-up postponed until ${date}.`);
+    }
+  }
+  return nextDb;
+}
+
+/**
+ * Batch-process follow-ups for `partnerIds` on `companyId`, reusing single-partner follow-up
+ * helpers (`followUpLevel`, `followUpLetter`, `followUpEmail`, `logManualFollowUp`,
+ * `queueFollowUpSms`, `ensureFollowUpActivity`, `applyFollowUpReminder`).
+ * Returns `{ db, results, summary }`.
+ */
+export async function processFollowUps(db, partnerIds, {
+  companyId = null,
+  at = today(),
+  deliverEmail = null,
+  ignoreNextActionDate = false,
+} = {}) {
+  const ids = normalizePartnerIds(partnerIds);
+  if (!ids.length) throw new Error('Select at least one customer first');
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const dueReminders = followUpReminderMap(db, cId, at);
+  let nextDb = db;
+  const results = [];
+
+  for (const id of ids) {
+    const partner = read(nextDb, 'res.partner', id);
+    if (!partner) {
+      results.push({ partnerId: id, partnerName: `#${id}`, companyId: cId, status: 'skipped', reason: 'Customer not found', actions: [] });
+      continue;
+    }
+    const compLine = partnerFollowUp(partner, cId);
+    if (compLine?.no_followup || compLine?.followup_status === 'no_action_needed') {
+      results.push({ partnerId: id, partnerName: partner.name, companyId: cId, status: 'skipped', reason: 'Excluded from follow-ups', actions: [] });
+      continue;
+    }
+    if (!ignoreNextActionDate && compLine?.followup_next_action_date && compLine.followup_next_action_date > at) {
+      results.push({ partnerId: id, partnerName: partner.name, companyId: cId, status: 'skipped', reason: 'Postponed', nextActionDate: compLine.followup_next_action_date, actions: [] });
+      continue;
+    }
+    const reminder = dueReminders.get(id);
+    if (!reminder) {
+      results.push({ partnerId: id, partnerName: partner.name, companyId: cId, status: 'skipped', reason: 'This customer has no overdue invoices', actions: [] });
+      continue;
+    }
+    const level = followUpLevel(nextDb, reminder, at);
+    if (!level) {
+      results.push({ partnerId: id, partnerName: partner.name, companyId: cId, status: 'skipped', reason: 'No follow-up level applies to this customer', actions: [] });
+      continue;
+    }
+    const levelName = followUpLevelName(level);
+    const sameCycle = (compLine?.followup_oldest_date ?? null) === (reminder.oldest ?? null);
+    const alreadySentLevel = sameCycle && compLine?.followup_level_delay != null
+      && Number(compLine.followup_level_delay) >= Number(level.delay)
+      && compLine?.followup_delivery_state === 'sent';
+    if (alreadySentLevel) {
+      results.push({ partnerId: id, partnerName: partner.name, companyId: cId, levelId: level.id, levelName, status: 'skipped', reason: 'Already processed for current follow-up level', actions: [] });
+      continue;
+    }
+
+    const channels = levelChannels(level);
+    const wantsEmail = channels.includes('email');
+    const wantsSms = channels.includes('sms');
+    const wantsLetter = channels.includes('letter');
+    const wantsPhone = channels.includes('phone');
+    const wantsActivity = Boolean(level.create_activity);
+    if (!channels.length && !wantsActivity) {
+      results.push({ partnerId: id, partnerName: partner.name, companyId: cId, levelId: level.id, levelName, status: 'failed', reason: 'No delivery action is configured for this follow-up level.', actions: [] });
+      continue;
+    }
+
+    const actions = [];
+    const errors = [];
+    let appliedLevel = false;
+
+    if (wantsSms) {
+      try {
+        if (wantsEmail) {
+          nextDb = queueFollowUpSms(nextDb, read(nextDb, 'res.partner', id), reminder, level, at, false);
+        } else {
+          nextDb = logManualFollowUp(nextDb, id, at, { scope: nextDb, reminder, companyId: cId, channel: 'sms', ignoreNextActionDate: true });
+          appliedLevel = true;
+        }
+        actions.push('sms');
+      } catch (err) {
+        errors.push(err?.message ?? String(err));
+      }
+    }
+
+    if (wantsEmail) {
+      const currentPartner = read(nextDb, 'res.partner', id);
+      if (!currentPartner?.email?.trim()) {
+        errors.push('A customer email address is required to send an email reminder');
+      } else if (!deliverEmail) {
+        errors.push('Email requires the server.');
+      } else {
+        try {
+          const letter = followUpLetter(nextDb, id, cId, at);
+          const email = followUpEmail(nextDb, letter.reminder, letter.level, currentPartner);
+          const staged = logManualFollowUp(nextDb, id, at, { scope: nextDb, reminder: letter.reminder, companyId: cId, channel: 'email', ignoreNextActionDate: true });
+          const out = await deliverEmail(email, { db: nextDb, stagedDb: staged, partner: currentPartner, reminder: letter.reminder, level: letter.level, companyId: cId });
+          if (out && typeof out === 'object' && out.serverHandled) {
+            nextDb = out.db ?? nextDb;
+            actions.push('email');
+            appliedLevel = true;
+          } else if (out === undefined || (typeof out === 'number' && Number.isInteger(out) && out >= 0) || (out && typeof out === 'object' && out.status === 'sent')) {
+            nextDb = staged;
+            actions.push('email');
+            appliedLevel = true;
+          } else if (out && typeof out === 'object' && out.status === 'outbox_only') {
+            errors.push(out.reason?.trim() || 'Automatic email delivery is not configured.');
+          } else {
+            errors.push('Mail transport returned an invalid delivery result');
+          }
+        } catch (err) {
+          errors.push(err?.message ?? String(err));
+        }
+      }
+      if (!appliedLevel && actions.includes('sms')) {
+        nextDb = applyFollowUpReminder(nextDb, nextDb, id, [reminder], at, 'sms', null);
+        appliedLevel = true;
+      }
+    }
+
+    if (wantsLetter) {
+      nextDb = logManualFollowUp(nextDb, id, at, { scope: nextDb, reminder, companyId: cId, channel: 'letter', ignoreNextActionDate: true });
+      actions.push('letter');
+      appliedLevel = true;
+    }
+
+    if (wantsPhone) {
+      nextDb = logManualFollowUp(nextDb, id, at, { scope: nextDb, reminder, companyId: cId, channel: 'phone', ignoreNextActionDate: true });
+      actions.push('phone');
+      appliedLevel = true;
+    }
+
+    if (!channels.length && wantsActivity) {
+      nextDb = applyFollowUpReminder(nextDb, nextDb, id, [reminder], at, null, null);
+      appliedLevel = true;
+    }
+
+    if (wantsActivity) {
+      const beforeActs = (nextDb.records?.['mail.activity'] ?? []).length;
+      if (!appliedLevel) {
+        nextDb = ensureFollowUpActivity(nextDb, id, reminder, level, at);
+      }
+      const afterActs = (nextDb.records?.['mail.activity'] ?? []).length;
+      const activityProg = partnerFollowUp(read(nextDb, 'res.partner', id), cId);
+      if (appliedLevel || afterActs > beforeActs || activityProg?.followup_activity_level === level.id) {
+        actions.push('activity');
+      }
+    }
+
+    const status = errors.length ? 'failed' : 'processed';
+    results.push({
+      partnerId: id,
+      partnerName: partner.name,
+      companyId: cId,
+      levelId: level.id,
+      levelName,
+      status,
+      actions,
+      ...(errors.length ? { reason: errors.join('; ') } : {}),
+    });
+  }
+
+  const summary = {
+    total: results.length,
+    processed: results.filter((r) => r.status === 'processed').length,
+    skipped: results.filter((r) => r.status === 'skipped').length,
+    failed: results.filter((r) => r.status === 'failed').length,
+    emailed: results.filter((r) => r.actions.includes('email')).length,
+    letters: results.filter((r) => r.actions.includes('letter')).length,
+    sms: results.filter((r) => r.actions.includes('sms')).length,
+    phone: results.filter((r) => r.actions.includes('phone')).length,
+    activities: results.filter((r) => r.actions.includes('activity')).length,
+    letterPartnerIds: results.filter((r) => r.actions.includes('letter')).map((r) => r.partnerId),
+  };
+
+  return { db: nextDb, results, summary };
+}
+
+/** Shared wizard specification for postponing customer follow-ups. */
+export const postponeFollowUpWizardSpec = (at = today()) => ({
+  title: 'Postpone Follow-ups',
+  fields: [
+    { name: 'date', type: 'date', label: 'Next Reminder', required: true, default: addDays(at, 7) },
+  ],
+});
+
 const ALLOWED_FOLLOWUP_CAMPAIGN_FIELDS = new Set([
   'id', 'name', 'mailing_model', 'body', 'followup_sms', 'company_id',
   'followup_partner_id', 'followup_company_id', 'followup_level_id', 'followup_oldest',
@@ -2776,6 +3040,11 @@ export const financeModels = {
       delay: { type: 'integer', label: 'Days Overdue', hidden: true },
       send_email: { type: 'boolean', label: 'Email' },
       send_sms: { type: 'boolean', label: 'SMS' },
+      auto_execute: {
+        type: 'boolean',
+        label: 'Automatic',
+        help: 'Automatically execute this follow-up level when due.',
+      },
       sms_message: { type: 'text', label: 'SMS Text', hideWhen: (r) => !r?.send_sms },
       create_activity: { type: 'boolean', label: 'Schedule Activity' },
       activity_default_responsible_type: {
@@ -2826,6 +3095,7 @@ export const financeModels = {
       delay: 15,
       send_email: true,
       send_sms: false,
+      auto_execute: true,
       create_activity: false,
       activity_default_responsible_type: 'followup',
     }),
@@ -2889,6 +3159,7 @@ export const financeModels = {
       { id: 'email', label: 'Email', fn: (r) => Boolean(r.send_email) },
       { id: 'sms', label: 'SMS', fn: (r) => Boolean(r.send_sms) },
       { id: 'activity', label: 'Schedule Activity', fn: (r) => Boolean(r.create_activity) },
+      { id: 'auto_execute', label: 'Automatic', fn: (r) => r.auto_execute !== false },
     ]],
     groupBys: ['reminder_timing', 'company_id'],
     form: {
@@ -2903,6 +3174,7 @@ export const financeModels = {
           label: 'Notification',
           groups: [
             { title: 'Actions', fields: ['send_email', 'send_sms'] },
+            { title: 'Options', fields: ['auto_execute'] },
             { fullWidth: true, fields: ['message', 'sms_message'] },
           ],
         },

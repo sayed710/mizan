@@ -6,9 +6,9 @@ import { categoryPath } from '../models/productconfig-helpers.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
-import { FollowUpWizard } from './FollowUpLetter.jsx';
+import { FollowUpBatchResultModal, FollowUpWizard, runBatchFollowUpsAction } from './FollowUpLetter.jsx';
 import { Wizard } from './Wizard.jsx';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, BUCKETS, companyReceivableLines, followUpCompanies, followUpLevel, followUps, followUpText, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerReceivableLines, resolveAgedAsOfDate, taxesByGrid, taxesByTax, taxItemKey, taxReport } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, BUCKETS, companyReceivableLines, followUpCompanies, followUpLevel, followUps, followUpText, isPartnerFollowUpPostponed, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerFollowUp, partnerFollowUpStatus, partnerReceivableLines, postponeFollowUp, postponeFollowUpWizardSpec, resolveAgedAsOfDate, taxesByGrid, taxesByTax, taxItemKey, taxReport } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -491,8 +491,9 @@ const Aged = (kind) => function AgedBody({ db, period, companyId, agingOptions, 
   );
 };
 
-function FollowUpActions({ db, reminder, companyId }) {
+function FollowUpActions({ db, reminder, companyId, onPostpone = null }) {
   const [open, setOpen] = useState(false);
+  const [postponeState, setPostponeState] = useState(null);
   const partner = read(db, 'res.partner', reminder.partner_id);
   const email = partner?.email?.trim();
   const lvl = followUpLevel(db, reminder);
@@ -517,25 +518,53 @@ function FollowUpActions({ db, reminder, companyId }) {
     {isDual && hasPhone && <>
       {' '}<button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: 'sms' }))}>{t('Send SMS')}</button>
     </>}
+    {' '}<button type="button" className="btn sm" onClick={() => (onPostpone ? onPostpone(reminder.partner_id, companyId) : setPostponeState({ spec: postponeFollowUpWizardSpec(), error: '' }))}>{t('Postpone')}</button>
+    {!onPostpone && postponeState && (
+      <Wizard
+        db={db}
+        spec={postponeState.spec}
+        error={postponeState.error}
+        onConfirm={(values) => {
+          try {
+            const next = postponeFollowUp(getDb(), [reminder.partner_id], values.date, { companyId });
+            commit(next);
+            setPostponeState(null);
+          } catch (e) {
+            setPostponeState((prev) => (prev ? { ...prev, error: t(e.message) } : prev));
+          }
+        }}
+        onCancel={() => setPostponeState(null)}
+      />
+    )}
   </>;
 }
 
-export function FollowUps({ db, sourceDb, companyId = 'all' }) {
+function followUpCompanyGroups(db, allowed, statusFilter = 'all', at = today()) {
+  const allowedSet = new Set(allowed);
+  const allFollowUps = followUps(db, at, { ignoreNextActionDate: true });
+  const companyGroups = new Map();
+  for (const f of allFollowUps) {
+    for (const part of followUpCompanies(f)) {
+      const cId = part.company_id ?? part.invoices[0]?.company_id ?? 1;
+      if (!allowedSet.has(cId)) continue;
+      const partner = read(db, 'res.partner', part.partner_id);
+      if (statusFilter === 'in_need_of_action' && partnerFollowUpStatus(db, partner, cId, at) !== 'in_need_of_action') continue;
+      if (statusFilter === 'postponed' && !isPartnerFollowUpPostponed(db, partner, cId, at)) continue;
+      if (!companyGroups.has(cId)) companyGroups.set(cId, []);
+      companyGroups.get(cId).push(part);
+    }
+  }
+  return companyGroups;
+}
+
+export function FollowUps({ db, sourceDb, companyId = 'all', statusFilter = 'all', selectedKeys = null, onToggle = null, onPostpone = null }) {
   const settingsAllowed = (sourceDb ?? db).settings?.allowed_company_ids ?? [currentCompany(sourceDb ?? db)];
   const allowed = companyId === 'all'
     ? settingsAllowed
     : settingsAllowed.filter((id) => id === Number(companyId));
   const multiCompany = allowed.length > 1;
-
-  const allFollowUps = followUps(db);
-  const companyGroups = new Map();
-  for (const f of allFollowUps) {
-    for (const part of followUpCompanies(f)) {
-      const cId = part.company_id ?? part.invoices[0]?.company_id ?? 1;
-      if (!companyGroups.has(cId)) companyGroups.set(cId, []);
-      companyGroups.get(cId).push(part);
-    }
-  }
+  const at = today();
+  const companyGroups = followUpCompanyGroups(db, allowed, statusFilter, at);
 
   const companyBalances = new Map();
   for (const cId of allowed) {
@@ -545,12 +574,31 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   const renderCustomerLines = (f, cId) => {
     const compCurr = companyCurrencyRecord(db, cId);
     const info = companyBalances.get(cId)?.get(f.partner_id) ?? partnerReceivableLines(db, f.partner_id, cId);
+    const partner = read(db, 'res.partner', f.partner_id);
+    const compLine = partnerFollowUp(partner, cId);
+    const postponed = isPartnerFollowUpPostponed(db, partner, cId, at);
+    const rowKey = `${cId}:${f.partner_id}`;
     return (
       <Fragment key={`${cId}-${f.partner_id}`}>
         <tr className="rep-detail">
           <td>
+            {onToggle && (
+              <>
+                <input
+                  type="checkbox"
+                  aria-label={partnerName(db, f.partner_id)}
+                  checked={Boolean(selectedKeys?.has(rowKey))}
+                  onChange={() => onToggle(rowKey)}
+                />{' '}
+              </>
+            )}
             <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
-            <FollowUpActions db={db} reminder={f} companyId={cId} />
+            {postponed && (
+              <>
+                <span className="badge badge-info">{t('Postponed')} ({compLine.followup_next_action_date})</span>{' '}
+              </>
+            )}
+            <FollowUpActions db={db} reminder={f} companyId={cId} onPostpone={onPostpone} />
           </td>
           <td className="num">{f.oldest ?? '—'}</td>
           <td className="num">{formatCurrency(info.total_due, compCurr)}</td>
@@ -1321,6 +1369,85 @@ function ReportPage({ leaf, params }) {
   const [sentState, setSentState] = useState({ key: '', ids: [] });
   const [sendError, setSendError] = useState('');
   const [sending, setSending] = useState(false);
+  const isFollowUps = leaf.report === 'followups';
+  const [followupStatusFilter, setFollowupStatusFilter] = useState('all');
+  const [selectedFollowUps, setSelectedFollowUps] = useState(() => new Set());
+  const [followupBatchReport, setFollowupBatchReport] = useState(null);
+  const [followupPostpone, setFollowupPostpone] = useState(null);
+  const [followupBusy, setFollowupBusy] = useState(false);
+  const [followupError, setFollowupError] = useState('');
+  const visibleFollowUpTargets = useMemo(() => {
+    if (!isFollowUps) return [];
+    const settingsAllowed = sourceDb.settings?.allowed_company_ids ?? [currentCompany(sourceDb)];
+    const allowed = selectedCompany === 'all'
+      ? settingsAllowed
+      : settingsAllowed.filter((id) => id === Number(selectedCompany));
+    const groups = followUpCompanyGroups(db, allowed, followupStatusFilter);
+    return allowed.flatMap((cId) => (groups.get(cId) ?? []).map((f) => ({
+      key: `${cId}:${f.partner_id}`,
+      partnerId: f.partner_id,
+      companyId: cId,
+    })));
+  }, [isFollowUps, db, sourceDb, selectedCompany, followupStatusFilter]);
+  const allFollowUpsSelected = visibleFollowUpTargets.length > 0 && visibleFollowUpTargets.every((item) => selectedFollowUps.has(item.key));
+  const toggleFollowUpKey = (key) => setSelectedFollowUps((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const toggleSelectAllFollowUps = () => setSelectedFollowUps((prev) => {
+    const next = new Set(prev);
+    for (const item of visibleFollowUpTargets) {
+      if (allFollowUpsSelected) next.delete(item.key);
+      else next.add(item.key);
+    }
+    return next;
+  });
+  const selectedFollowUpTargets = () => visibleFollowUpTargets.filter((item) => selectedFollowUps.has(item.key));
+  const handleProcessFollowUps = async () => {
+    const targets = selectedFollowUpTargets();
+    if (!targets.length) { setFollowupError('Select at least one customer first'); return; }
+    setFollowupError('');
+    setFollowupBusy(true);
+    try {
+      const report = await runBatchFollowUpsAction(targets);
+      setFollowupBatchReport(report);
+      setSelectedFollowUps(new Set());
+    } catch (err) {
+      setFollowupError(err?.message ?? 'Action failed');
+    } finally {
+      setFollowupBusy(false);
+    }
+  };
+  const handleOpenPostpone = () => {
+    const targets = selectedFollowUpTargets();
+    if (!targets.length) { setFollowupError('Select at least one customer first'); return; }
+    setFollowupError('');
+    setFollowupPostpone({ targets, spec: postponeFollowUpWizardSpec(), error: '' });
+  };
+  const confirmFollowupPostpone = async (values) => {
+    if (!followupPostpone) return;
+    try {
+      const byCompany = new Map();
+      for (const item of followupPostpone.targets) {
+        if (!byCompany.has(item.companyId)) byCompany.set(item.companyId, []);
+        byCompany.get(item.companyId).push(item.partnerId);
+      }
+      let nextDb = getDb();
+      for (const [cId, partnerIds] of byCompany.entries()) {
+        nextDb = postponeFollowUp(nextDb, partnerIds, values.date, { companyId: cId });
+      }
+      const res = await commit(nextDb, { quiet: true });
+      if (res && res.ok === false) {
+        setFollowupPostpone((prev) => (prev ? { ...prev, error: res.error ?? t('Could not save changes') } : prev));
+        return;
+      }
+      setFollowupPostpone(null);
+      setSelectedFollowUps(new Set());
+    } catch (err) {
+      setFollowupPostpone((prev) => (prev ? { ...prev, error: t(err.message) } : prev));
+    }
+  };
   const requestedIds = leaf.report === 'customerStatement' ? (params?.get('partners') ?? '').split(',').filter((id) => /^[1-9]\d*$/.test(id)).map(Number) : [];
   const statementIds = [...new Set(requestedIds)].filter((id) => read(db, 'res.partner', id));
   const auditScopeKey = JSON.stringify(sourceDb.settings?.allowed_company_ids ?? [sourceDb.settings?.current_company_id ?? 1]);
@@ -1689,8 +1816,29 @@ function ReportPage({ leaf, params }) {
       {showUnpostedOption && <label className="inline-select">
         <input type="checkbox" aria-label={t(leaf.report === 'depreciation' ? 'Include Draft Assets' : 'Include Unposted Entries')} checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t(leaf.report === 'depreciation' ? 'Include Draft Assets' : 'Include Unposted Entries')}
       </label>}
+      {isFollowUps && (
+        <label className="inline-select">
+          {t('Follow-up Status')}
+          <select
+            aria-label={t('Follow-up Status')}
+            value={followupStatusFilter}
+            onChange={(e) => { setFollowupStatusFilter(e.target.value); setSelectedFollowUps(new Set()); setFollowupError(''); }}
+          >
+            <option value="all">{t('All Overdue')}</option>
+            <option value="in_need_of_action">{t('In need of action')}</option>
+            <option value="postponed">{t('Postponed')}</option>
+          </select>
+        </label>
+      )}
       {subtitle && <span className="muted">{subtitle}</span>}
       <span className="spacer" />
+      {isFollowUps && (
+        <>
+          <button type="button" className="btn sm" disabled={followupBusy} onClick={handleProcessFollowUps}>{t('Process follow-ups')}</button>
+          <button type="button" className="btn sm" disabled={followupBusy} onClick={handleOpenPostpone}>{t('Postpone')}</button>
+          {followupError && <span role="alert">{t(followupError)}</span>}
+        </>
+      )}
       {isDeferred && <button type="button" className="btn sm" disabled={Boolean(periodError) || !deferredGrouped || Boolean(activeGenerateWizard?.pending)} title={!deferredGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={openGenerateWizard}>{t('Generate Entries')}</button>}
       {generationError && <span role="alert">{t(generationError)}</span>}
       {isAudit && (
@@ -1748,7 +1896,14 @@ function ReportPage({ leaf, params }) {
                 </tr>
               )}
               <tr>
-                <th>{t(reportFirstCol ?? '')}</th>
+                <th>
+                  {isFollowUps && !isPrinting && (
+                    <>
+                      <input type="checkbox" aria-label={t('Select all')} checked={allFollowUpsSelected} onChange={toggleSelectAllFollowUps} />{' '}
+                    </>
+                  )}
+                  {t(reportFirstCol ?? '')}
+                </th>
                 {isTaxBoxes && detailComparison && <th>{t('Description')}</th>}
                 {(detailComparison
                   ? periods.flatMap((p) => (leaf.report === 'tax' ? ['Base', 'Tax'] : ['Debit', 'Credit', 'Balance']).map((label) => `${p.label} - ${t(label)}`))
@@ -1804,6 +1959,10 @@ function ReportPage({ leaf, params }) {
                 showJournalAccount={showJournalAccount}
                 showInitialBalance={showInitialBalance}
                 showEndBalance={showEndBalance}
+                statusFilter={isFollowUps ? followupStatusFilter : undefined}
+                selectedKeys={isFollowUps && !isPrinting ? selectedFollowUps : undefined}
+                onToggle={isFollowUps && !isPrinting ? toggleFollowUpKey : undefined}
+                onPostpone={isFollowUps && !isPrinting ? (partnerId, cId) => { setFollowupError(''); setFollowupPostpone({ targets: [{ partnerId, companyId: cId }], spec: postponeFollowUpWizardSpec(), error: '' }); } : undefined}
               />
             )}
           </table>
@@ -1819,6 +1978,18 @@ function ReportPage({ leaf, params }) {
           onConfirm={confirmGenerateWizard}
           onCancel={cancelGenerateWizard}
         />
+      )}
+      {!isPrinting && followupPostpone && (
+        <Wizard
+          db={db}
+          spec={followupPostpone.spec}
+          error={followupPostpone.error}
+          onConfirm={confirmFollowupPostpone}
+          onCancel={() => setFollowupPostpone(null)}
+        />
+      )}
+      {!isPrinting && followupBatchReport && (
+        <FollowUpBatchResultModal report={followupBatchReport} onClose={() => setFollowupBatchReport(null)} />
       )}
     </ReportPrintView>
   );

@@ -1,16 +1,152 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { read } from '../orm.js';
 import { today } from '../models/common.js';
 import { addressLines, currentCompany } from '../models/company.js';
-import { followUpLetter, logManualFollowUp } from '../models/finance.js';
+import { followUpLetter, logManualFollowUp, processFollowUps } from '../models/finance.js';
 import { formatCurrency } from '../money.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { appOpen } from '../access.js';
 import { ReportPrintView } from './ReportPrintView.jsx';
+import { handleDialogKeyDown } from './Wizard.jsx';
 
 const money = (amount, currency) => `${formatCurrency(amount, currency, '')} ${currency.name}`;
 const totals = (list) => list.map(({ amount, currency }) => money(amount, currency)).join(', ') || '0';
+
+const ACTION_LABELS = {
+  email: 'Email',
+  letter: 'Letter',
+  sms: 'SMS',
+  phone: 'Phone',
+  activity: 'Activity',
+};
+
+const summarizeBatchResults = (results) => ({
+  total: results.length,
+  processed: results.filter((r) => r.status === 'processed').length,
+  skipped: results.filter((r) => r.status === 'skipped').length,
+  failed: results.filter((r) => r.status === 'failed').length,
+  emailed: results.filter((r) => r.actions.includes('email')).length,
+  letters: results.filter((r) => r.actions.includes('letter')).length,
+  sms: results.filter((r) => r.actions.includes('sms')).length,
+  phone: results.filter((r) => r.actions.includes('phone')).length,
+  activities: results.filter((r) => r.actions.includes('activity')).length,
+  letterPartnerIds: results.filter((r) => r.actions.includes('letter')).map((r) => r.partnerId),
+});
+
+/** Execute batch follow-ups for `targets` (`[{ partnerId, companyId }]`), reusing server email and local commit paths. */
+export async function runBatchFollowUpsAction(targets) {
+  if (!targets?.length) throw new Error('Select at least one customer first');
+  const results = [];
+
+  if (!isServer()) {
+    const byCompany = new Map();
+    for (const item of targets) {
+      const cId = Number(item.companyId ?? currentCompany(getDb()));
+      if (!byCompany.has(cId)) byCompany.set(cId, []);
+      byCompany.get(cId).push(Number(item.partnerId));
+    }
+    let nextDb = getDb();
+    for (const [cId, partnerIds] of byCompany.entries()) {
+      const res = await processFollowUps(nextDb, partnerIds, { companyId: cId });
+      nextDb = res.db;
+      results.push(...res.results);
+    }
+    if (nextDb !== getDb()) {
+      const saved = await commit(nextDb, { quiet: true });
+      if (saved && saved.ok === false) throw new Error(saved.error ?? 'Could not save changes');
+    }
+    return { results, summary: summarizeBatchResults(results) };
+  }
+
+  for (const item of targets) {
+    const partnerId = Number(item.partnerId);
+    const cId = Number(item.companyId ?? currentCompany(getDb()));
+    const beforeDb = getDb();
+    const res = await processFollowUps(beforeDb, [partnerId], {
+      companyId: cId,
+      deliverEmail: async (_email, ctx) => {
+        if (ctx.db !== getDb()) {
+          const pre = await commit(ctx.db, { quiet: true });
+          if (pre && pre.ok === false) throw new Error(pre.error ?? 'Could not save changes');
+        }
+        const mailRes = await serverAction('/api/mail/followup', { partnerId: ctx.partner.id, companyId: ctx.companyId });
+        if (!mailRes.ok) throw new Error(mailRes.error ?? 'Action failed');
+        if (mailRes.refreshError) throw new Error(mailRes.refreshError);
+        return { serverHandled: true, db: getDb() };
+      },
+    });
+    if (res.db !== getDb()) {
+      const saved = await commit(res.db, { quiet: true });
+      if (saved && saved.ok === false) throw new Error(saved.error ?? 'Could not save changes');
+    }
+    results.push(...res.results);
+  }
+  return { results, summary: summarizeBatchResults(results) };
+}
+
+export function FollowUpBatchResultModal({ report, onClose }) {
+  const box = useRef(null);
+  useEffect(() => {
+    box.current?.querySelector('button')?.focus();
+  }, []);
+  if (!report) return null;
+  const { results, summary } = report;
+  const lettersByCompany = new Map();
+  for (const r of results) {
+    if (!r.actions.includes('letter')) continue;
+    const cId = r.companyId ?? 1;
+    if (!lettersByCompany.has(cId)) lettersByCompany.set(cId, []);
+    lettersByCompany.get(cId).push(r.partnerId);
+  }
+  const openLetters = () => {
+    for (const [cId, ids] of lettersByCompany.entries()) {
+      const url = `${location.origin}${location.pathname}${location.search}#/print/followup/${ids.join(',')}?company=${cId}`;
+      const win = window.open?.(url, '_blank');
+      if (!win) location.hash = `#/print/followup/${ids.join(',')}?company=${cId}`;
+    }
+  };
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={box} className="modal" role="dialog" aria-modal="true" aria-label={t('Follow-up Processing Report')} onKeyDown={(e) => handleDialogKeyDown(e, box.current, onClose)}>
+        <h2>{t('Follow-up Processing Report')}</h2>
+        <p aria-live="polite">
+          {t('Processed')}: <b>{summary.processed}</b> · {t('Skipped')}: <b>{summary.skipped}</b> · {t('Failed')}: <b>{summary.failed}</b>
+        </p>
+        <table className="list">
+          <thead>
+            <tr>
+              <th>{t('Customer')}</th>
+              <th>{t('Level')}</th>
+              <th>{t('Status')}</th>
+              <th>{t('Actions')}</th>
+              <th>{t('Details')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {results.map((r) => (
+              <tr key={`${r.companyId ?? 1}-${r.partnerId}`}>
+                <td>{r.partnerName}</td>
+                <td>{r.levelName ?? '—'}</td>
+                <td>{t(r.status === 'processed' ? 'Processed' : r.status === 'skipped' ? 'Skipped' : 'Failed')}</td>
+                <td>{r.actions.length ? r.actions.map((a) => t(ACTION_LABELS[a] ?? a)).join(', ') : '—'}</td>
+                <td>{r.nextActionDate ? `${t(r.reason)} (${r.nextActionDate})` : (r.reason ? t(r.reason) : '—')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ marginTop: '0.75rem' }}>
+          {lettersByCompany.size > 0 && (
+            <>
+              <button type="button" className="btn primary" onClick={openLetters}>{t('Print Letters')}</button>{' '}
+            </>
+          )}
+          <button type="button" className="btn" onClick={onClose}>{t('Close')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function FollowUpWizard({ partnerId, companyId, onClose }) {
   const db = useDb();
@@ -62,25 +198,55 @@ export function FollowUpWizard({ partnerId, companyId, onClose }) {
   </div></div>;
 }
 
+function FollowUpLetterContent({ partner, letter }) {
+  return (
+    <>
+      <address><b>{partner.name}</b>{addressLines(partner, t('Tax ID')).map((line, i) => <div key={i}>{line}</div>)}</address>
+      <p style={{ whiteSpace: 'pre-line' }}>{letter.level.message}</p>
+      <table className="rep-table"><thead><tr>{['Invoice', 'Invoice Date', 'Due Date', 'Residual', 'Overdue'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
+        <tbody>{letter.invoices.map((m) => <tr key={m.id ? `${m.move_type ?? 'move'}-${m.id}` : m.name}><td>{m.name}</td><td>{m.invoice_date}</td><td>{m.invoice_date_due}</td><td>{money(m.amount_residual, m.followup_currency)}</td><td>{m.overdue ? t('Overdue') : ''}</td></tr>)}</tbody></table>
+      <p><b>{t('Total Due')}: {totals(letter.due)}</b></p><p><b>{t('Total Overdue')}: {totals(letter.overdue)}</b></p>
+    </>
+  );
+}
+
 export function FollowUpLetter({ partnerId, companyId }) {
   const db = useDb();
-  const company = read(db, 'res.company', Number(companyId ?? currentCompany(db)));
-  const partner = read(db, 'res.partner', Number(partnerId));
-  let letter;
-  let error;
-  try { letter = followUpLetter(db, Number(partnerId), Number(companyId ?? currentCompany(db))); } catch (e) { error = t(e.message); }
-  const canPrint = Boolean(letter && company && partner);
+  const cId = Number(companyId ?? currentCompany(db));
+  const company = read(db, 'res.company', cId);
+  const ids = String(partnerId ?? '').split(',').map((s) => Number(s.trim())).filter(Boolean);
+  const items = ids.map((id) => {
+    const partner = read(db, 'res.partner', id);
+    let letter = null;
+    let error = null;
+    try { letter = followUpLetter(db, id, cId); } catch (e) { error = t(e.message); }
+    return { id, partner, letter, error };
+  });
+  const isBatch = items.length > 1;
+  const single = items[0];
+  const canPrint = isBatch
+    ? Boolean(company && items.some((x) => x.letter && x.partner))
+    : Boolean(single?.letter && company && single?.partner);
   useEffect(() => {
     if (!canPrint) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
   }, [canPrint]);
-  if (!letter || !company || !partner) return <main className="action"><p role="alert">{error ?? t('Record not found.')}</p></main>;
-  return <ReportPrintView company={company} title={t('Follow-up Letter')} autoPrint={false}>
-    <address><b>{partner.name}</b>{addressLines(partner, t('Tax ID')).map((line, i) => <div key={i}>{line}</div>)}</address>
-    <p style={{ whiteSpace: 'pre-line' }}>{letter.level.message}</p>
-    <table className="rep-table"><thead><tr>{['Invoice', 'Invoice Date', 'Due Date', 'Residual', 'Overdue'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
-      <tbody>{letter.invoices.map((m) => <tr key={m.id ? `${m.move_type ?? 'move'}-${m.id}` : m.name}><td>{m.name}</td><td>{m.invoice_date}</td><td>{m.invoice_date_due}</td><td>{money(m.amount_residual, m.followup_currency)}</td><td>{m.overdue ? t('Overdue') : ''}</td></tr>)}</tbody></table>
-    <p><b>{t('Total Due')}: {totals(letter.due)}</b></p><p><b>{t('Total Overdue')}: {totals(letter.overdue)}</b></p>
-  </ReportPrintView>;
+  if (!company || (!isBatch && (!single?.letter || !single?.partner))) {
+    return <main className="action"><p role="alert">{single?.error ?? t('Record not found.')}</p></main>;
+  }
+  if (isBatch) {
+    const documents = items.map((item) => ({
+      key: item.id,
+      content: item.letter && item.partner
+        ? <FollowUpLetterContent partner={item.partner} letter={item.letter} />
+        : <p role="alert">{item.error ?? t('Record not found.')}</p>,
+    }));
+    return <ReportPrintView company={company} title={t('Follow-up Letter')} autoPrint={false} documents={documents} />;
+  }
+  return (
+    <ReportPrintView company={company} title={t('Follow-up Letter')} autoPrint={false}>
+      <FollowUpLetterContent partner={single.partner} letter={single.letter} />
+    </ReportPrintView>
+  );
 }
