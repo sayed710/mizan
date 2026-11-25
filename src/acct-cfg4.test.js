@@ -520,3 +520,29 @@ test('Finding 6 regression: Arabic translations exist for Company is required an
     assert.match(i18nSource, new RegExp(`'${key}':\\s*'[^']+'`), `${key} must have an Arabic entry in i18n.js`);
   }
 });
+
+test('migration 78 gives a company-less depreciation model the company of the assets using it', () => {
+  const db = seed();
+  const old = {
+    ...db,
+    schema_version: 77,
+    records: {
+      ...db.records,
+      'account.asset.model': [
+        { id: 901, name: 'Used by company 2' },
+        { id: 902, name: 'Shared' },
+        { id: 903, name: 'Unused' },
+      ],
+      'account.asset': [
+        ...(db.records['account.asset'] ?? []),
+        { id: 9901, name: 'A', company_id: 2, model_id: 901, state: 'draft' },
+        { id: 9902, name: 'B', company_id: 1, model_id: 902, state: 'draft' },
+        { id: 9903, name: 'C', company_id: 2, model_id: 902, state: 'draft' },
+      ],
+    },
+  };
+  const models = migrate(old).records['account.asset.model'];
+  assert.equal(models.find((m) => m.id === 901).company_id, 2);
+  assert.equal(models.find((m) => m.id === 902).company_id, undefined);
+  assert.equal(models.find((m) => m.id === 903).company_id, 1);
+});

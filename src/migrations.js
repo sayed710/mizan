@@ -2037,14 +2037,27 @@ export function migrateReconcileModelTolerance(db) {
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 
 export function migrateReconcileAndAssetModelCompany(db) {
+  // A company-less model takes the one company whose records use it; a model shared by several companies stays company-less
+  // so their assets keep posting, and an unused one goes to the main company.
+  const usersOf = (key) => {
+    if (key !== 'account.asset.model') return () => new Set();
+    const refs = [
+      ...(db.records['account.asset'] ?? []).map((a) => [a.model_id, a.company_id ?? 1]),
+      ...(db.records['account.account'] ?? []).map((a) => [a.asset_model_id, a.company_id ?? 1]),
+    ];
+    return (id) => new Set(refs.filter(([modelId]) => modelId === id).map(([, companyId]) => companyId));
+  };
   const backfillCompany = (key) => {
     const list = db?.records?.[key];
     if (!Array.isArray(list) || !list.length) return null;
+    const companiesUsing = usersOf(key);
     let changed = false;
     const next = list.map((r) => {
       if (!r || typeof r !== 'object' || r.company_id) return r;
+      const users = companiesUsing(r.id);
+      if (users.size > 1) return r;
       changed = true;
-      return { ...r, company_id: 1 };
+      return { ...r, company_id: users.size === 1 ? [...users][0] : 1 };
     });
     return changed ? next : null;
   };
