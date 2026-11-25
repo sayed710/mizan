@@ -9,10 +9,11 @@ import { applyFilters, create, groupRecords, matches, read, search } from './orm
 import { menusFor, models } from './models/index.js';
 import { addDays, shiftMonth, today } from './models/common.js';
 import { ensureBankSuspense } from './models/ledger.js';
+import { createCompany } from './models/company.js';
 import { setupDom, find } from './test-support/dom.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
-const { List } = await import('./views/List.jsx');
+const { List, visibleListColumns } = await import('./views/List.jsx');
 
 const STMT = 'account.bank.statement';
 
@@ -320,7 +321,7 @@ test('Bank Statements search/filter/group labels have Arabic translations and no
   globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null) };
   try {
     const { t } = await import(`./i18n.js?bank-stmt-ar=${Date.now()}`);
-    for (const key of ['Empty', 'Invalid', 'Date: This Month', 'Date: This Year', 'Journal', 'Date']) {
+    for (const key of ['Empty', 'Invalid', 'Date: This Month', 'Date: This Year', 'Journal', 'Date', 'Problem Description', 'Initial balance ({amount}) does not match previous statement', 'Incorrect ending balance, expected {amount}']) {
       assert.notEqual(t(key), key, `Arabic translation exists for "${key}"`);
     }
   } finally {
@@ -339,4 +340,81 @@ test('Bank Statements search/filter/group labels have Arabic translations and no
     seen.add(k);
   }
   assert.deepEqual(dups, [], 'No duplicate keys in src/i18n.js');
+});
+
+test('account.bank.statement list columns match Odoo 20 view_bank_statement_tree (single-company vs multi-company)', () => {
+  const db = seed();
+  const def = models[STMT];
+
+  assert.deepEqual(def.list, ['name', 'date', 'journal_id', 'company_id', 'balance_start', 'balance_end_real']);
+  assert.equal(def.fields.company_id.multiCompanyOnly, true);
+
+  // Single-company hides company_id (Odoo groups="base.group_multi_company"), and omits column_invisible balance_end / state
+  const single = visibleListColumns(def, db, {});
+  assert.deepEqual(single.cols, ['name', 'date', 'journal_id', 'balance_start', 'balance_end_real']);
+  assert.deepEqual(single.optionalCols, []);
+
+  const singleHtml = renderToStaticMarkup(createElement(List, {
+    db, model: STMT, records: [], open: () => {}, selected: new Set(), setSelected: () => {}, groupBy: [],
+  }));
+  const singleHeaders = [...singleHtml.matchAll(/<th[^>]*>(?:<button[^>]*>)?([^<]+)/g)].map((m) => m[1].trim()).filter(Boolean);
+  assert.deepEqual(singleHeaders, ['Reference', 'Date', 'Journal', 'Starting Balance', 'Ending Balance']);
+
+  // Multi-company includes company_id between journal_id and balance_start
+  const multiDb = createCompany(db, { name: 'Branch Co', currency_code: 'USD' }).db;
+  const multi = visibleListColumns(def, multiDb, {});
+  assert.deepEqual(multi.cols, ['name', 'date', 'journal_id', 'company_id', 'balance_start', 'balance_end_real']);
+  assert.deepEqual(multi.optionalCols, []);
+
+  const multiHtml = renderToStaticMarkup(createElement(List, {
+    db: multiDb, model: STMT, records: [], open: () => {}, selected: new Set(), setSelected: () => {}, groupBy: [],
+  }));
+  const multiHeaders = [...multiHtml.matchAll(/<th[^>]*>(?:<button[^>]*>)?([^<]+)/g)].map((m) => m[1].trim()).filter(Boolean);
+  assert.deepEqual(multiHeaders, ['Reference', 'Date', 'Journal', 'Company', 'Starting Balance', 'Ending Balance']);
+});
+
+test('account.bank.statement problem_description matches Odoo 20 _compute_problem_description', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+
+  const firstOk = create(db, STMT, {
+    name: 'PD/001',
+    journal_id: bankJournal.id,
+    date: '2026-04-01',
+    balance_start: 100,
+    balance_end_real: 150,
+    line_ids: [{ date: '2026-04-01', payment_ref: 'Inflow', amount: 50 }],
+  });
+  db = firstOk.db;
+  assert.equal(read(db, STMT, firstOk.id).problem_description, null);
+
+  // Invalid (initial balance 200 !== 150) AND incomplete (200 + 25 = 225 !== 300): invalid wins per Odoo elif
+  const bothBad = create(db, STMT, {
+    name: 'PD/002',
+    journal_id: bankJournal.id,
+    date: '2026-04-02',
+    balance_start: 200,
+    balance_end_real: 300,
+    line_ids: [{ date: '2026-04-02', payment_ref: 'Part', amount: 25 }],
+  });
+  db = bothBad.db;
+  assert.match(
+    read(db, STMT, bothBad.id).problem_description ?? '',
+    /^Initial balance \(.*200\.00\) does not match previous statement$/,
+  );
+
+  // Valid initial balance (300 === previous 300), but incomplete (300 + 40 = 340 !== 400)
+  const incompleteOnly = create(db, STMT, {
+    name: 'PD/003',
+    journal_id: bankJournal.id,
+    date: '2026-04-03',
+    balance_start: 300,
+    balance_end_real: 400,
+    line_ids: [{ date: '2026-04-03', payment_ref: 'Deposit', amount: 40 }],
+  });
+  db = incompleteOnly.db;
+  assert.match(
+    read(db, STMT, incompleteOnly.id).problem_description ?? '',
+    /^Incorrect ending balance, expected .*340\.00$/,
+  );
 });
