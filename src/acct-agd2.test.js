@@ -124,3 +124,47 @@ test('AGD-2: invalid or empty As of Date keeps last valid date, throws no silent
     await React.act(async () => root.unmount());
   }
 });
+
+test('AGD-2 regression: As of Date error associates a stable id with aria-describedby while error is present', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore } = await import('./store.js');
+  await initStore();
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'agedReceivable' } })));
+    const asOfInput = () => find(host, (n) => n.tagName === 'INPUT' && reactProps(n)?.['aria-label'] === 'As of');
+    const alertNode = () => find(host, (n) => reactProps(n)?.role === 'alert');
+
+    assert.equal(alertNode(), null);
+    assert.equal(reactProps(asOfInput())['aria-invalid'], false);
+    assert.equal(reactProps(asOfInput())['aria-describedby'], undefined);
+
+    await React.act(async () => reactProps(asOfInput()).onChange({ target: { value: '' } }));
+    const firstAlert = alertNode();
+    const errorId = reactProps(firstAlert)?.id;
+    assert.ok(typeof errorId === 'string' && errorId.length > 0);
+    assert.equal(reactProps(asOfInput())['aria-invalid'], true);
+    assert.equal(reactProps(asOfInput())['aria-describedby'], errorId);
+
+    await React.act(async () => reactProps(asOfInput()).onChange({ target: { value: '2025-02-30' } }));
+    assert.equal(reactProps(alertNode())?.id, errorId);
+    assert.equal(reactProps(asOfInput())['aria-describedby'], errorId);
+
+    await React.act(async () => reactProps(asOfInput()).onChange({ target: { value: '2025-07-01' } }));
+    assert.equal(alertNode(), null);
+    assert.equal(reactProps(asOfInput())['aria-invalid'], false);
+    assert.equal(reactProps(asOfInput())['aria-describedby'], undefined);
+
+    await React.act(async () => reactProps(asOfInput()).onChange({ target: { value: '' } }));
+    assert.equal(reactProps(alertNode())?.id, errorId);
+    assert.equal(reactProps(asOfInput())['aria-describedby'], errorId);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
