@@ -313,10 +313,20 @@ function trackingMessages(db, model, before, after, vals) {
 
 /** Apply onchange without mutating the original record. */
 function writeValues(db, model, before, vals) {
+  const fields = models[model].fields;
   const base = stripComputed(model, vals);
+  const onchangeInput = Object.fromEntries(
+    Object.entries(vals).filter(([k]) => !fields[k]?.compute || fields[k]?.type === 'one2many' || fields[k]?.editable),
+  );
   // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
-  const clean = { ...base, ...Object.fromEntries(Object.keys(base).flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...base }, k, db) ?? {})).filter(([k]) => !(k in base))) };
-  return { after: { ...before, ...clean }, clean };
+  const derived = Object.fromEntries(
+    Object.keys(onchangeInput)
+      .flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...onchangeInput }, k, db) ?? {}))
+      .filter(([k]) => !(k in onchangeInput)),
+  );
+  const clean = { ...base, ...stripComputed(model, derived) };
+  const finalClean = models[model].finalizeWrite?.(db, clean, before) ?? clean;
+  return { after: { ...before, ...finalClean }, clean: finalClean };
 }
 
 /** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
@@ -534,6 +544,7 @@ export function groupRecords(db, model, records, name, context = {}) {
 /** Aggregate a numeric field (sum, or mean of available numeric values when `groupOperator: 'avg'`), or the record count for "__count". */
 export function aggregate(records, measure, model = null) {
   if (measure === '__count') return records.length;
+  if (model && (models[model]?.fields?.[measure]?.groupOperator === false || models[model]?.fields?.[measure]?.measure === false)) return null;
   if (model && models[model]?.fields?.[measure]?.groupOperator === 'avg') {
     const values = records
       .map((r) => r[measure])

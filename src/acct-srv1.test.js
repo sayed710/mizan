@@ -424,18 +424,13 @@ test('SRV-2: Review > Inventory > Inventory Valuation period selector drives val
     const compOptions = findAll(companySelect, (n) => n.tagName === 'OPTION');
     assert.ok(!compOptions.some((o) => props(o)?.value === 'all'), 'All Companies option is omitted for Valuation');
 
-    // Period selector is present and drives valuation
-    const periodSelect = find(host, (n) => n.tagName === 'SELECT' && (props(n)?.value === 'year' || props(n)?.value === 'month'));
-    assert.ok(periodSelect, 'Period select is available on Inventory Valuation');
+    // As-of date selector is present and drives valuation
+    const asOfInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'As of');
+    assert.ok(asOfInput, 'As of date input is available on Inventory Valuation');
 
-    // Set custom period to end at past year end
+    // Set As of date to past year end
     await React.act(async () => {
-      props(periodSelect).onChange({ target: { value: 'custom' } });
-    });
-    const toInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'To');
-    assert.ok(toInput, 'Custom To date input exists');
-    await React.act(async () => {
-      props(toInput).onChange({ target: { value: `${pastYear}-12-31` } });
+      props(asOfInput).onChange({ target: { value: `${pastYear}-12-31` } });
     });
 
     // After driving date to past year end, row reflects 10 units instead of 15

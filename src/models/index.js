@@ -217,8 +217,8 @@ const allApps = [
           ...salesInvoiceView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
-        { key: 'products', label: 'Products', model: 'product', domain: (r) => r.sale_ok !== false, defaults: { sale_ok: true } },
-        customers,
+        { key: 'customer-products', label: 'Products', model: 'product', defaultFilters: ['sale_ok'], defaults: { sale_ok: true } },
+        { ...customers, defaultFilters: ['customers'], defaults: { customer_rank: 1 } },
       ] },
       { label: 'Vendors', children: [
         {
@@ -243,8 +243,8 @@ const allApps = [
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
-        { key: 'vendor-products', label: 'Products', model: 'product', domain: (r) => r.purchase_ok !== false, defaults: { purchase_ok: true } },
-        vendors,
+        { key: 'vendor-products', label: 'Products', model: 'product', defaultFilters: ['purchase_ok'], defaults: { purchase_ok: true } },
+        { ...vendors, defaultFilters: ['vendors'], defaults: { supplier_rank: 1 } },
       ] },
       { label: 'Accounting', children: [
                 { label: 'Transactions', children: [
@@ -358,7 +358,7 @@ const allApps = [
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
           { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list', defaultFilters: ['sale', 'purchase'], includeArchived: true },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
-          { key: 'journals', label: 'Journals', model: 'account.journal' },
+          { key: 'journals', label: 'Journals', model: 'account.journal', view: 'list' },
           { key: 'multi-ledger', label: 'Multi-Ledger', model: 'account.journal.group' },
           { key: 'currencies', label: 'Currencies', model: 'res.currency' },
           { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position', view: 'list' },
