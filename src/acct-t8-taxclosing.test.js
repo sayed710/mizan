@@ -1221,9 +1221,9 @@ test('TAX-13: use_in_tax_closing stored defaults on create, migration v60, and s
       })),
     },
   };
-  assert.equal(SCHEMA_VERSION, 68);
+  assert.equal(SCHEMA_VERSION, 69);
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 68);
+  assert.equal(migrated.schema_version, 69);
   const migratedTax = read(migrated, 'account.tax', createdTax.id);
   assert.strictEqual(migratedTax.invoice_repartition_line_ids[0].use_in_tax_closing, false);
   assert.strictEqual(migratedTax.invoice_repartition_line_ids[1].use_in_tax_closing, true);
