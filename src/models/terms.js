@@ -319,11 +319,12 @@ export const termModels = {
     createDefaults: (db, vals) => ({ discount_tax_computation: defaultDiscountTaxComputation(db, vals?.company_id) }),
     onchange: (r, key, db, context) => {
       if (key === 'company_id') {
+        const previous = context?.previous;
         const isExplicit = isFieldEdited('discount_tax_computation', context);
-        const oldDefault = context?.previous ? defaultDiscountTaxComputation(db, context.previous.company_id) : null;
+        const oldDefault = previous ? defaultDiscountTaxComputation(db, previous.company_id) : null;
         const isDefaultedOrUnset = context?.editedFields
           ? !isExplicit
-          : (r.discount_tax_computation == null || (oldDefault !== null && r.discount_tax_computation === oldDefault));
+          : (r.discount_tax_computation == null || (oldDefault !== null && r.discount_tax_computation === oldDefault && previous.discount_tax_computation === oldDefault));
         if (isDefaultedOrUnset) {
           return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
         }

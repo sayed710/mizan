@@ -181,3 +181,58 @@ test('terms for company without country code default to included and do not inhe
   const termNoComp = create(db, model, { name: 'Term Shared', company_id: null });
   assert.equal(read(termNoComp.db, model, termNoComp.id).discount_tax_computation, 'mixed');
 });
+
+test('programmatic write moving a term between companies updates defaulted discount tax mode and preserves explicit modes', () => {
+  const base = seed();
+  const currencyId = read(base, 'res.company', 1).currency_id;
+  const be = create(base, 'res.company', { name: 'BE Co', country_code: 'BE', currency_id: currencyId });
+  const nl = create(be.db, 'res.company', { name: 'NL Co', country_code: 'NL', currency_id: currencyId });
+  const db = nl.db;
+
+  // 1) Term created for BE inherits 'mixed'; moving to NL via write() recomputes to 'excluded'
+  const defaultedTerm = create(db, model, {
+    name: 'BE Defaulted Term',
+    company_id: be.id,
+    early_discount: true,
+    discount_percent: 10,
+    discount_days: 10,
+  });
+  assert.equal(read(defaultedTerm.db, model, defaultedTerm.id).discount_tax_computation, 'mixed');
+  const movedToNl = write(defaultedTerm.db, model, defaultedTerm.id, { company_id: nl.id });
+  assert.equal(read(movedToNl, model, defaultedTerm.id).discount_tax_computation, 'excluded');
+
+  // Verify subsequent invoice tax calculation uses the updated NL ('excluded') mode rather than stale BE ('mixed')
+  const inv = create(movedToNl, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: nl.id,
+    partner_id: 1,
+    invoice_date: '2026-04-01',
+    invoice_payment_term_id: defaultedTerm.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 20 }],
+  });
+  assert.equal(read(inv.db, 'account.move', inv.id).amount_tax, 20);
+
+  // 2) Term with custom mode ('included' on BE) keeps 'included' when moved via write()
+  const customTerm = create(db, model, {
+    name: 'BE Custom Term',
+    company_id: be.id,
+    early_discount: true,
+    discount_percent: 2,
+    discount_days: 10,
+    discount_tax_computation: 'included',
+  });
+  const movedCustom = write(customTerm.db, model, customTerm.id, { company_id: nl.id });
+  assert.equal(read(movedCustom, model, customTerm.id).discount_tax_computation, 'included');
+
+  // 3) Explicitly supplying discount_tax_computation in the same write() is never overwritten
+  const explicitMove = write(defaultedTerm.db, model, defaultedTerm.id, {
+    company_id: nl.id,
+    discount_tax_computation: 'mixed',
+  });
+  assert.equal(read(explicitMove, model, defaultedTerm.id).discount_tax_computation, 'mixed');
+
+  // 4) Legacy term with unset discount_tax_computation gets the new company's default on move
+  const unsetDb = patch(defaultedTerm.db, defaultedTerm.id, { discount_tax_computation: null });
+  const movedUnset = write(unsetDb, model, defaultedTerm.id, { company_id: nl.id });
+  assert.equal(read(movedUnset, model, defaultedTerm.id).discount_tax_computation, 'excluded');
+});
