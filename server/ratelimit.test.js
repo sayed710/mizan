@@ -1,35 +1,27 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { startServer } from './test-server.js';
 
 const directory = await mkdtemp(join(tmpdir(), 'mizan-ratelimit-'));
-let child;
+let server;
 let origin;
 
 async function start(preload) {
-  child = spawn(process.execPath, [...(preload ? ['--import', pathToFileURL(preload).href] : []), 'server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'admin-password-1', MIZAN_SECURE_COOKIE: '0', MIZAN_TRUST_PROXY: '1' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  return new Promise((resolve, reject) => {
-    let output = '';
-    const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
-    child.stdout.on('data', (chunk) => {
-      output += chunk;
-      const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
-      if (match) { clearTimeout(timeout); resolve(match[1]); }
-    });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
+  server = await startServer({
+    preload,
+    env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'admin-password-1', MIZAN_SECURE_COOKIE: '0', MIZAN_TRUST_PROXY: '1' },
   });
+  return server.origin;
 }
 async function stop() {
-  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+  await server?.stop();
+  server = null;
 }
-after(async () => { await stop(); await rm(directory, { recursive: true, force: true }); });
+after(async () => { await stop(); await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
 
 const attempt = (origin, login, password, ip) => fetch(`${origin}/api/login`, {
   method: 'POST',

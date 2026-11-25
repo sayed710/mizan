@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { setupDom } from './test-support/dom.js';
+import { setupDom, waitFor } from './test-support/dom.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postEntry, balanceSheet } from './models/ledger.js';
@@ -14,11 +14,7 @@ import { models } from './models/index.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
-const rendered = async (React, container, text) => {
-  for (let i = 0; i < 200 && !container.textContent.includes(text); i++) {
-    await React.act(() => new Promise((resolve) => setTimeout(resolve, 50)));
-  }
-};
+const rendered = (React, container, text) => waitFor(React, () => container.textContent.includes(text));
 
 test('multi-ledger selector limits journals to selected ledger on financial reports', async () => {
   const { makeEl } = setupDom();

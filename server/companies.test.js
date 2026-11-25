@@ -1,32 +1,33 @@
 import '../src/models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diffDb } from '../src/sync.js';
 import { create } from '../src/orm.js';
 import { createCompany } from '../src/models/company.js';
+import { startServer as spawnTestServer } from './test-server.js';
 
 const PASSWORD = 'company-admin-pw';
 
 async function startServer() {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-companies-'));
-  const child = spawn(process.execPath, ['server/index.js'], {
-    env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: PASSWORD },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-  const url = await new Promise((resolve, reject) => {
-    let out = '';
-    child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
-    child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
-  });
-  return { url, stop: async () => {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
-    rmSync(dir, { recursive: true, force: true });
-  } };
+  try {
+    const server = await spawnTestServer({
+      env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: PASSWORD },
+    });
+    return {
+      url: server.url,
+      stop: async () => {
+        await server.stop();
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      },
+    };
+  } catch (err) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    throw err;
+  }
 }
 
 const client = (url, auth) => {

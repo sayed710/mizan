@@ -48,7 +48,8 @@ function uiStrings() {
 }
 
 // The server starts, backs up and holds the database lease from a terminal: an operator reads these, not a screen.
-const OPERATOR_FILES = ['storage.js', 'backup.js'];
+// `test-server.js` is a test-only helper alongside `server/*.test.js`.
+const OPERATOR_FILES = ['storage.js', 'backup.js', 'test-server.js'];
 const OPERATOR_MESSAGES = new Set(['Run "npm run build" first']);
 
 /** Messages a screen can show after a failed action: literal errors, browser dialogs and server answers outside tests. */
