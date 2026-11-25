@@ -56,9 +56,9 @@ test('ANA-1: account.analytic.account has no stale plan field or default, plan_i
     },
   };
 
-  assert.equal(SCHEMA_VERSION, 76);
+  assert.ok(SCHEMA_VERSION >= 76);
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 76, 'migration bumped schema_version to 76');
+  assert.equal(migrated.schema_version, SCHEMA_VERSION, 'migration brings the database to the latest schema');
 
   const acc101 = read(migrated, 'account.analytic.account', 101);
   const acc102 = read(migrated, 'account.analytic.account', 102);

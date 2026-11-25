@@ -1,4 +1,5 @@
 import { purchaseLineId } from './models/purchase-links.js';
+import { ensureOnlinePaymentMethods, ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
 import { ensureCountries } from './models/country.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
@@ -24,7 +25,6 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
-import { ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
 import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 
@@ -2506,6 +2506,8 @@ export function migrateAnalyticAccountPlanToPlanId(db) {
   };
 }
 MIGRATIONS.push({ version: 76, name: 'analytic-account-plan-to-plan-id', up: migrateAnalyticAccountPlanToPlanId });
+
+MIGRATIONS.push({ version: 77, name: 'online-payment-methods', up: ensureOnlinePaymentMethods });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
