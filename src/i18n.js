@@ -87,6 +87,7 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Hide lines at 0': 'إخفاء البنود الصفرية',
   'Percentages on the Payment Terms lines must be between 0 and 100.': 'يجب أن تكون النسب في بنود شروط الدفع بين 0 و100.',
   'The Payment Term must have at least one percent line and the sum of the percent must be 100%.': 'يجب أن يحتوي شرط الدفع على بند نسبة واحد على الأقل وأن يكون مجموع النسب 100%.',
   'The Early Payment Discount functionality can only be used with payment terms using a single 100% line. ': 'لا يمكن استخدام خصم الدفع المبكر إلا مع شروط دفع تحتوي على بند واحد بنسبة 100%. ',
@@ -3954,6 +3955,24 @@ const ar = {
   'Automatically execute this follow-up level when due.': 'تنفيذ مستوى المتابعة هذا تلقائياً عند الاستحقاق.',
   'No delivery action is configured for this follow-up level.': 'لم يتم تكوين إجراء إرسال لمستوى المتابعة هذا.',
   'Automatic email delivery is not configured.': 'الإرسال التلقائي للبريد الإلكتروني غير مُعدّ.',
+  'Hash All Entries': 'تأمين جميع القيود',
+  'Not hashed': 'غير مؤمّن',
+  'inclusive, to make them immutable': 'شاملاً، لجعلها غير قابلة للتعديل',
+  'Unreconciled Bank Transactions': 'حركات بنكية غير مطابقة',
+  'Review Statements': 'مراجعة كشوف الحساب',
+  'Review Entries': 'مراجعة القيود',
+  'There are still unreconciled bank transactions before the selected date. The entries from journal prefixes containing them will not be secured: {prefixes}': 'لا تزال هناك حركات بنكية غير مطابقة قبل التاريخ المحدد. لن يتم تأمين القيود من بادئات دفاتر اليومية التي تحتوي عليها: {prefixes}',
+  'There are still draft entries before the selected date.': 'لا تزال هناك قيود مسودة قبل التاريخ المحدد.',
+  'There are entries that cannot be hashed. They can be protected by the Hard Lock Date.': 'توجد قيود لا يمكن تجزئتها. يمكن حمايتها عبر تاريخ الإقفال الصارم.',
+  'Securing these entries will create at least one gap in the sequence.': 'تأمين هذه القيود سيُنشئ فجوة واحدة على الأقل في التسلسل.',
+  'Securing these entries will also secure entries after the selected date.': 'تأمين هذه القيود سيؤمّن أيضاً قيوداً بعد التاريخ المحدد.',
+  'Set a date. The moves will be secured up to including this date.': 'حدّد تاريخاً. سيتم تأمين القيود حتى هذا التاريخ شاملاً.',
+  'Later prefixes in the same journal are also deferred until those earlier entries are reconciled: {prefixes}': 'كما تم تأجيل البادئات اللاحقة في نفس الدفتر حتى تتم مطابقة تلك القيود السابقة: {prefixes}',
+  'Later prefixes cannot be secured while earlier prefixes still have unsecured entries after the selected date: {prefixes}': 'لا يمكن تأمين البادئات اللاحقة ما دامت البادئات السابقة تحتوي على قيود غير مؤمّنة بعد التاريخ المحدد: {prefixes}',
+  '{count} numbered draft entries precede entries to be secured. Post or cancel them before securing.': 'تسبق {count} قيود مسودة مرقّمة قيوداً سيتم تأمينها. رحّلها أو ألغِها قبل التأمين.',
+  'There are numbered draft entries in the sequence being secured. Post or cancel them before securing.': 'توجد قيود مسودة مرقّمة ضمن التسلسل الجاري تأمينه. رحّلها أو ألغِها قبل التأمين.',
+  'There are still draft entries before the selected date and numbered draft entries in the sequence being secured.': 'لا تزال هناك قيود مسودة قبل التاريخ المحدد وقيود مسودة مرقّمة ضمن التسلسل الجاري تأمينه.',
+  'Cannot secure entries while numbered draft entries precede entries to be secured': 'لا يمكن تأمين القيود ما دامت هناك قيود مسودة مرقّمة تسبق القيود المطلوب تأمينها',
   Empty: 'فارغ',
 };
 

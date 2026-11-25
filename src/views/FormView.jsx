@@ -690,6 +690,7 @@ export function FormView({ leaf, id, base, params }) {
   const groups = resolve(def.form.groups) ?? def.form.groups ?? [];
   // A non-blocking warning shown above the form, such as an exceeded credit limit.
   const warning = def.form.warning?.(current, db) ?? null;
+  const warnings = def.form.warnings?.(current, db) ?? [];
   const banner = def.form.banner?.(current, db) ?? null;
   const footer = [].concat(resolve(def.form.footer) ?? []);
   const locked = !isNew && !!def.form.lockedWhen?.(current, db);
@@ -771,6 +772,17 @@ export function FormView({ leaf, id, base, params }) {
 
           {error && <div className="alert" role="alert">{error}</div>}
           {warning && <div className="alert alert-warning" role="status">{warning}</div>}
+          {warnings.map((w, i) => {
+            const level = w.level ?? 'warning';
+            return (
+              <div key={w.key ?? i} className={`alert alert-${level}`} role="alert" data-warning={w.key}>
+                <span>{w.message}</span>
+                {w.action_text && w.go && (
+                  <> <a className="alert-action" href={w.go}>{t(w.action_text)}</a></>
+                )}
+              </div>
+            );
+          })}
           {banner && <div className="alert alert-info" role="status">{t(banner)}</div>}
           <SimulatedNote text={def.simulated} />
           {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { read, search } from '../orm.js';
-import { cashFlow, customerStatement, executiveSummary, fiscalReport, partnerLedger, trialBalance } from '../models/reports.js';
+import { cashFlow, customerStatement, executiveSummary, fiscalReport, partnerLedger, reportAmountsVisible, trialBalance } from '../models/reports.js';
 import { currentCompany } from '../models/company.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -13,10 +13,10 @@ import { statementUrl } from '../statementNavigation.js';
 const num = (v, fmtMoney = money) => <td className="num">{fmtMoney(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
 
-export function TrialBalance({ db, period, periods, companyId, analyticAccountIds, showInitialBalance = true, showEndBalance = true, money: moneyProp }) {
+export function TrialBalance({ db, period, periods, companyId, analyticAccountIds, showInitialBalance = true, showEndBalance = true, hideZeroLines = false, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
-  const reports = (periods ?? [period]).map((p) => trialBalance(db, { ...p, reviewMode: period.reviewMode, company_id, analyticAccountIds }));
+  const reports = (periods ?? [period]).map((p) => trialBalance(db, { ...p, reviewMode: period.reviewMode, company_id, analyticAccountIds, includeZeroRows: true }));
   const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.account.id, row])));
   const accounts = new Map(reports.flatMap((report) => report.rows.map((row) => [row.account.id, row.account])));
   const rows = [...accounts.values()].sort((a, b) => a.code.localeCompare(b.code));
@@ -26,9 +26,10 @@ export function TrialBalance({ db, period, periods, companyId, analyticAccountId
     'credit',
     ...(showEndBalance ? ['end'] : []),
   ];
+  const visibleRows = rows.filter((account) => reportAmountsVisible(rowsByReport.flatMap((byAccount) => keys.map((key) => byAccount.get(account.id)?.[key] ?? 0)), hideZeroLines));
   return (
     <tbody>
-      {rows.map((r) => (
+      {visibleRows.map((r) => (
         <tr key={r.id} className="rep-detail"><td><a href={`#/open/account.account/${r.id}`}>{r.code} {r.name}</a></td>{rowsByReport.flatMap((byAccount, index) => { const row = byAccount.get(r.id); return keys.map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(row?.[key] ?? 0)}</td>); })}</tr>
       ))}
       <tr className="rep-total strong"><td>{t('Total')}</td>{reports.flatMap((report, index) => keys.map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(report.totals[key])}</td>))}</tr>
