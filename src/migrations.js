@@ -2193,6 +2193,121 @@ export function migrateSalesCreditLimit(db) {
 }
 MIGRATIONS.push({ version: 70, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
 
+export function migratePartnerTags(db) {
+  if (!db?.records) return db;
+  const existingCategories = [...(db.records['res.partner.category'] ?? [])];
+  const byName = new Map();
+  let maxId = 0;
+  for (const cat of existingCategories) {
+    if (cat.id > maxId) maxId = cat.id;
+    if (cat.name) byName.set(String(cat.name).trim().toLowerCase(), cat.id);
+  }
+
+  let categoriesChanged = false;
+  const categoryFor = (name) => {
+    const key = name.toLowerCase();
+    if (!byName.has(key)) {
+      maxId += 1;
+      existingCategories.push({ id: maxId, name, color: 0, active: true });
+      byName.set(key, maxId);
+      categoriesChanged = true;
+    }
+    return byName.get(key);
+  };
+  let partnersChanged = false;
+
+  const partners = db.records['res.partner'];
+  const nextPartners = Array.isArray(partners) ? partners.map((p) => {
+    if (!p) return p;
+    const rawTags = p.tag_ids;
+    if (rawTags == null) return p;
+    const list = Array.isArray(rawTags) ? rawTags : [rawTags];
+    if (!list.length) return p;
+
+    let partnerTagsChanged = false;
+    const tagSet = new Set();
+
+    for (const item of list) {
+      if (item == null || item === '') {
+        partnerTagsChanged = true;
+        continue;
+      }
+      const num = Number(typeof item === 'object' ? item.id : item);
+      if (typeof item === 'number' && Number.isSafeInteger(num) && num > 0) {
+        tagSet.add(num);
+        continue;
+      }
+      if (typeof item === 'string') {
+        const trimmed = item.trim();
+        if (!trimmed) {
+          partnerTagsChanged = true;
+          continue;
+        }
+        partnerTagsChanged = true;
+        const catId = categoryFor(trimmed);
+        tagSet.add(catId);
+        continue;
+      }
+      if (typeof item === 'object') {
+        partnerTagsChanged = true;
+        if (Number.isSafeInteger(num) && num > 0) {
+          tagSet.add(num);
+        } else if (item.name) {
+          const trimmed = String(item.name).trim();
+          if (!trimmed) continue;
+          const catId = categoryFor(trimmed);
+          tagSet.add(catId);
+        }
+      }
+    }
+
+    if (tagSet.size !== list.length) {
+      partnerTagsChanged = true;
+    }
+
+    if (partnerTagsChanged) {
+      partnersChanged = true;
+      return { ...p, tag_ids: [...tagSet] };
+    }
+    return p;
+  }) : partners;
+
+  const distModels = db.records['account.analytic.distribution.model'];
+  let distModelsChanged = false;
+  let nextDistModels = distModels;
+  if (Array.isArray(distModels)) {
+    nextDistModels = distModels.map((m) => {
+      if (!m || m.partner_category_id == null) return m;
+      if (typeof m.partner_category_id === 'string' && m.partner_category_id.trim() !== '') {
+        const trimmed = m.partner_category_id.trim();
+        const catId = categoryFor(trimmed);
+        distModelsChanged = true;
+        return { ...m, partner_category_id: catId };
+      }
+      return m;
+    });
+  }
+
+  if (!partnersChanged && !categoriesChanged && !distModelsChanged) return db;
+
+  const nextSeq = Math.max(db.seq?.['res.partner.category'] ?? 0, maxId);
+
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(partnersChanged ? { 'res.partner': nextPartners } : {}),
+      ...(categoriesChanged ? { 'res.partner.category': existingCategories } : {}),
+      ...(distModelsChanged ? { 'account.analytic.distribution.model': nextDistModels } : {}),
+    },
+    seq: {
+      ...(db.seq ?? {}),
+      'res.partner.category': nextSeq,
+    },
+  };
+}
+MIGRATIONS.push({ version: 71, name: 'partner-tags-res-partner-category', up: migratePartnerTags });
+
 function normalizeLegacyCountry(next, country) {
   if (country == null) return null;
   if (Number.isInteger(country)) {

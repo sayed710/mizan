@@ -369,6 +369,7 @@ const allApps = [
           { key: 'tax-units', label: 'Tax Units', model: 'account.tax.unit' },
           { key: 'cash-roundings', label: 'Rounding Methods', model: 'account.cash.rounding' },
           { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
+          { key: 'asset-groups', label: 'Asset Groups', model: 'account.asset.group' },
           { key: 'depreciation-models', label: 'Depreciation Models', model: 'account.asset.model' },
           { key: 'account-tags', label: 'Account Tags', model: 'account.account.tag' },
           { key: 'return-types', label: 'Return Types', model: 'account.return.type' },
@@ -428,7 +429,17 @@ const allApps = [
       ] },
     ],
   },
-  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }, { label: 'Configuration', children: [{ key: 'banks', label: 'Banks', model: 'res.bank' }] }] },
+  {
+    id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'],
+    menus: [
+      { key: 'contacts', label: 'Contacts', model: 'res.partner' },
+      { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
+      { label: 'Configuration', children: [
+        { key: 'tags', label: 'Tags', model: 'res.partner.category' },
+        { key: 'banks', label: 'Banks', model: 'res.bank' },
+      ] },
+    ],
+  },
   { id: 'calendar', name: 'Calendar', color: ['#0ea5e9', '#1d4ed8'], menus: [{ key: 'meetings', label: 'Meetings', model: 'calendar.event' }] },
   {
     id: 'project', name: 'Project', color: ['#22c55e', '#15803d'],
@@ -778,7 +789,7 @@ export const leavesOf = (app) => {
   return walk(app?.menus);
 };
 
-const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
+const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
   'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];
@@ -799,7 +810,7 @@ const PRIVATE_FIELDS = {
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
 export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.category', 'account.fiscal.year',
-  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.payment.method', 'account.payment.method.line', 'res.country.group'];
+  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.asset.group', 'account.payment.method', 'account.payment.method.line', 'res.country.group'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
 export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));

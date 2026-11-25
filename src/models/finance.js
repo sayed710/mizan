@@ -840,6 +840,7 @@ export function moveDeleteGuard(db, move, staged = db, ctx = null) {
   const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
   if (audited && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
+  if ((db.records['account.asset'] ?? []).some((a) => a.source_move_id === move.id && a.state !== 'cancel')) return "Handle the entry's linked assets before deleting it";
   if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
 }

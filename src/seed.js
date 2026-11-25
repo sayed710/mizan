@@ -10,7 +10,7 @@ import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, post
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
-import { migrateCountries, migratePartnerRanks, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
+import { migrateCountries, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { countryIdFor, ensureCountries } from './models/country.js';
 import { ensurePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
@@ -598,5 +598,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...migrateCountries(ensureCalendars(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))))), schema_version: SCHEMA_VERSION };
+  return { ...migrateCountries(ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready)))))))), schema_version: SCHEMA_VERSION };
 }
