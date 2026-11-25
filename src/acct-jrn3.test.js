@@ -180,7 +180,7 @@ test('JRN-2: journal search limits text matching to name/code and exposes Odoo t
   }
 });
 
-test('JRN-3: form smart button opens the journal entries and list optional/group-gated columns match Odoo', async () => {
+test('JRN-3: form smart button opens the journal items and list optional/group-gated columns match Odoo', async () => {
   const def = models['account.journal'];
   assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id']);
   assert.equal(def.fields.sequence.widget, 'handle');
@@ -189,8 +189,8 @@ test('JRN-3: form smart button opens the journal entries and list optional/group
   assert.equal(def.fields.active.optional, 'hide');
   assert.equal(def.fields.company_id.multiCompanyOnly, true);
   assert.equal(def.fields.company_id.optional, 'hide');
-  // currency_id and journal_group_id are not declared on account.journal yet (skipped)
-  assert.equal(Object.hasOwn(def.fields, 'currency_id'), false);
+  // jcf1 adds the optional journal currency column; journal_group_id is still not declared on account.journal
+  assert.equal(def.fields.currency_id.optional, 'hide');
   assert.equal(Object.hasOwn(def.fields, 'journal_group_id'), false);
 
   let db = seed();
@@ -204,9 +204,9 @@ test('JRN-3: form smart button opens the journal entries and list optional/group
   db = inv.db;
 
   const { FormView } = await import('./views/FormView.jsx');
-  const { ActionView, actionRecords } = await import('./views/ActionView.jsx');
+  const { ActionView } = await import('./views/ActionView.jsx');
 
-  // Form smart button renders 'Entries' and filters journal moves
+  // Form smart button opens the journal's items (jcf1), like Odoo's Journal Items action
   const formCtx = await mountView(
     (React) => React.createElement(FormView, { leaf: journalsLeaf(), id: String(saleJ.id), base: '#/accounting/journals', params: new URLSearchParams('view=list') }),
     db,
@@ -214,13 +214,8 @@ test('JRN-3: form smart button opens the journal entries and list optional/group
   try {
     const smart = find(formCtx.host, (n) => n.tagName === 'A' && hasClass(n, 'smart'));
     assert.ok(smart, 'Journal form renders smart button');
-    assert.equal(find(smart, (n) => n.tagName === 'SPAN')?.textContent, 'Entries');
-    const href = props(smart)?.href ?? '';
-    assert.equal(href, `#/accounting/entries?view=list&rel=journal_id:${saleJ.id}`);
-    const entriesLeaf = findLeafByKey(menusFor('accounting'), 'entries');
-    const opened = actionRecords(db, entriesLeaf, { field: 'journal_id', id: saleJ.id }, false);
-    assert.ok(opened.some((m) => m.id === inv.id));
-    assert.ok(opened.every((m) => (m.journal_id ?? null) === saleJ.id || m.state === 'draft'));
+    assert.ok(smart.textContent.includes('Journal Items'));
+    assert.equal(props(smart)?.href ?? '', `#/accounting/journal-items?journal=${saleJ.id}`);
   } finally {
     await formCtx.done();
   }
@@ -238,6 +233,7 @@ test('JRN-3: form smart button opens the journal entries and list optional/group
     assert.deepEqual(items, [
       ['Sequence Prefix', true],
       ['Default Account', true],
+      ['Currency', false],
       ['Active', false],
     ]);
   } finally {
@@ -263,6 +259,7 @@ test('JRN-3: form smart button opens the journal entries and list optional/group
     assert.deepEqual(items.map((b) => [b.textContent.replace('✓', '').trim(), props(b)['aria-checked']]), [
       ['Sequence Prefix', true],
       ['Default Account', true],
+      ['Currency', false],
       ['Active', false],
       ['Company', false],
     ]);
@@ -282,7 +279,7 @@ test('Arabic translations exist for journal list, search filters, and smart butt
   globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem: () => {}, removeItem: () => {}, clear: () => {} };
   try {
     const { t } = await import('./i18n.js?lang=ar-acct-jrn3');
-    for (const s of ['Journals', 'Journal', 'Type', 'Sequence Prefix', 'Default Account', 'Active', 'Company', 'Sales', 'Purchases', 'Liquidity', 'Miscellaneous', 'Archived', 'Entries']) {
+    for (const s of ['Journals', 'Journal', 'Type', 'Sequence Prefix', 'Default Account', 'Active', 'Company', 'Sales', 'Purchases', 'Liquidity', 'Miscellaneous', 'Archived', 'Journal Items']) {
       assert.notEqual(t(s), s, `missing Arabic translation for "${s}"`);
     }
   } finally {
