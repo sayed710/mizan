@@ -61,6 +61,11 @@ const canResetAsset = (db, asset) => ['open', 'cancel'].includes(asset.state)
   && (!db || !search(db, 'account.asset').some((child) => child.parent_id === asset.id || child.origin_asset_id === asset.id));
 
 const postedCents = (asset) => (asset.depreciation_ids ?? []).filter((l) => l.posted).reduce((s, l) => s + cents(l.amount), 0);
+const remainingUnpostedCount = (asset, upTo = null) => {
+  const unposted = (asset?.depreciation_ids ?? []).filter((l) => !l.posted);
+  const atDate = upTo ? unposted.filter((l) => l.date > upTo) : unposted;
+  return atDate.length || unposted.length;
+};
 const remainingDepreciableCents = (asset) => cents(asset.original_value)
   - cents(asset.salvage_value)
   - cents(asset.already_depreciated)
@@ -574,8 +579,27 @@ export function validateAssetIntegrity(db, before, asset, vals) {
     const methodPeriodChanged = asset.method_period !== before.method_period;
     const methodModeChanged = (asset.method_mode ?? 'duration') !== (before.method_mode ?? 'duration');
     const methodRateChanged = (asset.method_rate ?? null) !== (before.method_rate ?? null);
-    if ((methodPeriodChanged || methodModeChanged || methodRateChanged) && JSON.stringify(afterLines.filter((l) => !l.posted)) === JSON.stringify((before.depreciation_ids ?? []).filter((l) => !l.posted))) {
+    if (methodPeriodChanged && JSON.stringify(afterLines.filter((l) => !l.posted)) === JSON.stringify((before.depreciation_ids ?? []).filter((l) => !l.posted))) {
       return 'Cannot modify core asset fields once confirmed';
+    }
+    if ((methodModeChanged || methodRateChanged) && JSON.stringify(afterLines.filter((l) => !l.posted)) === JSON.stringify((before.depreciation_ids ?? []).filter((l) => !l.posted))) {
+      const unposted = afterLines.filter((l) => !l.posted);
+      const posted = afterLines.filter((l) => l.posted);
+      const expectedPeriods = asset.method_mode === 'rate' ? (Number(asset.method_rate) > 0 ? 1 / Number(asset.method_rate) : 0) : unposted.length;
+      const expectedBoard = asset.method !== 'no_depreciation' && expectedPeriods > 0
+        ? depreciationBoard(asset, {
+            periods: expectedPeriods,
+            dates: unposted.map((l) => l.date),
+            startDate: posted.length ? posted.at(-1).date : null,
+            remainingBase: cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated) - postedCents(asset),
+            initialCumulated: cents(asset.already_depreciated) + postedCents(asset),
+          })
+        : [];
+      const matchesExpected = expectedBoard.length === unposted.length
+        && expectedBoard.every((line, i) => line.date === unposted[i].date && cents(line.amount) === cents(unposted[i].amount));
+      if (!matchesExpected) {
+        return 'Cannot modify core asset fields once confirmed';
+      }
     }
     if (origChanged || salvageChanged || methodNumChanged || methodPeriodChanged || methodModeChanged || methodRateChanged) {
       if (asset.method === 'no_depreciation') {
@@ -1180,12 +1204,12 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
 
   const company = asset.company_id ?? 1;
   const journal = asset.journal_id ?? journalId(nextDb, 'MISC', company) ?? 'MISC';
-  const assetAcc = delta > 0 && increaseAccountId ? configuredAccount(nextDb, increaseAccountId, company, 'fixed asset', asset.name || 'the asset') : asset.account_asset_id;
+  const assetAcc = delta > 0 && increaseAccountId ? configuredAccount(nextDb, increaseAccountId, company, 'fixed asset', asset.name || 'the asset', { allowDeprecated: increaseAccountId === asset.account_asset_id }) : asset.account_asset_id;
   const childDepAcc = delta > 0 && asset.method !== 'no_depreciation'
-    ? (depreciationAccountId ? configuredAccount(nextDb, depreciationAccountId, company, 'depreciation', asset.name || 'the asset') : asset.account_depreciation_id)
+    ? (depreciationAccountId ? configuredAccount(nextDb, depreciationAccountId, company, 'depreciation', asset.name || 'the asset', { allowDeprecated: depreciationAccountId === asset.account_depreciation_id }) : asset.account_depreciation_id)
     : asset.account_depreciation_id;
   const childExpAcc = delta > 0 && asset.method !== 'no_depreciation'
-    ? (expenseAccountId ? configuredAccount(nextDb, expenseAccountId, company, 'depreciation expense', asset.name || 'the asset') : asset.account_depreciation_expense_id)
+    ? (expenseAccountId ? configuredAccount(nextDb, expenseAccountId, company, 'depreciation expense', asset.name || 'the asset', { allowDeprecated: expenseAccountId === asset.account_depreciation_expense_id }) : asset.account_depreciation_expense_id)
     : asset.account_depreciation_expense_id;
 
   let adjustmentMoveId = null;
@@ -1200,7 +1224,9 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
       if (!counterpartAcc) throw new Error('Configure a loss or expense account on the asset (or select a counterpart account) for the impairment');
     }
     // A selected counterpart must be active and belong to the asset company, like the asset's own accounts (Qodo 39).
-    counterpartAcc = configuredAccount(nextDb, counterpartAcc, company, 'counterpart', asset.name || 'the asset');
+    counterpartAcc = configuredAccount(nextDb, counterpartAcc, company, 'counterpart', asset.name || 'the asset', {
+      allowDeprecated: delta < 0 && !accountId && (!expenseAccountId || expenseAccountId === asset.account_depreciation_expense_id),
+    });
     const lines = delta > 0
       ? [
           { account: assetAcc, debit: delta / 100 },
@@ -1386,7 +1412,7 @@ function reduceRefundedAsset(db, asset, refundMove, refundAmount) {
       if (excess) {
         const company = asset.company_id ?? 1;
         const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
-        const expense = configuredAccount(db, asset.account_depreciation_expense_id, company, 'depreciation expense', asset.name || 'the asset');
+        const expense = configuredAccount(db, asset.account_depreciation_expense_id, company, 'depreciation expense', asset.name || 'the asset', { allowDeprecated: true });
         const date = refundMove.invoice_date ?? refundMove.date ?? today();
         if (postedLines.some((line) => line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
         const booked = postEntry(db, { journal, date, ref: `${asset.name} refund depreciation adjustment`, company, lines: [
@@ -1689,8 +1715,12 @@ export const assetModels = {
             { name: 'loss_account_id', type: 'many2one', relation: 'account.account', label: 'Loss Account', default: db && r ? read(db, 'res.company', r.company_id ?? 1)?.loss_account_id : null, invisible: (v) => !['sell', 'dispose'].includes(v.modify_action) },
             { name: 'invoice_line_ids', type: 'many2many', picker: 'asset_invoice_lines', label: 'Invoice Lines', required: (v) => v.modify_action === 'sell', invisible: (v) => v.modify_action !== 'sell', options: (currentDb, values) => assetSaleInvoiceLineOptions(currentDb, r, values.date) },
           ], onchange: (values, key) => {
+            if (key === 'method_number') {
+              return { method_rate: Number(values.method_number) > 0 ? 1 / Number(values.method_number) : null };
+            }
             if (key === 'method_mode' && values.method_mode === 'rate' && (values.method_rate == null || values.method_rate === '')) {
-              return { method_rate: Number(values.method_number) > 0 ? 1 / Number(values.method_number) : r?.method_rate ?? null };
+              const remaining = remainingUnpostedCount(r, values.date);
+              return { method_rate: Number(values.method_number) > 0 ? 1 / Number(values.method_number) : (remaining > 0 ? 1 / remaining : r?.method_rate ?? null) };
             }
             return {};
           } }),
@@ -1723,13 +1753,21 @@ export const assetModels = {
             const assetMode = r.method_mode ?? 'duration';
             const selectedMode = values.method_mode ?? assetMode;
             const modeChanged = selectedMode !== assetMode;
-            const rateInput = values.method_rate == null || values.method_rate === '' ? null : Number(values.method_rate);
-            const rateChanged = selectedMode === 'rate' && (modeChanged || (rateInput != null && rateInput !== Number(r.method_rate)));
+            const unpostedCount = remainingUnpostedCount(currentAsset);
             const numberInput = values.method_number == null || values.method_number === '' ? null : Number(values.method_number);
-            const duration = selectedMode === 'rate' ? (rateChanged ? (rateInput ? 1 / rateInput : 0) : null) : numberInput;
+            const rawRate = values.method_rate == null
+              ? (selectedMode === 'rate' && modeChanged ? (numberInput > 0 ? 1 / numberInput : (unpostedCount > 0 ? 1 / unpostedCount : null)) : null)
+              : (values.method_rate === '' ? null : Number(values.method_rate));
+            const rateChanged = selectedMode === 'rate' && (modeChanged || (rawRate != null && rawRate !== Number(r.method_rate)));
+            const rateDuration = rawRate ? 1 / rawRate : 0;
+            const normalizedRateDuration = Math.abs(rateDuration - Math.round(rateDuration)) < 1e-12 ? Math.round(rateDuration) : rateDuration;
+            const duration = selectedMode === 'rate' ? (rateChanged ? normalizedRateDuration : null) : numberInput;
             if (r.method !== 'no_depreciation' && duration != null && (!Number.isFinite(duration) || duration < 1)) throw new Error('The duration must be at least 1 period');
             const periodChanged = values.method_period != null && String(values.method_period) !== String(r.method_period);
             const salvageChanged = salvageProvided && newSalvageCents !== currentSalvageCents;
+            const methodRate = selectedMode === 'rate'
+              ? (rateChanged ? rawRate : null)
+              : (duration ? 1 / duration : (modeChanged && unpostedCount > 0 ? 1 / unpostedCount : null));
             let next = modifyAsset(depreciatedDb, currentAsset, {
               date,
               valueChange: delta,
@@ -1740,7 +1778,7 @@ export const assetModels = {
               methodNumber: duration,
               methodPeriod: periodChanged ? values.method_period : null,
               methodMode: modeChanged ? selectedMode : null,
-              methodRate: selectedMode === 'rate' ? (rateChanged ? rateInput : null) : (duration ? 1 / duration : null),
+              methodRate,
               salvageValue: salvageChanged ? Number(values.salvage_value) : null,
             });
             if (values.name?.trim()) next = postNote(next, 'account.asset', r.id, values.name.trim());

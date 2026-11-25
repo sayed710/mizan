@@ -282,3 +282,163 @@ test('AST-4 Value decrease closes imported asset when reduced to depreciated flo
   assert.equal(decreaseMove.line_ids.find((l) => l.account_id === lossExp.id).debit, 500);
   assert.equal(decreaseMove.line_ids.find((l) => l.account_id === accounts.account_asset_id).credit, 500);
 });
+
+test('AST-4 Qodo Finding 1: modifyAsset rejects newly selected deprecated accounts while preserving unchanged historical accounts', () => {
+  let db = seed();
+  const accounts = assetAccounts(db);
+  const depFixed = create(db, 'account.account', { code: '159901', name: 'Deprecated Fixed', account_type: 'asset_fixed', company_id: 1, deprecated: true });
+  const depAccum = create(depFixed.db, 'account.account', { code: '159902', name: 'Deprecated Accum', account_type: 'asset_fixed', company_id: 1, deprecated: true });
+  const depExp = create(depAccum.db, 'account.account', { code: '689901', name: 'Deprecated Expense', account_type: 'expense', company_id: 1, deprecated: true });
+  const depCounterpart = create(depExp.db, 'account.account', { code: '459901', name: 'Deprecated Counterpart', account_type: 'equity', company_id: 1, deprecated: true });
+  db = depCounterpart.db;
+
+  const made = create(db, 'account.asset', {
+    ...accounts,
+    name: 'Deprecated Guard Press',
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_number: 4,
+    method_period: '12',
+  });
+  db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  const asset = read(db, 'account.asset', made.id);
+  const counterpart = accountId(db, '450300');
+
+  assert.throws(
+    () => modifyAsset(db, asset, { date: '2026-02-01', valueChange: 200, accountId: counterpart, depreciationAccountId: depAccum.id }),
+    /Configure the depreciation account/i,
+  );
+  assert.throws(
+    () => modifyAsset(db, asset, { date: '2026-02-01', valueChange: 200, accountId: counterpart, expenseAccountId: depExp.id }),
+    /Configure the depreciation expense account/i,
+  );
+  assert.throws(
+    () => modifyAsset(db, asset, { date: '2026-02-01', valueChange: 200, accountId: counterpart, increaseAccountId: depFixed.id }),
+    /Configure the fixed asset account/i,
+  );
+  assert.throws(
+    () => modifyAsset(db, asset, { date: '2026-02-01', valueChange: 200, accountId: depCounterpart.id }),
+    /Configure the counterpart account/i,
+  );
+  assert.throws(
+    () => modifyAsset(db, asset, { date: '2026-02-01', valueChange: -100, expenseAccountId: depExp.id }),
+    /Configure the counterpart account/i,
+  );
+
+  // Unchanged historical accounts on the asset remain usable if later marked deprecated.
+  let historicalDb = write(db, 'account.account', accounts.account_asset_id, { deprecated: true });
+  historicalDb = write(historicalDb, 'account.account', accounts.account_depreciation_id, { deprecated: true });
+  historicalDb = write(historicalDb, 'account.account', accounts.account_depreciation_expense_id, { deprecated: true });
+  const historicalAsset = read(historicalDb, 'account.asset', made.id);
+
+  const increasedDb = modifyAsset(historicalDb, historicalAsset, {
+    date: '2026-02-01',
+    valueChange: 200,
+    accountId: counterpart,
+    increaseAccountId: accounts.account_asset_id,
+    depreciationAccountId: accounts.account_depreciation_id,
+    expenseAccountId: accounts.account_depreciation_expense_id,
+  });
+  const child = search(increasedDb, 'account.asset').find((a) => a.parent_id === made.id);
+  assert.ok(child);
+  assert.equal(child.account_depreciation_id, accounts.account_depreciation_id);
+  assert.equal(child.account_depreciation_expense_id, accounts.account_depreciation_expense_id);
+
+  const decreasedDb = modifyAsset(historicalDb, historicalAsset, {
+    date: '2026-02-01',
+    valueChange: -100,
+    expenseAccountId: accounts.account_depreciation_expense_id,
+  });
+  assert.equal(read(decreasedDb, 'account.asset', made.id).original_value, 900);
+});
+
+test('AST-4 Qodo Finding 2: switching to rate mode after posted periods derives rate from remaining unposted periods', () => {
+  let db = seed();
+  const accounts = assetAccounts(db);
+  const made = create(db, 'account.asset', {
+    ...accounts,
+    name: 'Five Year Press',
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_mode: 'duration',
+    method_number: 5,
+    method_period: '12',
+    prorata_computation_type: 'none',
+    prorata_date: '2026-01-01',
+  });
+  db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  db = postDepreciation(db, read(db, 'account.asset', made.id), '2026-12-31');
+
+  const asset = read(db, 'account.asset', made.id);
+  assert.equal(asset.depreciation_ids.filter((l) => l.posted).length, 1);
+  assert.equal(asset.depreciation_ids.filter((l) => !l.posted).length, 4);
+
+  const button = models['account.asset'].form.buttons.find((b) => b.label === 'Modify Depreciation');
+  const spec = button.wizard(db, asset);
+
+  assert.deepEqual(
+    spec.onchange({ modify_action: 'modify', date: '2027-01-15', method_mode: 'rate', method_number: null, method_rate: null }, 'method_mode'),
+    { method_rate: 0.25 },
+  );
+  assert.deepEqual(
+    spec.onchange({ modify_action: 'modify', date: '2027-12-31', method_mode: 'rate', method_number: null, method_rate: null }, 'method_mode'),
+    { method_rate: 1 / 3 },
+  );
+
+  const next = button.run(db, asset, {
+    modify_action: 'modify',
+    date: '2027-01-15',
+    method_mode: 'rate',
+    method_rate: 0.25,
+  }).db;
+  const synced = sync(db, next);
+  const updated = read(synced, 'account.asset', made.id);
+  assert.equal(updated.method_mode, 'rate');
+  assert.equal(updated.method_rate, 0.25);
+  assert.equal(updated.method_number, 5);
+  assert.equal(updated.depreciation_ids.filter((l) => l.posted).length, 1);
+  assert.equal(updated.depreciation_ids.filter((l) => !l.posted).length, 4);
+  assert.deepEqual(updated.depreciation_ids.map((l) => l.amount), [200, 200, 200, 200, 200]);
+  assert.equal(updated.depreciation_ids.at(-1).remaining, 0);
+
+  // Direct run omitting method_rate also stays consistent with remaining unposted periods.
+  const directRate = button.run(db, asset, {
+    modify_action: 'modify',
+    date: '2027-01-15',
+    method_mode: 'rate',
+  }).db;
+  const directUpdated = read(sync(db, directRate), 'account.asset', made.id);
+  assert.equal(directUpdated.method_rate, 0.25);
+  assert.equal(directUpdated.depreciation_ids.filter((l) => !l.posted).length, 4);
+
+  // Switching from rate back to duration without entering remaining duration keeps rate consistent.
+  const rateMade = create(db, 'account.asset', {
+    ...accounts,
+    name: 'Five Year Rate Press',
+    acquisition_date: '2026-01-01',
+    original_value: 1000,
+    salvage_value: 0,
+    method: 'linear',
+    method_mode: 'rate',
+    method_rate: 0.2,
+    method_number: 5,
+    method_period: '12',
+    prorata_computation_type: 'none',
+    prorata_date: '2026-01-01',
+  });
+  let rateStart = confirmAsset(rateMade.db, read(rateMade.db, 'account.asset', rateMade.id));
+  rateStart = postDepreciation(rateStart, read(rateStart, 'account.asset', rateMade.id), '2026-12-31');
+  const backToDuration = button.run(rateStart, read(rateStart, 'account.asset', rateMade.id), {
+    modify_action: 'modify',
+    date: '2027-01-15',
+    method_mode: 'duration',
+  }).db;
+  const backUpdated = read(sync(rateStart, backToDuration), 'account.asset', rateMade.id);
+  assert.equal(backUpdated.method_mode, 'duration');
+  assert.equal(backUpdated.method_rate, 0.25);
+  assert.equal(backUpdated.depreciation_ids.filter((l) => !l.posted).length, 4);
+});
