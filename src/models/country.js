@@ -35,7 +35,8 @@ export function stateIdFor(db, value, countryId) {
 }
 
 export function countryReferenceError(db, record) {
-  return record.country_id && !(Number.isInteger(record.country_id) && countryIdFor(db, record.country_id)) ? 'Selected country does not exist' : null;
+  if (record.country_id == null) return null;
+  return Number.isInteger(record.country_id) && countryIdFor(db, record.country_id) ? null : 'Selected country does not exist';
 }
 
 export function ensureCountries(db) {

@@ -360,10 +360,25 @@ export function autoFiscalPosition(db, address, companyId = null) {
     if (fp.vat_required && !String(p.vat ?? '').trim()) return false;
     if (!zipMatches(fp)) return false;
     const fpCountry = fpCountryFor(fp);
-    if (fpCountry && fpCountry !== country) return false;
+    if (fpCountry) {
+      if (fpCountry !== country) return false;
+    } else if (fp.country) {
+      const pNorm = typeof p.country === 'string' ? p.country.trim().toLowerCase() : '';
+      const fpNorm = typeof fp.country === 'string' ? fp.country.trim().toLowerCase() : '';
+      if (!fpNorm || fpNorm !== pNorm) return false;
+    }
     if (fp.country_group_id && !matchesCountryGroup(fp.country_group_id)) return false;
     const states = fpStates(fp, fpCountry);
-    if ((fp.state_ids ?? []).length && (!state || !states.includes(state))) return false;
+    if ((fp.state_ids ?? []).length) {
+      if (!state || !states.includes(state)) return false;
+    } else if (fp.states) {
+      const rawStates = Array.isArray(fp.states) ? fp.states : [fp.states];
+      if (rawStates.length) {
+        const pStateNorm = typeof p.state === 'string' ? p.state.trim().toLowerCase() : '';
+        const matchesLegacy = rawStates.some((s) => typeof s === 'string' && s.trim().toLowerCase() === pStateNorm);
+        if (!pStateNorm || !matchesLegacy) return false;
+      }
+    }
     return true;
   };
   const specificity = (fp) => {
@@ -1026,20 +1041,25 @@ export const taxModels = {
       const after = { ...before, ...nextVals };
       const hasCountryEdit = 'country_id' in nextVals || ('country_group_id' in nextVals && Boolean(nextVals.country_group_id)) || ('country' in nextVals && !nextVals.country);
       const hasStateEdit = 'state_ids' in nextVals || ('states' in nextVals && !(Array.isArray(nextVals.states) ? nextVals.states.length : nextVals.states));
-      const hasTargetingEdit = ['country_id', 'country_group_id', 'state_ids'].some((k) => k in nextVals);
+      const hasTargetingEdit = ['country_id', 'country_group_id', 'state_ids', 'country', 'states'].some((k) => k in nextVals);
       const hasAnyTarget = Boolean(after.country_id || after.country_group_id || (after.state_ids?.length ?? 0) > 0);
-      const completeWithAutoApply = Boolean(after.auto_apply && hasTargetingEdit && hasAnyTarget);
 
-      if (before.country && (hasCountryEdit || completeWithAutoApply)) {
+      if (before.country && hasCountryEdit) {
         nextVals.country = null;
       }
-      if (before.states && (hasStateEdit || completeWithAutoApply)) {
+      if (before.states && hasStateEdit) {
         nextVals.states = null;
       }
 
       const unresolvedCountry = Boolean(before.country && nextVals.country !== null);
       const unresolvedStates = Boolean(before.states && nextVals.states !== null);
-      if (before.unresolved_targeting && !unresolvedCountry && !unresolvedStates && (hasTargetingEdit || hasAnyTarget)) {
+      const hasUnresolved = unresolvedCountry || unresolvedStates;
+
+      if (hasUnresolved) {
+        if (after.auto_apply || before.unresolved_targeting) {
+          nextVals.unresolved_targeting = true;
+        }
+      } else if (before.unresolved_targeting && (hasTargetingEdit || hasAnyTarget)) {
         nextVals.unresolved_targeting = false;
       }
       return { db, vals: nextVals };

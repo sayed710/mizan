@@ -2111,10 +2111,12 @@ export function migrateCountries(db) {
           result.states = record.states ?? rawStates;
         }
 
-        if (record.auto_apply && (unresolvedCountry || unresolvedState)) {
-          result.auto_apply = false;
+        if (unresolvedCountry || unresolvedState) {
           result.unresolved_targeting = true;
-          console.warn(`Fiscal position "${record.name}" auto_apply disabled due to unresolved targeting (country: "${record.country}", states: ${JSON.stringify(rawStates)})`);
+          if (record.auto_apply) {
+            result.auto_apply = false;
+            console.warn(`Fiscal position "${record.name}" auto_apply disabled due to unresolved targeting (country: "${record.country}", states: ${JSON.stringify(rawStates)})`);
+          }
         }
       }
       return result;

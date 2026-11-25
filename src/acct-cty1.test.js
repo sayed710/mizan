@@ -4,7 +4,7 @@ import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { autoFiscalPosition, fiscalPositionFor, isDomesticTax } from './models/taxes.js';
-import { countryIdFor, stateIdFor } from './models/country.js';
+import { countryIdFor, countryReferenceError, stateIdFor } from './models/country.js';
 import { models } from './models/index.js';
 import { create, read, search, write } from './orm.js';
 import { importCsvRows } from './csv.js';
@@ -396,4 +396,125 @@ test('Qodo 2: lowercase, whitespace-padded, and alias country/state addresses ma
   const dbCompanyUae = write(db, 'res.company', 1, { country: 'UAE' });
   assert.equal(isDomesticTax(read(dbCompanyUae, 'account.tax', taxUae.id), dbCompanyUae), true);
   assert.equal(isDomesticTax(read(dbCompanyUae, 'account.tax', taxGiza.id), dbCompanyUae), false);
+});
+
+test('Review Finding 1: updating country and enabling auto-apply on position with both restrictions unresolved keeps legacy state restriction and unresolved marker', () => {
+  const db = seed();
+  const egypt = db.records['res.country'].find((c) => c.code === 'EG');
+  const giza = db.records['res.country.state'].find((s) => s.country_id === egypt.id && s.name === 'Giza');
+  const alex = db.records['res.country.state'].find((s) => s.country_id === egypt.id && s.name === 'Alexandria');
+
+  const old = {
+    ...db,
+    schema_version: SCHEMA_VERSION - 1,
+    records: {
+      ...db.records,
+      'account.fiscal.position': [
+        { id: 40, name: 'Both Unresolved FP', country: 'UnknownLand', state_ids: ['UnknownState'], auto_apply: true, sequence: 1 },
+      ],
+    },
+  };
+
+  const migrated = migrate(old);
+  const fpMigrated = read(migrated, 'account.fiscal.position', 40);
+  assert.equal(fpMigrated.unresolved_targeting, true);
+  assert.equal(fpMigrated.country, 'UnknownLand');
+  assert.deepEqual(fpMigrated.states, ['UnknownState']);
+
+  // Updating only country and enabling auto-apply must NOT clear legacy state restriction or unresolved marker
+  const step1 = write(migrated, 'account.fiscal.position', 40, { country_id: egypt.id, auto_apply: true });
+  const fpStep1 = read(step1, 'account.fiscal.position', 40);
+  assert.equal(fpStep1.country_id, egypt.id);
+  assert.equal(fpStep1.country, undefined);
+  assert.deepEqual(fpStep1.states, ['UnknownState']);
+  assert.equal(fpStep1.unresolved_targeting, true);
+
+  // Position must not match broadly across the country or for any state until state restriction is resolved
+  assert.equal(autoFiscalPosition(step1, { country_id: egypt.id }), null);
+  assert.equal(autoFiscalPosition(step1, { country_id: egypt.id, state_id: giza.id }), null);
+  assert.equal(autoFiscalPosition(step1, { country_id: egypt.id, state_id: alex.id }), null);
+
+  // Once states are also explicitly repaired, unresolved_targeting is cleared and position matches
+  const step2 = write(step1, 'account.fiscal.position', 40, { state_ids: [giza.id] });
+  const fpStep2 = read(step2, 'account.fiscal.position', 40);
+  assert.equal(fpStep2.states, undefined);
+  assert.equal(fpStep2.unresolved_targeting, undefined);
+  assert.equal(autoFiscalPosition(step2, { country_id: egypt.id, state_id: giza.id }), 40);
+  assert.equal(autoFiscalPosition(step2, { country_id: egypt.id, state_id: alex.id }), null);
+});
+
+test('Review Finding 2: migrated manual fiscal positions retain unresolved marker and remain excluded when auto-apply is enabled', () => {
+  const db = seed();
+  const egypt = db.records['res.country'].find((c) => c.code === 'EG');
+  const giza = db.records['res.country.state'].find((s) => s.country_id === egypt.id && s.name === 'Giza');
+
+  const old = {
+    ...db,
+    schema_version: SCHEMA_VERSION - 1,
+    records: {
+      ...db.records,
+      'account.fiscal.position': [
+        { id: 41, name: 'Manual Unresolved Country', country: 'UnknownLand', auto_apply: false, sequence: 1 },
+        { id: 42, name: 'Manual Unresolved State', state_ids: ['UnknownState'], auto_apply: false, sequence: 2 },
+      ],
+    },
+  };
+
+  const migrated = migrate(old);
+  const fp41Migrated = read(migrated, 'account.fiscal.position', 41);
+  const fp42Migrated = read(migrated, 'account.fiscal.position', 42);
+
+  // Migration marks unresolved targeting even on manual positions
+  assert.equal(fp41Migrated.unresolved_targeting, true);
+  assert.equal(fp42Migrated.unresolved_targeting, true);
+
+  // Enabling auto_apply without editing targets keeps them excluded
+  const enabled41 = write(migrated, 'account.fiscal.position', 41, { auto_apply: true });
+  const enabled42 = write(migrated, 'account.fiscal.position', 42, { auto_apply: true });
+  assert.equal(read(enabled41, 'account.fiscal.position', 41).unresolved_targeting, true);
+  assert.equal(read(enabled42, 'account.fiscal.position', 42).unresolved_targeting, true);
+
+  assert.equal(autoFiscalPosition(enabled41, { country_id: egypt.id }), null);
+  assert.equal(autoFiscalPosition(enabled41, { country_id: 999999 }), null);
+  assert.equal(autoFiscalPosition(enabled42, { country_id: egypt.id, state_id: giza.id }), null);
+
+  // Even if an existing record had unresolved targeting without the marker, enabling auto_apply establishes it
+  const unflaggedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.fiscal.position': [
+        { id: 43, name: 'Unflagged Manual Legacy', country: 'UnknownLand', auto_apply: false, sequence: 1 },
+      ],
+    },
+  };
+  assert.equal(autoFiscalPosition(unflaggedDb, { country_id: egypt.id }), null);
+  const enabledUnflagged = write(unflaggedDb, 'account.fiscal.position', 43, { auto_apply: true });
+  assert.equal(read(enabledUnflagged, 'account.fiscal.position', 43).unresolved_targeting, true);
+  assert.equal(autoFiscalPosition(enabledUnflagged, { country_id: egypt.id }), null);
+});
+
+test('Review Finding 3: countryReferenceError and models reject country_id: 0 on create and write', () => {
+  const db = seed();
+
+  assert.equal(countryReferenceError(db, { country_id: 0 }), 'Selected country does not exist');
+  assert.equal(countryReferenceError(db, { country_id: null }), null);
+  assert.equal(countryReferenceError(db, { country_id: undefined }), null);
+
+  for (const model of ['account.tax', 'account.tax.group', 'account.account.tag', 'account.fiscal.position']) {
+    const existing = db.records[model]?.[0];
+    assert.ok(existing, `${model} should have at least one seeded record`);
+
+    // create with country_id: 0 must reject
+    assert.throws(
+      () => create(db, model, { ...models[model].defaults?.(999), name: `Zero Country ${model}`, country_id: 0 }),
+      /Selected country does not exist/
+    );
+
+    // write with country_id: 0 must reject
+    assert.throws(
+      () => write(db, model, existing.id, { country_id: 0 }),
+      /Selected country does not exist/
+    );
+  }
 });
