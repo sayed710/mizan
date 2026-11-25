@@ -222,6 +222,7 @@ const ar = {
   'Journal account belongs to another company': 'حساب دفتر اليومية يتبع شركة أخرى',
   'Journal belongs to another company': 'دفتر اليومية يتبع شركة أخرى',
   'Set a short code on the journal': 'حدّد رمزاً مختصراً لدفتر اليومية',
+  'Cannot change journal currency when existing transactions cannot be safely interpreted in their original currency': 'لا يمكن تغيير عملة دفتر اليومية عندما يتعذر تفسير المعاملات الحالية بعملتها الأصلية',
   'Debits and credits cannot be negative': 'لا يمكن أن يكون المدين أو الدائن سالباً',
   'Journal entry is not balanced: total debit must equal total credit': 'القيد غير متوازن: يجب أن يساوي إجمالي المدين إجمالي الدائن',
   'Selected journal does not exist': 'دفتر اليومية المحدد غير موجود',
