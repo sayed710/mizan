@@ -3881,6 +3881,8 @@ const ar = {
   'Invalid amount': 'مبلغ غير صالح',
   'The matched entry belongs to another partner': 'القيد المطابق ينتمي إلى شريك آخر',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
+  'The Early Payment Discount functionality can only be used with payment terms using a single 100% line.': 'لا يمكن استخدام ميزة خصم السداد المبكر إلا مع شروط دفع تستخدم بنداً واحداً بنسبة 100%.',
+  'You can not delete payment terms as other records still reference it. However, you can archive it.': 'لا يمكنك حذف شروط الدفع لأن سجلات أخرى ما زالت تشير إليها. يمكنك أرشفتها بدلاً من ذلك.',
   'Total Sales': 'إجمالي المبيعات',
   'Total Purchases': 'إجمالي المشتريات',
   'Clear the Taxes filter to export the statutory XML return': 'امسح عامل تصفية الضرائب لتصدير إقرار XML النظامي',
