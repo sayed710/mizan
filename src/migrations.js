@@ -1999,6 +1999,63 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+/** Customer and vendor ranks marked from posted invoices and confirmed orders, per commercial partner. */
+export function migratePartnerRanks(db) {
+  const partners = db.records['res.partner'] ?? [];
+  const partnerById = new Map(partners.map((p) => [p.id, p]));
+  const commercialIdCache = new Map();
+  const commercialId = (partnerId) => {
+    if (partnerId == null) return null;
+    if (commercialIdCache.has(partnerId)) return commercialIdCache.get(partnerId);
+    let p = partnerById.get(partnerId);
+    if (!p) {
+      commercialIdCache.set(partnerId, null);
+      return null;
+    }
+    const seen = new Set();
+    while (p?.parent_id) {
+      if (seen.has(p.id)) { p = null; break; }
+      seen.add(p.id);
+      const parent = partnerById.get(p.parent_id);
+      if (!parent) break;
+      p = parent;
+    }
+    const cid = p?.id ?? null;
+    commercialIdCache.set(partnerId, cid);
+    return cid;
+  };
+
+  const hasCustomerActivity = new Set();
+  const hasSupplierActivity = new Set();
+  const markActivity = (set, partnerId) => {
+    const cid = commercialId(partnerId);
+    if (cid != null) set.add(cid);
+  };
+
+  for (const move of db.records['account.move'] ?? []) {
+    if (move.state === 'posted') {
+      if (move.move_type === 'out_invoice') markActivity(hasCustomerActivity, move.partner_id);
+      else if (move.move_type === 'in_invoice') markActivity(hasSupplierActivity, move.partner_id);
+    }
+  }
+  for (const order of db.records['sale.order'] ?? []) {
+    if (order.state === 'sale' || order.state === 'done') markActivity(hasCustomerActivity, order.partner_id);
+  }
+  for (const order of db.records['purchase.order'] ?? []) {
+    if (order.state === 'purchase' || order.state === 'done') markActivity(hasSupplierActivity, order.partner_id);
+  }
+
+  const updatedPartners = partners.map((p) => {
+    const currentCust = Number(p.customer_rank) || 0;
+    const currentSupp = Number(p.supplier_rank) || 0;
+    return {
+      ...p,
+      customer_rank: currentCust > 0 ? currentCust : (hasCustomerActivity.has(p.id) ? 1 : 0),
+      supplier_rank: currentSupp > 0 ? currentSupp : (hasSupplierActivity.has(p.id) ? 1 : 0),
+    };
+  });
+  return { ...db, records: { ...db.records, 'res.partner': updatedPartners } };
+}
 MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
   const budgets = db?.records?.['account.budget'];
   if (!Array.isArray(budgets) || !budgets.length) return db;
@@ -2035,6 +2092,105 @@ export function migrateReconcileModelTolerance(db) {
   return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
 }
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
+MIGRATIONS.push({ version: 69, name: 'partner-ranks', up: migratePartnerRanks });
+
+export function migrateSalesCreditLimit(db) {
+  const partners = db?.records?.['res.partner'];
+  const companies = db?.records?.['res.company'];
+  if (!Array.isArray(partners) && !Array.isArray(companies)) return db;
+
+  // Partner 1 demo limit (100000) from legacy seed without an explicit setting is dropped so fresh and upgraded databases match.
+  const isDemoSeedLimit = (p) => p?.id === 1 && p?.name === 'Nile Furniture Co.' && Number(p?.credit_limit) === 100000 && !p?.use_partner_credit_limit;
+
+  const partnerById = new Map((partners ?? []).map((p) => [p.id, p]));
+  const commercialIdOf = (p) => {
+    let curr = p;
+    const seen = new Set();
+    while (curr?.parent_id) {
+      if (seen.has(curr.id)) return curr.id;
+      seen.add(curr.id);
+      const next = partnerById.get(curr.parent_id);
+      if (!next) break;
+      curr = next;
+    }
+    return curr?.id ?? p.id;
+  };
+
+  // Group contacts by their commercial parent entity.
+  const groups = new Map();
+  for (const p of (partners ?? [])) {
+    const cId = commercialIdOf(p);
+    if (!groups.has(cId)) groups.set(cId, []);
+    groups.get(cId).push(p);
+  }
+
+  // Determine commercial limit overrides for each commercial group.
+  // Explicit consolidation policy:
+  // 1. If the commercial parent has an existing positive limit, keep that limit.
+  // 2. Otherwise, take the maximum limit among its children.
+  const groupConsolidatedLimit = new Map();
+  for (const [cId, members] of groups.entries()) {
+    const commParent = partnerById.get(cId) ?? members[0];
+    const commLimit = isDemoSeedLimit(commParent) ? 0 : (Number(commParent?.credit_limit) || 0);
+    const childLimits = members
+      .filter((m) => m.id !== cId && !isDemoSeedLimit(m))
+      .map((m) => Number(m?.credit_limit) || 0)
+      .filter((l) => l > 0);
+
+    let targetLimit = 0;
+    if (commLimit > 0) {
+      targetLimit = commLimit;
+    } else if (childLimits.length > 0) {
+      targetLimit = Math.max(...childLimits);
+    }
+    if (targetLimit > 0) {
+      groupConsolidatedLimit.set(cId, targetLimit);
+    }
+  }
+
+  const hasAnyPartnerLimit = groupConsolidatedLimit.size > 0;
+  let changed = false;
+
+  const nextPartners = (partners ?? []).map((p) => {
+    const cId = commercialIdOf(p);
+    const consolidated = groupConsolidatedLimit.get(cId);
+    if (isDemoSeedLimit(p)) {
+      changed = true;
+      if (consolidated && p.id === cId) {
+        return { ...p, use_partner_credit_limit: true, credit_limit: consolidated };
+      }
+      const { credit_limit: _cl, ...rest } = p;
+      return rest;
+    }
+    if (consolidated) {
+      const nextLimit = p.id === cId ? consolidated : (p.credit_limit != null ? consolidated : p.credit_limit);
+      if (!p.use_partner_credit_limit || p.credit_limit !== nextLimit) {
+        changed = true;
+        return { ...p, use_partner_credit_limit: true, credit_limit: nextLimit };
+      }
+    }
+    return p;
+  });
+
+  const nextCompanies = (companies ?? []).map((c) => {
+    if (hasAnyPartnerLimit && !c.account_use_credit_limit) {
+      changed = true;
+      return { ...c, account_use_credit_limit: true };
+    }
+    return c;
+  });
+
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(partners ? { 'res.partner': nextPartners } : {}),
+      ...(companies ? { 'res.company': nextCompanies } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 70, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
 
 export function migrateAnalyticAccountPlanToPlanId(db) {
   const accounts = db?.records?.['account.analytic.account'];

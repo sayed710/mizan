@@ -16,7 +16,8 @@ const invoice = (db, vals) => {
 };
 
 test('confirming a quotation over the credit limit warns without blocking', () => {
-  const db0 = write(seed(), 'res.partner', 3, { credit_limit: receivableOf(seed(), 3) + 500 });
+  const base = write(seed(), 'res.company', 1, { account_use_credit_limit: true });
+  const db0 = write(base, 'res.partner', 3, { use_partner_credit_limit: true, credit_limit: receivableOf(base, 3) + 500 });
   const { db, id } = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 0 }] });
   assert.match(models['sale.order'].form.warning(read(db, 'sale.order', id), db), /credit limit/);
   assert.equal(read(run(db, 'sale.order', id, 'Confirm'), 'sale.order', id).state, 'sale');
