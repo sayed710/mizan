@@ -23,7 +23,7 @@ import { normalizeReconcileRule } from './models/reconcile.js';
 import { ensureStatementReports } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
-import { ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
+import { ensureOnlinePaymentMethods, ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
 import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
 
@@ -2035,6 +2035,7 @@ export function migrateReconcileModelTolerance(db) {
   return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
 }
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
+MIGRATIONS.push({ version: 77, name: 'online-payment-methods', up: ensureOnlinePaymentMethods });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

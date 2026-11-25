@@ -5,6 +5,7 @@ import { setupDom, find } from './test-support/dom.js';
 import { create, read, search, SHARED_MODELS, write } from './orm.js';
 import { ACCOUNTING_CONFIG, menusFor, models, targetOf, viewsOf } from './models/index.js';
 import { ensureOnlinePaymentMethods } from './models/paymentmethod.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -267,6 +268,8 @@ test('Arabic translations exist and contain no identity strings for payment.meth
       'A payment method cannot be its own primary payment method',
       "You can't deactivate a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): Wire Transfer",
       "You can't delete a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): Wire Transfer",
+      "You can't link a provider in the enabled or test state to an archived payment method.\nLinked provider(s): Wire Transfer",
+      "You can't enable a payment provider that is linked to an archived payment method.\nArchived method(s): Wire Transfer",
     ];
     for (const s of strings) {
       const ar = t(s);
@@ -276,4 +279,116 @@ test('Arabic translations exist and contain no identity strings for payment.meth
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('migration v77 seeds online payment methods for existing databases upgraded from schema_version 68', () => {
+  const fresh = seed();
+  const { 'payment.method': _removedMethods, ...restRecords } = fresh.records;
+  const { 'payment.method': _removedSeq, ...restSeq } = fresh.seq;
+  const legacyDb = { ...fresh, schema_version: 68, records: restRecords, seq: restSeq };
+
+  assert.equal(SCHEMA_VERSION, 77);
+  assert.equal(search(legacyDb, 'payment.method', { includeArchived: true }).length, 0);
+
+  const upgraded = migrate(legacyDb);
+  assert.equal(upgraded.schema_version, 77);
+  const providersByCode = Object.fromEntries(search(upgraded, 'payment.provider').map((p) => [p.code, p]));
+  assert.deepEqual(
+    search(upgraded, 'payment.method').map((m) => ({ code: m.code, name: m.name, active: m.active, provider_ids: m.provider_ids })),
+    [
+      { code: 'wire_transfer', name: 'Wire Transfer', active: true, provider_ids: [providersByCode.wire.id] },
+      { code: 'cod', name: 'Cash on Delivery', active: true, provider_ids: [providersByCode.cod.id] },
+      { code: 'demo', name: 'Demo', active: true, provider_ids: [providersByCode.demo.id] },
+    ],
+  );
+  assert.strictEqual(migrate(upgraded), upgraded);
+
+  // Minimal legacy DB without seq/messages also migrates cleanly and preserves already-present methods.
+  const minimalLegacy = {
+    schema_version: 68,
+    records: {
+      'payment.provider': [
+        { id: 1, name: 'Wire Transfer', code: 'wire', state: 'enabled' },
+        { id: 2, name: 'Cash on Delivery', code: 'cod', state: 'enabled' },
+      ],
+      'payment.method': [
+        { id: 10, name: 'Custom Wire', code: 'wire_transfer', sequence: 10, active: false, provider_ids: [] },
+      ],
+    },
+  };
+  const minimalUpgraded = migrate(minimalLegacy);
+  assert.equal(minimalUpgraded.schema_version, 77);
+  const methods = search(minimalUpgraded, 'payment.method', { includeArchived: true });
+  assert.equal(methods.find((m) => m.code === 'wire_transfer')?.active, false);
+  assert.deepEqual(methods.find((m) => m.code === 'cod')?.provider_ids, [2]);
+});
+
+test('archived payment.method cannot link enabled providers and providers cannot be enabled while linked to archived methods', () => {
+  let db = seed();
+  const wireProvider = search(db, 'payment.provider').find((p) => p.code === 'wire');
+  const codProvider = search(db, 'payment.provider').find((p) => p.code === 'cod');
+  const demoProvider = search(db, 'payment.provider').find((p) => p.code === 'demo');
+  const wireMethod = search(db, 'payment.method').find((m) => m.code === 'wire_transfer');
+  const demoMethod = search(db, 'payment.method').find((m) => m.code === 'demo');
+
+  // 1. Disable provider, archive its method, then try to re-enable the provider via ORM and via diffDb + applyDiff.
+  db = write(db, 'payment.provider', wireProvider.id, { state: 'disabled' });
+  db = write(db, 'payment.method', wireMethod.id, { active: false });
+
+  assert.throws(
+    () => write(db, 'payment.provider', wireProvider.id, { state: 'enabled' }),
+    /You can't enable a payment provider that is linked to an archived payment method\.\nArchived method\(s\): Wire Transfer/,
+  );
+
+  const clientReenabled = {
+    ...db,
+    records: {
+      ...db.records,
+      'payment.provider': db.records['payment.provider'].map((p) => (p.id === wireProvider.id ? { ...p, state: 'enabled' } : p)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, clientReenabled)),
+    /You can't enable a payment provider that is linked to an archived payment method\.\nArchived method\(s\): Wire Transfer/,
+  );
+
+  // 2. Linking an enabled provider to an already-archived method is blocked via ORM and via diffDb + applyDiff.
+  db = write(db, 'payment.method', demoMethod.id, { active: false });
+  assert.throws(
+    () => write(db, 'payment.method', demoMethod.id, { provider_ids: [demoProvider.id, codProvider.id] }),
+    /You can't link a provider in the enabled or test state to an archived payment method\.\nLinked provider\(s\): Cash on Delivery/,
+  );
+
+  const clientLinked = {
+    ...db,
+    records: {
+      ...db.records,
+      'payment.method': db.records['payment.method'].map((m) => (m.id === demoMethod.id ? { ...m, provider_ids: [demoProvider.id, codProvider.id] } : m)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, clientLinked)),
+    /You can't link a provider in the enabled or test state to an archived payment method\.\nLinked provider\(s\): Cash on Delivery/,
+  );
+
+  // 3. Creating an archived method linked to an enabled provider is blocked via ORM and diffDb + applyDiff.
+  assert.throws(
+    () => create(db, 'payment.method', { name: 'Archived COD', code: 'arch_cod', active: false, provider_ids: [codProvider.id] }),
+    /You can't deactivate a payment method that is linked to a provider in the enabled or test state\.\nLinked provider\(s\): Cash on Delivery/,
+  );
+
+  // 4. Unarchiving the method (or unlinking the provider) allows re-enabling the provider, including in a single sync diff.
+  const unarchivedAndEnabled = write(
+    write(db, 'payment.method', wireMethod.id, { active: true }),
+    'payment.provider',
+    wireProvider.id,
+    { state: 'enabled' },
+  );
+  const syncedBoth = applyDiff(db, diffDb(db, unarchivedAndEnabled));
+  assert.equal(read(syncedBoth, 'payment.provider', wireProvider.id).state, 'enabled');
+  assert.equal(read(syncedBoth, 'payment.method', wireMethod.id).active, true);
+
+  const unlinkedWire = write(db, 'payment.method', wireMethod.id, { provider_ids: [] });
+  const reenabledUnlinked = write(unlinkedWire, 'payment.provider', wireProvider.id, { state: 'enabled' });
+  assert.equal(read(reenabledUnlinked, 'payment.provider', wireProvider.id).state, 'enabled');
 });
