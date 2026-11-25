@@ -7,7 +7,7 @@ import { closeFiscalYear } from './models/closing.js';
 
 test('analytic balance sheet reports a closed prior year as retained equity, not current earnings', () => {
   let db = seed();
-  const alpha = create(db, 'account.analytic.account', { name: 'Project Alpha' });
+  const alpha = create(db, 'account.analytic.account', { name: 'Project Alpha', plan_id: db.records['account.analytic.plan'][0].id });
   db = alpha.db;
   const tag = { analytic_distribution: { [alpha.id]: 100 } };
 

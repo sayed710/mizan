@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { setupDom, find } from './test-support/dom.js';
+import { setupDom, find, waitFor } from './test-support/dom.js';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
@@ -24,11 +24,7 @@ const collectAll = (node, pred, out = []) => {
   for (const child of node.childNodes ?? []) collectAll(child, pred, out);
   return out;
 };
-const rendered = async (React, container, text) => {
-  for (let i = 0; i < 200 && !container.textContent.includes(text); i++) {
-    await React.act(() => new Promise((resolve) => setTimeout(resolve, 20)));
-  }
-};
+const rendered = (React, container, text) => waitFor(React, () => container.textContent.includes(text));
 
 function cleanReportingFixture() {
   let db = seed();
@@ -290,7 +286,7 @@ test('FIN-12: horizontal groups store real record ids validated against chosen m
   const co2Journal = search(db, 'account.journal').find((j) => j.company_id === co2.id);
   const co2Partner = create(db, 'res.partner', { name: 'Co2 Private Partner', company_id: co2.id });
   db = co2Partner.db;
-  const co2Analytic = create(db, 'account.analytic.account', { name: 'Co2 Analytic', company_id: co2.id });
+  const co2Analytic = create(db, 'account.analytic.account', { name: 'Co2 Analytic', company_id: co2.id, plan_id: db.records['account.analytic.plan'][0].id });
   db = co2Analytic.db;
 
   // Server-side guard tests through diffDb + applyDiff
@@ -635,7 +631,7 @@ test('Qodo 3: Legacy horizontal-group rule migration and normalization moves ids
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 72);
+  assert.equal(migrated.schema_version, 78);
   const upgradedGroup = migrated.records['account.report.horizontal.group'].find((g) => g.id === 991);
   assert.deepEqual(upgradedGroup.rule_ids[0].partner_ids, [1, 2]);
   assert.equal(upgradedGroup.rule_ids[0].ids, '');

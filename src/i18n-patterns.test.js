@@ -109,8 +109,8 @@ const VALUE_ONLY = /^(?:\{\d+\}|[\s:.,()#"·→-])*$/;
 
 /** Template-literal messages in the app and the server, written like the pattern keys: `Journal {1} belongs…`. */
 function sourceTemplates() {
-  // The server's database lease and backup tool speak to an operator at a terminal, not to a screen.
-  const skipped = ['seed.js', 'migrations.js', 'i18n.js', 'i18n-patterns.js', 'storage.js', 'backup.js'];
+  // The server's database lease, backup tool, and test server helper do not surface messages to end users.
+  const skipped = ['seed.js', 'migrations.js', 'i18n.js', 'i18n-patterns.js', 'storage.js', 'backup.js', 'test-server.js'];
   const walk = (d) => readdirSync(d).flatMap((n) => {
     const p = join(d, n);
     if (statSync(p).isDirectory()) return n === 'test-support' ? [] : walk(p);

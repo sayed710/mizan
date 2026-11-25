@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { setupDom } from './test-support/dom.js';
+import { setupDom, waitFor } from './test-support/dom.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postEntry, balanceSheet } from './models/ledger.js';
@@ -14,11 +14,7 @@ import { models } from './models/index.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
-const rendered = async (React, container, text) => {
-  for (let i = 0; i < 200 && !container.textContent.includes(text); i++) {
-    await React.act(() => new Promise((resolve) => setTimeout(resolve, 50)));
-  }
-};
+const rendered = (React, container, text) => waitFor(React, () => container.textContent.includes(text));
 
 test('multi-ledger selector limits journals to selected ledger on financial reports', async () => {
   const { makeEl } = setupDom();
@@ -84,8 +80,9 @@ test('multi-ledger selector limits journals to selected ledger on financial repo
 
 test('horizontal grouping by analytic group provides comparison columns in financial reports', () => {
   let db = seed();
-  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Project' });
-  const a2 = create(a1.db, 'account.analytic.account', { name: 'Beta Project' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Project', plan_id: planId });
+  const a2 = create(a1.db, 'account.analytic.account', { name: 'Beta Project', plan_id: planId });
   db = a2.db;
 
   const date = `${today().slice(0, 4)}-05-10`;

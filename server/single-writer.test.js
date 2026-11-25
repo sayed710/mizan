@@ -1,18 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { claimWriter } from './storage.js';
+import { startServer } from './test-server.js';
 
-const stop = async (child) => {
-  if (!child || child.exitCode !== null) return;
-  const exited = new Promise((resolve) => child.once('exit', resolve));
-  child.send('shutdown');
-  await exited;
-};
+const stop = async (server) => server?.stop?.();
 
 test('a second writer is refused while the lease is fresh, and can take over a stale or forced one', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-lease-'));
@@ -44,16 +39,17 @@ test('a second writer is refused while the lease is fresh, and can take over a s
   }
 });
 
-const start = (dbPath, env = {}) => new Promise((resolve) => {
-  const child = spawn(process.execPath, ['server/index.js'], {
-    env: { ...process.env, PORT: '0', MIZAN_DB: dbPath, MIZAN_ADMIN_PASSWORD: 'lease-admin-pw', ...env }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-  let out = '';
-  const done = (result) => resolve({ child, out, ...result });
-  child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) done({ url: m[1] }); });
-  child.stderr.on('data', (b) => { out += b; });
-  child.on('exit', (code) => done({ code }));
-});
+const start = async (dbPath, env = {}) => {
+  try {
+    const server = await startServer({
+      env: { ...process.env, PORT: '0', MIZAN_DB: dbPath, MIZAN_ADMIN_PASSWORD: 'lease-admin-pw', ...env },
+    });
+    return { ...server, out: server.output };
+  } catch (err) {
+    if (err?.exited) return { child: null, out: err.output, code: err.code, stop: async () => {} };
+    throw err;
+  }
+};
 
 test('a second server on the same database file refuses to start', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-lease-'));
@@ -64,13 +60,13 @@ test('a second server on the same database file refuses to start', async () => {
     assert.equal(second.code, 1);
     assert.match(second.out, /Another Mizan server .* is using this database/);
     // Stopping the first one releases the database right away.
-    await stop(first.child);
+    await stop(first);
     const third = await start(join(dir, 'db.sqlite'));
     assert.ok(third.url, third.out);
-    await stop(third.child);
+    await stop(third);
   } finally {
-    await stop(first.child);
-    rmSync(dir, { recursive: true, force: true });
+    await stop(first);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -122,8 +118,8 @@ test('after a forced takeover the old server stops on its next login, user or AP
     assert.ok(!res || res.status >= 400, `the displaced server must not hand out a session (got ${res?.status})`);
     assert.equal(await exited, 1);
   } finally {
-    await stop(old.child);
-    await stop(next?.child);
-    rmSync(dir, { recursive: true, force: true });
+    await stop(old);
+    await stop(next);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

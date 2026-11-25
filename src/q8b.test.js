@@ -309,7 +309,7 @@ test('Qodo 74: Migration 28 leaves base repartition tag_ids empty when only tag_
 test('Qodo 14: Invoices with fixed-amount payment terms post and calculate installments', () => {
   let db = seed();
   const mixedTerm = create(db, 'account.payment.term', {
-    name: 'Fixed 125 + 100%',
+    name: 'Fixed 125 + Remainder',
     line_ids: [
       { value: 125, value_type: 'fixed', nb_days: 0, delay_type: 'days_after' },
       { value: 100, value_type: 'percent', nb_days: 30, delay_type: 'days_after' },

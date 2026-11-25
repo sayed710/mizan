@@ -1,8 +1,6 @@
 import '../src/models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,26 +14,29 @@ import { companyViewDb } from '../src/companyView.js';
 import { logManualFollowUp, runFollowUps } from '../src/models/finance.js';
 import { seed } from '../src/seed.js';
 import { openStorage } from './storage.js';
+import { startServer as spawnTestServer } from './test-server.js';
 
 const PASSWORD = 'audit-admin-pw';
 
 async function startServer(prepare = () => {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-audit-'));
-  prepare(join(dir, 'db.sqlite'));
-  const child = spawn(process.execPath, ['server/index.js'], {
-    env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: PASSWORD },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-  const url = await new Promise((resolve, reject) => {
-    let out = '';
-    child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
-    child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
-  });
-  // Wait for exit before removing the SQLite folder, including on Windows.
-  return { url, stop: async () => {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+  try {
+    prepare(join(dir, 'db.sqlite'));
+    const server = await spawnTestServer({
+      env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: PASSWORD },
+    });
+    // Wait for exit before removing the SQLite folder, including on Windows.
+    return {
+      url: server.url,
+      stop: async () => {
+        await server.stop();
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      },
+    };
+  } catch (err) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  } };
+    throw err;
+  }
 }
 
 const client = (url) => {
@@ -824,7 +825,9 @@ test('GET /api/audit filters by user, model, record, field, date range and rejec
     assert.ok(valueField.body.some((r) => r.res_id === move.id));
 
     // Date range filter (date and timestamp bounds)
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const leadAuditRow = recordFiltered.body.find((r) => r.res_id === lead.id);
+    assert.ok(leadAuditRow, 'Lead row must exist in audit log');
+    const todayStr = leadAuditRow.at.slice(0, 10);
     const dateFiltered = await admin('GET', `/api/audit?model=crm.lead&date_from=${todayStr}&date_to=${todayStr}`);
     assert.equal(dateFiltered.status, 200);
     assert.ok(dateFiltered.body.some((r) => r.res_id === lead.id));

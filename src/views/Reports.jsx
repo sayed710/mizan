@@ -26,7 +26,7 @@ import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
 import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
-import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
+import { GENERIC_TAX_TOTALS, TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowAnalyticColumns, cashflowColumns, detailReportColumns, executiveColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
 import { customPeriodError, DEFAULT_REPORT_PERIOD, PERIODS, reportPage, updateReportParam } from './reportNavigation.js';
@@ -221,6 +221,11 @@ export function resolveTaxReportTemplate(db, companyId, companies = null) {
   return null;
 }
 
+const exportTaxReturnXml = (db, retOrSpec, baseName = retOrSpec?.name || 'tax-return') => {
+  const safeBase = String(baseName).replace(/[^a-zA-Z0-9_-]+/g, '-');
+  downloadXml(`${safeBase}.xml`, taxReturnToXml(db, retOrSpec));
+};
+
 export function TaxReportTable({ db, period, returnRecord = null }) {
   const safeBase = String(returnRecord?.name || 'tax-return').replace(/[^a-zA-Z0-9_-]+/g, '-');
   const template = returnRecord?.tax_return_template;
@@ -233,7 +238,7 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
         <div className="row" style={{ marginBottom: 8 }}>
           <button type="button" className="btn sm" onClick={() => downloadCsv(`${safeBase}.csv`, taxReturnToCsv(db, returnRecord))}>{t('Export CSV')}</button>
           <button type="button" className="btn sm" onClick={() => downloadXlsx(`${safeBase}.xlsx`, taxReturnToCsv(db, returnRecord), { sheetName: safeBase, columnTypes: ['text', 'text', 'number', 'number'] })}>{t('Export XLSX')}</button>
-          <button type="button" className="btn sm" onClick={() => downloadXml(`${safeBase}.xml`, taxReturnToXml(db, returnRecord))}>{t('Export XML')}</button>
+          <button type="button" className="btn sm" onClick={() => exportTaxReturnXml(db, returnRecord, safeBase)}>{t('Export XML')}</button>
         </div>
       )}
       <table className="list report">
@@ -324,7 +329,8 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
   });
 
   if (periods) {
-    const specs = periods.map((p) => ({ ...p, ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}), tax_return_template: activeVariant }));
+    const taxFilter = period?.taxIds?.length ? { taxIds: period.taxIds } : {};
+    const specs = periods.map((p) => ({ ...p, ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}), ...taxFilter, tax_return_template: activeVariant }));
     const reports = specs.map((spec) => activeVariant === 'generic' ? genericTaxRows(taxesByTax(db, spec)) : taxReturnBoxes(db, spec).boxes);
     const rowKey = (row) => activeVariant === 'generic' ? taxItemKey({ ...row, tax_name: row.name }) : row.code;
     const rowsByReport = reports.map((rows) => new Map(rows.map((row) => [rowKey(row), row])));
@@ -340,7 +346,7 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
       {activeVariant === 'generic' ? <>{section('Sales')}{renderRows(mergedRows.filter((row) => row.side === 'sale'))}{section('Purchases')}{renderRows(mergedRows.filter((row) => row.side === 'purchase'))}</> : renderRows(mergedRows)}
       {grids.size > 0 && section('Tax Grids')}
       {[...grids.values()].map((row) => <tr key={`grid-${row.id}`} className="rep-detail"><td>{row.name}</td>{gridsByReport.flatMap((byId, index) => { const value = byId.get(row.id); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>)}
-      {activeVariant === 'generic' && ['output', 'input', 'payable'].map((key) => <tr key={key} className={`rep-total ${key === 'payable' ? 'strong' : ''}`}><td>{t(key === 'output' ? 'Output Tax' : key === 'input' ? 'Input Tax' : 'Tax Payable')}</td>{totals.flatMap((total, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} className="num">{fmtMoney(total[key])}</td>])}</tr>)}
+      {activeVariant === 'generic' && GENERIC_TAX_TOTALS.map(({ key, label, strong }) => <tr key={key} className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td>{totals.flatMap((total, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} className="num">{fmtMoney(total[key])}</td>])}</tr>)}
     </tbody>;
   }
 
@@ -422,14 +428,12 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
       {renderSection('Purchases', rows.filter((x) => x.side === 'purchase'))}
       {grids.length > 0 && <tr className="rep-section"><td>{t('Tax Grids')}</td><td /><td /></tr>}
       {grids.map((x) => <tr key={x.id} className="rep-detail"><td>{x.name}</td><td className="num">{fmtMoney(x.base)}</td><td className="num">{fmtMoney(x.tax)}</td></tr>)}
-      {renderTotalLine('Output Tax', 'TOTAL-OUT', r.output)}
-      {renderTotalLine('Input Tax', 'TOTAL-IN', r.input)}
-      {renderTotalLine('Tax Payable', 'PAYABLE', r.payable, true)}
+      {GENERIC_TAX_TOTALS.map(({ key, code, label, strong }) => renderTotalLine(label, code, r[key], strong))}
     </tbody>
   );
 }
 
-function DetailComparison({ db, data, report, companyId, variant, money: fmtMoney = money }) {
+function DetailComparison({ db, data, report, companyId, variant, taxIds, money: fmtMoney = money }) {
   const [open, setOpen] = useState(null);
   const isStatutoryTax = report === 'tax' && variant !== 'generic';
   const width = (isStatutoryTax ? 2 : 1) + data.periods.length * (report === 'tax' ? 2 : 3);
@@ -451,7 +455,7 @@ function DetailComparison({ db, data, report, companyId, variant, money: fmtMone
       )}
     </tr>
     {report === 'tax' && row.columns.map((column, index) => column?.code && open === `${row.id}:${index}` ? (
-      <TaxBoxDetailRow key={index} db={db} returnOrPeriod={{ ...data.periods[index], company_id: companyId === 'all' ? null : Number(companyId), tax_return_template: variant }} code={column.code} colSpan={width} money={fmtMoney} />
+      <TaxBoxDetailRow key={index} db={db} returnOrPeriod={{ ...data.periods[index], company_id: companyId === 'all' ? null : Number(companyId), tax_return_template: variant, ...(taxIds?.length ? { taxIds } : {}) }} code={column.code} colSpan={width} money={fmtMoney} />
     ) : null)}
   </Fragment>)}</tbody>;
 }
@@ -1086,7 +1090,9 @@ function ReportPage({ leaf, params }) {
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
     const allLedgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
     const activeLedger = LEDGER_REPORTS.includes(leaf.report) ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
-    const journals = (activeLedger ? search(companyDb, 'account.journal').filter((j) => (activeLedger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal', { includeArchived: leaf.report === 'inalterability' }))
+    const journals = (activeLedger
+      ? search(companyDb, 'account.journal', { includeArchived: leaf.report === 'inalterability' }).filter((j) => j.journal_group_id === activeLedger.id || (activeLedger.journal_ids ?? []).includes(j.id))
+      : search(companyDb, 'account.journal', { includeArchived: leaf.report === 'inalterability' }))
       .filter((j) => selectedCompany === 'all' || !j.company_id || j.company_id === Number(selectedCompany));
     const chosenIds = LEDGER_REPORTS.includes(leaf.report)
       ? journalIds.filter((jId) => journals.some((j) => j.id === jId))
@@ -1094,7 +1100,7 @@ function ReportPage({ leaf, params }) {
     const targetIds = chosenIds.length
       ? chosenIds
       : activeLedger
-        ? (activeLedger.journal_ids ?? [])
+        ? journals.map((j) => j.id)
         : null;
     return { ledgers: allLedgers, ledger: activeLedger, availableJournals: journals, selectedJournalIds: chosenIds, targetJournalIds: targetIds };
   }, [companyDb, leaf.report, ledgerId, selectedCompany, journalIds]);
@@ -1147,15 +1153,27 @@ function ReportPage({ leaf, params }) {
   const countryTemplateKey = leaf.report === 'tax' ? resolveTaxReportTemplate(companyDb, selectedCompany, companies) : null;
   const countryTemplate = countryTemplateKey ? TAX_RETURN_TEMPLATES[countryTemplateKey] : null;
   const [taxVariant, setTaxVariant] = useState(null);
+  const [taxIds, setTaxIds] = useState([]);
   const [taxVariantCompany, setTaxVariantCompany] = useState(selectedCompany);
   if (taxVariantCompany !== selectedCompany) {
     setTaxVariantCompany(selectedCompany);
     setTaxVariant(null);
   }
+  const availableTaxes = useMemo(() => {
+    if (leaf.report !== 'tax') return [];
+    return search(scopedCompanyDb, 'account.tax')
+      .filter((tax) => selectedCompany === 'all' || !tax.company_id || tax.company_id === Number(selectedCompany))
+      .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.name ?? '').localeCompare(b.name ?? '') || (a.id ?? 0) - (b.id ?? 0));
+  }, [leaf.report, scopedCompanyDb, selectedCompany]);
+  const selectedTaxIds = useMemo(
+    () => taxIds.filter((taxId) => availableTaxes.some((tax) => tax.id === taxId)),
+    [taxIds, availableTaxes],
+  );
   const activeTaxVariant = (taxVariant && (taxVariant === 'generic' || taxVariant === countryTemplateKey))
     ? taxVariant
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
+  const xmlCompanyId = selectedCompanyId ?? (companies.length === 1 ? companies[0].id : null);
   const period = useMemo(
     () => (isAged || isValuation ? { from: '', to: agedReportDate(asOfState.date) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
     [isAged, isValuation, asOfState.date, periodKey, customPeriod],
@@ -1239,8 +1257,12 @@ function ReportPage({ leaf, params }) {
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement', 'depreciation'].includes(leaf.report);
   const effectivePeriod = useMemo(
-    () => (showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period),
-    [showUnpostedOption, includeUnposted, period]
+    () => ({
+      ...period,
+      ...(showUnpostedOption && includeUnposted ? { reviewMode: 'all' } : {}),
+      ...(leaf.report === 'tax' && selectedTaxIds.length > 0 ? { taxIds: selectedTaxIds } : {}),
+    }),
+    [showUnpostedOption, includeUnposted, period, leaf.report, selectedTaxIds]
   );
   const rootPlans = useMemo(() => {
     if (leaf.report !== 'analytic') return [];
@@ -1307,7 +1329,7 @@ function ReportPage({ leaf, params }) {
           : null
   );
   const detailComparison = !periodError && periods && ['tax', 'fiscal'].includes(leaf.report)
-    ? detailReportColumns(db, leaf.report, periods, { company_id: selectedCompany === 'all' ? null : Number(selectedCompany), analyticAccountIds, includeUnposted, variant: activeTaxVariant }) : null;
+    ? detailReportColumns(db, leaf.report, periods, { company_id: selectedCompany === 'all' ? null : Number(selectedCompany), analyticAccountIds, includeUnposted, variant: activeTaxVariant, taxIds: selectedTaxIds }) : null;
   const tableRef = useRef(null);
   const isAudit = leaf.report === 'audit';
   const [auditUser, setAuditUser] = useState('');
@@ -1614,6 +1636,14 @@ function ReportPage({ leaf, params }) {
           </select>
         </label>
       )}
+      {leaf.report === 'tax' && (
+        <label className="inline-select">
+          {t('Taxes')}
+          <select aria-label={t('Taxes')} multiple value={selectedTaxIds.map(String)} onChange={(e) => setTaxIds(selectedOptionIds(e))}>
+            {availableTaxes.map((tax) => <option key={tax.id} value={tax.id}>{tax.name}</option>)}
+          </select>
+        </label>
+      )}
       {showAnalyticFilter && analyticAccounts.length > 0 && (
         <label className="inline-select">
           {t('Analytic Accounts')}
@@ -1717,6 +1747,25 @@ function ReportPage({ leaf, params }) {
       <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
       <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={exportCsv}>{t('Download CSV')}</button>
       <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={exportXlsx}>{t('Export XLSX')}</button>
+      {isTaxBoxes && xmlCompanyId != null && (
+        <button
+          type="button"
+          className="btn sm"
+          disabled={Boolean(periodError) || selectedTaxIds.length > 0}
+          title={selectedTaxIds.length > 0 ? t('Clear the Taxes filter to export the statutory XML return') : undefined}
+          onClick={() => {
+            if (periodError || selectedTaxIds.length > 0) return;
+            exportTaxReturnXml(db, {
+              ...period,
+              company_id: xmlCompanyId,
+              tax_return_template: activeTaxVariant,
+              name: TAX_RETURN_TEMPLATES[activeTaxVariant].label,
+            }, `tax-return-${activeTaxVariant}`);
+          }}
+        >
+          {t('Export XML')}
+        </button>
+      )}
       </div>
       {periodError && (
         <div className="alert" role="alert" style={{ margin: '0 16px 12px' }}>
@@ -1766,7 +1815,7 @@ function ReportPage({ leaf, params }) {
               </tr>
             </thead>
             {detailComparison ? (
-              <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} money={fmtMoney} />
+              <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} taxIds={selectedTaxIds} money={fmtMoney} />
             ) : periods && PERIODIC_BODY_REPORTS.has(leaf.report) ? (
               <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} money={fmtMoney} />
             ) : data ? (

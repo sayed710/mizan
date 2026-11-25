@@ -1,13 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startServer } from './test-server.js';
 
-let child, directory, origin, cookie;
+let server, directory, origin, cookie;
 // Raw HTTP so the test sees the bytes on the wire (fetch would decompress silently).
 const raw = (path, { method = 'GET', headers = {}, body } = {}) => new Promise((ok, fail) => {
   const req = request(origin + path, { method, headers: { Cookie: cookie ?? '', ...headers, ...(body ? { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', 'Content-Length': Buffer.byteLength(body) } : {}) } }, (res) => {
@@ -21,25 +20,15 @@ const raw = (path, { method = 'GET', headers = {}, body } = {}) => new Promise((
 
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'mizan-poll-'));
-  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  origin = await new Promise((resolve, reject) => {
-    let output = '';
-    const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
-    child.stdout.on('data', (chunk) => {
-      output += chunk;
-      const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
-      if (match) { clearTimeout(timeout); resolve(match[1]); }
-    });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
-  });
+  server = await startServer({ env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '' } });
+  origin = server.origin;
   const login = await raw('/api/login', { method: 'POST', body: JSON.stringify({ login: 'admin', password: 'test-admin-password' }) });
   cookie = login.headers['set-cookie'][0].split(';')[0];
 });
 
 after(async () => {
-  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
-  if (directory) await rm(directory, { recursive: true, force: true });
+  await server?.stop();
+  if (directory) await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 test('the database is gzipped and an unchanged poll answers 304 with no body', async () => {
