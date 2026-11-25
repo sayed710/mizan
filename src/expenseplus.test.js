@@ -190,8 +190,10 @@ test('duplicates exclude self and match employee, date and rounded total; onchan
   const model = expensePlusModels['hr.expense'];
   const pricing = model.onchange({ product_id: 1, quantity: 2 }, 'product_id', changed);
   const product = read(changed, 'product', 1);
+  const taxRate = read(changed, 'account.tax', product.supplier_tax_id)?.amount ?? 0;
   assert.equal(pricing.unit_amount, product.cost);
-  assert.equal(pricing.total_amount, Math.round(2 * product.cost * (1 + product.purchase_tax / 100) * 100) / 100);
+  assert.equal(pricing.tax, taxRate);
+  assert.equal(pricing.total_amount, Math.round(2 * product.cost * (1 + taxRate / 100) * 100) / 100);
 });
 
 test('expense analysis includes date boundaries and reports independent employee and category totals', () => {

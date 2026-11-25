@@ -46,7 +46,7 @@ export function startSession(db, openingCash = 0, configId = null) {
 export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1, journalId = openSession(db)?.journal_id ?? null } = {}) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
   const fp = fiscalPositionId || fiscalPositionFor(db, partnerId, companyId);
-  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: p?.sale_tax ?? 14 };
+  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: 0 };
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);

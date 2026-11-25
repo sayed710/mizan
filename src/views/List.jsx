@@ -148,8 +148,10 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         }
         const editable = def.editableList?.includes(f);
         const isTags = !editable && field.type === 'many2many' && field.widget === 'many2many_tags';
-        const text = editable || isTags ? null : display(db, field, r[f], r);
-        const badge = editable || isTags ? null : badgeClass(field.badge, r[f]);
+        const cellVal = field.valueFallback && !(r[f]?.length) ? field.valueFallback(r) : r[f];
+        const hiddenByRule = Boolean(field.hideWhen?.(r, db));
+        const text = editable || isTags ? null : display(db, field, cellVal, r);
+        const badge = editable || isTags ? null : badgeClass(field.badge, cellVal);
         // Odoo's relative-date widget shows a past date in red.
         const pastDue = field.widget === 'remaining_days' && text && r[f] && r[f] < today();
         return (
@@ -157,7 +159,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
             onClick={editable ? (e) => e.stopPropagation() : undefined}>
             {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
-              : isTags ? <span className="many2many-tags">{(Array.isArray(r[f]) ? r[f] : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>
+              : isTags ? (!hiddenByRule && <span className="many2many-tags">{(Array.isArray(cellVal) ? cellVal : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>)
               : badge && text ? <span className={badge}>{text}</span> : text}
           </td>
         );

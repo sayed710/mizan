@@ -67,11 +67,12 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
   const text = <>{label}{required && <span className="req" aria-hidden="true">*</span>}</>;
   const fieldCtx = { isNew, stored };
   const isReadonly = readonly || fieldReadonly(field, record, db, fieldCtx);
+  const resolvedValue = field.valueFallback && !(value?.length) ? field.valueFallback(record) : value;
   return (
     <div className="field">
       {isLabelable(field, isReadonly, record, db, fieldCtx) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
       <div className="field-value">
-        <FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} stored={stored} />
+        <FieldInput db={db} model={model} fieldName={name} field={field} value={resolvedValue} onChange={onChange} id={id} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} stored={stored} />
         {field.help && <div className="field-help">{t(field.help)}</div>}
       </div>
     </div>

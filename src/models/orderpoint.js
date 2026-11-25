@@ -2,6 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { addDays, pad, today } from './common.js';
 import { vendorPrice } from './routes.js';
+import { productTax } from './taxes.js';
 import { ensureMainWarehouse, mainWarehouse } from './warehouse.js';
 
 export function childLocationIds(db, rootLocationId) {
@@ -157,7 +158,7 @@ export function orderOrderpoints(db, ids) {
       if (!vendor) continue; // no valid vendor
 
       const priceUnit = best?.price ?? (Number(prod?.cost) || 0);
-      const tax = prod?.purchase_tax ?? 14;
+      const tax = productTax(next, prod, 'purchase', null, op.company_id ?? 1)?.tax ?? 0;
 
       // Check for existing draft RFQ to extend/merge
       const existingRfq = search(next, 'purchase.order').find(

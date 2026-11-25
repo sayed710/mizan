@@ -3911,6 +3911,13 @@ const ar = {
   'Configure the deferred expense account on the company': 'حدّد حساب المصروفات المؤجلة على الشركة',
   'Configure the recognition account on the source line': 'حدّد حساب الاعتراف على البند المصدر',
   'Saving...': 'جارٍ الحفظ...',
+  Combo: 'باقة',
+  'Cost and Revenue': 'التكلفة والإيرادات',
+  'From Category': 'من الفئة',
+  'Select an existing tax': 'اختر ضريبة موجودة',
+  'Combo products cannot have taxes': 'لا يمكن أن تحتوي منتجات الباقة على ضرائب',
+  'Combo products cannot be purchased': 'لا يمكن شراء منتجات الباقة',
+  'Combo products cannot have attributes': 'لا يمكن أن تحتوي منتجات الباقة على خصائص',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
