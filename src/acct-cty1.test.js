@@ -43,7 +43,7 @@ test('CTY-2: migration uses exact matches, fiscal positions match IDs and sync r
   const egypt = db.records['res.country'].find((c) => c.code === 'EG');
   const saudi = db.records['res.country'].find((c) => c.code === 'SA');
   const state = db.records['res.country.state'].find((s) => s.country_id === egypt.id);
-  const old = { ...db, schema_version: SCHEMA_VERSION - 1, records: { ...db.records,
+  const old = { ...db, schema_version: 71, records: { ...db.records,
     'account.tax.group': [
       { id: 1, name: 'Exact', country: 'EG' },
       { id: 2, name: 'Unknown', country: 'unknown' },
@@ -84,7 +84,7 @@ test('Finding 1: migration resolves country codes, leaves informal names unresol
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: 71,
     records: {
       ...db.records,
       'account.fiscal.position': [
@@ -258,7 +258,7 @@ test('Qodo 1: repaired migrated fiscal positions clear unresolved_targeting and 
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: 71,
     records: {
       ...db.records,
       'account.fiscal.position': [
@@ -406,7 +406,7 @@ test('Review Finding 1: updating country and enabling auto-apply on position wit
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: 71,
     records: {
       ...db.records,
       'account.fiscal.position': [
@@ -450,7 +450,7 @@ test('Review Finding 2: migrated manual fiscal positions retain unresolved marke
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: 71,
     records: {
       ...db.records,
       'account.fiscal.position': [
