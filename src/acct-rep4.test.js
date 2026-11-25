@@ -221,8 +221,9 @@ test('REP4-5 Current unfinished budget period evaluates achievement against elap
     invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }],
   });
   db = postMove(posted.db, posted.id);
+  const expenseAccount = search(db, 'account.account').find((a) => a.code === '600000' && (!a.company_id || a.company_id === 1));
   db = create(db, 'account.analytic.line', {
-    account_id: an.id, move_id: posted.id, company_id: 1, date: `${currentYear}-01-02`, amount: -2000, general_account: '600000',
+    account_id: an.id, move_id: posted.id, company_id: 1, date: `${currentYear}-01-02`, amount: -2000, general_account: expenseAccount.id,
   }).db;
   const budget = create(db, 'account.budget', {
     name: 'Unfinished period budget',
