@@ -1037,17 +1037,24 @@ function offsetCreditNote(db, noteId) {
 export function assetDraftValues(db, move, line, { amount, accountId, date }) {
   const account = read(db, 'account.account', accountId);
   const model = account?.asset_model_id ? read(db, 'account.asset.model', account.asset_model_id) : null;
-  const defaultJournal = read(db, 'res.company', move.company_id ?? 1)?.default_general_journal_id ?? null;
-  const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
+  const company = move.company_id ?? 1;
+  if (model?.company_id && model.company_id !== company) {
+    throw new Error('Asset model must belong to the bill company');
+  }
+  const defaultJournal = read(db, 'res.company', company)?.default_general_journal_id ?? null;
+  const rawModelJournal = model?.journal_id ? read(db, 'account.journal', model.journal_id) : null;
+  const modelJournal = rawModelJournal?.type === 'general' && (!rawModelJournal.company_id || rawModelJournal.company_id === company)
+    ? model.journal_id
+    : null;
   const product = read(db, 'product', line.product_id);
   const acquisitionDate = date;
   const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
   const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
   const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
   return {
-      name: line.name || product?.name || move.name, original_value: amount, acquisition_date: date,
-      partner_id: line.partner_id ?? move.partner_id ?? null, company_id: move.company_id ?? 1,
-      account_asset_id: accountId,
+    name: line.name || product?.name || move.name, original_value: amount, acquisition_date: date,
+    partner_id: line.partner_id ?? move.partner_id ?? null, company_id: company,
+    account_asset_id: accountId,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
@@ -3095,7 +3102,12 @@ export const accountingModels = {
         domain: (candidate, acc) => candidate.active !== false && candidate.id !== acc?.id && (!acc?.company_id || !candidate.company_id || candidate.company_id === acc.company_id),
         hideWhen: (r) => !isIncomeOrExpenseAccount(r),
       },
-      asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      asset_model_id: {
+        type: 'many2one',
+        relation: 'account.asset.model',
+        label: 'Depreciation Model',
+        domain: (m, acc) => !m.company_id || m.company_id === (acc?.company_id ?? 1),
+      },
       create_asset: {
         type: 'selection',
         label: 'Create Asset',
@@ -3138,7 +3150,7 @@ export const accountingModels = {
       if (after.asset_model_id) {
         const model = read(db, 'account.asset.model', after.asset_model_id);
         if (!model) return 'Select an existing asset model';
-        if (model.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
+        if (model.company_id && model.company_id !== (after.company_id ?? 1)) return 'Asset model must belong to the account company';
       }
       if (after.create_asset === 'validate') {
         const model = after.asset_model_id ? read(db, 'account.asset.model', after.asset_model_id) : null;
@@ -4745,7 +4757,7 @@ Object.assign(accountingModels, {
     defaults: () => ({ active: true }),
     views: ['list'],
     list: ['code', 'name'],
-    searchFields: ['name'],
+    searchFields: ['code', 'name'],
     form: {
       title: 'name',
       hideTitle: true,
@@ -4804,6 +4816,18 @@ Object.assign(accountingModels, {
     guard: (db, before, after) => {
       const countryError = countryReferenceError(db, after);
       if (countryError) return countryError;
+      const keyChanged = !before
+        || before.name !== after.name
+        || before.applicability !== after.applicability
+        || (before.country_id ?? null) !== (after.country_id ?? null);
+      const duplicate = keyChanged && Boolean(after.country_id) && (db.records['account.account.tag'] ?? []).some((r) =>
+        r.id !== after.id
+        && r.name === after.name
+        && r.applicability === after.applicability
+        && Boolean(r.country_id)
+        && r.country_id === after.country_id,
+      );
+      if (duplicate) return 'A tag with the same name and applicability already exists in this country.';
       if (!before || before.applicability === after.applicability) return null;
       const inAccounts = (db.records['account.account'] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id));
       const inTaxes = (db.records['account.tax'] ?? []).some((r) =>
@@ -4831,6 +4855,11 @@ Object.assign(accountingModels, {
     },
     defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
     views: ['list'],
+    filters: [
+      [
+        { id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false },
+      ],
+    ],
     list: ['name', 'applicability', 'country_id', 'color'],
     searchFields: ['name'],
     form: {
@@ -4846,9 +4875,14 @@ Object.assign(accountingModels, {
   'account.asset.model': {
     label: 'Depreciation Models',
     guard: (db, before, after, ctx) => {
+      if (!after.company_id) return 'Company is required';
       if (before && before.company_id !== after.company_id && after.company_id
-        && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.company_id && a.company_id !== after.company_id)) {
+        && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && (a.company_id ?? 1) !== after.company_id)) {
         return 'Asset model must belong to the account company';
+      }
+      if (before && before.company_id !== after.company_id && after.company_id
+        && (db.records['account.asset'] ?? []).some((a) => a.model_id === after.id && (a.company_id ?? 1) !== after.company_id)) {
+        return 'Depreciation model must belong to the asset company';
       }
       if ((!after.account_depreciation_id || !after.account_depreciation_expense_id)
         && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.create_asset === 'validate')) {
@@ -4864,7 +4898,7 @@ Object.assign(accountingModels, {
     },
     fields: {
       name: { type: 'char', label: 'Model Name', required: true },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       method: {
         type: 'selection',
         label: 'Depreciation Method',
@@ -4898,8 +4932,20 @@ Object.assign(accountingModels, {
       account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Legacy Expense Account', readonly: true, compute: (r) => r.account_depreciation_expense_id ?? null },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
+      notes: { type: 'html', label: 'Notes' },
     },
-    defaults: () => ({ method: 'linear', method_mode: 'duration', method_number: 5, method_rate: 0.2, method_period: '12', method_progress_factor: 0.3, prorata: false }),
+    createDefaults: (db) => ({
+      company_id: currentCompany(db),
+    }),
+    defaults: () => ({
+      method: 'linear',
+      method_mode: 'duration',
+      method_number: 5,
+      method_rate: 0.2,
+      method_period: '12',
+      method_progress_factor: 0.3,
+      prorata: false,
+    }),
     onchange: (r, key) => syncMethodRateAndDuration(r, key),
     list: ['name', 'method', 'method_number', 'method_period', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
     form: {
@@ -4907,6 +4953,9 @@ Object.assign(accountingModels, {
       groups: [
         ['name', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
         ['method', 'method_mode', 'method_rate', 'method_number', 'method_period', 'method_progress_factor', 'prorata_computation_type', 'prorata_date', 'analytic_distribution'],
+      ],
+      tabs: [
+        { label: 'Notes', fields: ['notes'] },
       ],
     },
   },
@@ -4970,7 +5019,15 @@ Object.assign(accountingModels, {
             }
             const analysis = analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date });
             if (analysis.not_hashable_unlocked_move_ids?.length) {
-              throw new Error('Cannot secure entries while draft entries exist on or before the secured date');
+              const hasDateDraft = analysis.not_hashable_unlocked_move_ids.some((id) => {
+                const m = read(db, 'account.move', id);
+                return (m?.invoice_date ?? m?.date ?? '') <= r.hash_date;
+              });
+              throw new Error(
+                hasDateDraft
+                  ? 'Cannot secure entries while draft entries exist on or before the secured date'
+                  : 'Cannot secure entries while numbered draft entries precede entries to be secured',
+              );
             }
             const count = analysis.entries_count;
             const unreconciledIds = analysis.unreconciled_bank_statement_line_ids ?? [];

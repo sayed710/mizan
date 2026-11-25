@@ -2509,6 +2509,46 @@ MIGRATIONS.push({ version: 76, name: 'analytic-account-plan-to-plan-id', up: mig
 
 MIGRATIONS.push({ version: 77, name: 'online-payment-methods', up: ensureOnlinePaymentMethods });
 
+export function migrateReconcileAndAssetModelCompany(db) {
+  // A company-less model takes the one company whose records use it; a model shared by several companies or linked
+  // from a company-less (shared) account stays company-less so bills in any company keep posting, and an unused one
+  // goes to the main company.
+  const usersOf = (key) => {
+    if (key !== 'account.asset.model') return () => new Set();
+    const refs = [
+      ...(db.records['account.asset'] ?? []).filter((a) => a.model_id).map((a) => [a.model_id, a.company_id ?? 1]),
+      ...(db.records['account.account'] ?? []).filter((a) => a.asset_model_id).map((a) => [a.asset_model_id, a.company_id || null]),
+    ];
+    return (id) => new Set(refs.filter(([modelId]) => modelId === id).map(([, companyId]) => companyId));
+  };
+  const backfillCompany = (key) => {
+    const list = db?.records?.[key];
+    if (!Array.isArray(list) || !list.length) return null;
+    const companiesUsing = usersOf(key);
+    let changed = false;
+    const next = list.map((r) => {
+      if (!r || typeof r !== 'object' || r.company_id) return r;
+      const users = companiesUsing(r.id);
+      if (users.has(null) || users.size > 1) return r;
+      changed = true;
+      return { ...r, company_id: users.size === 1 ? [...users][0] : 1 };
+    });
+    return changed ? next : null;
+  };
+  const nextReconcile = backfillCompany('account.reconcile.model');
+  const nextAssetModels = backfillCompany('account.asset.model');
+  if (!nextReconcile && !nextAssetModels) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(nextReconcile ? { 'account.reconcile.model': nextReconcile } : {}),
+      ...(nextAssetModels ? { 'account.asset.model': nextAssetModels } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 78, name: 'assign-default-company-to-reconcile-and-asset-models', up: migrateReconcileAndAssetModelCompany });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

@@ -76,6 +76,17 @@ function moveSequencePrefix(move, journal) {
   return journal?.invoice_sequence_prefix || journal?.code || journal?.name || '';
 }
 
+function moveJournalId(db, move) {
+  return move?.journal_id ?? resolveDocumentJournal(db, move)?.id ?? null;
+}
+
+function isSequenceConflictDraft(db, move, company, lastSecuredNameByJournal) {
+  if ((move.company_id ?? 1) !== company || move.state !== 'draft') return false;
+  if (!move.name || move.name === '/') return false;
+  const lastSecuredName = lastSecuredNameByJournal.get(moveJournalId(db, move));
+  return lastSecuredName != null && (move.name ?? '').localeCompare(lastSecuredName) <= 0;
+}
+
 const WARNING_ORDER = { danger: 0, warning: 1, info: 2 };
 
 /** Finds sequence gaps in a list of moves sorted by sequence. */
@@ -159,6 +170,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   const gapMoveIds = [];
   const notHashablePostedIds = [];
   const unhashedPostedMoves = [];
+  const lastNewlySecuredByJournal = new Map();
   const deferredByUnreconciledPrefixes = [];
   const deferredByLaterEntryPrefixes = [];
 
@@ -216,6 +228,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
     const blockerPrefix = firstBlocker ? moveSequencePrefix(firstBlocker, journal) : '';
     const blockedByUnreconciled = Boolean(firstBlocker && ignoredChainKeys.has(`${journal.id}:${blockerPrefix}`));
 
+    let lastNewlySecuredName = null;
     for (const { prefix, allChainMoves, chainMovesToHash } of prefixCandidates) {
       const kept = firstBlocker
         ? chainMovesToHash.filter((m) => (m.name ?? '').localeCompare(firstBlocker.name ?? '') < 0)
@@ -224,7 +237,13 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
         (blockedByUnreconciled ? deferredByUnreconciledPrefixes : deferredByLaterEntryPrefixes).push(prefix);
       }
       if (!kept.length) continue;
-      for (const m of kept) unhashedPostedMoves.push(m);
+      for (const m of kept) {
+        unhashedPostedMoves.push(m);
+        const moveName = m.name ?? '';
+        if (lastNewlySecuredName === null || moveName.localeCompare(lastNewlySecuredName) > 0) {
+          lastNewlySecuredName = moveName;
+        }
+      }
       const keptSet = new Set(kept.map((m) => m.id));
       const gapScope = allChainMoves.filter(
         (m) => (m.invoice_date ?? m.date ?? '') <= targetDate || keptSet.has(m.id),
@@ -235,19 +254,28 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
         for (const m of gapScope) gapMoveIds.push(m.id);
       }
     }
+    if (lastNewlySecuredName !== null) {
+      lastNewlySecuredByJournal.set(journal.id, lastNewlySecuredName);
+    }
   }
 
   const unhashedDates = unhashedPostedMoves.map((m) => m.invoice_date ?? m.date ?? '').filter(Boolean);
   const rawLockDate = unhashedDates.length ? unhashedDates.sort().at(-1) : '';
   const proposedLockDate = rawLockDate && rawLockDate > targetDate ? targetDate : rawLockDate;
 
-  const draftMoves = (db.records['account.move'] ?? []).filter((m) => {
-    if ((m.company_id ?? 1) !== company || m.state !== 'draft') return false;
+  const dateDraftMoves = [];
+  const sequenceConflictDraftMoves = [];
+  for (const m of db.records['account.move'] ?? []) {
+    if ((m.company_id ?? 1) !== company || m.state !== 'draft') continue;
     const date = m.invoice_date ?? m.date ?? '';
-    if (proposedLockDate && date <= proposedLockDate) return true;
-    const jId = resolveDocumentJournal(db, m)?.id ?? null;
-    return restrictedIds.has(jId) && date <= targetDate;
-  });
+    const jId = moveJournalId(db, m);
+    if ((proposedLockDate && date <= proposedLockDate) || (restrictedIds.has(jId) && date <= targetDate)) {
+      dateDraftMoves.push(m);
+    } else if (isSequenceConflictDraft(db, m, company, lastNewlySecuredByJournal)) {
+      sequenceConflictDraftMoves.push(m);
+    }
+  }
+  const draftMoves = [...dateDraftMoves, ...sequenceConflictDraftMoves];
 
   const afterSelectedDateMoves = unhashedPostedMoves.filter((m) => (m.invoice_date ?? m.date ?? '') > targetDate);
 
@@ -286,11 +314,21 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
     });
   }
   if (draftMoves.length) {
-    warnings.push(t('{count} draft entries found before or on {date}. Draft entries cannot be hashed.', { count: draftMoves.length, date: targetDate }));
+    if (dateDraftMoves.length) {
+      warnings.push(t('{count} draft entries found before or on {date}. Draft entries cannot be hashed.', { count: dateDraftMoves.length, date: targetDate }));
+    }
+    if (sequenceConflictDraftMoves.length) {
+      warnings.push(t('{count} numbered draft entries precede entries to be secured. Post or cancel them before securing.', { count: sequenceConflictDraftMoves.length }));
+    }
+    const draftMsg = dateDraftMoves.length && sequenceConflictDraftMoves.length
+      ? t('There are still draft entries before the selected date and numbered draft entries in the sequence being secured.')
+      : sequenceConflictDraftMoves.length
+        ? t('There are numbered draft entries in the sequence being secured. Post or cancel them before securing.')
+        : t('There are still draft entries before the selected date.');
     warningItems.push({
       key: 'account_unhashed_draft_entries',
       level: 'warning',
-      message: t('There are still draft entries before the selected date.'),
+      message: draftMsg,
       action_text: 'Review Entries',
       go: `#/accounting/entries?view=list&rel=id:${draftMoves.map((m) => m.id).join(',')}`,
     });
@@ -374,13 +412,15 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   const moveIdSet = Array.isArray(moveIds) ? new Set(moveIds) : null;
   const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : moveIdSet ? moveIdSet.has(m.id) : (m.invoice_date ?? m.date ?? '') <= targetDate);
   // A numbered draft before the entry (reset to draft keeps its number) would land unhashed inside the chain once re-posted.
-  if (through && (db.records['account.move'] ?? []).some((m) => m.state === 'draft' && m.journal_id === through.journal_id
-    && (m.company_id ?? 1) === company && m.name && m.name !== '/' && inScope(m))) {
+  if (through && (db.records['account.move'] ?? []).some((m) => isSequenceConflictDraft(
+    db, m, company, new Map([[moveJournalId(db, through), through.name ?? '']]),
+  ))) {
     throw new Error('Post or cancel the earlier draft entries of this journal before locking this entry');
   }
 
   let next = db;
   let securedThrough = '';
+  const lastNewlySecuredByJournal = new Map();
   for (const journal of restrictedJournals) {
     const journalMoves = (next.records['account.move'] ?? [])
       .filter((m) => (m.company_id ?? 1) === company && m.journal_id === journal.id && m.state === 'posted')
@@ -400,6 +440,9 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
       throw new Error('Cannot secure entries while an earlier sequence remains unsecured');
     }
     if (lastSecured && unhashed.some((m) => (m.name ?? '').localeCompare(lastSecured.name ?? '') <= 0)) throw new Error('Cannot secure an entry before the last secured sequence');
+    if (unhashed.length && !through) {
+      lastNewlySecuredByJournal.set(journal.id, unhashed.at(-1).name ?? '');
+    }
     for (const move of unhashed) {
       lastSeqNum += 1;
       const hash = computeMoveHash(move, previousHash, 3);
@@ -428,6 +471,9 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   if (lockDate) {
     const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (m.invoice_date ?? m.date ?? '') <= lockDate);
     if (drafts.length) throw new Error('Cannot secure entries while draft entries exist on or before the secured date');
+  }
+  if (lastNewlySecuredByJournal.size && (db.records['account.move'] ?? []).some((m) => isSequenceConflictDraft(db, m, company, lastNewlySecuredByJournal))) {
+    throw new Error('Cannot secure entries while numbered draft entries precede entries to be secured');
   }
   if (!skipHardLock && lockDate && (!currentComp.hard_lock_date || lockDate > currentComp.hard_lock_date)) {
     next = write(next, 'res.company', company, { hard_lock_date: lockDate });

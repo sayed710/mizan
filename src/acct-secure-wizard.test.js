@@ -8,8 +8,9 @@ import { apps, leavesOf, models } from './models/index.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postEntry } from './models/ledger.js';
+import { postMove } from './models/accounting.js';
 import { bookToAccount } from './models/bank.js';
-import { analyzeJournalChains, checkInalterability, computeMoveHash } from './models/hash_chain.js';
+import { analyzeJournalChains, checkInalterability, computeMoveHash, secureEntries } from './models/hash_chain.js';
 import { applyDiff, diffDb } from './sync.js';
 import { createCompany } from './models/company.js';
 import { invoiceJournalDefaults } from './test-support/accounting-company.js';
@@ -357,6 +358,9 @@ test('Arabic translations exist for all new Secure Entries wizard strings', asyn
       'Review Statements',
       'Review Entries',
       'There are still draft entries before the selected date.',
+      'There are numbered draft entries in the sequence being secured. Post or cancel them before securing.',
+      'There are still draft entries before the selected date and numbered draft entries in the sequence being secured.',
+      'Cannot secure entries while numbered draft entries precede entries to be secured',
       'There are entries that cannot be hashed. They can be protected by the Hard Lock Date.',
       'Securing these entries will create at least one gap in the sequence.',
       'Securing these entries will also secure entries after the selected date.',
@@ -564,4 +568,78 @@ test('unreconciled bank lines in unrestricted journals do not trigger danger war
 
   assert.ok(read(res.db, 'account.move', inv.id).inalterable_hash, 'sales entry secured');
   assert.equal(read(res.db, 'res.company', 1).hard_lock_date, '2026-01-10', 'hard_lock_date updated despite unreconciled line in unrestricted journal');
+});
+
+test('later-dated numbered draft preceding newly secured entries blocks wizard and secureEntries until resolved, while keeping selected-date cap for unrelated drafts and hard lock', () => {
+  let db = seed();
+  const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
+  const generalJournal = search(db, 'account.journal').find((j) => j.type === 'general' && !j.restrict_mode_hash_table);
+  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
+  const accounts = search(db, 'account.account');
+  const lines = [
+    { account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 },
+    { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 },
+  ];
+
+  // Enable restrict_mode_hash_table only after posting and resetting a later-dated entry (retained number)
+  const m1 = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, date: '2026-01-20', invoice_date: '2026-01-20', name: 'INV/2026/0001', line_ids: lines });
+  const m2 = create(m1.db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, date: '2026-01-18', invoice_date: '2026-01-18', name: 'INV/2026/0002', line_ids: lines });
+  const m3 = create(m2.db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, date: '2026-01-10', invoice_date: '2026-01-10', name: 'INV/2026/0003', line_ids: lines });
+  const m4 = create(m3.db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, date: '2026-01-22', invoice_date: '2026-01-22', name: 'INV/2026/0004', line_ids: lines });
+  db = m4.db;
+
+  const resetBtn = models['account.move'].form.buttons.find((b) => b.label === 'Reset to Draft');
+  db = resetBtn.run(db, read(db, 'account.move', m2.id)).db;
+  db = resetBtn.run(db, read(db, 'account.move', m4.id)).db;
+  db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
+
+  // Unrelated later-dated drafts: unnumbered in same journal + draft in unrestricted journal
+  const draftUnnumbered = create(db, 'account.move', { move_type: 'entry', state: 'draft', journal_id: saleJournal.id, date: '2026-01-25', invoice_date: '2026-01-25', name: '/', line_ids: lines });
+  const draftUnrestricted = create(draftUnnumbered.db, 'account.move', { move_type: 'entry', state: 'draft', journal_id: generalJournal.id, date: '2026-01-15', invoice_date: '2026-01-15', name: '/', line_ids: lines });
+  db = draftUnrestricted.db;
+
+  // Analyzing with hashDate=2026-01-10: m1 (2026-01-20) and m3 (2026-01-10) are in move_to_hash_ids,
+  // and later-dated retained draft m2 (INV/2026/0002) MUST block while unrelated drafts do NOT.
+  const analysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-10' });
+  assert.ok(analysis.move_to_hash_ids.includes(m1.id) && analysis.move_to_hash_ids.includes(m3.id));
+  assert.ok(analysis.not_hashable_unlocked_move_ids.includes(m2.id), 'later-dated numbered draft before last secured entry is detected');
+  assert.ok(!analysis.not_hashable_unlocked_move_ids.includes(m4.id), 'numbered draft sorting after last secured entry is not blocking');
+  assert.ok(!analysis.not_hashable_unlocked_move_ids.includes(draftUnnumbered.id), 'unnumbered later-dated draft is not blocking');
+  assert.ok(!analysis.not_hashable_unlocked_move_ids.includes(draftUnrestricted.id), 'unrestricted later-dated draft is not blocking');
+  const draftWarn = analysis.warning_items.find((w) => w.key === 'account_unhashed_draft_entries');
+  assert.ok(draftWarn && draftWarn.go.includes(String(m2.id)), 'wizard warning surfaces conflicting draft');
+
+  const wizModel = models['account.secure.entries.wizard'];
+  const wiz = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-10' });
+  const wizRec = read(wiz.db, 'account.secure.entries.wizard', wiz.id);
+  const secureBtn = wizModel.form.buttons.find((b) => b.label === 'Secure Entries');
+  assert.equal(secureBtn.when(wizRec, wiz.db), false, 'wizard confirmation prevented');
+  assert.throws(() => secureBtn.run(wiz.db, wizRec), /not available/i);
+  assert.throws(() => secureEntries(db, { companyId: 1, hashDate: '2026-01-10', moveIds: [m1.id, m3.id] }), /draft/i, 'direct secureEntries blocks on conflicting later-dated draft');
+
+  // Direct secureEntries without moveIds when earlier posted entries are all <= hashDate also blocks on m2
+  let directDb = resetBtn.run(db, read(db, 'account.move', m1.id)).db;
+  directDb = write(directDb, 'account.move', m1.id, { date: '2026-01-05', invoice_date: '2026-01-05' });
+  directDb = postMove(directDb, m1.id);
+  assert.throws(() => secureEntries(directDb, { companyId: 1, hashDate: '2026-01-10' }), /draft/i, 'direct secureEntries without moveIds also blocks on conflicting later-dated draft');
+
+  // Resolve conflict by reposting m2; confirmation succeeds and hard_lock_date stays capped at 2026-01-10
+  db = postMove(db, m2.id);
+  const resolvedAnalysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-10' });
+  assert.deepEqual(resolvedAnalysis.not_hashable_unlocked_move_ids, []);
+  const wiz2 = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-10' });
+  const wiz2Rec = read(wiz2.db, 'account.secure.entries.wizard', wiz2.id);
+  assert.equal(secureBtn.when(wiz2Rec, wiz2.db), true, 'confirmation unblocked after reposting conflicting draft');
+  const securedRes = secureBtn.run(wiz2.db, wiz2Rec);
+
+  assert.ok(read(securedRes.db, 'account.move', m1.id).inalterable_hash, 'm1 secured');
+  assert.ok(read(securedRes.db, 'account.move', m2.id).inalterable_hash, 'm2 secured');
+  assert.ok(read(securedRes.db, 'account.move', m3.id).inalterable_hash, 'm3 secured');
+  assert.equal(read(securedRes.db, 'res.company', 1).hard_lock_date, '2026-01-10', 'hard_lock_date remains capped at hash_date');
+
+  // Unrelated later-dated drafts (including m4 after INV/2026/0003) can still be posted normally
+  const afterM4 = postMove(securedRes.db, m4.id);
+  assert.equal(read(afterM4, 'account.move', m4.id).state, 'posted');
+  const afterUnrestricted = postMove(afterM4, draftUnrestricted.id);
+  assert.equal(read(afterUnrestricted, 'account.move', draftUnrestricted.id).state, 'posted');
 });

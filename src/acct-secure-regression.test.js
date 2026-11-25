@@ -83,7 +83,8 @@ test('journal audit calculates filtered journal totals and signed refund taxes',
 import { postMove } from './models/accounting.js';
 
 test('depreciation model creates assets directly and on a bill account with server persistence', () => {
-  let { db, company } = setup();
+  let { db } = setup();
+  const company = 1;
   const account = db.records['account.account'].find((a) => a.account_type === 'expense');
   const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const model = create(db, 'account.asset.model', { name: 'Equipment', method: 'degressive_then_linear', method_number: 4, method_period: '12', prorata: true, account_asset_id: account.id, analytic_distribution: { [analytic.id]: 100 } }); db = model.db;
@@ -286,7 +287,7 @@ test('depreciation model form save and server sync reject invalid analytic distr
   for (const value of bad) {
     assert.throws(() => saveFormRecord(db, leaf.model, null, { name: 'Invalid', analytic_distribution: value }), /Analytic|analytic/);
     if (Number.isNaN(value)) continue; // JSON cannot transport NaN; malformed text is stopped by the form save.
-    const raw = { ...models[leaf.model].defaults(), id: (db.seq[leaf.model] ?? 0) + 1, name: 'Invalid', analytic_distribution: value };
+    const raw = { ...models[leaf.model].defaults(), id: (db.seq[leaf.model] ?? 0) + 1, company_id: 1, name: 'Invalid', analytic_distribution: value };
     assert.throws(() => applyDiff(db, { upserts: { [leaf.model]: [raw] }, deletes: {} }, { isAdmin: true }), /Analytic|analytic|Invalid value/);
   }
   const good = saveFormRecord(db, leaf.model, null, { name: 'Valid', analytic_distribution: parseDistributionInput(`{"${analytic.id}":100}`) });
