@@ -321,6 +321,7 @@ export function isCashDifferenceCloseContext(ctx, lineId = null) {
  */
 export function validateCashDifferenceLine(db, statement, line) {
   if (!db || !statement || !line || line.statement_id !== statement.id) return { ok: false };
+  if (line.active === false) return { ok: false };
   if (!line.counterpart_account_id || !line.amount) return { ok: false };
   const journal = read(db, 'account.journal', line.journal_id);
   if (journal?.type !== 'cash' || statement.journal_id !== journal.id) return { ok: false };

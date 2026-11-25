@@ -861,3 +861,51 @@ test('STM2-10: Cash statements with ordinary lines on profit/loss accounts close
   };
   assert.throws(() => closeStatement(dupDb, dupStmt.id), /Cannot add lines to a statement with reconciled lines/);
 });
+
+test('STM2-11: Sync rejects a newly submitted cash-difference adjustment with active: false', async () => {
+  let db = seed();
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash' && (j.company_id ?? 1) === 1);
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '450000' && (a.company_id ?? 1) === 1);
+  const lossAccount = search(db, 'account.account').find((a) => a.code === '690000' && (a.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', cashJournal.id, {
+    profit_account_id: profitAccount.id,
+    loss_account_id: lossAccount.id,
+  });
+  const partner = search(db, 'res.partner')[0];
+
+  const cashStmt = create(db, 'account.bank.statement', {
+    name: 'CASH/STM2/ARCHIVED-DIFF',
+    journal_id: cashJournal.id,
+    date: '2026-06-20',
+    balance_start: 100,
+    balance_end_real: 220,
+    line_ids: [
+      { date: '2026-06-20', payment_ref: 'Cash Sale', partner_id: partner.id, amount: 100 },
+    ],
+  });
+  db = cashStmt.db;
+  const line1 = search(db, 'account.bank.statement.line').find((l) => l.statement_id === cashStmt.id);
+  const inv = makePostedInvoice(db, { partnerId: partner.id, price: 100, date: '2026-06-20' });
+  db = reconcileWith(inv.db, line1, inv.id);
+
+  // Build a legitimately booked closing diff and mark the new cash-difference line archived (active: false)
+  const closedDb = closeStatement(db, cashStmt.id);
+  const validDiff = diffDb(db, closedDb);
+  const createdDiffLine = validDiff.upserts['account.bank.statement.line'].find((l) => l.id !== line1.id);
+  assert.ok(createdDiffLine, 'Expected closeStatement diff to create a cash-difference line');
+  assert.equal(createdDiffLine.is_cash_difference, true);
+
+  const archivedCashDiff = {
+    ...validDiff,
+    upserts: {
+      ...validDiff.upserts,
+      'account.bank.statement.line': validDiff.upserts['account.bank.statement.line'].map((l) => (
+        l.id === createdDiffLine.id ? { ...l, active: false } : l
+      )),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, archivedCashDiff, { author: 'Clerk', isAdmin: false }),
+    /Cash difference provenance can only be set when closing a cash statement/
+  );
+});

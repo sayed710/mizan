@@ -54,7 +54,7 @@ export function bookBankMovement(db, line, company, { date, openAmount }) {
   const via = paymentJournal(db, line.journal_id, company);
   const incoming = line.amount > 0;
   const amount = statementCompanyAmount(db, line);
-  const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
+  const currency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(db, company)?.id;
   const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * Math.abs(line.amount) } : {};
   const booked = postEntry(db, { journal: via.code, journal_id: line.journal_id, date, ref: line.payment_ref, company,
@@ -128,7 +128,7 @@ export function reconcileWith(db, line, moveId) {
   const step = Number(docCurrency?.rounding ?? 0.01);
   const available = round(line.open_amount ?? statementCompanyAmount(db, line));
   const rate = rateAt(db, move.currency_id, date, company);
-  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const journalCurrency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   const total = bookedStatementAmount(db, line);
   const foreignOpen = docRound(Math.abs(line.amount) * available / total);
   const sameCurrency = journalCurrency === (move.currency_id ?? companyCurrencyRecord(db, company)?.id);
@@ -156,7 +156,7 @@ export function reconcileWith(db, line, moveId) {
   let current = db;
   let bankMoveId = line.bank_move_id;
   let suspense = null;
-  const bankCurrency = read(db, 'account.journal', line.journal_id)?.currency_id;
+  const bankCurrency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id;
   if (bankMoveId || remaining > 0 || (bankCurrency && bankCurrency !== companyCurrencyRecord(db, company)?.id)) {
     const bookedBank = bookBankMovement(db, line, company, { date, openAmount: available });
     current = bookedBank.db;
@@ -242,7 +242,8 @@ export function paymentMatchError(db, line, payment, { journal = null, companyCu
   if (!allowMatched && (isPaymentMatched(db, payment, line?.id) || (!allowLinePayments && allocatedPaymentIds(line).has(payment.id)))) return 'Payment is already matched';
   const statementJournal = journal ?? (line?.journal_id ? read(db, 'account.journal', line.journal_id) : null);
   const compCurrency = companyCurrency ?? read(db, 'res.company', company)?.currency_id;
-  if (statementJournal?.currency_id && (payment.currency_id ?? compCurrency) !== statementJournal.currency_id) {
+  const lineCurrencyId = line?.currency_id ?? statementJournal?.currency_id;
+  if (lineCurrencyId && lineCurrencyId !== compCurrency && (payment.currency_id ?? compCurrency) !== lineCurrencyId) {
     return 'Payment currency must match the bank journal currency';
   }
   const outstandingAccount = paymentOutstandingAccountId(db, payment);
@@ -368,8 +369,9 @@ export function matchPayment(db, line) {
   const amount = line.bank_move_id ? round(line.open_amount) : bookedTotal;
   const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
   const incoming = line.amount > 0;
-  const foreign = journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id;
-  const journalCurr = foreign ? read(db, 'res.currency', journal.currency_id) : null;
+  const statementCurrencyId = line.currency_id ?? journal?.currency_id;
+  const foreign = statementCurrencyId && statementCurrencyId !== companyCurrencyRecord(db, company)?.id;
+  const journalCurr = foreign ? read(db, 'res.currency', statementCurrencyId) : null;
   const fxAmounts = foreign ? payments.map((p) => roundCurrency(p.amount, journalCurr)) : [];
   const foreignAmount = foreign
     ? (line.bank_move_id
@@ -395,7 +397,7 @@ export function matchPayment(db, line) {
     if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label for the bank difference');
     if (line.writeoff_amount != null) {
       const configuredAmount = Number(line.writeoff_amount);
-      const currency = read(db, 'res.currency', journal?.currency_id) ?? companyCurrencyRecord(db, company);
+      const currency = read(db, 'res.currency', statementCurrencyId) ?? companyCurrencyRecord(db, company);
       const expected = Math.abs(foreign ? foreignDifference : difference);
       if (!Number.isFinite(configuredAmount) || configuredAmount < 0 || roundCurrency(configuredAmount, currency) !== configuredAmount || configuredAmount !== expected) {
         throw new Error('Write-off amount must equal the payment difference in statement currency');
@@ -435,7 +437,7 @@ export function matchPayment(db, line) {
     currentDb = bookedBank.db;
     bankMoveId = bookedBank.bankMoveId;
   }
-  const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
+  const fx = (value) => foreign ? { currency_id: statementCurrencyId, amount_currency: value } : {};
   let lines;
   const writeoff = needsWriteoff ? (foreign ? statementCompanyAmount(db, line, foreignDifference) : difference) : 0;
   const writeoffLines = [];
@@ -475,9 +477,9 @@ export function matchPayment(db, line) {
     const includeBankFx = foreign && (
       netFx !== 0
       || !outstandingItems.some((item) => item.isDirect)
-      || outstandingItems.some((item) => item.isDirect && item.currency_id === journal.currency_id)
+      || outstandingItems.some((item) => item.isDirect && item.currency_id === statementCurrencyId)
     );
-    const bankFx = includeBankFx ? { currency_id: journal.currency_id, amount_currency: netFx } : {};
+    const bankFx = includeBankFx ? { currency_id: statementCurrencyId, amount_currency: netFx } : {};
     const bankLines = netLiquidity
       ? [netLiquidity > 0
           ? { account: via.accountId, debit: netLiquidity, ...bankFx }
@@ -558,7 +560,7 @@ export function bookToAccount(db, line, opts = {}) {
     bankMoveId = bookedBank.bankMoveId;
   }
   const liquidity = bankMoveId ? ensureBankSuspense(current, line.company_id ?? 1, line.journal_id).id : via.accountId;
-  const currency = read(current, 'account.journal', line.journal_id)?.currency_id;
+  const currency = line.currency_id ?? read(current, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(current, line.company_id)?.id;
   const foreignValue = foreign
     ? (requested === open && line.open_amount == null
@@ -793,7 +795,7 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
           return 'Bank transaction allocations must match its amount';
         }
       }
-      const journalCurrId = read(db, 'account.journal', after.journal_id)?.currency_id;
+      const journalCurrId = after.currency_id ?? read(db, 'account.journal', after.journal_id)?.currency_id;
       if (journalCurrId && directCurrencyLines.every((l) => l.currency_id === journalCurrId)) {
         const curr = read(db, 'res.currency', journalCurrId);
         const sumFx = directCurrencyLines.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0);
@@ -1193,11 +1195,22 @@ export const bankModels = {
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
     defaults: () => ({ sequence: 10, date: today(), state: 'to_check' }),
-    createDefaults: (db, vals) => ({ currency_id: read(db, 'account.journal', vals.journal_id)?.currency_id ?? companyCurrencyRecord(db, vals.company_id)?.id ?? null }),
+    createDefaults: (db, vals = {}) => {
+      const journal = vals.journal_id ? read(db, 'account.journal', vals.journal_id) : null;
+      const companyId = vals.company_id ?? journal?.company_id ?? 1;
+      return {
+        company_id: companyId,
+        currency_id: journal?.currency_id ?? companyCurrencyRecord(db, companyId)?.id ?? null,
+      };
+    },
     onchange: (r, key, db) => {
       if (key !== 'journal_id') return {};
       const journal = read(db, 'account.journal', r.journal_id);
-      return { currency_id: journal?.currency_id ?? companyCurrencyRecord(db, journal?.company_id ?? r.company_id)?.id ?? null };
+      const companyId = journal?.company_id ?? r.company_id ?? 1;
+      return {
+        company_id: companyId,
+        currency_id: journal?.currency_id ?? companyCurrencyRecord(db, companyId)?.id ?? null,
+      };
     },
     sort: statementLineOrder,
     // The handle orders transactions of the same day; the date always comes first.
