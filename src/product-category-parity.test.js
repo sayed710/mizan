@@ -280,7 +280,6 @@ test('canonical income/expense accounts resolve invoice lines and COGS after mig
   };
 
   const migrated = migrate(legacyDb);
-
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
   assert.equal(migrate(migrated), migrated, 'migration 48 is idempotent');
 

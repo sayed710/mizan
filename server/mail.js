@@ -5,9 +5,10 @@ import { ConflictError, applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
 import { addressLines, documentCompany, documentTaxBreakdown } from '../src/models/company.js';
-import { subtotal, today } from '../src/models/common.js';
+import { subtotal, today, validDate } from '../src/models/common.js';
+import { customerStatement } from '../src/models/reports.js';
 import { followUpEmail, followUpLetter, logManualFollowUp, partnerFollowUp } from '../src/models/finance.js';
-import { formatCurrency } from '../src/money.js';
+import { findCompanyCurrencyRecord, formatCurrency } from '../src/money.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
@@ -121,19 +122,53 @@ export function documentEmail(db, model, rec, company = null) {
 /**
  * @returns {Promise<{status: number, body: object, db?: object}>}
  */
-export async function sendDocument(cfg, db, user, { model, id }) {
+export async function sendDocument(cfg, db, _user, { model, id }) {
   if (!DOCUMENTS[model]) return { status: 400, body: { error: 'This document cannot be emailed' } };
   const rec = read(db, model, Number(id));
   if (!rec) return { status: 404, body: { error: 'Record not found' } };
+  if (model === 'account.move' && rec.state !== 'posted') return { status: 400, body: { error: 'Only posted invoices can be emailed.' } };
   const partner = read(db, 'res.partner', rec.partner_id);
   if (!partner?.email) return { status: 400, body: { error: 'The customer has no email address' } };
   const company = documentCompany(db, rec);
   if (!company) return { status: 400, body: { error: 'Configure the document company before emailing.' } };
-  await sendMail(cfg, { to: partner.email, ...documentEmail(db, model, rec, company) });
+  const email = { to: partner.email, ...documentEmail(db, model, rec, company) };
   const nextState = DOCUMENTS[model][rec.state];
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
+  if (model === 'account.move' && rec.state === 'posted') next = write(next, model, rec.id, { is_move_sent: true });
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
-  return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
+  await sendMail(cfg, email);
+  return { status: 200, body: { ok: true }, db: next };
+}
+
+/** Deliver one company-scoped customer statement using the accounting report calculation. */
+export async function sendCustomerStatement(cfg, db, { partnerId, companyId, from, to, reviewMode }, deliver = sendMail) {
+  // Input problems are the caller's, not the mail server's: answer 400 with the bare message so the client can translate it.
+  const invalid = (error) => ({ status: 400, body: { error } });
+  const company = Number(companyId);
+  if (!Number.isSafeInteger(company) || !read(db, 'res.company', company)
+    || !(db.settings?.allowed_company_ids ?? [db.settings?.current_company_id ?? 1]).includes(company)) {
+    return invalid('Configure the document company before emailing.');
+  }
+  if ((from && !validDate(from)) || !validDate(to) || (from && from > to)) return invalid('Invalid statement period');
+  const partner = read(db, 'res.partner', Number(partnerId));
+  if (!partner) return invalid('Record not found');
+  if (!partner.email?.trim()) return invalid('The customer has no email address');
+  const statementDb = (db.settings?.current_company_id ?? 1) === company ? db : { ...db, settings: { ...db.settings, current_company_id: company } };
+  const currency = findCompanyCurrencyRecord(statementDb, company);
+  if (!currency) return invalid('Configure the document or company currency before emailing.');
+  const docCompany = documentCompany(statementDb, { company_id: company });
+  if (!docCompany) return invalid('Configure the document company before emailing.');
+  const report = customerStatement(statementDb, partner.id, { from, to, company_id: company, reviewMode: reviewMode === 'all' ? 'all' : 'posted' });
+  const amount = (value) => formatCurrency(value, currency);
+  const rows = report.lines.map((line) => [line.date, line.move_name, line.ref ?? '', amount(line.debit), amount(line.credit), amount(line.balance)]);
+  const headings = ['Date', 'Journal Entry', 'Reference', 'Debit', 'Credit', 'Balance'];
+  const header = [docCompany.name, partner.name, 'Customer Statement', `${from || ''} – ${to}`];
+  const opening = `Opening Balance: ${amount(report.opening)}`;
+  const closing = `Closing Balance: ${amount(report.closing)}`;
+  const text = [...header, opening, headings.join(' | '), ...rows.map((row) => row.join(' | ')), closing].join('\n');
+  const html = `<h1>${escapeHtml(docCompany.name)}</h1><h2>${escapeHtml(partner.name)} – Customer Statement</h2><p>${escapeHtml(header[3])}</p><p>${escapeHtml(opening)}</p><table border="1"><thead><tr>${headings.map((value) => `<th>${escapeHtml(value)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</tbody></table><p>${escapeHtml(closing)}</p>`;
+  await deliver(cfg, { to: partner.email.trim(), subject: `${docCompany.name} – Customer Statement`, text, html });
+  return { status: 200, body: { ok: true } };
 }
 
 /** Send a follow-up and persist its existing manual reminder transition after delivery. */
@@ -245,9 +280,18 @@ export function reconcileFollowUp(current, snapshot, sent, opts, partnerId, comp
  * turn the send into a failure: on a conflict only the "sent" note is recorded and the newer state is kept.
  * @returns {{db: object, notice?: string}}
  */
-export function recordSent(current, snapshot, sent, opts, reconcile = null) {
+export function recordSent(current, snapshot, sent, opts, { document = null, reconcile = null } = {}) {
+  const diff = diffDb(snapshot, sent);
+  const original = document?.model === 'account.move' ? read(snapshot, document.model, Number(document.id)) : null;
+  if (original?.state === 'posted') {
+    const rows = (diff.upserts['account.move'] ??= []);
+    if (!rows.some((row) => row.id === original.id)) rows.push(read(sent, 'account.move', original.id));
+    const base = ((diff.bases['account.move'] ??= {})[original.id] ??= {});
+    base.state = original.state;
+    base.is_move_sent = original.is_move_sent ?? null;
+  }
   try {
-    return { db: applyDiff(current, diffDb(snapshot, sent), opts) };
+    return { db: applyDiff(current, diff, opts) };
   } catch (e) {
     if (!(e instanceof ConflictError)) throw e;
     if (typeof reconcile === 'function') {

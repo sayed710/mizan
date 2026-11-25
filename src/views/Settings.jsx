@@ -223,6 +223,9 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
   }
+  if (vals.quick_edit_mode !== undefined && vals.quick_edit_mode !== null && vals.quick_edit_mode !== '' && !['out_invoices', 'in_invoices', 'out_and_in_invoices'].includes(vals.quick_edit_mode)) {
+    return 'Select a valid quick encoding mode';
+  }
   if (vals.account_check_printing_layout !== undefined && vals.account_check_printing_layout !== null && !['none', 'top', 'middle', 'bottom'].includes(vals.account_check_printing_layout)) {
     return 'Select a valid check layout';
   }
@@ -273,11 +276,12 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
   const showCurrencies = hasField('currency_id') || !company;
   const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
-  const showVendorBills = hasField('three_way_matching');
+  const showVendorBills = hasField('three_way_matching') || hasField('autopost_bills');
   const showFiscalPeriods = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail'].some(hasField);
   const priceIncludeOptions = fields.account_price_include?.options ?? [['tax_included', 'Tax Included'], ['tax_excluded', 'Tax Excluded']];
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
   const periodicityOptions = fields.tax_periodicity?.options ?? [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']];
+  const quickEditOptions = fields.quick_edit_mode?.options ?? [['out_invoices', 'Customer Invoices'], ['in_invoices', 'Vendor Bills'], ['out_and_in_invoices', 'Customer Invoices and Vendor Bills']];
   const generalJournals = (db.records['account.journal'] ?? [])
     .filter((j) => j.active !== false && j.type === 'general' && (!j.company_id || !company || j.company_id === company.id));
   const companyAccounts = (db.records['account.account'] ?? [])
@@ -547,12 +551,31 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
       {showVendorBills && (
         <div className="settings-block" data-block="vendor_bills">
           <h3>{t('Vendor Bills')}</h3>
+          {hasField('autopost_bills') && (
+            <SettingRow id="autopost_bills" label="Auto-post bills" description="Automatically post eligible digitized vendor bills.">
+              <input id="autopost_bills" type="checkbox" checked={!!company?.autopost_bills} disabled={readOnly || !company}
+                onChange={(e) => onWriteCompany({ autopost_bills: e.target.checked })} />
+            </SettingRow>
+          )}
           {hasField('three_way_matching') && (
             <SettingRow id="three_way_matching" label="Three-Way Matching" description="Verify that vendor bill quantities match the purchase order and receipt before marking bills ready to pay.">
               <input id="three_way_matching" type="checkbox" checked={!!company?.three_way_matching} disabled={readOnly || !company}
                 onChange={(e) => onWriteCompany({ three_way_matching: e.target.checked })} />
             </SettingRow>
           )}
+        </div>
+      )}
+
+      {hasField('quick_edit_mode') && (
+        <div className="settings-block" data-block="quick_encoding">
+          <h3>{t('Quick Encoding')}</h3>
+          <SettingRow id="quick_edit_mode" label="Quick encoding" description="Enter the tax-included total on draft invoices and bills to prefill new lines with the remaining amount.">
+            <select id="quick_edit_mode" disabled={readOnly || !company} value={company?.quick_edit_mode ?? ''}
+              onChange={(e) => onWriteCompany({ quick_edit_mode: e.target.value || null })}>
+              <option value="">{t('None')}</option>
+              {quickEditOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+            </select>
+          </SettingRow>
         </div>
       )}
 
@@ -677,6 +700,15 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
           </div>
         );
       })}
+      {hasField('account_storno') && (
+        <div className="settings-block" data-block="storno">
+          <h3>{t('Storno Accounting')}</h3>
+          <SettingRow id="account_storno" label="Storno accounting" description="Use negative numbers to reverse original entries">
+            <input id="account_storno" type="checkbox" checked={!!company?.account_storno} disabled={readOnly || !company}
+              onChange={(e) => onWriteCompany({ account_storno: e.target.checked })} />
+          </SettingRow>
+        </div>
+      )}
     </section>
   );
 }

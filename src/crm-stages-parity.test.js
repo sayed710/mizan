@@ -137,7 +137,6 @@ test('migration v9 transforms legacy string stages, lost reasons, and tags witho
   const migrated = migrate(oldDb);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
 
-
   const l1 = read(migrated, 'crm.lead', 101);
   assert.equal(typeof l1.stage_id, 'number');
   assert.equal(read(migrated, 'crm.stage', l1.stage_id).name, 'New');

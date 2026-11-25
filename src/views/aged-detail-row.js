@@ -4,6 +4,7 @@ import { createElement } from 'react';
 export function AgedDetailRow({ buckets, detail, money }) {
   return createElement('tr', { className: 'rep-detail' },
     createElement('td', null, createElement('a', { href: `#/open/account.move/${detail.move_id}` }, detail.name)),
+    createElement('td', null, detail.invoice_date ?? detail.date ?? ''),
     ...buckets.map(([key]) => createElement('td', { key, className: 'num' }, detail[key] ? money(detail[key]) : '')),
     createElement('td', { className: 'num' }, money(detail.total)));
 }
