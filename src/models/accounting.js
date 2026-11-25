@@ -2926,7 +2926,7 @@ export const putMoneyIn = (db, journalId, args) => cashMove(db, journalId, args,
 export const takeMoneyOut = (db, journalId, args) => cashMove(db, journalId, args, -1);
 
 /** Sync a liquidity journal's default account currency when it does not conflict with existing items or another forced currency. */
-function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwriteExisting = false } = {}) {
+function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwriteExisting = false, journalId = null } = {}) {
   const account = accountId ? read(db, 'account.account', accountId) : null;
   if (!account) return db;
   const nextCurrency = targetCurrencyId ?? null;
@@ -2936,7 +2936,7 @@ function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwri
   if (nextCurrency && accountCurrencyChangeError(db, account, { ...account, currency_id: nextCurrency })) {
     return db;
   }
-  return write(db, 'account.account', accountId, { currency_id: nextCurrency });
+  return write(db, 'account.account', accountId, { currency_id: nextCurrency }, journalId ? { syncFromJournalId: journalId } : undefined);
 }
 
 export const accountingModels = {
@@ -3002,7 +3002,7 @@ export const accountingModels = {
       },
     },
     defaults: () => ({ account_type: 'expense', active: true, tax_ids: [] }),
-    guard: (db, before, after) => {
+    guard: (db, before, after, ctx) => {
       if (after.non_trade && !canBeNonTrade(after)) return 'Non Trade requires a receivable or payable account';
       const useError = accountTypeGuard(db, before, after);
       if (useError) return useError;
@@ -3041,6 +3041,18 @@ export const accountingModels = {
       }
       const currencyError = accountCurrencyChangeError(db, before, after);
       if (currencyError) return currencyError;
+      if (before && (before.currency_id ?? null) !== (after.currency_id ?? null)) {
+        const nextCurrency = after.currency_id ?? null;
+        const linkedLiquidity = (db.records['account.journal'] ?? []).filter(
+          (j) => j.id !== ctx?.syncFromJournalId
+            && j.active !== false
+            && isLiquidityJournal(j)
+            && j.default_account_id === after.id,
+        );
+        if (linkedLiquidity.some((j) => j.currency_id && j.currency_id !== nextCurrency)) {
+          return 'Another journal uses this default account with a different currency';
+        }
+      }
       if (before && (before.company_id ?? null) !== (after.company_id ?? null)) {
         const openingMoveIds = new Set((db.records['res.company'] ?? []).map((c) => c.account_opening_move_id).filter(Boolean));
         const isReferencedInOpeningMove = (db.records['account.move'] ?? []).some(
@@ -3115,7 +3127,9 @@ export const accountingModels = {
       const companyId = after.company_id ?? 1;
       const currencyChanged = !before || (before.currency_id ?? null) !== (after.currency_id ?? null);
       const defaultAccountChanged = !before || (before.default_account_id ?? null) !== (after.default_account_id ?? null);
-      if (isLiquidityJournal(after) && after.default_account_id && (currencyChanged || defaultAccountChanged)) {
+      const becameLiquidity = !before || (!isLiquidityJournal(before) && isLiquidityJournal(after));
+      const unarchived = before?.active === false && after.active !== false;
+      if (isLiquidityJournal(after) && after.default_account_id && (currencyChanged || defaultAccountChanged || becameLiquidity || unarchived)) {
         const account = read(db, 'account.account', after.default_account_id);
         if (account) {
           const accountCurrency = account.currency_id ?? null;
@@ -3199,14 +3213,14 @@ export const accountingModels = {
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       name: { type: 'char', label: 'Journal', required: true },
-      code: { type: 'char', label: 'Sequence Prefix', required: true },
+      code: { type: 'char', label: 'Sequence Prefix', required: true, optional: 'show' },
       type: {
         type: 'selection', label: 'Type', required: true,
         options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['cash', 'Cash'], ['bank', 'Bank'], ['credit', 'Credit Card'], ['general', 'Miscellaneous']],
         help: 'Select "Sales" for customer invoices journals; "Purchase" for vendor bills journals; "Cash", "Bank" or "Credit Card" for customer or vendor payments; "Miscellaneous" for everything else.',
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', domain: (currency) => currency.active !== false },
       journal_group_id: { type: 'many2one', relation: 'account.journal.group', label: 'Ledger' },
       sequence_override_regex: { type: 'text', label: 'Sequence Override Regex', hidden: true },
@@ -3223,7 +3237,7 @@ export const accountingModels = {
       refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
       refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
       default_account_id: {
-        type: 'many2one', relation: 'account.account', label: 'Default Account',
+        type: 'many2one', relation: 'account.account', label: 'Default Account', optional: 'show',
         required: (r, _db, { isNew } = {}) => ['sale', 'purchase'].includes(r?.type) || (!isNew && isLiquidityJournal(r)),
       },
       suspense_account_id: {
@@ -3377,11 +3391,16 @@ export const accountingModels = {
     },
     prepareWrite: (db, vals, before) => {
       let nextVals = { ...vals };
-      if (('currency_id' in vals || 'default_account_id' in vals) && isLiquidityJournal({ ...before, ...vals }) && (vals.default_account_id ?? before?.default_account_id)) {
-        const targetAccountId = vals.default_account_id ?? before.default_account_id;
-        const targetCurrencyId = ('currency_id' in vals ? vals.currency_id : before?.currency_id) ?? null;
+      const nextRecord = { ...before, ...vals };
+      const currencyChanged = 'currency_id' in vals && (vals.currency_id ?? null) !== (before?.currency_id ?? null);
+      const defaultAccountChanged = 'default_account_id' in vals && (vals.default_account_id ?? null) !== (before?.default_account_id ?? null);
+      const becameLiquidity = !isLiquidityJournal(before) && isLiquidityJournal(nextRecord);
+      if ((currencyChanged || defaultAccountChanged || becameLiquidity) && isLiquidityJournal(nextRecord) && nextRecord.default_account_id) {
+        const targetAccountId = nextRecord.default_account_id;
+        const targetCurrencyId = nextRecord.currency_id ?? null;
         db = syncLiquidityAccountCurrency(db, targetAccountId, targetCurrencyId, {
-          overwriteExisting: 'currency_id' in vals && !('default_account_id' in vals),
+          overwriteExisting: currencyChanged && !defaultAccountChanged && !becameLiquidity,
+          journalId: before?.id ?? null,
         });
       }
       if (nextVals.type !== undefined) {
@@ -3430,6 +3449,8 @@ export const accountingModels = {
     onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
     onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    views: ['list', 'kanban'],
+    searchFields: ['name', 'code'],
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },

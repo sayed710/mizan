@@ -6,6 +6,8 @@ import { diffDb, applyDiff } from './sync.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { journalSequenceName } from './models/journal-sequence.js';
 import { postEntry } from './models/ledger.js';
+import { payMove, postMove } from './models/accounting.js';
+import { today } from './models/common.js';
 import './models/index.js';
 
 test('JRN-1 journal currency and sequence behavior survive synchronization', () => {
@@ -409,5 +411,55 @@ test('Finding 13: posting with large sequence numbers above MAX_SAFE_INTEGER pro
     journalSequenceName(padded, read(padded, 'account.journal', journal.id), '2025-03-03', 'LSEQ/2025/000000000000000001'),
     'LSEQ/2025/009007199254740993',
   );
+});
+
+test('Shared liquidity default account rejects currency change that conflicts with another journal', () => {
+  let db = seed();
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+
+  // 1. Two bank journals share an unused USD-forced account; changing one to EUR must fail
+  const sharedUsdAcc = create(db, 'account.account', { name: 'Shared USD Bank', code: '111330', account_type: 'asset_cash', company_id: 1, currency_id: usd.id });
+  db = sharedUsdAcc.db;
+  const j1 = create(db, 'account.journal', { name: 'Bank USD 1', code: 'BU1', type: 'bank', company_id: 1, default_account_id: sharedUsdAcc.id, suspense_account_id: bank.suspense_account_id, currency_id: usd.id });
+  db = j1.db;
+  const j2 = create(db, 'account.journal', { name: 'Bank USD 2', code: 'BU2', type: 'bank', company_id: 1, default_account_id: sharedUsdAcc.id, suspense_account_id: bank.suspense_account_id, currency_id: usd.id });
+  db = j2.db;
+
+  assert.throws(
+    () => write(db, 'account.journal', j1.id, { currency_id: eur.id }),
+    /Another journal uses this default account with a different currency/,
+  );
+  assert.equal(read(db, 'account.account', sharedUsdAcc.id).currency_id, usd.id);
+  assert.equal(read(db, 'account.journal', j1.id).currency_id, usd.id);
+
+  // Forged diff updating both journal and shared account together must also be rejected
+  const forged = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.journal': db.records['account.journal'].map((j) => (j.id === j1.id ? { ...j, currency_id: eur.id } : j)),
+      'account.account': db.records['account.account'].map((a) => (a.id === sharedUsdAcc.id ? { ...a, currency_id: eur.id } : a)),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, forged), { isAdmin: true }),
+    /Another journal uses this default account with a different currency/,
+  );
+
+  // Subsequent USD payment through j2 still succeeds
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    company_id: 1,
+    invoice_date: today(),
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+  assert.doesNotThrow(() => {
+    db = payMove(db, inv.id, 50, today(), { journalId: j2.id, directBank: true });
+  });
+
 });
 
