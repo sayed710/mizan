@@ -9,7 +9,7 @@ import { ACTIVITY_TYPES } from './mail.js';
 import { currentActor, employeeFor } from './actor.js';
 import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, validStornoMove } from './ledger.js';
 import { toCompany } from './currency.js';
-import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
+import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, isSectionOrNote, resolveLineTaxes, taxBaseTags, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, round, roundCurrency } from '../money.js';
@@ -853,19 +853,24 @@ const normalizeTaxIds = (ids) => {
   return [...new Set(list.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
 };
 
+/** Expand `account.tax` IDs (including group children) into a deduplicated Set of positive integer IDs. */
+function expandTaxIdSet(db, ids) {
+  const expanded = new Set();
+  const visit = (rawId) => {
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id) || id <= 0 || expanded.has(id)) return;
+    expanded.add(id);
+    const tax = read(db, 'account.tax', id);
+    for (const childId of tax?.children_tax_ids ?? []) visit(childId);
+  };
+  for (const id of ids ?? []) visit(id);
+  return expanded;
+}
+
 /** Expand selected `account.tax` IDs (including group children), or null when unfiltered. */
 function selectedTaxIdSet(db, period) {
   const raw = normalizeTaxIds(period?.taxIds);
-  if (!raw.length) return null;
-  const selected = new Set();
-  const visit = (id) => {
-    if (selected.has(id)) return;
-    selected.add(id);
-    const tax = read(db, 'account.tax', id);
-    for (const childId of tax?.children_tax_ids ?? []) visit(Number(childId));
-  };
-  for (const id of raw) visit(id);
-  return selected;
+  return raw.length ? expandTaxIdSet(db, raw) : null;
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
@@ -1431,19 +1436,96 @@ export function taxRowsFromItems(items) {
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
 }
 
+/** Resolve originating tax IDs per base tag from an invoice or cash-basis origin's immutable line snapshots. */
+function snapshotBaseTagTaxes(move, line, { cashBasis = false } = {}) {
+  const invLines = move?.invoice_line_ids ?? [];
+  if (!invLines.length) return null;
+  const side = ['out_refund', 'in_refund'].includes(move.move_type) ? 'refund' : 'invoice';
+  const indices = !cashBasis && Array.isArray(line?.invoice_sources) && line.invoice_sources.length
+    ? [...new Set(line.invoice_sources.map((s) => s.index).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < invLines.length))]
+    : invLines.map((_, idx) => idx);
+  const tagMap = new Map();
+  for (const idx of indices) {
+    const invLine = invLines[idx];
+    if (!invLine || isSectionOrNote(invLine)) continue;
+    for (const t of resolveLineTaxes(invLine)) {
+      if (Boolean(t.tax_cash_basis) !== cashBasis || t.tax_id == null) continue;
+      for (const tagId of taxBaseTags(t, side, invLine)) {
+        if (!tagMap.has(tagId)) tagMap.set(tagId, new Set());
+        tagMap.get(tagId).add(Number(t.tax_id));
+      }
+    }
+  }
+  return tagMap;
+}
+
+/** Resolve which base-grid tag IDs on `line` belong to `selectedTaxes` using posted provenance. */
+function matchingBaseGridTagIds(db, moves, move, line, selectedTaxes) {
+  const tagIds = line.tax_tag_ids ?? [];
+  if (!tagIds.length) return new Set();
+
+  const isRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id);
+  const originMove = isRelease
+    ? moves.get(move.cash_basis_origin_move_id)
+    : (move?.reversed_entry_id && !(move?.invoice_line_ids?.length) ? moves.get(move.reversed_entry_id) : move);
+  const snapshotMap = originMove?.invoice_line_ids?.length
+    ? snapshotBaseTagTaxes(originMove, isRelease ? null : line, { cashBasis: isRelease })
+    : null;
+
+  let rawTaxIds = Array.isArray(line.tax_ids) && line.tax_ids.length
+    ? line.tax_ids
+    : null;
+
+  if (!rawTaxIds && snapshotMap) {
+    const inferred = new Set();
+    for (const tagId of tagIds) {
+      for (const taxId of snapshotMap.get(tagId) ?? []) inferred.add(taxId);
+    }
+    rawTaxIds = [...inferred];
+  }
+  if (!rawTaxIds && move) {
+    const siblingTaxIds = (move.line_ids ?? [])
+      .filter((l) => !l.tax_grid_base && l.tax_id != null && (!line.tax_base_line_key || !l.tax_base_line_key || l.tax_base_line_key === line.tax_base_line_key))
+      .map((l) => Number(l.tax_id));
+    rawTaxIds = [...new Set(siblingTaxIds)];
+  }
+  if (!rawTaxIds?.length) return new Set();
+
+  const lineTaxes = [...expandTaxIdSet(db, rawTaxIds)];
+  if (!lineTaxes.some((id) => selectedTaxes.has(id))) return new Set();
+  if (lineTaxes.every((id) => selectedTaxes.has(id))) return new Set(tagIds);
+
+  if (snapshotMap) {
+    const allowedLineTaxSet = new Set(lineTaxes);
+    return new Set(tagIds.filter((tagId) => {
+      const owners = snapshotMap.get(tagId);
+      return owners && [...owners].some((id) => allowedLineTaxSet.has(id) && selectedTaxes.has(id));
+    }));
+  }
+
+  // Multi-tax manual/legacy line without an invoice snapshot: attribute tags across the line's taxes.
+  const currentOwners = new Map();
+  for (const id of lineTaxes) {
+    const tax = read(db, 'account.tax', id);
+    for (const row of [...(tax?.invoice_repartition_line_ids ?? []), ...(tax?.refund_repartition_line_ids ?? [])]) {
+      if (row.repartition_type !== 'base') continue;
+      for (const tagId of row.tag_ids ?? []) {
+        if (!currentOwners.has(tagId)) currentOwners.set(tagId, []);
+        currentOwners.get(tagId).push(id);
+      }
+    }
+  }
+  return new Set(tagIds.filter((tagId) => {
+    const owners = currentOwners.get(tagId);
+    return owners ? owners.some((id) => selectedTaxes.has(id)) : true;
+  }));
+}
+
 /** Tax grid amounts from tags on posted journal items. */
 export function taxesByGrid(db, period = {}) {
   const rows = new Map();
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
   const selectedTaxes = selectedTaxIdSet(db, period);
-  const selectedBaseTagIds = selectedTaxes
-    ? new Set([...selectedTaxes].flatMap((id) => {
-        const tax = read(db, 'account.tax', id);
-        return [...(tax?.invoice_repartition_line_ids ?? []), ...(tax?.refund_repartition_line_ids ?? [])]
-          .filter((r) => r.repartition_type === 'base')
-          .flatMap((r) => r.tag_ids ?? []);
-      }))
-    : null;
   const items = period.tax_unit_id
     ? returnCompanies(db, period).flatMap((company_id) => journalItems(db, { ...period, tax_unit_id: null, company_id }))
     : journalItems(db, period);
@@ -1459,11 +1541,15 @@ export function taxesByGrid(db, period = {}) {
     const move = moves.get(line.move_id);
     const side = line.tax_side || (['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null);
     if (!side) continue;
+    const allowedBaseTags = selectedTaxes && line.tax_grid_base && line.tax_id == null
+      ? matchingBaseGridTagIds(db, moves, move, line, selectedTaxes)
+      : null;
+    if (allowedBaseTags && !allowedBaseTags.size) continue;
     const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
     const value = side === 'sale' ? -balance : balance;
     const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && isLegacyCashBasisRelease(move));
     for (const id of line.tax_tag_ids ?? []) {
-      if (selectedBaseTagIds && line.tax_grid_base && line.tax_id == null && !selectedBaseTagIds.has(id)) continue;
+      if (allowedBaseTags && !allowedBaseTags.has(id)) continue;
       const tag = read(db, 'account.account.tag', id);
       if (!tag) continue;
       const row = rows.get(id) ?? { id, name: tag.name, base: 0, tax: 0 };

@@ -3,14 +3,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, read, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { accountId } from './models/ledger.js';
-import { postMove } from './models/accounting.js';
+import { accountId, journalId } from './models/ledger.js';
+import { payMove, postMove } from './models/accounting.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
 import { taxItems, taxReport, taxesByGrid, taxesByTax } from './models/finance.js';
 import { taxBoxItems, taxReturnBoxes, taxReturnToXml } from './models/taxExport.js';
 import { detailReportColumns } from './views/reportCompare.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -144,6 +145,9 @@ function setupTxr1Data({ template = 'generic' } = {}) {
     saleTaxAId: saleTaxA.id,
     saleTaxBId: saleTaxB.id,
     purchTaxId: purchTax.id,
+    baseTagOutId: baseTagOut.id,
+    taxTagOutAId: taxTagOutA.id,
+    taxTagOutBId: taxTagOutB.id,
   };
 }
 
@@ -341,4 +345,280 @@ test('TXR-3: Statutory XML export is reachable on the Tax Report page only when 
     globalThis.URL = origUrl;
     globalThis.Blob = origBlob;
   }
+});
+
+test('Finding 1: All-companies statutory scope hides Export XML when multiple companies share a template, and taxReturnToXml refuses null company_id', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+  const { Reports } = await import('./views/Reports.jsx');
+
+  let { db, yr } = setupTxr1Data({ template: 'eg_vat' });
+  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Co 2', currency_id: 1, tax_return_template: 'eg_vat' });
+  db = c2.db;
+  const c3 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Co 3', currency_id: 1, tax_return_template: 'eg_vat' });
+  db = c3.db;
+
+  // Model guard: explicit company_id: null or multi-company omitted company_id never falls back to company 1
+  const multiBoxes = taxReturnBoxes(db, { from: `${yr}-01-01`, to: `${yr}-12-31`, company_id: null, tax_return_template: 'eg_vat' });
+  assert.equal(multiBoxes.company_id, null);
+  assert.throws(
+    () => taxReturnToXml(db, { from: `${yr}-01-01`, to: `${yr}-12-31`, company_id: null, tax_return_template: 'eg_vat' }),
+    /single company/i,
+  );
+  assert.throws(
+    () => taxReturnToXml(db, { from: `${yr}-01-01`, to: `${yr}-12-31`, tax_return_template: 'eg_vat' }),
+    /single company/i,
+  );
+
+  // Scope excludes company 1 completely (only companies 2 and 3 allowed), both sharing eg_vat
+  db = {
+    ...db,
+    settings: { ...db.settings, current_company_id: c2.id, allowed_company_ids: [c2.id, c3.id] },
+  };
+  await React.act(async () => commit(db));
+
+  const downloads = [];
+  const origUrl = globalThis.URL;
+  const origBlob = globalThis.Blob;
+  globalThis.Blob = class MockBlob {
+    constructor(parts) { this.textContent = parts.join(''); }
+  };
+  globalThis.URL = {
+    createObjectURL: (blob) => { downloads.push(blob.textContent); return 'blob:f1'; },
+    revokeObjectURL: () => {},
+  };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'tax' } })));
+
+    // Under 'All Companies' with 2 companies sharing eg_vat, Export XML must NOT be offered
+    assert.equal(find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Export XML'), null);
+
+    // Selecting Company 2 resolves a single concrete company and exports companyId="2"
+    const companySelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Company');
+    assert.ok(companySelect);
+    await React.act(async () => props(companySelect).onChange({ target: { value: String(c2.id) } }));
+
+    const xmlBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Export XML');
+    assert.ok(xmlBtn, 'Export XML must appear once a single concrete company is selected');
+    await React.act(async () => props(xmlBtn).onClick());
+    assert.ok(downloads.at(-1).includes(`companyId="${c2.id}"`));
+  } finally {
+    await React.act(async () => root.unmount());
+    globalThis.URL = origUrl;
+    globalThis.Blob = origBlob;
+  }
+});
+
+test('Finding 2: Editing a tax base repartition tag after posting preserves historical grid bases under Taxes filter', () => {
+  let { db, yr, period, saleTaxAId, baseTagOutId, taxTagOutAId } = setupTxr1Data();
+  const vatOutAcc = accountId(db, '251000');
+
+  // Also test cash-basis tax and manual journal entry whose base tag changes after posting
+  const cbBaseTag = create(db, 'account.account.tag', { name: 'CB Old Base', applicability: 'taxes' });
+  db = cbBaseTag.db;
+  const cbTaxTag = create(db, 'account.account.tag', { name: 'CB Tax Tag', applicability: 'taxes' });
+  db = cbTaxTag.db;
+  const cbTax = create(db, 'account.tax', {
+    name: 'CB Tax 10%',
+    amount: 10,
+    amount_type: 'percent',
+    type_tax_use: 'sale',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: accountId(db, '251100'),
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, tag_ids: [cbBaseTag.id] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: vatOutAcc, tag_ids: [cbTaxTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, tag_ids: [cbBaseTag.id] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: vatOutAcc, tag_ids: [cbTaxTag.id] },
+    ],
+  });
+  db = cbTax.db;
+  const cbInv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: `${yr}-03-18`,
+    company_id: 1,
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 300, ...taxSnapshot(read(db, 'account.tax', cbTax.id)) }],
+  });
+  db = postMove(cbInv.db, cbInv.id);
+  db = payMove(db, cbInv.id, 330, `${yr}-03-19`);
+
+  const revAcc = accountId(db, '400000', 1);
+  const cashAcc = search(db, 'account.account').find((a) => (a.company_id ?? 1) === 1 && (a.account_type === 'asset_cash' || a.account_type === 'asset_current'))?.id;
+  const miscJournalId = journalId(db, 'MISC', 1);
+  const entry = create(db, 'account.move', {
+    move_type: 'entry',
+    journal_id: miscJournalId,
+    date: `${yr}-03-20`,
+    company_id: 1,
+    line_ids: [
+      { account_id: revAcc, debit: 0, credit: 600, tax_ids: [saleTaxAId] },
+      { account_id: cashAcc, debit: 684, credit: 0 },
+    ],
+  });
+  db = postMove(entry.db, entry.id);
+
+  const newTag = create(db, 'account.account.tag', { name: 'Grid Out Base New', applicability: 'taxes' });
+  db = newTag.db;
+
+  // Edit both saleTaxA and cbTax base repartition tags AFTER posting
+  db = write(db, 'account.tax', saleTaxAId, {
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, tag_ids: [newTag.id] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: vatOutAcc, tag_ids: [taxTagOutAId] },
+    ],
+  });
+  db = write(db, 'account.tax', cbTax.id, {
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, tag_ids: [newTag.id] },
+      { repartition_type: 'tax', factor_percent: 100, account_id: vatOutAcc, tag_ids: [cbTaxTag.id] },
+    ],
+  });
+
+  const gridsA = taxesByGrid(db, { ...period, taxIds: [saleTaxAId] });
+  assert.equal(gridsA.find((g) => g.id === baseTagOutId)?.base, 1800, 'Invoice 1000 + multi 200 + manual entry 600 base preserved');
+  assert.equal(gridsA.find((g) => g.id === taxTagOutAId)?.tax, 252, '140 + 28 + 84 tax preserved');
+
+  const gridsCb = taxesByGrid(db, { ...period, taxIds: [cbTax.id] });
+  assert.equal(gridsCb.find((g) => g.id === cbBaseTag.id)?.base, 300, 'Cash-basis base preserved after tax edit');
+  assert.equal(gridsCb.find((g) => g.id === cbTaxTag.id)?.tax, 30);
+});
+
+test('Finding 3: Switching Variant to Generic hides Export XML so statutory boxes cannot be exported from Generic view', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+  const { Reports } = await import('./views/Reports.jsx');
+
+  const { db } = setupTxr1Data({ template: 'eg_vat' });
+  await React.act(async () => commit(db));
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'tax' } })));
+    const variantSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Variant');
+    assert.ok(variantSelect);
+    assert.equal(props(variantSelect).value, 'eg_vat');
+    assert.ok(find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Export XML'));
+
+    await React.act(async () => props(variantSelect).onChange({ target: { value: 'generic' } }));
+    assert.equal(find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Export XML'), null);
+
+    await React.act(async () => props(variantSelect).onChange({ target: { value: 'eg_vat' } }));
+    assert.ok(find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Export XML'));
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Finding 4: Export XML is disabled while Taxes filter is active and taxReturnToXml rejects filtered specs', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+  const { Reports } = await import('./views/Reports.jsx');
+
+  const { db, yr, saleTaxAId } = setupTxr1Data({ template: 'eg_vat' });
+  assert.throws(
+    () => taxReturnToXml(db, { from: `${yr}-01-01`, to: `${yr}-12-31`, company_id: 1, tax_return_template: 'eg_vat', taxIds: [saleTaxAId] }),
+    /tax filter/i,
+  );
+
+  await React.act(async () => commit(db));
+  const downloads = [];
+  const origUrl = globalThis.URL;
+  const origBlob = globalThis.Blob;
+  globalThis.Blob = class MockBlob {
+    constructor(parts) { this.textContent = parts.join(''); }
+  };
+  globalThis.URL = {
+    createObjectURL: (blob) => { downloads.push(blob.textContent); return 'blob:f4'; },
+    revokeObjectURL: () => {},
+  };
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'tax' } })));
+    const taxesSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Taxes');
+    await React.act(async () => props(taxesSelect).onChange({ target: { selectedOptions: [{ value: String(saleTaxAId) }] } }));
+
+    const xmlBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Export XML');
+    assert.ok(xmlBtn);
+    assert.equal(props(xmlBtn).disabled, true);
+    await React.act(async () => props(xmlBtn).onClick());
+    assert.equal(downloads.length, 0, 'Filtered tax report must not trigger XML download');
+
+    // Clearing filter re-enables Export XML
+    await React.act(async () => props(taxesSelect).onChange({ target: { selectedOptions: [] } }));
+    const enabledBtn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Export XML');
+    assert.equal(props(enabledBtn).disabled, false);
+    await React.act(async () => props(enabledBtn).onClick());
+    assert.equal(downloads.length, 1);
+  } finally {
+    await React.act(async () => root.unmount());
+    globalThis.URL = origUrl;
+    globalThis.Blob = origBlob;
+  }
+});
+
+test('Finding 5: Filtering by a tax excludes bases from separate invoices or lines that only used another tax sharing the same base tag', () => {
+  let { db, yr, period, saleTaxAId, saleTaxBId, baseTagOutId, taxTagOutAId, taxTagOutBId } = setupTxr1Data();
+  const snapA = taxSnapshot(read(db, 'account.tax', saleTaxAId));
+  const snapB = taxSnapshot(read(db, 'account.tax', saleTaxBId));
+
+  // Separate invoice using ONLY Sale B (which shares baseTagOutId with Sale A)
+  const invBOnly = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: `${yr}-03-14`,
+    company_id: 1,
+    invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 500, ...snapB }],
+  });
+  db = postMove(invBOnly.db, invBOnly.id);
+
+  // Single invoice with two lines on the same income account: one using Sale A (300), one using Sale B (400)
+  const invSplit = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: `${yr}-03-16`,
+    company_id: 1,
+    invoice_line_ids: [
+      { product_id: 5, qty: 1, price_unit: 300, ...snapA },
+      { product_id: 5, qty: 1, price_unit: 400, ...snapB },
+    ],
+  });
+  db = postMove(invSplit.db, invSplit.id);
+
+  const gridsAll = taxesByGrid(db, period);
+  assert.equal(gridsAll.find((g) => g.id === baseTagOutId)?.base, 2400); // 1000 + 200 + 500 + 300 + 400
+
+  const gridsA = taxesByGrid(db, { ...period, taxIds: [saleTaxAId] });
+  assert.equal(gridsA.find((g) => g.id === baseTagOutId)?.base, 1500, 'Must include 1000 + 200 + 300 only, excluding 500 and 400');
+  assert.equal(gridsA.find((g) => g.id === taxTagOutAId)?.tax, 210); // 140 + 28 + 42
+  assert.equal(gridsA.some((g) => g.id === taxTagOutBId), false);
+
+  const gridsB = taxesByGrid(db, { ...period, taxIds: [saleTaxBId] });
+  assert.equal(gridsB.find((g) => g.id === baseTagOutId)?.base, 1100, 'Must include 500 + 200 + 400 only, excluding 1000 and 300');
+  assert.equal(gridsB.find((g) => g.id === taxTagOutBId)?.tax, 55); // 10 + 25 + 20
+  assert.equal(gridsB.some((g) => g.id === taxTagOutAId), false);
 });

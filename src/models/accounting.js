@@ -1506,6 +1506,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     partner_id: r.partner_id,
     name: bg.tax_name || 'Cash basis base',
     tax_id: bg.tax_id ?? null,
+    ...(bg.tax_ids?.length ? { tax_ids: bg.tax_ids } : {}),
     tax_name: bg.tax_name || 'Cash basis base',
     tax_tag_ids: bg.tax_tag_ids,
     tax_grid_base: true,
@@ -1741,6 +1742,7 @@ export function bookEarlyDiscount(db, id, discount, date = today(), paymentMoveI
   const bases = discountTaxComputation(term) === 'included'
     ? (r.line_ids ?? []).filter((line) => line.tax_grid_base && line.tax_tag_ids?.length).map((line) => ({
       account: discountAccount, partner_id: r.partner_id, tax_tag_ids: line.tax_tag_ids,
+      ...(line.tax_ids?.length ? { tax_ids: line.tax_ids } : (line.tax_id != null ? { tax_ids: [line.tax_id] } : {})),
       tax_grid_base: true, tax_side: isPurchase(r) ? 'purchase' : 'sale',
       debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
     })) : [];
@@ -3158,14 +3160,14 @@ export const accountingModels = {
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       name: { type: 'char', label: 'Journal', required: true },
-      code: { type: 'char', label: 'Sequence Prefix', required: true },
+      code: { type: 'char', label: 'Sequence Prefix', required: true, optional: 'show' },
       type: {
         type: 'selection', label: 'Type', required: true,
         options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['cash', 'Cash'], ['bank', 'Bank'], ['credit', 'Credit Card'], ['general', 'Miscellaneous']],
         help: 'Select "Sales" for customer invoices journals; "Purchase" for vendor bills journals; "Cash", "Bank" or "Credit Card" for customer or vendor payments; "Miscellaneous" for everything else.',
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
       refund_sequence: {
         type: 'boolean', label: 'Dedicated Credit Note Sequence',
         help: 'Check this box if you don\'t want to share the same sequence for invoices and credit notes made from this journal',
@@ -3179,7 +3181,7 @@ export const accountingModels = {
       refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
       refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
       default_account_id: {
-        type: 'many2one', relation: 'account.account', label: 'Default Account',
+        type: 'many2one', relation: 'account.account', label: 'Default Account', optional: 'show',
         required: (r, _db, { isNew } = {}) => ['sale', 'purchase'].includes(r?.type) || (!isNew && isLiquidityJournal(r)),
       },
       suspense_account_id: {
@@ -3376,6 +3378,8 @@ export const accountingModels = {
     onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
     onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    views: ['list', 'kanban'],
+    searchFields: ['name', 'code'],
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },

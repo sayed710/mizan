@@ -47,9 +47,9 @@ export const GENERIC_TAX_TOTALS = [
 export function taxReturnPeriod(db, retOrPeriod) {
   if (!retOrPeriod) return {};
   if ('from' in retOrPeriod || 'to' in retOrPeriod) return retOrPeriod;
-  const companyId = retOrPeriod.company_id ?? 1;
+  const companyId = retOrPeriod.company_id !== undefined ? retOrPeriod.company_id : 1;
   const unit = retOrPeriod.tax_unit_id ? read(db, 'account.tax.unit', retOrPeriod.tax_unit_id) : null;
-  const taxUnitId = unit && (unit.company_ids ?? []).includes(companyId) ? unit.id : null;
+  const taxUnitId = unit && companyId != null && (unit.company_ids ?? []).includes(companyId) ? unit.id : null;
   return {
     from: retOrPeriod.date_from,
     to: retOrPeriod.date_to,
@@ -61,7 +61,8 @@ export function taxReturnPeriod(db, retOrPeriod) {
 
 /** Resolve the explicit box template key from the return or its company, defaulting to `generic`. */
 export function resolveTaxReturnTemplate(db, ret) {
-  const company = read(db, 'res.company', ret?.company_id ?? 1);
+  const companyId = ret?.company_id !== undefined ? ret.company_id : 1;
+  const company = companyId != null ? read(db, 'res.company', companyId) : null;
   const explicit = ret?.tax_return_template || company?.tax_return_template || 'generic';
   return Object.hasOwn(TAX_RETURN_TEMPLATES, explicit) ? explicit : 'generic';
 }
@@ -129,11 +130,16 @@ export function taxReturnBoxes(db, ret) {
   const boxes = spec.mode === 'boxes'
     ? buildTemplateBoxes(db, period, spec, taxRows, totals)
     : buildGenericBoxes(db, period, taxRows, totals);
+  const companies = db?.records?.['res.company'] ?? [];
+  const explicitCompanyId = period.company_id !== undefined ? period.company_id : ret?.company_id;
+  const resolvedCompanyId = explicitCompanyId !== undefined
+    ? explicitCompanyId
+    : (companies.length === 1 ? companies[0].id : null);
   return {
     template,
     templateLabel: spec.label,
     period,
-    company_id: period.company_id ?? ret?.company_id ?? 1,
+    company_id: resolvedCompanyId,
     boxes,
     totals,
   };
@@ -215,6 +221,12 @@ export function taxReturnToCsv(db, ret) {
 /** Build escaped XML document of tax return boxes for an `account.return` record. */
 export function taxReturnToXml(db, ret) {
   const { template, period, company_id: companyId, boxes, totals } = taxReturnBoxes(db, ret);
+  if (companyId == null) {
+    throw new Error('Select a single company before exporting a tax return XML');
+  }
+  if (period.taxIds?.length) {
+    throw new Error('Clear the tax filter before exporting a statutory tax return XML');
+  }
   const returnName = ret?.name ?? 'Tax Return';
   const boxXml = boxes.map((b) => (
     `    <box code="${escapeXml(b.code, { attribute: true })}" label="${escapeXml(b.label, { attribute: true })}" base="${round(b.base).toFixed(2)}" tax="${round(b.tax).toFixed(2)}" kind="${escapeXml(b.kind, { attribute: true })}"/>`

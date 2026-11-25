@@ -322,6 +322,11 @@ export function counterpartTaxLines(db, {
   }, { currency: calcCurrency, roundingMethod: 'round_per_line' });
 
   const allBaseTags = [...new Set(taxRecs.flatMap((t) => taxRepartitionLines(t, 'invoice').find((r) => r.repartition_type === 'base')?.tag_ids ?? []))];
+  const baseTaxIds = [...new Set(
+    taxRecs
+      .filter((t) => (taxRepartitionLines(t, 'invoice').find((r) => r.repartition_type === 'base')?.tag_ids ?? []).length > 0)
+      .map((t) => t.id)
+  )].sort((a, b) => a - b);
 
   const taxLines = [];
   for (const t of computed.taxes) {
@@ -352,6 +357,7 @@ export function counterpartTaxLines(db, {
     tax_side: isCredit ? 'sale' : 'purchase',
     tax_grid_base: true,
     tax_tag_ids: allBaseTags,
+    ...(baseTaxIds.length ? { tax_ids: baseTaxIds } : {}),
   });
 
   const counterpartSide = !isCredit ? 'debit' : 'credit';

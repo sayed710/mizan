@@ -132,9 +132,9 @@ const ar = {
   'Admins only': 'للمديرين فقط',
   'Inventory or Barcode access is required': 'تحتاج صلاحية المخزون أو الباركود',
   'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)': 'البريد الإلكتروني غير مُعدّ (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)',
-  'Only posted invoices can be emailed.': '???? ????? ???????? ??????? ??? ??????? ??????????.',
-  'The email was sent, but its status could not be recorded: {reason}': '????? ??????? ??? ???? ????? ?????: {reason}',
-  'The email was sent, but the document changed meanwhile, so its status was left as it is.': '????? ??????? ??? ??????? ????? ?? ???????? ???? ???? ????? ??? ??.',
+  'Only posted invoices can be emailed.': 'لا يمكن إرسال سوى الفواتير المرحّلة بالبريد الإلكتروني.',
+  'The email was sent, but its status could not be recorded: {reason}': 'تم إرسال البريد، لكن تعذّر تسجيل حالته: {reason}',
+  'The email was sent, but the document changed meanwhile, so its status was left as it is.': 'تم إرسال البريد، لكن المستند تغيّر في هذه الأثناء، فتُركت حالته كما هي.',
   'The email was sent, but the data was restored meanwhile, so the send was not recorded': 'أُرسل البريد، لكن البيانات استُعيدت في الأثناء فلم يُسجَّل الإرسال',
   'Current password is wrong': 'كلمة المرور الحالية غير صحيحة',
   'before must be an audit entry id': 'قيمة before يجب أن تكون معرّف قيد في سجل التدقيق',
@@ -3788,6 +3788,9 @@ const ar = {
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
   'Total Sales': 'إجمالي المبيعات',
   'Total Purchases': 'إجمالي المشتريات',
+  'Clear the Taxes filter to export the statutory XML return': 'امسح عامل تصفية الضرائب لتصدير إقرار XML النظامي',
+  'Select a single company before exporting a tax return XML': 'اختر شركة واحدة قبل تصدير إقرار الضريبة بصيغة XML',
+  'Clear the tax filter before exporting a statutory tax return XML': 'امسح عامل تصفية الضريبة قبل تصدير إقرار الضريبة النظامي بصيغة XML',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -1025,6 +1025,7 @@ function ReportPage({ leaf, params }) {
     ? taxVariant
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
+  const xmlCompanyId = selectedCompanyId ?? (companies.length === 1 ? companies[0].id : null);
   const period = useMemo(
     () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
     [isAged, asOf, periodKey, customPeriod],
@@ -1417,16 +1418,21 @@ function ReportPage({ leaf, params }) {
       <button type="button" className="btn sm" onClick={() => setIsPrinting(true)}>{t('Print')}</button>
       <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
-      {leaf.report === 'tax' && countryTemplateKey && (
+      {isTaxBoxes && xmlCompanyId != null && (
         <button
           type="button"
           className="btn sm"
-          onClick={() => exportTaxReturnXml(db, {
-            ...effectivePeriod,
-            company_id: selectedCompanyId ?? (companies.length === 1 ? companies[0].id : null),
-            tax_return_template: countryTemplateKey,
-            name: countryTemplate.label,
-          }, `tax-return-${countryTemplateKey}`)}
+          disabled={selectedTaxIds.length > 0}
+          title={selectedTaxIds.length > 0 ? t('Clear the Taxes filter to export the statutory XML return') : undefined}
+          onClick={() => {
+            if (selectedTaxIds.length > 0) return;
+            exportTaxReturnXml(db, {
+              ...period,
+              company_id: xmlCompanyId,
+              tax_return_template: activeTaxVariant,
+              name: TAX_RETURN_TEMPLATES[activeTaxVariant].label,
+            }, `tax-return-${activeTaxVariant}`);
+          }}
         >
           {t('Export XML')}
         </button>
