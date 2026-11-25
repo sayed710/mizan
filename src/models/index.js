@@ -326,7 +326,6 @@ const allApps = [
           { key: 'customer-statement', label: 'Customer Statement', type: 'report', report: 'customerStatement' },
           { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
           { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
-          { key: 'partner-ledger-payable', label: 'Partner Ledger (Payable)', type: 'report', report: 'partnerPayable' },
           { key: 'follow-ups', label: 'Follow-up Reports', type: 'report', report: 'followups' },
         ] },
                 { label: 'Taxes & Fiscal', children: [
@@ -359,7 +358,7 @@ const allApps = [
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
           { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list', defaultFilters: ['sale', 'purchase'], includeArchived: true },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
-          { key: 'journals', label: 'Journals', model: 'account.journal' },
+          { key: 'journals', label: 'Journals', model: 'account.journal', view: 'list' },
           { key: 'multi-ledger', label: 'Multi-Ledger', model: 'account.journal.group' },
           { key: 'currencies', label: 'Currencies', model: 'res.currency' },
           { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position', view: 'list' },

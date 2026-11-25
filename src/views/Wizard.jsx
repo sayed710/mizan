@@ -61,7 +61,7 @@ function WizardField({ db, field, value, values, onChange, id, disabled = false 
         {!candidates.length && <p className="muted">{t('Nothing to choose from.')}</p>}
         {candidates.map((r) => (
           <label key={r.id} className="check">
-            <input type="checkbox" checked={chosen.has(r.id)} onChange={(e) => onChange(e.target.checked ? [...chosen, r.id] : [...chosen].filter((x) => x !== r.id))} />
+            <input type="checkbox" checked={chosen.has(r.id)} disabled={disabled} onChange={(e) => onChange(e.target.checked ? [...chosen, r.id] : [...chosen].filter((x) => x !== r.id))} />
             {r.name}
           </label>
         ))}
@@ -100,7 +100,7 @@ export function handleDialogKeyDown(e, container, onClose) {
   }
 }
 
-export function Wizard({ db, spec, onConfirm, onCancel, error }) {
+export function Wizard({ db, spec, onConfirm, onCancel, error, pending = false }) {
   const [state, setState] = useState(() => {
     const init = wizardDefaults(spec);
     try {
@@ -111,13 +111,21 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
   });
   const { values, fieldError } = state;
   const [missing, setMissing] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const mountedRef = useRef(true);
   // A read-only wizard shows values without offering a write.
   const readOnly = !!spec.readOnly;
+  const isSaving = Boolean(pending || submitting);
   const box = useRef(null);
   useEffect(() => {
+    mountedRef.current = true;
     const previous = document.activeElement;
     box.current?.querySelector('input, select, textarea, button')?.focus();
-    return () => previous?.focus?.();
+    return () => {
+      mountedRef.current = false;
+      previous?.focus?.();
+    };
   }, []);
 
   let renderError = null;
@@ -126,7 +134,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
     try {
       if (!isFieldVisible(f, values)) continue;
       const req = isFieldRequired(f, values);
-      const disabled = isFieldDisabled(f, values, readOnly);
+      const disabled = isFieldDisabled(f, values, readOnly || isSaving);
       const val = f.compute ? f.compute(values, db) : values[f.name];
       visibleFields.push({ f, req, disabled, val });
     } catch (e) {
@@ -135,11 +143,16 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
   }
   const interactionError = fieldError || renderError;
   const displayedError = interactionError || error;
-  const canSubmit = !readOnly && !interactionError;
+  const canSubmit = !readOnly && !interactionError && !isSaving;
+
+  const requestCancel = () => {
+    if (isSaving || submittingRef.current) return;
+    onCancel?.();
+  };
 
   const submit = (e) => {
     e.preventDefault();
-    if (!canSubmit) return;
+    if (!canSubmit || submittingRef.current) return;
     let empty;
     try {
       empty = missingFields(spec, values);
@@ -148,19 +161,37 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
       return;
     }
     setMissing(empty);
-    if (!empty.length) return onConfirm(values);
+    if (empty.length) return;
+    submittingRef.current = true;
+    let result;
+    try {
+      result = onConfirm(values);
+    } catch (err) {
+      submittingRef.current = false;
+      throw err;
+    }
+    if (result && typeof result.then === 'function') {
+      setSubmitting(true);
+      return Promise.resolve(result).finally(() => {
+        submittingRef.current = false;
+        if (mountedRef.current) setSubmitting(false);
+      });
+    }
+    submittingRef.current = false;
+    return result;
   };
-  // Escape closes; Tab stays inside the dialog.
-  const onKeyDown = (e) => handleDialogKeyDown(e, box.current, onCancel);
+  // Escape closes unless a save is in progress; Tab stays inside the dialog.
+  const onKeyDown = (e) => handleDialogKeyDown(e, box.current, requestCancel);
   return (
-    <div className="wizard-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
-      <form ref={box} className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title" onSubmit={submit} onKeyDown={onKeyDown}>
+    <div className="wizard-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) requestCancel(); }}>
+      <form ref={box} className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title" aria-busy={isSaving || undefined} onSubmit={submit} onKeyDown={onKeyDown}>
         <h2 id="wizard-title">{t(spec.title)}</h2>
         {visibleFields.map(({ f, req, disabled, val }) => (
           <div className="field" key={f.name}>
             <label htmlFor={`w-${f.name}`}>{t(f.label)}{req && <span className="req" aria-hidden="true">*</span>}</label>
             <div className="field-value">
               <WizardField db={db} field={f} id={`w-${f.name}`} disabled={disabled} value={val} values={values} onChange={(v) => {
+                if (isSaving || submittingRef.current) return;
                 setMissing([]);
                 setState((s) => {
                   const next = { ...s.values, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) };
@@ -180,8 +211,8 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
           <div className="alert" role="alert">{missing.length && !interactionError ? `${t('Fill in')}: ${missing.join(', ')}` : displayedError}</div>
         )}
         <div className="row">
-          <button type="submit" className="btn primary" disabled={!canSubmit}>{t(spec.confirmLabel ?? 'Confirm')}</button>
-          <button type="button" className="btn" onClick={onCancel}>{t('Cancel')}</button>
+          <button type="submit" className="btn primary" disabled={!canSubmit}>{isSaving ? t('Saving...') : t(spec.confirmLabel ?? 'Confirm')}</button>
+          <button type="button" className="btn" disabled={isSaving} onClick={requestCancel}>{t('Cancel')}</button>
         </div>
       </form>
     </div>

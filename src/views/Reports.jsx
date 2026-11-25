@@ -6,6 +6,7 @@ import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
+import { Wizard } from './Wizard.jsx';
 import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
@@ -27,7 +28,7 @@ import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowAnalyticColumns, cashflowColumns, detailReportColumns, executiveColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
-import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage } from './reportNavigation.js';
+import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage, updateReportParam } from './reportNavigation.js';
 import { statementUrl } from '../statementNavigation.js';
 export { PERIODS };
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -591,8 +592,9 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   );
 }
 
-export function Budget({ db, period, companyId = 'all' }) {
+export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money }) {
   const availableCompanies = companiesOf(db);
+  const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
     const acc = read(db, 'account.account', l.account_id);
@@ -604,24 +606,96 @@ export function Budget({ db, period, companyId = 'all' }) {
     if (!companyId || !availableCompanies.some((company) => company.id === companyId)) return;
     commit(write(getDb(), 'account.budget', budgetId, { company_id: companyId }));
   };
+  const targetPeriods = periods?.length ? periods : [period];
+  const minFrom = targetPeriods.map((p) => p.from).filter(Boolean).sort()[0];
+  const maxTo = targetPeriods.map((p) => p.to).filter(Boolean).sort().at(-1);
+  const datesOverlap = (from1, to1, from2, to2) =>
+    (!to1 || !from2 || to1 >= from2) && (!from1 || !to2 || from1 <= to2);
+
   return (
     <tbody>
-      {search(db, 'account.budget').filter((b) => (companyId === 'all' || b.company_id === Number(companyId)) && !['draft', 'cancel'].includes(b.state) && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
+      {search(db, 'account.budget').filter((b) => {
+        if (['draft', 'cancel'].includes(b.state)) return false;
+        if (targetCompanyId && b.company_id && b.company_id !== targetCompanyId) return false;
+        if (minFrom && b.date_to && b.date_to < minFrom) return false;
+        if (maxTo && b.date_from && b.date_from > maxTo) return false;
+        return true;
+      }).flatMap((b) => {
         const company = b.company_id ? read(db, 'res.company', b.company_id) : null;
         const companyMissing = !company;
         let currency = null;
-        let reportLines = [];
+        const periodReports = [];
         let reportError = null;
+
+        const baseBudgetLines = (b.lines ?? []).filter((line) => {
+          if (!analyticAccountIds?.length) return true;
+          return line.analytic_account_id && analyticAccountIds.includes(line.analytic_account_id);
+        });
+
         if (!companyMissing) {
           try {
             currency = budgetCurrency(db, company.id);
-            if (b.lines?.length) reportLines = budgetReport(db, b.id, today(), { period, company_id: company.id });
           } catch (error) {
             reportError = error instanceof Error ? error.message : String(error);
           }
+
+          if (currency) {
+            for (const p of targetPeriods) {
+              const budgetOverlaps = datesOverlap(b.date_from, b.date_to, p.from, p.to);
+              if (!budgetOverlaps) {
+                const zeroLines = baseBudgetLines.map((line) => ({
+                  ...line,
+                  planned_amount: 0,
+                  achieved_amount: 0,
+                  committed_amount: 0,
+                  budget_variance: 0,
+                  budget_achievement: 0,
+                  budget_theoretical: 0,
+                  analytic_lines: [],
+                  commitment_lines: [],
+                }));
+                periodReports.push({ period: p, lines: zeroLines, error: null });
+              } else {
+                try {
+                  const asOfDate = p.to && p.to < today() ? p.to : today();
+                  const rawLines = b.lines?.length
+                    ? budgetReport(db, b.id, asOfDate, { period: p, company_id: company.id, analyticAccountIds })
+                    : [];
+                  const lines = rawLines.map((line) => {
+                    const lineFrom = line.date_from || b.date_from;
+                    const lineTo = line.date_to || b.date_to;
+                    if (!datesOverlap(lineFrom, lineTo, p.from, p.to)) {
+                      return {
+                        ...line,
+                        planned_amount: 0,
+                        achieved_amount: 0,
+                        committed_amount: 0,
+                        budget_variance: 0,
+                        budget_achievement: 0,
+                        budget_theoretical: 0,
+                        analytic_lines: [],
+                        commitment_lines: [],
+                      };
+                    }
+                    return line;
+                  });
+                  periodReports.push({ period: p, lines, error: null });
+                } catch (error) {
+                  const pErr = error instanceof Error ? error.message : String(error);
+                  if (!reportError) reportError = pErr;
+                  periodReports.push({ period: p, lines: [], error: pErr });
+                }
+              }
+            }
+          }
         }
+        if (!companyMissing && !reportError && analyticAccountIds?.length && periodReports.every((pr) => pr.lines.length === 0)) {
+          return [];
+        }
+        const colSpan = 1 + targetPeriods.length * 5;
+        const firstReportLines = periodReports.find((pr) => !pr.error && pr.lines.length > 0)?.lines ?? baseBudgetLines;
         return [
-          <tr key={b.id} className="rep-section"><td colSpan={6}>
+          <tr key={b.id} className="rep-section"><td colSpan={colSpan}>
             <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
             {companyMissing
               ? <label className="inline-select">{t('Company')}
@@ -632,28 +706,46 @@ export function Budget({ db, period, companyId = 'all' }) {
               </label>
               : <span className="muted"> · {company.name}</span>}
           </td></tr>,
-          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={6} className="muted">{t('Select a company to show this budget report.')}</td></tr>] : []),
-          ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={6} className="muted" role="alert">{reportError}</td></tr>] : []),
-          ...reportLines.map((l, i) => (
-            <Fragment key={`${b.id}-${i}`}>
-              <tr className="rep-detail">
-                <td>{lineLabel(l)}</td>
-                <BudgetMoneyCell value={l.planned_amount ?? l.planned} currency={currency} money={money} />
-                <BudgetMoneyCell value={l.achieved_amount} currency={currency} money={money} />
-                <BudgetMoneyCell value={l.committed_amount} currency={currency} money={money} />
-                <BudgetMoneyCell value={l.budget_variance} currency={currency} money={money} />
-                <td className="num">{(l.budget_theoretical ?? l.theoretical) ? `${l.budget_achievement}%` : ''}</td>
-              </tr>
-              {l.analytic_lines.map((item) => <tr className="rep-detail" key={item.id}>
-                <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                <td /><BudgetMoneyCell value={item.amount * l.budgetSign} currency={currency} money={money} /><td /><td /><td />
-              </tr>)}
-              {l.commitment_lines.map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
-                <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
-                <td /><td /><BudgetMoneyCell value={item.amount * l.budgetSign} currency={currency} money={money} /><td /><td />
-              </tr>)}
-            </Fragment>
-          )),
+          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company to show this budget report.')}</td></tr>] : []),
+          ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{reportError}</td></tr>] : []),
+          ...firstReportLines.map((l, i) => {
+            const pr0Line = periodReports[0]?.lines?.[i];
+            const detailLine = pr0Line ?? l;
+            return (
+              <Fragment key={`${b.id}-${i}`}>
+                <tr className="rep-detail">
+                  <td>{lineLabel(l)}</td>
+                  {periodReports.flatMap((pr, pIdx) => {
+                    if (pr.error || !pr.lines?.[i]) {
+                      return [
+                        <td key={`${pIdx}-pl`} className="num">—</td>,
+                        <td key={`${pIdx}-pr`} className="num">—</td>,
+                        <td key={`${pIdx}-c`} className="num">—</td>,
+                        <td key={`${pIdx}-v`} className="num">—</td>,
+                        <td key={`${pIdx}-a`} className="num">—</td>,
+                      ];
+                    }
+                    const pLine = pr.lines[i];
+                    return [
+                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount} currency={currency} money={money} />,
+                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={money} />,
+                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={money} />,
+                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={money} />,
+                      <td key={`${pIdx}-a`} className="num">{pLine.budget_theoretical ? `${pLine.budget_achievement}%` : ''}</td>,
+                    ];
+                  })}
+                </tr>
+                {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.analytic_lines ?? []).map((item) => <tr className="rep-detail" key={item.id}>
+                  <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
+                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td /><td />
+                </tr>)}
+                {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.commitment_lines ?? []).map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
+                  <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
+                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td />
+                </tr>)}
+              </Fragment>
+            );
+          }),
         ];
       })}
     </tbody>
@@ -789,9 +881,9 @@ function Valuation({ db, period, companyId, money: fmtMoney = money }) {
 }
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
-function Depreciation({ db, period, companyId, money: moneyProp }) {
+function Depreciation({ db, period, companyId, includeDraft = false, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const { rows, totals } = depreciationReport(db, period, companyId);
+  const { rows, totals } = depreciationReport(db, period, companyId, { includeDraft });
   return (
     <tbody>
       {rows.map(({ a, original, inPeriod, accumulated, book }) => (
@@ -868,9 +960,9 @@ export const REPORTS = {
   deferredExpense: { title: 'Deferred Expense', Body: DeferredBody, firstCol: 'Account', cols: ['Total', 'Not Started', 'Before', 'Current', 'Recognized', '<= 12 Months', '> 12 Months'] },
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   fiscal: { title: 'Fiscal Report', Body: FiscalReport, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger, cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
-  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
+  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger, cols: ['Due Date', 'Matching', 'Label', 'Initial Balance', 'Debit', 'Credit', 'End Balance', 'Amount Currency'] },
   cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
   executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
@@ -888,6 +980,9 @@ export const REPORTS = {
   journalAudit: { title: 'Journal Audit', Body: JournalAudit, firstCol: 'Date', cols: ['Number', 'Partner', 'Account', 'Label', 'Debit', 'Credit'] },
   inalterability: { title: 'Data Inalterability Check', Body: InalterabilityCheck, firstCol: 'Journal', cols: ['First Secured Entry', 'Last Secured Entry', 'Status'] },
 };
+
+export const PERIODIC_BODY_REPORTS = new Set(['trial', 'fiscal', 'tax', 'budget']);
+export const COMPARABLE_REPORTS = new Set([...PERIODIC_BODY_REPORTS, 'pnl', 'balance', 'cashflow', 'executive']);
 
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf, id, params }) {
@@ -911,6 +1006,10 @@ function ReportPage({ leaf, params }) {
   const isDeferred = ['deferredRevenue', 'deferredExpense'].includes(leaf.report);
   const deferredKind = leaf.report === 'deferredRevenue' ? 'revenue' : 'expense';
   const [generationError, setGenerationError] = useState('');
+  const [generateWizard, setGenerateWizard] = useState(null);
+  const generateWizardSeqRef = useRef(0);
+  const latestGenerateIdRef = useRef(0);
+  const pendingGenerateIdsRef = useRef(new Set());
   const [companyId, setCompanyId] = useState(params?.get('company') || 'all');
   const allowAllCompanies = !isDeferred && !['customerStatement', 'valuation'].includes(leaf.report);
   const { companyDb, availableCompanies, companies, selectedCompany } = useMemo(
@@ -928,6 +1027,11 @@ function ReportPage({ leaf, params }) {
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [partnerFilterIds, setPartnerFilterIds] = useState([]);
   const [unreconciledOnly, setUnreconciledOnly] = useState(false);
+  const [accountType, setAccountType] = useState(() => {
+    const param = params?.get('accountType');
+    if (param && ['both', 'receivable', 'payable'].includes(param)) return param;
+    return leaf.report === 'partnerPayable' ? 'payable' : 'both';
+  });
   const [groupByPartner, setGroupByPartner] = useState(false);
   const [showJournalAccount, setShowJournalAccount] = useState(false);
   const [showInitialBalance, setShowInitialBalance] = useState(true);
@@ -1009,13 +1113,80 @@ function ReportPage({ leaf, params }) {
     () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
     [isAged, asOf, periodKey, customPeriod],
   );
+  const deferredCompanyId = Number(selectedCompany) || 1;
+  const deferredGrouped = isDeferred && deferredSettings(db, deferredCompanyId, deferredKind).isGrouped;
+  const generateContextKey = `${deferredKind}:${deferredCompanyId}:${period.to}`;
+  const activeGenerateWizard = generateWizard?.key === generateContextKey ? generateWizard : null;
+  const openGenerateWizard = () => {
+    if (!deferredSettings(getDb(), deferredCompanyId, deferredKind).isGrouped) {
+      setGenerationError('Grouped deferral generation requires a company configured for grouped posting');
+      return;
+    }
+    if (activeGenerateWizard?.pending || (activeGenerateWizard && pendingGenerateIdsRef.current.has(activeGenerateWizard.id))) return;
+    const wizardId = ++generateWizardSeqRef.current;
+    latestGenerateIdRef.current = wizardId;
+    setGenerationError('');
+    setGenerateWizard({
+      id: wizardId,
+      key: generateContextKey,
+      companyId: deferredCompanyId,
+      kind: deferredKind,
+      pending: false,
+      spec: {
+        title: 'Generate Entries',
+        fields: [
+          {
+            name: 'date',
+            type: 'date',
+            label: 'Period End Date',
+            required: true,
+            default: period.to,
+            help: 'Grouped recognition entries and their next-day reversals will be generated for this date.',
+          },
+        ],
+      },
+      error: '',
+    });
+  };
+  const cancelGenerateWizard = () => {
+    if (!activeGenerateWizard) return;
+    const wizardId = activeGenerateWizard.id;
+    if (activeGenerateWizard.pending || pendingGenerateIdsRef.current.has(wizardId)) return;
+    setGenerateWizard((w) => (w?.id === wizardId && !w.pending ? null : w));
+  };
+  const confirmGenerateWizard = async (values) => {
+    const wizardInstance = activeGenerateWizard;
+    if (!wizardInstance) return;
+    const wizardId = wizardInstance.id;
+    if (wizardInstance.pending || pendingGenerateIdsRef.current.has(wizardId)) return;
+    pendingGenerateIdsRef.current.add(wizardId);
+    setGenerateWizard((w) => (w?.id === wizardId ? { ...w, pending: true, error: '' } : w));
+    try {
+      const nextDb = generateGroupedEntries(getDb(), {
+        date: values.date,
+        company_id: wizardInstance.companyId,
+        kind: wizardInstance.kind,
+      });
+      const res = await commit(nextDb, { quiet: true });
+      if (res && res.ok === false) {
+        setGenerateWizard((w) => (w?.id === wizardId ? { ...w, pending: false, error: res.error ?? t('Could not save changes') } : w));
+        return;
+      }
+      if (latestGenerateIdRef.current === wizardId) setGenerationError('');
+      setGenerateWizard((w) => (w?.id === wizardId ? null : w));
+    } catch (error) {
+      setGenerateWizard((w) => (w?.id === wizardId ? { ...w, pending: false, error: t(error.message) } : w));
+    } finally {
+      pendingGenerateIdsRef.current.delete(wizardId);
+    }
+  };
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
   const isTrial = leaf.report === 'trial';
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
-  const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'tax', 'fiscal'].includes(leaf.report) && periodKey !== 'all';
-  const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
+  const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all';
+  const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement', 'depreciation'].includes(leaf.report);
   const effectivePeriod = useMemo(
     () => (showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period),
     [showUnpostedOption, includeUnposted, period]
@@ -1052,7 +1223,7 @@ function ReportPage({ leaf, params }) {
               ]
             : cols;
   const reportFirstCol = isTaxBoxes ? 'Box' : firstCol;
-  const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
+  const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive', 'budget'].includes(leaf.report);
   const primaryCompanyId = selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany);
   // Like the statement reports, the cash flow offers the groups not limited to specific reports.
   const horizontalGroups = leaf.report === 'cashflow'
@@ -1296,6 +1467,22 @@ function ReportPage({ leaf, params }) {
       )}
       {isPartnerLedger && <>
         <label className="inline-select">
+          {t('Account Type')}
+          <select
+            aria-label={t('Account Type')}
+            value={accountType}
+            onChange={(e) => {
+              const val = e.target.value;
+              setAccountType(val);
+              updateReportParam('accountType', val, leaf);
+            }}
+          >
+            <option value="both">{t('Both')}</option>
+            <option value="receivable">{t('Receivable')}</option>
+            <option value="payable">{t('Payable')}</option>
+          </select>
+        </label>
+        <label className="inline-select">
           <input type="checkbox" checked={unreconciledOnly} onChange={(e) => setUnreconciledOnly(e.target.checked)} /> {t('Unreconciled entries only')}
         </label>
         <label className="inline-select">
@@ -1335,16 +1522,11 @@ function ReportPage({ leaf, params }) {
         </select>
       </label>}
       {showUnpostedOption && <label className="inline-select">
-        <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
+        <input type="checkbox" aria-label={t(leaf.report === 'depreciation' ? 'Include Draft Assets' : 'Include Unposted Entries')} checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t(leaf.report === 'depreciation' ? 'Include Draft Assets' : 'Include Unposted Entries')}
       </label>}
       <span className="muted">{subtitle}</span>
       <span className="spacer" />
-      {isDeferred && <button type="button" className="btn sm" disabled={!deferredSettings(db, Number(selectedCompany) || 1, deferredKind).isGrouped} title={!deferredSettings(db, Number(selectedCompany) || 1, deferredKind).isGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={() => {
-        if (!deferredSettings(getDb(), Number(selectedCompany) || 1, deferredKind).isGrouped) return;
-        setGenerationError('');
-        try { commit(generateGroupedEntries(getDb(), { date: period.to, company_id: Number(selectedCompany), kind: deferredKind })); }
-        catch (error) { setGenerationError(error.message); }
-      }}>{t('Generate Entries')}</button>}
+      {isDeferred && <button type="button" className="btn sm" disabled={!deferredGrouped || Boolean(activeGenerateWizard?.pending)} title={!deferredGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={openGenerateWizard}>{t('Generate Entries')}</button>}
       {generationError && <span role="alert">{t(generationError)}</span>}
       {isAudit && (
         <span className="pager" role="group" aria-label={t('Pager')}>
@@ -1390,7 +1572,7 @@ function ReportPage({ leaf, params }) {
               {isTaxBoxes && detailComparison && <th>{t('Description')}</th>}
               {(detailComparison
                 ? periods.flatMap((p) => (leaf.report === 'tax' ? ['Base', 'Tax'] : ['Debit', 'Credit', 'Balance']).map((label) => `${p.label} - ${t(label)}`))
-                : periods && ['trial', 'fiscal', 'tax'].includes(leaf.report)
+                : periods && PERIODIC_BODY_REPORTS.has(leaf.report)
                   ? (isTaxBoxes ? ['Description', ...periods.flatMap((p) => ['Base', 'Tax'].map((c) => `${p.label} - ${t(c)}`))] : periods.flatMap((p) => reportCols.map((c) => `${p.label} - ${t(typeof c === 'object' && c ? c.label : c)}`)))
                   : data
                     ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])]
@@ -1405,7 +1587,7 @@ function ReportPage({ leaf, params }) {
           </thead>
           {detailComparison ? (
             <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} money={fmtMoney} />
-          ) : periods && ['trial', 'fiscal', 'tax'].includes(leaf.report) ? (
+          ) : periods && PERIODIC_BODY_REPORTS.has(leaf.report) ? (
             <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} money={fmtMoney} />
           ) : data ? (
             <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} />
@@ -1431,6 +1613,8 @@ function ReportPage({ leaf, params }) {
               rootPlans={rootPlans}
               hasUnassigned={hasUnassigned}
               money={fmtMoney}
+              includeDraft={leaf.report === 'depreciation' && includeUnposted}
+              accountType={accountType}
               groupByPartner={groupByPartner}
               showJournalAccount={showJournalAccount}
               showInitialBalance={showInitialBalance}
@@ -1439,6 +1623,17 @@ function ReportPage({ leaf, params }) {
           )}
         </table>
       </div>
+      {!isPrinting && activeGenerateWizard && (
+        <Wizard
+          key={activeGenerateWizard.id}
+          db={db}
+          spec={activeGenerateWizard.spec}
+          error={activeGenerateWizard.error}
+          pending={Boolean(activeGenerateWizard.pending)}
+          onConfirm={confirmGenerateWizard}
+          onCancel={cancelGenerateWizard}
+        />
+      )}
     </ReportPrintView>
   );
 }
