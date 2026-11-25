@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, write } from './orm.js';
+import { applyFilters, create, write } from './orm.js';
 import { seed } from './seed.js';
 import { apps, findLeaf, menusFor, models } from './models/index.js';
 import { actionRecords } from './companyView.js';
@@ -68,13 +68,15 @@ test('PRD-1: Customers > Products shows only sale_ok products and defaults sale_
   const neither = create(both.db, 'product', { name: 'PRD1 Internal Neither', sale_ok: false, purchase_ok: false });
   db = neither.db;
 
-  const custIds = new Set(actionRecords(db, customersProducts).map((r) => r.id));
+  // Odoo opens these menus with a removable default filter (Can be Sold / Can be Purchased), not a fixed domain.
+  const shown = (leaf) => new Set(applyFilters('product', actionRecords(db, leaf), leaf.defaultFilters, db).map((r) => r.id));
+  const custIds = shown(customersProducts);
   assert.ok(custIds.has(sellOnly.id));
   assert.ok(custIds.has(both.id));
   assert.ok(!custIds.has(buyOnly.id));
   assert.ok(!custIds.has(neither.id));
 
-  const vendIds = new Set(actionRecords(db, vendorsProducts).map((r) => r.id));
+  const vendIds = shown(vendorsProducts);
   assert.ok(vendIds.has(buyOnly.id));
   assert.ok(vendIds.has(both.id));
   assert.ok(!vendIds.has(sellOnly.id));
