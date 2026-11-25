@@ -10,7 +10,9 @@ const MAX_SLICES = SERIES.length - 1;
 
 export const measuresOf = (model) => [
   ['__count', 'Count'],
-  ...Object.entries(models[model].fields).filter(([, f]) => ['monetary', 'float'].includes(f.type) && !f.hidden).map(([k, f]) => [k, f.label]),
+  ...Object.entries(models[model]?.fields ?? {})
+    .filter(([, f]) => ['monetary', 'float'].includes(f.type) && !f.hidden && f.groupOperator !== false && f.groupOperator !== null && f.groupOperator !== 'none' && f.measure !== false)
+    .map(([k, f]) => [k, f.label]),
 ];
 
 /** Format a numeric measure value, rendering unavailable (null/undefined) aggregates as an em dash. */

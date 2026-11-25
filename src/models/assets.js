@@ -746,11 +746,12 @@ function computeBoard(db, asset) {
 }
 
 /** Report values as of a cutoff, excluding subsequent recorded adjustments. */
-export function depreciationReport(db, period, companyId = 'all') {
+export function depreciationReport(db, period, companyId = 'all', { includeDraft = false } = {}) {
   const hasInPeriod = (a) => (a.depreciation_ids ?? []).some((l) => l.posted && (!period.from || l.date >= period.from) && l.date <= period.to);
   const rows = search(db, 'account.asset').filter((a) => (
     (companyId === 'all' || (a.company_id ?? 1) === Number(companyId))
-    && a.state !== 'cancel' && a.state !== 'draft'
+    && a.state !== 'cancel'
+    && (includeDraft || a.state !== 'draft')
     && (!a.acquisition_date || a.acquisition_date <= period.to)
     && (!a.disposal_date || a.disposal_date > period.to || hasInPeriod(a))
   )).map((a) => {
