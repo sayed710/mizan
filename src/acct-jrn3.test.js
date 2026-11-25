@@ -182,7 +182,7 @@ test('JRN-2: journal search limits text matching to name/code and exposes Odoo t
 
 test('JRN-3: form smart button opens the journal entries and list optional/group-gated columns match Odoo', async () => {
   const def = models['account.journal'];
-  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id']);
+  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id']);
   assert.equal(def.fields.sequence.widget, 'handle');
   assert.equal(def.fields.code.optional, 'show');
   assert.equal(def.fields.default_account_id.optional, 'show');
