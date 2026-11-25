@@ -3883,6 +3883,7 @@ const ar = {
   'Clear the Taxes filter to export the statutory XML return': 'امسح عامل تصفية الضرائب لتصدير إقرار XML النظامي',
   'Select a single company before exporting a tax return XML': 'اختر شركة واحدة قبل تصدير إقرار الضريبة بصيغة XML',
   'Clear the tax filter before exporting a statutory tax return XML': 'امسح عامل تصفية الضريبة قبل تصدير إقرار الضريبة النظامي بصيغة XML',
+  'Select a company on the budget record to show this budget report.': 'اختر شركة في سجل الموازنة لعرض تقرير هذه الموازنة.',
   'Company is required': 'الشركة مطلوبة',
   'Company cannot be changed once assigned': 'لا يمكن تغيير الشركة بعد تعيينها',
   'Journals in the reconciliation model must belong to the model company': 'يجب أن تنتمي دفاتر اليومية في نموذج التسوية إلى شركة النموذج',
