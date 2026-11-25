@@ -50,7 +50,7 @@ test('plan totals per plan', () => {
   const office = accounts.find((a) => a.name === 'Office Projects');
   const cairo = accounts.find((a) => a.name === 'Cairo Branch');
 
-  // Office is legacy:project, Cairo is legacy:region
+  // Office is plan:<Projects id>, Cairo is plan:<Regions id>
   const rows = [
     { accountId: office.id, percent: 60 },
     { accountId: cairo.id, percent: 40 },
@@ -58,8 +58,8 @@ test('plan totals per plan', () => {
   const totals = planTotals(rows, db);
   assert.equal(totals.length, 2);
 
-  const officePlan = totals.find((p) => p.key === `legacy:${office.plan}`);
-  const cairoPlan = totals.find((p) => p.key === `legacy:${cairo.plan}`);
+  const officePlan = totals.find((p) => p.key === `plan:${office.plan_id}`);
+  const cairoPlan = totals.find((p) => p.key === `plan:${cairo.plan_id}`);
   assert.ok(officePlan, 'has office plan');
   assert.ok(cairoPlan, 'has cairo plan');
   assert.equal(officePlan.total, 60);
@@ -237,7 +237,7 @@ test('a new row defaults to what is left of its own plan, not of every plan', as
   const accounts = search(db, 'account.analytic.account');
   const office = accounts.find((a) => a.name === 'Office Projects');
   const cairo = accounts.find((a) => a.name === 'Cairo Branch');
-  assert.notEqual(office.plan, cairo.plan, 'fixture accounts sit in different plans');
+  assert.notEqual(office.plan_id, cairo.plan_id, 'fixture accounts sit in different plans');
   const full = [{ accountId: office.id, percent: 100 }];
   assert.equal(remainingInPlan(full, cairo, db), 100, 'another plan is still empty');
   assert.equal(remainingInPlan([{ accountId: office.id, percent: 70 }], office, db), 30);

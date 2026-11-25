@@ -2,7 +2,7 @@
 import { create, read, search, unlink, write } from '../orm.js';
 import { isLiquidityJournal, paymentJournal, statementCompanyAmount } from './ledger.js';
 import { bookToAccount } from './bank.js';
-import { today } from './common.js';
+import { monthFilters, today } from './common.js';
 import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency, roundCurrency } from '../money.js';
@@ -68,9 +68,11 @@ export function roundStatementAmount(db, statement, amount) {
   return currency ? roundCurrency(num, currency) : num;
 }
 
+const statementLines = (r, db) => (Array.isArray(r?.line_ids) ? r.line_ids : (linesByStatement(db).get(r?.id) ?? []));
+
 /** Computed ending balance: balance_start + sum of its lines' amounts. */
 export function computeBalanceEnd(r, db) {
-  const lines = Array.isArray(r?.line_ids) ? r.line_ids : (linesByStatement(db).get(r?.id) ?? []);
+  const lines = statementLines(r, db);
   const linesSum = lines.reduce((acc, l) => acc + (Number(l?.amount) || 0), 0);
   const total = (Number(r?.balance_start) || 0) + linesSum;
   return roundStatementAmount(db, r, total);
@@ -78,11 +80,23 @@ export function computeBalanceEnd(r, db) {
 
 /** Computed completeness: has lines and balance_end equals balance_end_real at the journal currency rounding. */
 export function computeIsComplete(r, db) {
-  const lines = Array.isArray(r?.line_ids) ? r.line_ids : (linesByStatement(db).get(r?.id) ?? []);
+  const lines = statementLines(r, db);
   if (!lines.length) return false;
   const balanceEnd = computeBalanceEnd(r, db);
   const balanceEndReal = roundStatementAmount(db, r, r?.balance_end_real);
   return balanceEnd === balanceEndReal;
+}
+
+const statementIsComplete = (r, db) => (typeof r?.is_complete === 'boolean' ? r.is_complete : (db ? computeIsComplete(r, db) : false));
+const statementIsValid = (r, db) => (typeof r?.is_valid === 'boolean' ? r.is_valid : (db ? computeIsValid(r, db) : true));
+
+/** List row decoration matching Odoo 20 `view_bank_statement_tree`: danger when invalid or (journal-linked and incomplete), muted without a journal. */
+export function statementListDecoration(r, db = null) {
+  const isComplete = statementIsComplete(r, db);
+  const isValid = statementIsValid(r, db);
+  if ((r?.journal_id && !isComplete) || !isValid) return 'danger';
+  if (!r?.journal_id) return 'muted';
+  return null;
 }
 
 let inComputeIsValid = false;
@@ -541,6 +555,16 @@ export const bankStatementModels = {
       return {};
     },
     sort: (a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')) || b.id - a.id,
+    searchFields: ['name', 'journal_id', 'date'],
+    filters: [
+      [
+        { id: 'empty', label: 'Empty', fn: (r, db) => statementLines(r, db).length === 0 },
+        { id: 'invalid', label: 'Invalid', fn: (r, db) => !statementIsValid(r, db) || !statementIsComplete(r, db) },
+      ],
+      monthFilters('date', 'Date'),
+    ],
+    groupBys: ['journal_id', 'date'],
+    listDecoration: statementListDecoration,
     list: ['name', 'date', 'journal_id', 'balance_start', 'balance_end', 'balance_end_real', 'state'],
     form: {
       title: 'name',

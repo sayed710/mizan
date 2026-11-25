@@ -69,6 +69,7 @@ function expenseLineKey(line) {
     Boolean(line.tax_base_signed), Boolean(line.tax_zero), Boolean(line.tax_grid_base), Boolean(line.tax_grid_release),
     line.use_in_tax_closing !== false,
     line.type_tax_use || null, [...(line.tax_tag_ids ?? [])].sort((a, b) => a - b),
+    [...(line.tax_ids ?? [])].sort((a, b) => a - b),
   ]);
 }
 

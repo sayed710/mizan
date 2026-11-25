@@ -205,7 +205,7 @@ test('RCM-1: company_id is required, defaults to current company, enforces compa
       }],
     },
   };
-  const migrated = migrate(legacyDb);
+  const migrated = migrate(legacyDb, 72);
   const legacyRec = read(migrated, MODEL, 9200);
   assert.equal(legacyRec.company_id ?? null, null, 'migration does not guess a company for existing companyless records');
   assert.equal(ruleMatches(legacyRec, { payment_ref: 'LEGACY FEE', amount: -10 }), true);
@@ -421,7 +421,7 @@ test('RCM-3: single-company form reveals editable Company field only for company
         line_ids: [],
       }],
     },
-  });
+  }, 72);
   assert.equal(read(migrated, MODEL, 9400).company_id ?? null, null, 'migration still does not guess company');
 
   // New form in single-company still hides Company (defaults to current company)

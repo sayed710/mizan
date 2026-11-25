@@ -642,6 +642,16 @@ export function validateAssetIntegrity(db, before, asset, vals) {
     }
   }
 
+  if (asset.model_id) {
+    const model = read(db, 'account.asset.model', asset.model_id);
+    if (!model && (!before || asset.model_id !== before.model_id)) {
+      return 'Select an existing depreciation model';
+    }
+    if (model?.company_id && model.company_id !== company) {
+      return 'Depreciation model must belong to the asset company';
+    }
+  }
+
   // G5: bill_id and journal_id validation
   if (vals && 'bill_id' in vals && vals.bill_id !== (before?.bill_id ?? null) && vals.bill_id != null) {
     const bill = read(db, 'account.move', vals.bill_id);
@@ -1473,7 +1483,13 @@ export const assetModels = {
       source_line_identity: { type: 'char', label: 'Source Line', readonly: true },
       asset_group_id: { type: 'many2one', relation: 'account.asset.group', label: 'Asset Group', domain: (g, r) => (g.company_id ?? 1) === (r?.company_id ?? 1) },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
-      model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model', readonly: readonlyWhenNotDraft },
+      model_id: {
+        type: 'many2one',
+        relation: 'account.asset.model',
+        label: 'Depreciation Model',
+        domain: (m, r) => !m.company_id || m.company_id === (r?.company_id ?? 1),
+        readonly: readonlyWhenNotDraft,
+      },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account', readonly: readonlyWhenNotDraft },
       account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account', readonly: readonlyWhenNotDraft },
       account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Legacy Expense Account', readonly: true, compute: (r) => r.account_depreciation_expense_id ?? null },
@@ -1536,9 +1552,11 @@ export const assetModels = {
     guard: assetGuard,
     createDefaults: (db, vals) => {
       const company = vals?.company_id ?? (db ? currentCompany(db) : 1);
-      const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
+      const rawModel = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
+      const model = rawModel && (!rawModel.company_id || rawModel.company_id === company) ? rawModel : null;
       const parent = vals?.parent_id && db ? read(db, 'account.asset', vals.parent_id) : null;
-      const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
+      const rawJournal = model?.journal_id ? read(db, 'account.journal', model.journal_id) : null;
+      const modelJournal = rawJournal?.type === 'general' && (!rawJournal.company_id || rawJournal.company_id === company) ? model.journal_id : null;
       const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'method_mode', 'method_rate', 'prorata', 'prorata_computation_type', 'prorata_date', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
       if (modelJournal) modelDefaults.journal_id = modelJournal;
       const defaultJournal = !vals?.journal_id && !modelDefaults.journal_id ? (journalId(db, 'MISC', company) ?? null) : null;
@@ -1583,7 +1601,9 @@ export const assetModels = {
       if (key === 'model_id' && r.model_id) {
         const model = read(db, 'account.asset.model', r.model_id);
         if (model) {
-          const modelJournal = model.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : undefined;
+          const company = r.company_id ?? (db ? currentCompany(db) : 1);
+          const rawJournal = model.journal_id ? read(db, 'account.journal', model.journal_id) : null;
+          const modelJournal = rawJournal?.type === 'general' && (!rawJournal.company_id || rawJournal.company_id === company) ? model.journal_id : undefined;
           const computation = assetProrataComputation(model);
           const period = model.method_period ?? r.method_period ?? '12';
           const methodNumber = model.method_number ?? r.method_number;

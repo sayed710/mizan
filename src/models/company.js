@@ -85,7 +85,7 @@ export function setCompanies(db, { current, allowed }) {
 // Accounting configuration belongs to its company; other configuration is readable across companies.
 const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position', 'account.cash.rounding', 'account.analytic.account']);
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
-  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'res.country.group', 'res.partner.category']);
+  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'payment.method', 'res.country.group', 'res.partner.category']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'res.partner.category', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
@@ -280,7 +280,7 @@ export function withCompany(models) {
 // Accounting settings shown in General Settings are company controls and can only be changed by administrators over sync.
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
-  'audit_trail', 'three_way_matching', 'autopost_bills', 'invoice_qr', 'quick_edit_mode', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
+  'group_analytic_accounting', 'audit_trail', 'three_way_matching', 'autopost_bills', 'invoice_qr', 'quick_edit_mode', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'fiscalyear_last_day', 'fiscalyear_last_month',
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
@@ -713,6 +713,7 @@ export const companyModels = {
     label: 'Companies',
     fields: {
       name: { type: 'char', label: 'Company Name', required: true },
+      group_analytic_accounting: { type: 'boolean', label: 'Analytic Accounting' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       account_default_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Default Receivable Account' },
       account_default_payable_id: { type: 'many2one', relation: 'account.account', label: 'Default Payable Account' },
@@ -821,6 +822,7 @@ export const companyModels = {
     },
     defaults: () => ({
       active: true,
+      group_analytic_accounting: false,
       fiscalyear_last_day: 31,
       fiscalyear_last_month: 12,
       currency_provider: 'none',

@@ -124,8 +124,9 @@ for (const [moveType, accountCode, sign] of [['out_invoice', '410000', -1], ['in
       deferred_generation_method: 'manual_grouped', deferred_amount_computation_method: 'full_months',
       deferred_revenue_account_id: accountId(seed(), '212000'), deferred_expense_account_id: accountId(seed(), '132000'),
     });
-    const analyticA = create(db, 'account.analytic.account', { name: 'Project A' });
-    const analyticB = create(analyticA.db, 'account.analytic.account', { name: 'Project B' });
+    const planId = db.records['account.analytic.plan'][0].id;
+    const analyticA = create(db, 'account.analytic.account', { name: 'Project A', plan_id: planId });
+    const analyticB = create(analyticA.db, 'account.analytic.account', { name: 'Project B', plan_id: planId });
     db = analyticB.db;
     const button = (label, id) => { db = models['account.move'].form.buttons.find((b) => b.label === label).run(db, read(db, 'account.move', id)).db; };
     const invoices = [];

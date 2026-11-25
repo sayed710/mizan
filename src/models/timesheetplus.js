@@ -37,6 +37,12 @@ export function timesheetGuard(db, before, after, ctx) {
     const reset = after.validated === false && changed.every((key) => ['validated', 'validated_by', 'validated_on'].includes(key));
     if (changed.length && !reset) return 'Validated timesheets are read-only; reset to draft first';
   }
+  if (before?.move_id && ['invoice', 'vendor_bill', 'journal_entry'].includes(before.category)
+    && (before.amount !== after.amount || before.general_account !== after.general_account || before.move_id !== after.move_id || before.category !== after.category)) return 'Generated analytic amounts and accounts are read-only';
+  if (after.general_account) {
+    const account = read(db, 'account.account', after.general_account);
+    if (!account || (account.company_id && account.company_id !== (after.company_id ?? 1))) return 'Select a general account belonging to the line company';
+  }
   if (!isTimesheet(after)) return null;
   if (!Number.isFinite(Number(after.unit_amount)) || Number(after.unit_amount) < 0) return 'Hours must be a non-negative number';
   if (after.billable && !['billable_time', 'billable_fixed', 'non_billable'].includes(after.billable)) return 'Select a valid billing type';
@@ -161,7 +167,7 @@ export const timesheetPlusModels = {
       so_line_index: { type: 'integer', label: 'Sale Order Line Index' },
       invoiced: { type: 'boolean', label: 'Invoiced' },
       timer_start: { type: 'char', label: 'Timer Started', readonly: true },
-      amount: { ...base.fields.amount, readonly: true },
+      amount: { ...base.fields.amount, readonly: (r) => !!r.move_id || isTimesheet(r) },
     },
     defaults: (id) => ({ ...base.defaults(id), validated: false, validated_by: '', validated_on: null, billable: 'non_billable', so_id: null, so_line_index: 0, invoiced: false, timer_start: null }),
     guard: timesheetGuard,

@@ -2,6 +2,7 @@
 // For non-admin users, the editable fields of a locked record cannot change; workflow fields (status, links and
 // amounts that buttons set, which the form shows read-only or not at all) still can.
 import { isVerifiedReopenBoard } from './assets.js';
+import { isCompanylessBudget } from './analyticplus.js';
 
 const groupFields = (items = []) => items.flatMap((item) => {
   if (typeof item === 'string') return [item];
@@ -53,6 +54,7 @@ const MAINTAINED = {
   'account.batch.payment': ['replacement_date', 'replacement_identifier', 'replacement_sequence', 'replacement_sepa_file'],
   'account.bank.statement.line': ['move_id', 'payment_id'], // validated unreconciliation clears the matched links
   'account.asset': ['depreciation_ids'], // Set to Running may rebuild missing pending lines when reopening
+  'account.budget': ['company_id'], // assigning a valid company to an existing companyless locked budget
 };
 
 export function withLocks(models) {
@@ -71,9 +73,11 @@ export function withLocks(models) {
           && before.state === 'close'
           && ['open', 'paused'].includes(r.state)
           && isVerifiedReopenBoard(before, r, db);
+        const isCompanylessBudgetRecord = name === 'account.budget' && isCompanylessBudget(db, before);
         const maintained = (name === 'sign.request' && before.state !== 'sent')
           || (name === 'hr.expense.sheet' && before.state === r.state)
           || (name === 'account.asset' && !isReopeningAsset)
+          || (name === 'account.budget' && !isCompanylessBudgetRecord)
           ? [] : MAINTAINED[name] ?? [];
         const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f)
           && !(name === 'account.move' && f === 'line_ids' && ctx?.verifiedBankRewrite));
