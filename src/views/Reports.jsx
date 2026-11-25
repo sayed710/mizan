@@ -2,12 +2,13 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
 import { models } from '../registry.js';
 import { today, validDate } from '../models/common.js';
+import { categoryPath } from '../models/productconfig-helpers.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
 import { Wizard } from './Wizard.jsx';
-import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, companyReceivableLines, followUps, followUpCompanies, followUpLevel, followUpText, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerReceivableLines, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -20,7 +21,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { money, PagerButtons } from '../ui.jsx';
-import { companyCurrencyRecord, findCompanyCurrencyRecord } from '../money.js';
+import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency } from '../money.js';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
@@ -536,6 +537,59 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
     }
   }
 
+  const companyBalances = new Map();
+  for (const cId of allowed) {
+    companyBalances.set(cId, companyReceivableLines(db, cId));
+  }
+
+  const renderCustomerLines = (f, cId) => {
+    const compCurr = companyCurrencyRecord(db, cId);
+    const info = companyBalances.get(cId)?.get(f.partner_id) ?? partnerReceivableLines(db, f.partner_id, cId);
+    return (
+      <Fragment key={`${cId}-${f.partner_id}`}>
+        <tr className="rep-detail">
+          <td>
+            <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
+            <FollowUpActions db={db} reminder={f} companyId={cId} />
+          </td>
+          <td className="num">{f.oldest ?? '—'}</td>
+          <td className="num">{formatCurrency(info.total_due, compCurr)}</td>
+          <td className="num">{formatCurrency(info.total_overdue, compCurr)}</td>
+        </tr>
+        {info.lines.length > 0 && (
+          <tr className="rep-detail no-export">
+            <td colSpan={4} style={{ paddingLeft: '1.5rem', paddingBottom: '1rem' }}>
+              <table className="list report" style={{ margin: '0.25rem 0', width: '100%' }}>
+                <thead>
+                  <tr>
+                    <th>{t('Invoice Date')}</th>
+                    <th>{t('Due Date')}</th>
+                    <th>{t('Number')}</th>
+                    <th>{t('Reference')}</th>
+                    <th className="num">{t('Residual Amount')}</th>
+                    <th>{t('Overdue')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {info.lines.map((l, i) => (
+                    <tr key={l.move_id ? `${l.move_id}-${i}` : i}>
+                      <td>{l.invoice_date}</td>
+                      <td>{l.due_date}</td>
+                      <td><a href={`#/open/account.move/${l.move_id}`}>{l.number}</a></td>
+                      <td>{l.reference}</td>
+                      <td className="num">{formatCurrency(l.residual_amount, compCurr)}</td>
+                      <td>{l.is_credit ? '—' : (l.is_overdue ? t('Overdue') : '—')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </td>
+          </tr>
+        )}
+      </Fragment>
+    );
+  };
+
   if (multiCompany) {
     const sections = allowed
       .map((cId) => ({
@@ -549,21 +603,9 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
         {sections.map(({ company, items }) => (
           <Fragment key={company.id}>
             <tr className="rep-section">
-              <td colSpan={3}><strong>{company.name}</strong></td>
+              <td colSpan={4}><strong>{company.name}</strong></td>
             </tr>
-            {items.map((f) => {
-              return (
-                <tr key={`${company.id}-${f.partner_id}`} className="rep-detail">
-                  <td>
-                    <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
-                    <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-                    <FollowUpActions db={db} reminder={f} companyId={company.id} />
-                  </td>
-                  <td className="num">{f.oldest}</td>
-                  <td className="num">{formatFollowUpTotals(f)}</td>
-                </tr>
-              );
-            })}
+            {items.map((f) => renderCustomerLines(f, company.id))}
           </Fragment>
         ))}
       </tbody>
@@ -575,19 +617,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
 
   return (
     <tbody>
-      {singleItems.map((f) => {
-        return (
-          <tr key={f.partner_id} className="rep-detail">
-            <td>
-              <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
-              <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              <FollowUpActions db={db} reminder={f} companyId={singleCompanyId} />
-            </td>
-            <td className="num">{f.oldest}</td>
-            <td className="num">{formatFollowUpTotals(f)}</td>
-          </tr>
-        );
-      })}
+      {singleItems.map((f) => renderCustomerLines(f, singleCompanyId))}
     </tbody>
   );
 }
@@ -860,11 +890,18 @@ function AuditRows({ db, rows }) {
 }
 
 /** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
-function Valuation({ db, period, companyId, money: fmtMoney = money }) {
-  const report = valuationReport(db, { at: period.to || today(), companyId: Number(companyId) });
+function Valuation({ db, period, companyId, categoryId, productId, warehouseId, locationId, money: fmtMoney = money }) {
+  const report = valuationReport(db, {
+    at: period.to || today(),
+    companyId,
+    categoryId,
+    productId,
+    warehouseId,
+    locationId,
+  });
   const unavailable = Object.values(report).some((v) => v.qty === null);
-  const rows = Object.entries(report).filter(([, v]) => v.qty !== 0)
-    .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
+  const rows = Object.entries(report).filter(([, v]) => v.qty === null || Math.abs(v.qty) > 1e-8)
+    .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
   return (
     <tbody>
       {rows.map(({ p, value }) => (
@@ -971,7 +1008,7 @@ export const REPORTS = {
   tax: { title: 'Tax Report', Body: Tax, cols: ['Base', 'Tax'] },
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: [] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: [] },
-  followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
+  followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Total Due', 'Total Overdue'] },
   budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Committed', 'Variance', 'Achievement'] },
   analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
   pnl: { title: 'Profit and Loss', cols: ['Balance'] },
@@ -1019,6 +1056,18 @@ function ReportPage({ leaf, params }) {
   const [periodKey, setPeriodKey] = useState(params?.has('from') && params?.get('to') ? 'custom' : DEFAULT_REPORT_PERIOD);
   const [asOf, setAsOf] = useState(today());
   const isAged = ['agedReceivable', 'agedPayable'].includes(leaf.report);
+  const isValuation = leaf.report === 'valuation';
+  const [valuationCategoryId, setValuationCategoryId] = useState('');
+  const [valuationProductId, setValuationProductId] = useState('');
+  const [valuationWarehouseId, setValuationWarehouseId] = useState('');
+  const [valuationLocationId, setValuationLocationId] = useState('');
+  const [valuationCompany, setValuationCompany] = useState(selectedCompany);
+  if (valuationCompany !== selectedCompany) {
+    setValuationCompany(selectedCompany);
+    setValuationProductId('');
+    setValuationWarehouseId('');
+    setValuationLocationId('');
+  }
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
@@ -1080,6 +1129,22 @@ function ReportPage({ leaf, params }) {
         }, selectedCompany).companyDb
       : companyDb
   ), [sourceDb, selectedCompanyId, selectedCompany, companyDb]);
+  const { valuationProducts, valuationWarehouses, valuationLocations } = useMemo(() => {
+    if (!isValuation) return { valuationProducts: [], valuationWarehouses: [], valuationLocations: [] };
+    const targetCompId = selectedCompany === 'all' ? null : Number(selectedCompany);
+    const products = search(scopedCompanyDb, 'product')
+      .filter((p) => p.type === 'goods' && (selectedCompany === 'all' || p.company_id === targetCompId || !p.company_id))
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+    const warehouses = search(scopedCompanyDb, 'stock.warehouse')
+      .filter((w) => selectedCompany === 'all' || !w.company_id || w.company_id === targetCompId);
+    const locations = search(scopedCompanyDb, 'stock.location')
+      .filter((l) => l.usage === 'internal' && (selectedCompany === 'all' || !l.company_id || l.company_id === targetCompId));
+    return { valuationProducts: products, valuationWarehouses: warehouses, valuationLocations: locations };
+  }, [isValuation, scopedCompanyDb, selectedCompany]);
+  const companyChanged = valuationCompany !== selectedCompany;
+  const activeValuationProductId = !companyChanged && valuationProducts.some((p) => p.id === Number(valuationProductId)) ? valuationProductId : '';
+  const activeValuationWarehouseId = !companyChanged && valuationWarehouses.some((w) => w.id === Number(valuationWarehouseId)) ? valuationWarehouseId : '';
+  const activeValuationLocationId = !companyChanged && valuationLocations.some((l) => l.id === Number(valuationLocationId)) ? valuationLocationId : '';
   const fmtMoney = useMemo(() => reportMoney(scopedCompanyDb, selectedCompany), [scopedCompanyDb, selectedCompany]);
   const db = useMemo(() => (
     targetJournalIds
@@ -1110,8 +1175,8 @@ function ReportPage({ leaf, params }) {
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
   const period = useMemo(
-    () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
-    [isAged, asOf, periodKey, customPeriod],
+    () => (isAged || isValuation ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
+    [isAged, isValuation, asOf, periodKey, customPeriod],
   );
   const deferredCompanyId = Number(selectedCompany) || 1;
   const deferredGrouped = isDeferred && deferredSettings(db, deferredCompanyId, deferredKind).isGrouped;
@@ -1341,11 +1406,40 @@ function ReportPage({ leaf, params }) {
         ? companies.map((c) => documentCompany(companyDb, { company_id: c.id }) || c)
         : (printCompany ? [printCompany] : []))
     : null;
+  const valuationFiltersList = [];
+  if (isValuation) {
+    valuationFiltersList.push(`≤ ${period.to}`);
+    if (selectedCompany !== 'all') {
+      const c = read(companyDb, 'res.company', Number(selectedCompany));
+      if (c) valuationFiltersList.push(`${t('Company')}: ${c.name}`);
+    }
+    if (valuationCategoryId) {
+      const cat = read(companyDb, 'product.category', Number(valuationCategoryId));
+      if (cat) valuationFiltersList.push(`${t('Product Category')}: ${categoryPath(companyDb, cat.id) || cat.name}`);
+    }
+    if (activeValuationProductId) {
+      const prod = read(scopedCompanyDb, 'product', Number(activeValuationProductId));
+      const label = prod ? `${prod.default_code ? `[${prod.default_code}] ` : ''}${prod.name}` : activeValuationProductId;
+      valuationFiltersList.push(`${t('Product')}: ${label}`);
+    }
+    if (activeValuationWarehouseId) {
+      const wh = read(scopedCompanyDb, 'stock.warehouse', Number(activeValuationWarehouseId));
+      if (wh) valuationFiltersList.push(`${t('Warehouse')}: ${wh.name}`);
+    }
+    if (activeValuationLocationId) {
+      const loc = read(scopedCompanyDb, 'stock.location', Number(activeValuationLocationId));
+      if (loc) valuationFiltersList.push(`${t('Location')}: ${loc.name}`);
+    }
+  }
+  const valuationFilterSummary = valuationFiltersList.join(' · ');
+
   const subtitle = isAged
     ? `${t('As of Date')}: ${period.to} · ${t('Aging period length (days)')}: ${agingInterval} · ${t('Based on')}: ${t(agingBasis === 'base_on_invoice_date' ? 'Invoice Date' : 'Due Date')}`
     : leaf.report === 'inalterability'
       ? t('Chain verification always covers all secured entries.')
-      : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
+      : isValuation
+        ? valuationFilterSummary
+        : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`);
   const controls = (
     <div className="control-panel">
       <h1 className="cp-title">{t(title)}</h1>
@@ -1354,17 +1448,18 @@ function ReportPage({ leaf, params }) {
         <label className="inline-select">{t('Aging period length (days)')}<input type="number" min="1" step="1" value={agingInterval} onChange={(e) => { const n = Number(e.target.value); if (Number.isSafeInteger(n) && n > 0) setAgingInterval(n); }} /></label>
         <label className="inline-select">{t('Based on')}<select value={agingBasis} onChange={(e) => setAgingBasis(e.target.value)}><option value="base_on_maturity_date">{t('Due Date')}</option><option value="base_on_invoice_date">{t('Invoice Date')}</option></select></label>
       </>}
-      {leaf.report !== 'inalterability' && !isAged && <label className="inline-select">
+      {isValuation && <label>{t('As of')}<input aria-label={t('As of')} type="date" value={period.to} onChange={(e) => setAsOf(agedReportDate(e.target.value))} /></label>}
+      {leaf.report !== 'inalterability' && !isAged && !isValuation && <label className="inline-select">
         {t('Period')}
         <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
           <option value="month">{t('This Month')}</option>
           <option value="quarter">{t('This Quarter')}</option>
           <option value="year">{t('This Year')}</option>
           {!isDeferred && <option value="all">{t('All Dates')}</option>}
-          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'valuation', 'budget', 'deferredRevenue', 'deferredExpense', 'audit'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense', 'audit'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
         </select>
       </label>}
-      {!isAged && periodKey === 'custom' && <><label>{t('From')}<input aria-label={t('From')} type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input aria-label={t('To')} type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+      {!isAged && !isValuation && periodKey === 'custom' && <><label>{t('From')}<input aria-label={t('From')} type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input aria-label={t('To')} type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
       {isAudit && (
         <>
           <label className="inline-select">
@@ -1439,6 +1534,73 @@ function ReportPage({ leaf, params }) {
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
         <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={allowAllCompanies} />
+      )}
+      {isValuation && (
+        <>
+          <label className="inline-select">
+            {t('Product Category')}
+            <select
+              aria-label={t('Product Category')}
+              value={valuationCategoryId}
+              onChange={(e) => setValuationCategoryId(e.target.value)}
+            >
+              <option value="">{t('All Categories')}</option>
+              {search(companyDb, 'product.category').map((c) => (
+                <option key={c.id} value={c.id}>
+                  {categoryPath(companyDb, c.id) || c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Product')}
+            <select
+              aria-label={t('Product')}
+              value={activeValuationProductId}
+              onChange={(e) => setValuationProductId(e.target.value)}
+            >
+              <option value="">{t('All Products')}</option>
+              {valuationProducts.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.default_code ? `[${p.default_code}] ` : ''}{p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Warehouse')}
+            <select
+              aria-label={t('Warehouse')}
+              value={activeValuationWarehouseId}
+              onChange={(e) => {
+                setValuationWarehouseId(e.target.value);
+                setValuationLocationId('');
+              }}
+            >
+              <option value="">{t('All Warehouses')}</option>
+              {valuationWarehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name} ({w.code})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-select">
+            {t('Location')}
+            <select
+              aria-label={t('Location')}
+              value={activeValuationLocationId}
+              onChange={(e) => setValuationLocationId(e.target.value)}
+            >
+              <option value="">{t('All Locations')}</option>
+              {valuationLocations.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">
@@ -1567,6 +1729,13 @@ function ReportPage({ leaf, params }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead>
+            {isValuation && (
+              <tr className="rep-filter-header">
+                <th colSpan={reportCols.length + 1} className="rep-active-filters">
+                  {valuationFilterSummary}
+                </th>
+              </tr>
+            )}
             <tr>
               <th>{t(reportFirstCol ?? '')}</th>
               {isTaxBoxes && detailComparison && <th>{t('Description')}</th>}
@@ -1601,6 +1770,10 @@ function ReportPage({ leaf, params }) {
               sourceDb={sourceDb}
               period={effectivePeriod}
               companyId={selectedCompany}
+              categoryId={valuationCategoryId}
+              productId={activeValuationProductId}
+              warehouseId={activeValuationWarehouseId}
+              locationId={activeValuationLocationId}
               analyticAccountIds={analyticAccountIds}
               partnerIds={partnerFilterIds}
               unreconciledOnly={unreconciledOnly}

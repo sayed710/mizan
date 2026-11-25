@@ -6,7 +6,7 @@ import { create, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { menusFor, models } from './models/index.js';
-import { installments, termScheduleError } from './models/terms.js';
+import { installments, formatTermPreview, termScheduleError } from './models/terms.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -386,6 +386,18 @@ test('PTM-4: residual percentage line identity is consistent between schedule va
     { date: '2026-01-31', amount: 100 },
     { date: '2026-03-02', amount: 600 },
   ]);
+
+  // Preview must pass example_date to termScheduleError so month-length-sensitive lines sort identically to installments.
+  const dateSensitiveTerm = {
+    example_amount: 1000,
+    example_date: '2026-02-10',
+    line_ids: [
+      { value_type: 'fixed', value: 300, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 90, nb_days: 5, delay_type: 'days_end_of_month' }, // Feb 28 + 5 = Mar 5 -> last in Feb, residual
+      { value_type: 'percent', value: 10, nb_days: 22, delay_type: 'days_after' }, // Feb 10 + 22 = Mar 4 -> earlier in Feb
+    ],
+  };
+  assert.match(formatTermPreview(dateSensitiveTerm), /Installment of 600\.00 due on 2026-03-05/);
 });
 
 test('PTM-5: sync diff removing an invoice reference and deleting its term in the same batch succeeds', () => {
@@ -500,4 +512,69 @@ test('PTM-6: legacy payment terms violating new validation rules can be archived
     }),
     /The Payment Term must have at least one percent line and the sum of the percent must be 100%./,
   );
+});
+
+test('PTM-7: term preview and draft invoice PrintDoc validate schedule against selected date when due-date order flips around month-end', async () => {
+  let db = seed();
+  // Two valid terms whose residual percent line flips between early-month and late-month invoice dates:
+  // - Term A is valid when days_end_of_month <= days_after(+15) (late month), invalid on 2026-11-01 (early month).
+  // - Term B is valid when days_after(+15) <= days_end_of_month (early month), invalid on 2026-11-25 (late month).
+  const cases = [
+    {
+      name: 'Flip Early Invalid',
+      selectedDate: '2026-11-01',
+      lines: [
+        { value_type: 'fixed', value: 300, nb_days: 0, delay_type: 'days_after' },
+        { value_type: 'percent', value: 10, nb_days: 0, delay_type: 'days_end_of_month' },
+        { value_type: 'percent', value: 90, nb_days: 15, delay_type: 'days_after' },
+      ],
+    },
+    {
+      name: 'Flip Late Invalid',
+      selectedDate: '2026-11-25',
+      lines: [
+        { value_type: 'fixed', value: 300, nb_days: 0, delay_type: 'days_after' },
+        { value_type: 'percent', value: 10, nb_days: 15, delay_type: 'days_after' },
+        { value_type: 'percent', value: 90, nb_days: 0, delay_type: 'days_end_of_month' },
+      ],
+    },
+  ];
+
+  const { PrintDoc } = await import('./views/PrintDoc.jsx');
+  for (const c of cases) {
+    const termRes = create(db, 'account.payment.term', {
+      name: c.name,
+      display_on_invoice: true,
+      line_ids: c.lines,
+    });
+    db = termRes.db;
+    const term = read(db, 'account.payment.term', termRes.id);
+
+    // formatTermPreview must return the explicit validation message rather than throwing when example_date flips order.
+    assert.equal(
+      formatTermPreview({ ...term, example_amount: 1000, example_date: c.selectedDate }),
+      'Payment terms must allocate 100% of the total',
+    );
+
+    const invRes = create(db, 'account.move', {
+      move_type: 'out_invoice',
+      partner_id: 1,
+      invoice_date: c.selectedDate,
+      invoice_payment_term_id: term.id,
+      invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 0 }],
+    });
+    db = invRes.db;
+
+    // Draft PrintDoc must render cleanly without throwing and omit the invalid installment table.
+    const ctx = await mountView(
+      (React) => React.createElement(PrintDoc, { model: 'account.move', id: invRes.id }),
+      db,
+    );
+    try {
+      const tables = allFind(ctx.host, (n) => n.tagName === 'TABLE');
+      assert.equal(tables.some((tbl) => tbl.textContent.includes('Due Date')), false);
+    } finally {
+      await ctx.done();
+    }
+  }
 });

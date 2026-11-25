@@ -253,7 +253,7 @@ export function formatTermPreview(r) {
   if (inputError) return t(inputError);
 
   const total = Number(rawAmount);
-  const validationError = termScheduleError(r, total) ?? dueTermLinesError(r);
+  const validationError = termScheduleError(r, total, null, date) ?? dueTermLinesError(r);
   if (validationError) return t(validationError);
   if (r?.display_on_invoice === false) return '';
 
