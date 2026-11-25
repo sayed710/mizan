@@ -132,7 +132,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       onDrop={canDrag ? (e) => { e.preventDefault(); dropRow(r.id); } : undefined}
       onClick={() => open(r.id)}
       onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(r.id); }}
-      className={`${selected.has(r.id) ? 'selected' : ''} ${(listDecoration ?? def.listDecoration)?.(r) ?? ''}`}
+      className={`${selected.has(r.id) ? 'selected' : ''} ${(listDecoration ?? def.listDecoration)?.(r, db) ?? ''}`}
     >
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />

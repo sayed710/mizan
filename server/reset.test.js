@@ -5,63 +5,26 @@ import { once } from 'node:events';
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startServer, stopChild } from './test-server.js';
 
 const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
-
-/**
- * Gracefully ask `child` to exit over IPC, tolerating only ERR_IPC_CHANNEL_CLOSED (which can happen when
- * `child.connected` is still true before the parent reads IPC EOF). If the channel is gone while the process
- * is still alive, kill it and wait for `close` so the server never outlives the test before dir removal.
- */
-async function stopChild(child, isClosed = () => false) {
-  if (isClosed()) return;
-  const closed = once(child, 'close');
-  let channelClosed = !child.connected;
-  let sendError = null;
-  try {
-    if (child.connected) {
-      await new Promise((resolve) => {
-        child.send('shutdown', (err) => {
-          if (err?.code === 'ERR_IPC_CHANNEL_CLOSED') channelClosed = true;
-          else if (err) sendError = err;
-          resolve();
-        });
-      });
-    }
-  } finally {
-    if ((channelClosed || !child.connected || sendError) && child.exitCode === null && child.signalCode === null) {
-      child.kill();
-    }
-    await closed;
-  }
-  if (sendError) throw sendError;
-}
 
 /** Start a server with `env`, run `fn(origin, adminHeaders, directory)`, then stop it. */
 async function withServer(env, fn) {
   const directory = await mkdtemp(join(tmpdir(), 'mizan-reset-'));
-  const child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '', NODE_ENV: '', MIZAN_ALLOW_RESET: '', ...env }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  let closed = false;
-  child.once('close', () => { closed = true; });
+  let server;
   try {
-    const origin = await new Promise((resolve, reject) => {
-      let output = '';
-      const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
-      child.stdout.on('data', (chunk) => {
-        output += chunk;
-        const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
-        if (match) { clearTimeout(timeout); resolve(match[1]); }
-      });
-      child.stderr.on('data', (chunk) => { output += chunk; });
-      child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
+    server = await startServer({
+      env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '', NODE_ENV: '', MIZAN_ALLOW_RESET: '', ...env },
     });
+    const { origin } = server;
     const res = await fetch(`${origin}/api/login`, { method: 'POST', headers, body: JSON.stringify({ login: 'admin', password: 'test-admin-password' }) });
     await fn(origin, { ...headers, Cookie: res.headers.get('set-cookie').split(';')[0] }, directory);
   } finally {
     try {
-      await stopChild(child, () => closed);
+      await server?.stop();
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }
 }

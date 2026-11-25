@@ -114,7 +114,7 @@ test('account.analytic.distribution.model list columns, optional flags, handle, 
   let db = seed();
   const partner = create(db, 'res.partner', { name: 'Alpha Partner' });
   const product = create(partner.db, 'product', { name: 'Alpha Service', type: 'service' });
-  const analytic = create(product.db, 'account.analytic.account', { name: 'Ops Analytic' });
+  const analytic = create(product.db, 'account.analytic.account', { name: 'Ops Analytic', plan_id: product.db.records['account.analytic.plan'][0].id });
   const r1 = create(analytic.db, 'account.analytic.distribution.model', {
     sequence: 10,
     account_prefix: '601',
@@ -219,7 +219,7 @@ test('account.analytic.distribution.model form layout, labels, help texts, hidde
   let db = seed();
   const second = createCompany(db, { name: 'Second Analytic Co' });
   db = setCompanies(second.db, { current: second.id, allowed: [1, second.id] });
-  const analytic = create(db, 'account.analytic.account', { name: 'Second Co Analytic', company_id: second.id });
+  const analytic = create(db, 'account.analytic.account', { name: 'Second Co Analytic', company_id: second.id, plan_id: db.records['account.analytic.plan'][0].id });
   const rule = create(analytic.db, 'account.analytic.distribution.model', {
     account_prefix: '600',
     company_id: second.id,
@@ -270,9 +270,10 @@ test('account.analytic.distribution.model validates analytic account company bef
   let db = seed();
   const second = createCompany(db, { name: 'Rival Co' });
   db = second.db;
-  const co1Analytic = create(db, 'account.analytic.account', { name: 'Co1 Project', company_id: 1 });
-  const co2Analytic = create(co1Analytic.db, 'account.analytic.account', { name: 'Co2 Project', company_id: second.id });
-  const sharedAnalytic = create(co2Analytic.db, 'account.analytic.account', { name: 'Shared Project' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const co1Analytic = create(db, 'account.analytic.account', { name: 'Co1 Project', company_id: 1, plan_id: planId });
+  const co2Analytic = create(co1Analytic.db, 'account.analytic.account', { name: 'Co2 Project', company_id: second.id, plan_id: planId });
+  const sharedAnalytic = create(co2Analytic.db, 'account.analytic.account', { name: 'Shared Project', plan_id: planId });
   db = sharedAnalytic.db;
 
   assert.throws(

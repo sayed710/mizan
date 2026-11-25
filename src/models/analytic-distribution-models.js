@@ -1,6 +1,5 @@
 import { read, search } from '../orm.js';
-
-export const planOf = (account) => account?.plan_id ? `plan:${account.plan_id}` : `legacy:${account?.plan || 'project'}`;
+import { planOf } from '../analytic_distribution.js';
 
 // A category reference is an id (legacy rules stored it as text); names are never matched.
 const toCategoryId = (val) => {
@@ -70,9 +69,13 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
   const applied = new Set();
   for (const { model } of matched) {
     const distribution = model.analytic_distribution ?? {};
-    const plans = new Set(Object.keys(distribution).map((id) => planOf(read(db, 'account.analytic.account', Number(id)))));
+    const entries = Object.entries(distribution)
+      .map(([id, percent]) => [id, percent, read(db, 'account.analytic.account', Number(id))])
+      .filter(([, , account]) => Boolean(account));
+    if (!entries.length) continue;
+    const plans = new Set(entries.map(([, , account]) => planOf(account)));
     if ([...plans].some((plan) => applied.has(plan))) continue;
-    Object.assign(result, distribution);
+    for (const [id, percent] of entries) result[id] = percent;
     for (const plan of plans) applied.add(plan);
   }
   return result;

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { setupDom } from './test-support/dom.js';
+import { setupDom, waitFor } from './test-support/dom.js';
 import { create, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { checkInalterability, secureEntries } from './models/hash_chain.js';
@@ -29,11 +29,7 @@ function find(node, predicate) {
   return findAll(node, predicate)[0] ?? null;
 }
 
-const rendered = async (React, container, text) => {
-  for (let i = 0; i < 200 && !container.textContent.includes(text); i++) {
-    await React.act(() => new Promise((resolve) => setTimeout(resolve, 50)));
-  }
-};
+const rendered = (React, container, text) => waitFor(React, () => container.textContent.includes(text));
 
 const server = (db, next) => applyDiff(db, diffDb(db, next), { isAdmin: true });
 

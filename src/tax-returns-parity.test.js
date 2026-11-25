@@ -1319,7 +1319,7 @@ test('invoice analytic defaults follow posting accounts and refresh through form
   const invoice = read(posted, 'account.move', made.id);
   assert.deepEqual(invoice.invoice_line_ids[0].analytic_distribution, { [a]: 100 });
   assert.ok(invoice.line_ids.some((l) => l.account_id === mapped.id));
-  assert.equal(search(posted, 'account.analytic.line').find((l) => l.move_id === made.id).general_account, '633330');
+  assert.equal(search(posted, 'account.analytic.line').find((l) => l.move_id === made.id).general_account, search(posted, 'account.account').find((account) => account.code === '633330').id);
 });
 
 test('invoice line defaults stay isolated from sales order product changes', () => {
@@ -1401,7 +1401,7 @@ test('bill analytic defaults use the stock interim account actually posted', () 
   const interim = search(posted, 'account.account').find((a) => a.code === '110200');
   assert.ok(bill.line_ids.some((l) => l.account_id === interim.id));
   assert.deepEqual(bill.invoice_line_ids[0].analytic_distribution, { [analytic]: 100 });
-  assert.equal(search(posted, 'account.analytic.line').find((l) => l.move_id === made.id).general_account, '110200');
+  assert.equal(search(posted, 'account.analytic.line').find((l) => l.move_id === made.id).general_account, search(posted, 'account.account').find((account) => account.code === '110200').id);
 });
 
 test('analytic distribution models: matches most specific model and propagates onchange / posting fallback', () => {

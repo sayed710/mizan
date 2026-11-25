@@ -82,11 +82,10 @@ import { diffDb, applyDiff } from './sync.js';
 import { apps, findLeaf } from './models/index.js';
 import { sendCustomerStatement } from '../server/mail.js';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startServer } from '../server/test-server.js';
 
 function fixture() {
   const base = seed();
@@ -127,13 +126,10 @@ async function verifyStatementEndpoint() {
   await new Promise((resolve) => smtp.listen(0, '127.0.0.1', resolve));
   const dir = mkdtempSync(join(tmpdir(), 'mizan-cst1-'));
   const password = 'statement-test-password';
-  const child = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: password, MIZAN_SMTP_HOST: '127.0.0.1', MIZAN_SMTP_PORT: String(smtp.address().port), MIZAN_SMTP_FROM: 'erp@example.com', MIZAN_SECURE_COOKIE: '0' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  let server;
   try {
-    const origin = await new Promise((resolve, reject) => {
-      let output = '';
-      child.stdout.on('data', (chunk) => { output += chunk; const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output); if (match) resolve(match[1]); });
-      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${output}`)));
-    });
+    server = await startServer({ env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: password, MIZAN_SMTP_HOST: '127.0.0.1', MIZAN_SMTP_PORT: String(smtp.address().port), MIZAN_SMTP_FROM: 'erp@example.com', MIZAN_SECURE_COOKIE: '0' } });
+    const { origin } = server;
     const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
     const login = await fetch(`${origin}/api/login`, { method: 'POST', headers, body: JSON.stringify({ login: 'admin', password }) });
     assert.equal(login.status, 200);
@@ -153,7 +149,7 @@ async function verifyStatementEndpoint() {
     const invalidJson = await invalidPeriod.json();
     assert.equal(invalidJson.error, 'Invalid statement period');
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+    await server?.stop();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await new Promise((resolve) => smtp.close(resolve));
   }

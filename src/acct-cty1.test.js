@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate, MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
+
+// Databases saved just before the country-records migration, whatever migrations come later.
+const BEFORE_COUNTRIES = MIGRATIONS.find((m) => m.name === 'country-records').version - 1;
 import { autoFiscalPosition, fiscalPositionFor, isDomesticTax } from './models/taxes.js';
 import { countryIdFor, countryReferenceError, stateIdFor } from './models/country.js';
 import { models } from './models/index.js';
@@ -43,7 +46,7 @@ test('CTY-2: migration uses exact matches, fiscal positions match IDs and sync r
   const egypt = db.records['res.country'].find((c) => c.code === 'EG');
   const saudi = db.records['res.country'].find((c) => c.code === 'SA');
   const state = db.records['res.country.state'].find((s) => s.country_id === egypt.id);
-  const old = { ...db, schema_version: SCHEMA_VERSION - 1, records: { ...db.records,
+  const old = { ...db, schema_version: BEFORE_COUNTRIES, records: { ...db.records,
     'account.tax.group': [
       { id: 1, name: 'Exact', country: 'EG' },
       { id: 2, name: 'Unknown', country: 'unknown' },
@@ -84,7 +87,7 @@ test('Finding 1: migration resolves country codes, leaves informal names unresol
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: BEFORE_COUNTRIES,
     records: {
       ...db.records,
       'account.fiscal.position': [
@@ -258,7 +261,7 @@ test('Qodo 1: repaired migrated fiscal positions clear unresolved_targeting and 
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: BEFORE_COUNTRIES,
     records: {
       ...db.records,
       'account.fiscal.position': [
@@ -406,7 +409,7 @@ test('Review Finding 1: updating country and enabling auto-apply on position wit
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: BEFORE_COUNTRIES,
     records: {
       ...db.records,
       'account.fiscal.position': [
@@ -450,7 +453,7 @@ test('Review Finding 2: migrated manual fiscal positions retain unresolved marke
 
   const old = {
     ...db,
-    schema_version: SCHEMA_VERSION - 1,
+    schema_version: BEFORE_COUNTRIES,
     records: {
       ...db.records,
       'account.fiscal.position': [

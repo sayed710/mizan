@@ -8,7 +8,8 @@ import { postMove } from './models/accounting.js';
 import { analyticActuals } from './models/finance.js';
 
 test('journal entry analytics use the accounting date when posted and backfilled', () => {
-  const analytic = create(seed(), 'account.analytic.account', { name: 'Historical entry' });
+  const db0 = seed();
+  const analytic = create(db0, 'account.analytic.account', { name: 'Historical entry', plan_id: db0.records['account.analytic.plan'][0].id });
   const accounts = search(analytic.db, 'account.account');
   const expense = accounts.find((account) => account.code === '600000');
   const cash = accounts.find((account) => account.account_type === 'asset_cash');
@@ -28,7 +29,8 @@ test('journal entry analytics use the accounting date when posted and backfilled
 });
 
 test('migration restores historical analytic actuals without duplicating posted allocations', () => {
-  const analytic = create(seed(), 'account.analytic.account', { name: 'Historical project' });
+  const db0 = seed();
+  const analytic = create(db0, 'account.analytic.account', { name: 'Historical project', plan_id: db0.records['account.analytic.plan'][0].id });
   let db = analytic.db;
   const ids = [];
   for (const type of ['out_invoice', 'in_invoice', 'in_refund']) {
