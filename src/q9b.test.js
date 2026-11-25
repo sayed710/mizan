@@ -79,8 +79,8 @@ test('global legacy reconciliation rules use shared accounts across companies an
   const shared = create(branch.db, 'account.account', { name: 'Shared fee', code: 'Q9B-RULE', account_type: 'expense', company_id: null });
   const owned = create(shared.db, 'account.account', { name: 'Company fee', code: 'Q9B-RULE', account_type: 'expense', company_id: 1 });
   const onlyOwned = create(owned.db, 'account.account', { name: 'Private fee', code: 'Q9B-PRIVATE', account_type: 'expense', company_id: 1 });
-  const rule = create(onlyOwned.db, 'account.reconcile.model', { name: 'Global fee', company_id: null, rule_type: 'writeoff_button', line_ids: [{ account_code: 'Q9B-RULE', amount_type: 'percentage', amount: 100 }] });
-  const missing = create(rule.db, 'account.reconcile.model', { name: 'Unresolved fee', company_id: null, rule_type: 'writeoff_button', line_ids: [{ account_code: 'Q9B-PRIVATE', amount_type: 'percentage', amount: 100 }] });
+  const rule = create(onlyOwned.db, 'account.reconcile.model', { name: 'Global fee', company_id: branch.id, rule_type: 'writeoff_button', line_ids: [{ account_code: 'Q9B-RULE', amount_type: 'percentage', amount: 100 }] });
+  const missing = create(rule.db, 'account.reconcile.model', { name: 'Unresolved fee', company_id: branch.id, rule_type: 'writeoff_button', line_ids: [{ account_code: 'Q9B-PRIVATE', amount_type: 'percentage', amount: 100 }] });
   const db = migrate({ ...missing.db, schema_version: 30 }, 31);
   const migratedRule = read(db, 'account.reconcile.model', rule.id);
   assert.equal(migratedRule.line_ids[0].account_id, shared.id);

@@ -1,6 +1,6 @@
 // SMS Marketing: recipients with a phone, GSM-7/Unicode segment counting, per-recipient traces and STOP opt-outs.
 import { create, search, write } from '../orm.js';
-import { today } from './common.js';
+import { partnerHasTag, today } from './common.js';
 
 // GSM 03.38 basic set plus the extension characters that cost two septets.
 const GSM = new Set('@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà');
@@ -23,7 +23,7 @@ const blacklisted = (db) => new Set(search(db, 'phone.blacklist').filter((b) => 
 /** Recipients with a usable phone: list contacts not opted out, or contacts; deduped and without blacklisted numbers. */
 export function smsRecipients(db, campaign, { partnerId = null } = {}) {
   const raw = campaign.mailing_model === 'res.partner'
-    ? search(db, 'res.partner').filter((p) => (partnerId == null || p.id === partnerId) && (!campaign.partner_tag || (p.tag_ids ?? []).includes(campaign.partner_tag))).map((p) => ({ phone: p.mobile || p.phone, name: p.name, res_model: 'res.partner', res_id: p.id }))
+    ? search(db, 'res.partner').filter((p) => (partnerId == null || p.id === partnerId) && (!campaign.partner_tag || partnerHasTag(db, p, campaign.partner_tag))).map((p) => ({ phone: p.mobile || p.phone, name: p.name, res_model: 'res.partner', res_id: p.id }))
     : search(db, 'mailing.contact').filter((c) => c.list_id === campaign.list_id && !c.opt_out).map((c) => ({ phone: c.phone, name: c.name, res_model: 'mailing.contact', res_id: c.id }));
   const banned = blacklisted(db);
   const seen = new Set();
