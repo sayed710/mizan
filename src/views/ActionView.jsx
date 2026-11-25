@@ -4,7 +4,8 @@ import { applyFilters, matches, read, search as searchRecords, unlink } from '..
 import { display, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, getDb, serverAction, useDb } from '../store.js';
+import { confirmUnconfiguredSend, postUnsentNote, sendTarget, shouldSendEmail } from './documentSend.js';
 import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
@@ -145,19 +146,38 @@ export function ActionView({ leaf, base, params }) {
     </span>
   );
   const listActions = leaf?.listActions ?? def.listActions ?? [];
-  const confirmWizard = (values) => {
+  const confirmWizard = async (values) => {
     try {
-      const res = wizard.action.run(getDb(), wizard.ids, values, { defaults: leaf?.defaults ?? {} });
-      setWizard(null);
-      if (res?.go) {
-        if (res.db) commit(res.db);
-        location.hash = res.go;
-        return;
+      const hasEmail = shouldSendEmail(wizard.action, wizard.spec, values);
+      const { endpoint, live, channel } = sendTarget(wizard.action);
+      if (hasEmail && channel && !confirmUnconfiguredSend(channel)) return;
+
+      const res = wizard.action.run(
+        getDb(),
+        wizard.ids,
+        hasEmail && live ? { ...values, live: true } : values,
+        { defaults: leaf?.defaults ?? {} },
+      );
+      const nextDb = res?.db ?? (res && !('db' in res) && !('go' in res) && !('message' in res) ? res : null);
+      if (nextDb) await commit(nextDb);
+
+      if (hasEmail) {
+        if (live) {
+          for (const id of wizard.ids) {
+            const out = await serverAction(endpoint, { model, id });
+            if (out?.ok === false) throw new Error(out.error ?? 'Could not save changes');
+          }
+        } else if (channel) {
+          await commit(wizard.ids.reduce((acc, id) => postUnsentNote(acc, model, id, channel), getDb()));
+        }
       }
-      if (res) commit(res.db ?? res);
+
+      setWizard(null);
       setSelected(new Set());
+      if (res?.message) alert(t(res.message));
+      if (res?.go) location.hash = res.go;
     } catch (e) {
-      setWizard((w) => ({ ...w, error: t(e.message) }));
+      setWizard((w) => (w ? { ...w, error: t(e.message) } : null));
     }
   };
   const extra = view === 'list' ? (

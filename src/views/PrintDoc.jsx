@@ -288,6 +288,121 @@ function printCell(db, model, k, f, l, rec) {
   return display(db, f, value, { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id });
 }
 
+function DocumentPaper({ db, model, def, layout, rec, proforma = false }) {
+  const company = documentCompany(db, rec);
+  const qrSettings = invoiceQrSettingsForCompany(db, company);
+  const isProformaInvoice = model === 'account.move' && isProformaMove(rec, proforma);
+  const partner = read(db, layout.partnerModel ?? 'res.partner', rec[layout.partner ?? 'partner_id']);
+  const taxBreakdown = model === 'account.move' ? documentTaxBreakdown(db, rec, rec[layout.lines] ?? []) : [];
+  const lineDef = def.fields[layout.lines];
+  const cols = Object.entries(lineDef.fields).filter(([, f]) => !f.hidden);
+  const priced = 'price_unit' in lineDef.fields;
+  return (
+    <article className="paper">
+      {isProformaInvoice && (
+        <div className="paper-watermark" aria-label={t('Proforma Invoice')}>
+          {t('PRO-FORMA')}
+        </div>
+      )}
+      <header className="paper-head">
+        <div>
+          <b className="paper-company">{company.name}</b>
+          {addressLines(company, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`} className="muted">{line}</div>)}
+          <div className="muted">{company.currency ?? t('Company currency is not configured')}</div>
+        </div>
+        {partner && (
+          <address>
+            <b>{partner.name}</b>
+            {[partner.email ?? partner.work_email, partner.phone ?? partner.work_phone].filter(Boolean).map((l) => <div key={l}>{l}</div>)}
+            {addressLines(partner, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`}>{line}</div>)}
+          </address>
+        )}
+      </header>
+      <h1>{layout.title(rec, proforma)} {rec.name && rec.name !== '/' && !(model === 'account.move' && rec.state === 'draft' && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(rec.move_type)) ? rec.name : ''}</h1>
+      <dl className="paper-info">
+        {layout.info.filter((f) => rec[f]).map((f) => (
+          <div key={f}><dt>{t(def.fields[f].label)}</dt><dd>{def.fields[f].type === 'date' ? formatDate(rec[f]) : display(db, def.fields[f], rec[f], rec)}</dd></div>
+        ))}
+      </dl>
+      <table className="paper-lines">
+        <thead><tr>{cols.map(([k, f]) => <th key={k}>{t(f.label)}</th>)}{priced && <th className="num">{t('Amount')}</th>}</tr></thead>
+        <tbody>
+          {(rec[layout.lines] ?? []).map((l, i) => (
+            <tr key={i}>
+              {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{printCell(db, model, k, f, l, rec)}</td>)}
+              {priced && <td className="num">{display(db, { type: 'monetary' }, subtotal(l), rec)}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {model === 'account.move' && taxBreakdown.length > 0 && (
+        <table className="paper-lines paper-taxes">
+          <thead><tr><th>{t('Tax')}</th><th className="num">{t('Base')}</th><th className="num">{t('Amount')}</th></tr></thead>
+          <tbody>
+            {taxBreakdown.map((row, i) => (
+              <tr key={i}>
+                <td>{row.label}</td>
+                <td className="num">{display(db, { type: 'monetary' }, row.base, rec)}</td>
+                <td className="num">{display(db, { type: 'monetary' }, row.amount, rec)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <dl className="totals paper-totals">
+        {(() => {
+          const totalsFields = typeof layout.totals === 'function' ? layout.totals(rec) : layout.totals;
+          const taxTotals = model === 'account.move' ? invoiceTaxTotals(db, rec) : null;
+          if (!taxTotals) {
+            return totalsFields.map((f) => (
+              <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
+            ));
+          }
+          const hasTaxGroups = taxTotals.subtotals.some((s) => s.groups.length > 0);
+          return (
+            <>
+              {taxTotals.subtotals.map((sub, si) => (
+                <Fragment key={`sub-${si}`}>
+                  <div><dt>{t(sub.name)}</dt><dd>{display(db, { type: 'monetary' }, sub.amount, rec)}</dd></div>
+                  {sub.groups.map((g) => (
+                    <div key={`grp-${g.tax_group_id ?? 'none'}`}><dt>{g.tax_group_id ? g.name : t(g.name)}</dt><dd>{display(db, { type: 'monetary' }, g.amount, rec)}</dd></div>
+                  ))}
+                </Fragment>
+              ))}
+              {!hasTaxGroups && <div><dt>{t(def.fields.amount_tax.label)}</dt><dd>{display(db, def.fields.amount_tax, rec.amount_tax, rec)}</dd></div>}
+              {taxTotals.rounding_amount !== 0 && <div><dt>{t('Cash Rounding')}</dt><dd>{display(db, { type: 'monetary' }, taxTotals.rounding_amount, rec)}</dd></div>}
+              {totalsFields.filter((f) => !['amount_untaxed', 'amount_tax'].includes(f)).map((f) => (
+                <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
+              ))}
+            </>
+          );
+        })()}
+      </dl>
+      {model === 'account.move' && <PaymentQr db={db} company={company} settings={qrSettings} move={rec} />}
+      {model === 'account.move' && (() => {
+        const term = rec.invoice_payment_term_id && read(db, 'account.payment.term', rec.invoice_payment_term_id);
+        const note = invoiceTermNote(db, rec) && <p className="paper-note">{invoiceTermNote(db, rec)}</p>;
+        if (!term?.display_on_invoice) return note;
+        const currency = documentCurrency(db, rec);
+        const rows = rec.state === 'posted'
+          ? (invoiceInstallments(db, rec, term) ?? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency))
+          : rec.state === 'draft' && !termScheduleError(term, rec.amount_total, currency) && !dueTermLinesError(term)
+            ? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency)
+            : null;
+        if (!rows?.length) return note;
+        return <>{note}<table><thead><tr><th>{t('Due Date')}</th><th>{t('Amount')}</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><td>{formatDate(row.date)}</td><td className="num">{formatCurrency(row.amount, currency)}</td></tr>)}</tbody></table></>;
+      })()}
+      {rec.narration && <p className="paper-note">{rec.narration}</p>}
+      {/* invoice_legal_notes are captured with the line's tax snapshots. */}
+      {model === 'account.move' && ['out_invoice', 'out_refund'].includes(rec.move_type) && (() => {
+        const notes = invoiceTaxLegalNotes(rec.invoice_line_ids);
+        return notes.map((note) => <p className="paper-note" key={note} style={{ whiteSpace: 'pre-wrap' }}>{note}</p>);
+      })()}
+      <footer className="paper-foot muted">{company.name} · {t('Generated by Mizan')}</footer>
+    </article>
+  );
+}
+
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */
 export function PrintDoc({ model, id, proforma = false }) {
   const db = useDb();
@@ -298,8 +413,10 @@ export function PrintDoc({ model, id, proforma = false }) {
   const multiPayments = model === 'account.payment' && rawIds.length > 1
     ? rawIds.map((pid) => read(db, 'account.payment', pid)).filter((p) => p && p.state === 'posted' && p.payment_type === 'outbound' && p.check_number != null)
     : null;
-  const recId = multiPayments?.length ? multiPayments[0].id : rec?.id;
-  const isProformaInvoice = model === 'account.move' && isProformaMove(rec, proforma);
+  const multiMoves = model === 'account.move' && rawIds.length > 1
+    ? rawIds.map((mid) => read(db, 'account.move', mid)).filter(Boolean)
+    : null;
+  const recId = multiPayments?.length ? multiPayments[0].id : multiMoves?.length ? multiMoves[0].id : rec?.id;
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
     if (!recId || isDraftInboundBatch) return undefined;
@@ -344,125 +461,20 @@ export function PrintDoc({ model, id, proforma = false }) {
       </ReportPrintView>
     );
   }
-  if (!rec || !layout) return <main className="action"><p className="empty">{t('Record not found.')}</p></main>;
-
-  const company = documentCompany(db, rec);
-  if (!company) return <main className="action"><p className="empty" role="alert">{t('Configure the document company before printing.')}</p></main>;
-  const qrSettings = invoiceQrSettingsForCompany(db, company);
-
-  const partner = read(db, layout.partnerModel ?? 'res.partner', rec[layout.partner ?? 'partner_id']);
-  const taxBreakdown = model === 'account.move' ? documentTaxBreakdown(db, rec, rec[layout.lines] ?? []) : [];
-  const lineDef = def.fields[layout.lines];
-  const cols = Object.entries(lineDef.fields).filter(([, f]) => !f.hidden);
-  const priced = 'price_unit' in lineDef.fields;
+  const docs = multiMoves?.length ? multiMoves : (rec ? [rec] : []);
+  if (!docs.length || !layout) return <main className="action"><p className="empty">{t('Record not found.')}</p></main>;
+  if (docs.some((doc) => !documentCompany(db, doc))) {
+    return <main className="action"><p className="empty" role="alert">{t('Configure the document company before printing.')}</p></main>;
+  }
   return (
     <main className="print-page">
       <div className="no-print print-toolbar">
         <button type="button" className="btn primary" onClick={() => window.print()}>{t('Print')}</button>
         <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
       </div>
-      <article className="paper">
-        {isProformaInvoice && (
-          <div className="paper-watermark" aria-label={t('Proforma Invoice')}>
-            {t('PRO-FORMA')}
-          </div>
-        )}
-        <header className="paper-head">
-          <div>
-            <b className="paper-company">{company.name}</b>
-            {addressLines(company, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`} className="muted">{line}</div>)}
-            <div className="muted">{company.currency ?? t('Company currency is not configured')}</div>
-          </div>
-          {partner && (
-            <address>
-              <b>{partner.name}</b>
-              {[partner.email ?? partner.work_email, partner.phone ?? partner.work_phone].filter(Boolean).map((l) => <div key={l}>{l}</div>)}
-              {addressLines(partner, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`}>{line}</div>)}
-            </address>
-          )}
-        </header>
-        <h1>{layout.title(rec, proforma)} {rec.name && rec.name !== '/' && !(model === 'account.move' && rec.state === 'draft' && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(rec.move_type)) ? rec.name : ''}</h1>
-        <dl className="paper-info">
-          {layout.info.filter((f) => rec[f]).map((f) => (
-            <div key={f}><dt>{t(def.fields[f].label)}</dt><dd>{def.fields[f].type === 'date' ? formatDate(rec[f]) : display(db, def.fields[f], rec[f], rec)}</dd></div>
-          ))}
-        </dl>
-        <table className="paper-lines">
-          <thead><tr>{cols.map(([k, f]) => <th key={k}>{t(f.label)}</th>)}{priced && <th className="num">{t('Amount')}</th>}</tr></thead>
-          <tbody>
-            {(rec[layout.lines] ?? []).map((l, i) => (
-              <tr key={i}>
-                {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{printCell(db, model, k, f, l, rec)}</td>)}
-                {priced && <td className="num">{display(db, { type: 'monetary' }, subtotal(l), rec)}</td>}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {model === 'account.move' && taxBreakdown.length > 0 && (
-          <table className="paper-lines paper-taxes">
-            <thead><tr><th>{t('Tax')}</th><th className="num">{t('Base')}</th><th className="num">{t('Amount')}</th></tr></thead>
-            <tbody>
-              {taxBreakdown.map((row, i) => (
-                <tr key={i}>
-                  <td>{row.label}</td>
-                  <td className="num">{display(db, { type: 'monetary' }, row.base, rec)}</td>
-                  <td className="num">{display(db, { type: 'monetary' }, row.amount, rec)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        <dl className="totals paper-totals">
-          {(() => {
-            const totalsFields = typeof layout.totals === 'function' ? layout.totals(rec) : layout.totals;
-            const taxTotals = model === 'account.move' ? invoiceTaxTotals(db, rec) : null;
-            if (!taxTotals) {
-              return totalsFields.map((f) => (
-                <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
-              ));
-            }
-            const hasTaxGroups = taxTotals.subtotals.some((s) => s.groups.length > 0);
-            return (
-              <>
-                {taxTotals.subtotals.map((sub, si) => (
-                  <Fragment key={`sub-${si}`}>
-                    <div><dt>{t(sub.name)}</dt><dd>{display(db, { type: 'monetary' }, sub.amount, rec)}</dd></div>
-                    {sub.groups.map((g) => (
-                      <div key={`grp-${g.tax_group_id ?? 'none'}`}><dt>{g.tax_group_id ? g.name : t(g.name)}</dt><dd>{display(db, { type: 'monetary' }, g.amount, rec)}</dd></div>
-                    ))}
-                  </Fragment>
-                ))}
-                {!hasTaxGroups && <div><dt>{t(def.fields.amount_tax.label)}</dt><dd>{display(db, def.fields.amount_tax, rec.amount_tax, rec)}</dd></div>}
-                {taxTotals.rounding_amount !== 0 && <div><dt>{t('Cash Rounding')}</dt><dd>{display(db, { type: 'monetary' }, taxTotals.rounding_amount, rec)}</dd></div>}
-                {totalsFields.filter((f) => !['amount_untaxed', 'amount_tax'].includes(f)).map((f) => (
-                  <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
-                ))}
-              </>
-            );
-          })()}
-        </dl>
-        {model === 'account.move' && <PaymentQr db={db} company={company} settings={qrSettings} move={rec} />}
-        {model === 'account.move' && (() => {
-          const term = rec.invoice_payment_term_id && read(db, 'account.payment.term', rec.invoice_payment_term_id);
-          const note = invoiceTermNote(db, rec) && <p className="paper-note">{invoiceTermNote(db, rec)}</p>;
-          if (!term?.display_on_invoice) return note;
-          const currency = documentCurrency(db, rec);
-          const rows = rec.state === 'posted'
-            ? (invoiceInstallments(db, rec, term) ?? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency))
-            : rec.state === 'draft' && !termScheduleError(term, rec.amount_total, currency) && !dueTermLinesError(term)
-              ? installments(term, rec.amount_total, validDate(rec.invoice_date) ? rec.invoice_date : today(), currency)
-              : null;
-          if (!rows?.length) return note;
-          return <>{note}<table><thead><tr><th>{t('Due Date')}</th><th>{t('Amount')}</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><td>{formatDate(row.date)}</td><td className="num">{formatCurrency(row.amount, currency)}</td></tr>)}</tbody></table></>;
-        })()}
-        {rec.narration && <p className="paper-note">{rec.narration}</p>}
-        {/* invoice_legal_notes are captured with the line's tax snapshots. */}
-        {model === 'account.move' && ['out_invoice', 'out_refund'].includes(rec.move_type) && (() => {
-          const notes = invoiceTaxLegalNotes(rec.invoice_line_ids);
-          return notes.map((note) => <p className="paper-note" key={note} style={{ whiteSpace: 'pre-wrap' }}>{note}</p>);
-        })()}
-        <footer className="paper-foot muted">{company.name} · {t('Generated by Mizan')}</footer>
-      </article>
+      {docs.map((doc) => (
+        <DocumentPaper key={doc.id} db={db} model={model} def={def} layout={layout} rec={doc} proforma={proforma} />
+      ))}
     </main>
   );
 }

@@ -18,8 +18,7 @@ import { saveFormRecord } from './formSave.js';
 import { changeFormValue, newDefaults } from './formDefaults.js';
 import { RecordAnalysis } from './Analysis.jsx';
 
-/** Integrations whose buttons fall back to only recording a send when not configured. */
-const SENDING = { smtp: 'Email', sms: 'SMS' };
+import { confirmUnconfiguredSend, postUnsentNote, sendTarget, shouldSendEmail } from './documentSend.js';
 import { Wizard } from './Wizard.jsx';
 import { TaxReportTable } from './Reports.jsx';
 
@@ -518,13 +517,6 @@ export function FormView({ leaf, id, base, params }) {
   };
   const leave = (hash) => { if (!dirty || save() != null) location.hash = hash; };
 
-  /** Where a button sends (server endpoint), whether that integration is live, and the unconfigured channel otherwise. */
-  const sendTarget = (b) => {
-    const endpoint = b.server ?? (b.email === 'mailing' ? '/api/mail/mailing' : b.email ? '/api/mail/document' : null);
-    const need = b.requires ?? (b.email ? 'smtp' : 'server');
-    const live = endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need]);
-    return { endpoint, live, channel: !live && endpoint && SENDING[need] };
-  };
   const runButton = async (b) => {
     // Buttons that need input open an in-app dialog; the button runs with what was entered.
     if (!b.prompt) {
@@ -533,8 +525,8 @@ export function FormView({ leaf, id, base, params }) {
     }
     // Without the integration the button only records the send: say so, ask first and leave a trace.
     const { endpoint, live, channel } = sendTarget(b);
-    if (channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
-    const noteUnsent = (id) => { if (channel) commit(postNote(getDb(), model, id, t('Not sent: {channel} is not configured.', { channel: t(channel) }))); };
+    if (channel && !confirmUnconfiguredSend(channel)) return;
+    const noteUnsent = (id) => { if (channel) commit(postUnsentNote(getDb(), model, id, channel)); };
     if (live) {
       if (b.prompt) {
         // With a wizard the amount is asked in the in-app dialog and sent as the same text the prompt would have.
@@ -632,11 +624,10 @@ export function FormView({ leaf, id, base, params }) {
     if (wizard.live) { setWizard(null); wizard.live(values); return; }
     try {
       const b = wizard.b;
-      const hasEmailField = wizard.spec?.fields?.some((f) => f.name === 'email');
-      const shouldEmail = Boolean(b.email && (hasEmailField ? values?.email : true));
+      const shouldEmail = shouldSendEmail(b, wizard.spec, values);
       const { endpoint, live, channel } = sendTarget(b);
 
-      if (shouldEmail && channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
+      if (shouldEmail && channel && !confirmUnconfiguredSend(channel)) return;
 
       const savedId = wizard.id ?? save();
       if (savedId == null) return;
@@ -662,7 +653,7 @@ export function FormView({ leaf, id, base, params }) {
             return;
           }
         } else if (channel) {
-          commit(postNote(getDb(), model, savedId, t('Not sent: {channel} is not configured.', { channel: t(channel) })));
+          commit(postUnsentNote(getDb(), model, savedId, channel));
         }
       }
 
