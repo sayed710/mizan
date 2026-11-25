@@ -371,6 +371,7 @@ test('Area 4: budgets support account_id and analytic_account_id lines, compute 
 
   const budget = create(db, 'account.budget', {
     name: 'Q1 2026 Master Budget',
+    budget_type: 'both',
     company_id: 1,
     date_from: '2026-01-01',
     date_to: '2026-01-31',

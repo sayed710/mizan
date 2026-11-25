@@ -3878,6 +3878,7 @@ const ar = {
   'Invalid amount': 'مبلغ غير صالح',
   'The matched entry belongs to another partner': 'القيد المطابق ينتمي إلى شريك آخر',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
+  'Select a company on the budget record to show this budget report.': 'اختر شركة في سجل الموازنة لعرض تقرير هذه الموازنة.',
   'Company is required': 'الشركة مطلوبة',
   'Company cannot be changed once assigned': 'لا يمكن تغيير الشركة بعد تعيينها',
   'Journals in the reconciliation model must belong to the model company': 'يجب أن تنتمي دفاتر اليومية في نموذج التسوية إلى شركة النموذج',
