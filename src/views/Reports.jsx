@@ -918,22 +918,24 @@ function Valuation({ db, period, companyId, categoryId, productId, warehouseId, 
 }
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
-function Depreciation({ db, period, companyId, includeDraft = false, money: moneyProp }) {
+function Depreciation({ db, period, companyId, groupBy = '', includeDraft = false, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const { rows, totals } = depreciationReport(db, period, companyId, { includeDraft });
+  const { rows, totals, groups } = depreciationReport(db, period, companyId, { groupBy, includeDraft });
+  const renderRow = ({ a, original, inPeriod, accumulated, book }) => (
+    <tr key={a.id} className="rep-detail">
+      <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td><td>{a.acquisition_date}</td>
+      {[original, inPeriod, accumulated, book].map((value, i) => <td key={i} className="num">{fmtMoney(value)}</td>)}
+    </tr>
+  );
+  const totalRow = (label, values) => (
+    <tr className="rep-total strong">
+      <td>{label}</td><td />{['original', 'inPeriod', 'accumulated', 'book'].map((key) => <td key={key} className="num">{fmtMoney(values[key])}</td>)}
+    </tr>
+  );
   return (
     <tbody>
-      {rows.map(({ a, original, inPeriod, accumulated, book }) => (
-        <tr key={a.id} className="rep-detail">
-          <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td>
-          <td>{a.acquisition_date}</td>
-          <td className="num">{fmtMoney(original)}</td>
-          <td className="num">{fmtMoney(inPeriod)}</td>
-          <td className="num">{fmtMoney(accumulated)}</td>
-          <td className="num">{fmtMoney(book)}</td>
-        </tr>
-      ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td className="num">{fmtMoney(totals.original)}</td><td className="num">{fmtMoney(totals.inPeriod)}</td><td className="num">{fmtMoney(totals.accumulated)}</td><td className="num">{fmtMoney(totals.book)}</td></tr>
+      {groupBy ? groups.map((group) => <Fragment key={group.id ?? 'none'}><tr className="rep-section"><td colSpan={6}>{group.name || t('Undefined')}</td></tr>{group.rows.map(renderRow)}{totalRow(t('Subtotal'), group.totals)}</Fragment>) : rows.map(renderRow)}
+      {totalRow(t('Total'), totals)}
     </tbody>
   );
 }
@@ -1090,6 +1092,7 @@ function ReportPage({ leaf, params }) {
   const [showInitialBalance, setShowInitialBalance] = useState(true);
   const [showEndBalance, setShowEndBalance] = useState(true);
   const [auditSort, setAuditSort] = useState('date');
+  const [depreciationGroupBy, setDepreciationGroupBy] = useState('');
   const [agingInterval, setAgingInterval] = useState(30);
   const [agingBasis, setAgingBasis] = useState('base_on_maturity_date');
   const agingOptions = useMemo(() => ({ aging_interval: agingInterval, aging_based_on: agingBasis }), [agingInterval, agingBasis]);
@@ -1551,6 +1554,12 @@ function ReportPage({ leaf, params }) {
           <option value="number">{t('Journal Entry Number')}</option>
         </select>
       </label>}
+      {leaf.report === 'depreciation' && <label className="inline-select">{t('Group By')}
+        <select aria-label={t('Group By')} value={depreciationGroupBy} onChange={(e) => setDepreciationGroupBy(e.target.value)}>
+          <option value="">{t('None')}</option>
+          <option value="asset_group_id">{t('Asset Group')}</option>
+        </select>
+      </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
         <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={allowAllCompanies} />
       )}
@@ -1807,6 +1816,7 @@ function ReportPage({ leaf, params }) {
                 variant={activeTaxVariant}
                 sort={auditSort}
                 kind={deferredKind}
+                groupBy={depreciationGroupBy}
                 journalId={leaf.report === 'inalterability' ? activeInalterabilityJournalId : undefined}
                 agedData={agedData}
                 agingOptions={agingOptions}

@@ -394,6 +394,8 @@ export function paymentGuard(db, before, after, ctx) {
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
   if (leavesPosted && before.move_type === 'in_invoice' && (db.records['account.asset'] ?? []).some((asset) => asset.bill_id === before.id
     && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the bill\'s running or depreciated assets before resetting it';
+  if (leavesPosted && (db.records['account.asset'] ?? []).some((asset) => asset.source_move_id === before.id
+    && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the entry\'s running or depreciated assets before resetting it';
   // A posted credit may have enabled an advance; resetting it must not undo that protection.
   if (leavesPosted && before.move_type === 'out_refund' && before.sale_id) {
     const order = read(db, 'sale.order', before.sale_id);
@@ -1029,32 +1031,20 @@ function offsetCreditNote(db, noteId) {
 }
 
 /** Bill lines booked on an account configured to create assets generate draft or validated assets (once per bill line). */
-function draftAssetsFromBill(db, bill) {
-  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
-  const existing = billAssets.filter((a) => a.state === 'draft');
-  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
-  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
-  const retained = new Set();
-  // Without a model journal, assets use the company's configured general journal.
-  const defaultJournal = read(db, 'res.company', bill.company_id ?? 1)?.default_general_journal_id ?? null;
-  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
-    const booked = postedBillLine(bill, index);
-    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
-    const account = read(next, 'account.account', booked.account);
-    const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
-    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
-    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
-    if (mode === 'no') return next;
-    const modelJournal = model?.journal_id && read(next, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
-    const product = read(next, 'product', line.product_id);
-    const acquisitionDate = bill.invoice_date ?? today();
-    const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
-    const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
-    const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
-    const values = {
-      name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: acquisitionDate,
-      partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-      account_asset_id: booked.account,
+export function assetDraftValues(db, move, line, { amount, accountId, date }) {
+  const account = read(db, 'account.account', accountId);
+  const model = account?.asset_model_id ? read(db, 'account.asset.model', account.asset_model_id) : null;
+  const defaultJournal = read(db, 'res.company', move.company_id ?? 1)?.default_general_journal_id ?? null;
+  const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
+  const product = read(db, 'product', line.product_id);
+  const acquisitionDate = date;
+  const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
+  const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
+  const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
+  return {
+      name: line.name || product?.name || move.name, original_value: amount, acquisition_date: date,
+      partner_id: line.partner_id ?? move.partner_id ?? null, company_id: move.company_id ?? 1,
+      account_asset_id: accountId,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
@@ -1080,6 +1070,23 @@ function draftAssetsFromBill(db, bill) {
         analytic_distribution: null,
       }),
     };
+}
+
+function draftAssetsFromBill(db, bill) {
+  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
+  const existing = billAssets.filter((a) => a.state === 'draft');
+  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
+  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
+  const retained = new Set();
+  // Without a model journal, assets use the company's configured general journal.
+  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
+    const booked = postedBillLine(bill, index);
+    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
+    const account = read(next, 'account.account', booked.account);
+    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
+    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
+    if (mode === 'no') return next;
+    const values = { ...assetDraftValues(next, bill, { ...line, partner_id: bill.partner_id }, { amount: booked.amount, accountId: booked.account, date: bill.invoice_date ?? today() }), bill_id: bill.id, bill_line: index };
     const asset = existing.find((a) => a.bill_line === index);
     let assetId;
     let nextDb;
@@ -3686,7 +3693,15 @@ export const accountingModels = {
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
       return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
-    invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
+    invariant: (db, after, before, stored, ctx) => {
+      const err = secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
+      if (err) return err;
+      if (before?.state === 'posted' && after.state !== 'posted'
+        && (db.records['account.asset'] ?? []).some((a) => a.source_move_id === after.id && a.state !== 'cancel')) {
+        return "Handle the entry's draft assets before resetting it";
+      }
+      return null;
+    },
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
@@ -3700,11 +3715,20 @@ export const accountingModels = {
       if (before.state === 'posted' && after.state !== 'posted') {
         db = reverseInvoiceDeferrals(db, before);
         db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry, attemptAutoPostMove);
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === before.id && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
+        }
       }
       if (after.state === 'cancel' && before?.state !== 'cancel') {
-        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === (before?.id ?? after.id) && a.state === 'draft').map((a) => a.id);
+        const moveId = before?.id ?? after.id;
+        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === moveId && a.state === 'draft').map((a) => a.id);
         if (draftAssets.length) {
           db = unlink(db, 'account.asset', draftAssets);
+        }
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === moveId && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
         }
       }
       if (before?.state !== after.state) {

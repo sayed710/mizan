@@ -367,6 +367,7 @@ const allApps = [
           { key: 'tax-units', label: 'Tax Units', model: 'account.tax.unit' },
           { key: 'cash-roundings', label: 'Rounding Methods', model: 'account.cash.rounding' },
           { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
+          { key: 'asset-groups', label: 'Asset Groups', model: 'account.asset.group' },
           { key: 'depreciation-models', label: 'Depreciation Models', model: 'account.asset.model' },
           { key: 'account-tags', label: 'Account Tags', model: 'account.account.tag' },
           { key: 'return-types', label: 'Return Types', model: 'account.return.type' },
@@ -797,7 +798,7 @@ const PRIVATE_FIELDS = {
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
 export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.category', 'account.fiscal.year',
-  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.payment.method', 'account.payment.method.line', 'res.country.group'];
+  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.asset.group', 'account.payment.method', 'account.payment.method.line', 'res.country.group'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
 export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));
