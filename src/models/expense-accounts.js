@@ -54,7 +54,7 @@ export function expenseDebits(db, report, expenses, postingJournal = null) {
     return [{
       account: account.id,
       debit: base,
-      ...(baseTags.length ? { tax_tag_ids: baseTags, tax_grid_base: true } : {}),
+      ...(baseTags.length ? { tax_tag_ids: baseTags, tax_grid_base: true, tax_side: 'purchase', tax_ids: [tax.id] } : {}),
       ...(line.product_id ? { product_id: line.product_id } : {}),
       ...(line.analytic_distribution != null ? { analytic_distribution: line.analytic_distribution } : (line.analytic_account_id ? { analytic_account_id: line.analytic_account_id } : {})),
     }, ...taxLines];

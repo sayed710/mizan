@@ -54,7 +54,21 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
   const fields = models[model].fields;
   // A menu's own column labels (what export writes, e.g. Customer / Invoice Date) are accepted next to the model labels.
   const labelsOf = (key) => [fields[key].label, listLabels?.[key]].filter(Boolean).flatMap((label) => [label, t(label)]).map((label) => label.toLowerCase());
-  const keyOf = (header) => Object.keys(fields).find((key) => key === header || labelsOf(key).includes(header.trim().toLowerCase()));
+  const keyOf = (header) => {
+    const trimmed = (header ?? '').trim();
+    const lower = trimmed.toLowerCase();
+    const direct = Object.keys(fields).find((key) => key === trimmed || labelsOf(key).includes(lower));
+    if (direct) return direct;
+    if (lower === 'res.country.code' || lower === 'country_id/code' || lower === 'country_id.code' || lower === 'country code') {
+      const countryField = Object.keys(fields).find((key) => fields[key].relation === 'res.country');
+      if (countryField) return countryField;
+    }
+    if (lower === 'res.country.state.code' || lower === 'state_ids/code' || lower === 'state_ids.code' || lower === 'state code') {
+      const stateField = Object.keys(fields).find((key) => fields[key].relation === 'res.country.state');
+      if (stateField) return stateField;
+    }
+    return undefined;
+  };
   const [header, ...body] = rows;
   const keys = header.map(keyOf);
   let next = db;
@@ -72,11 +86,36 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
           vals[key] = null;
           return;
         }
-        const id = Number(raw);
+        let id = Number(raw);
+        if ((!Number.isSafeInteger(id) || id <= 0) && field.relation === 'res.country') {
+          const found = search(next, 'res.country').find((record) => record.code && record.code.toUpperCase() === raw.toUpperCase());
+          if (found) id = found.id;
+        }
         if (!Number.isSafeInteger(id) || id <= 0 || !search(next, field.relation).some((record) => record.id === id)) {
           throw new Error(`Enter an existing record ID for ${field.label}`);
         }
         vals[key] = id;
+      }
+      else if (field.type === 'many2many') {
+        if (!raw) {
+          vals[key] = [];
+          return;
+        }
+        const tokens = raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean);
+        const ids = [];
+        const existing = search(next, field.relation);
+        for (const token of tokens) {
+          let id = Number(token);
+          if ((!Number.isSafeInteger(id) || id <= 0) && field.relation === 'res.country.state') {
+            const found = existing.find((record) => record.code && record.code.toUpperCase() === token.toUpperCase());
+            if (found) id = found.id;
+          }
+          if (!Number.isSafeInteger(id) || id <= 0 || !existing.some((record) => record.id === id)) {
+            throw new Error(`Enter existing record IDs for ${field.label}`);
+          }
+          ids.push(id);
+        }
+        vals[key] = [...new Set(ids)];
       }
       else if (['monetary', 'float', 'integer', 'priority'].includes(field.type)) vals[key] = raw === '' ? null : Number(raw);
       else if (field.type === 'boolean') vals[key] = /^(1|true|yes|نعم)$/i.test(raw);

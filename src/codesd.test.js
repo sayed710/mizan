@@ -95,11 +95,11 @@ test('codesd 4: POS stock return COGS uses configured stock account with a nonst
 test('codesd 5: analytic lines retain the actual booked account rather than a fallback chart code', () => {
   let db = setup();
   const expense = account(db, 'CUSTOM-ANALYTIC'); db = expense.db;
-  const analytic = create(db, 'account.analytic.account', { name: 'Audit project' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Audit project', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const draft = invoice(db, null, { move_type: 'in_invoice', invoice_line_ids: [{ name: 'Allocated', account_id: expense.id, qty: 1, price_unit: 100, tax: 0, analytic_distribution: { [analytic.id]: 100 } }] });
   db = postMove(draft.db, draft.id);
   const lines = analyticLinesForMove(db, read(db, 'account.move', draft.id));
-  assert.equal(lines.find((line) => line.account_id === analytic.id).general_account, 'CUSTOM-ANALYTIC');
+  assert.equal(lines.find((line) => line.account_id === analytic.id).general_account, expense.id);
 });
 
 test('codesd 6: single expenses use expenseDebits product and tax settings, with no category inference', () => {

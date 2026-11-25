@@ -1,6 +1,6 @@
 // Email Marketing: mailing lists, contacts, mailings with A/B tests, delivery traces and the blacklist.
 import { create, read, search, write } from '../orm.js';
-import { addDays, today } from './common.js';
+import { addDays, partnerHasTag, today } from './common.js';
 
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
 const norm = (email) => String(email ?? '').trim().toLowerCase();
@@ -17,8 +17,12 @@ export function renderTemplate(text, object) {
   });
 }
 
-const matches = (m) => (r) => (!m.partner_tag || (r.tag_ids ?? []).includes(m.partner_tag))
-  && (!m.partner_country || norm(r.country) === norm(m.partner_country));
+const matches = (db, m) => (r) => (!m.partner_country || norm(r.country) === norm(m.partner_country))
+  && (!m.partner_tag || (
+    m.mailing_model === 'crm.lead'
+      ? (r.tag_ids ?? []).includes(m.partner_tag)
+      : partnerHasTag(db, r, m.partner_tag)
+  ));
 
 /** Recipients of a mailing: list contacts not opted out, or partners/leads by tag and country; deduped, minus the blacklist. */
 export function recipientsOf(db, mailing) {
@@ -27,9 +31,9 @@ export function recipientsOf(db, mailing) {
     ? search(db, 'mailing.contact').filter((c) => c.list_id === mailing.list_id && !c.opt_out)
       .map((c) => ({ email: c.email, name: c.name, res_model: 'mailing.contact', res_id: c.id }))
     : model === 'crm.lead'
-      ? search(db, 'crm.lead').filter((l) => l.email).filter(matches(mailing))
+      ? search(db, 'crm.lead').filter((l) => l.email).filter(matches(db, mailing))
         .map((l) => ({ email: l.email, name: l.partner_name || l.contact_name || l.name, res_model: 'crm.lead', res_id: l.id }))
-      : search(db, 'res.partner').filter((p) => p.email).filter(matches(mailing))
+      : search(db, 'res.partner').filter((p) => p.email).filter(matches(db, mailing))
         .map((p) => ({ email: p.email, name: p.name, res_model: 'res.partner', res_id: p.id }));
   const blocked = mailing.exclude_blacklist === false ? new Set() : new Set(search(db, 'mail.blacklist').map((b) => norm(b.email)));
   const seen = new Set();

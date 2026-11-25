@@ -102,6 +102,7 @@ import { glReconcileModels } from './glReconcile.js';
 import { paymentMethodModels } from './paymentmethod.js';
 import { lockExceptionModels } from './lockexception.js';
 import { countryGroupModels } from './countrygroup.js';
+import { countryModels } from './country.js';
 
 // Generic entry menus search like Journal Entries, not like invoices.
 const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys', 'groupByLabels'].filter((k) => k in journalEntriesView).map((k) => [k, journalEntriesView[k]]));
@@ -110,6 +111,7 @@ export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
 export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, resBankModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
+MODEL_MODULES.countryModels = countryModels;
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -217,8 +219,8 @@ const allApps = [
           ...salesInvoiceView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
-        { key: 'products', label: 'Products', model: 'product', domain: (r) => r.sale_ok !== false, defaults: { sale_ok: true } },
-        customers,
+        { key: 'customer-products', label: 'Products', model: 'product', defaultFilters: ['sale_ok'], defaults: { sale_ok: true } },
+        { ...customers, defaultFilters: ['customers'], defaults: { customer_rank: 1 } },
       ] },
       { label: 'Vendors', children: [
         {
@@ -243,13 +245,30 @@ const allApps = [
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
-        { key: 'vendor-products', label: 'Products', model: 'product', domain: (r) => r.purchase_ok !== false, defaults: { purchase_ok: true } },
-        vendors,
+        { key: 'vendor-products', label: 'Products', model: 'product', defaultFilters: ['purchase_ok'], defaults: { purchase_ok: true } },
+        { ...vendors, defaultFilters: ['vendors'], defaults: { supplier_rank: 1 } },
       ] },
       { label: 'Accounting', children: [
                 { label: 'Transactions', children: [
           { key: 'entries', label: 'Journal Entries', model: 'account.move', ...journalEntriesView },
-          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line' },
+          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line',
+            list: ['date', 'name', 'account_id', 'company_id', 'amount'],
+            optionalList: ['ref', 'general_account', 'move_id', 'product_id', 'unit_amount', 'product_uom_id', 'partner_id'], listLabels: { unit_amount: 'Quantity' },
+            groupBy: ['account_id'], groupBys: ['date', 'account_id', 'general_account', 'category', 'product_id', 'partner_id'],
+            defaults: { category: 'other', employee_id: null, unit_amount: 0 },
+            form: {
+              title: 'name',
+              groups: [
+                ['account_id', 'date', 'company_id'],
+                ['amount', 'ref', 'partner_id', { field: 'unit_amount', label: 'Quantity' }, 'product_id', 'product_uom_id'],
+                ['move_id', 'general_account', 'legacy_general_account', 'category'],
+                ['employee_id', 'project_id', 'task_id'],
+                ['billable', 'so_id', 'so_line_index', 'invoiced'],
+                ['validated', 'validated_by', 'validated_on', 'timer_start'],
+              ],
+              chatter: true,
+            },
+          },
           { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
           { key: 'statements', label: 'Bank Statements', model: 'account.bank.statement' },
           { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
@@ -367,6 +386,7 @@ const allApps = [
           { key: 'tax-units', label: 'Tax Units', model: 'account.tax.unit' },
           { key: 'cash-roundings', label: 'Rounding Methods', model: 'account.cash.rounding' },
           { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
+          { key: 'asset-groups', label: 'Asset Groups', model: 'account.asset.group' },
           { key: 'depreciation-models', label: 'Depreciation Models', model: 'account.asset.model' },
           { key: 'account-tags', label: 'Account Tags', model: 'account.account.tag' },
           { key: 'return-types', label: 'Return Types', model: 'account.return.type' },
@@ -429,7 +449,17 @@ const allApps = [
       ] },
     ],
   },
-  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }, { label: 'Configuration', children: [{ key: 'banks', label: 'Banks', model: 'res.bank' }] }] },
+  {
+    id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'],
+    menus: [
+      { key: 'contacts', label: 'Contacts', model: 'res.partner' },
+      { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
+      { label: 'Configuration', children: [
+        { key: 'tags', label: 'Tags', model: 'res.partner.category' },
+        { key: 'banks', label: 'Banks', model: 'res.bank' },
+      ] },
+    ],
+  },
   { id: 'calendar', name: 'Calendar', color: ['#0ea5e9', '#1d4ed8'], menus: [{ key: 'meetings', label: 'Meetings', model: 'calendar.event' }] },
   {
     id: 'project', name: 'Project', color: ['#22c55e', '#15803d'],
@@ -779,7 +809,7 @@ export const leavesOf = (app) => {
   return walk(app?.menus);
 };
 
-const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
+const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
   'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];
@@ -800,7 +830,7 @@ const PRIVATE_FIELDS = {
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
 export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.category', 'account.fiscal.year',
-  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.payment.method', 'account.payment.method.line', 'payment.method', 'res.country.group'];
+  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model', 'account.asset.group', 'account.payment.method', 'account.payment.method.line', 'payment.method', 'res.country.group'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
 export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));

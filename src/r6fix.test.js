@@ -24,7 +24,8 @@ test('tax grids follow posted base and tax items including refunds', () => {
 });
 
 test('credit limit warns while sale confirmation and invoice posting succeed', () => {
-  let db = write(seed(), 'res.partner', 2, { credit_limit: 50 });
+  let db = write(seed(), 'res.company', 1, { account_use_credit_limit: true });
+  db = write(db, 'res.partner', 2, { use_partner_credit_limit: true, credit_limit: 50 });
   const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2025-01-01', invoice_line_ids: [{ qty: 1, price_unit: 60, tax: 0 }] });
   assert.match(models['account.move'].form.warning(read(inv.db, 'account.move', inv.id), inv.db), /credit limit/i);
   db = postMove(inv.db, inv.id);
