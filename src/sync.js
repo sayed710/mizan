@@ -15,6 +15,7 @@ import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
 import { isProtectedAuditMessage } from './models/auditRules.js';
 import { syncJournalMethodLines, unlinkJournalMethodLines } from './models/paymentmethod.js';
+import { authorizeSyncCashDifferenceLines, syncStatementLines } from './models/bankstatement.js';
 import { syncLinkedPartnerBanks } from './models/resbank.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
@@ -640,6 +641,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const changed = [];
   const submittedByRecord = new Map();
   const requestedGeneratedMoves = new Set();
+  const requestedCashDiffLines = new Set();
   // Models that point at other records (guardLast) are validated after those records of the same change set.
   const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[b]?.guardFirst ? 1 : 0) - (models[a]?.guardFirst ? 1 : 0) || (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
   for (const [model, recs] of upserts) {
@@ -689,9 +691,17 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         }
         if (!prior && submitted.system_generated === true) requestedGeneratedMoves.add(submitted.id);
       }
+      if (model === 'account.bank.statement.line') {
+        if (prior && submitted.is_cash_difference !== undefined && Boolean(submitted.is_cash_difference) !== Boolean(prior.is_cash_difference)) {
+          throw new Error('Cash difference provenance cannot be changed');
+        }
+        if (!prior && submitted.is_cash_difference === true) requestedCashDiffLines.add(submitted.id);
+      }
       const input = model === 'account.move' && !prior
         ? (({ fx_payment_move_id, fx_invoice_id, system_generated, ...rest }) => rest)(submitted)
-        : submitted;
+        : model === 'account.bank.statement.line' && !prior
+          ? (({ is_cash_difference, ...rest }) => rest)(submitted)
+          : submitted;
       const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
       const cleaned = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
       if (model === 'account.move' && cleaned.state === 'draft' && cleaned.posting_order != null && (!submitted || submitted.posting_order === undefined)) delete cleaned.posting_order;
@@ -787,6 +797,12 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   for (const id of requestedGeneratedMoves) {
     if (!generatedMoves.has(id)) throw new Error('System-generated status can only come from a generated accounting workflow');
   }
+  const cashDiffSync = authorizeSyncCashDifferenceLines(staged, db, changed, requestedCashDiffLines);
+  for (const id of requestedCashDiffLines) {
+    if (!cashDiffSync.verifiedIds.has(id)) {
+      throw new Error('Cash difference provenance can only be set when closing a cash statement');
+    }
+  }
   const settlementOrigins = new Map();
   for (const [model, record] of changed) {
     if (model === 'account.partial.reconcile' && record.exchange_move_id && !oldMoves.has(record.exchange_move_id)) {
@@ -841,7 +857,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec, seen, !before, before) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { ...baseCtx, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets }, submittedByRecord.get(`${model}:${rec.id}`));
+      ?? models[model].guard?.(seen, before, rec, { ...baseCtx, ...cashDiffSync.ctx, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets }, submittedByRecord.get(`${model}:${rec.id}`));
     if (err) throw new Error(err);
     if (model === 'account.journal') {
       const submitted = submittedByRecord.get(`${model}:${rec.id}`);
@@ -849,6 +865,15 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       records = nextDb.records;
       stagedSeq = nextDb.seq;
       seen.records = records;
+    }
+    if (model === 'account.bank.statement') {
+      const submitted = submittedByRecord.get(`${model}:${rec.id}`);
+      if (submitted && Object.hasOwn(submitted, 'line_ids')) {
+        const nextDb = syncStatementLines({ ...db, records, seq: stagedSeq }, rec, submitted.line_ids, before);
+        records = nextDb.records;
+        stagedSeq = nextDb.seq;
+        seen.records = records;
+      }
     }
     if (model === 'res.bank') {
       const nextDb = syncLinkedPartnerBanks({ ...db, records, seq: stagedSeq }, rec, before);
@@ -872,6 +897,14 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     }
     records = { ...records, 'account.move': (records['account.move'] ?? []).map((move) => generatedRecords.get(move.id) ?? move) };
   }
+  if (cashDiffSync.verifiedIds.size) {
+    const cashDiffRecords = new Map((records['account.bank.statement.line'] ?? []).filter((line) => cashDiffSync.verifiedIds.has(line.id)).map((line) => [line.id, { ...line, is_cash_difference: true }]));
+    for (const [id, marked] of cashDiffRecords) {
+      const before = (records['account.bank.statement.line'] ?? []).find((line) => line.id === id);
+      growth += json(marked) - json(before);
+    }
+    records = { ...records, 'account.bank.statement.line': (records['account.bank.statement.line'] ?? []).map((line) => cashDiffRecords.get(line.id) ?? line) };
+  }
   const marks = highWater(db.numbering, db.records);
   const numbered = uniqueNumbers(records, d.upserts, db.records, marks);
   for (const [model, id] of numbered.renamed) {
@@ -889,7 +922,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records: stagedRecords }, baseCtx)).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records: stagedRecords }, { ...baseCtx, finalRecords: stagedRecords })).find(Boolean);
     if (blocked) throw new Error(blocked);
     const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
     if (unauthorized) throw new Error(unauthorized);
@@ -927,7 +960,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   if (missing) throw new Error(missing);
   // Id counters follow the records actually stored; the client's own counters (d.seq) are ignored so they cannot be poisoned.
   const seq = { ...db.seq, ...stagedSeq };
-  for (const model of new Set([...Object.keys(d.upserts ?? {}), 'account.payment.method.line'])) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
+  for (const model of new Set([...Object.keys(d.upserts ?? {}), 'account.payment.method.line', 'account.bank.statement.line'])) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
   const auditRecords = new Map();
   const kept = new Set(db.messages.filter((m) => {

@@ -317,7 +317,7 @@ function buildRichJournalItemsDb() {
   });
   db = postMove(discountInvRes.db, discountInvRes.id);
 
-    return { db, splitInvId: splitInvRes.id, discountInvId: discountInvRes.id, bridgedInvId: bridgedInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
+  return { db, splitInvId: splitInvRes.id, discountInvId: discountInvRes.id, bridgedInvId: bridgedInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
 }
 
 test('Journal Items list columns match Odoo 20 order, optional state, multi-company and multi-currency gating', async () => {

@@ -150,10 +150,10 @@ test('invalid payment term schedule does not throw during invoice rendering', ()
 });
 
 test('fixed installment preserves configured amount when earlier percentage line is sorted first', () => {
-  // 50% due at day 0, fixed 100 due at day 30, total 1000
+  // 100% residual due at day 0, fixed 100 due at day 30, total 1000
   const term = {
     line_ids: [
-      { value_type: 'percent', value: 50, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 100, nb_days: 0, delay_type: 'days_after' },
       { value_type: 'fixed', value: 100, nb_days: 30, delay_type: 'days_after' },
     ],
   };
@@ -167,7 +167,7 @@ test('fixed installment preserves configured amount when earlier percentage line
   const termReverseDef = {
     line_ids: [
       { value_type: 'fixed', value: 100, nb_days: 30, delay_type: 'days_after' },
-      { value_type: 'percent', value: 50, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 100, nb_days: 0, delay_type: 'days_after' },
     ],
   };
   assert.deepEqual(installments(termReverseDef, 1000, '2026-01-01'), [

@@ -1,4 +1,4 @@
-import { addDays, isoDate, today, validDate } from './common.js';
+import { addDays, isFieldEdited, isoDate, today, validDate } from './common.js';
 import { currencyUnits, documentCurrency, roundCurrency } from '../money.js';
 import { companyCurrency } from './currency.js';
 import { t } from '../i18n.js';
@@ -158,11 +158,13 @@ export function termScheduleError(term, total, currency = null, invoiceDate = nu
   if (balanceIndex >= 0 && balanceIndex !== rawLines.length - 1) return 'The balance due term must be the last one';
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
   const hasPercent = lines.some(isPercentLine);
-  const lastPercentIndex = balanceIndex < 0 && hasFixed && hasPercent ? lines.findLastIndex(isPercentLine) : -1;
+  const percentSum = lines.filter(isPercentLine).reduce((sum, line) => sum + (Number(line.value) || 0), 0);
+  const percentIs100 = roundPercent(percentSum) === 100;
+  const lastPercentIndex = balanceIndex < 0 && hasFixed && hasPercent && percentIs100 ? lines.findLastIndex(isPercentLine) : -1;
   const requestedTotal = lines.reduce((sum, line, index) => sum + (
     line.value_type === 'fixed' ? fixed[index] : isPercentLine(line) && index !== lastPercentIndex ? totalCents * (Number(line.value) || 0) / 100 : 0
   ), 0);
-  if (balanceIndex >= 0 || (hasFixed && hasPercent)) {
+  if (balanceIndex >= 0 || (hasFixed && hasPercent && percentIs100)) {
     if (requestedTotal > totalCents + lines.length / 2) {
       return 'Payment terms must allocate 100% of the total';
     }
@@ -241,6 +243,15 @@ export function discountTaxComputation(term) {
 export function mixedDiscountFactor(term) {
   const percent = Number(term?.discount_percent) || 0;
   return term?.early_discount && discountTaxComputation(term) === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
+}
+
+function defaultDiscountTaxComputation(db, companyId) {
+  if (!db) return 'included';
+  const targetCompany = companyId
+    ? read(db, 'res.company', companyId)
+    : read(db, 'res.company', db.settings?.current_company_id || 1);
+  const code = targetCompany?.country_code;
+  return code === 'BE' ? 'mixed' : code === 'NL' ? 'excluded' : 'included';
 }
 
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });
@@ -344,9 +355,27 @@ export const termModels = {
       },
     },
     defaults: () => ({ sequence: 10, active: true, display_on_invoice: true, early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
-    createDefaults: (_db, vals) => (vals?.early_discount ? { discount_tax_computation: 'included' } : {}),
-    onchange: (r, key) => (key === 'early_discount' && r.early_discount && !r.discount_tax_computation ? { discount_tax_computation: 'included' } : {}),
+    createDefaults: (db, vals) => ({ discount_tax_computation: defaultDiscountTaxComputation(db, vals?.company_id) }),
+    onchange: (r, key, db, context) => {
+      if (key === 'company_id') {
+        const previous = context?.previous;
+        const isExplicit = isFieldEdited('discount_tax_computation', context);
+        const oldDefault = previous ? defaultDiscountTaxComputation(db, previous.company_id) : null;
+        const isDefaultedOrUnset = context?.editedFields
+          ? !isExplicit
+          : (r.discount_tax_computation == null || (oldDefault !== null && r.discount_tax_computation === oldDefault && previous.discount_tax_computation === oldDefault));
+        if (isDefaultedOrUnset) {
+          return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+        }
+        return {};
+      }
+      if (key === 'early_discount' && r.early_discount && !r.discount_tax_computation) {
+        return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+      }
+      return {};
+    },
     guard: (_db, before, after, _ctx, vals) => {
+      if (before && after.active === false && before.active !== false && Object.keys(after).every((key) => key === 'active' || JSON.stringify(after[key]) === JSON.stringify(before[key])) && Object.keys(before).every((key) => key === 'active' || Object.hasOwn(after, key))) return null;
       const exampleErr = exampleInputsError(vals);
       if (exampleErr) return exampleErr;
       // Terms saved before the mode existed keep reading as 'included' (discountTaxComputation) and stay editable.
@@ -354,19 +383,22 @@ export const termModels = {
       if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) && !legacyUnset) {
         return 'Select a discount tax computation mode';
       }
-      // Legacy terms that predate these rules stay archivable/editable until their lines or discount change (compared, not taken from vals, so sync re-checks the same way).
-      const shouldValidateLines = !before || ['line_ids', 'early_discount', 'discount_percent', 'discount_days'].some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+      // Legacy terms that predate these rules stay archivable/renamable until re-activated or until lines or discount fields change.
+      const shouldValidateLines = !before
+        || (before.active === false && after.active !== false)
+        || ['line_ids', 'early_discount', 'discount_percent', 'discount_days'].some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
       if (shouldValidateLines) {
         return paymentTermLinesError(after) ?? dueTermLinesError(after);
       }
       return null;
     },
-    protectDelete: (db, term, staged) => (((staged?.records ?? db.records)['account.move'] ?? []).some((move) => move.invoice_payment_term_id === term.id)
-      ? 'You can not delete payment terms as other records still reference it. However, you can archive it.'
+    protectDelete: (db, term, staged = db, context = {}) => (((context?.finalRecords ?? staged?.records ?? db.records)['account.move'] ?? []).some((move) => move.invoice_payment_term_id === term.id)
+      ? "Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them. How about archiving them instead?"
       : null),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     views: ['list', 'kanban'],
     kanban: { title: 'name', lines: ['note'] },
+    filters: [[{ id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false }]],
     list: ['sequence', 'name', 'company_id'],
     listDecoration: (r) => (r.active === false ? 'muted' : ''),
     searchFields: ['name'],

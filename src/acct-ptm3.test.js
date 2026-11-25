@@ -217,7 +217,7 @@ test('PTM-1: payment term save guard enforces Odoo _check_lines and _check_perce
       'The Early Payment Discount functionality can only be used with payment terms using a single 100% line.',
       'The Early Payment Discount must be strictly positive.',
       'The Early Payment Discount days must be strictly positive.',
-      'You can not delete payment terms as other records still reference it. However, you can archive it.',
+      "Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them. How about archiving them instead?",
     ]) {
       assert.notEqual(t(msg), msg, `Missing Arabic translation for "${msg}"`);
     }
@@ -273,7 +273,7 @@ test('PTM-2: delete protection blocks unlinking terms referenced by account.move
   // Deleting referenced term is blocked both directly and via diffDb + applyDiff
   assert.throws(
     () => unlink(db, 'account.payment.term', [refTerm.id]),
-    /You can not delete payment terms as other records still reference it/,
+    /payment terms are quite popular and can't be deleted/,
   );
   const forgedDeleteRef = {
     ...db,
@@ -284,7 +284,7 @@ test('PTM-2: delete protection blocks unlinking terms referenced by account.move
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, forgedDeleteRef), { isAdmin: true }),
-    /You can not delete payment terms as other records still reference it/,
+    /payment terms are quite popular and can't be deleted/,
   );
 
   // Archiving a referenced term stays allowed (direct write + diffDb/applyDiff)
@@ -449,11 +449,11 @@ test('PTM-5: sync diff removing an invoice reference and deleting its term in th
   // Still rejects deleting term when invoice reference is not removed
   assert.throws(
     () => applyDiff(inv.db, { deletes: { 'account.payment.term': [term.id] } }, { isAdmin: true }),
-    /You can not delete payment terms as other records still reference it/,
+    /payment terms are quite popular and can't be deleted/,
   );
   assert.throws(
     () => unlink(inv.db, 'account.payment.term', [term.id]),
-    /You can not delete payment terms as other records still reference it/,
+    /payment terms are quite popular and can't be deleted/,
   );
 });
 
@@ -490,7 +490,7 @@ test('PTM-6: legacy payment terms violating new validation rules can be archived
   // Deletion is blocked because invoice references it
   assert.throws(
     () => unlink(db, 'account.payment.term', [legacyTerm.id]),
-    /You can not delete payment terms as other records still reference it. However, you can archive it./,
+    /Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them\. How about archiving them instead\?/,
   );
 
   // Archiving the legacy invalid term succeeds
