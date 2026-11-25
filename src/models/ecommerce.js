@@ -7,6 +7,7 @@ import { logisticsModels } from './logistics.js';
 import { pricelistModels } from './pricelist.js';
 import { salesModels } from './sales.js';
 import { billControlModels } from './billcontrol.js';
+import { paymentProviderGuard } from './paymentmethod.js';
 
 const RIBBONS = [['', 'None'], ['sale', 'Sale'], ['new', 'New'], ['sold_out', 'Sold out']];
 export const PAYMENT_PROVIDERS = [['wire', 'Wire Transfer'], ['cod', 'Cash on Delivery'], ['demo', 'Demo']];
@@ -169,6 +170,7 @@ export const ecommerceModels = {
       done_msg: { type: 'text', label: 'Done Message' },
     },
     defaults: () => ({ state: 'disabled', code: 'wire', journal_id: null, company_id: 1, pending_msg: '', done_msg: '' }),
+    guard: paymentProviderGuard,
     filters: [[{ id: 'enabled', label: 'Enabled', fn: (r) => r.state === 'enabled' }]],
     kanban: { title: 'name', lines: ['code'], badge: 'state' },
     list: ['name', 'code', 'state'],

@@ -631,7 +631,7 @@ test('Qodo 3: Legacy horizontal-group rule migration and normalization moves ids
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 76);
+  assert.equal(migrated.schema_version, 77);
   const upgradedGroup = migrated.records['account.report.horizontal.group'].find((g) => g.id === 991);
   assert.deepEqual(upgradedGroup.rule_ids[0].partner_ids, [1, 2]);
   assert.equal(upgradedGroup.rule_ids[0].ids, '');
