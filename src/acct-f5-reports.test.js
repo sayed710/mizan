@@ -358,8 +358,9 @@ test('FIN-13: ConfigurableReportPage passes analyticAccountIds to compareConfigu
   db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
   const yr = Number(today().slice(0, 4));
 
-  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Analytics', company_id: 1 }); db = a1.db;
-  const a2 = create(db, 'account.analytic.account', { name: 'Beta Analytics', company_id: 1 }); db = a2.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Analytics', company_id: 1, plan_id: planId }); db = a1.db;
+  const a2 = create(db, 'account.analytic.account', { name: 'Beta Analytics', company_id: 1, plan_id: planId }); db = a2.db;
 
   const cashAcc = search(db, 'account.account').find((a) => a.code === '101401');
   const revAcc = search(db, 'account.account').find((a) => a.code === '400000');

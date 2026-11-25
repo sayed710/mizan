@@ -51,8 +51,9 @@ async function renderReportText(db, report) {
 
 test('Qodo 16: analytic report filter scales split allocations', () => {
   let db = seed();
-  const first = create(db, 'account.analytic.account', { name: 'Alpha split' }); db = first.db;
-  const second = create(db, 'account.analytic.account', { name: 'Beta split' }); db = second.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const first = create(db, 'account.analytic.account', { name: 'Alpha split', plan_id: planId }); db = first.db;
+  const second = create(db, 'account.analytic.account', { name: 'Beta split', plan_id: planId }); db = second.db;
   const line = { account_id: byType(db, 'income').id, debit: 0, credit: 100, analytic_distribution: { [first.id]: 60, [second.id]: 40 } };
 
   assert.equal(filterByAnalytic([line], [first.id])[0].credit, 60);
@@ -68,7 +69,7 @@ test('Qodo 16: analytic report filter scales split allocations', () => {
 
 test('Qodo 17: cash flow page has no horizontal balance sheet group path', async () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Cash flow group account' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Cash flow group account', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   db = create(db, 'account.report.horizontal.group', {
     name: 'Cash flow comparison group', company_id: 1, rule_ids: [{ field: 'analytic', ids: String(analytic.id) }],
   }).db;
@@ -86,7 +87,7 @@ test('Qodo 17: cash flow page has no horizontal balance sheet group path', async
 
 test('Qodo 38: zero analytic actuals skip foreign currency conversion', () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Zero foreign actual' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Zero foreign actual', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const foreign = create(db, 'res.currency', { name: 'Unrated test currency', rounding: 0.01, rate_ids: [] }); db = foreign.db;
   const company = createCompany(db, { name: 'Unrated foreign branch', ...invoiceJournalDefaults(db), currency_id: foreign.id }); db = company.db;
   db = appendRecord(db, 'account.analytic.line', {
@@ -138,7 +139,7 @@ test('Qodo 55: legacy budget requires and accepts an explicit company selection'
 
 test('Qodo 56: budget commitments resolve explicit purchase distribution models', () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Modelled purchase' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Modelled purchase', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const model = create(db, 'account.analytic.distribution.model', {
     product_id: 5, company_id: 1, analytic_distribution: { [analytic.id]: 100 },
   }); db = model.db;
@@ -158,7 +159,7 @@ test('Qodo 56: budget commitments resolve explicit purchase distribution models'
 
 test('Qodo 57: one unlinked posted bill line does not abort other budget rows', async () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Unlinked purchase' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Unlinked purchase', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const order = create(db, 'purchase.order', {
     state: 'purchase', partner_id: 2, company_id: 1, date_order: '2026-06-10',
     order_line: [{ purchase_line_key: 'known-line', product_id: 5, qty: 1, price_unit: 100, tax: 0, analytic_distribution: { [analytic.id]: 100 } }],
@@ -221,8 +222,9 @@ test('Qodo 58: journal reconciliation finds statement matches through the indexe
 
 test('Qodo 59: analytic cash flow restores an untagged cash counterpart at the allocated share', () => {
   let db = seed();
-  const first = create(db, 'account.analytic.account', { name: 'Cash flow alpha' }); db = first.db;
-  const second = create(db, 'account.analytic.account', { name: 'Cash flow beta' }); db = second.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const first = create(db, 'account.analytic.account', { name: 'Cash flow alpha', plan_id: planId }); db = first.db;
+  const second = create(db, 'account.analytic.account', { name: 'Cash flow beta', plan_id: planId }); db = second.db;
   const cash = byType(db, 'asset_cash');
   const expense = byType(db, 'expense');
   db = postEntry(db, { journal: 'MISC', date: '2040-07-31', lines: [
@@ -242,8 +244,9 @@ test('Qodo 59: analytic cash flow restores an untagged cash counterpart at the a
 
 test('Qodo 60: horizontal partner columns retain the selected analytic account filter', () => {
   let db = seed();
-  const first = create(db, 'account.analytic.account', { name: 'Grouped alpha' }); db = first.db;
-  const second = create(db, 'account.analytic.account', { name: 'Grouped beta' }); db = second.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const first = create(db, 'account.analytic.account', { name: 'Grouped alpha', plan_id: planId }); db = first.db;
+  const second = create(db, 'account.analytic.account', { name: 'Grouped beta', plan_id: planId }); db = second.db;
   const cash = byType(db, 'asset_cash');
   const income = byType(db, 'income');
   db = postEntry(db, { journal: 'MISC', date: '2040-09-10', lines: [
@@ -278,8 +281,9 @@ test('Qodo 60: horizontal partner columns retain the selected analytic account f
 
 test('Qodo 61: an advance for another analytic account does not enter filtered cash flow', () => {
   let db = seed();
-  const selected = create(db, 'account.analytic.account', { name: 'Selected advance scope' }); db = selected.db;
-  const assignedElsewhere = create(db, 'account.analytic.account', { name: 'Other advance scope' }); db = assignedElsewhere.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const selected = create(db, 'account.analytic.account', { name: 'Selected advance scope', plan_id: planId }); db = selected.db;
+  const assignedElsewhere = create(db, 'account.analytic.account', { name: 'Other advance scope', plan_id: planId }); db = assignedElsewhere.db;
   const journal = search(db, 'account.journal').find((item) => item.code === 'MISC');
   const cash = byType(db, 'asset_cash');
   const payable = byType(db, 'liability_payable');

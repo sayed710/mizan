@@ -93,7 +93,7 @@ test('ANI-1 accounting analytic views are distinct from the timesheet leaf', () 
 });
 
 test('ANI-2 manual amounts can be changed through sync while generated amounts cannot', () => {
-  const a = create(seed(), 'account.analytic.account', { name: 'Analytic' });
+  const a = create(seed(), 'account.analytic.account', { plan_id: 1, name: 'Analytic' });
   const manual = create(a.db, model, { name: 'Manual', category: 'other', account_id: a.id, amount: 10 });
   assert.equal(models[model].fields.amount.readonly(read(manual.db, model, manual.id)), false);
   const staged = write(manual.db, model, manual.id, { amount: 35 });
@@ -122,13 +122,13 @@ test('ANI-3 migration resolves exact company codes and reports unmatched or ambi
   ];
   const old = { ...base, schema_version: 67, records: { ...base.records, 'account.account': [...base.records['account.account'], ...accounts], [model]: lines } };
   const db = migrate(old);
-  assert.equal(SCHEMA_VERSION, 75);
+  assert.equal(SCHEMA_VERSION, 76);
   assert.deepEqual(db.records[model].map((r) => r.general_account), [7001, 7002, null, null]);
   assert.deepEqual(db.records[model].slice(2).map((r) => r.legacy_general_account), ['UNKNOWN', 'DUP']);
   assert.equal(db.messages.filter((m) => m.model === model && [8003, 8004].includes(m.res_id)).length, 2);
   assert.equal(migrate(db), db);
   assert.equal(models[model].fields.general_account.relation, 'account.account');
-  const analytic = create(seed(), 'account.analytic.account', { name: 'Manual' });
+  const analytic = create(seed(), 'account.analytic.account', { plan_id: 1, name: 'Manual' });
   const line = create(analytic.db, model, { name: 'Manual', category: 'other', account_id: analytic.id });
   const foreign = { ...line.db, records: { ...line.db.records, 'account.account': [...line.db.records['account.account'], accounts[1]] } };
   const invalid = force(foreign, line.id, { general_account: 7002 });
@@ -161,7 +161,7 @@ test('ANI-4 accounting analytic-items form renders chatter with migration repair
 });
 
 test('ANI-5 validated timesheet opened via accounting analytic-items is locked and offers Reset to Draft', async () => {
-  const analytic = create(seed(), 'account.analytic.account', { name: 'Timesheet Analytic' });
+  const analytic = create(seed(), 'account.analytic.account', { plan_id: 1, name: 'Timesheet Analytic' });
   const ts = create(analytic.db, model, {
     name: 'Dev work',
     category: 'timesheet',
@@ -207,7 +207,7 @@ test('ANI-6 accounting analytic-items form renders and edits employee_id, projec
     return acc;
   };
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Delivery Analytic' });
+  const analytic = create(db, 'account.analytic.account', { plan_id: search(db, 'account.analytic.plan')[0].id, name: 'Delivery Analytic' });
   db = analytic.db;
   const emp1 = create(db, 'hr.employee', { name: 'Emp One' });
   db = emp1.db;
