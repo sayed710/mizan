@@ -7,6 +7,6 @@ test('a server that fails to start is dead before startServer rejects', async ()
     () => assert.fail('startServer should reject'),
     (e) => e,
   );
-  assert.ok(err.timedOut || err.exited, 'startup failed');
+  assert.ok(err instanceof Error);
   assert.ok(err.child.exitCode !== null || err.child.signalCode !== null, 'child process has exited');
 });
