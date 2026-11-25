@@ -3924,6 +3924,7 @@ const ar = {
   'Configure the deferred expense account on the company': 'حدّد حساب المصروفات المؤجلة على الشركة',
   'Configure the recognition account on the source line': 'حدّد حساب الاعتراف على البند المصدر',
   'Saving...': 'جارٍ الحفظ...',
+  Empty: 'فارغ',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

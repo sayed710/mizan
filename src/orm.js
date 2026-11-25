@@ -591,6 +591,7 @@ export function matches(db, model, rec, terms, searchFields = null) {
           .join(' ');
       }
       if (f.type === 'tags') return (rec[k] ?? []).join(' ');
+      if (explicitSearch && (f.type === 'date' || f.type === 'datetime')) return String(rec[k] ?? '');
       if (explicitSearch && ['monetary', 'float', 'integer'].includes(f.type)) {
         const val = f.compute ? f.compute(rec, db) : rec[k];
         if (val == null || val === '') return '';
