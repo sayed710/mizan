@@ -1,8 +1,16 @@
 import { create, read, write } from '../orm.js';
-import { today } from './common.js';
+import { commercialPartnerId, today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
 import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
+
+/** Mark a commercial partner as a customer or vendor. Sets the rank to 1 only when it is 0 (activity flag), so concurrent postings never write conflicting ranks. */
+export function incrementPartnerRank(db, partnerId, field) {
+  const id = commercialPartnerId(db, partnerId);
+  const partner = id == null ? null : read(db, 'res.partner', id);
+  if (!partner || (Number(partner[field]) || 0) > 0) return db;
+  return { ...db, records: { ...db.records, 'res.partner': db.records['res.partner'].map((row) => row.id === id ? { ...row, [field]: 1 } : row) } };
+}
 
 export function isRotting(db, model, r) {
   if (!r) return false;
@@ -112,6 +120,8 @@ export const crmModels = {
     label: 'Contacts',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      customer_rank: { type: 'integer', label: 'Customer Rank', readonly: true },
+      supplier_rank: { type: 'integer', label: 'Vendor Rank', readonly: true },
       is_company: { type: 'boolean', label: 'Company' },
       parent_id: { type: 'many2one', relation: 'res.partner', label: 'Parent Contact', hidden: true },
       email: { type: 'char', label: 'Email' },
@@ -200,7 +210,7 @@ export const crmModels = {
         },
       },
     },
-    defaults: () => ({ tag_ids: [], followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
+    defaults: () => ({ tag_ids: [], customer_rank: 0, supplier_rank: 0, followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
     onchange: (r, key, db) => {
       if (key === 'use_partner_credit_limit') {
         const comp = db ? read(db, 'res.company', db.settings?.current_company_id ?? 1) : null;
@@ -255,6 +265,8 @@ export const crmModels = {
     },
     onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
+      { id: 'customers', label: 'Customers', fn: (r) => (r.customer_rank ?? 0) > 0 },
+      { id: 'vendors', label: 'Vendors', fn: (r) => (r.supplier_rank ?? 0) > 0 },
       { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
       { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
     ]],
