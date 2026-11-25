@@ -3823,6 +3823,8 @@ const ar = {
   'Margin': 'الهامش',
   'Invoice Number': 'رقم الفاتورة',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
+  'As of Date is required': 'حقل حتى تاريخ مطلوب',
+  'Enter a valid As of Date': 'أدخل تاريخاً صالحاً لحقل حتى تاريخ',
   'Enter a From date': 'أدخل تاريخ البداية',
   'Enter both From and To dates': 'أدخل تاريخَي البداية والنهاية',
   'Enter a To date': 'أدخل تاريخ النهاية',
