@@ -56,7 +56,14 @@ export async function startServer({ env = process.env, preload, timeoutMs = DEFA
   let closed = false;
   child.once('close', () => { closed = true; });
 
-  const origin = await new Promise((resolve, reject) => {
+  const origin = await waitForListening().catch(async (err) => {
+    // Never hand back a failed start while the process may still hold the caller's temp directory.
+    await stopChild(child, () => closed);
+    err.child = child;
+    throw err;
+  });
+
+  function waitForListening() { return new Promise((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
       clearTimeout(timeout);
@@ -103,7 +110,7 @@ export async function startServer({ env = process.env, preload, timeoutMs = DEFA
     child.stderr.on('data', onStderr);
     child.once('error', onError);
     child.once('exit', onExit);
-  });
+  }); }
 
   return {
     child,
