@@ -39,6 +39,8 @@ function normCell(v) {
 
 function setupDownloadSpy(makeEl) {
   const downloads = [];
+  const blobsByUrl = new Map();
+  let urlSeq = 0;
   const origCreateElement = globalThis.document.createElement;
   const origCreateElementNS = globalThis.document.createElementNS;
   const origCreateUrl = URL.createObjectURL;
@@ -52,19 +54,25 @@ function setupDownloadSpy(makeEl) {
       origSetAttr(name, value);
       if (name === 'colspan' || name === 'colSpan') el.colSpan = Number(value);
       if (name === 'rowspan' || name === 'rowSpan') el.rowSpan = Number(value);
+      if (name === 'href') el.href = String(value);
+      if (name === 'download') el.download = String(value);
     };
     el.click = () => {
       if (tag.toLowerCase() === 'a') {
-        downloads.push({ filename: el.download, blob: el._blob ?? downloads.at(-1)?.blob });
+        const blob = blobsByUrl.get(el.href);
+        if (blob) downloads.push({ filename: el.download ?? null, href: el.href, blob });
       }
     };
     return el;
   };
   URL.createObjectURL = (blob) => {
-    downloads.push({ filename: null, blob });
-    return 'blob:test';
+    const url = `blob:test-${++urlSeq}`;
+    blobsByUrl.set(url, blob);
+    return url;
   };
-  URL.revokeObjectURL = () => {};
+  URL.revokeObjectURL = (url) => {
+    blobsByUrl.delete(url);
+  };
 
   const takeLast = async () => {
     const entry = downloads.pop();
@@ -278,16 +286,31 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
     assert.ok(csvBtn, 'List view renders CSV Export button');
     assert.ok(xlsxBtn, 'List view renders Export XLSX button');
 
+    const expectedHeaders = ['Number', 'Partner', 'Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status'];
+    const expectedInv1 = ['INV-EXP2-001', 1, 'Jun 1, 2026', '', 500, 500, 500, 'Draft'];
+    const expectedInv2 = ['INV-EXP2-002', 1, 'Jun 2, 2026', '', 400, 400, 400, 'Draft'];
+    const expectedMoveCount = search(db, 'account.move').filter((m) => (m.company_id ?? 1) === 1).length;
+
     await React.act(async () => props(csvBtn).onClick());
     const csvAll = await spy.takeLast();
+    assert.ok(csvAll, 'Unselected CSV download captured');
     assert.equal(csvAll.filename, 'account.move.csv');
     const csvAllRows = fromCsv(await csvAll.text());
+    assert.deepEqual(csvAllRows[0], expectedHeaders);
+    assert.equal(csvAllRows.length, expectedMoveCount + 1, 'Unselected CSV exports header + all company moves');
+    assert.deepEqual(csvAllRows.find((r) => r[0] === 'INV-EXP2-001')?.map(normCell), expectedInv1);
+    assert.deepEqual(csvAllRows.find((r) => r[0] === 'INV-EXP2-002')?.map(normCell), expectedInv2);
 
     await React.act(async () => props(xlsxBtn).onClick());
     const xlsxAll = await spy.takeLast();
+    assert.ok(xlsxAll, 'Unselected XLSX download captured');
     assert.equal(xlsxAll.filename, 'account.move.xlsx');
     assert.equal(xlsxAll.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     const parsedAll = readXlsx(xlsxAll.bytes);
+    assert.deepEqual(parsedAll.rows[0], expectedHeaders);
+    assert.equal(parsedAll.rows.length, expectedMoveCount + 1, 'Unselected XLSX exports header + all company moves');
+    assert.deepEqual(parsedAll.rows.find((r) => r[0] === 'INV-EXP2-001')?.map(normCell), expectedInv1);
+    assert.deepEqual(parsedAll.rows.find((r) => r[0] === 'INV-EXP2-002')?.map(normCell), expectedInv2);
     assert.equal(parsedAll.rows.length, csvAllRows.length);
     for (let i = 0; i < csvAllRows.length; i += 1) {
       assert.deepEqual(parsedAll.rows[i].map(normCell), csvAllRows[i].map(normCell));
@@ -299,15 +322,25 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
 
     await React.act(async () => props(csvBtn).onClick());
     const csvSel = await spy.takeLast();
+    assert.ok(csvSel, 'Selected CSV download captured');
+    assert.equal(csvSel.filename, 'account.move.csv');
     const csvSelRows = fromCsv(await csvSel.text());
-    assert.equal(csvSelRows.length, 2);
+    assert.equal(csvSelRows.length, 2, 'Selected CSV export includes header + 1 selected row');
+    assert.deepEqual(csvSelRows[0], expectedHeaders);
+    assert.deepEqual(csvSelRows[1].map(normCell), expectedInv2);
+    assert.equal(csvSelRows.some((r) => r[0] === 'INV-EXP2-001'), false, 'Selected CSV excludes unselected invoice');
 
     await React.act(async () => props(xlsxBtn).onClick());
     const xlsxSel = await spy.takeLast();
+    assert.ok(xlsxSel, 'Selected XLSX download captured');
+    assert.equal(xlsxSel.filename, 'account.move.xlsx');
+    assert.equal(xlsxSel.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     const parsedSel = readXlsx(xlsxSel.bytes);
     assert.equal(parsedSel.rows.length, 2, 'Selected XLSX export includes header + 1 selected row');
+    assert.deepEqual(parsedSel.rows[0], expectedHeaders);
+    assert.deepEqual(parsedSel.rows[1].map(normCell), expectedInv2);
+    assert.equal(parsedSel.rows.some((r) => r[0] === 'INV-EXP2-001'), false, 'Selected XLSX excludes unselected invoice');
     assert.deepEqual(parsedSel.rows[1].map(normCell), csvSelRows[1].map(normCell));
-    assert.ok(parsedSel.rows[1].includes('INV-EXP2-002'));
 
     // Non-list views (e.g. kanban) do not render list export buttons.
     await React.act(async () => {
@@ -320,6 +353,44 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
     assert.equal(find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export XLSX')), null);
   } finally {
     await React.act(async () => root.unmount());
+    spy.restore();
+  }
+});
+
+test('EXP-2 download spy: records downloads only when anchor href resolves to an active tracked blob URL', async () => {
+  const { makeEl } = setupDom();
+  const spy = setupDownloadSpy(makeEl);
+  try {
+    const url = URL.createObjectURL(new Blob(['valid-payload'], { type: 'text/plain' }));
+
+    // Missing href must not be recorded even though a blob was created.
+    const missingHref = globalThis.document.createElement('a');
+    missingHref.download = 'broken.txt';
+    missingHref.click();
+    assert.equal(await spy.takeLast(), null, 'Click without href is not recorded');
+
+    // Wrong href must not fall back to the most recently created blob.
+    const wrongHref = globalThis.document.createElement('a');
+    wrongHref.href = 'blob:unrelated';
+    wrongHref.download = 'wrong.txt';
+    wrongHref.click();
+    assert.equal(await spy.takeLast(), null, 'Click with untracked href is not recorded');
+
+    // Valid tracked href records the matching blob.
+    const validLink = globalThis.document.createElement('a');
+    validLink.href = url;
+    validLink.download = 'good.txt';
+    validLink.click();
+    const captured = await spy.takeLast();
+    assert.ok(captured, 'Click with tracked blob URL is recorded');
+    assert.equal(captured.filename, 'good.txt');
+    assert.equal(await captured.text(), 'valid-payload');
+
+    // Clicking after URL revocation must not resolve to the revoked blob.
+    URL.revokeObjectURL(url);
+    validLink.click();
+    assert.equal(await spy.takeLast(), null, 'Click after revokeObjectURL is not recorded');
+  } finally {
     spy.restore();
   }
 });
