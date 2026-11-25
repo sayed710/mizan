@@ -1,12 +1,15 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
+import { currentCompany } from './company.js';
+import { distributionModelCompanyError } from './analyticplus.js';
 import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { statementHasReconciledLines } from './bankstatement.js';
 import { recordLockDate } from './finance.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
-import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
 
 export { sameCommercialPartner } from './common.js';
 
@@ -369,9 +372,9 @@ export function counterpartTaxLines(db, {
 function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
   const company = line.company_id ?? 1;
-  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
-  const foreign = journalCurrency && journalCurrency !== companyCurrencyRecord(db, company)?.id;
-  const currency = read(db, 'res.currency', journalCurrency);
+  const lineCurrencyId = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const foreign = lineCurrencyId && lineCurrencyId !== companyCurrencyRecord(db, company)?.id;
+  const currency = read(db, 'res.currency', lineCurrencyId);
   const balance = line.open_amount != null
     ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency)
     : roundCurrency(Math.abs(line.amount), currency);
@@ -398,7 +401,7 @@ function writeOff(db, rule, line) {
   const side = (value, debit, extra = {}) => ({
     ...extra,
     [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency),
-    ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}),
+    ...(foreign ? { currency_id: lineCurrencyId, amount_currency: (debit ? 1 : -1) * value } : {}),
   });
   const items = counterparts.flatMap((l) => {
     const sameAsCounterpart = l.value > 0;
@@ -409,7 +412,7 @@ function writeOff(db, rule, line) {
       account_id: l.account_id,
       incoming: sameAsCounterpart ? incoming : !incoming,
       currency,
-      foreignCurrency: foreign ? journalCurrency : null,
+      foreignCurrency: foreign ? lineCurrencyId : null,
       companyValue,
       balance,
       date: line.date,
@@ -452,7 +455,7 @@ function writeOff(db, rule, line) {
       account: bookedBank.suspense,
       partner_id,
       [incoming ? 'debit' : 'credit']: counterpartTotal,
-      ...(foreign ? { currency_id: journalCurrency, amount_currency: -itemCurrency } : {}),
+      ...(foreign ? { currency_id: lineCurrencyId, amount_currency: -itemCurrency } : {}),
     }, ...items];
   }
   const { db: booked, id } = postEntry(current, {
@@ -553,6 +556,10 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 /** Apply the first configured partner mapping before evaluating reconciliation rules. */
 export function mapStatementPartner(db, line) {
   if (!line || line.partner_id || line.state === 'reconciled') return db;
+  if (line.statement_id) {
+    const stmt = read(db, 'account.bank.statement', line.statement_id);
+    if (stmt?.state === 'closed' || statementHasReconciledLines(db, line.statement_id)) return db;
+  }
   if (line.bank_move_id || line.move_id) {
     const lock = recordLockDate(db, line);
     if (lock && String(line.date ?? today()) <= lock) return db;
@@ -604,7 +611,19 @@ export function suggestRule(db, line) {
   return activeRules(db).find((r) => ruleMatches(r, line)) ?? null;
 }
 
-function guardReconcileModel(db, _before, rule) {
+function guardReconcileModel(db, before, rule) {
+  if (!rule.company_id) {
+    return 'Company is required';
+  }
+  if (before?.company_id && rule.company_id !== before.company_id) {
+    return 'Company cannot be changed once assigned';
+  }
+  for (const journalId of rule.match_journal_ids ?? []) {
+    const journal = read(db, 'account.journal', journalId);
+    if (!journal || (journal.company_id && journal.company_id !== rule.company_id)) {
+      return 'Journals in the reconciliation model must belong to the model company';
+    }
+  }
   if (['greater', 'between'].includes(rule.match_amount) && isBlank(rule.match_amount_min)) {
     return 'Minimum amount is required for the selected amount condition';
   }
@@ -623,7 +642,7 @@ function guardReconcileModel(db, _before, rule) {
     }
     if (mapping.partner_id) {
       const partner = read(db, 'res.partner', mapping.partner_id);
-      if (!partner || partner.active === false || (rule.company_id && partner.company_id && partner.company_id !== rule.company_id)) {
+      if (!partner || partner.active === false || (partner.company_id && partner.company_id !== rule.company_id)) {
         return 'Partner in partner mapping must belong to the model company';
       }
     }
@@ -638,21 +657,30 @@ function guardReconcileModel(db, _before, rule) {
     if (!line.account_id && !line.partner_id && !line.account_code) {
       return 'Each counterpart item requires an account unless a partner is set';
     }
+    if (line.partner_id) {
+      const partner = read(db, 'res.partner', line.partner_id);
+      if (!partner || partner.active === false || (partner.company_id && partner.company_id !== rule.company_id)) {
+        return 'Partner in counterpart item must belong to the model company';
+      }
+    }
     if (line.account_id) {
       const account = read(db, 'account.account', line.account_id);
-      if (!account || account.active === false || (account.company_id && account.company_id !== (rule.company_id ?? 1))) {
+      if (!account || account.active === false || (account.company_id && account.company_id !== rule.company_id)) {
         return 'Reconciliation accounts must be active and belong to the model company';
       }
     }
-    if (line.analytic_distribution && typeof line.analytic_distribution === 'object') {
-      const modelCompany = rule.company_id ?? 1;
-      for (const id of Object.keys(line.analytic_distribution)) {
-        const analytic = read(db, 'account.analytic.account', Number(id));
-        if (analytic?.company_id && analytic.company_id !== modelCompany) {
-          return 'Analytic accounts in the distribution must belong to the model company';
-        }
+    if (Array.isArray(line.tax_ids) && line.tax_ids.length) {
+      try {
+        validateTaxCompany(db, line.tax_ids, rule.company_id);
+      } catch (error) {
+        return error.message;
       }
     }
+    const analyticErr = distributionModelCompanyError(db, {
+      company_id: rule.company_id,
+      analytic_distribution: line.analytic_distribution,
+    });
+    if (analyticErr) return analyticErr;
     const isPartnerMappingOnly = !line.account_id && !line.account_code && Boolean(line.partner_id) && line.amount_string == null && line.amount == null;
     if (isPartnerMappingOnly) continue;
     const type = line.amount_type || 'percentage';
@@ -675,7 +703,16 @@ export const reconcileModels = {
     label: 'Reconciliation Models',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      company_id: {
+        type: 'many2one',
+        relation: 'res.company',
+        label: 'Company',
+        required: true,
+        copy: false,
+        readonly: (r, _db, { isNew, stored } = {}) => Boolean(isNew || (stored ? stored.company_id : r?.company_id)),
+        default: (db) => currentCompany(db),
+        multiCompanyOnly: true,
+      },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       trigger: {
         type: 'selection',
@@ -737,8 +774,8 @@ export const reconcileModels = {
         label: 'Counterpart Items',
         fields: {
           sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
-          partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
-          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
+          partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', domain: (p, r) => p.active !== false && (!r?.company_id || !p.company_id || p.company_id === r.company_id) },
+          account_id: { type: 'many2one', relation: 'account.account', label: 'Account', domain: (a, r) => a.active !== false && (!r?.company_id || !a.company_id || a.company_id === r.company_id) },
           amount_type: {
             type: 'selection',
             label: 'Amount Type',
@@ -751,7 +788,7 @@ export const reconcileModels = {
           },
           amount_string: { type: 'char', label: 'Amount' },
           amount: { type: 'float', label: 'Numeric Amount', hidden: true },
-          tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', optional: 'hide' },
+          tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', optional: 'hide', domain: (t, r) => t.active !== false && (!r?.company_id || !t.company_id || t.company_id === r.company_id) },
           analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
           label: { type: 'char', label: 'Label' },
         },
@@ -796,6 +833,7 @@ export const reconcileModels = {
       active: true,
       line_ids: [],
     }),
+    createDefaults: (db) => ({ company_id: currentCompany(db) }),
     prepareCreate: (db, vals) => ({ db, vals: normalizeReconcileRule(vals) }),
     guard: guardReconcileModel,
     onWrite: (db, after) => {
@@ -809,7 +847,7 @@ export const reconcileModels = {
         },
       };
     },
-    list: ['sequence', 'name', 'trigger', 'match_journal_ids'],
+    list: ['sequence', 'name', 'trigger', 'match_journal_ids', 'company_id'],
     filters: [
       [
         { id: 'created_by_user', label: 'Created by User', fn: (r) => !r.created_automatically },
@@ -838,6 +876,7 @@ export const reconcileModels = {
           'match_partner_ids',
           'sequence',
           'active',
+          'company_id',
         ],
         [
           'match_amount',

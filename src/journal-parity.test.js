@@ -456,7 +456,7 @@ test('account.journal list columns, search filters, sequence ordering, and per-t
   const fields = def.fields;
 
   // List columns & labels & type selection order
-  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id']);
+  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id']);
   assert.equal(fields.sequence.widget, 'handle');
   assert.equal(fields.name.label, 'Journal');
   assert.equal(fields.active.optional, 'hide');

@@ -1,19 +1,21 @@
+import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
+import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
-import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxSnapshot, validateTaxCompany } from './taxes.js';
-import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
+import { accountDefaultTaxIds, accountTax, cashBasisTransitionAccount, cashBasisGroups, computeLineTaxes, entryTaxRepartitionSide, expandTaxIds, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, lineTaxIds, mapAccount, productTax, replaceTaxSnapshot, resolveLineTaxes, sameTaxIds, taxBaseTags, taxLabel, taxRepartitionSplits, taxRowsFactor, taxSnapshot, validateTaxCompany } from './taxes.js';
+import { discountTaxComputation, dueDate, earlyDiscount, mixedDiscountFactor } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic, syncDeferredAnalyticDistribution } from './analyticplus.js';
 import { billableLines, checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
-import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, isCurrencyZero, roundCurrency, round as round2 } from '../money.js';
 import { hasMultiCurrency } from './money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
@@ -53,12 +55,7 @@ function invoiceCompanyDefaults(db, move, previous, context = {}) {
   const termsEligible = ['out_invoice', 'out_refund'].includes(move.move_type);
   const result = {};
 
-  const isEdited = (field) => {
-    if (!context?.editedFields) return false;
-    if (context.editedFields instanceof Set) return context.editedFields.has(field);
-    if (Array.isArray(context.editedFields)) return context.editedFields.includes(field);
-    return Object.hasOwn(context.editedFields, field);
-  };
+  const isEdited = (field) => isFieldEdited(field, context);
 
   const oldTerms = oldCompany?.use_invoice_terms ? (oldCompany.invoice_terms ?? '') : null;
   const termsUntouched = context?.editedFields ? !isEdited('narration') : (move.narration === undefined || (previous && oldTerms !== null && move.narration === oldTerms));
@@ -91,6 +88,9 @@ function accountTypeGuard(db, before, after) {
 }
 
 function accountCodeGuard(db, before, after) {
+  if (after.code && /[^A-Za-z0-9.-]/.test(after.code)) {
+    return `The account code can only contain alphanumeric characters, dots, and dashes. (account code: ${after.code})`;
+  }
   const codeOrCompanyChanged = !before || before.code !== after.code || (before.company_id ?? null) !== (after.company_id ?? null);
   if (codeOrCompanyChanged && (db.records['account.account'] ?? []).some((account) => account.id !== after.id
     && account.code === after.code && (account.company_id ?? null) === (after.company_id ?? null))) {
@@ -395,6 +395,8 @@ export function paymentGuard(db, before, after, ctx) {
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
   if (leavesPosted && before.move_type === 'in_invoice' && (db.records['account.asset'] ?? []).some((asset) => asset.bill_id === before.id
     && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the bill\'s running or depreciated assets before resetting it';
+  if (leavesPosted && (db.records['account.asset'] ?? []).some((asset) => asset.source_move_id === before.id
+    && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the entry\'s running or depreciated assets before resetting it';
   // A posted credit may have enabled an advance; resetting it must not undo that protection.
   if (leavesPosted && before.move_type === 'out_refund' && before.sale_id) {
     const order = read(db, 'sale.order', before.sale_id);
@@ -876,6 +878,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
         : {});
   const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
   let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  if (r.move_type === 'out_invoice' || r.move_type === 'in_invoice') posted = incrementPartnerRank(posted, r.partner_id, r.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -1029,32 +1032,20 @@ function offsetCreditNote(db, noteId) {
 }
 
 /** Bill lines booked on an account configured to create assets generate draft or validated assets (once per bill line). */
-function draftAssetsFromBill(db, bill) {
-  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
-  const existing = billAssets.filter((a) => a.state === 'draft');
-  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
-  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
-  const retained = new Set();
-  // Without a model journal, assets use the company's configured general journal.
-  const defaultJournal = read(db, 'res.company', bill.company_id ?? 1)?.default_general_journal_id ?? null;
-  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
-    const booked = postedBillLine(bill, index);
-    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
-    const account = read(next, 'account.account', booked.account);
-    const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
-    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
-    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
-    if (mode === 'no') return next;
-    const modelJournal = model?.journal_id && read(next, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
-    const product = read(next, 'product', line.product_id);
-    const acquisitionDate = bill.invoice_date ?? today();
-    const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
-    const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
-    const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
-    const values = {
-      name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: acquisitionDate,
-      partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-      account_asset_id: booked.account,
+export function assetDraftValues(db, move, line, { amount, accountId, date }) {
+  const account = read(db, 'account.account', accountId);
+  const model = account?.asset_model_id ? read(db, 'account.asset.model', account.asset_model_id) : null;
+  const defaultJournal = read(db, 'res.company', move.company_id ?? 1)?.default_general_journal_id ?? null;
+  const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
+  const product = read(db, 'product', line.product_id);
+  const acquisitionDate = date;
+  const modelComputation = model ? assetProrataComputation(model) : ASSET_DEPRECIATION_DEFAULTS.prorata_computation_type;
+  const modelPeriod = model ? (model.method_period ?? '12') : ASSET_DEPRECIATION_DEFAULTS.method_period;
+  const modelNumber = model ? (model.method_number ?? 5) : ASSET_DEPRECIATION_DEFAULTS.method_number;
+  return {
+      name: line.name || product?.name || move.name, original_value: amount, acquisition_date: date,
+      partner_id: line.partner_id ?? move.partner_id ?? null, company_id: move.company_id ?? 1,
+      account_asset_id: accountId,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
@@ -1080,6 +1071,23 @@ function draftAssetsFromBill(db, bill) {
         analytic_distribution: null,
       }),
     };
+}
+
+function draftAssetsFromBill(db, bill) {
+  const billAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id);
+  const existing = billAssets.filter((a) => a.state === 'draft');
+  // A line whose asset was already confirmed keeps it; reposting must not create a second one.
+  const confirmedLines = new Set(billAssets.filter((a) => a.state !== 'draft').map((a) => a.bill_line));
+  const retained = new Set();
+  // Without a model journal, assets use the company's configured general journal.
+  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
+    const booked = postedBillLine(bill, index);
+    if (!booked || booked.amount === 0 || confirmedLines.has(index)) return next;
+    const account = read(next, 'account.account', booked.account);
+    // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
+    const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
+    if (mode === 'no') return next;
+    const values = { ...assetDraftValues(next, bill, { ...line, partner_id: bill.partner_id }, { amount: booked.amount, accountId: booked.account, date: bill.invoice_date ?? today() }), bill_id: bill.id, bill_line: index };
     const asset = existing.find((a) => a.bill_line === index);
     let assetId;
     let nextDb;
@@ -1979,7 +1987,12 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 
 const invoiceLineField = {
   ...invoiceLineBase,
-  newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
+  newLine: (move, db) => {
+    const baseLine = (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db);
+    const mismatch = move && db ? quickEditMismatch(db, move) : null;
+    if (!mismatch) return baseLine;
+    return { ...baseLine, price_unit: quickEditLinePriceUnit(db, move, baseLine, mismatch.remaining, mismatch.docCurr) };
+  },
   onchange: (line, key, db, move, context = {}) => {
     const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: resolveDocumentJournal(db, move)?.id } : move);
     const base = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
@@ -2638,6 +2651,97 @@ function unbalancedEntryWarning(db, r) {
   return t('Journal entry is not balanced: total debit must equal total credit.');
 }
 
+/** Whether Quick Encoding applies to `r` under its company's `quick_edit_mode` (draft covered invoices/bills only). */
+export function isQuickEditEnabled(r, db) {
+  if (!r || !isInvoice(r) || (r.state && r.state !== 'draft') || !db) return false;
+  const companyId = r.company_id ?? currentCompany(db);
+  const mode = read(db, 'res.company', companyId)?.quick_edit_mode;
+  if (mode === 'out_invoices') return ['out_invoice', 'out_refund'].includes(r.move_type);
+  if (mode === 'in_invoices') return ['in_invoice', 'in_refund'].includes(r.move_type);
+  if (mode === 'out_and_in_invoices') return true;
+  return false;
+}
+
+/** Compute quick-edit remaining amount and document currency when quick encoding is active with a non-zero target. */
+function quickEditMismatch(db, r) {
+  if (!isQuickEditEnabled(r, db)) return null;
+  const target = Number(r.quick_edit_total_amount);
+  if (r.quick_edit_total_amount == null || r.quick_edit_total_amount === '' || !Number.isFinite(target) || target === 0) return null;
+  // A company without a configured currency has no total to compare yet.
+  const docCurr = (db.records['res.currency'] ?? []).find((c) => c.id === r.currency_id) ?? findCompanyCurrencyRecord(db, r.company_id ?? null);
+  if (!docCurr) return null;
+  const currentTotal = total(r, db);
+  if (currentTotal == null) return null;
+  const expected = roundCurrency(target, docCurr);
+  const actual = roundCurrency(currentTotal, docCurr);
+  const remaining = roundCurrency(expected - actual, docCurr);
+  if (isCurrencyZero(remaining, docCurr)) return null;
+  return { docCurr, expected, actual, remaining };
+}
+
+/** Convert a tax-included remaining amount to the line's `price_unit` via `computeLineTaxes`. */
+function quickEditLinePriceUnit(db, move, line, remaining, docCurr) {
+  const specs = resolveLineTaxes(line);
+  const term = db && move?.invoice_payment_term_id ? read(db, 'account.payment.term', move.invoice_payment_term_id) : null;
+  const discountFactor = mixedDiscountFactor(term);
+  if (!specs.length || (specs.every((t) => t.tax_include) && discountFactor === 1)) {
+    return roundCurrency(remaining, docCurr);
+  }
+  const side = isRefund(move) ? 'refund' : 'invoice';
+  const roundingMethod = companyRoundingMethod(db, move?.company_id);
+  const forcedBreakdown = Array.isArray(line.tax_breakdown) && line.tax_breakdown.length
+    ? line.tax_breakdown.map((t) => ({ ...t, tax_include: true }))
+    : line.tax_breakdown;
+  const probe = {
+    ...line,
+    qty: 1,
+    price_unit: remaining,
+    discount: 0,
+    tax_include: true,
+    ...(forcedBreakdown ? { tax_breakdown: forcedBreakdown } : {}),
+  };
+  const computed = computeLineTaxes(probe, { currency: docCurr, roundingMethod, side });
+  const includedTax = specs.some((t) => t.tax_include)
+    ? computed.taxes.filter((t) => t.tax_include).reduce((s, t) => s + t.amount * taxRowsFactor(t, side), 0)
+    : 0;
+  const baseRawPrice = computed.untaxed + includedTax;
+  const effectiveTotal = discountFactor !== 1
+    ? computed.untaxed + discountFactor * computed.tax
+    : remaining;
+  const rawPrice = Math.abs(effectiveTotal) > 1e-12 && Number.isFinite(effectiveTotal)
+    ? (baseRawPrice * remaining) / effectiveTotal
+    : baseRawPrice;
+  const rounded = roundCurrency(rawPrice, docCurr);
+  const expectedTotal = roundCurrency((Number(total(move, db)) || 0) + remaining, docCurr);
+  const totalWith = (price) => total({ ...move, invoice_line_ids: [...(move.invoice_line_ids ?? []), { ...line, qty: 1, discount: 0, price_unit: price }] }, db);
+  if (totalWith(rounded) === expectedTotal) return rounded;
+  const precise = Math.round(rawPrice * 1e6) / 1e6;
+  if (totalWith(precise) === expectedTotal) return precise;
+  const step = Number(docCurr?.rounding ?? 0.01);
+  let low = rawPrice - step * 2;
+  let high = rawPrice + step * 2;
+  for (let i = 0; i < 20; i++) {
+    const mid = Math.round(((low + high) / 2) * 1e6) / 1e6;
+    const roundedMid = roundCurrency(mid, docCurr);
+    if (totalWith(roundedMid) === expectedTotal) return roundedMid;
+    const t = totalWith(mid);
+    if (t === expectedTotal) return mid;
+    if (t < expectedTotal) low = mid;
+    else high = mid;
+  }
+  return rounded;
+}
+
+/** Non-blocking form warning when Quick Encoding target differs from the computed invoice total. */
+function quickEditWarning(db, r) {
+  const mismatch = quickEditMismatch(db, r);
+  if (!mismatch) return '';
+  return t('The entered total ({entered}) does not match the computed total ({computed}).', {
+    entered: formatCurrency(mismatch.expected, mismatch.docCurr),
+    computed: formatCurrency(mismatch.actual, mismatch.docCurr),
+  });
+}
+
 /** Whether a move can be reset back to draft under Mizan's settlement, hash, bank, and lock rules. */
 function canResetMove(r, db, ctx = null) {
   if (!r || r.state === 'draft' || r.inalterable_hash || Number(r.amount_paid) > 0) return false;
@@ -3096,6 +3200,8 @@ export const accountingModels = {
 
   'account.journal': {
     label: 'Journals',
+    views: ['list', 'kanban'],
+    searchFields: ['name', 'code'],
     guard: (db, before, after, _ctx, vals) => {
       const companyId = after.company_id ?? 1;
       if (before?.id) {
@@ -3107,6 +3213,12 @@ export const accountingModels = {
           const blockedOwner = companies.find((c) => c[field] === before.id && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id)));
           if (blockedOwner) {
             return `Clear the ${label} of company ${blockedOwner.name} before archiving this journal or changing its type or company`;
+          }
+        }
+        if ((before.currency_id ?? null) !== (after.currency_id ?? null)) {
+          const statementLines = (db.records['account.bank.statement.line'] ?? []).filter((l) => l.journal_id === before.id);
+          if (statementLines.some((l) => !l.currency_id || !read(db, 'res.currency', l.currency_id))) {
+            return 'Cannot change journal currency when existing transactions cannot be safely interpreted in their original currency';
           }
         }
       }
@@ -3166,6 +3278,7 @@ export const accountingModels = {
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', optional: 'hide' },
       refund_sequence: {
         type: 'boolean', label: 'Dedicated Credit Note Sequence',
         help: 'Check this box if you don\'t want to share the same sequence for invoices and credit notes made from this journal',
@@ -3376,16 +3489,16 @@ export const accountingModels = {
     onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
     onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
-    views: ['list', 'kanban'],
-    searchFields: ['name', 'code'],
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },
       { id: 'liquidity', label: 'Liquidity', fn: (r) => isLiquidityJournal(r) },
       { id: 'miscellaneous', label: 'Miscellaneous', fn: (r) => r.type === 'general' },
+    ], [
+      { id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false },
     ]],
     kanban: { title: 'name', lines: ['code', 'type'], counter: { label: 'Entries', model: 'account.move', field: 'journal_id' } },
-    list: ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id'],
+    list: ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id'],
     form: {
       title: 'name',
       chatter: true,
@@ -3411,7 +3524,7 @@ export const accountingModels = {
           },
         },
       ],
-      smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
+      smart: [{ label: 'Journal Items', value: (db, j) => journalItems(db).filter((line) => line.journal_id === j.id).length, target: (j) => `accounting/journal-items?journal=${j.id}` }],
       groups: [['type', 'code']],
       tabs: (j) => {
         const liquidity = isLiquidityJournal(j);
@@ -3426,6 +3539,7 @@ export const accountingModels = {
         }[j.type];
         const entries = [
           { field: 'default_account_id', label: accountLabel },
+          'currency_id',
           ...(liquidity ? ['suspense_account_id'] : []),
           ...(j.type === 'purchase' ? ['non_deductible_account_id'] : []),
           ...(cashOrBank ? ['profit_account_id', 'loss_account_id'] : []),
@@ -3580,7 +3694,15 @@ export const accountingModels = {
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
       return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
-    invariant: (db, after, before, stored, ctx) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored),
+    invariant: (db, after, before, stored, ctx) => {
+      const err = secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
+      if (err) return err;
+      if (before?.state === 'posted' && after.state !== 'posted'
+        && (db.records['account.asset'] ?? []).some((a) => a.source_move_id === after.id && a.state !== 'cancel')) {
+        return "Handle the entry's draft assets before resetting it";
+      }
+      return null;
+    },
     protectDelete: (db, m, staged, ctx) => ((db.records['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) || (staged?.records?.['res.company'] ?? []).some((c) => c.account_opening_move_id === m.id) ? 'Opening entries cannot be deleted' : null) ?? moveDeleteGuard(db, m, staged, ctx) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
@@ -3594,11 +3716,20 @@ export const accountingModels = {
       if (before.state === 'posted' && after.state !== 'posted') {
         db = reverseInvoiceDeferrals(db, before);
         db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry, attemptAutoPostMove);
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === before.id && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
+        }
       }
       if (after.state === 'cancel' && before?.state !== 'cancel') {
-        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === (before?.id ?? after.id) && a.state === 'draft').map((a) => a.id);
+        const moveId = before?.id ?? after.id;
+        const draftAssets = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === moveId && a.state === 'draft').map((a) => a.id);
         if (draftAssets.length) {
           db = unlink(db, 'account.asset', draftAssets);
+        }
+        const draftSourceAssets = (db.records['account.asset'] ?? []).filter((a) => a.source_move_id === moveId && a.state === 'draft');
+        for (const asset of draftSourceAssets) {
+          db = write(db, 'account.asset', asset.id, { state: 'cancel' });
         }
       }
       if (before?.state !== after.state) {
@@ -3916,6 +4047,12 @@ export const accountingModels = {
       },
       auto_post_until: { type: 'date', label: 'Repeat Until', copy: false },
       auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
+      quick_edit_total_amount: {
+        type: 'monetary',
+        label: 'Total (Tax inc.)',
+        copy: false,
+        hideWhen: (r, db) => !isQuickEditEnabled(r, db),
+      },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
@@ -4316,10 +4453,17 @@ export const accountingModels = {
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
       banner: (r, db) => suggestBillAutopost(db, r) ? 'Automatically post future digitized bills from this vendor?' : null,
-      warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : ['in_invoice', 'in_refund'].includes(r.move_type) ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
+      warning: (r, db) => {
+        const base = r.move_type === 'out_invoice'
+          ? ((!r.state || r.state === 'draft') ? creditWarning(db, r.partner_id, total(r, db), r) : '')
+          : ['in_invoice', 'in_refund'].includes(r.move_type)
+            ? duplicateBillWarning(db, r)
+            : unbalancedEntryWarning(db, r);
+        return [base, quickEditWarning(db, r)].filter(Boolean).join(' · ') || '';
+      },
       groups: (r) => (isInvoice(r)
         ? [
-          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? ['purchase_id', { field: 'ref', label: 'Bill Reference' }] : [])],
+          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }, ...(isPurchase(r) ? ['purchase_id', { field: 'ref', label: 'Bill Reference' }] : []), 'quick_edit_total_amount'],
           [
             { field: 'invoice_date', label: isPurchase(r) ? 'Bill Date' : 'Invoice Date' },
             { label: 'Due Date', fields: ['invoice_date_due', 'invoice_payment_term_id'], join: 'or' },
@@ -4548,6 +4692,8 @@ Object.assign(accountingModels, {
   'account.account.tag': {
     label: 'Account Tags',
     guard: (db, before, after) => {
+      const countryError = countryReferenceError(db, after);
+      if (countryError) return countryError;
       if (!before || before.applicability === after.applicability) return null;
       const inAccounts = (db.records['account.account'] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id));
       const inTaxes = (db.records['account.tax'] ?? []).some((r) =>
@@ -4570,18 +4716,18 @@ Object.assign(accountingModels, {
       color: { type: 'integer', label: 'Color' },
       cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating'], ['investing', 'Investing'], ['financing', 'Financing']] },
       active: { type: 'boolean', label: 'Active', help: 'Set active to false to hide the Account Tag without removing it.' },
-      country: { type: 'char', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
+      country_id: { type: 'many2one', relation: 'res.country', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
       balance_negate: { type: 'boolean', label: 'Negate Balance' },
     },
     defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
     views: ['list'],
-    list: ['name', 'applicability', 'country', 'color'],
+    list: ['name', 'applicability', 'country_id', 'color'],
     searchFields: ['name'],
     form: {
       title: 'name',
       hideTitle: true,
       groups: (r) => [
-        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country'] : [])],
+        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country_id'] : [])],
         ['cash_flow_activity'],
       ],
     },

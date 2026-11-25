@@ -1,13 +1,14 @@
 // Fixed assets: depreciation boards and their posting.
 import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, subtotal, today, validDate } from './common.js';
-import { journalId, postEntry, reversalLine } from './ledger.js';
+import { journalId, journalItemIdentity, postEntry, reconciledJournalItems, reversalLine } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
 import { configuredAccount } from './configured-account.js';
 import { currentCompany } from './company.js';
 import { toCompany } from './currency.js';
 import { t } from '../i18n.js';
+import { assetDraftValues } from './accounting.js';
 
 /** Depreciation settings of an asset without a model. */
 export const ASSET_DEPRECIATION_DEFAULTS = {
@@ -67,6 +68,40 @@ const remainingDepreciableCents = (asset) => cents(asset.original_value)
 const isDisposedAsset = (asset) => Boolean(asset?.disposal_date || asset?.disposal_move_id);
 const hasDerivedAsset = (db, asset) => Boolean(db && search(db, 'account.asset').some((a) => a.origin_asset_id === asset.id));
 
+/** Follow parent_id up to find the root ancestor asset ID. */
+export function rootAssetId(db, assetOrId) {
+  let curr = typeof assetOrId === 'object' && assetOrId !== null ? assetOrId : (read(db, 'account.asset', assetOrId) ?? null);
+  const seen = new Set();
+  while (curr && curr.parent_id && !seen.has(curr.id)) {
+    seen.add(curr.id);
+    const parent = read(db, 'account.asset', curr.parent_id);
+    if (!parent) break;
+    curr = parent;
+  }
+  return curr?.id ?? null;
+}
+
+/** Collect all undisposed gross-increase descendants of an asset in the hierarchy. */
+export function assetDescendants(db, parentId) {
+  const result = [];
+  const queue = [parentId];
+  const allAssets = db?.records?.['account.asset'] ?? [];
+  const visited = new Set([parentId]);
+  while (queue.length > 0) {
+    const currentId = queue.shift();
+    for (const child of allAssets) {
+      if (child.parent_id === currentId && !visited.has(child.id)) {
+        visited.add(child.id);
+        queue.push(child.id);
+        if (['open', 'paused', 'close'].includes(child.state) && !isDisposedAsset(child)) {
+          result.push(child);
+        }
+      }
+    }
+  }
+  return result;
+}
+
 export function pendingScheduleValid(asset, remaining) {
   const unposted = (asset.depreciation_ids ?? []).filter((line) => !line.posted);
   const unpostedTotal = unposted.reduce((sum, line) => sum + cents(line.amount), 0);
@@ -125,6 +160,63 @@ function hasAssetReversal(db, moveId) {
     && (reversals[0].date ?? reversals[0].invoice_date) >= (source.date ?? source.invoice_date)
     && JSON.stringify((reversals[0].line_ids ?? []).map((line) => signature(line)).sort()) === JSON.stringify(expected);
 }
+const isValidFixedAssetAccount = (account, company = 1) => Boolean(
+  account && account.active !== false && (!account.company_id || account.company_id === company) && account.account_type === 'asset_fixed',
+);
+
+function requireAssetAccount(db, asset, field, label) {
+  const company = asset.company_id ?? 1;
+  const id = asset[field];
+  if (!id) throw new Error(`Configure the ${label} account on asset ${asset.name}`);
+  const acc = read(db, 'account.account', id);
+  if (!acc || acc.active === false) throw new Error(`Configure the ${label} account on asset ${asset.name}`);
+  if (acc.company_id && acc.company_id !== company) throw new Error(`${label} account ${acc.code || acc.name} belongs to another company`);
+  return acc;
+}
+
+function sourceMoveJournalItems(db, moveId) {
+  const move = moveId ? read(db, 'account.move', moveId) : null;
+  if (!move || move.state !== 'posted') return { move: null, items: [] };
+  const date = move.date ?? move.invoice_date;
+  const company_id = move.company_id ?? 1;
+  const items = reconciledJournalItems(db, move, { partialMatching: true }).map((line) => ({
+    ...line,
+    line_identity: journalItemIdentity(line),
+    move_id: move.id,
+    date,
+    company_id,
+  }));
+  return { move, items };
+}
+
+function billLineIndicesForItem(move, line) {
+  if (move?.move_type !== 'in_invoice' || !Array.isArray(line?.invoice_sources)) return new Set();
+  return new Set(line.invoice_sources.map((s) => s.index).filter(Number.isInteger));
+}
+
+export function journalItemHasAsset(db, move, line, excludeAssetId = null) {
+  if (!move || !line) return false;
+  const moveId = line.move_id ?? move.id;
+  const identity = line.line_identity ?? journalItemIdentity(line);
+  const billIndices = billLineIndicesForItem(move, line);
+  return (db.records['account.asset'] ?? []).some((other) => (
+    other.id !== excludeAssetId
+    && other.state !== 'cancel'
+    && (
+      (other.source_move_id === moveId && other.source_line_identity === identity)
+      || (billIndices.size > 0 && other.bill_id === moveId && billIndices.has(other.bill_line))
+    )
+  ));
+}
+
+export function canCreateAssetFromJournalItem(db, line, move = null) {
+  if (!line) return false;
+  const sourceMove = move ?? (line.move_id ? read(db, 'account.move', line.move_id) : null);
+  if (!sourceMove || sourceMove.state !== 'posted') return false;
+  if (cents(line.debit) - cents(line.credit) <= 0) return false;
+  if (!isValidFixedAssetAccount(read(db, 'account.account', line.account_id), sourceMove.company_id ?? 1)) return false;
+  return !journalItemHasAsset(db, sourceMove, line);
+}
 
 export function assetAccountGuard(db, _before, asset) {
   for (const field of ['account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id']) {
@@ -179,6 +271,50 @@ export function assetSaleInvoiceLineOptions(db, asset, date) {
 
 export function validateAssetIntegrity(db, before, asset, vals) {
   const company = asset.company_id ?? 1;
+  if (asset.asset_group_id) {
+    const group = read(db, 'account.asset.group', asset.asset_group_id);
+    if (!group || (group.company_id ?? 1) !== company) return 'Asset group must belong to the asset company';
+  }
+  if ((asset.activation_date || asset.activation_opening_move_id || asset.activation_value != null) && !asset.activation_move_id) return 'Invalid asset activation entries';
+  if (asset.activation_move_id && !before?.activation_move_id && before?.state !== 'open') return 'Invalid asset activation state';
+  if (before?.activation_move_id && (before.activation_move_id !== asset.activation_move_id || before.activation_opening_move_id !== asset.activation_opening_move_id || before.activation_date !== asset.activation_date || cents(before.activation_value) !== cents(asset.activation_value) || before.state !== asset.state)) return 'Asset activation cannot be changed';
+  if (before?.parent_id && before.parent_id !== asset.parent_id) return 'Asset parent cannot be changed';
+  if (before?.gross_increase_move_id && before.gross_increase_move_id !== asset.gross_increase_move_id) return 'Gross increase entry cannot be changed';
+  if (before?.origin_asset_id && (before.origin_asset_id !== asset.origin_asset_id || before.transfer_move_id !== asset.transfer_move_id)) return 'Asset transfer cannot be changed';
+  if (before?.source_move_id && (before.source_move_id !== asset.source_move_id || before.source_line_identity !== asset.source_line_identity)) return 'Asset source journal item cannot be changed';
+  const sourceSetOrReactivated = Boolean(asset.source_move_id || asset.source_line_identity) && asset.state !== 'cancel'
+    && (!before?.source_move_id || before.state === 'cancel' || (before.state === 'draft' && (asset.state !== 'draft' || ['original_value', 'account_asset_id', 'acquisition_date'].some((field) => asset[field] !== before[field]))));
+  if (sourceSetOrReactivated) {
+    if (!asset.source_move_id || !asset.source_line_identity) return 'Invalid asset source journal item';
+    const { move, items } = sourceMoveJournalItems(db, asset.source_move_id);
+    const matches = items.filter((line) => line.line_identity === asset.source_line_identity);
+    const baseOrigCents = cents(asset.original_value) - (asset.revaluation_ids ?? []).reduce((sum, item) => sum + cents(item.amount), 0);
+    if (!move || matches.length !== 1 || !isValidFixedAssetAccount(read(db, 'account.account', matches[0].account_id), company) || matches[0].company_id !== company || matches[0].account_id !== asset.account_asset_id || cents(matches[0].debit) - cents(matches[0].credit) <= 0 || cents(matches[0].debit) - cents(matches[0].credit) !== baseOrigCents || matches[0].date !== asset.acquisition_date) return 'Invalid asset source journal item';
+    if (asset.state !== 'cancel' && journalItemHasAsset(db, move, matches[0], asset.id)) return 'Journal item already has an asset';
+  }
+  if (asset.parent_id) {
+    const parent = read(db, 'account.asset', asset.parent_id);
+    const move = read(db, 'account.move', asset.gross_increase_move_id);
+    const original = cents(asset.original_value) - (asset.revaluation_ids ?? []).reduce((sum, item) => sum + cents(item.amount), 0);
+    if (!parent || parent.id === asset.id || (parent.company_id ?? 1) !== company || !move || move.state !== 'posted' || move.move_type !== 'entry' || (move.company_id ?? 1) !== company || move.date !== asset.acquisition_date || !(move.line_ids ?? []).some((line) => line.account_id === asset.account_asset_id && cents(line.debit) - cents(line.credit) === original) || (db.records['account.asset'] ?? []).some((other) => other.id !== asset.id && other.gross_increase_move_id === move.id)) return 'Invalid gross increase parent or entry';
+  }
+  if (asset.origin_asset_id) {
+    const origin = read(db, 'account.asset', asset.origin_asset_id);
+    const amount = cents(asset.original_value) - (asset.revaluation_ids ?? []).reduce((sum, item) => sum + cents(item.amount), 0);
+    const transfer = read(db, 'account.move', asset.transfer_move_id);
+    const duplicate = (db.records['account.asset'] ?? []).some((other) => other.id !== asset.id && other.state !== 'cancel' && other.origin_asset_id === asset.origin_asset_id);
+    if (duplicate) return 'Activation parent already has a child asset';
+    if (!origin || origin.id === asset.id || (origin.company_id ?? 1) !== company || !isValidFixedAssetAccount(read(db, 'account.account', asset.account_asset_id), company) || amount !== cents(origin.original_value) - cents(origin.already_depreciated) - postedCents(origin) || asset.acquisition_date < origin.acquisition_date) return 'Invalid asset transfer';
+    if (origin.account_asset_id !== asset.account_asset_id && (!transfer || transfer.state !== 'posted' || transfer.move_type !== 'entry' || (transfer.company_id ?? 1) !== company || transfer.date !== asset.acquisition_date || !(transfer.line_ids ?? []).some((line) => line.account_id === origin.account_asset_id && cents(line.credit) - cents(line.debit) === amount) || !(transfer.line_ids ?? []).some((line) => line.account_id === asset.account_asset_id && cents(line.debit) - cents(line.credit) === amount))) return 'Invalid asset transfer';
+  }
+  if (asset.activation_move_id) {
+    const close = read(db, 'account.move', asset.activation_move_id);
+    const opening = read(db, 'account.move', asset.activation_opening_move_id);
+    const amount = cents(asset.activation_value);
+    const accumulated = cents(asset.original_value) - amount;
+    const has = (move, account, side, value) => (move?.line_ids ?? []).some((line) => line.account_id === account && cents(line[side]) === value);
+    if (asset.state !== 'close' || amount <= 0 || amount !== cents(asset.original_value) - cents(asset.already_depreciated) - postedCents(asset) || !close || !opening || close.state !== 'posted' || opening.state !== 'posted' || !asset.activation_date || (asset.acquisition_date && asset.activation_date < asset.acquisition_date) || (asset.depreciation_ids ?? []).some((l) => l.posted && l.date > asset.activation_date) || (asset.revaluation_ids ?? []).some((r) => r.date > asset.activation_date) || close.date !== asset.activation_date || opening.date !== asset.activation_date || (close.company_id ?? 1) !== company || (opening.company_id ?? 1) !== company || !has(close, asset.account_asset_id, 'credit', cents(asset.original_value)) || !has(close, asset.account_asset_id, 'debit', amount) || (accumulated > 0 && !has(close, asset.account_depreciation_id, 'debit', accumulated)) || !has(opening, asset.account_asset_id, 'credit', amount)) return 'Invalid asset activation entries';
+  }
 
   // Q4: Disposal field rules and move verification
   if (before?.disposal_date && (before.refund_disposal_move_id ?? null) !== (asset.refund_disposal_move_id ?? null)) return 'Disposal fields cannot be modified once set';
@@ -224,6 +360,7 @@ export function validateAssetIntegrity(db, before, asset, vals) {
       return 'Disposal move must be a posted entry in the asset company';
     }
     const origCents = cents(asset.original_value);
+    const accumulated = postedCents(asset) + cents(asset.already_depreciated);
     const fixedCredit = (dispMove.line_ids ?? []).find(
       (l) => l.account_id === asset.account_asset_id && cents(l.credit) === origCents && (cents(l.debit) || 0) === 0,
     );
@@ -234,7 +371,6 @@ export function validateAssetIntegrity(db, before, asset, vals) {
       const refundAmount = (refund?.invoice_line_ids ?? []).filter((line) => source?.line_id && line.source_line_id === source.line_id)
         .reduce((sum, line) => sum + cents(toCompany(db, refund.currency_id, Math.abs(subtotal(line, db)), refund.invoice_date ?? refund.date, company)), 0);
       const fixedRefund = (refund?.line_ids ?? []).some((line) => line.account_id === asset.account_asset_id && cents(line.credit) >= origCents);
-      const accumulated = postedCents(asset) + cents(asset.already_depreciated);
       const depDebit = (dispMove.line_ids ?? []).some((line) => line.account_id === asset.account_depreciation_id && cents(line.debit) === accumulated);
       const gainId = read(db, 'res.company', company)?.gain_account_id;
       const gainCredit = (dispMove.line_ids ?? []).some((line) => line.account_id === gainId && cents(line.credit) === accumulated);
@@ -242,8 +378,9 @@ export function validateAssetIntegrity(db, before, asset, vals) {
         return 'Disposal move must credit the fixed asset account by the asset original value';
       }
     }
+    const rootId = rootAssetId(db, asset);
     const moveUsedElsewhere = (db.records['account.asset'] ?? []).some(
-      (a) => (a.id !== asset.id && a.disposal_move_id === asset.disposal_move_id)
+      (a) => (a.id !== asset.id && rootAssetId(db, a) !== rootId && a.disposal_move_id === asset.disposal_move_id)
         || (a.depreciation_ids ?? []).some((l) => l.move_id === asset.disposal_move_id)
         || (a.revaluation_ids ?? []).some((r) => r.move_id === asset.disposal_move_id),
     );
@@ -267,9 +404,31 @@ export function validateAssetIntegrity(db, before, asset, vals) {
         accounts.set(info.accountId, (accounts.get(info.accountId) ?? 0) + info.amount);
       }
       if (total !== cents(asset.sale_value)) return 'Sale price must match the invoice line amount';
+      const linkedChildren = (db.records['account.asset'] ?? []).filter((a) => {
+        if (a.id === asset.id || rootAssetId(db, a) !== rootId) return false;
+        return a.disposal_move_id === asset.disposal_move_id;
+      });
+      const totalOrig = origCents + linkedChildren.reduce((sum, c) => sum + cents(c.original_value), 0);
+      const totalAcc = accumulated + linkedChildren.reduce((sum, c) => sum + postedCents(c) + cents(c.already_depreciated), 0);
+      const netLoss = totalOrig - totalAcc - cents(asset.sale_value);
       for (const [account, amount] of accounts) {
+        let otherDebit = 0;
+        if (asset.account_asset_id === account) otherDebit -= origCents;
+        if (asset.account_depreciation_id === account) otherDebit += accumulated;
+        for (const c of linkedChildren) {
+          if (c.account_asset_id === account) otherDebit -= cents(c.original_value);
+          if (c.account_depreciation_id === account) otherDebit += (postedCents(c) + cents(c.already_depreciated));
+        }
+        if (netLoss !== 0) {
+          const lossLine = (dispMove.line_ids ?? []).find((l) => (
+            netLoss > 0
+              ? (cents(l.debit) === netLoss && (cents(l.credit) || 0) === 0)
+              : (cents(l.credit) === -netLoss && (cents(l.debit) || 0) === 0)
+          ) && l.account_id === account && l.account_id !== asset.account_asset_id && !linkedChildren.some((c) => c.account_asset_id === l.account_id));
+          if (lossLine) otherDebit += netLoss;
+        }
         const debit = (dispMove.line_ids ?? []).filter((line) => line.account_id === account).reduce((sum, line) => sum + cents(line.debit) - cents(line.credit), 0);
-        if (amount < 0 ? debit > amount : debit < amount) return 'Disposal move must book the sale on the sale invoice line account';
+        if (debit - otherDebit !== amount) return 'Disposal move must book the sale on the sale invoice line account';
       }
     } else if (asset.sale_invoice_id != null) {
       const saleInv = read(db, 'account.move', asset.sale_invoice_id);
@@ -731,40 +890,49 @@ function validate(db, asset) {
     ['account_depreciation_id', 'depreciation'],
     ['account_depreciation_expense_id', 'depreciation expense'],
   ]) {
-    const id = asset[field];
-    if (!id) throw new Error(`Configure the ${label} account on asset ${asset.name}`);
-    const acc = read(db, 'account.account', id);
-    if (!acc || acc.active === false) throw new Error(`Configure the ${label} account on asset ${asset.name}`);
-    if (acc.company_id && acc.company_id !== company) throw new Error(`${label} account ${acc.code || acc.name} belongs to another company`);
+    if (asset.method === 'no_depreciation' && field !== 'account_asset_id') continue;
+    requireAssetAccount(db, asset, field, label);
   }
 }
 
 function computeBoard(db, asset) {
   validate(db, asset);
-  const depreciation_ids = depreciationBoard(asset).map((l) => ({ ...l, posted: false, move_id: null }));
+  const depreciation_ids = asset.method === 'no_depreciation' ? [] : depreciationBoard(asset).map((l) => ({ ...l, posted: false, move_id: null }));
   return write(db, 'account.asset', asset.id, { depreciation_ids });
 }
 
 /** Report values as of a cutoff, excluding subsequent recorded adjustments. */
-export function depreciationReport(db, period, companyId = 'all') {
+export function depreciationReport(db, period, companyId = 'all', options = {}) {
+  const { groupBy = null, includeDraft = false } = typeof options === 'string'
+    ? { groupBy: options, includeDraft: false }
+    : (options ?? {});
   const hasInPeriod = (a) => (a.depreciation_ids ?? []).some((l) => l.posted && (!period.from || l.date >= period.from) && l.date <= period.to);
   const rows = search(db, 'account.asset').filter((a) => (
     (companyId === 'all' || (a.company_id ?? 1) === Number(companyId))
-    && a.state !== 'cancel' && a.state !== 'draft'
+    && a.state !== 'cancel'
+    && (includeDraft || a.state !== 'draft')
     && (!a.acquisition_date || a.acquisition_date <= period.to)
     && (!a.disposal_date || a.disposal_date > period.to || hasInPeriod(a))
+    && (!a.activation_date || a.activation_date > period.to || hasInPeriod(a))
   )).map((a) => {
-    const original = (cents(a.original_value) - (a.revaluation_ids ?? []).filter((r) => r.date > period.to).reduce((s, r) => s + cents(r.amount), 0)) / 100;
+    const activated = Boolean((a.activation_date && a.activation_date <= period.to) || search(db, 'account.asset').some((child) => child.origin_asset_id === a.id && child.acquisition_date <= period.to));
+    const original = activated ? 0 : (cents(a.original_value) - (a.revaluation_ids ?? []).filter((r) => r.date > period.to).reduce((s, r) => s + cents(r.amount), 0)) / 100;
     const posted = (a.depreciation_ids ?? []).filter((l) => l.posted);
     const sum = (list) => list.reduce((s, l) => s + cents(l.amount), 0);
-    const accumulated = (cents(a.already_depreciated) + sum(posted.filter((l) => l.date <= period.to))) / 100;
+    const accumulated = activated ? 0 : (cents(a.already_depreciated) + sum(posted.filter((l) => l.date <= period.to))) / 100;
     const inPeriod = sum(posted.filter((l) => (!period.from || l.date >= period.from) && l.date <= period.to)) / 100;
-    const activated = search(db, 'account.asset').some((child) => child.origin_asset_id === a.id && child.acquisition_date <= period.to);
-    const book = activated || (a.disposal_date && a.disposal_date <= period.to) ? 0 : (cents(original) - cents(accumulated)) / 100;
+    const book = ((a.disposal_date && a.disposal_date <= period.to) || activated) ? 0 : (cents(original) - cents(accumulated)) / 100;
     return { a, original, accumulated, inPeriod, book };
   });
   const totals = Object.fromEntries(['original', 'inPeriod', 'accumulated', 'book'].map((key) => [key, rows.reduce((s, row) => s + cents(row[key]), 0) / 100]));
-  return { rows, totals };
+  const grouped = new Map();
+  if (groupBy === 'asset_group_id') for (const row of rows) {
+    const id = row.a.asset_group_id ?? null;
+    if (!grouped.has(id)) grouped.set(id, []);
+    grouped.get(id).push(row);
+  }
+  const groups = [...grouped].map(([id, items]) => ({ id, name: read(db, 'account.asset.group', id)?.name ?? '', rows: items, totals: Object.fromEntries(['original', 'inPeriod', 'accumulated', 'book'].map((key) => [key, items.reduce((sum, row) => sum + cents(row[key]), 0) / 100])) }));
+  return { rows, totals, groups };
 }
 
 /** Validate the asset, build its board and start depreciating. */
@@ -870,12 +1038,17 @@ export function resumeAsset(db, asset, date = today(), note = '') {
 /** Post due depreciation, drop the rest of the board and book the sale or scrapping of the asset. */
 export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, invoiceLine = 0, invoiceLines = [], lossAccountId = null, gainAccountId = null, note = '' }) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
-  if (!['open', 'paused', 'close'].includes(asset.state) || asset.disposal_date) throw new Error('Only running or paused assets can be disposed');
+  if (!['open', 'paused', 'close'].includes(asset.state) || asset.disposal_date || asset.activation_date) throw new Error('Only running or paused assets can be disposed');
   if (!date) throw new Error('Set a disposal date');
   if (saleValue != null && !(Number(saleValue) >= 0)) throw new Error('The sale price cannot be negative');
   if (Number(saleValue) > 0 && !invoiceId && !invoiceLines.length) throw new Error('Select the customer invoice for this sale');
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
   if (asset.state !== 'open' && (asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
+  const children = assetDescendants(db, asset.id);
+  for (const child of children) {
+    if ((child.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
+    if (child.state !== 'open' && (child.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
+  }
   validate(db, asset);
   if (invoiceId && invoiceLines.length) throw new Error('Select a sale invoice line');
   const seen = new Set();
@@ -897,12 +1070,18 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   const sale = selectedLines.length ? selectedLines.reduce((sum, line) => sum + line.amount, 0) : invoice ? lineInfo.amount : cents(saleValue ?? 0);
   if (selectedLines.length && saleValue != null && cents(saleValue) !== sale) throw new Error('Sale price must match the invoice line amount');
   if (sale < 0) throw new Error('The sale price cannot be negative');
-  const depreciated = postDepreciation(db, asset, date);
+  let depreciated = postDepreciation(db, asset, date);
+  for (const child of children) {
+    depreciated = postDepreciation(depreciated, read(depreciated, 'account.asset', child.id), date);
+  }
   const current = read(depreciated, 'account.asset', asset.id);
+  const currentChildren = children.map((c) => read(depreciated, 'account.asset', c.id));
   const kept = (current.depreciation_ids ?? []).filter((l) => l.posted);
   const original = cents(asset.original_value);
   const accumulated = postedCents(current) + cents(asset.already_depreciated);
-  const loss = original - accumulated - sale;
+  const totalOriginal = original + currentChildren.reduce((sum, c) => sum + cents(c.original_value), 0);
+  const totalAccumulated = accumulated + currentChildren.reduce((sum, c) => sum + postedCents(c) + cents(c.already_depreciated), 0);
+  const loss = totalOriginal - totalAccumulated - sale;
   const company = asset.company_id ?? 1;
   // Immutable db: resolving the disposal account after the depreciation catch-up persists nothing on failure.
   const companyRecord = read(db, 'res.company', company);
@@ -915,13 +1094,33 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   const lines = [
     { account: assetAcc, credit: original / 100 },
     accumulated > 0 && { account: depAcc, debit: accumulated / 100 },
+    ...currentChildren.flatMap((c) => {
+      const cOrig = cents(c.original_value);
+      const cAcc = postedCents(c) + cents(c.already_depreciated);
+      return [
+        { account: c.account_asset_id, credit: cOrig / 100 },
+        cAcc > 0 && { account: c.account_depreciation_id, debit: cAcc / 100 },
+      ].filter(Boolean);
+    }),
     sale > 0 && lineInfo && { account: lineInfo.accountId, debit: sale / 100 },
     ...selectedLines.filter((line) => line.amount !== 0).map((line) => ({ account: line.accountId, ...(line.amount > 0 ? { debit: line.amount / 100 } : { credit: -line.amount / 100 }) })),
     loss > 0 && { account: disposalAccount, debit: loss / 100, analytic_distribution: asset.analytic_distribution },
     loss < 0 && { account: disposalAccount, credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
   const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
-  const result = write(postAnalytic(booked, id), 'account.asset', asset.id, {
+  let result = postAnalytic(booked, id);
+  for (const c of currentChildren) {
+    const cKept = (c.depreciation_ids ?? []).filter((l) => l.posted);
+    result = write(result, 'account.asset', c.id, {
+      depreciation_ids: cKept,
+      cancelled_depreciation_ids: (c.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })),
+      state: 'close',
+      disposal_date: date,
+      disposal_move_id: id,
+    });
+    if (note?.trim()) result = postNote(result, 'account.asset', c.id, note.trim());
+  }
+  result = write(result, 'account.asset', asset.id, {
     depreciation_ids: kept,
     cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })),
     state: 'close',
@@ -998,13 +1197,17 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
     const remaining = (asset.depreciation_ids ?? []).filter((line) => !line.posted);
     const duration = methodNumber != null ? Number(methodNumber) : remaining.length;
     if (duration < 1) throw new Error('Remaining duration must be at least 1 period');
+    const computation = asset.prorata_computation_type ?? assetProrataComputation(asset);
+    const childProrataDate = defaultProrataDate(date, methodPeriod ?? asset.method_period, computation);
     const child = create(nextDb, 'account.asset', {
-      name: asset.name, parent_id: asset.id, acquisition_date: date, original_value: delta / 100,
+      name: asset.name, parent_id: asset.id, gross_increase_move_id: adjustmentMoveId, acquisition_date: date, original_value: delta / 100,
       salvage_value: 0, already_depreciated: 0, state: 'draft', depreciation_ids: [],
       company_id: company, journal_id: read(nextDb, 'account.journal', asset.journal_id)?.type === 'general' ? asset.journal_id : journalId(nextDb, 'MISC', company), account_asset_id: assetAcc,
       account_depreciation_id: asset.account_depreciation_id, account_depreciation_expense_id: asset.account_depreciation_expense_id,
       method: asset.method, method_number: duration, method_period: methodPeriod ?? asset.method_period, method_mode: methodMode ?? asset.method_mode, method_rate: methodRate ?? asset.method_rate,
       method_progress_factor: asset.method_progress_factor, prorata: asset.prorata,
+      prorata_computation_type: computation,
+      prorata_date: childProrataDate,
       analytic_distribution: asset.analytic_distribution,
     });
     return confirmAsset(child.db, read(child.db, 'account.asset', child.id));
@@ -1042,29 +1245,59 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   });
 }
 
+export function createAssetsFromJournalItems(db, selections) {
+  if (!selections.length) throw new Error('Select at least one journal item');
+  const seen = new Set();
+  const moveCache = new Map();
+  return selections.reduce((next, selection) => {
+    const key = JSON.stringify([selection.move_id, selection.line_identity]);
+    if (seen.has(key)) throw new Error('Journal item selected more than once');
+    seen.add(key);
+    if (!moveCache.has(selection.move_id)) {
+      moveCache.set(selection.move_id, sourceMoveJournalItems(next, selection.move_id));
+    }
+    const { move, items } = moveCache.get(selection.move_id);
+    const matches = items.filter((line) => line.line_identity === selection.line_identity);
+    if (!move || matches.length !== 1) throw new Error('Selected journal item is missing or ambiguous');
+    const line = matches[0];
+    const balanceCents = cents(line.debit) - cents(line.credit);
+    if (!(balanceCents > 0)) throw new Error('Only debit journal items with a positive balance can create assets');
+    if (!isValidFixedAssetAccount(read(next, 'account.account', line.account_id), move.company_id ?? 1)) throw new Error('Select a valid fixed asset account');
+    if (journalItemHasAsset(next, move, line)) throw new Error('Journal item already has an asset');
+    return create(next, 'account.asset', { ...assetDraftValues(next, move, line, { amount: balanceCents / 100, accountId: line.account_id, date: line.date }), source_move_id: line.move_id, source_line_identity: line.line_identity }).db;
+  }, db);
+
+}
 /** Transfer the remaining book value into a new asset. */
 export function activateDepreciation(db, asset, { date = today(), newAccountAssetId, note = '' } = {}) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
   if (asset.state !== 'open' || asset.disposal_date) throw new Error('Only running assets can activate depreciation');
   if (!date) throw new Error('Set an activation date');
+  if (asset.acquisition_date && date < asset.acquisition_date) throw new Error('Invalid activation date');
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
+  if ((asset.revaluation_ids ?? []).some((entry) => entry.date > date)) throw new Error('Activation date cannot precede an existing revaluation');
   const company = asset.company_id ?? 1;
+  if (!isValidFixedAssetAccount(read(db, 'account.account', newAccountAssetId), company)) throw new Error('Select a valid fixed asset account');
   const target = configuredAccount(db, newAccountAssetId, company, 'fixed asset', asset.name || 'the asset');
   let next = postDepreciation(db, asset, date);
   asset = read(next, 'account.asset', asset.id);
   const value = cents(asset.original_value) - cents(asset.already_depreciated) - postedCents(asset);
   if (value <= 0) throw new Error('The asset book value must be positive');
+  if (cents(asset.already_depreciated) + postedCents(asset) > 0) requireAssetAccount(next, asset, 'account_depreciation_id', 'depreciation');
+  if (cents(asset.salvage_value) >= value) throw new Error('The not depreciable value must be lower than the transferred value');
+  let transferMoveId = null;
   if (target !== asset.account_asset_id) {
     const entry = postEntry(next, { journal: asset.journal_id ?? journalId(next, 'MISC', company), date, ref: `${asset.name} transfer`, company, lines: [
       { account: target, debit: value / 100 }, { account: asset.account_asset_id, credit: value / 100 },
     ] });
     next = entry.db;
+    transferMoveId = entry.id;
   }
   const remaining = (asset.depreciation_ids ?? []).filter((line) => !line.posted);
   const targetAccount = read(next, 'account.account', target);
   const targetModel = targetAccount?.asset_model_id && read(next, 'account.asset.model', targetAccount.asset_model_id);
   const child = create(next, 'account.asset', {
-    name: asset.name, origin_asset_id: asset.id, acquisition_date: date, original_value: value / 100,
+    name: asset.name, origin_asset_id: asset.id, transfer_move_id: transferMoveId, acquisition_date: date, original_value: value / 100,
     salvage_value: asset.salvage_value ?? 0, already_depreciated: 0, state: 'draft', depreciation_ids: [],
     company_id: company, journal_id: targetModel?.journal_id ?? asset.journal_id, account_asset_id: target,
     model_id: targetModel?.id ?? null,
@@ -1072,7 +1305,7 @@ export function activateDepreciation(db, asset, { date = today(), newAccountAsse
     method: targetModel?.method ?? asset.method, method_number: targetModel?.method_number ?? (remaining.length || asset.method_number), method_period: targetModel?.method_period ?? asset.method_period,
     method_progress_factor: targetModel?.method_progress_factor ?? asset.method_progress_factor, prorata: targetModel?.prorata ?? asset.prorata, analytic_distribution: asset.analytic_distribution,
   });
-  next = write(child.db, 'account.asset', asset.id, { state: 'close', depreciation_ids: (asset.depreciation_ids ?? []).filter((line) => line.posted) });
+  next = write(child.db, 'account.asset', asset.id, { state: 'close', depreciation_ids: (asset.depreciation_ids ?? []).filter((line) => line.posted), cancelled_depreciation_ids: [...(asset.cancelled_depreciation_ids ?? []), ...remaining.map((line) => ({ ...line, cancelled: true }))] });
   next = confirmAsset(next, read(next, 'account.asset', child.id));
   return note?.trim() ? postNote(next, 'account.asset', asset.id, note.trim()) : next;
 }
@@ -1189,6 +1422,7 @@ export function adjustAssetsForCreditNote(db, refundMove, originalBillMove = (re
     const lines = (refundMove.invoice_line_ids ?? []).filter((l) => l.source_line_id != null && String(l.source_line_id) === String(billLine.line_id));
     const amount = lines.reduce((sum, l) => sum + toCompany(nextDb, refundMove.currency_id, Math.abs(subtotal(l, nextDb)), refundMove.invoice_date ?? refundMove.date, refundMove.company_id ?? 1), 0);
     if (!(amount > 0)) continue;
+    if (search(nextDb, 'account.asset').some((child) => child.origin_asset_id === asset.id && child.state !== 'cancel')) throw new Error('Cannot refund a transferred asset until its transfer is adjusted');
     if (amount < Number(asset.original_value)) nextDb = reduceRefundedAsset(nextDb, asset, refundMove, amount);
     else if (asset.state === 'draft' || (!(asset.depreciation_ids ?? []).some((l) => l.posted) && !cents(asset.already_depreciated))) nextDb = cancelRefundedAsset(nextDb, asset);
     else nextDb = disposeRefundedAsset(nextDb, asset, refundMove);
@@ -1197,14 +1431,23 @@ export function adjustAssetsForCreditNote(db, refundMove, originalBillMove = (re
 }
 
 export const assetModels = {
+  'account.asset.group': {
+    label: 'Asset Groups',
+    guard: (db, before, group) => before && before.company_id !== group.company_id && (db.records['account.asset'] ?? []).some((asset) => asset.asset_group_id === group.id && (asset.company_id ?? 1) !== (group.company_id ?? 1)) ? 'Asset group must belong to the asset company' : null,
+    fields: { name: { type: 'char', label: 'Name', required: true }, company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true } },
+    list: ['name', 'company_id'],
+    form: { title: 'name', groups: [['name', 'company_id']] },
+  },
   'account.asset': {
     label: 'Assets',
     guardLast: true,
-    actions: { dispose: disposeAsset, modify: modifyAsset, adjustForCreditNote: adjustAssetsForCreditNote },
+    actions: { dispose: disposeAsset, modify: modifyAsset, activate: activateDepreciation, adjustForCreditNote: adjustAssetsForCreditNote },
     fields: {
       name: { type: 'char', label: 'Asset Name', required: true },
       parent_id: { type: 'many2one', relation: 'account.asset', label: 'Parent Asset', readonly: true },
+      gross_increase_move_id: { type: 'many2one', relation: 'account.move', label: 'Gross Increase Entry', readonly: true, hidden: true },
       origin_asset_id: { type: 'many2one', relation: 'account.asset', label: 'Original Asset', readonly: true },
+      transfer_move_id: { type: 'many2one', relation: 'account.move', label: 'Transfer Entry', readonly: true, hidden: true },
       children_ids: { type: 'one2many', label: 'Gross Increases', readonly: true, fields: { name: { type: 'char', label: 'Asset Name' }, original_value: { type: 'monetary', label: 'Original Value' } }, compute: (r, db) => (db?.records['account.asset'] ?? []).filter((a) => a.parent_id === r.id).map((a) => a.id) },
       derived_asset_ids: { type: 'one2many', label: 'Active Asset', readonly: true, fields: { name: { type: 'char', label: 'Asset Name' }, original_value: { type: 'monetary', label: 'Original Value' } }, compute: (r, db) => (db?.records['account.asset'] ?? []).filter((a) => a.origin_asset_id === r.id).map((a) => a.id) },
       gross_increase_value: { type: 'monetary', label: 'Gross Increase', readonly: true, compute: (r, db) => (db?.records['account.asset'] ?? []).filter((a) => a.parent_id === r.id).reduce((sum, a) => sum + Number(a.original_value || 0), 0) },
@@ -1222,6 +1465,13 @@ export const assetModels = {
       prorata: { type: 'boolean', label: 'Prorata Temporis', readonly: readonlyWhenNotDraft },
       prorata_computation_type: { type: 'selection', label: 'Computation', options: [['none', 'No Prorata'], ['constant_periods', 'Constant Periods'], ['daily_computation', 'Based on days per period']], readonly: readonlyWhenNotDraft },
       prorata_date: { type: 'date', label: 'Prorata Date', readonly: readonlyWhenNotDraft },
+      activation_move_id: { type: 'many2one', relation: 'account.move', label: 'Closing Entry', readonly: true },
+      activation_opening_move_id: { type: 'many2one', relation: 'account.move', label: 'Opening Entry', readonly: true },
+      activation_date: { type: 'date', label: 'Activation Date', readonly: true },
+      activation_value: { type: 'monetary', label: 'Transferred Value', readonly: true },
+      source_move_id: { type: 'many2one', relation: 'account.move', label: 'Source Entry', readonly: true },
+      source_line_identity: { type: 'char', label: 'Source Line', readonly: true },
+      asset_group_id: { type: 'many2one', relation: 'account.asset.group', label: 'Asset Group', domain: (g, r) => (g.company_id ?? 1) === (r?.company_id ?? 1) },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
       model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model', readonly: readonlyWhenNotDraft },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account', readonly: readonlyWhenNotDraft },
@@ -1287,17 +1537,20 @@ export const assetModels = {
     createDefaults: (db, vals) => {
       const company = vals?.company_id ?? (db ? currentCompany(db) : 1);
       const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
+      const parent = vals?.parent_id && db ? read(db, 'account.asset', vals.parent_id) : null;
       const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
       const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'method_mode', 'method_rate', 'prorata', 'prorata_computation_type', 'prorata_date', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
       if (modelJournal) modelDefaults.journal_id = modelJournal;
       const defaultJournal = !vals?.journal_id && !modelDefaults.journal_id ? (journalId(db, 'MISC', company) ?? null) : null;
       const computation = vals?.prorata_computation_type
         ? vals.prorata_computation_type
-        : vals?.prorata !== undefined
-          ? (vals.prorata ? 'daily_computation' : 'none')
-          : assetProrataComputation(modelDefaults);
+        : parent
+          ? assetProrataComputation(parent)
+          : vals?.prorata !== undefined
+            ? (vals.prorata ? 'daily_computation' : 'none')
+            : assetProrataComputation(modelDefaults);
       const acquisition = vals?.acquisition_date || today();
-      const period = vals?.method_period ?? modelDefaults.method_period ?? '12';
+      const period = vals?.method_period ?? modelDefaults.method_period ?? parent?.method_period ?? '12';
       const defaultDate = defaultProrataDate(acquisition, period, computation);
       const modelDate = model && computation === assetProrataComputation(model) ? modelDefaults.prorata_date : null;
       return {
@@ -1306,7 +1559,7 @@ export const assetModels = {
         ...modelDefaults,
         prorata_computation_type: computation,
         prorata: vals?.prorata ?? (computation !== 'none'),
-        prorata_date: vals?.prorata_date || modelDate || defaultDate,
+        prorata_date: vals?.prorata_date || (vals?.parent_id ? defaultDate : (modelDate || defaultDate)),
       };
     },
     onchange: (r, key, db) => {
@@ -1356,8 +1609,8 @@ export const assetModels = {
       }
       return {};
     },
-    groupBys: ['state', 'method'],
-    filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'open' }, { id: 'closed', label: 'Closed', fn: (r) => r.state === 'close' }]],
+    groupBys: ['state', 'method', 'asset_group_id'],
+    filters: [[{ id: 'has_asset_group', label: 'Asset Group', fn: (r) => Boolean(r.asset_group_id) }], [{ id: 'running', label: 'Running', fn: (r) => r.state === 'open' }, { id: 'closed', label: 'Closed', fn: (r) => r.state === 'close' }]],
     kanban: { title: 'name', lines: ['original_value', 'book_value', 'method'], badge: 'state' },
     list: ['acquisition_date', 'name', 'partner_id', 'model_id', 'original_value', 'book_value', 'method', 'state'],
     form: {
@@ -1396,7 +1649,7 @@ export const assetModels = {
             { name: 'method_rate', type: 'float', label: 'Depreciation Rate', default: r?.method_mode === 'rate' ? r?.method_rate : null, invisible: (v) => v.modify_action !== 'modify' || v.method_mode !== 'rate' },
             { name: 'account_asset_id', type: 'many2one', relation: 'account.account', label: 'Gross Increase Account', invisible: (v) => v.modify_action !== 'modify' },
             { name: 'account_asset_counterpart_id', type: 'many2one', relation: 'account.account', label: 'Asset Counterpart Account', invisible: (v) => v.modify_action !== 'modify' },
-            { name: 'new_account_asset_id', type: 'many2one', relation: 'account.account', label: 'New Fixed Asset Account', required: (v) => v.modify_action === 'activate_depreciation', invisible: (v) => v.modify_action !== 'activate_depreciation' },
+            { name: 'new_account_asset_id', type: 'many2one', relation: 'account.account', label: 'New Fixed Asset Account', required: (v) => v.modify_action === 'activate_depreciation', invisible: (v) => v.modify_action !== 'activate_depreciation', domain: (account) => isValidFixedAssetAccount(account, r.company_id ?? 1) },
             { name: 'gain_account_id', type: 'many2one', relation: 'account.account', label: 'Gain Account', default: db && r ? read(db, 'res.company', r.company_id ?? 1)?.gain_account_id : null, invisible: (v) => !['sell', 'dispose'].includes(v.modify_action) },
             { name: 'loss_account_id', type: 'many2one', relation: 'account.account', label: 'Loss Account', default: db && r ? read(db, 'res.company', r.company_id ?? 1)?.loss_account_id : null, invisible: (v) => !['sell', 'dispose'].includes(v.modify_action) },
             { name: 'invoice_line_ids', type: 'many2many', picker: 'asset_invoice_lines', label: 'Invoice Lines', required: (v) => v.modify_action === 'sell', invisible: (v) => v.modify_action !== 'sell', options: (currentDb, values) => assetSaleInvoiceLineOptions(currentDb, r, values.date) },
@@ -1471,7 +1724,7 @@ export const assetModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'], ['method', 'method_mode', 'method_rate', 'method_number', 'method_period', 'method_progress_factor', 'prorata_computation_type', 'prorata_date', 'analytic_distribution', 'disposal_date', 'sale_value']],
+      groups: [['parent_id', 'source_move_id', 'asset_group_id', 'model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'], ['method', 'method_mode', 'method_rate', 'method_number', 'method_period', 'method_progress_factor', 'prorata_computation_type', 'prorata_date', 'analytic_distribution', 'disposal_date', 'sale_value']],
       tabs: [{ label: 'Depreciation Board', fields: ['depreciation_ids', 'cancelled_depreciation_ids'] }],
       chatter: true,
     },

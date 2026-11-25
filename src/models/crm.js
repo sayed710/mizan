@@ -1,8 +1,103 @@
 import { create, read, write } from '../orm.js';
-import { today } from './common.js';
+import { commercialPartnerId, today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
+
+export function partnerCategoryCompleteName(db, r) {
+  if (!r?.name) return '';
+  const names = [r.name];
+  const seen = new Set(r.id ? [r.id] : []);
+  const find = (key) => (db?.records?.['res.partner.category'] ?? []).find((c) => c.id === key);
+  for (let c = find(r.parent_id); c && !seen.has(c.id); c = find(c.parent_id)) {
+    seen.add(c.id);
+    names.unshift(c.name);
+  }
+  return names.join(' / ');
+}
+
+// Reusable inverse index caches per records snapshot for partner tags and child categories
+const categoryPartnerIndexCache = new WeakMap();
+export function partnersByCategory(db) {
+  if (!db?.records || typeof db.records !== 'object') return new Map();
+  let index = categoryPartnerIndexCache.get(db.records);
+  if (!index) {
+    index = new Map();
+    for (const p of db.records['res.partner'] ?? []) {
+      const tags = p?.tag_ids;
+      if (!tags) continue;
+      const list = Array.isArray(tags) ? tags : [tags];
+      for (const t of list) {
+        const id = typeof t === 'object' && t !== null ? t.id : t;
+        if (id != null) {
+          const arr = index.get(id);
+          if (arr) arr.push(p.id); else index.set(id, [p.id]);
+        }
+      }
+    }
+    categoryPartnerIndexCache.set(db.records, index);
+  }
+  return index;
+}
+
+const categoryChildIndexCache = new WeakMap();
+export function childrenByCategory(db) {
+  if (!db?.records || typeof db.records !== 'object') return new Map();
+  let index = categoryChildIndexCache.get(db.records);
+  if (!index) {
+    index = new Map();
+    for (const c of db.records['res.partner.category'] ?? []) {
+      if (c?.parent_id != null) {
+        const arr = index.get(c.parent_id);
+        if (arr) arr.push(c.id); else index.set(c.parent_id, [c.id]);
+      }
+    }
+    categoryChildIndexCache.set(db.records, index);
+  }
+  return index;
+}
+
+export function partnerTagIds(db, names) {
+  let currentDb = db;
+  const ids = [];
+  const list = Array.isArray(names) ? names : names ? [names] : [];
+  for (const raw of list) {
+    const trimmed = String(raw ?? '').trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    const categories = currentDb?.records?.['res.partner.category'] ?? [];
+    const existing = categories.find((c) => c.active !== false && String(c.name ?? '').trim().toLowerCase() === lower);
+    if (existing) {
+      if (!ids.includes(existing.id)) ids.push(existing.id);
+    } else {
+      const { db: nextDb, id } = create(currentDb, 'res.partner.category', { name: trimmed });
+      currentDb = nextDb;
+      if (!ids.includes(id)) ids.push(id);
+    }
+  }
+  return { db: currentDb, ids };
+}
+
+export function guardPartnerCategory(db, before, r) {
+  let id = r.parent_id;
+  const targetId = before?.id ?? r.id;
+  const seen = new Set(targetId ? [targetId] : []);
+  const find = (key) => (db?.records?.['res.partner.category'] ?? []).find((c) => c.id === key);
+  while (id) {
+    if (seen.has(id)) return 'Category hierarchy cannot contain a cycle';
+    seen.add(id);
+    id = find(id)?.parent_id;
+  }
+  return null;
+}
+
+/** Mark a commercial partner as a customer or vendor. Sets the rank to 1 only when it is 0 (activity flag), so concurrent postings never write conflicting ranks. */
+export function incrementPartnerRank(db, partnerId, field) {
+  const id = commercialPartnerId(db, partnerId);
+  const partner = id == null ? null : read(db, 'res.partner', id);
+  if (!partner || (Number(partner[field]) || 0) > 0) return db;
+  return { ...db, records: { ...db.records, 'res.partner': db.records['res.partner'].map((row) => row.id === id ? { ...row, [field]: 1 } : row) } };
+}
 
 export function isRotting(db, model, r) {
   if (!r) return false;
@@ -108,11 +203,59 @@ export const crmModels = {
     },
   },
 
+  'res.partner.category': {
+    label: 'Contact Tags',
+    fields: {
+      name: { type: 'char', label: 'Tag Name', required: true },
+      color: { type: 'integer', label: 'Color' },
+      parent_id: { type: 'many2one', relation: 'res.partner.category', label: 'Parent Category' },
+      complete_name: {
+        type: 'char',
+        label: 'Complete Name',
+        compute: (r, db) => partnerCategoryCompleteName(db, r),
+      },
+      display_name: {
+        type: 'char',
+        label: 'Complete Name',
+        compute: (r, db) => partnerCategoryCompleteName(db, r),
+      },
+      active: { type: 'boolean', label: 'Active' },
+      partner_ids: {
+        type: 'many2many',
+        relation: 'res.partner',
+        label: 'Partners',
+        readonly: true,
+        compute: (r, db) => [...(partnersByCategory(db).get(r?.id) ?? [])],
+      },
+      child_ids: {
+        type: 'many2many',
+        relation: 'res.partner.category',
+        label: 'Child Tags',
+        readonly: true,
+        compute: (r, db) => [...(childrenByCategory(db).get(r?.id) ?? [])],
+      },
+    },
+    defaults: () => ({ active: true, color: 0 }),
+    guard: guardPartnerCategory,
+    searchFields: ['name', 'complete_name'],
+    list: ['display_name', 'color'],
+    listLabels: { display_name: 'Tag Name' },
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'parent_id', 'color', 'active'],
+      ],
+    },
+  },
+
   'res.partner': {
     label: 'Contacts',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      customer_rank: { type: 'integer', label: 'Customer Rank', readonly: true },
+      supplier_rank: { type: 'integer', label: 'Vendor Rank', readonly: true },
       is_company: { type: 'boolean', label: 'Company' },
+      parent_id: { type: 'many2one', relation: 'res.partner', label: 'Parent Contact', hidden: true },
       email: { type: 'char', label: 'Email' },
       phone: { type: 'char', label: 'Phone' },
       city: { type: 'char', label: 'City' },
@@ -120,7 +263,13 @@ export const crmModels = {
       country: { type: 'char', label: 'Country' },
       vat: { type: 'char', label: 'Tax ID' },
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
-      credit_limit: { type: 'monetary', label: 'Credit Limit' },
+      use_partner_credit_limit: { type: 'boolean', label: 'Partner Limit', hideWhen: (_r, db) => !creditLimitEnabled(db) },
+      credit_limit: {
+        type: 'monetary',
+        label: 'Credit Limit',
+        hideWhen: (_r, db) => !creditLimitEnabled(db),
+        readonly: (r) => !r?.use_partner_credit_limit,
+      },
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       autopost_bills: { type: 'selection', label: 'Auto-post bills', options: [['always', 'Always'], ['ask', 'Ask after 3 validations without edits'], ['never', 'Never']], default: 'ask', hideWhen: (_r, db) => !read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.autopost_bills },
       property_supplier_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Supplier Payment Terms' },
@@ -158,7 +307,7 @@ export const crmModels = {
           no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
-      tag_ids: { type: 'tags', label: 'Tags' },
+      tag_ids: { type: 'many2many', relation: 'res.partner.category', label: 'Tags' },
       bank_ids: {
         type: 'one2many',
         relation: 'res.partner.bank',
@@ -193,8 +342,12 @@ export const crmModels = {
         },
       },
     },
-    defaults: () => ({ tag_ids: [], followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
+    defaults: () => ({ tag_ids: [], customer_rank: 0, supplier_rank: 0, followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
     onchange: (r, key, db) => {
+      if (key === 'use_partner_credit_limit') {
+        const comp = db ? read(db, 'res.company', db.settings?.current_company_id ?? 1) : null;
+        return { credit_limit: r.use_partner_credit_limit ? (comp?.account_default_credit_limit ?? 0) : null };
+      }
       if (key === 'followup_next_action_date') {
         const cId = db?.settings?.current_company_id ?? 1;
         return {
@@ -206,29 +359,46 @@ export const crmModels = {
       return {};
     },
     prepareWrite: (db, vals, before) => {
-      if (vals && 'followup_next_action_date' in vals) {
+      let nextVals = vals;
+      if (nextVals?.use_partner_credit_limit === false && nextVals.credit_limit !== null) {
+        nextVals = { ...nextVals, credit_limit: null };
+      }
+      if (nextVals && 'followup_next_action_date' in nextVals) {
         const cId = db?.settings?.current_company_id ?? 1;
-        const base = { ...before, ...vals };
+        const base = { ...before, ...nextVals };
         const nextPartner = updatePartnerFollowUp(base, cId, {
           followup_next_action_date: vals.followup_next_action_date || null,
         });
-        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+        return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
-      return null;
+      return nextVals !== vals ? { db, vals: nextVals } : null;
     },
     prepareCreate: (db, vals) => {
-      if (vals && 'followup_next_action_date' in vals) {
-        const cId = db?.settings?.current_company_id ?? 1;
-        const nextPartner = updatePartnerFollowUp(vals, cId, {
-          followup_next_action_date: vals.followup_next_action_date || null,
-        });
-        return { db, vals: { ...vals, followup_lines: nextPartner.followup_lines } };
+      let nextVals = vals;
+      if (nextVals && !nextVals.use_partner_credit_limit && 'credit_limit' in nextVals) {
+        const { credit_limit: _cl, ...rest } = nextVals;
+        nextVals = rest;
       }
-      return null;
+      if (nextVals && 'followup_next_action_date' in nextVals) {
+        const cId = db?.settings?.current_company_id ?? 1;
+        const nextPartner = updatePartnerFollowUp(nextVals, cId, {
+          followup_next_action_date: nextVals.followup_next_action_date || null,
+        });
+        return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
+      }
+      return nextVals !== vals ? { db, vals: nextVals } : null;
     },
-    guard: (db, before, after) => validatePartnerBankLines(db, after?.id, after?.bank_ids),
+    guard: (db, before, after) => {
+      if (after?.credit_limit != null && after?.credit_limit !== '') {
+        const n = Number(after.credit_limit);
+        if (!Number.isFinite(n) || n < 0) return 'Credit Limit must be non-negative';
+      }
+      return validatePartnerBankLines(db, after?.id, after?.bank_ids);
+    },
     onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
+      { id: 'customers', label: 'Customers', fn: (r) => (r.customer_rank ?? 0) > 0 },
+      { id: 'vendors', label: 'Vendors', fn: (r) => (r.supplier_rank ?? 0) > 0 },
       { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
       { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
     ]],
@@ -237,6 +407,7 @@ export const crmModels = {
     list: ['name', 'email', 'phone', 'city', 'country'],
     form: {
       title: 'name',
+      prepare: (r, db) => (!r?.use_partner_credit_limit && creditLimitEnabled(db) ? { ...r, credit_limit: read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.account_default_credit_limit ?? 0 } : r),
       smart: [
         { label: 'Opportunities', model: 'crm.lead', field: 'partner_id', target: 'crm/pipeline' },
         { label: 'Sales', model: 'sale.order', field: 'partner_id', target: 'sales/quotations' },
@@ -254,6 +425,7 @@ export const crmModels = {
         {
           label: 'Accounting',
           fields: ['autopost_bills', 'property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
+          groups: [['use_partner_credit_limit']],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
       ],

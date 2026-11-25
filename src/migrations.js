@@ -1,4 +1,5 @@
 import { purchaseLineId } from './models/purchase-links.js';
+import { ensureCountries } from './models/country.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -1999,6 +2000,63 @@ export function migrateTaxPriceIncludeOverride(db) {
 }
 MIGRATIONS.push({ version: 65, name: 'tax-price-include-override', up: migrateTaxPriceIncludeOverride });
 MIGRATIONS.push({ version: 66, name: 'electronic-and-sepa-payment-methods', up: migrateElectronicAndSepa });
+/** Customer and vendor ranks marked from posted invoices and confirmed orders, per commercial partner. */
+export function migratePartnerRanks(db) {
+  const partners = db.records['res.partner'] ?? [];
+  const partnerById = new Map(partners.map((p) => [p.id, p]));
+  const commercialIdCache = new Map();
+  const commercialId = (partnerId) => {
+    if (partnerId == null) return null;
+    if (commercialIdCache.has(partnerId)) return commercialIdCache.get(partnerId);
+    let p = partnerById.get(partnerId);
+    if (!p) {
+      commercialIdCache.set(partnerId, null);
+      return null;
+    }
+    const seen = new Set();
+    while (p?.parent_id) {
+      if (seen.has(p.id)) { p = null; break; }
+      seen.add(p.id);
+      const parent = partnerById.get(p.parent_id);
+      if (!parent) break;
+      p = parent;
+    }
+    const cid = p?.id ?? null;
+    commercialIdCache.set(partnerId, cid);
+    return cid;
+  };
+
+  const hasCustomerActivity = new Set();
+  const hasSupplierActivity = new Set();
+  const markActivity = (set, partnerId) => {
+    const cid = commercialId(partnerId);
+    if (cid != null) set.add(cid);
+  };
+
+  for (const move of db.records['account.move'] ?? []) {
+    if (move.state === 'posted') {
+      if (move.move_type === 'out_invoice') markActivity(hasCustomerActivity, move.partner_id);
+      else if (move.move_type === 'in_invoice') markActivity(hasSupplierActivity, move.partner_id);
+    }
+  }
+  for (const order of db.records['sale.order'] ?? []) {
+    if (order.state === 'sale' || order.state === 'done') markActivity(hasCustomerActivity, order.partner_id);
+  }
+  for (const order of db.records['purchase.order'] ?? []) {
+    if (order.state === 'purchase' || order.state === 'done') markActivity(hasSupplierActivity, order.partner_id);
+  }
+
+  const updatedPartners = partners.map((p) => {
+    const currentCust = Number(p.customer_rank) || 0;
+    const currentSupp = Number(p.supplier_rank) || 0;
+    return {
+      ...p,
+      customer_rank: currentCust > 0 ? currentCust : (hasCustomerActivity.has(p.id) ? 1 : 0),
+      supplier_rank: currentSupp > 0 ? currentSupp : (hasSupplierActivity.has(p.id) ? 1 : 0),
+    };
+  });
+  return { ...db, records: { ...db.records, 'res.partner': updatedPartners } };
+}
 MIGRATIONS.push({ version: 67, name: 'default-legacy-budget-type-both', up: (db) => {
   const budgets = db?.records?.['account.budget'];
   if (!Array.isArray(budgets) || !budgets.length) return db;
@@ -2035,6 +2093,311 @@ export function migrateReconcileModelTolerance(db) {
   return changed ? { ...db, records: { ...db.records, 'account.reconcile.model': nextRules } } : db;
 }
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
+MIGRATIONS.push({ version: 69, name: 'partner-ranks', up: migratePartnerRanks });
+
+export function migrateSalesCreditLimit(db) {
+  const partners = db?.records?.['res.partner'];
+  const companies = db?.records?.['res.company'];
+  if (!Array.isArray(partners) && !Array.isArray(companies)) return db;
+
+  // Partner 1 demo limit (100000) from legacy seed without an explicit setting is dropped so fresh and upgraded databases match.
+  const isDemoSeedLimit = (p) => p?.id === 1 && p?.name === 'Nile Furniture Co.' && Number(p?.credit_limit) === 100000 && !p?.use_partner_credit_limit;
+
+  const partnerById = new Map((partners ?? []).map((p) => [p.id, p]));
+  const commercialIdOf = (p) => {
+    let curr = p;
+    const seen = new Set();
+    while (curr?.parent_id) {
+      if (seen.has(curr.id)) return curr.id;
+      seen.add(curr.id);
+      const next = partnerById.get(curr.parent_id);
+      if (!next) break;
+      curr = next;
+    }
+    return curr?.id ?? p.id;
+  };
+
+  // Group contacts by their commercial parent entity.
+  const groups = new Map();
+  for (const p of (partners ?? [])) {
+    const cId = commercialIdOf(p);
+    if (!groups.has(cId)) groups.set(cId, []);
+    groups.get(cId).push(p);
+  }
+
+  // Determine commercial limit overrides for each commercial group.
+  // Explicit consolidation policy:
+  // 1. If the commercial parent has an existing positive limit, keep that limit.
+  // 2. Otherwise, take the maximum limit among its children.
+  const groupConsolidatedLimit = new Map();
+  for (const [cId, members] of groups.entries()) {
+    const commParent = partnerById.get(cId) ?? members[0];
+    const commLimit = isDemoSeedLimit(commParent) ? 0 : (Number(commParent?.credit_limit) || 0);
+    const childLimits = members
+      .filter((m) => m.id !== cId && !isDemoSeedLimit(m))
+      .map((m) => Number(m?.credit_limit) || 0)
+      .filter((l) => l > 0);
+
+    let targetLimit = 0;
+    if (commLimit > 0) {
+      targetLimit = commLimit;
+    } else if (childLimits.length > 0) {
+      targetLimit = Math.max(...childLimits);
+    }
+    if (targetLimit > 0) {
+      groupConsolidatedLimit.set(cId, targetLimit);
+    }
+  }
+
+  const hasAnyPartnerLimit = groupConsolidatedLimit.size > 0;
+  let changed = false;
+
+  const nextPartners = (partners ?? []).map((p) => {
+    const cId = commercialIdOf(p);
+    const consolidated = groupConsolidatedLimit.get(cId);
+    if (isDemoSeedLimit(p)) {
+      changed = true;
+      if (consolidated && p.id === cId) {
+        return { ...p, use_partner_credit_limit: true, credit_limit: consolidated };
+      }
+      const { credit_limit: _cl, ...rest } = p;
+      return rest;
+    }
+    if (consolidated) {
+      const nextLimit = p.id === cId ? consolidated : (p.credit_limit != null ? consolidated : p.credit_limit);
+      if (!p.use_partner_credit_limit || p.credit_limit !== nextLimit) {
+        changed = true;
+        return { ...p, use_partner_credit_limit: true, credit_limit: nextLimit };
+      }
+    }
+    return p;
+  });
+
+  const nextCompanies = (companies ?? []).map((c) => {
+    if (hasAnyPartnerLimit && !c.account_use_credit_limit) {
+      changed = true;
+      return { ...c, account_use_credit_limit: true };
+    }
+    return c;
+  });
+
+  if (!changed) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(partners ? { 'res.partner': nextPartners } : {}),
+      ...(companies ? { 'res.company': nextCompanies } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 70, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
+
+export function migratePartnerTags(db) {
+  if (!db?.records) return db;
+  const existingCategories = [...(db.records['res.partner.category'] ?? [])];
+  const byName = new Map();
+  let maxId = 0;
+  for (const cat of existingCategories) {
+    if (cat.id > maxId) maxId = cat.id;
+    if (cat.name) byName.set(String(cat.name).trim().toLowerCase(), cat.id);
+  }
+
+  let categoriesChanged = false;
+  const categoryFor = (name) => {
+    const key = name.toLowerCase();
+    if (!byName.has(key)) {
+      maxId += 1;
+      existingCategories.push({ id: maxId, name, color: 0, active: true });
+      byName.set(key, maxId);
+      categoriesChanged = true;
+    }
+    return byName.get(key);
+  };
+  let partnersChanged = false;
+
+  const partners = db.records['res.partner'];
+  const nextPartners = Array.isArray(partners) ? partners.map((p) => {
+    if (!p) return p;
+    const rawTags = p.tag_ids;
+    if (rawTags == null) return p;
+    const list = Array.isArray(rawTags) ? rawTags : [rawTags];
+    if (!list.length) return p;
+
+    let partnerTagsChanged = false;
+    const tagSet = new Set();
+
+    for (const item of list) {
+      if (item == null || item === '') {
+        partnerTagsChanged = true;
+        continue;
+      }
+      const num = Number(typeof item === 'object' ? item.id : item);
+      if (typeof item === 'number' && Number.isSafeInteger(num) && num > 0) {
+        tagSet.add(num);
+        continue;
+      }
+      if (typeof item === 'string') {
+        const trimmed = item.trim();
+        if (!trimmed) {
+          partnerTagsChanged = true;
+          continue;
+        }
+        partnerTagsChanged = true;
+        const catId = categoryFor(trimmed);
+        tagSet.add(catId);
+        continue;
+      }
+      if (typeof item === 'object') {
+        partnerTagsChanged = true;
+        if (Number.isSafeInteger(num) && num > 0) {
+          tagSet.add(num);
+        } else if (item.name) {
+          const trimmed = String(item.name).trim();
+          if (!trimmed) continue;
+          const catId = categoryFor(trimmed);
+          tagSet.add(catId);
+        }
+      }
+    }
+
+    if (tagSet.size !== list.length) {
+      partnerTagsChanged = true;
+    }
+
+    if (partnerTagsChanged) {
+      partnersChanged = true;
+      return { ...p, tag_ids: [...tagSet] };
+    }
+    return p;
+  }) : partners;
+
+  const distModels = db.records['account.analytic.distribution.model'];
+  let distModelsChanged = false;
+  let nextDistModels = distModels;
+  if (Array.isArray(distModels)) {
+    nextDistModels = distModels.map((m) => {
+      if (!m || m.partner_category_id == null) return m;
+      if (typeof m.partner_category_id === 'string' && m.partner_category_id.trim() !== '') {
+        const trimmed = m.partner_category_id.trim();
+        const catId = categoryFor(trimmed);
+        distModelsChanged = true;
+        return { ...m, partner_category_id: catId };
+      }
+      return m;
+    });
+  }
+
+  if (!partnersChanged && !categoriesChanged && !distModelsChanged) return db;
+
+  const nextSeq = Math.max(db.seq?.['res.partner.category'] ?? 0, maxId);
+
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(partnersChanged ? { 'res.partner': nextPartners } : {}),
+      ...(categoriesChanged ? { 'res.partner.category': existingCategories } : {}),
+      ...(distModelsChanged ? { 'account.analytic.distribution.model': nextDistModels } : {}),
+    },
+    seq: {
+      ...(db.seq ?? {}),
+      'res.partner.category': nextSeq,
+    },
+  };
+}
+MIGRATIONS.push({ version: 71, name: 'partner-tags-res-partner-category', up: migratePartnerTags });
+
+function normalizeLegacyCountry(next, country) {
+  if (country == null) return null;
+  if (Number.isInteger(country)) {
+    return (next.records['res.country'] ?? []).some((r) => r.id === country) ? country : null;
+  }
+  const raw = String(country).trim();
+  if (!raw) return null;
+  const countries = next.records['res.country'] ?? [];
+  const lower = raw.toLowerCase();
+  const byCodeOrName = countries.filter((r) => r.code?.toLowerCase() === lower || r.name?.toLowerCase() === lower);
+  if (byCodeOrName.length === 1) return byCodeOrName[0].id;
+  return null;
+}
+
+function normalizeLegacyState(next, state, countryId) {
+  if (state == null) return null;
+  if (Number.isInteger(state)) {
+    return (next.records['res.country.state'] ?? []).some((r) => r.id === state && (countryId == null || r.country_id === countryId)) ? state : null;
+  }
+  const raw = String(state).trim();
+  if (!raw) return null;
+  const states = next.records['res.country.state'] ?? [];
+  const lower = raw.toLowerCase();
+  const byCodeOrName = states.filter((r) => (countryId == null || r.country_id === countryId) && (r.code?.toLowerCase() === lower || r.name?.toLowerCase() === lower));
+  if (byCodeOrName.length === 1) return byCodeOrName[0].id;
+
+  if (countryId) {
+    let stateSeq = Math.max(next.seq?.['res.country.state'] ?? 0, 0, ...states.map((r) => r.id));
+    const code = raw.length <= 5 ? raw.toUpperCase() : raw;
+    const newState = { id: ++stateSeq, name: raw, code, country_id: countryId };
+    states.push(newState);
+    next.seq = { ...next.seq, 'res.country.state': stateSeq };
+    return newState.id;
+  }
+  return null;
+}
+
+export function migrateCountries(db) {
+  const next = ensureCountries(db);
+  const records = { ...next.records };
+  for (const model of ['account.tax.group', 'account.tax', 'account.account.tag', 'account.fiscal.position']) {
+    if (!Array.isArray(records[model])) continue;
+    records[model] = records[model].map((record) => {
+      const countryId = record.country_id ?? normalizeLegacyCountry(next, record.country);
+      const hadCountryTarget = Boolean(record.country);
+      const unresolvedCountry = hadCountryTarget && countryId == null;
+
+      let result = { ...record };
+      if (countryId != null) {
+        delete result.country;
+        result.country_id = countryId;
+      } else {
+        result.country_id = null;
+        if (!hadCountryTarget) delete result.country;
+      }
+
+      if (model === 'account.fiscal.position') {
+        const rawStates = record.state_ids ?? [];
+        let unresolvedState = false;
+        const resolvedStates = [];
+
+        for (const s of rawStates) {
+          const sid = normalizeLegacyState(next, s, countryId);
+          if (sid != null) {
+            resolvedStates.push(sid);
+          } else {
+            unresolvedState = true;
+          }
+        }
+
+        result.state_ids = resolvedStates;
+        if (unresolvedState) {
+          result.states = record.states ?? rawStates;
+        }
+
+        if (unresolvedCountry || unresolvedState) {
+          result.unresolved_targeting = true;
+          if (record.auto_apply) {
+            result.auto_apply = false;
+            console.warn(`Fiscal position "${record.name}" auto_apply disabled due to unresolved targeting (country: "${record.country}", states: ${JSON.stringify(rawStates)})`);
+          }
+        }
+      }
+      return result;
+    });
+  }
+  return { ...next, records };
+}
+MIGRATIONS.push({ version: 72, name: 'country-records', up: migrateCountries });
+
 MIGRATIONS.push({ version: 73, name: 'analytic-general-account-id', up: (db) => {
   const unresolved = [];
   const accounts = db.records['account.account'] ?? [];

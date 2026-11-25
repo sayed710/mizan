@@ -95,19 +95,22 @@ test('TAX-9: res.country.group model and fiscal position country_group_id/state_
   assert.ok(models['res.partner'].fields.state, 'res.partner declares state');
 
   let db = seed();
-  const group = create(db, 'res.country.group', { name: 'GCC', country_ids: ['UAE', 'Saudi Arabia'] });
+  const egypt = search(db, 'res.country').find((c) => c.code === 'EG');
+  const giza = search(db, 'res.country.state').find((s) => s.country_id === egypt.id && s.code === 'GZ');
+  const group = create(db, 'res.country.group', { name: 'Regional', country_ids: ['Egypt', 'Saudi Arabia'] });
   db = applyDiff(db, diffDb(db, group.db), { isAdmin: true });
-  assert.deepEqual(read(db, 'res.country.group', group.id).country_ids, ['UAE', 'Saudi Arabia']);
+  assert.deepEqual(read(db, 'res.country.group', group.id).country_ids, ['Egypt', 'Saudi Arabia']);
 
   const fp = create(db, 'account.fiscal.position', {
     name: 'GCC Sales',
     auto_apply: true,
     country_group_id: group.id,
-    state_ids: ['Dubai'],
+    country_id: egypt.id,
+    state_ids: [giza.id],
   });
   db = applyDiff(db, diffDb(db, fp.db), { isAdmin: true });
   assert.equal(read(db, 'account.fiscal.position', fp.id).country_group_id, group.id);
-  assert.deepEqual(read(db, 'account.fiscal.position', fp.id).state_ids, ['Dubai']);
+  assert.deepEqual(read(db, 'account.fiscal.position', fp.id).state_ids, [giza.id]);
 
   // Guard rejects dangling country_group_id via diffDb + applyDiff
   const forged = {
@@ -137,6 +140,9 @@ test('TAX-9: res.country.group model and fiscal position country_group_id/state_
 test('TAX-9: fiscalPositionFor matches country group, states, and zip with Odoo specificity order without name inference', () => {
   const base = seed();
   let db = base;
+  const us = search(db, 'res.country').find((c) => c.code === 'US');
+  const california = create(db, 'res.country.state', { name: 'California', code: 'CA', country_id: us.id });
+  db = california.db;
   const eu = create(db, 'res.country.group', { name: 'European Union', country_ids: ['France', 'Germany'] });
   db = eu.db;
   const na = create(db, 'res.country.group', { name: 'North America', country_ids: ['United States', 'Canada'] });
@@ -149,18 +155,18 @@ test('TAX-9: fiscalPositionFor matches country group, states, and zip with Odoo 
   db = fpEu.db;
   const fpNa = create(db, 'account.fiscal.position', { name: 'United States', auto_apply: true, sequence: 3, country_group_id: na.id });
   db = fpNa.db;
-  const fpUs = create(db, 'account.fiscal.position', { name: 'US National', auto_apply: true, sequence: 10, country: 'United States' });
+  const fpUs = create(db, 'account.fiscal.position', { name: 'US National', auto_apply: true, sequence: 10, country_id: us.id });
   db = fpUs.db;
   const fpUsZip = create(db, 'account.fiscal.position', {
-    name: 'US 900xx', auto_apply: true, sequence: 20, country: 'United States', zip_from: '90000', zip_to: '90099',
+    name: 'US 900xx', auto_apply: true, sequence: 20, country_id: us.id, zip_from: '90000', zip_to: '90099',
   });
   db = fpUsZip.db;
   const fpCa = create(db, 'account.fiscal.position', {
-    name: 'California', auto_apply: true, sequence: 30, country: 'United States', state_ids: ['California', 'CA'],
+    name: 'California', auto_apply: true, sequence: 30, country_id: us.id, state_ids: [california.id],
   });
   db = fpCa.db;
   const fpCaLaZip = create(db, 'account.fiscal.position', {
-    name: 'LA Zip', auto_apply: true, sequence: 40, country: 'United States', state_ids: ['California'], zip_from: '90000', zip_to: '90099',
+    name: 'LA Zip', auto_apply: true, sequence: 40, country_id: us.id, state_ids: [california.id], zip_from: '90000', zip_to: '90099',
   });
   db = fpCaLaZip.db;
 

@@ -1,3 +1,4 @@
+import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
 import { create, getActiveCompany, read, search, setActiveCompany, write } from '../orm.js';
 import { adjustQuantity, moveValued, revalue } from './valuation.js';
@@ -745,7 +746,7 @@ export const salesModels = {
               const product = read(db, 'product', l.product_id);
               return product?.type === 'goods' ? { ...l, procurement_route: routeAction(db, product, l) } : l;
             });
-            const confirmed = write(consumeOrderCodes(db, r), 'sale.order', r.id, { state: 'sale', order_line: lines });
+            const confirmed = write(incrementPartnerRank(consumeOrderCodes(db, r), r.partner_id, 'customer_rank'), 'sale.order', r.id, { state: 'sale', order_line: lines });
             const { db: procured, stockLines } = procure(confirmed, read(confirmed, 'sale.order', r.id));
             return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_shipping_id ?? r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null, scheduled_date: r.commitment_date }) };
           },
@@ -824,7 +825,7 @@ export const salesModels = {
           label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),
           // Dropship orders go vendor → customer directly: no receipt into our stock.
           run: (db, r) => {
-            const confirmed = write(db, 'purchase.order', r.id, { state: 'purchase' });
+            const confirmed = write(incrementPartnerRank(db, r.partner_id, 'supplier_rank'), 'purchase.order', r.id, { state: 'purchase' });
             if (!r.dropship_partner_id) return { db: createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
             const moves = r.order_line.map((l, i) => ({ product_id: l.product_id, qty: toStock(confirmed, l, Number(l.qty)), so_line: l.so_line, po_line: i }));
             let next = confirmed;
