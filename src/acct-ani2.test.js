@@ -198,3 +198,75 @@ test('ANI-5 validated timesheet opened via accounting analytic-items is locked a
     await ctx.done();
   }
 });
+
+test('ANI-6 accounting analytic-items form renders and edits employee_id, project_id, task_id, category, and preserves model groups without duplicates', async () => {
+  const findAll = (node, predicate, acc = []) => {
+    if (!node) return acc;
+    if (predicate(node)) acc.push(node);
+    for (const child of node.childNodes ?? []) findAll(child, predicate, acc);
+    return acc;
+  };
+  let db = seed();
+  const analytic = create(db, 'account.analytic.account', { name: 'Delivery Analytic' });
+  db = analytic.db;
+  const emp1 = create(db, 'hr.employee', { name: 'Emp One' });
+  db = emp1.db;
+  const emp2 = create(db, 'hr.employee', { name: 'Emp Two' });
+  db = emp2.db;
+  const proj1 = create(db, 'project.project', { name: 'Proj One' });
+  db = proj1.db;
+  const proj2 = create(db, 'project.project', { name: 'Proj Two' });
+  db = proj2.db;
+  const task1 = create(db, 'project.task', { name: 'Task One', project_id: proj1.id });
+  db = task1.db;
+  const task2 = create(db, 'project.task', { name: 'Task Two', project_id: proj2.id });
+  db = task2.db;
+  const line = create(db, model, {
+    name: 'Editable Item',
+    account_id: analytic.id,
+    date: '2026-02-01',
+    amount: 42,
+    employee_id: emp1.id,
+    project_id: proj1.id,
+    task_id: task1.id,
+    category: 'other',
+  });
+  const ctx = await mountAnalyticForm(line.db, line.id);
+  try {
+    // Both accounting layout fields and previously omitted fields render once without duplicates.
+    for (const id of ['f-account_id', 'f-date', 'f-amount', 'f-unit_amount', 'f-general_account', 'f-move_id', 'f-employee_id', 'f-project_id', 'f-task_id', 'f-category', 'f-billable', 'f-so_id']) {
+      const matches = findAll(ctx.host, (n) => props(n)?.id === id);
+      assert.equal(matches.length, 1, `expected ${id} to render exactly once, found ${matches.length}`);
+    }
+
+    const empSelect = find(ctx.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-employee_id');
+    const projSelect = find(ctx.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-project_id');
+    const taskSelect = find(ctx.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-task_id');
+    const catSelect = find(ctx.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-category');
+    assert.equal(props(empSelect).value, emp1.id);
+    assert.equal(props(projSelect).value, proj1.id);
+    assert.equal(props(taskSelect).value, task1.id);
+    assert.equal(props(catSelect).value, 'other');
+
+    await ctx.React.act(async () => {
+      props(empSelect).onChange({ target: { value: String(emp2.id) } });
+      props(projSelect).onChange({ target: { value: String(proj2.id) } });
+      props(taskSelect).onChange({ target: { value: String(task2.id) } });
+      props(catSelect).onChange({ target: { value: 'timesheet' } });
+    });
+
+    const saveBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Save');
+    assert.ok(saveBtn, 'Save button must appear after editing');
+    await ctx.React.act(async () => {
+      props(saveBtn).onClick();
+    });
+
+    const saved = read(ctx.getDb(), model, line.id);
+    assert.equal(saved.employee_id, emp2.id);
+    assert.equal(saved.project_id, proj2.id);
+    assert.equal(saved.task_id, task2.id);
+    assert.equal(saved.category, 'timesheet');
+  } finally {
+    await ctx.done();
+  }
+});
