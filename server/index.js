@@ -863,9 +863,7 @@ async function api(req, res, path) {
       commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {
-      return send(res, 502, delivered
-        ? { error: `The email was sent, but its status could not be recorded: ${e.message}`, delivered: true }
-        : { error: `Email could not be sent: ${e.message}` });
+      return send(res, 502, { error: delivered ? `The email was sent, but its status could not be recorded: ${e.message}` : `Email could not be sent: ${e.message}`, ...(delivered ? { delivered: true } : {}) });
     }
   }
   const sessionToken = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1] ?? '';
