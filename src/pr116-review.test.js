@@ -73,11 +73,11 @@ test('the company currency hides its Rates tab even when it is not the base curr
 
 test('the printed invoice shows the payment-term note or name unless the term is hidden from invoices', () => {
   let db = seed();
-  const shown = create(db, 'account.payment.term', { name: '30 Days', note: 'Payment terms: 30 days', line_ids: [{ value: 'percent', value_amount: 100, nb_days: 30 }] });
+  const shown = create(db, 'account.payment.term', { name: '30 Days', note: 'Payment terms: 30 days', line_ids: [{ value_type: 'percent', value: 100, nb_days: 30 }] });
   db = shown.db;
-  const named = create(db, 'account.payment.term', { name: '45 Days', line_ids: [{ value: 'percent', value_amount: 100, nb_days: 45 }] });
+  const named = create(db, 'account.payment.term', { name: '45 Days', line_ids: [{ value_type: 'percent', value: 100, nb_days: 45 }] });
   db = named.db;
-  const hidden = create(db, 'account.payment.term', { name: 'Hidden', display_on_invoice: false, line_ids: [{ value: 'percent', value_amount: 100, nb_days: 10 }] });
+  const hidden = create(db, 'account.payment.term', { name: 'Hidden', display_on_invoice: false, line_ids: [{ value_type: 'percent', value: 100, nb_days: 10 }] });
   db = hidden.db;
   assert.equal(invoiceTermNote(db, { invoice_payment_term_id: shown.id }), 'Payment terms: 30 days');
   assert.equal(invoiceTermNote(db, { invoice_payment_term_id: named.id }), 'Payment Terms: 45 Days');

@@ -1,7 +1,7 @@
 /** Resolve field editability for a record across forms, imports, copies, and API metadata. */
-export const fieldReadonly = (field, record, db) => !!(
+export const fieldReadonly = (field, record, db, ctx = undefined) => !!(
   (field?.compute && !field?.editable)
-  || (typeof field?.readonly === 'function' ? field.readonly(record, db) : field?.readonly)
+  || (typeof field?.readonly === 'function' ? field.readonly(record, db, ctx) : field?.readonly)
 );
 
 /** Resolve whether a field is required for a record across forms, imports, and ORM validation. */

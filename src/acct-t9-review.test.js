@@ -86,7 +86,9 @@ test('a country group made in one company can be chosen from another company', (
 test('website cart and checkout apply a state-scoped fiscal position from the buyer state and keep the state', () => {
   let db = seed();
   const saleTax = db.records['account.tax'].find((t) => t.type_tax_use === 'sale' && Number(t.amount) === 14 && !t.price_include);
-  const fp = create(db, 'account.fiscal.position', { name: 'Alexandria Zone', auto_apply: true, sequence: 1, country: 'Egypt', state_ids: ['Alexandria'] });
+  const egypt = search(db, 'res.country').find((c) => c.code === 'EG');
+  const alex = search(db, 'res.country.state').find((s) => s.country_id === egypt.id && s.name === 'Alexandria');
+  const fp = create(db, 'account.fiscal.position', { name: 'Alexandria Zone', auto_apply: true, sequence: 1, country_id: egypt.id, state_ids: [alex.id] });
   const mapped = create(fp.db, 'account.tax', { name: 'Alexandria 0%', amount_type: 'percent', amount: 0, type_tax_use: 'sale', fiscal_position_ids: [fp.id], original_tax_ids: [saleTax.id] });
   db = write(mapped.db, 'product', 1, { tax_id: saleTax.id });
   const lines = [{ product_id: 1, qty: 1 }];

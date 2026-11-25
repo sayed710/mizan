@@ -1,4 +1,4 @@
-import { addDays, isoDate, today, validDate } from './common.js';
+import { addDays, isFieldEdited, isoDate, today, validDate } from './common.js';
 import { currencyUnits, documentCurrency, roundCurrency } from '../money.js';
 import { companyCurrency } from './currency.js';
 import { t } from '../i18n.js';
@@ -108,11 +108,14 @@ export function termScheduleError(term, total, currency = null) {
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
   const hasPercent = lines.some((line) => line.value_type === 'percent');
   const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
-  if (balanceIndex >= 0 || (hasFixed && hasPercent)) {
+  const percentSum = lines.filter((line) => line.value_type === 'percent').reduce((sum, line) => sum + (Number(line.value) || 0), 0);
+  const percentIs100 = Math.round(percentSum * 100) === 10000;
+  const allocatesExactTotal = Math.abs(requestedTotal - totalCents) <= lines.length / 2;
+  if (balanceIndex >= 0) {
     if (requestedTotal > totalCents + lines.length / 2) {
       return 'Payment terms must allocate 100% of the total';
     }
-  } else if (Math.abs(requestedTotal - totalCents) > lines.length / 2) {
+  } else if (!allocatesExactTotal && !(hasFixed && hasPercent && percentIs100)) {
     return 'Payment terms must allocate 100% of the total';
   }
   return null;
@@ -188,6 +191,28 @@ export function discountTaxComputation(term) {
 export function mixedDiscountFactor(term) {
   const percent = Number(term?.discount_percent) || 0;
   return term?.early_discount && discountTaxComputation(term) === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
+}
+
+function termConfigurationError(term) {
+  const lines = term.line_ids ?? [];
+  const percents = lines.filter((line) => line.value_type === 'percent');
+  if (percents.some((line) => !Number.isFinite(Number(line.value)) || Number(line.value) < 0 || Number(line.value) > 100)) return 'Percentages on the Payment Terms lines must be between 0 and 100.';
+  const total = percents.reduce((sum, line) => sum + Number(line.value), 0);
+  const balance = lines.some((line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance'));
+  if (balance ? total > 100 : Math.round(total * 100) !== 10000) return 'The Payment Term must have at least one percent line and the sum of the percent must be 100%.';
+  if (term.early_discount && (lines.length !== 1 || lines[0].value_type !== 'percent' || Number(lines[0].value) !== 100)) return 'The Early Payment Discount functionality can only be used with payment terms using a single 100% line. ';
+  if (term.early_discount && !(Number(term.discount_percent) > 0)) return 'The Early Payment Discount must be strictly positive.';
+  if (term.early_discount && !(Number(term.discount_days) > 0)) return 'The Early Payment Discount days must be strictly positive.';
+  return null;
+}
+
+function defaultDiscountTaxComputation(db, companyId) {
+  if (!db) return 'included';
+  const targetCompany = companyId
+    ? read(db, 'res.company', companyId)
+    : read(db, 'res.company', db.settings?.current_company_id || 1);
+  const code = targetCompany?.country_code;
+  return code === 'BE' ? 'mixed' : code === 'NL' ? 'excluded' : 'included';
 }
 
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });
@@ -291,9 +316,27 @@ export const termModels = {
       },
     },
     defaults: () => ({ sequence: 10, active: true, display_on_invoice: true, early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
-    createDefaults: (_db, vals) => (vals?.early_discount ? { discount_tax_computation: 'included' } : {}),
-    onchange: (r, key) => (key === 'early_discount' && r.early_discount && !r.discount_tax_computation ? { discount_tax_computation: 'included' } : {}),
+    createDefaults: (db, vals) => ({ discount_tax_computation: defaultDiscountTaxComputation(db, vals?.company_id) }),
+    onchange: (r, key, db, context) => {
+      if (key === 'company_id') {
+        const previous = context?.previous;
+        const isExplicit = isFieldEdited('discount_tax_computation', context);
+        const oldDefault = previous ? defaultDiscountTaxComputation(db, previous.company_id) : null;
+        const isDefaultedOrUnset = context?.editedFields
+          ? !isExplicit
+          : (r.discount_tax_computation == null || (oldDefault !== null && r.discount_tax_computation === oldDefault && previous.discount_tax_computation === oldDefault));
+        if (isDefaultedOrUnset) {
+          return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+        }
+        return {};
+      }
+      if (key === 'early_discount' && r.early_discount && !r.discount_tax_computation) {
+        return { discount_tax_computation: defaultDiscountTaxComputation(db, r.company_id) };
+      }
+      return {};
+    },
     guard: (_db, before, after, _ctx, vals) => {
+      if (before && after.active === false && before.active !== false && Object.keys(after).every((key) => key === 'active' || JSON.stringify(after[key]) === JSON.stringify(before[key])) && Object.keys(before).every((key) => key === 'active' || Object.hasOwn(after, key))) return null;
       const exampleErr = exampleInputsError(vals);
       if (exampleErr) return exampleErr;
       // Terms saved before the mode existed keep reading as 'included' (discountTaxComputation) and stay editable.
@@ -301,11 +344,13 @@ export const termModels = {
       if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) && !legacyUnset) {
         return 'Select a discount tax computation mode';
       }
-      return dueTermLinesError(after);
+      return termConfigurationError(after) ?? dueTermLinesError(after);
     },
+    protectDelete: (db, r, staged = db, context = {}) => ((context.finalRecords ?? staged.records)['account.move'] ?? []).some((move) => move.invoice_payment_term_id === r.id) ? "Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them. How about archiving them instead?" : null,
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     views: ['list', 'kanban'],
-    kanban: { title: 'name', lines: ['early_discount'] },
+    kanban: { title: 'name', lines: ['note'] },
+    filters: [[{ id: 'archived', label: 'Archived', includeArchived: true, fn: (r) => r.active === false }]],
     list: ['sequence', 'name', 'company_id'],
     listDecoration: (r) => (r.active === false ? 'muted' : ''),
     searchFields: ['name'],

@@ -11,7 +11,7 @@ import { createCompany, setCompanies } from './models/company.js';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
-const budget = (db, account, extra = {}) => create(db, 'account.budget', { name: 'Audit budget', date_from: '2026-01-01', date_to: '2026-01-31', lines: [{ analytic_account_id: account, planned: -1000 }], ...extra });
+const budget = (db, account, extra = {}) => create(db, 'account.budget', { name: 'Audit budget', date_from: '2026-01-01', date_to: '2026-01-31', lines: [{ analytic_account_id: account, planned: 1000 }], ...extra });
 const actual = (db, id) => budgetReport(db, id, '2026-01-31')[0];
 
 test('budget achieved excludes timesheets and draft moves and follows posted move resets', () => {

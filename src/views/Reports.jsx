@@ -1,14 +1,14 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { read, search, write } from '../orm.js';
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { read, search } from '../orm.js';
 import { models } from '../registry.js';
-import { today, validDate } from '../models/common.js';
+import { today } from '../models/common.js';
 import { categoryPath } from '../models/productconfig-helpers.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
 import { Wizard } from './Wizard.jsx';
-import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, companyReceivableLines, followUps, followUpCompanies, followUpLevel, followUpText, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerReceivableLines, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, BUCKETS, companyReceivableLines, followUpCompanies, followUpLevel, followUps, followUpText, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerReceivableLines, resolveAgedAsOfDate, taxesByGrid, taxesByTax, taxItemKey, taxReport } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -622,8 +622,8 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   );
 }
 
-export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money }) {
-  const availableCompanies = companiesOf(db);
+export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money: moneyProp }) {
+  const fmtMoney = moneyProp ?? money;
   const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
@@ -631,17 +631,23 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
     const general = acc ? `${acc.code} ${acc.name}` : l.general_account;
     return [analytic, general].filter(Boolean).join(' · ') || '—';
   };
-  const selectCompany = (budgetId, value) => {
-    const companyId = Number(value);
-    if (!companyId || !availableCompanies.some((company) => company.id === companyId)) return;
-    commit(write(getDb(), 'account.budget', budgetId, { company_id: companyId }));
-  };
   const targetPeriods = periods?.length ? periods : [period];
   const minFrom = targetPeriods.map((p) => p.from).filter(Boolean).sort()[0];
   const maxTo = targetPeriods.map((p) => p.to).filter(Boolean).sort().at(-1);
   const datesOverlap = (from1, to1, from2, to2) =>
     (!to1 || !from2 || to1 >= from2) && (!from1 || !to2 || from1 <= to2);
-
+  const zeroBudgetLine = (line) => ({
+    ...line,
+    planned_amount: 0,
+    achieved_amount: 0,
+    committed_amount: 0,
+    budget_variance: 0,
+    achievement: 0,
+    budget_achievement: 0,
+    budget_theoretical: 0,
+    analytic_lines: [],
+    commitment_lines: [],
+  });
   return (
     <tbody>
       {search(db, 'account.budget').filter((b) => {
@@ -673,18 +679,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
             for (const p of targetPeriods) {
               const budgetOverlaps = datesOverlap(b.date_from, b.date_to, p.from, p.to);
               if (!budgetOverlaps) {
-                const zeroLines = baseBudgetLines.map((line) => ({
-                  ...line,
-                  planned_amount: 0,
-                  achieved_amount: 0,
-                  committed_amount: 0,
-                  budget_variance: 0,
-                  budget_achievement: 0,
-                  budget_theoretical: 0,
-                  analytic_lines: [],
-                  commitment_lines: [],
-                }));
-                periodReports.push({ period: p, lines: zeroLines, error: null });
+                periodReports.push({ period: p, lines: baseBudgetLines.map(zeroBudgetLine), error: null });
               } else {
                 try {
                   const asOfDate = p.to && p.to < today() ? p.to : today();
@@ -694,20 +689,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                   const lines = rawLines.map((line) => {
                     const lineFrom = line.date_from || b.date_from;
                     const lineTo = line.date_to || b.date_to;
-                    if (!datesOverlap(lineFrom, lineTo, p.from, p.to)) {
-                      return {
-                        ...line,
-                        planned_amount: 0,
-                        achieved_amount: 0,
-                        committed_amount: 0,
-                        budget_variance: 0,
-                        budget_achievement: 0,
-                        budget_theoretical: 0,
-                        analytic_lines: [],
-                        commitment_lines: [],
-                      };
-                    }
-                    return line;
+                    return !datesOverlap(lineFrom, lineTo, p.from, p.to) ? zeroBudgetLine(line) : line;
                   });
                   periodReports.push({ period: p, lines, error: null });
                 } catch (error) {
@@ -727,16 +709,9 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
         return [
           <tr key={b.id} className="rep-section"><td colSpan={colSpan}>
             <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
-            {companyMissing
-              ? <label className="inline-select">{t('Company')}
-                <select aria-label={`${t('Company')} for ${b.name}`} value="" onChange={(event) => selectCompany(b.id, event.target.value)}>
-                  <option value="">{t('Select a company')}</option>
-                  {availableCompanies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-              </label>
-              : <span className="muted"> · {company.name}</span>}
+            {company && <span className="muted"> · {company.name}</span>}
           </td></tr>,
-          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company to show this budget report.')}</td></tr>] : []),
+          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company on the budget record to show this budget report.')} {t('Select a company to show this budget report.')}</td></tr>] : []),
           ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{reportError}</td></tr>] : []),
           ...firstReportLines.map((l, i) => {
             const pr0Line = periodReports[0]?.lines?.[i];
@@ -757,21 +732,21 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                     }
                     const pLine = pr.lines[i];
                     return [
-                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={money} />,
-                      <td key={`${pIdx}-a`} className="num">{pLine.budget_theoretical ? `${pLine.budget_achievement}%` : ''}</td>,
+                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount ?? pLine.planned} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={fmtMoney} />,
+                      <td key={`${pIdx}-a`} className="num">{(pLine.planned_amount ?? pLine.planned) ? `${pLine.budget_achievement ?? pLine.achievement}%` : ''}</td>,
                     ];
                   })}
                 </tr>
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.analytic_lines ?? []).map((item) => <tr className="rep-detail" key={item.id}>
                   <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td /><td />
+                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td /><td />
                 </tr>)}
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.commitment_lines ?? []).map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
                   <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
-                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td />
+                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td />
                 </tr>)}
               </Fragment>
             );
@@ -918,22 +893,24 @@ function Valuation({ db, period, companyId, categoryId, productId, warehouseId, 
 }
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
-function Depreciation({ db, period, companyId, includeDraft = false, money: moneyProp }) {
+function Depreciation({ db, period, companyId, groupBy = '', includeDraft = false, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const { rows, totals } = depreciationReport(db, period, companyId, { includeDraft });
+  const { rows, totals, groups } = depreciationReport(db, period, companyId, { groupBy, includeDraft });
+  const renderRow = ({ a, original, inPeriod, accumulated, book }) => (
+    <tr key={a.id} className="rep-detail">
+      <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td><td>{a.acquisition_date}</td>
+      {[original, inPeriod, accumulated, book].map((value, i) => <td key={i} className="num">{fmtMoney(value)}</td>)}
+    </tr>
+  );
+  const totalRow = (label, values) => (
+    <tr className="rep-total strong">
+      <td>{label}</td><td />{['original', 'inPeriod', 'accumulated', 'book'].map((key) => <td key={key} className="num">{fmtMoney(values[key])}</td>)}
+    </tr>
+  );
   return (
     <tbody>
-      {rows.map(({ a, original, inPeriod, accumulated, book }) => (
-        <tr key={a.id} className="rep-detail">
-          <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td>
-          <td>{a.acquisition_date}</td>
-          <td className="num">{fmtMoney(original)}</td>
-          <td className="num">{fmtMoney(inPeriod)}</td>
-          <td className="num">{fmtMoney(accumulated)}</td>
-          <td className="num">{fmtMoney(book)}</td>
-        </tr>
-      ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td className="num">{fmtMoney(totals.original)}</td><td className="num">{fmtMoney(totals.inPeriod)}</td><td className="num">{fmtMoney(totals.accumulated)}</td><td className="num">{fmtMoney(totals.book)}</td></tr>
+      {groupBy ? groups.map((group) => <Fragment key={group.id ?? 'none'}><tr className="rep-section"><td colSpan={6}>{group.name || t('Undefined')}</td></tr>{group.rows.map(renderRow)}{totalRow(t('Subtotal'), group.totals)}</Fragment>) : rows.map(renderRow)}
+      {totalRow(t('Total'), totals)}
     </tbody>
   );
 }
@@ -1054,7 +1031,11 @@ function ReportPage({ leaf, params }) {
     [sourceDb, companyId, allowAllCompanies],
   );
   const [periodKey, setPeriodKey] = useState(params?.has('from') && params?.get('to') ? 'custom' : DEFAULT_REPORT_PERIOD);
-  const [asOf, setAsOf] = useState(today());
+  const asOfErrorId = useId();
+  const [asOfState, setAsOfState] = useState(() => {
+    const initial = today();
+    return { input: initial, date: initial, error: '' };
+  });
   const isAged = ['agedReceivable', 'agedPayable'].includes(leaf.report);
   const isValuation = leaf.report === 'valuation';
   const [valuationCategoryId, setValuationCategoryId] = useState('');
@@ -1086,6 +1067,7 @@ function ReportPage({ leaf, params }) {
   const [showInitialBalance, setShowInitialBalance] = useState(true);
   const [showEndBalance, setShowEndBalance] = useState(true);
   const [auditSort, setAuditSort] = useState('date');
+  const [depreciationGroupBy, setDepreciationGroupBy] = useState('');
   const [agingInterval, setAgingInterval] = useState(30);
   const [agingBasis, setAgingBasis] = useState('base_on_maturity_date');
   const agingOptions = useMemo(() => ({ aging_interval: agingInterval, aging_based_on: agingBasis }), [agingInterval, agingBasis]);
@@ -1175,8 +1157,8 @@ function ReportPage({ leaf, params }) {
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
   const period = useMemo(
-    () => (isAged || isValuation ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
-    [isAged, isValuation, asOf, periodKey, customPeriod],
+    () => (isAged || isValuation ? { from: '', to: agedReportDate(asOfState.date) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
+    [isAged, isValuation, asOfState.date, periodKey, customPeriod],
   );
   const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all';
   const periodError = !isAged && !['inalterability', 'valuation'].includes(leaf.report)
@@ -1455,11 +1437,15 @@ function ReportPage({ leaf, params }) {
       <div className="control-panel">
         <h1 className="cp-title">{t(title)}</h1>
       {isAged && <>
-        <label>{t('As of Date')}<input aria-label={t('As of')} type="date" value={asOf} onChange={(e) => { if (validDate(e.target.value)) setAsOf(e.target.value); }} /></label>
+        <label>{t('As of Date')}<input aria-label={t('As of')} aria-invalid={Boolean(asOfState.error)} aria-describedby={asOfState.error ? asOfErrorId : undefined} type="date" value={asOfState.input} onChange={(e) => setAsOfState((prev) => resolveAgedAsOfDate(e.target.value, prev.date))} /></label>
+        {asOfState.error && <span id={asOfErrorId} className="alert" role="alert">{t(asOfState.error)}</span>}
         <label className="inline-select">{t('Aging period length (days)')}<input type="number" min="1" step="1" value={agingInterval} onChange={(e) => { const n = Number(e.target.value); if (Number.isSafeInteger(n) && n > 0) setAgingInterval(n); }} /></label>
         <label className="inline-select">{t('Based on')}<select value={agingBasis} onChange={(e) => setAgingBasis(e.target.value)}><option value="base_on_maturity_date">{t('Due Date')}</option><option value="base_on_invoice_date">{t('Invoice Date')}</option></select></label>
       </>}
-      {isValuation && <label>{t('As of')}<input aria-label={t('As of')} type="date" value={period.to} onChange={(e) => setAsOf(agedReportDate(e.target.value))} /></label>}
+      {isValuation && <>
+        <label>{t('As of')}<input aria-label={t('As of')} aria-invalid={Boolean(asOfState.error)} aria-describedby={asOfState.error ? asOfErrorId : undefined} type="date" value={asOfState.input} onChange={(e) => setAsOfState((prev) => resolveAgedAsOfDate(e.target.value, prev.date))} /></label>
+        {asOfState.error && <span id={asOfErrorId} className="alert" role="alert">{t(asOfState.error)}</span>}
+      </>}
       {leaf.report !== 'inalterability' && !isAged && !isValuation && <label className="inline-select">
         {t('Period')}
         <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
@@ -1541,6 +1527,12 @@ function ReportPage({ leaf, params }) {
         <select aria-label={t('Sort by')} value={auditSort} onChange={(e) => setAuditSort(e.target.value)}>
           <option value="date">{t('Date')}</option>
           <option value="number">{t('Journal Entry Number')}</option>
+        </select>
+      </label>}
+      {leaf.report === 'depreciation' && <label className="inline-select">{t('Group By')}
+        <select aria-label={t('Group By')} value={depreciationGroupBy} onChange={(e) => setDepreciationGroupBy(e.target.value)}>
+          <option value="">{t('None')}</option>
+          <option value="asset_group_id">{t('Asset Group')}</option>
         </select>
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
@@ -1799,6 +1791,7 @@ function ReportPage({ leaf, params }) {
                 variant={activeTaxVariant}
                 sort={auditSort}
                 kind={deferredKind}
+                groupBy={depreciationGroupBy}
                 journalId={leaf.report === 'inalterability' ? activeInalterabilityJournalId : undefined}
                 agedData={agedData}
                 agingOptions={agingOptions}
