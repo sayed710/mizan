@@ -1,44 +1,23 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { request } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startServer } from './test-server.js';
 
-let child, directory, origin;
+let server, directory, origin;
 const JSON_HEADERS = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' };
 
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'mizan-stale-'));
-  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  origin = await new Promise((resolve, reject) => {
-    let output = '';
-    const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 30000);
-    child.on('message', (msg) => {
-      if (msg?.type === 'ready' && msg.port > 0) {
-        clearTimeout(timeout);
-        resolve(`http://127.0.0.1:${msg.port}`);
-      }
-    });
-    child.stdout.on('data', (chunk) => {
-      output += chunk;
-      const match = /Mizan listening on http:\/\/(?:localhost|127\.0\.0\.1):([1-9]\d*)/.exec(output);
-      if (match) {
-        clearTimeout(timeout);
-        resolve(`http://127.0.0.1:${match[1]}`);
-      }
-    });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    child.on('error', (err) => { clearTimeout(timeout); reject(err); });
-    child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
-  });
+  server = await startServer({ env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '' } });
+  origin = server.origin;
 });
 
 after(async () => {
-  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
-  if (directory) await rm(directory, { recursive: true, force: true });
+  await server?.stop();
+  if (directory) await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 test('a slow public request does not revert changes committed while its body was arriving', async () => {
