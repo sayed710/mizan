@@ -254,19 +254,28 @@ function isNonBaseCompanyCurrency(record, db) {
   return Boolean(own && base && own.id === record.id && own.id !== base.id);
 }
 
-/** Stamp `write_date` on newly added or modified rate rows while keeping untouched rows unchanged. */
-function stampRateWriteDates(beforeRows = null, afterRows = []) {
+/** Stamp `write_date` on newly added or modified rate rows while restoring stored `write_date` on untouched rows. */
+export function stampRateWriteDates(beforeRows = null, afterRows = []) {
   if (!Array.isArray(afterRows)) return afterRows;
   const now = new Date().toISOString();
   const isPlainRow = (row) => Boolean(row && typeof row === 'object' && !Array.isArray(row));
-  const rowKey = (row) => `${row.date ?? ''}:${row.company_id == null || row.company_id === '' ? 'all' : String(Number(row.company_id))}:${row.rate}`;
-  const unchangedKeys = beforeRows ? new Set(beforeRows.filter(isPlainRow).map(rowKey)) : null;
+  const rateKey = (rate) => {
+    if (typeof rate === 'boolean' || rate === null || rate === '' || rate === undefined) return String(rate);
+    const num = Number(rate);
+    return Number.isFinite(num) ? String(num) : String(rate);
+  };
+  const rowKey = (row) => `${row.date ?? ''}:${row.company_id == null || row.company_id === '' ? 'all' : String(Number(row.company_id))}:${rateKey(row.rate)}`;
+  const beforeByKey = beforeRows ? new Map(beforeRows.filter(isPlainRow).map((row) => [rowKey(row), row])) : null;
   return afterRows.map((row) => {
     if (!isPlainRow(row)) return row;
-    if (unchangedKeys) {
-      return unchangedKeys.has(rowKey(row)) ? row : { ...row, write_date: now };
+    const stored = beforeByKey?.get(rowKey(row));
+    if (stored) {
+      const { write_date: _ignored, ...rest } = row;
+      return Object.hasOwn(stored, 'write_date') && stored.write_date !== undefined
+        ? { ...rest, write_date: stored.write_date }
+        : rest;
     }
-    return { ...row, write_date: row.write_date || now };
+    return { ...row, write_date: now };
   });
 }
 
@@ -276,9 +285,9 @@ export const currencyModels = {
     prepareCreate: (db, vals) => (Array.isArray(vals.rate_ids)
       ? { db, vals: { ...vals, rate_ids: stampRateWriteDates(null, vals.rate_ids) } }
       : null),
-    prepareWrite: (db, vals, before) => (Array.isArray(vals.rate_ids)
-      ? { db, vals: { ...vals, rate_ids: stampRateWriteDates(before?.rate_ids ?? [], vals.rate_ids) } }
-      : null),
+    finalizeWrite: (_db, vals, before) => (Array.isArray(vals.rate_ids)
+      ? { ...vals, rate_ids: stampRateWriteDates(before?.rate_ids ?? [], vals.rate_ids) }
+      : vals),
     guard: (db, before, after) => {
       const rounding = Number(after.rounding ?? 0.01);
       if (!Number.isFinite(rounding) || rounding <= 0) return 'Currency rounding must be positive';

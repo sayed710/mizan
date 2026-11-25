@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
 import { addDays, today } from './models/common.js';
@@ -162,9 +162,12 @@ test('CUR-1: Rates grid includes Odoo optional write_date and rate columns, time
     assert.ok(Date.parse(updatedRow.write_date) > Date.parse(oldTs));
     assert.equal(untouchedRow.write_date, oldTs);
 
-    // Syncing via diffDb + applyDiff preserves valid write_date and rejects malformed write_date and invalid rates.
+    // Syncing via diffDb + applyDiff stamps an authoritative write_date on changed rows, preserves oldTs on untouched rows, and rejects malformed write_date and invalid rates.
     const synced = applyDiff(db, diffDb(db, ctx.getDb()), { isAdmin: true });
-    assert.equal(read(synced, 'res.currency', eur.id).rate_ids.find((r) => r.date === dNew).write_date, updatedRow.write_date);
+    const syncedRow = read(synced, 'res.currency', eur.id).rate_ids.find((r) => r.date === dNew);
+    assert.notEqual(syncedRow.write_date, oldTs);
+    assert.ok(Date.parse(syncedRow.write_date) >= Date.parse(updatedRow.write_date));
+    assert.equal(read(synced, 'res.currency', eur.id).rate_ids.find((r) => r.date === dOld).write_date, oldTs);
 
     const forgedBadDate = {
       ...db,
@@ -233,4 +236,177 @@ test('CUR-2: Currency form has no chatter (Odoo res.currency is not a mail.threa
   const updatedDb = upsertCurrencyRate(db, eur.id, { date: today(), rate: 0.8, companyId: euroCo.id });
   assert.equal(rateAt(updatedDb, usd.id, today(), euroCo.id), 1.25);
   assert.equal(toCompany(updatedDb, usd.id, 100, today(), euroCo.id), 80);
+});
+
+test('CUR-1 regression: server and ORM own rate write_date on create, write, and applyDiff (never trusting forged or missing timestamps)', () => {
+  const forgedPast = '2001-01-01T00:00:00.000Z';
+  const forgedFuture = '2099-12-31T23:59:59.000Z';
+  const storedTs = '2026-01-10T09:30:00.000Z';
+  const d1 = addDays(today(), -30);
+  const d2 = addDays(today(), -10);
+  const d3 = addDays(today(), -2);
+
+  let db = seed();
+  const accountant = { author: 'Accountant', isAdmin: false, allowed: new Set(['res.currency']) };
+
+  // 1. Direct ORM create discards supplied write_date and stamps current time.
+  const startCreate = Date.now();
+  const created = create(db, 'res.currency', {
+    name: 'TST',
+    symbol: 'T',
+    rounding: 0.01,
+    rate_ids: [{ date: d1, rate: 1.5, company_id: null, write_date: forgedFuture }],
+  });
+  const createdRow = read(created.db, 'res.currency', created.id).rate_ids[0];
+  assert.notEqual(createdRow.write_date, forgedFuture);
+  assert.ok(Date.parse(createdRow.write_date) >= startCreate - 1000);
+
+  // 2. applyDiff create discards supplied write_date and stamps server time.
+  const syncCreatedDiff = diffDb(db, {
+    ...db,
+    records: {
+      ...db.records,
+      'res.currency': [
+        ...db.records['res.currency'],
+        { id: 9901, name: 'SYN', symbol: 'S', rounding: 0.01, position: 'before', active: true, rate_ids: [{ date: d1, rate: 2.25, company_id: null, write_date: forgedPast }] },
+      ],
+    },
+  });
+  const syncCreated = applyDiff(db, syncCreatedDiff, accountant);
+  const syncCreatedRow = syncCreated.records['res.currency'].find((c) => c.name === 'SYN').rate_ids[0];
+  assert.notEqual(syncCreatedRow.write_date, forgedPast);
+  assert.ok(Date.parse(syncCreatedRow.write_date) >= startCreate - 1000);
+
+  // Seed EUR with: d1 (storedTs), d2 (no write_date, legacy), d3 (company-specific, storedTs).
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const branch = create(db, 'res.company', { name: 'Branch Co', currency_id: eur.id });
+  db = {
+    ...branch.db,
+    records: {
+      ...branch.db.records,
+      'res.currency': branch.db.records['res.currency'].map((c) => (c.id === eur.id ? {
+        ...c,
+        rate_ids: [
+          { date: d1, rate: 0.92, company_id: null, write_date: storedTs },
+          { date: d2, rate: 0.91, company_id: null },
+          { date: d3, rate: 0.89, company_id: branch.id, write_date: storedTs },
+        ],
+      } : c)),
+    },
+  };
+
+  // 3. Direct ORM write:
+  // - unchanged row with omitted or forged write_date restores storedTs
+  // - unchanged legacy row without stored write_date strips forged write_date
+  // - modified and newly added rows ignore forged write_date and stamp now
+  const d4 = today();
+  const writtenDb = write(db, 'res.currency', eur.id, {
+    rate_ids: [
+      { date: d1, rate: 0.92, company_id: null }, // omitted write_date
+      { date: d2, rate: 0.91, company_id: null, write_date: forgedFuture }, // legacy row + forged ts
+      { date: d3, rate: 0.88, company_id: branch.id, write_date: forgedPast }, // modified rate + forged ts
+      { date: d4, rate: 0.87, company_id: null, write_date: forgedFuture }, // new row + forged ts
+    ],
+  });
+  const writtenRates = read(writtenDb, 'res.currency', eur.id).rate_ids;
+  assert.equal(writtenRates.find((r) => r.date === d1).write_date, storedTs);
+  assert.equal(Object.hasOwn(writtenRates.find((r) => r.date === d2), 'write_date'), false);
+  assert.notEqual(writtenRates.find((r) => r.date === d3).write_date, forgedPast);
+  assert.ok(Date.parse(writtenRates.find((r) => r.date === d3).write_date) > Date.parse(storedTs));
+  assert.notEqual(writtenRates.find((r) => r.date === d4).write_date, forgedFuture);
+  assert.ok(Date.parse(writtenRates.find((r) => r.date === d4).write_date) > Date.parse(storedTs));
+
+  // 4. applyDiff update with forged/missing timestamps as non-admin accountant:
+  const currentEur = db.records['res.currency'].find((c) => c.id === eur.id);
+  const forgedDiff = {
+    upserts: {
+      'res.currency': [{
+        ...currentEur,
+        rate_ids: [
+          { date: d1, rate: 0.92, company_id: null, write_date: forgedPast }, // unchanged with forged ts
+          { date: d2, rate: 0.91, company_id: null, write_date: forgedFuture }, // legacy unchanged with forged ts
+          { date: d3, rate: 0.85, company_id: branch.id, write_date: forgedPast }, // changed rate with forged ts
+          { date: d4, rate: 0.84, company_id: null, write_date: forgedFuture }, // new row with forged ts
+        ],
+      }],
+    },
+    deletes: {},
+  };
+  const syncedDb = applyDiff(db, forgedDiff, accountant);
+  const syncedRates = read(syncedDb, 'res.currency', eur.id).rate_ids;
+  assert.equal(syncedRates.find((r) => r.date === d1).write_date, storedTs);
+  assert.equal(Object.hasOwn(syncedRates.find((r) => r.date === d2), 'write_date'), false);
+  assert.notEqual(syncedRates.find((r) => r.date === d3).write_date, forgedPast);
+  assert.ok(Date.parse(syncedRates.find((r) => r.date === d3).write_date) > Date.parse(storedTs));
+  assert.notEqual(syncedRates.find((r) => r.date === d4).write_date, forgedFuture);
+  assert.ok(Date.parse(syncedRates.find((r) => r.date === d4).write_date) > Date.parse(storedTs));
+
+  // Also test omitting write_date on unchanged rows via applyDiff restores storedTs.
+  const omittedDiff = {
+    upserts: {
+      'res.currency': [{
+        ...currentEur,
+        rate_ids: [
+          { date: d1, rate: 0.92, company_id: null },
+          { date: d2, rate: 0.91, company_id: null },
+          { date: d3, rate: 0.89, company_id: branch.id },
+          { date: d4, rate: 0.86, company_id: null, write_date: forgedPast },
+        ],
+      }],
+    },
+    deletes: {},
+  };
+  const omittedSynced = applyDiff(db, omittedDiff, accountant);
+  const omittedRates = read(omittedSynced, 'res.currency', eur.id).rate_ids;
+  assert.equal(omittedRates.find((r) => r.date === d1).write_date, storedTs);
+  assert.equal(omittedRates.find((r) => r.date === d3).write_date, storedTs);
+  assert.notEqual(omittedRates.find((r) => r.date === d4).write_date, forgedPast);
+  assert.ok(Date.parse(omittedRates.find((r) => r.date === d4).write_date) > Date.parse(storedTs));
+});
+
+test('CUR-2 regression: direct base_rate write without rate_ids generates rate row and stamps write_date', () => {
+  let db = seed();
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const euroCo = create(db, 'res.company', { name: 'Euro Co', currency_id: eur.id });
+  const oldTs = '2026-01-10T09:30:00.000Z';
+  const dOld = addDays(today(), -60);
+  db = {
+    ...euroCo.db,
+    settings: { ...euroCo.db.settings, current_company_id: euroCo.id, allowed_company_ids: [1, euroCo.id] },
+    records: {
+      ...euroCo.db.records,
+      'res.currency': euroCo.db.records['res.currency'].map((c) => (c.id === eur.id ? {
+        ...c,
+        rate_ids: [{ date: dOld, rate: 0.92, company_id: euroCo.id, write_date: oldTs }],
+      } : c)),
+    },
+  };
+
+  // Direct write of base_rate without explicit rate_ids on non-base company currency.
+  const afterBaseRate = write(db, 'res.currency', eur.id, { base_rate: 0.8 });
+  const rawEur = afterBaseRate.records['res.currency'].find((c) => c.id === eur.id);
+  assert.equal(Object.hasOwn(rawEur, 'base_rate'), false);
+  assert.equal(Object.hasOwn(rawEur, 'base_rate_date'), false);
+  const todayRow = rawEur.rate_ids.find((r) => r.date === today() && r.company_id === euroCo.id);
+  assert.ok(todayRow, 'base_rate write generates today rate row');
+  assert.equal(todayRow.rate, 0.8);
+  assert.ok(todayRow.write_date && Date.parse(todayRow.write_date) > Date.parse(oldTs), 'generated rate row has new write_date');
+  assert.equal(rawEur.rate_ids.find((r) => r.date === dOld).write_date, oldTs, 'untouched rate row keeps stored write_date');
+
+  // Direct write with explicit base_rate_date + base_rate without rate_ids also generates and stamps the dated row.
+  const customDate = addDays(today(), -5);
+  const afterDated = write(afterBaseRate, 'res.currency', eur.id, { base_rate_date: customDate, base_rate: 0.75 });
+  const datedRow = read(afterDated, 'res.currency', eur.id).rate_ids.find((r) => r.date === customDate && r.company_id === euroCo.id);
+  assert.ok(datedRow);
+  assert.equal(datedRow.rate, 0.75);
+  assert.ok(datedRow.write_date && Date.parse(datedRow.write_date) > Date.parse(oldTs));
+
+  // Syncing the direct base_rate write via diffDb + applyDiff keeps the generated row and authoritative write_date.
+  const synced = applyDiff(db, diffDb(db, afterDated), { author: 'Accountant', isAdmin: false, allowed: new Set(['res.currency']) });
+  const syncedRow = read(synced, 'res.currency', eur.id).rate_ids.find((r) => r.date === customDate && r.company_id === euroCo.id);
+  assert.equal(syncedRow.rate, 0.75);
+  assert.ok(syncedRow.write_date && Date.parse(syncedRow.write_date) >= Date.parse(datedRow.write_date));
+
+  // Invalid base_rate without rate_ids is rejected by guard.
+  assert.throws(() => write(db, 'res.currency', eur.id, { base_rate: 0 }), /strictly positive/);
 });
