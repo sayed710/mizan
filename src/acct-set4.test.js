@@ -468,7 +468,8 @@ test('QE-4: non-blocking mismatch warning on form, cleared when matching, postin
   assert.equal(models['account.move'].form.warning(read(zeroDb, 'account.move', inv.id), zeroDb), '');
 
   // Existing creditWarning + quickEditWarning coexist cleanly
-  const creditDb = write(inv.db, 'res.partner', 2, { credit_limit: 50 });
+  // Credit limits apply only when the company enables Sales Credit Limit (Odoo account_use_credit_limit).
+  const creditDb = write(write(inv.db, 'res.company', read(inv.db, 'account.move', inv.id).company_id ?? 1, { account_use_credit_limit: true }), 'res.partner', 2, { use_partner_credit_limit: true, credit_limit: 50 });
   const bothWarn = models['account.move'].form.warning(read(creditDb, 'account.move', inv.id), creditDb);
   assert.match(bothWarn, /credit limit/i);
   assert.ok(bothWarn.length > models['account.move'].form.warning(read(clearedDb, 'account.move', inv.id), clearedDb).length);
