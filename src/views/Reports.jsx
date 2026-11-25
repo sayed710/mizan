@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
 import { models } from '../registry.js';
-import { today, validDate } from '../models/common.js';
+import { today } from '../models/common.js';
 import { categoryPath } from '../models/productconfig-helpers.js';
 import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
