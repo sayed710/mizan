@@ -9,8 +9,9 @@ import { budgetReport } from './models/analyticplus.js';
 
 test('invoice journal items retain distinct analytic distributions', () => {
   let db = seed();
-  const a = create(db, 'account.analytic.account', { name: 'A' }); db = a.db;
-  const b = create(db, 'account.analytic.account', { name: 'B' }); db = b.db;
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a = create(db, 'account.analytic.account', { name: 'A', plan_id: planId }); db = a.db;
+  const b = create(db, 'account.analytic.account', { name: 'B', plan_id: planId }); db = b.db;
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-10', invoice_line_ids: [
     { product_id: 1, qty: 1, price_unit: 10, tax: 0, analytic_distribution: { [a.id]: 100 } },
     { product_id: 1, qty: 1, price_unit: 20, tax: 0, analytic_distribution: { [b.id]: 100 } },
@@ -36,7 +37,7 @@ test('mandatory plan applies to expense but not bank counterpart', () => {
 
 test('bill analytic actuals follow accounting date and budget period', () => {
   let db = seed();
-  const a = create(db, 'account.analytic.account', { name: 'A' }); db = a.db;
+  const a = create(db, 'account.analytic.account', { name: 'A', plan_id: db.records['account.analytic.plan'][0].id }); db = a.db;
   const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 1, invoice_date: '2026-01-10', date: '2026-02-10', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 30, tax: 0, analytic_distribution: { [a.id]: 100 } }] });
   db = postMove(bill.db, bill.id);
   assert.equal(journalItems(db, { from: '2026-02-01', to: '2026-02-28' }).some((l) => l.move_id === bill.id), true);

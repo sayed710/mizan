@@ -41,7 +41,7 @@ test('accounting report menus and open button render selected-company ledger and
   const tag = create(db, 'account.account.tag', { name: 'REPORT TAG', applicability: 'accounts' }); db = tag.db;
   const account = create(db, 'account.account', { name: 'Report Account', code: '879100', company_id: 1, account_type: 'expense', tag_ids: [tag.id] }); db = account.db;
   const excluded = create(db, 'account.account', { name: 'Excluded Account', code: '879200', company_id: 1, account_type: 'expense' }); db = excluded.db;
-  const analytic = create(db, 'account.analytic.account', { name: 'ANALYTIC ONE', company_id: 1 }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'ANALYTIC ONE', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const date = `${today().slice(0, 4)}-02-01`;
   db = postEntry(db, { journal: 'MISC', company: 1, date, lines: [{ account: account.id, debit: 100, partner_id: 1, analytic_distribution: { [analytic.id]: 60 } }, { account: excluded.id, debit: 20, partner_id: 2 }, { account: '301000', credit: 120 }] }).db;
   const otherAccount = create(db, 'account.account', { name: 'Branch Account', code: '879100', company_id: other.id, account_type: 'expense' }); db = otherAccount.db;
@@ -89,8 +89,10 @@ test('analytic group splits a posted invoice journal item using its source alloc
   const { makeEl } = setupDom();
   const React = await import('react'); const { createRoot } = await import('react-dom/client');
   const { initStore, commit } = await import('./store.js'); await initStore();
-  const first = create(seed(), 'account.analytic.account', { name: 'PROJECT ONE' });
-  const second = create(first.db, 'account.analytic.account', { name: 'PROJECT TWO' });
+  const db0 = seed();
+  const planId = db0.records['account.analytic.plan'][0].id;
+  const first = create(db0, 'account.analytic.account', { name: 'PROJECT ONE', plan_id: planId });
+  const second = create(first.db, 'account.analytic.account', { name: 'PROJECT TWO', plan_id: planId });
   const invoice = create(second.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: today(), invoice_line_ids: [
     { qty: 1, price_unit: 30, tax: 0, analytic_distribution: { [first.id]: 100 } },
     { qty: 1, price_unit: 70, tax: 0, analytic_distribution: { [second.id]: 100 } },

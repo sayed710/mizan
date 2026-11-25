@@ -29,7 +29,7 @@ test('Area 1: resetting or cancelling historical deferred invoices and bills rev
       deferred_revenue_account_id: accountId(seed(), '212000'),
       deferred_expense_account_id: accountId(seed(), '132000'),
     });
-    const analytic = create(db, 'account.analytic.account', { name: 'Deferred Project' });
+    const analytic = create(db, 'account.analytic.account', { name: 'Deferred Project', plan_id: db.records['account.analytic.plan'][0].id });
     db = analytic.db;
     const doc = create(db, 'account.move', {
       move_type: moveType,
@@ -104,7 +104,7 @@ test('Area 1: credit notes and vendor refunds with deferred dates create offsett
     deferred_revenue_account_id: accountId(seed(), '212000'),
     deferred_expense_account_id: accountId(seed(), '132000'),
   });
-  const analytic = create(db, 'account.analytic.account', { name: 'Refund Deferral Analytic' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Refund Deferral Analytic', plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
   const inv = create(db, 'account.move', {
     move_type: 'out_invoice',
@@ -327,7 +327,7 @@ test('Area 3: auto_post at_date and monthly/quarterly/yearly recurrence until en
 
 test('Area 4: budgets support account_id and analytic_account_id lines, compute actuals from posted entries and achievement %, and render in the budget report', async () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Marketing Campaign' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Marketing Campaign', plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
   const revAccId = accountId(db, '400000');
   const expAccId = accountId(db, '600000');
