@@ -1152,8 +1152,9 @@ const paymentEntries = (db, payment) => [payment.move_id, payment.destination_mo
   .map((id) => read(db, 'account.move', id)).filter(Boolean);
 
 /**
- * Why a payment cannot go back to draft, or null. Cancelled payments always can; posted ones only while
- * nothing is matched, batched, bank-matched, hashed or locked. Reconciled payments keep only Reverse.
+ * Why a payment cannot go back to draft, or null. Cancelled and rejected payments with no posted entries
+ * always can; posted ones only while nothing is matched, batched, bank-matched, hashed or locked.
+ * Reconciled payments keep only Reverse.
  */
 export function resetToDraftError(db, payment, ctx = null) {
   if (!payment) return 'Payment not found';
@@ -1163,9 +1164,9 @@ export function resetToDraftError(db, payment, ctx = null) {
     return 'Void the check before resetting the payment to draft';
   }
   const entries = paymentEntries(db, payment);
-  if (payment.state === 'cancel' && entries.every((m) => m.state !== 'posted')) return null;
+  if ((payment.state === 'cancel' || payment.state === 'rejected') && entries.every((m) => m.state !== 'posted')) return null;
   if (payment.state === 'reversed') return 'Reversed payments cannot be reset to draft';
-  if (payment.state !== 'posted' && payment.state !== 'cancel') return 'Only posted or cancelled payments can be reset to draft';
+  if (payment.state !== 'posted' && payment.state !== 'cancel' && payment.state !== 'rejected') return 'Only posted, cancelled, or rejected payments can be reset to draft';
   if (isPaymentMatched(db, payment) || (paired && isPaymentMatched(db, paired)) || entries.some((m) => bookedByBank(db, m.id))) {
     return 'A payment linked to a reconciled bank transaction cannot be reset to draft';
   }
@@ -1215,15 +1216,16 @@ export function resetToDraftError(db, payment, ctx = null) {
   return reconciled ? 'Reconciled payments cannot be reset to draft' : null;
 }
 
-/** Reset a payment back to draft: its entries are deleted, or cancelled where the move rules keep them. */
-export function resetPaymentToDraft(db, paymentOrId, ctx = null) {
+/** Undo posted entries of a payment (and paired transfer) and move the payment to `draft` or `cancel`. */
+function undoPaymentToState(db, paymentOrId, targetState, ctx = null) {
   const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
-  if (payment?.state === 'draft') return db;
+  if (!payment) throw new Error('Payment not found');
+  if (payment.state === targetState) return db;
   const error = resetToDraftError(db, payment, ctx);
   if (error) throw new Error(error);
 
   const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
-  if (paired && paired.state !== 'draft') {
+  if (paired && paired.state !== targetState) {
     const pairedError = resetToDraftError(db, paired, ctx);
     if (pairedError) throw new Error(pairedError);
   }
@@ -1254,14 +1256,14 @@ export function resetPaymentToDraft(db, paymentOrId, ctx = null) {
   }
 
   next = write(next, 'account.payment', payment.id, {
-    state: 'draft',
+    state: targetState,
     move_id: null,
     destination_move_id: null,
     unapplied: 0,
   });
-  if (paired && paired.state !== 'draft') {
+  if (paired && paired.state !== targetState) {
     next = write(next, 'account.payment', paired.id, {
-      state: 'draft',
+      state: targetState,
       move_id: null,
       destination_move_id: null,
       unapplied: 0,
@@ -1279,9 +1281,70 @@ export function resetPaymentToDraft(db, paymentOrId, ctx = null) {
     }
   }
 
-  next = postNote(next, 'account.payment', payment.id, 'Reset to draft');
-  if (paired && paired.state !== 'draft') {
-    next = postNote(next, 'account.payment', paired.id, 'Reset to draft');
+  const note = targetState === 'cancel' ? 'Payment cancelled' : 'Reset to draft';
+  next = postNote(next, 'account.payment', payment.id, note);
+  if (paired && paired.state !== targetState) {
+    next = postNote(next, 'account.payment', paired.id, note);
+  }
+  return next;
+}
+
+/** Reset a payment back to draft: its entries are deleted, or cancelled where the move rules keep them. */
+export function resetPaymentToDraft(db, paymentOrId, ctx = null) {
+  return undoPaymentToState(db, paymentOrId, 'draft', ctx);
+}
+
+/** Cancel a draft payment, or a sent paid payment (cancelling/unlinking its entry as in Odoo 20). */
+export function cancelPayment(db, paymentOrId, ctx = null) {
+  const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
+  if (!payment) throw new Error('Payment not found');
+  if (payment.state === 'draft') {
+    return write(db, 'account.payment', payment.id, { state: 'cancel' });
+  }
+  if (payment.state === 'posted' && !isPaymentMatched(db, payment) && payment.is_sent) {
+    return undoPaymentToState(db, payment, 'cancel', ctx);
+  }
+  throw new Error('Only draft or sent paid payments can be cancelled');
+}
+
+/** True when `payment` is in Odoo's paid (not bank-matched) state. */
+const isPaidUnmatched = (db, payment) => Boolean(payment && payment.state === 'posted' && !(db && isPaymentMatched(db, payment)));
+
+/** Mark a manual, paid, unreconciled payment as sent (Odoo 20 `mark_as_sent`). */
+export function markAsSent(db, paymentOrId) {
+  const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
+  if (!isPaidUnmatched(db, payment)) throw new Error('Only paid, unreconciled payments can be marked as sent');
+  if (paymentMethodCode(db, payment) !== 'manual') throw new Error('Only manual payments can be marked as sent');
+  if (payment.is_sent) return db;
+  return write(db, 'account.payment', payment.id, { is_sent: true });
+}
+
+/** Unmark a manual, paid, unreconciled payment as sent (Odoo 20 `unmark_as_sent`). */
+export function unmarkAsSent(db, paymentOrId) {
+  const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
+  if (!isPaidUnmatched(db, payment)) throw new Error('Only paid, unreconciled payments can be unmarked as sent');
+  if (paymentMethodCode(db, payment) !== 'manual') throw new Error('Only manual payments can be unmarked as sent');
+  if (!payment.is_sent) return db;
+  return write(db, 'account.payment', payment.id, { is_sent: false });
+}
+
+/** Reject a sent, paid, unreconciled payment (Odoo 20 `action_reject`). */
+export function rejectPayment(db, paymentOrId, ctx = null) {
+  const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
+  if (!isPaidUnmatched(db, payment)) throw new Error('Only paid, unreconciled payments can be rejected');
+  if (!payment.is_sent) throw new Error('Only sent payments can be rejected');
+  const err = resetToDraftError(db, payment, ctx);
+  if (err) throw new Error(err);
+  const paired = payment.paired_internal_transfer_payment_id ? read(db, 'account.payment', payment.paired_internal_transfer_payment_id) : null;
+  if (paired && paired.state === 'posted') {
+    const pairedErr = resetToDraftError(db, paired, ctx);
+    if (pairedErr) throw new Error(pairedErr);
+  }
+  let next = write(db, 'account.payment', payment.id, { state: 'rejected' });
+  next = postNote(next, 'account.payment', payment.id, 'Payment rejected');
+  if (paired && paired.state === 'posted') {
+    next = write(next, 'account.payment', paired.id, { state: 'rejected' });
+    next = postNote(next, 'account.payment', paired.id, 'Payment rejected');
   }
   return next;
 }
@@ -1303,13 +1366,17 @@ export function nextCheckNumber(db, journalId, requested = 0) {
   return consumedCheckNumbers(db, journalId).reduce((next, n) => Math.max(next, n + 1), Math.max(Number(requested || 1), Number(journal?.check_next_number || 1)));
 }
 
+/** Canonical method code ('manual', 'check_printing', ...) of a payment's method line, or null. */
+export function paymentMethodCode(db, payment) {
+  if (!payment?.payment_method_line_id || !db) return null;
+  const line = read(db, 'account.payment.method.line', payment.payment_method_line_id);
+  if (!line?.payment_method_id) return null;
+  return read(db, 'account.payment.method', line.payment_method_id)?.code ?? null;
+}
+
 /** True when payment pays by check (method code 'check_printing'). Never infer from names. */
 export function paymentPaysByCheck(db, payment) {
-  if (!payment?.payment_method_line_id || !db) return false;
-  const line = read(db, 'account.payment.method.line', payment.payment_method_line_id);
-  if (!line?.payment_method_id) return false;
-  const method = read(db, 'account.payment.method', line.payment_method_id);
-  return method?.code === 'check_printing';
+  return paymentMethodCode(db, payment) === 'check_printing';
 }
 
 /** Check whether check number is already used on this journal by another payment or voided check. */
@@ -1589,6 +1656,21 @@ export function printPaymentsChecks(db, ids, values = {}) {
   return { db: next, go: `#/print/account.payment/${payments.map((p) => p.id).join(',')}` };
 }
 
+/** Open the Payment Receipt report for the selected payments (Odoo 20 `action_print_receipt`). */
+export function printPaymentReceipts(db, ids) {
+  if (!ids?.length) throw new Error('Select at least one payment');
+  const uniqueIds = [...new Set(ids)];
+  const payments = uniqueIds.map((id) => read(db, 'account.payment', id)).filter(Boolean);
+  if (payments.length !== uniqueIds.length) throw new Error('Payment not found');
+  return { db, go: `#/print/account.payment/${uniqueIds.join(',')}?report=receipt` };
+}
+
+export const printPaymentReceiptListAction = {
+  label: 'Print Payment Receipt',
+  requiresSelection: true,
+  run: (db, ids) => printPaymentReceipts(db, ids),
+};
+
 export const validatePaymentsListAction = {
   label: 'Validate',
   requiresSelection: true,
@@ -1625,8 +1707,105 @@ export const printChecksListAction = {
   run: (db, ids, values = {}) => printPaymentsChecks(db, ids, values),
 };
 
-const STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
-const DISPLAY_STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['reconciled', 'Reconciled'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
+const STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['cancel', 'Canceled'], ['reversed', 'Reversed'], ['rejected', 'Rejected']];
+const DISPLAY_STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['reconciled', 'Reconciled'], ['cancel', 'Canceled'], ['reversed', 'Reversed'], ['rejected', 'Rejected']];
+
+/** True when a posted payment's counterpart/writeoff reconcilable items have zero residual (Odoo 20 `is_reconciled`). */
+export function isPaymentReconciled(db, payment) {
+  if (!db || !payment || payment.state !== 'posted' || !payment.move_id) return false;
+  const move = read(db, 'account.move', payment.move_id);
+  if (!move || move.state !== 'posted') return false;
+  if (Number(payment.amount) === 0) return true;
+  const journal = payment.journal_id ? read(db, 'account.journal', payment.journal_id) : null;
+  const liquidityId = payment.outstanding_account_id ?? journal?.default_account_id ?? null;
+  const items = reconciledJournalItems(db, move);
+  const reconcileLines = items.filter((line) => {
+    if (line.account_id === liquidityId) return false;
+    const account = read(db, 'account.account', line.account_id);
+    return isReconcilableAccount(account);
+  });
+  if (!reconcileLines.length) return true;
+  const curr = documentCurrency(db, payment) ?? companyCurrencyRecord(db, payment.company_id);
+  const isCompanyCurr = !curr || curr.id === companyCurrencyRecord(db, payment.company_id)?.id;
+  const totalResidual = reconcileLines.reduce(
+    (sum, line) => sum + (Number(isCompanyCurr ? line.amount_residual : (line.amount_residual_currency ?? line.amount_residual)) || 0),
+    0,
+  );
+  const step = Number(curr?.rounding ?? 0.01);
+  return Math.abs(totalResidual) < step / 2;
+}
+
+/** Odoo 20 `_compute_payment_receipt_title`: Payment Receipt, Remittance Advice, or Refund Confirmation. */
+export function paymentReceiptTitle(payment) {
+  if (payment?.payment_type === 'outbound' && payment?.partner_type === 'supplier') return 'Remittance Advice';
+  if ((payment?.payment_type === 'outbound' && payment?.partner_type === 'customer')
+    || (payment?.payment_type === 'inbound' && payment?.partner_type === 'supplier')) {
+    return 'Refund Confirmation';
+  }
+  return 'Payment Receipt';
+}
+
+/** Structured invoice/partial settlement rows for the Payment Receipt report (Odoo 20 `report_payment_receipt_document`). */
+export function paymentReceiptData(db, payment) {
+  const p = typeof payment === 'object' && payment !== null ? payment : read(db, 'account.payment', payment);
+  if (!p) return null;
+  const invoices = paymentSettledMoves(db, p);
+  const companyCurr = companyCurrencyRecord(db, p.company_id);
+  const invoiceRows = invoices.map((inv) => {
+    const invCurr = documentCurrency(db, inv) ?? companyCurr;
+    const rows = (inv.payments ?? []).filter((row) => !row.reversed).map((row) => {
+      if (row.discount) {
+        return {
+          date: null,
+          name: 'Early Payment Discount',
+          ref: '',
+          amountInvoice: Number(row.amount) || 0,
+          currencyInvoice: invCurr,
+          amountPayment: null,
+          currencyPayment: null,
+        };
+      }
+      const move = row.move_id ? read(db, 'account.move', row.move_id) : null;
+      const linkedPay = row.move_id
+        ? (db.records['account.payment'] ?? []).find((x) => x.move_id === row.move_id && x.state !== 'cancel')
+        : null;
+      const payCurr = linkedPay ? documentCurrency(db, linkedPay) : (move ? documentCurrency(db, move) : null);
+      const amountInvoice = Number(row.amount) || 0;
+      let amountPayment = amountInvoice;
+      if (payCurr && invCurr && payCurr.id !== invCurr.id) {
+        const companyAmt = row.payment_company_amount != null
+          ? Number(row.payment_company_amount)
+          : toCompany(db, invCurr.id, amountInvoice, row.date ?? inv.invoice_date, inv.company_id);
+        amountPayment = payCurr.id === companyCurr?.id
+          ? roundCurrency(companyAmt, payCurr)
+          : roundCurrency(companyAmt * rateAt(db, payCurr.id, row.date ?? inv.invoice_date, inv.company_id), payCurr);
+      }
+      return {
+        date: row.date,
+        name: move?.name || linkedPay?.name || '—',
+        ref: linkedPay?.memo || move?.ref || '',
+        amountInvoice,
+        currencyInvoice: invCurr,
+        amountPayment,
+        currencyPayment: payCurr,
+      };
+    });
+    return {
+      invoice: inv,
+      currency: invCurr,
+      residual: residual(inv, db),
+      rows,
+    };
+  });
+  const otherCurrency = invoiceRows.some((entry) => entry.rows.some(
+    (row) => row.currencyPayment && entry.currency && row.currencyPayment.id !== entry.currency.id,
+  ));
+  return {
+    title: paymentReceiptTitle(p),
+    invoices: invoiceRows,
+    otherCurrency,
+  };
+}
 
 /** True when `move` is an invoice/bill/credit note actively settled by `payment`. */
 export const isMoveSettledByPayment = (move, payment) => Boolean(
@@ -1712,6 +1891,7 @@ const PAYMENT_FILTERS = [
   [
     { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
     { id: 'paid', label: 'Paid', fn: (r) => r.state === 'posted' },
+    { id: 'rejected', label: 'Rejected', fn: (r) => r.state === 'rejected' },
   ],
   [
     { id: 'outstanding', label: 'Outstanding', fn: (r, db) => r.state === 'posted' && !(db && isPaymentMatched(db, r)) },
@@ -1722,8 +1902,13 @@ const PAYMENT_FILTERS = [
 const PAYMENT_GROUP_BYS = ['partner_id', 'journal_id', 'display_state', 'date', 'currency_id', 'company_id'];
 const PAYMENT_GROUP_BY_LABELS = { partner_id: 'Partner', display_state: 'Status', date: 'Payment Date', currency_id: 'Currency' };
 
-/** Highlight draft payments as info and cancelled payments as muted on payment lists. */
-const paymentListDecoration = (r) => (r.state === 'draft' ? 'info' : r.state === 'cancel' ? 'muted' : null);
+/** Highlight draft as info, cancelled as muted, and paid unreconciled payments as warning (Odoo 20). */
+const paymentListDecoration = (r, db) => (
+  r.state === 'draft' ? 'info'
+    : r.state === 'cancel' ? 'muted'
+      : r.state === 'posted' && !(db ? (isPaymentMatched(db, r) || isPaymentReconciled(db, r)) : (r.display_state === 'reconciled' || r.is_reconciled)) ? 'warning'
+        : null
+);
 
 export const customerPaymentView = {
   list: PAYMENT_LIST,
@@ -1848,9 +2033,37 @@ export const payModels = {
         return 'Check number must be unique per journal';
       }
       if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
-      if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && after.state === 'cancel'))) {
+      if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && ['cancel', 'rejected'].includes(after.state)))) {
         const resetError = resetToDraftError(db, before, ctx);
         if (resetError) return resetError;
+      }
+      if (!before && after.is_sent && after.state !== 'posted') {
+        return 'Only paid payments can be marked as sent';
+      }
+      if (!before && after.state === 'rejected') {
+        return 'Payments cannot be created in rejected state';
+      }
+      if (before && Boolean(before.is_sent) !== Boolean(after.is_sent)) {
+        if (after.is_sent) {
+          if (before.state !== 'posted' || after.state !== 'posted' || isPaymentMatched(db, after) || paymentMethodCode(db, after) !== 'manual') {
+            return 'Only manual, paid, unreconciled payments can be marked as sent';
+          }
+        } else if (!['draft', 'cancel'].includes(after.state)) {
+          if (before.state !== 'posted' || after.state !== 'posted' || isPaymentMatched(db, after) || paymentMethodCode(db, after) !== 'manual') {
+            return 'Only manual, paid, unreconciled payments can be unmarked as sent';
+          }
+        }
+      }
+      if (before && after.state === 'rejected' && before.state !== 'rejected') {
+        if (before.state !== 'posted' || !before.is_sent || isPaymentMatched(db, before)) {
+          return 'Only sent, paid, unreconciled payments can be rejected';
+        }
+      }
+      if (before && before.state === 'posted' && after.state === 'cancel') {
+        const linkedMove = after.move_id ? read(db, 'account.move', after.move_id) : null;
+        if (linkedMove?.state === 'posted') {
+          return 'A cancelled payment cannot be linked to a posted journal entry';
+        }
       }
       if (after.state === 'draft' && after.move_id) {
         const m = read(db, 'account.move', after.move_id);
@@ -1875,7 +2088,7 @@ export const payModels = {
         'partner_type', 'journal_id', 'payment_method_line_id', 'move_id', 'destination_move_id', 'destination_journal_id',
         'is_internal_transfer', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active',
         'paired_internal_transfer_payment_id',
-      ], (p) => p.state === 'posted')(db, before, after, ctx);
+      ], (p) => p.state === 'posted' || p.state === 'rejected')(db, before, after, ctx);
       if (lockErr) return lockErr;
 
       if (after.currency_id) {
@@ -1955,16 +2168,22 @@ export const payModels = {
       outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       unapplied: { type: 'monetary', label: 'Outstanding Credit', readonly: true, currency: 'company' },
-      state: { type: 'selection', label: 'Status', tracking: true, options: STATES, badge: { draft: 'muted', posted: 'ok', cancel: 'muted', reversed: 'muted' } },
+      is_sent: { type: 'boolean', label: 'Is Sent', readonly: true, copy: false },
+      is_reconciled: { type: 'boolean', label: 'Is Reconciled', compute: (r, db) => isPaymentReconciled(db, r) },
+      state: { type: 'selection', label: 'Status', tracking: true, options: STATES, badge: { draft: 'muted', posted: 'ok', cancel: 'muted', reversed: 'muted', rejected: 'muted' } },
       display_state: {
         type: 'selection',
         label: 'Status',
         options: DISPLAY_STATES,
-        badge: { draft: 'info', posted: 'warning', reconciled: 'success', cancel: 'muted', reversed: 'muted' },
+        badge: { draft: 'info', posted: 'warning', reconciled: 'success', cancel: 'muted', reversed: 'muted', rejected: 'muted' },
+        badgeFor: (r, db) => (r.state === 'posted' && db && isPaymentReconciled(db, r) ? 'success' : null),
         compute: (r, db) => (r.state === 'posted' && db && isPaymentMatched(db, r) ? 'reconciled' : r.state),
       },
     },
-    defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0, is_internal_transfer: false, check_printed: false }),
+    defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0, is_internal_transfer: false, check_printed: false, is_sent: false }),
+    menuActions: [
+      { label: 'Payment Receipt', when: (r) => Boolean(r?.id), run: (db, r) => ({ db, go: `#/print/account.payment/${r.id}?report=receipt` }) },
+    ],
     createDefaults: (db, vals = {}) => {
       const companyId = vals.company_id ?? getActiveCompany() ?? currentCompany(db);
       const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
@@ -2000,7 +2219,7 @@ export const payModels = {
     form: {
       statusbar: 'state',
       statusbarFor: 'display_state',
-      statusbarHide: ['reconciled', 'cancel', 'reversed'],
+      statusbarHide: ['reconciled', 'cancel', 'reversed', 'rejected'],
       // Memo stays editable on posted payments, except inside a locked period (the dated lock rejects it).
       unlockedFields: (r, db) => {
         const lock = r && db ? recordLockDate(db, r) : null;
@@ -2044,6 +2263,11 @@ export const payModels = {
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postPayment(db, read(db, 'account.payment', r.id)) }) },
         {
+          label: 'Reject',
+          when: (r, db) => isPaidUnmatched(db, r) && Boolean(r.is_sent),
+          run: (db, r) => ({ db: rejectPayment(db, read(db, 'account.payment', r.id)) }),
+        },
+        {
           label: 'Reset to Draft',
           when: (r, db) => r.state !== 'draft' && Boolean(db) && !resetToDraftError(db, r),
           run: (db, r) => ({ db: resetPaymentToDraft(db, read(db, 'account.payment', r.id)) }),
@@ -2078,6 +2302,16 @@ export const payModels = {
           },
         },
         { label: 'Reverse', when: (r) => r.state === 'posted', run: (db, r) => ({ db: reversePayment(db, read(db, 'account.payment', r.id)) }) },
+        {
+          label: 'Mark as Sent',
+          when: (r, db) => isPaidUnmatched(db, r) && !r.is_sent && paymentMethodCode(db, r) === 'manual',
+          run: (db, r) => ({ db: markAsSent(db, read(db, 'account.payment', r.id)) }),
+        },
+        {
+          label: 'Unmark as Sent',
+          when: (r, db) => isPaidUnmatched(db, r) && Boolean(r.is_sent) && paymentMethodCode(db, r) === 'manual',
+          run: (db, r) => ({ db: unmarkAsSent(db, read(db, 'account.payment', r.id)) }),
+        },
         {
           label: 'Print Check',
           when: (r, db) => {
@@ -2135,7 +2369,11 @@ export const payModels = {
           ask: [{ label: 'New Check Number', type: 'number' }],
           run: (db, r, answers) => ({ db: reprintCheck(db, r, answers?.[0] ?? null), go: `#/print/account.payment/${r.id}` }),
         },
-        { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
+        {
+          label: 'Cancel',
+          when: (r, db) => Boolean(r?.id) && (r.state === 'draft' || (isPaidUnmatched(db, r) && Boolean(r.is_sent))),
+          run: (db, r) => ({ db: cancelPayment(db, read(db, 'account.payment', r.id)) }),
+        },
       ],
       title: 'name',
       groups: (r, db) => [

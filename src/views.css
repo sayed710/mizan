@@ -284,6 +284,7 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
 .fold-caret.open::before { content: '▾'; }
 html[dir="rtl"] .fold-caret:not(.open)::before { content: '◂'; }
 .list tr.danger td { color: var(--danger); }
+.list tr.warning td { color: var(--warn); }
 .list tr.info td { color: #1d6fa5; }
 .list tr.muted td { color: var(--muted); }
 .list td.danger { color: var(--danger); }

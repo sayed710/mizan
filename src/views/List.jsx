@@ -67,7 +67,12 @@ export function visibleListColumns(def, db, optionalState = {}, { list = null, o
   return { cols, optionalCols };
 }
 
-const badgeClass = (map, value) => (map ? (map[value] ? `badge badge-${map[value]}` : 'badge') : null);
+const badgeClass = (field, value, rec, db) => {
+  const custom = field?.badgeFor?.(rec, db);
+  if (custom) return `badge badge-${custom}`;
+  const map = field?.badge;
+  return map ? (map[value] ? `badge badge-${map[value]}` : 'badge') : null;
+};
 
 // Footer sums use the active company's reporting currency for monetary fields; `sum: false` opts a field out (running balances).
 const Totals = ({ db, cols, fields, records }) =>
@@ -132,7 +137,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       onDrop={canDrag ? (e) => { e.preventDefault(); dropRow(r.id); } : undefined}
       onClick={() => open(r.id)}
       onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(r.id); }}
-      className={`${selected.has(r.id) ? 'selected' : ''} ${(listDecoration ?? def.listDecoration)?.(r) ?? ''}`}
+      className={`${selected.has(r.id) ? 'selected' : ''} ${(listDecoration ?? def.listDecoration)?.(r, db) ?? ''}`}
     >
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />
@@ -149,7 +154,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         const editable = def.editableList?.includes(f);
         const isTags = !editable && field.type === 'many2many' && field.widget === 'many2many_tags';
         const text = editable || isTags ? null : display(db, field, r[f], r);
-        const badge = editable || isTags ? null : badgeClass(field.badge, r[f]);
+        const badge = editable || isTags ? null : badgeClass(field, r[f], r, db);
         // Odoo's relative-date widget shows a past date in red.
         const pastDue = field.widget === 'remaining_days' && text && r[f] && r[f] < today();
         return (

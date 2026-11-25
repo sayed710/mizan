@@ -194,6 +194,7 @@ test('Payment status labels, bank-matched Reconciled display_state, filters, and
     reconciled: 'Reconciled',
     cancel: 'Canceled',
     reversed: 'Reversed',
+    rejected: 'Rejected',
   });
 
   // Search filters: Outstanding = posted and not reconciled
@@ -294,7 +295,7 @@ test('Payment form renders Odoo 20 groups, radio Payment Type, direction-aware b
     assert.equal(props(custSmart[0]).href, `#/accounting/invoices?view=list&rel=payment_id:${custPostedId}`);
     assert.equal(custSmart[1].textContent, 'Journal Entry');
     assert.equal(props(custSmart[1]).href, `#/accounting/entries/${custPosted.move_id}`);
-    assert.deepEqual(headerButtons(), ['Reverse']);
+    assert.deepEqual(headerButtons(), ['Reverse', 'Mark as Sent']);
     // Target filtering resolves exactly the settled invoice
     const relInv = parseRel(db, 'account.move', `payment_id:${custPostedId}`);
     const settledInvs = actionRecords(db, leafFor('Customers', 'invoices'), relInv);
