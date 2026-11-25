@@ -435,3 +435,148 @@ test('VAL-2: Print, CSV, and XLSX exports use the same filtered rows and show ac
     await React.act(async () => root.unmount());
   }
 });
+
+test('VAL-2 regression: warehouse/location filter uses product cost when no layers exist and preserves historical legacy guard', async () => {
+  let db = seed();
+  const loc = create(db, 'stock.location', { name: 'Legacy WH/Stock', usage: 'internal', company_id: 1 });
+  db = loc.db;
+  const wh = create(db, 'stock.warehouse', { name: 'Legacy WH', code: 'LWH', lot_stock_id: loc.id, company_id: 1 });
+  db = wh.db;
+
+  const legacyProd = create(db, 'product', { name: 'Legacy Unlayered Item', type: 'goods', cost: 15, qty_available: 4 });
+  db = legacyProd.db;
+  const periodicProd = create(db, 'product', { name: 'Periodic Unlayered Item', type: 'goods', valuation: 'manual_periodic', cost: 25, qty_available: 3 });
+  db = periodicProd.db;
+
+  db.records['stock.quant'] = [
+    ...(db.records['stock.quant'] ?? []),
+    { id: 9801, product_id: legacyProd.id, location_id: loc.id, company_id: 1, quantity: 4 },
+    { id: 9802, product_id: periodicProd.id, location_id: loc.id, company_id: 1, quantity: 3 },
+  ];
+
+  const byWh = valuationReport(db, { warehouseId: wh.id, at: today() });
+  assert.deepEqual(byWh[legacyProd.id], { qty: 4, value: 60, unitCost: 15 });
+  assert.deepEqual(byWh[periodicProd.id], { qty: 3, value: 75, unitCost: 25 });
+
+  const byLoc = valuationReport(db, { locationId: loc.id, at: today() });
+  assert.deepEqual(byLoc[legacyProd.id], { qty: 4, value: 60, unitCost: 15 });
+  assert.deepEqual(byLoc[periodicProd.id], { qty: 3, value: 75, unitCost: 25 });
+
+  const historical = valuationReport(db, { warehouseId: wh.id, at: '2000-01-01' });
+  assert.deepEqual(historical[legacyProd.id], { qty: null, value: null, unitCost: null });
+});
+
+test('VAL-2 regression: switching company resets valuation product, warehouse, and location filters immediately', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = seed();
+  const branch = createCompany(db, { name: 'Switch Branch Co', currency_id: read(db, 'res.company', 1).currency_id });
+  db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
+
+  const loc1 = create(db, 'stock.location', { name: 'Co1 Bin', usage: 'internal', company_id: 1 });
+  db = loc1.db;
+  const wh1 = create(db, 'stock.warehouse', { name: 'Co1 WH', code: 'C1W', lot_stock_id: loc1.id, company_id: 1 });
+  db = wh1.db;
+  const loc2 = create(db, 'stock.location', { name: 'Co2 Bin', usage: 'internal', company_id: branch.id });
+  db = loc2.db;
+  const wh2 = create(db, 'stock.warehouse', { name: 'Co2 WH', code: 'C2W', lot_stock_id: loc2.id, company_id: branch.id });
+  db = wh2.db;
+
+  const p1 = create(db, 'product', { name: 'Co1 Exclusive Widget', type: 'goods', company_id: 1, cost: 10 });
+  db = p1.db;
+  const p2 = create(db, 'product', { name: 'Co2 Exclusive Widget', type: 'goods', company_id: branch.id, cost: 50 });
+  db = p2.db;
+
+  db.records['stock.quant'] = [
+    ...(db.records['stock.quant'] ?? []),
+    { id: 9811, product_id: p1.id, location_id: loc1.id, company_id: 1, quantity: 3 },
+    { id: 9812, product_id: p2.id, location_id: loc2.id, company_id: branch.id, quantity: 2 },
+  ];
+  db.records['stock.valuation.layer'] = [
+    { id: 9813, product_id: p1.id, company_id: 1, date: '2026-01-10', quantity: 3, unit_cost: 10, value: 30 },
+    { id: 9814, product_id: p2.id, company_id: branch.id, date: '2026-01-10', quantity: 2, unit_cost: 50, value: 100 },
+  ];
+  await React.act(async () => store.commit(db));
+
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'valuation' } })));
+
+    const companySelect = find(host, (n) => props(n)?.['aria-label'] === 'Company');
+    const prodSelect = find(host, (n) => props(n)?.['aria-label'] === 'Product');
+    const whSelect = find(host, (n) => props(n)?.['aria-label'] === 'Warehouse');
+    const locSelect = find(host, (n) => props(n)?.['aria-label'] === 'Location');
+    assert.ok(companySelect && prodSelect && whSelect && locSelect);
+
+    await React.act(async () => props(prodSelect).onChange({ target: { value: String(p1.id) } }));
+    await React.act(async () => props(whSelect).onChange({ target: { value: String(wh1.id) } }));
+    await React.act(async () => props(locSelect).onChange({ target: { value: String(loc1.id) } }));
+    assert.ok(textOf(find(host, (n) => n.tagName === 'TABLE')).includes('Co1 Exclusive Widget'));
+
+    await React.act(async () => props(companySelect).onChange({ target: { value: String(branch.id) } }));
+
+    assert.equal(props(find(host, (n) => props(n)?.['aria-label'] === 'Product')).value, '');
+    assert.equal(props(find(host, (n) => props(n)?.['aria-label'] === 'Warehouse')).value, '');
+    assert.equal(props(find(host, (n) => props(n)?.['aria-label'] === 'Location')).value, '');
+
+    const tableText = textOf(find(host, (n) => n.tagName === 'TABLE'));
+    assert.ok(tableText.includes('Co2 Exclusive Widget'), 'New company stock appears immediately after company switch');
+    assert.ok(!tableText.includes('Co1 Exclusive Widget'), 'Previous company product filter is cleared');
+    assert.ok(!tableText.includes('Co1 WH'), 'Previous company warehouse filter is cleared');
+    assert.ok(!tableText.includes('Co1 Bin'), 'Previous company location filter is cleared');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('VAL-2 regression: companyId "all" with warehouse or location filter values each company quant at that company unit cost', async () => {
+  let db = seed();
+  const branch = createCompany(db, { name: 'Multi-Cost Branch', currency_id: read(db, 'res.company', 1).currency_id });
+  db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
+
+  const shared = create(db, 'product', { name: 'Shared Multi-Cost Item', type: 'goods', cost: 0 });
+  db = shared.db;
+
+  const rootLoc = create(db, 'stock.location', { name: 'Global Group', usage: 'view' });
+  db = rootLoc.db;
+  const whView1 = create(db, 'stock.location', { name: 'MC1', parent_id: rootLoc.id, usage: 'view', company_id: 1 });
+  db = whView1.db;
+  const loc1 = create(db, 'stock.location', { name: 'Co1 Stock', parent_id: whView1.id, usage: 'internal', company_id: 1 });
+  db = loc1.db;
+  const wh1 = create(db, 'stock.warehouse', { name: 'Co1 WH', code: 'MC1', lot_stock_id: loc1.id, company_id: 1 });
+  db = wh1.db;
+
+  const whView2 = create(db, 'stock.location', { name: 'MC2', parent_id: rootLoc.id, usage: 'view', company_id: branch.id });
+  db = whView2.db;
+  const loc2 = create(db, 'stock.location', { name: 'Co2 Stock', parent_id: whView2.id, usage: 'internal', company_id: branch.id });
+  db = loc2.db;
+  const wh2 = create(db, 'stock.warehouse', { name: 'Co2 WH', code: 'MC2', lot_stock_id: loc2.id, company_id: branch.id });
+  db = wh2.db;
+
+  db.records['stock.quant'] = [
+    ...(db.records['stock.quant'] ?? []),
+    { id: 9821, product_id: shared.id, location_id: loc1.id, company_id: 1, quantity: 4 },
+    { id: 9822, product_id: shared.id, location_id: loc2.id, company_id: branch.id, quantity: 6 },
+  ];
+  db.records['stock.valuation.layer'] = [
+    { id: 9823, product_id: shared.id, company_id: 1, date: '2026-01-10', quantity: 4, unit_cost: 10, value: 40 },
+    { id: 9824, product_id: shared.id, company_id: branch.id, date: '2026-01-10', quantity: 6, unit_cost: 30, value: 180 },
+  ];
+
+  const repWh1 = valuationReport(db, { companyId: 'all', warehouseId: wh1.id, at: '2026-01-31' });
+  assert.deepEqual(repWh1[shared.id], { qty: 4, value: 40, unitCost: 10 });
+
+  const repWh2 = valuationReport(db, { companyId: 'all', warehouseId: wh2.id, at: '2026-01-31' });
+  assert.deepEqual(repWh2[shared.id], { qty: 6, value: 180, unitCost: 30 });
+
+  const repAllLocs = valuationReport(db, { companyId: 'all', locationId: rootLoc.id, at: '2026-01-31' });
+  assert.deepEqual(repAllLocs[shared.id], { qty: 10, value: 220, unitCost: 22 });
+});

@@ -402,22 +402,43 @@ export function valuationReport(db, {
 
   const rows = {};
   for (const p of products) {
-    const all = layers(db, p.id, comp);
-    const ls = all.filter((l) => l.date <= at);
     if (allowedLocIds) {
       // Mirrors Odoo's stock_account product value with warehouse/location context:
       // quantity is the sum of stock.quant quantities in the allowed internal locations
-      // (omitting products with no quantity there), and value = qty × unit cost from the
-      // product's company valuation layers at the valuation date.
-      const qty = (db.records['stock.quant'] ?? [])
-        .filter((q) => q.product_id === p.id && (comp === 'all' || (q.company_id ?? 1) === comp) && allowedLocIds.has(q.location_id))
-        .reduce((s, q) => s + q.quantity, 0);
+      // (omitting products with no quantity there), and value is the sum across companies
+      // of each company's selected quantity × that company's unit cost at the valuation date
+      // (falling back to product cost when no layers exist for that company).
+      const qtyByComp = new Map();
+      for (const q of db.records['stock.quant'] ?? []) {
+        if (q.product_id !== p.id || !allowedLocIds.has(q.location_id)) continue;
+        const cId = q.company_id ?? 1;
+        if (comp !== 'all' && cId !== comp) continue;
+        qtyByComp.set(cId, (qtyByComp.get(cId) ?? 0) + q.quantity);
+      }
+      let qty = 0;
+      let value = 0;
+      let unavailable = false;
+      for (const [cId, compQty] of qtyByComp) {
+        if (Math.abs(compQty) <= 1e-8) continue;
+        const compAll = layers(db, p.id, cId);
+        let unitCost;
+        if (compAll.length) {
+          const compLs = compAll.filter((l) => l.date <= at);
+          const layerQty = quantity(compLs);
+          unitCost = layerQty ? valueOf(compLs) / layerQty : 0;
+        } else {
+          if (at < today()) { unavailable = true; break; }
+          unitCost = Number(p.cost) || 0;
+        }
+        qty += compQty;
+        value = round(value + round(compQty * unitCost));
+      }
+      if (unavailable) { rows[p.id] = { qty: null, value: null, unitCost: null }; continue; }
       if (Math.abs(qty) <= 1e-8) continue;
-      const layerQty = quantity(ls);
-      const unitCost = layerQty ? valueOf(ls) / layerQty : 0;
-      const value = round(qty * unitCost);
       rows[p.id] = { qty, value, unitCost: value / qty };
     } else {
+      const all = layers(db, p.id, comp);
+      const ls = all.filter((l) => l.date <= at);
       const legacyQty = all.length ? 0 : stockQuantity(db, p, comp);
       // Unvalued legacy stock has no history, so its quantity at a past date is unknown.
       if (!all.length && legacyQty && at < today()) { rows[p.id] = { qty: null, value: null, unitCost: null }; continue; }

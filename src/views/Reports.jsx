@@ -933,6 +933,13 @@ function ReportPage({ leaf, params }) {
   const [valuationProductId, setValuationProductId] = useState('');
   const [valuationWarehouseId, setValuationWarehouseId] = useState('');
   const [valuationLocationId, setValuationLocationId] = useState('');
+  const [valuationCompany, setValuationCompany] = useState(selectedCompany);
+  if (valuationCompany !== selectedCompany) {
+    setValuationCompany(selectedCompany);
+    setValuationProductId('');
+    setValuationWarehouseId('');
+    setValuationLocationId('');
+  }
   const [comparison, setComparison] = useState('none');
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
@@ -994,6 +1001,22 @@ function ReportPage({ leaf, params }) {
         }, selectedCompany).companyDb
       : companyDb
   ), [sourceDb, selectedCompanyId, selectedCompany, companyDb]);
+  const { valuationProducts, valuationWarehouses, valuationLocations } = useMemo(() => {
+    if (!isValuation) return { valuationProducts: [], valuationWarehouses: [], valuationLocations: [] };
+    const targetCompId = selectedCompany === 'all' ? null : Number(selectedCompany);
+    const products = search(scopedCompanyDb, 'product')
+      .filter((p) => p.type === 'goods' && (selectedCompany === 'all' || p.company_id === targetCompId || !p.company_id))
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+    const warehouses = search(scopedCompanyDb, 'stock.warehouse')
+      .filter((w) => selectedCompany === 'all' || !w.company_id || w.company_id === targetCompId);
+    const locations = search(scopedCompanyDb, 'stock.location')
+      .filter((l) => l.usage === 'internal' && (selectedCompany === 'all' || !l.company_id || l.company_id === targetCompId));
+    return { valuationProducts: products, valuationWarehouses: warehouses, valuationLocations: locations };
+  }, [isValuation, scopedCompanyDb, selectedCompany]);
+  const companyChanged = valuationCompany !== selectedCompany;
+  const activeValuationProductId = !companyChanged && valuationProducts.some((p) => p.id === Number(valuationProductId)) ? valuationProductId : '';
+  const activeValuationWarehouseId = !companyChanged && valuationWarehouses.some((w) => w.id === Number(valuationWarehouseId)) ? valuationWarehouseId : '';
+  const activeValuationLocationId = !companyChanged && valuationLocations.some((l) => l.id === Number(valuationLocationId)) ? valuationLocationId : '';
   const fmtMoney = useMemo(() => reportMoney(scopedCompanyDb, selectedCompany), [scopedCompanyDb, selectedCompany]);
   const db = useMemo(() => (
     targetJournalIds
@@ -1199,17 +1222,17 @@ function ReportPage({ leaf, params }) {
       const cat = read(companyDb, 'product.category', Number(valuationCategoryId));
       if (cat) valuationFiltersList.push(`${t('Product Category')}: ${categoryPath(companyDb, cat.id) || cat.name}`);
     }
-    if (valuationProductId) {
-      const prod = read(scopedCompanyDb, 'product', Number(valuationProductId));
-      const label = prod ? `${prod.default_code ? `[${prod.default_code}] ` : ''}${prod.name}` : valuationProductId;
+    if (activeValuationProductId) {
+      const prod = read(scopedCompanyDb, 'product', Number(activeValuationProductId));
+      const label = prod ? `${prod.default_code ? `[${prod.default_code}] ` : ''}${prod.name}` : activeValuationProductId;
       valuationFiltersList.push(`${t('Product')}: ${label}`);
     }
-    if (valuationWarehouseId) {
-      const wh = read(scopedCompanyDb, 'stock.warehouse', Number(valuationWarehouseId));
+    if (activeValuationWarehouseId) {
+      const wh = read(scopedCompanyDb, 'stock.warehouse', Number(activeValuationWarehouseId));
       if (wh) valuationFiltersList.push(`${t('Warehouse')}: ${wh.name}`);
     }
-    if (valuationLocationId) {
-      const loc = read(scopedCompanyDb, 'stock.location', Number(valuationLocationId));
+    if (activeValuationLocationId) {
+      const loc = read(scopedCompanyDb, 'stock.location', Number(activeValuationLocationId));
       if (loc) valuationFiltersList.push(`${t('Location')}: ${loc.name}`);
     }
   }
@@ -1338,62 +1361,48 @@ function ReportPage({ leaf, params }) {
             {t('Product')}
             <select
               aria-label={t('Product')}
-              value={valuationProductId}
+              value={activeValuationProductId}
               onChange={(e) => setValuationProductId(e.target.value)}
             >
               <option value="">{t('All Products')}</option>
-              {(() => {
-                const targetCompId = selectedCompany === 'all' ? null : Number(selectedCompany);
-                return search(scopedCompanyDb, 'product')
-                  .filter((p) => p.type === 'goods' && (
-                    selectedCompany === 'all'
-                    || p.company_id === targetCompId
-                    || !p.company_id
-                  ))
-                  .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.default_code ? `[${p.default_code}] ` : ''}{p.name}
-                    </option>
-                  ));
-              })()}
+              {valuationProducts.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.default_code ? `[${p.default_code}] ` : ''}{p.name}
+                </option>
+              ))}
             </select>
           </label>
           <label className="inline-select">
             {t('Warehouse')}
             <select
               aria-label={t('Warehouse')}
-              value={valuationWarehouseId}
+              value={activeValuationWarehouseId}
               onChange={(e) => {
                 setValuationWarehouseId(e.target.value);
                 setValuationLocationId('');
               }}
             >
               <option value="">{t('All Warehouses')}</option>
-              {search(scopedCompanyDb, 'stock.warehouse')
-                .filter((w) => selectedCompany === 'all' || !w.company_id || w.company_id === Number(selectedCompany))
-                .map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name} ({w.code})
-                  </option>
-                ))}
+              {valuationWarehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name} ({w.code})
+                </option>
+              ))}
             </select>
           </label>
           <label className="inline-select">
             {t('Location')}
             <select
               aria-label={t('Location')}
-              value={valuationLocationId}
+              value={activeValuationLocationId}
               onChange={(e) => setValuationLocationId(e.target.value)}
             >
               <option value="">{t('All Locations')}</option>
-              {search(scopedCompanyDb, 'stock.location')
-                .filter((l) => l.usage === 'internal' && (selectedCompany === 'all' || !l.company_id || l.company_id === Number(selectedCompany)))
-                .map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name}
-                  </option>
-                ))}
+              {valuationLocations.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
             </select>
           </label>
         </>
@@ -1572,9 +1581,9 @@ function ReportPage({ leaf, params }) {
               period={effectivePeriod}
               companyId={selectedCompany}
               categoryId={valuationCategoryId}
-              productId={valuationProductId}
-              warehouseId={valuationWarehouseId}
-              locationId={valuationLocationId}
+              productId={activeValuationProductId}
+              warehouseId={activeValuationWarehouseId}
+              locationId={activeValuationLocationId}
               analyticAccountIds={analyticAccountIds}
               partnerIds={partnerFilterIds}
               unreconciledOnly={unreconciledOnly}
