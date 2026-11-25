@@ -420,11 +420,17 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     } else {
       const zero = '';
       const zeroTaxId = null;
+      const accrualTaxes = computed.taxes.filter((t) => !t.tax_cash_basis);
       const tags = [...new Set(computed.taxes.length
-        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => taxBaseTags(t, side, l))
+        ? accrualTaxes.flatMap((t) => taxBaseTags(t, side, l))
         : cashBasis ? [] : taxBaseTags(null, side, l))].sort((a, b) => a - b);
-      const key = JSON.stringify([account, zero, zeroTaxId, tags, cashBasis, distributionKey]);
-      const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
+      const taxIds = [...new Set(
+        accrualTaxes
+          .filter((t) => t.tax_id != null && taxBaseTags(t, side, l).length > 0)
+          .map((t) => Number(t.tax_id))
+      )].sort((a, b) => a - b);
+      const key = JSON.stringify([account, zero, zeroTaxId, tags, taxIds, cashBasis, distributionKey]);
+      const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, taxIds, cashBasis, distribution, amount: 0, base: 0, lines: [] };
       group.amount += computed.untaxed;
       group.base += computed.untaxed;
       group.lines.push({ index, line_id: l.line_id, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
@@ -636,7 +642,7 @@ export function invoiceLines(db, move) {
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, base, zero, lines, tags, zeroTaxId, distribution }) => [
+  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, base, zero, lines, tags, taxIds, zeroTaxId, distribution }) => [
     account,
     companyRound(docRound(amount) / rate),
     docRound(amount),
@@ -646,6 +652,7 @@ export function invoiceLines(db, move) {
     zeroTaxId,
     distribution,
     companyRound(docRound(base ?? amount) / rate),
+    taxIds ?? [],
   ]);
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
@@ -734,7 +741,7 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true, tax_side: sale ? 'sale' : 'purchase' } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany, taxIds]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true, tax_side: sale ? 'sale' : 'purchase', ...(taxIds.length ? { tax_ids: taxIds } : {}) } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, use_in_tax_closing: g.cash_basis ? false : (g.use_in_tax_closing === true), ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base)
@@ -877,7 +884,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
       }
     }
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
-    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...currencyFields, ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}), ...(l.use_in_tax_closing != null ? { use_in_tax_closing: Boolean(l.use_in_tax_closing) } : {}) };
+    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...currencyFields, ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_ids?.length ? { tax_ids: [...l.tax_ids] } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}), ...(l.use_in_tax_closing != null ? { use_in_tax_closing: Boolean(l.use_in_tax_closing) } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
   if (analyticPostingHooks?.checkMandatoryPlans) {
