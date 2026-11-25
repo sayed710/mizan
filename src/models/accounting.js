@@ -1,3 +1,4 @@
+import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
@@ -879,6 +880,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
         : {});
   const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
   let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  if (r.move_type === 'out_invoice' || r.move_type === 'in_invoice') posted = incrementPartnerRank(posted, r.partner_id, r.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -4433,7 +4435,7 @@ export const accountingModels = {
       banner: (r, db) => suggestBillAutopost(db, r) ? 'Automatically post future digitized bills from this vendor?' : null,
       warning: (r, db) => {
         const base = r.move_type === 'out_invoice'
-          ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r)
+          ? ((!r.state || r.state === 'draft') ? creditWarning(db, r.partner_id, total(r, db), r) : '')
           : ['in_invoice', 'in_refund'].includes(r.move_type)
             ? duplicateBillWarning(db, r)
             : unbalancedEntryWarning(db, r);
