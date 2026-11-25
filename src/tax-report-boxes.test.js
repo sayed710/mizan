@@ -183,8 +183,8 @@ test('company with generic: no selector, existing table unchanged', async () => 
     assert.match(allText, /Purchases/);
     assert.match(allText, /Goods VAT 14% C1/);
     assert.match(allText, /Services VAT 10% C1/);
-    assert.match(allText, /Output Tax/);
-    assert.match(allText, /Input Tax/);
+    assert.match(allText, /Total Sales/);
+    assert.match(allText, /Total Purchases/);
     assert.match(allText, /Tax Payable/);
     assert.doesNotMatch(allText, /BOX-1/);
   } finally {
@@ -229,8 +229,8 @@ test('switching the variant to Generic shows the existing by-tax rows', async ()
     assert.match(allText, /Purchases/);
     assert.match(allText, /Goods VAT 14% C1/);
     assert.match(allText, /Services VAT 10% C1/);
-    assert.match(allText, /Output Tax/);
-    assert.match(allText, /Input Tax/);
+    assert.match(allText, /Total Sales/);
+    assert.match(allText, /Total Purchases/);
     assert.match(allText, /Tax Payable/);
     assert.doesNotMatch(allText, /BOX-1/);
   } finally {
@@ -336,7 +336,7 @@ test('standalone Tax component: renders country boxes by default when company te
     await React.act(async () => root.render(React.createElement(Tax, { db, period, variant: 'generic' })));
     const genericText = textOf(host);
     assert.match(genericText, /Sales/);
-    assert.match(genericText, /Output Tax/);
+    assert.match(genericText, /Total Sales/);
     assert.doesNotMatch(genericText, /BOX-1/);
   } finally {
     await React.act(async () => root.unmount());

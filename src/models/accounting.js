@@ -1514,6 +1514,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     partner_id: r.partner_id,
     name: bg.tax_name || 'Cash basis base',
     tax_id: bg.tax_id ?? null,
+    ...(bg.tax_ids?.length ? { tax_ids: bg.tax_ids } : {}),
     tax_name: bg.tax_name || 'Cash basis base',
     tax_tag_ids: bg.tax_tag_ids,
     tax_grid_base: true,
@@ -1749,6 +1750,7 @@ export function bookEarlyDiscount(db, id, discount, date = today(), paymentMoveI
   const bases = discountTaxComputation(term) === 'included'
     ? (r.line_ids ?? []).filter((line) => line.tax_grid_base && line.tax_tag_ids?.length).map((line) => ({
       account: discountAccount, partner_id: r.partner_id, tax_tag_ids: line.tax_tag_ids,
+      ...(line.tax_ids?.length ? { tax_ids: line.tax_ids } : (line.tax_id != null ? { tax_ids: [line.tax_id] } : {})),
       tax_grid_base: true, tax_side: isPurchase(r) ? 'purchase' : 'sale',
       debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
     })) : [];
