@@ -151,7 +151,7 @@ function buildInvoiceAnalysisFixture() {
     parentPartner: parentPartner.id,
     childPartner: childPartner.id,
     salesperson: salesperson.id,
-    baseCurrId,
+    baseCurrId, fxCurrId,
   };
 }
 
@@ -162,7 +162,7 @@ test('Invoice Analysis menu leaf and account.invoice.report structure match Odoo
 
   const def = models['account.invoice.report'];
   assert.equal(def.readonly, true);
-  assert.deepEqual(def.pivot, { row: 'invoice_date', col: null, measure: 'price_subtotal' });
+  assert.deepEqual(def.pivot, { row: 'invoice_date', col: 'product_categ_id', measure: 'price_subtotal' });
   assert.deepEqual(def.defaultFilters, ['posted']);
   assert.equal(def.fields.price_average.groupOperator, 'avg');
   assert.deepEqual(def.groupBys, [
@@ -189,7 +189,7 @@ test('Invoice Analysis menu leaf and account.invoice.report structure match Odoo
 });
 
 test('account.invoice.report splits lines, converts FX, negates credit notes, excludes cancelled, and ties out to P&L revenue', () => {
-  const { db, ids, categA, categB, prodA, prodB, parentPartner, childPartner, salesperson, baseCurrId } = buildInvoiceAnalysisFixture();
+  const { db, ids, categA, categB, prodA, prodB, parentPartner, childPartner, salesperson, baseCurrId, fxCurrId } = buildInvoiceAnalysisFixture();
   // Remove seeded moves so our P&L revenue ties strictly to this fixture's posted customer moves
   const cleanDb = {
     ...db,
@@ -236,7 +236,9 @@ test('account.invoice.report splits lines, converts FX, negates credit notes, ex
 
   // Foreign-currency line converted to company currency (rate 0.5 => x2)
   const fxRow = rows.find((r) => r.move_id === ids.invFx);
-  assert.equal(fxRow.currency_id, baseCurrId);
+  assert.equal(fxRow.currency_id, fxCurrId);
+  assert.equal(fxRow.price_subtotal_currency, 100);
+  assert.equal(fxRow.price_total_currency, 110);
   assert.equal(fxRow.price_subtotal, 200);
   assert.equal(fxRow.price_total, 220);
   assert.equal(fxRow.price_average, 100);
