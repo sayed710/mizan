@@ -534,6 +534,7 @@ export function groupRecords(db, model, records, name, context = {}) {
 /** Aggregate a numeric field (sum, or mean of available numeric values when `groupOperator: 'avg'`), or the record count for "__count". */
 export function aggregate(records, measure, model = null) {
   if (measure === '__count') return records.length;
+  if (model && (models[model]?.fields?.[measure]?.groupOperator === false || models[model]?.fields?.[measure]?.measure === false)) return null;
   if (model && models[model]?.fields?.[measure]?.groupOperator === 'avg') {
     const values = records
       .map((r) => r[measure])

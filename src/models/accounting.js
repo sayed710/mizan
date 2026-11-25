@@ -91,6 +91,9 @@ function accountTypeGuard(db, before, after) {
 }
 
 function accountCodeGuard(db, before, after) {
+  if (after.code && /[^A-Za-z0-9.-]/.test(after.code)) {
+    return `The account code can only contain alphanumeric characters, dots, and dashes. (account code: ${after.code})`;
+  }
   const codeOrCompanyChanged = !before || before.code !== after.code || (before.company_id ?? null) !== (after.company_id ?? null);
   if (codeOrCompanyChanged && (db.records['account.account'] ?? []).some((account) => account.id !== after.id
     && account.code === after.code && (account.company_id ?? null) === (after.company_id ?? null))) {

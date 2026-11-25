@@ -3793,6 +3793,11 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  'Untaxed Amount in Currency': 'المبلغ غير الخاضع للضريبة بالعملة',
+  'Total in Currency': 'الإجمالي بالعملة',
+  'Inventory Value': 'قيمة المخزون',
+  'Margin': 'الهامش',
+  'Invoice Number': 'رقم الفاتورة',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
 };
 
