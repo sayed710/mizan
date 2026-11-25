@@ -59,18 +59,19 @@ function withComputed(model, vals, db) {
   };
 }
 
-function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record, isNew = false }) {
+function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record, isNew = false, stored = null }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
   const label = labelOverride ? t(labelOverride) : (field.custom ? field.label : t(field.label));
   const required = fieldRequired(field, record, db, isNew);
   const text = <>{label}{required && <span className="req" aria-hidden="true">*</span>}</>;
-  const isReadonly = readonly || fieldReadonly(field, record, db);
+  const fieldCtx = { isNew, stored };
+  const isReadonly = readonly || fieldReadonly(field, record, db, fieldCtx);
   return (
     <div className="field">
-      {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
+      {isLabelable(field, isReadonly, record, db, fieldCtx) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
       <div className="field-value">
-        <FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} />
+        <FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} stored={stored} />
         {field.help && <div className="field-help">{t(field.help)}</div>}
       </div>
     </div>
@@ -81,22 +82,36 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
 const lockFor = (def, readonly, name, record, db) => readonly
   && !((typeof def.form?.unlockedFields === 'function' ? def.form.unlockedFields(record, db) : def.form?.unlockedFields) ?? []).includes(name);
 
-function renderGroupItem(item, { db, model, def, current, set, readonly, titled, isNew, multiCompany }) {
+const isMissingValue = (v) => v == null || v === '';
+const isGroupFieldVisible = (def, name, { db, current, stored, isNew, multiCompany }) => {
+  const field = def.fields[name];
+  if (!field) return true;
+  if (field.multiCompanyOnly && !multiCompany) {
+    // Keep required multi-company fields visible in single-company DBs when a legacy record has no company yet.
+    const needsAssignment = fieldRequired(field, current, db, isNew)
+      && isMissingValue(isNew ? current?.[name] : stored?.[name])
+      && !fieldReadonly(field, current, db, { isNew, stored });
+    if (!needsAssignment) return false;
+  }
+  return !field.hideWhen?.(current, db);
+};
+
+function renderGroupItem(item, { db, model, def, current, set, readonly, titled, isNew, stored = null, multiCompany }) {
+  const fieldCtx = { isNew, stored };
   if (typeof item === 'string') {
+    if (!isGroupFieldVisible(def, item, { db, current, stored, isNew, multiCompany })) return null;
     const field = def.fields[item];
-    if (field?.multiCompanyOnly && !multiCompany) return null;
-    if (field?.hideWhen?.(current, db)) return null;
     const itemReadonly = lockFor(def, readonly, item, current, db);
     if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
-      const isReadonly = itemReadonly || fieldReadonly(field, current, db);
-      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={current} label={t(field.label)} isNew={isNew} />;
+      const isReadonly = itemReadonly || fieldReadonly(field, current, db, fieldCtx);
+      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={current} label={t(field.label)} isNew={isNew} stored={stored} />;
     }
-    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} isNew={isNew} />;
+    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} isNew={isNew} stored={stored} />;
   }
   if (item && Array.isArray(item.fields)) {
-    const visibleFields = item.fields.filter((f) => (!def.fields[f]?.multiCompanyOnly || multiCompany) && !def.fields[f]?.hideWhen?.(current, db));
+    const visibleFields = item.fields.filter((f) => isGroupFieldVisible(def, f, { db, current, stored, isNew, multiCompany }));
     if (!visibleFields.length) return null;
-    const isRowReadonly = visibleFields.every((f) => lockFor(def, readonly, f, current, db) || fieldReadonly(def.fields[f], current, db));
+    const isRowReadonly = visibleFields.every((f) => lockFor(def, readonly, f, current, db) || fieldReadonly(def.fields[f], current, db, fieldCtx));
     const isOrJoin = item.join === 'or';
     let fieldsToRender = visibleFields;
     if (isRowReadonly && isOrJoin) {
@@ -104,20 +119,20 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
       fieldsToRender = populated.length ? populated : [visibleFields[0]];
     }
     const first = def.fields[fieldsToRender[0]];
-    const firstReadonly = lockFor(def, readonly, fieldsToRender[0], current, db) || fieldReadonly(first, current, db);
+    const firstReadonly = lockFor(def, readonly, fieldsToRender[0], current, db) || fieldReadonly(first, current, db, fieldCtx);
     const labelText = t(item.label ?? first.label);
     return (
       <div key={item.key ?? visibleFields[0]} className="field">
-        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${fieldsToRender[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
+        {isLabelable(first, firstReadonly, current, db, fieldCtx) ? <label htmlFor={`f-${fieldsToRender[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
         <div className={`field-value field-pair${item.inline ? ' field-inline' : ''}`}>
           {fieldsToRender.map((f, idx) => {
             const fd = def.fields[f];
-            const isRo = lockFor(def, readonly, f, current, db) || fieldReadonly(fd, current, db);
+            const isRo = lockFor(def, readonly, f, current, db) || fieldReadonly(fd, current, db, fieldCtx);
             const sep = (isRowReadonly && isOrJoin) ? null : (idx > 0 ? (item.joins ? item.joins[idx - 1] : item.join) : null);
             return (
               <Fragment key={f}>
                 {sep && <span className="field-join">{t(sep)}</span>}
-                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={fd.placeholder ? t(fd.placeholder) : (idx > 0 && !item.inline ? t(fd.label) : undefined)} isNew={isNew} />
+                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={fd.placeholder ? t(fd.placeholder) : (idx > 0 && !item.inline ? t(fd.label) : undefined)} isNew={isNew} stored={stored} />
               </Fragment>
             );
           })}
@@ -126,9 +141,8 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
       </div>
     );
   }
-  if (def.fields[item.field]?.multiCompanyOnly && !multiCompany) return null;
-  if (def.fields[item.field]?.hideWhen?.(current, db)) return null;
-  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} isNew={isNew} />;
+  if (!isGroupFieldVisible(def, item.field, { db, current, stored, isNew, multiCompany })) return null;
+  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} isNew={isNew} stored={stored} />;
 }
 
 function renderGroups(groups, opts) {
@@ -312,9 +326,12 @@ function Activities({ db, model, id, name }) {
   );
 }
 
-function ActionsMenu({ model, rec, backHash, base, query, onAction, isNew }) {
+function ActionsMenu({ model, rec, backHash, base, query, onAction, isNew, onError }) {
   const [open, setOpen] = useState(false);
-  const run = (fn) => { setOpen(false); fn(); };
+  const run = (fn) => {
+    setOpen(false);
+    try { fn(); } catch (e) { onError?.(e); }
+  };
   const duplicate = () => {
     const res = create(getDb(), model, duplicateValues(model, rec, getDb()));
     commit(res.db);
@@ -440,6 +457,7 @@ export function FormView({ leaf, id, base, params }) {
     return <main className="form-page"><p className="empty">{t('Record not found.')} <a href={backHash}>{t('Back to')} {t(leaf.label)}</a></p></main>;
   }
 
+  const stored = isNew ? null : rec;
   const values = { ...(isNew ? initial : rec), ...changes };
   const current = withComputed(model, def.form.prepare?.(values, db) ?? values, db);
   const dirty = Object.keys(changes).length > 0;
@@ -687,7 +705,7 @@ export function FormView({ leaf, id, base, params }) {
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : displayTitle}</span>
           </nav>
-          {(!isNew || (models[model].menuActions ?? []).length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} />}
+          {(!isNew || (models[model].menuActions ?? []).length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} onError={fail} />}
           {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && current.move_type === 'out_invoice')) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
           {dirty && (
             <span className="dirty">
@@ -766,14 +784,14 @@ export function FormView({ leaf, id, base, params }) {
               {Array.isArray(def.form.titleFields)
                 ? <div className="field-pair">{def.form.titleFields.map((f) => {
                     const fd = def.fields[f];
-                    return <FieldInput key={f} db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={locked || fieldReadonly(fd, current, db)} record={current} label={t(fd.label)} placeholder={t(fd.placeholder ?? fd.label)} />;
+                    return <FieldInput key={f} db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={locked || fieldReadonly(fd, current, db, { isNew, stored })} record={current} label={t(fd.label)} placeholder={t(fd.placeholder ?? fd.label)} isNew={isNew} stored={stored} />;
                   })}</div>
                 : titleField.readonly || titleField.compute
                   ? <h2>{isNew ? t('Draft') : displayTitle}</h2>
                   : <input id={`f-${def.form.title}`} aria-label={t(titleField.label)} placeholder={t(titleField.placeholder ?? titleField.label)} readOnly={locked}
                       value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>}
-            {renderGroups(groups, { db, model, def, current, set, readonly: locked, isNew })}
+            {renderGroups(groups, { db, model, def, current, set, readonly: locked, isNew, stored })}
             {def.form.outstandingCredits && !isNew && (
               <OutstandingCredits
                 db={db}
@@ -826,10 +844,10 @@ export function FormView({ leaf, id, base, params }) {
                       return (['one2many', 'text', 'html'].includes(def.fields[f].type)
                         ? (
                           <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                            placeholder={resolvedPlaceholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
+                            placeholder={resolvedPlaceholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} isNew={isNew} stored={stored} />
                         )
                         // Plain fields in a tab get a label, like fields in the header groups.
-                        : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} />);
+                        : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} stored={stored} />);
                     };
                     return (
                       <>
@@ -854,7 +872,7 @@ export function FormView({ leaf, id, base, params }) {
                           <>
                             {activeTab.help && <p className="field-help">{t(activeTab.help)}</p>}
                             {(activeTab.fields ?? []).map((f) => renderTabField(f))}
-                            {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly, isNew })}
+                            {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly, isNew, stored })}
                           </>
                         )}
                         {(activeTab.aside?.length > 0 || (footer.length > 0 && tab === 0)) && (

@@ -126,12 +126,12 @@ test('budget reports filter account prefixes and periods and prorate inclusive d
     { date: '2026-01-11', amount: -500, general_account: '600000' },
     { date: '2026-01-02', amount: -999, general_account: '600000', account_id: b },
   ].reduce((next, vals) => create(next, 'account.analytic.line', { account_id: a, move_id: posted.id, ...vals }).db, postMove(posted.db, posted.id));
-  const { db, id } = create(actuals, 'account.budget', { name: 'Ten days', date_from: '2026-01-01', date_to: '2026-01-10', lines: [
+  const { db, id } = create(actuals, 'account.budget', { name: 'Ten days', budget_type: 'both', date_from: '2026-01-01', date_to: '2026-01-10', lines: [
     { analytic_account_id: a, general_account: '600', planned: -1000 },
     { analytic_account_id: a, planned: 0 },
   ] });
   const [costs, all] = budgetReport(db, id, '2026-01-05');
-  assert.deepEqual([costs.planned, costs.practical, costs.theoretical, costs.achievement], [-1000, -200, -500, 40]);
+  assert.deepEqual([costs.planned, costs.practical, costs.theoretical, costs.achievement], [-1000, -200, -500, 20]);
   assert.deepEqual([all.practical, all.theoretical, all.achievement], [-170, 0, 0]);
   assert.equal(budgetReport(db, id, '2025-12-31')[0].theoretical, 0);
   assert.equal(budgetReport(db, id, '2026-01-01')[0].theoretical, -100);

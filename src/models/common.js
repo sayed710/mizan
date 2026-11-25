@@ -30,6 +30,18 @@ export function sameCommercialPartner(db, leftId, rightId) {
   return left != null && left === commercialPartnerId(db, rightId);
 }
 
+/** Check whether `partner` carries a tag matching `tagName` (case-insensitive, resolving `res.partner.category` ids). */
+export function partnerHasTag(db, partner, tagName) {
+  const target = String(tagName ?? '').trim().toLowerCase();
+  if (!target) return true;
+  return (partner?.tag_ids ?? []).some((entry) => {
+    const id = typeof entry === 'object' && entry !== null ? entry.id : entry;
+    const cat = id != null ? read(db, 'res.partner.category', id) : null;
+    const name = cat ? cat.name : (typeof entry === 'object' && entry !== null ? entry.name : typeof entry === 'string' ? entry : '');
+    return String(name ?? '').trim().toLowerCase() === target;
+  });
+}
+
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
 
 /** Local calendar date as YYYY-MM-DD (not UTC, so "today" matches the user's wall clock). */
@@ -305,3 +317,12 @@ export const monthFilters = (field, labelPrefix = '', value = (r) => r[field]) =
   { id: `${field}_month`, label: labelPrefix ? `${labelPrefix}: This Month` : 'This Month', fn: (r) => value(r)?.slice(0, 7) === today().slice(0, 7) },
   { id: `${field}_year`, label: labelPrefix ? `${labelPrefix}: This Year` : 'This Year', fn: (r) => value(r)?.slice(0, 4) === today().slice(0, 4) },
 ];
+
+/** Whether the form's onchange context marks `field` as edited by the user (editedFields: Set, array or object). */
+export function isFieldEdited(field, context) {
+  const edited = context?.editedFields;
+  if (!edited) return false;
+  if (edited instanceof Set) return edited.has(field);
+  if (Array.isArray(edited)) return edited.includes(field);
+  return Object.hasOwn(edited, field);
+}
