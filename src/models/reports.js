@@ -168,7 +168,8 @@ export function cashflowAnalysis(db, { from, to, company_id }) {
     if (!months.has(month)) months.set(month, new Map());
     const amounts = months.get(month);
     const sums = amounts.get(journal.id) ?? { inflow: 0, outflow: 0 };
-    const booked = Math.sign(Number(line.amount)) * toCompany(db, journal.currency_id, Math.abs(Number(line.amount)), line.date, line.company_id ?? 1);
+    const lineCurrency = line.currency_id ?? journal.currency_id;
+    const booked = Math.sign(Number(line.amount)) * toCompany(db, lineCurrency, Math.abs(Number(line.amount)), line.date, line.company_id ?? 1);
     const amount = reportingBookedAmount(db, line, booked);
     sums.inflow += Math.max(amount, 0);
     sums.outflow += Math.max(-amount, 0);

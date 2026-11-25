@@ -90,9 +90,9 @@ test('migration 40 backfills journal parity fields without changing existing num
     },
   };
 
-  assert.equal(SCHEMA_VERSION, 68);
+  assert.equal(SCHEMA_VERSION, 78);
   const upgraded = migrate(v39Db);
-  assert.equal(upgraded.schema_version, 68);
+  assert.equal(upgraded.schema_version, 78);
 
   const sd = read(upgraded, 'account.journal', 901);
   const ss = read(upgraded, 'account.journal', 902);
@@ -114,7 +114,7 @@ test('migration 40 backfills journal parity fields without changing existing num
 
   // Idempotent on second pass
   const again = migrate(upgraded);
-  assert.equal(again.schema_version, 68);
+  assert.equal(again.schema_version, 78);
   assert.equal(read(again, 'account.journal', 901).refund_sequence, true);
   assert.equal(read(again, 'account.journal', 902).refund_sequence, false);
 });
@@ -456,7 +456,7 @@ test('account.journal list columns, search filters, sequence ordering, and per-t
   const fields = def.fields;
 
   // List columns & labels & type selection order
-  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id']);
+  assert.deepEqual(def.list, ['sequence', 'name', 'type', 'code', 'default_account_id', 'currency_id', 'active', 'company_id']);
   assert.equal(fields.sequence.widget, 'handle');
   assert.equal(fields.name.label, 'Journal');
   assert.equal(fields.active.optional, 'hide');

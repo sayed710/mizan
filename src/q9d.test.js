@@ -217,7 +217,7 @@ test('Qodo 32: intercompany bill rejects purchase tax group containing another c
 
 test('Qodo 44: analytic balance sheet and executive summary balance with tagged income and untagged receivable', () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Project Alpha' });
+  const analytic = create(db, 'account.analytic.account', { name: 'Project Alpha', plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
 
   const invoice = create(db, 'account.move', {

@@ -13,6 +13,7 @@ export function newDefaults(db, model, leaf, params, rel) {
 
 /** Apply the same field onchange used by the form before saving. */
 export function changeFormValue(model, base, changes, key, value, db, stageExplicit, editedFields) {
+  if (editedFields instanceof Set) editedFields.add(key);
   const prev = { ...base, ...changes };
   const next = { ...changes, [key]: value };
   const extra = models[model].onchange?.({ ...base, ...next }, key, db, { stageExplicit, previous: prev, editedFields }) ?? {};

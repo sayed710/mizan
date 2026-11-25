@@ -13,6 +13,7 @@ const patterns = {
   'Invalid {1} #{2} in the backup: {3} has the wrong structure': 'السجل {1} رقم {2} غير صالح في النسخة الاحتياطية: بنية {3} خاطئة',
   'Invalid settings.{1} in the backup': 'الإعداد {1} غير صالح في النسخة الاحتياطية',
   'Enter an existing record ID for {1}': 'أدخل معرّف سجل موجود للحقل {1*}',
+  'Enter existing record IDs for {1}': 'أدخل معرّفات سجلات موجودة للحقل {1*}',
   '{1} cannot be duplicated; use its payment workflow': 'لا يمكن تكرار {1*}؛ استخدم مسار الدفع الخاص به',
   'Configure the {1} sequence prefix on the selected journal': 'حدّد بادئة تسلسل {1*} على دفتر اليومية المحدد',
   'Configure a positive next {1} sequence number on the selected journal': 'حدّد رقماً تالياً موجباً لتسلسل {1*} على دفتر اليومية المحدد',
@@ -218,6 +219,10 @@ const patterns = {
   '{1} reminder(s) failed: {2}': 'فشل إرسال {1} من التذكيرات: {2}',
   'Invalid recipient {1}': 'مستلم غير صالح {1}',
   'SMTP {1}: {2}': 'خادم البريد {1}: {2}',
+  "You can't deactivate a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): {1}": 'لا يمكنك إلغاء تفعيل طريقة دفع مرتبطة بمزود في حالة مُفعّل أو اختبار.\nالمزودون المرتبطون: {1}',
+  "You can't delete a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): {1}": 'لا يمكنك حذف طريقة دفع مرتبطة بمزود في حالة مُفعّل أو اختبار.\nالمزودون المرتبطون: {1}',
+  "You can't link a provider in the enabled or test state to an archived payment method.\nLinked provider(s): {1}": 'لا يمكنك ربط مزود في حالة مُفعّل أو اختبار بطريقة دفع مؤرشفة.\nالمزودون المرتبطون: {1}',
+  "You can't enable a payment provider that is linked to an archived payment method.\nArchived method(s): {1}": 'لا يمكنك تفعيل مزود دفع مرتبط بطريقة دفع مؤرشفة.\nطرق الدفع المؤرشفة: {1}',
 };
 
 // Short English words and phrases that the code puts inside the messages above.

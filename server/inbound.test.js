@@ -7,14 +7,13 @@ import { createShare } from '../src/models/signplus.js';
 import { referralLink, points, syncFromApplicant } from '../src/models/skillsplus.js';
 import { DatabaseSync } from 'node:sqlite';
 import { openBlobs } from './blobs.js';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diffDb } from '../src/sync.js';
 import { publicApply } from './api.js';
 import { sharePage, smsInbound, SMS_PATH, twilioSignature } from './inbound.js';
+import { startServer } from './test-server.js';
 
 const ENV = { MIZAN_TWILIO_TOKEN: 'secret-token', MIZAN_PUBLIC_URL: 'https://erp.example.com/' };
 const form = (o) => Buffer.from(new URLSearchParams(o).toString());
@@ -113,19 +112,12 @@ test('share downloads resolve stored blobs only after token, expiry and document
 
 test('HTTP public routes serve stored share files and persist only signed SMS opt-outs', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-inbound-'));
-  const child = spawn(process.execPath, ['server/index.js'], {
-    cwd: new URL('..', import.meta.url),
-    env: { ...process.env, ...ENV, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: 'inbound-admin-password', MIZAN_SECURE_COOKIE: '0' },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  let server;
   try {
-    const url = await new Promise((resolve, reject) => {
-      let output = '';
-      child.stdout.on('data', (b) => { output += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output); if (m) resolve(m[1]); });
-      child.stderr.on('data', (b) => { output += b; });
-      child.on('error', reject);
-      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${output}`)));
+    server = await startServer({
+      env: { ...process.env, ...ENV, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: 'inbound-admin-password', MIZAN_SECURE_COOKIE: '0' },
     });
+    const { url } = server;
     const login = await fetch(url + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-requested-with': 'mizan' }, body: JSON.stringify({ login: 'admin', password: 'inbound-admin-password' }) });
     assert.equal(login.status, 200);
     const headers = { 'content-type': 'application/json', 'x-requested-with': 'mizan', cookie: login.headers.get('set-cookie').split(';')[0] };
@@ -153,7 +145,7 @@ test('HTTP public routes serve stored share files and persist only signed SMS op
     const after = await (await fetch(url + '/api/db', { headers })).json();
     assert.equal(search(after, 'phone.blacklist').filter((r) => r.number === msg.From).length, 1);
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
-    rmSync(dir, { recursive: true, force: true });
+    await server?.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

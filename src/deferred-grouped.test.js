@@ -45,8 +45,9 @@ test('manually & grouped deferred generation posts grouped entries, next-day rev
   assert.ok(methodField.options.some(([key, label]) => key === 'manual_grouped' && label === 'Manually & Grouped'));
 
   let db = seed();
-  const analytic1 = create(db, 'account.analytic.account', { name: 'Alpha Deferral Project' });
-  const analytic2 = create(analytic1.db, 'account.analytic.account', { name: 'Beta Deferral Project' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const analytic1 = create(db, 'account.analytic.account', { name: 'Alpha Deferral Project', plan_id: planId });
+  const analytic2 = create(analytic1.db, 'account.analytic.account', { name: 'Beta Deferral Project', plan_id: planId });
   db = write(analytic2.db, 'res.company', 1, {
     deferred_generation_method: 'manual_grouped',
     deferred_amount_computation_method: 'full_months',

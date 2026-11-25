@@ -551,8 +551,8 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 }
 
 /** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
-export const isLabelable = (field, readonly, record, db) => {
-  const isReadonly = readonly || fieldReadonly(field, record, db);
+export const isLabelable = (field, readonly, record, db, fieldCtx = undefined) => {
+  const isReadonly = readonly || fieldReadonly(field, record, db, fieldCtx);
   return !(isReadonly || (field?.compute && !field?.editable)) && !['one2many', 'priority'].includes(field?.type) && field?.widget !== 'radio';
 };
 
@@ -678,9 +678,9 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
 
   const planGroups = planTotals(rows, db);
   const unassignedRows = rows.filter((r) => !planGroups.some((g) => g.rows.includes(r)));
-  const planName = (account) => account.plan_id
+  const planName = (account) => (account?.plan_id
     ? display(db, models['account.analytic.account'].fields.plan_id, account.plan_id)
-    : display(db, models['account.analytic.account'].fields.plan, account.plan || 'project');
+    : '');
 
 
   const invalid = Number.isNaN(value);
@@ -804,8 +804,8 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
   );
 }
 
-export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, disabled = false, placeholder, record, label, isNew = false }) {
-  const isReadonly = readonly || fieldReadonly(field, record, db);
+export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, disabled = false, placeholder, record, label, isNew = false, stored = null }) {
+  const isReadonly = readonly || fieldReadonly(field, record, db, { isNew, stored });
   const isRequired = fieldRequired(field, record, db, isNew);
   if (field.type === 'one2many') return <Lines db={db} model={model} fieldName={fieldName} id={id} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
   if (field.type === 'many2many' && field.openDirect && (isReadonly || field.compute)) {

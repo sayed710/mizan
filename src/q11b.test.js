@@ -60,7 +60,7 @@ function makeLedgerFixture(db) {
 }
 
 test('Qodo 3: system_generated cannot be client-originated or used to bypass mandatory plans', () => {
-  let db = seed();
+  let db = write(seed(), 'res.company', 1, { group_analytic_accounting: true });
 
   const plan = create(db, 'account.analytic.plan', {
     name: 'Mandatory Plan Q3',

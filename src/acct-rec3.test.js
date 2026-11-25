@@ -21,10 +21,10 @@ test('a percentage payment tolerance above 100 is refused on create, write and r
 
 test('upgrade brings percentage tolerances above 100 down to 100, leaving amount tolerances intact, allowing subsequent edits and deactivation', () => {
   const base = seed();
-  const legacyRule1 = { id: 801, name: 'Legacy 150% rule', rule_type: 'matching_rule', trigger: 'manual', payment_tolerance_type: 'percentage', payment_tolerance: 150, active: true };
-  const legacyRule2 = { id: 802, name: 'Legacy 150 amount rule', rule_type: 'matching_rule', trigger: 'manual', payment_tolerance_type: 'amount', payment_tolerance: 150, active: true };
-  const legacyRule3 = { id: 803, name: 'Legacy untyped 120 rule', rule_type: 'matching_rule', trigger: 'manual', payment_tolerance: 120, active: true };
-  const legacyRule4 = { id: 804, name: 'Legacy 50% rule', rule_type: 'matching_rule', trigger: 'manual', payment_tolerance_type: 'percentage', payment_tolerance: 50, active: true };
+  const legacyRule1 = { id: 801, name: 'Legacy 150% rule', company_id: 1, rule_type: 'matching_rule', trigger: 'manual', payment_tolerance_type: 'percentage', payment_tolerance: 150, active: true };
+  const legacyRule2 = { id: 802, name: 'Legacy 150 amount rule', company_id: 1, rule_type: 'matching_rule', trigger: 'manual', payment_tolerance_type: 'amount', payment_tolerance: 150, active: true };
+  const legacyRule3 = { id: 803, name: 'Legacy untyped 120 rule', company_id: 1, rule_type: 'matching_rule', trigger: 'manual', payment_tolerance: 120, active: true };
+  const legacyRule4 = { id: 804, name: 'Legacy 50% rule', company_id: 1, rule_type: 'matching_rule', trigger: 'manual', payment_tolerance_type: 'percentage', payment_tolerance: 50, active: true };
 
   const legacyDb = {
     ...base,
@@ -41,7 +41,7 @@ test('upgrade brings percentage tolerances above 100 down to 100, leaving amount
 
   // Upgrade the database
   const upgraded = migrate(legacyDb);
-  assert.equal(upgraded.schema_version, 68);
+  assert.equal(upgraded.schema_version, 78);
 
   const r1 = read(upgraded, MODEL, 801);
   const r2 = read(upgraded, MODEL, 802);

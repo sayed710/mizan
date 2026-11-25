@@ -90,9 +90,9 @@ test('REP4-2 Budget vs Actual: report-level company, analytic account filters an
   }
 
   // Create analytic accounts
-  const an1 = create(db, 'account.analytic.account', { name: 'Project Alpha', company_id: 1 });
+  const an1 = create(db, 'account.analytic.account', { name: 'Project Alpha', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = applyDiff(db, diffDb(db, an1.db), { isAdmin: true });
-  const an2 = create(db, 'account.analytic.account', { name: 'Project Beta', company_id: 1 });
+  const an2 = create(db, 'account.analytic.account', { name: 'Project Beta', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = applyDiff(db, diffDb(db, an2.db), { isAdmin: true });
 
   // Create budget in company 1 with lines for an1 and an2
@@ -211,27 +211,29 @@ test('REP4-4 Budget comparison displays period headers and the same amounts as s
   }
 });
 
-test('REP4-5 Current unfinished budget period evaluates achievement against elapsed target', async () => {
+test('REP4-5 Current unfinished budget period evaluates achievement against full period plan', async () => {
   let db = seed();
   const currentYear = today().slice(0, 4);
-  const an = create(db, 'account.analytic.account', { name: 'Unfinished Project', company_id: 1 });
+  const an = create(db, 'account.analytic.account', { name: 'Unfinished Project', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = an.db;
   const posted = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: 1, company_id: 1, date: `${currentYear}-01-01`, invoice_date: `${currentYear}-01-01`,
     invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }],
   });
   db = postMove(posted.db, posted.id);
+  const expenseAccount = search(db, 'account.account').find((a) => a.code === '600000' && (!a.company_id || a.company_id === 1));
   db = create(db, 'account.analytic.line', {
-    account_id: an.id, move_id: posted.id, company_id: 1, date: `${currentYear}-01-02`, amount: -2000, general_account: '600000',
+    account_id: an.id, move_id: posted.id, company_id: 1, date: `${currentYear}-01-02`, amount: -2000, general_account: expenseAccount.id,
   }).db;
   const budget = create(db, 'account.budget', {
     name: 'Unfinished period budget',
+    budget_type: 'expense',
     company_id: 1,
     date_from: `${currentYear}-01-01`,
     date_to: '2030-12-31',
     state: 'confirmed',
     lines: [
-      { planned: -10000, analytic_account_id: an.id, general_account: '600', date_from: `${currentYear}-01-01`, date_to: '2030-12-31' },
+      { planned: 10000, analytic_account_id: an.id, general_account: '600', date_from: `${currentYear}-01-01`, date_to: '2030-12-31' },
     ],
   });
   db = budget.db;
@@ -250,10 +252,9 @@ test('REP4-5 Current unfinished budget period evaluates achievement against elap
   );
 
   const expectedReport = budgetReport(db, budget.id, today(), { period, company_id: 1 });
-  const expectedAchievement = expectedReport[0].achievement;
-  assert.ok(expectedAchievement > 20, `Achievement ${expectedAchievement}% reflects elapsed target, not full period (20%)`);
-  assert.match(html, new RegExp(`${expectedAchievement}%`));
-  assert.doesNotMatch(html, />20%</);
+  assert.equal(expectedReport[0].budget_achievement, 20);
+  assert.equal(expectedReport[0].achievement, 20);
+  assert.match(html, />20%</);
 });
 
 test('REP4-6 Budget starting in current period displays zero metrics for nonoverlapping earlier period', async () => {
@@ -307,7 +308,7 @@ test('REP4-6 Budget starting in current period displays zero metrics for nonover
 
 test('REP4-7 Analytic filter retains companyless budgets and failed reports', async () => {
   let db = seed();
-  const an = create(db, 'account.analytic.account', { name: 'Active Filter Account', company_id: 1 });
+  const an = create(db, 'account.analytic.account', { name: 'Active Filter Account', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = an.db;
 
   const b1 = create(db, 'account.budget', {
@@ -395,16 +396,16 @@ test('REP4-8 Later comparison period failure renders unavailable cells and does 
     )
   );
 
-  assert.match(html, />\$12,345\.00</);
+  assert.match(html, />\$6,172\.50</);
   assert.match(html, /Configure a unique purchase order line link/);
-  const matches = html.match(/>\$12,345\.00</g) || [];
-  assert.equal(matches.length, 1, 'Planned amount 12345 should only appear for period 2025, not repeated in period 2026');
+  const matches = html.match(/>\$6,172\.50</g) || [];
+  assert.equal(matches.length, 1, 'Prorated planned amount 6172.50 should only appear for period 2025, not repeated in period 2026');
   assert.match(html, /—/);
 });
 
 test('REP4-9 Expense budget unbilled purchase commitment detail matches committed summary sign', async () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Expense Project', company_id: 1 });
+  const analytic = create(db, 'account.analytic.account', { name: 'Expense Project', company_id: 1, plan_id: db.records['account.analytic.plan'][0].id });
   db = analytic.db;
   const budget = create(db, 'account.budget', {
     name: 'Expense Commitment Budget',

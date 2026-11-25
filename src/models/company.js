@@ -85,9 +85,9 @@ export function setCompanies(db, { current, allowed }) {
 // Accounting configuration belongs to its company; other configuration is readable across companies.
 const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position', 'account.cash.rounding', 'account.analytic.account']);
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
-  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'res.country.group']);
+  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'payment.method', 'res.country.group', 'res.partner.category']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
-const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
+const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'res.partner.category', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
 /** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
 const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
@@ -280,7 +280,7 @@ export function withCompany(models) {
 // Accounting settings shown in General Settings are company controls and can only be changed by administrators over sync.
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
-  'audit_trail', 'three_way_matching', 'autopost_bills', 'invoice_qr', 'quick_edit_mode', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
+  'group_analytic_accounting', 'audit_trail', 'three_way_matching', 'autopost_bills', 'invoice_qr', 'quick_edit_mode', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date', 'tax_return_template',
   'fiscalyear_last_day', 'fiscalyear_last_month',
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
@@ -291,6 +291,7 @@ const CONTROL_FIELDS = [
   'deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method',
   'deferred_revenue_periodicity', 'deferred_expense_periodicity',
   'transfer_account_id', 'account_storno', 'account_check_printing_layout',
+  'account_use_credit_limit', 'account_default_credit_limit',
   'use_invoice_terms', 'invoice_terms', 'incoterm_id',
 ];
 
@@ -340,6 +341,10 @@ function companyGuard(db, before, r, ctx) {
   }
   if (r.currency_next_execution_date != null && r.currency_next_execution_date !== '' && !validDate(r.currency_next_execution_date)) {
     return 'Currency next execution date must be a valid date';
+  }
+  if (r.account_default_credit_limit != null && r.account_default_credit_limit !== '') {
+    const n = Number(r.account_default_credit_limit);
+    if (!Number.isFinite(n) || n < 0) return 'Default Credit Limit must be non-negative';
   }
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
@@ -708,6 +713,7 @@ export const companyModels = {
     label: 'Companies',
     fields: {
       name: { type: 'char', label: 'Company Name', required: true },
+      group_analytic_accounting: { type: 'boolean', label: 'Analytic Accounting' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       account_default_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Default Receivable Account' },
       account_default_payable_id: { type: 'many2one', relation: 'account.account', label: 'Default Payable Account' },
@@ -797,6 +803,8 @@ export const companyModels = {
       three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
       autopost_bills: { type: 'boolean', label: 'Auto-post bills', default: false },
       audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
+      account_use_credit_limit: { type: 'boolean', label: 'Sales Credit Limit' },
+      account_default_credit_limit: { type: 'monetary', label: 'Default Credit Limit' },
       fiscalyear_last_day: { type: 'integer', label: 'Fiscal Year End Day' },
       fiscalyear_last_month: { type: 'integer', label: 'Fiscal Year End Month' },
       currency_provider: {
@@ -813,6 +821,7 @@ export const companyModels = {
     },
     defaults: () => ({
       active: true,
+      group_analytic_accounting: false,
       fiscalyear_last_day: 31,
       fiscalyear_last_month: 12,
       currency_provider: 'none',

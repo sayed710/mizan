@@ -11,11 +11,12 @@ import { createCompany, setCompanies } from './models/company.js';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
-const budget = (db, account, extra = {}) => create(db, 'account.budget', { name: 'Audit budget', date_from: '2026-01-01', date_to: '2026-01-31', lines: [{ analytic_account_id: account, planned: -1000 }], ...extra });
+const budget = (db, account, extra = {}) => create(db, 'account.budget', { name: 'Audit budget', date_from: '2026-01-01', date_to: '2026-01-31', lines: [{ analytic_account_id: account, planned: 1000 }], ...extra });
 const actual = (db, id) => budgetReport(db, id, '2026-01-31')[0];
 
 test('budget achieved excludes timesheets and draft moves and follows posted move resets', () => {
-  const a = create(seed(), 'account.analytic.account', { name: 'Budget actuals' });
+  const db0 = seed();
+  const a = create(db0, 'account.analytic.account', { name: 'Budget actuals', plan_id: db0.records['account.analytic.plan'][0].id });
   let db = create(a.db, 'account.analytic.line', { account_id: a.id, date: '2026-01-10', amount: -500 }).db;
   const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-10', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0, analytic_account_id: a.id }] });
   const b = budget(bill.db, a.id);
@@ -30,7 +31,7 @@ test('budgets default to the selected database company and reject missing compan
   let db = seed();
   const company = createCompany(db, { name: 'Second', currency_id: read(db, 'res.company', 1).currency_id });
   db = setCompanies(company.db, { current: company.id, allowed: [1, company.id] });
-  const a = create(db, 'account.analytic.account', { name: 'Second company analysis', company_id: company.id });
+  const a = create(db, 'account.analytic.account', { name: 'Second company analysis', company_id: company.id, plan_id: db.records['account.analytic.plan'][0].id });
   const b = budget(a.db, a.id);
   assert.equal(read(b.db, 'account.budget', b.id).company_id, company.id);
   const bill = create(b.db, 'account.move', { company_id: company.id, move_type: 'entry', date: '2026-01-10', invoice_date: '2026-01-10', line_ids: [] });
@@ -47,7 +48,8 @@ test('budgets default to the selected database company and reject missing compan
 });
 
 test('budget commitments track confirmed unbilled allocations through partial bills and cancellation', async () => {
-  const a = create(seed(), 'account.analytic.account', { name: 'Purchase budget' });
+  const db0 = seed();
+  const a = create(db0, 'account.analytic.account', { name: 'Purchase budget', plan_id: db0.records['account.analytic.plan'][0].id });
   const po = create(a.db, 'purchase.order', { partner_id: 2, date_order: '2026-01-10', order_line: [{ product_id: 5, qty: 10, price_unit: 100, discount: 10, tax: 0, analytic_distribution: { [a.id]: 60 } }] });
   const b = budget(po.db, a.id);
   assert.equal(actual(b.db, b.id).committed, 0);
@@ -76,7 +78,8 @@ test('budget commitments track confirmed unbilled allocations through partial bi
 });
 
 test('commitments use explicit line IDs for repeated products and reject unlinked posted bills', () => {
-  const a = create(seed(), 'account.analytic.account', { name: 'Allocated purchase' });
+  const db0 = seed();
+  const a = create(db0, 'account.analytic.account', { name: 'Allocated purchase', plan_id: db0.records['account.analytic.plan'][0].id });
   const b = budget(a.db, a.id);
   const po = create(b.db, 'purchase.order', { state: 'purchase', partner_id: 2, date_order: '2026-01-10', order_line: [
     { purchase_line_key: 'allocated', product_id: 5, qty: 10, price_unit: 20, tax: 0, analytic_account_id: a.id },
@@ -93,7 +96,8 @@ test('commitments use explicit line IDs for repeated products and reject unlinke
 });
 
 test('commitments honor company, line dates, explicit general accounts and foreign currency rates', () => {
-  const a = create(seed(), 'account.analytic.account', { name: 'Currency purchases' });
+  const db0 = seed();
+  const a = create(db0, 'account.analytic.account', { name: 'Currency purchases', plan_id: db0.records['account.analytic.plan'][0].id });
   const expense = create(a.db, 'account.account', { name: 'Configured purchase expense', code: 'AUD-COST', account_type: 'expense' });
   const currency = create(expense.db, 'res.currency', { name: 'AUDIT', symbol: 'A', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
   const company = createCompany(currency.db, { name: 'Other purchase company', currency_id: read(currency.db, 'res.company', 1).currency_id });
