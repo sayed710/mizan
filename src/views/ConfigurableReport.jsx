@@ -57,6 +57,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
   const [includeUnposted, setIncludeUnposted] = useState(false);
+  const [hideZeroLines, setHideZeroLines] = useState(false);
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [from, setFrom] = useState(`${today().slice(0, 4)}-01-01`);
   const [to, setTo] = useState(statementKind ? today() : `${today().slice(0, 4)}-12-31`);
@@ -151,7 +152,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
         periods,
         period,
         group,
-        { companyIds, analyticAccountIds, includeUnposted },
+        { companyIds, analyticAccountIds, includeUnposted, hideZeroLines, includeZeroRows: Boolean(statementKind) },
       );
     } catch (error) {
       console.error('Could not compute configurable report:', error, {
@@ -312,6 +313,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
         <label className="inline-select">
           <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
         </label>
+        {statementKind && <label className="inline-select">
+          <input type="checkbox" checked={hideZeroLines} onChange={(e) => setHideZeroLines(e.target.checked)} /> {t('Hide lines at 0')}
+        </label>}
         <span className="spacer" />
         <ReportFoldAll keys={expandableCodes} open={openCodes} onToggle={() => setOpenCodes((prev) => toggleAllReportFolds(prev, expandableCodes))} />
         <button type="button" className="btn sm" disabled={!data} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
