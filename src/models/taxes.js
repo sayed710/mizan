@@ -658,8 +658,13 @@ export function cashBasisGroups(lines, rate = 1, documentCurrency = null, compan
         .sort((a, b) => a - b);
       if (baseTags.length) {
         const account_id = options.lineAccount?.(l) ?? null;
-        const key = `${account_id}|${baseTags.join(',')}`;
-        const g = byBase.get(key) ?? { account_id, tax_tag_ids: baseTags, cash_basis: true, document_base: 0 };
+        const taxIds = [...new Set(
+          cbTaxes
+            .filter((t) => t.tax_id != null && taxBaseTags(t, side, l).some((tagId) => baseTags.includes(tagId)))
+            .map((t) => Number(t.tax_id))
+        )].sort((a, b) => a - b);
+        const key = `${account_id}|${baseTags.join(',')}|${taxIds.join(',')}`;
+        const g = byBase.get(key) ?? { account_id, tax_tag_ids: baseTags, tax_ids: taxIds, cash_basis: true, document_base: 0 };
         byBase.set(key, { ...g, document_base: g.document_base + computed.untaxed });
       }
     }

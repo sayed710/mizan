@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { journalItems } from './models/ledger.js';
@@ -22,7 +22,7 @@ test('invoice journal items retain distinct analytic distributions', () => {
 });
 
 test('mandatory plan applies to expense but not bank counterpart', () => {
-  let db = seed();
+  let db = write(seed(), 'res.company', 1, { group_analytic_accounting: true });
   const plan = create(db, 'account.analytic.plan', { name: 'Mandatory', default_applicability: 'mandatory' }); db = plan.db;
   const a = create(db, 'account.analytic.account', { name: 'A', plan_id: plan.id }); db = a.db;
   const expense = search(db, 'account.account').find((x) => x.account_type === 'expense');

@@ -1,3 +1,4 @@
+import { analyticAccountingEnabled } from './analytic-setting.js';
 import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
 import { countryReferenceError } from './country.js';
@@ -1514,6 +1515,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     partner_id: r.partner_id,
     name: bg.tax_name || 'Cash basis base',
     tax_id: bg.tax_id ?? null,
+    ...(bg.tax_ids?.length ? { tax_ids: bg.tax_ids } : {}),
     tax_name: bg.tax_name || 'Cash basis base',
     tax_tag_ids: bg.tax_tag_ids,
     tax_grid_base: true,
@@ -1749,6 +1751,7 @@ export function bookEarlyDiscount(db, id, discount, date = today(), paymentMoveI
   const bases = discountTaxComputation(term) === 'included'
     ? (r.line_ids ?? []).filter((line) => line.tax_grid_base && line.tax_tag_ids?.length).map((line) => ({
       account: discountAccount, partner_id: r.partner_id, tax_tag_ids: line.tax_tag_ids,
+      ...(line.tax_ids?.length ? { tax_ids: line.tax_ids } : (line.tax_id != null ? { tax_ids: [line.tax_id] } : {})),
       tax_grid_base: true, tax_side: isPurchase(r) ? 'purchase' : 'sale',
       debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
     })) : [];
@@ -1987,6 +1990,7 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 
 const invoiceLineField = {
   ...invoiceLineBase,
+  columnsFor: (record, db) => Object.entries(invoiceLineField.fields).filter(([key]) => key !== 'analytic_distribution' || analyticAccountingEnabled(db, record?.company_id)),
   newLine: (move, db) => {
     const baseLine = (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db);
     const mismatch = move && db ? quickEditMismatch(db, move) : null;
@@ -2570,7 +2574,7 @@ const lineItem = {
       ['tax_ids', { ...lineItem.fields.tax_ids, widget: 'many2many_tags', hidden: false }],
       ['debit', lineItem.fields.debit],
       ['credit', lineItem.fields.credit],
-      ...(db && search(db, 'account.analytic.plan').length
+      ...(db && analyticAccountingEnabled(db, record?.company_id) && search(db, 'account.analytic.plan').length
         ? [['analytic_distribution', { ...lineItem.fields.analytic_distribution, hidden: false }]]
         : []),
       ['tax_tag_ids', { ...lineItem.fields.tax_tag_ids, label: 'Tax Grids', hidden: false, optional: 'hide' }],

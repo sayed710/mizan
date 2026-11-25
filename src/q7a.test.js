@@ -91,7 +91,7 @@ test('6. Mixed-discount invoices with multiple distinct tax groups match the pos
     discount_percent: 2,
     discount_days: 10,
     discount_tax_computation: 'mixed',
-    line_ids: [{ value_type: 'percent', value: 100, nb_days: 30 }],
+    line_ids: [{ value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
   }));
 
   const sourceTax = search(db, 'account.tax').find((tax) => tax.type_tax_use === 'sale' && !tax.price_include && tax.tax_exigibility === 'on_invoice');

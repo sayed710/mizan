@@ -92,7 +92,7 @@ test('AGE-2 aligns taxes by identity and excludes another company in each period
   const b = result.rows.find((row) => row.label === 'VAT B');
   assert.deepEqual(a.columns.map((c) => c?.values[1] ?? 0), [10, 0]);
   assert.deepEqual(b.columns.map((c) => c?.values[1] ?? 0), [0, 20]);
-  assert.deepEqual(result.rows.find((row) => row.label === 'Output Tax').columns.map((c) => c.values[1]), [10, 20]);
+  assert.deepEqual(result.rows.find((row) => row.label === 'Total Sales').columns.map((c) => c.values[1]), [10, 20]);
 });
 
 test('AGE-3 fiscal comparison aligns account and category movements for selected company', () => {
