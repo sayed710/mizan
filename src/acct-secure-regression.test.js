@@ -83,7 +83,8 @@ test('journal audit calculates filtered journal totals and signed refund taxes',
 import { postMove } from './models/accounting.js';
 
 test('depreciation model creates assets directly and on a bill account with server persistence', () => {
-  let { db, company } = setup();
+  let { db } = setup();
+  const company = 1;
   const account = db.records['account.account'].find((a) => a.account_type === 'expense');
   const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP' }); db = analytic.db;
   const model = create(db, 'account.asset.model', { name: 'Equipment', method: 'degressive_then_linear', method_number: 4, method_period: '12', prorata: true, account_asset_id: account.id, analytic_distribution: { [analytic.id]: 100 } }); db = model.db;

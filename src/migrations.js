@@ -2036,6 +2036,32 @@ export function migrateReconcileModelTolerance(db) {
 }
 MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance', up: migrateReconcileModelTolerance });
 
+export function migrateReconcileAndAssetModelCompany(db) {
+  const backfillCompany = (key) => {
+    const list = db?.records?.[key];
+    if (!Array.isArray(list) || !list.length) return null;
+    let changed = false;
+    const next = list.map((r) => {
+      if (!r || typeof r !== 'object' || r.company_id) return r;
+      changed = true;
+      return { ...r, company_id: 1 };
+    });
+    return changed ? next : null;
+  };
+  const nextReconcile = backfillCompany('account.reconcile.model');
+  const nextAssetModels = backfillCompany('account.asset.model');
+  if (!nextReconcile && !nextAssetModels) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(nextReconcile ? { 'account.reconcile.model': nextReconcile } : {}),
+      ...(nextAssetModels ? { 'account.asset.model': nextAssetModels } : {}),
+    },
+  };
+}
+MIGRATIONS.push({ version: 78, name: 'assign-default-company-to-reconcile-and-asset-models', up: migrateReconcileAndAssetModelCompany });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

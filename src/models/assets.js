@@ -483,6 +483,16 @@ export function validateAssetIntegrity(db, before, asset, vals) {
     }
   }
 
+  if (asset.model_id) {
+    const model = read(db, 'account.asset.model', asset.model_id);
+    if (!model && (!before || asset.model_id !== before.model_id)) {
+      return 'Select an existing depreciation model';
+    }
+    if (model?.company_id && model.company_id !== company) {
+      return 'Depreciation model must belong to the asset company';
+    }
+  }
+
   // G5: bill_id and journal_id validation
   if (vals && 'bill_id' in vals && vals.bill_id !== (before?.bill_id ?? null) && vals.bill_id != null) {
     const bill = read(db, 'account.move', vals.bill_id);
@@ -1223,7 +1233,13 @@ export const assetModels = {
       prorata_computation_type: { type: 'selection', label: 'Computation', options: [['none', 'No Prorata'], ['constant_periods', 'Constant Periods'], ['daily_computation', 'Based on days per period']], readonly: readonlyWhenNotDraft },
       prorata_date: { type: 'date', label: 'Prorata Date', readonly: readonlyWhenNotDraft },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
-      model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model', readonly: readonlyWhenNotDraft },
+      model_id: {
+        type: 'many2one',
+        relation: 'account.asset.model',
+        label: 'Depreciation Model',
+        domain: (m, r) => !m.company_id || m.company_id === (r?.company_id ?? 1),
+        readonly: readonlyWhenNotDraft,
+      },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account', readonly: readonlyWhenNotDraft },
       account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account', readonly: readonlyWhenNotDraft },
       account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Legacy Expense Account', readonly: true, compute: (r) => r.account_depreciation_expense_id ?? null },
@@ -1286,7 +1302,8 @@ export const assetModels = {
     guard: assetGuard,
     createDefaults: (db, vals) => {
       const company = vals?.company_id ?? (db ? currentCompany(db) : 1);
-      const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
+      const rawModel = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
+      const model = rawModel && (!rawModel.company_id || rawModel.company_id === company) ? rawModel : null;
       const modelJournal = model?.journal_id && read(db, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
       const modelDefaults = model ? Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'method_mode', 'method_rate', 'prorata', 'prorata_computation_type', 'prorata_date', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]])) : {};
       if (modelJournal) modelDefaults.journal_id = modelJournal;

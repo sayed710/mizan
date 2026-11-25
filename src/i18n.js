@@ -132,9 +132,9 @@ const ar = {
   'Admins only': 'للمديرين فقط',
   'Inventory or Barcode access is required': 'تحتاج صلاحية المخزون أو الباركود',
   'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)': 'البريد الإلكتروني غير مُعدّ (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)',
-  'Only posted invoices can be emailed.': '???? ????? ???????? ??????? ??? ??????? ??????????.',
-  'The email was sent, but its status could not be recorded: {reason}': '????? ??????? ??? ???? ????? ?????: {reason}',
-  'The email was sent, but the document changed meanwhile, so its status was left as it is.': '????? ??????? ??? ??????? ????? ?? ???????? ???? ???? ????? ??? ??.',
+  'Only posted invoices can be emailed.': 'لا يمكن إرسال سوى الفواتير المرحّلة بالبريد الإلكتروني.',
+  'The email was sent, but its status could not be recorded: {reason}': 'تم إرسال البريد، لكن تعذّر تسجيل حالته: {reason}',
+  'The email was sent, but the document changed meanwhile, so its status was left as it is.': 'تم إرسال البريد، لكن المستند تغيّر في هذه الأثناء، فتُركت حالته كما هي.',
   'The email was sent, but the data was restored meanwhile, so the send was not recorded': 'أُرسل البريد، لكن البيانات استُعيدت في الأثناء فلم يُسجَّل الإرسال',
   'Current password is wrong': 'كلمة المرور الحالية غير صحيحة',
   'before must be an audit entry id': 'قيمة before يجب أن تكون معرّف قيد في سجل التدقيق',
@@ -3787,6 +3787,12 @@ const ar = {
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
   'A tag with the same name and applicability already exists in this country.': 'توجد علامة تصنيف بنفس الاسم وقابلية التطبيق بالفعل في هذه الدولة.',
+  'Company is required': 'الشركة مطلوبة',
+  'Select an existing depreciation model': 'اختر نموذج إهلاك موجوداً',
+  'Depreciation model must belong to the asset company': 'يجب أن يتبع نموذج الإهلاك شركة الأصل',
+  'Select an existing asset model': 'اختر نموذج أصول موجوداً',
+  'Asset model must belong to the account company': 'يجب أن يتبع نموذج الأصول شركة الحساب',
+  'Asset model must belong to the bill company': 'يجب أن يتبع نموذج الأصول شركة فاتورة المورد',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

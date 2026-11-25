@@ -1045,6 +1045,9 @@ function draftAssetsFromBill(db, bill) {
     // Odoo decides by the account's explicit "Create Asset" setting (a linked model without one means draft); the model supplies the values.
     const mode = account?.create_asset ?? (account?.asset_model_id ? 'draft' : 'no');
     if (mode === 'no') return next;
+    if (model?.company_id && model.company_id !== (bill.company_id ?? 1)) {
+      throw new Error('Asset model must belong to the bill company');
+    }
     const modelJournal = model?.journal_id && read(next, 'account.journal', model.journal_id)?.type === 'general' ? model.journal_id : null;
     const product = read(next, 'product', line.product_id);
     const acquisitionDate = bill.invoice_date ?? today();
@@ -2964,7 +2967,12 @@ export const accountingModels = {
         domain: (candidate, acc) => candidate.active !== false && candidate.id !== acc?.id && (!acc?.company_id || !candidate.company_id || candidate.company_id === acc.company_id),
         hideWhen: (r) => !isIncomeOrExpenseAccount(r),
       },
-      asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      asset_model_id: {
+        type: 'many2one',
+        relation: 'account.asset.model',
+        label: 'Depreciation Model',
+        domain: (m, acc) => !m.company_id || m.company_id === (acc?.company_id ?? 1),
+      },
       create_asset: {
         type: 'selection',
         label: 'Create Asset',
@@ -3007,7 +3015,7 @@ export const accountingModels = {
       if (after.asset_model_id) {
         const model = read(db, 'account.asset.model', after.asset_model_id);
         if (!model) return 'Select an existing asset model';
-        if (model.company_id && after.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
+        if (model.company_id && model.company_id !== (after.company_id ?? 1)) return 'Asset model must belong to the account company';
       }
       if (after.create_asset === 'validate') {
         const model = after.asset_model_id ? read(db, 'account.asset.model', after.asset_model_id) : null;
@@ -3158,14 +3166,14 @@ export const accountingModels = {
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       name: { type: 'char', label: 'Journal', required: true },
-      code: { type: 'char', label: 'Sequence Prefix', required: true },
+      code: { type: 'char', label: 'Sequence Prefix', required: true, optional: 'show' },
       type: {
         type: 'selection', label: 'Type', required: true,
         options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['cash', 'Cash'], ['bank', 'Bank'], ['credit', 'Credit Card'], ['general', 'Miscellaneous']],
         help: 'Select "Sales" for customer invoices journals; "Purchase" for vendor bills journals; "Cash", "Bank" or "Credit Card" for customer or vendor payments; "Miscellaneous" for everything else.',
       },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
       refund_sequence: {
         type: 'boolean', label: 'Dedicated Credit Note Sequence',
         help: 'Check this box if you don\'t want to share the same sequence for invoices and credit notes made from this journal',
@@ -3179,7 +3187,7 @@ export const accountingModels = {
       refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
       refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
       default_account_id: {
-        type: 'many2one', relation: 'account.account', label: 'Default Account',
+        type: 'many2one', relation: 'account.account', label: 'Default Account', optional: 'show',
         required: (r, _db, { isNew } = {}) => ['sale', 'purchase'].includes(r?.type) || (!isNew && isLiquidityJournal(r)),
       },
       suspense_account_id: {
@@ -3376,6 +3384,8 @@ export const accountingModels = {
     onWrite: (db, after, before, vals) => syncJournalMethodLines(db, after, vals, before),
     onUnlink: (db, removed) => unlinkJournalMethodLines(db, removed),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    views: ['list', 'kanban'],
+    searchFields: ['name', 'code'],
     filters: [[
       { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
       { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },
@@ -4547,7 +4557,11 @@ Object.assign(accountingModels, {
     label: 'Account Tags',
     guard: (db, before, after) => {
       const normCountry = (c) => (c ? String(c).trim() : null);
-      const duplicate = Boolean(after.country) && (db.records['account.account.tag'] ?? []).some((r) =>
+      const keyChanged = !before
+        || before.name !== after.name
+        || before.applicability !== after.applicability
+        || normCountry(before.country) !== normCountry(after.country);
+      const duplicate = keyChanged && Boolean(after.country) && (db.records['account.account.tag'] ?? []).some((r) =>
         r.id !== after.id
         && r.name === after.name
         && r.applicability === after.applicability
@@ -4605,8 +4619,12 @@ Object.assign(accountingModels, {
     guard: (db, before, after, ctx) => {
       if (!after.company_id) return 'Company is required';
       if (before && before.company_id !== after.company_id && after.company_id
-        && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.company_id && a.company_id !== after.company_id)) {
+        && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && (a.company_id ?? 1) !== after.company_id)) {
         return 'Asset model must belong to the account company';
+      }
+      if (before && before.company_id !== after.company_id && after.company_id
+        && (db.records['account.asset'] ?? []).some((a) => a.model_id === after.id && (a.company_id ?? 1) !== after.company_id)) {
+        return 'Depreciation model must belong to the asset company';
       }
       if ((!after.account_depreciation_id || !after.account_depreciation_expense_id)
         && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.create_asset === 'validate')) {
