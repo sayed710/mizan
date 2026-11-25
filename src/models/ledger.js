@@ -1,5 +1,6 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
+import { journalSequenceName } from './journal-sequence.js';
 import { create, read, search } from '../orm.js';
 import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
@@ -895,9 +896,10 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   const isDraft = state === 'draft';
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;
-  const name = isDraft ? '/' : nextName(db, 'account.move', prefix);
+  const name = isDraft ? '/' : journalSequenceName(db, j, date, nextName(db, 'account.move', prefix), (move) => move.move_type === 'entry');
   const made = create(db, 'account.move', {
     move_type: 'entry', state: isDraft ? 'draft' : 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
+    ...(j.currency_id && line_ids.some((l) => l.currency_id === j.currency_id) ? { currency_id: j.currency_id } : { currency_id: null }),
     name, line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
     ...(auto_post ? { auto_post } : {}),
     ...(is_tax_payment ? { is_tax_payment: true } : {}),

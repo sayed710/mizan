@@ -2423,6 +2423,29 @@ MIGRATIONS.push({ version: 74, name: 'preserve-legacy-analytic-accounting', up: 
   )) } };
 } });
 
+export function migrateJournalGroups(db) {
+  const groups = [...(db.records['account.journal.group'] ?? [])].sort(
+    (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id
+  );
+  const knownJournals = new Set((db.records['account.journal'] ?? []).map((j) => j.id));
+  const memberships = new Map();
+  for (const group of groups) {
+    for (const id of group.journal_ids ?? []) {
+      if (!knownJournals.has(id)) continue;
+      if (!memberships.has(id)) {
+        memberships.set(id, group.id);
+      }
+    }
+  }
+  const journals = (db.records['account.journal'] ?? []).map((journal) => {
+    const groupId = memberships.get(journal.id) ?? journal.journal_group_id ?? null;
+    return groupId != null ? { ...journal, journal_group_id: groupId } : journal;
+  });
+  const cleanGroups = groups.map(({ journal_ids: _old, ...group }) => group);
+  return { ...db, records: { ...db.records, 'account.journal': journals, 'account.journal.group': cleanGroups } };
+}
+MIGRATIONS.push({ version: 75, name: 'journal-ledger-direction', up: migrateJournalGroups });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
