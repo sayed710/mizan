@@ -3799,6 +3799,17 @@ const ar = {
   'Margin': 'الهامش',
   'Invoice Number': 'رقم الفاتورة',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
+  'Grouped recognition entries and their next-day reversals will be generated for this date.': 'سيتم إنشاء قيود الاعتراف المجمّعة وقيود عكسها في اليوم التالي لهذا التاريخ.',
+  'Configure an active deferred revenue journal on the company': 'حدّد دفتر إيرادات مؤجلة نشطاً على الشركة',
+  'Configure an active deferred expense journal on the company': 'حدّد دفتر مصروفات مؤجلة نشطاً على الشركة',
+  'Deferred revenue journal must belong to the company': 'يجب أن ينتمي دفتر الإيرادات المؤجلة إلى الشركة',
+  'Deferred expense journal must belong to the company': 'يجب أن ينتمي دفتر المصروفات المؤجلة إلى الشركة',
+  'Deferred revenue journal must be a Miscellaneous journal': 'يجب أن يكون دفتر الإيرادات المؤجلة دفتر قيود متنوعة',
+  'Deferred expense journal must be a Miscellaneous journal': 'يجب أن يكون دفتر المصروفات المؤجلة دفتر قيود متنوعة',
+  'Configure the deferred revenue account on the company': 'حدّد حساب الإيرادات المؤجلة على الشركة',
+  'Configure the deferred expense account on the company': 'حدّد حساب المصروفات المؤجلة على الشركة',
+  'Configure the recognition account on the source line': 'حدّد حساب الاعتراف على البند المصدر',
+  'Saving...': 'جارٍ الحفظ...',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

@@ -6,6 +6,7 @@ import { depreciationReport } from '../models/assets.js';
 import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
+import { Wizard } from './Wizard.jsx';
 import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
@@ -1005,6 +1006,10 @@ function ReportPage({ leaf, params }) {
   const isDeferred = ['deferredRevenue', 'deferredExpense'].includes(leaf.report);
   const deferredKind = leaf.report === 'deferredRevenue' ? 'revenue' : 'expense';
   const [generationError, setGenerationError] = useState('');
+  const [generateWizard, setGenerateWizard] = useState(null);
+  const generateWizardSeqRef = useRef(0);
+  const latestGenerateIdRef = useRef(0);
+  const pendingGenerateIdsRef = useRef(new Set());
   const [companyId, setCompanyId] = useState(params?.get('company') || 'all');
   const allowAllCompanies = !isDeferred && !['customerStatement', 'valuation'].includes(leaf.report);
   const { companyDb, availableCompanies, companies, selectedCompany } = useMemo(
@@ -1108,6 +1113,73 @@ function ReportPage({ leaf, params }) {
     () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
     [isAged, asOf, periodKey, customPeriod],
   );
+  const deferredCompanyId = Number(selectedCompany) || 1;
+  const deferredGrouped = isDeferred && deferredSettings(db, deferredCompanyId, deferredKind).isGrouped;
+  const generateContextKey = `${deferredKind}:${deferredCompanyId}:${period.to}`;
+  const activeGenerateWizard = generateWizard?.key === generateContextKey ? generateWizard : null;
+  const openGenerateWizard = () => {
+    if (!deferredSettings(getDb(), deferredCompanyId, deferredKind).isGrouped) {
+      setGenerationError('Grouped deferral generation requires a company configured for grouped posting');
+      return;
+    }
+    if (activeGenerateWizard?.pending || (activeGenerateWizard && pendingGenerateIdsRef.current.has(activeGenerateWizard.id))) return;
+    const wizardId = ++generateWizardSeqRef.current;
+    latestGenerateIdRef.current = wizardId;
+    setGenerationError('');
+    setGenerateWizard({
+      id: wizardId,
+      key: generateContextKey,
+      companyId: deferredCompanyId,
+      kind: deferredKind,
+      pending: false,
+      spec: {
+        title: 'Generate Entries',
+        fields: [
+          {
+            name: 'date',
+            type: 'date',
+            label: 'Period End Date',
+            required: true,
+            default: period.to,
+            help: 'Grouped recognition entries and their next-day reversals will be generated for this date.',
+          },
+        ],
+      },
+      error: '',
+    });
+  };
+  const cancelGenerateWizard = () => {
+    if (!activeGenerateWizard) return;
+    const wizardId = activeGenerateWizard.id;
+    if (activeGenerateWizard.pending || pendingGenerateIdsRef.current.has(wizardId)) return;
+    setGenerateWizard((w) => (w?.id === wizardId && !w.pending ? null : w));
+  };
+  const confirmGenerateWizard = async (values) => {
+    const wizardInstance = activeGenerateWizard;
+    if (!wizardInstance) return;
+    const wizardId = wizardInstance.id;
+    if (wizardInstance.pending || pendingGenerateIdsRef.current.has(wizardId)) return;
+    pendingGenerateIdsRef.current.add(wizardId);
+    setGenerateWizard((w) => (w?.id === wizardId ? { ...w, pending: true, error: '' } : w));
+    try {
+      const nextDb = generateGroupedEntries(getDb(), {
+        date: values.date,
+        company_id: wizardInstance.companyId,
+        kind: wizardInstance.kind,
+      });
+      const res = await commit(nextDb, { quiet: true });
+      if (res && res.ok === false) {
+        setGenerateWizard((w) => (w?.id === wizardId ? { ...w, pending: false, error: res.error ?? t('Could not save changes') } : w));
+        return;
+      }
+      if (latestGenerateIdRef.current === wizardId) setGenerationError('');
+      setGenerateWizard((w) => (w?.id === wizardId ? null : w));
+    } catch (error) {
+      setGenerateWizard((w) => (w?.id === wizardId ? { ...w, pending: false, error: t(error.message) } : w));
+    } finally {
+      pendingGenerateIdsRef.current.delete(wizardId);
+    }
+  };
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
@@ -1454,12 +1526,7 @@ function ReportPage({ leaf, params }) {
       </label>}
       <span className="muted">{subtitle}</span>
       <span className="spacer" />
-      {isDeferred && <button type="button" className="btn sm" disabled={!deferredSettings(db, Number(selectedCompany) || 1, deferredKind).isGrouped} title={!deferredSettings(db, Number(selectedCompany) || 1, deferredKind).isGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={() => {
-        if (!deferredSettings(getDb(), Number(selectedCompany) || 1, deferredKind).isGrouped) return;
-        setGenerationError('');
-        try { commit(generateGroupedEntries(getDb(), { date: period.to, company_id: Number(selectedCompany), kind: deferredKind })); }
-        catch (error) { setGenerationError(error.message); }
-      }}>{t('Generate Entries')}</button>}
+      {isDeferred && <button type="button" className="btn sm" disabled={!deferredGrouped || Boolean(activeGenerateWizard?.pending)} title={!deferredGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={openGenerateWizard}>{t('Generate Entries')}</button>}
       {generationError && <span role="alert">{t(generationError)}</span>}
       {isAudit && (
         <span className="pager" role="group" aria-label={t('Pager')}>
@@ -1556,6 +1623,17 @@ function ReportPage({ leaf, params }) {
           )}
         </table>
       </div>
+      {!isPrinting && activeGenerateWizard && (
+        <Wizard
+          key={activeGenerateWizard.id}
+          db={db}
+          spec={activeGenerateWizard.spec}
+          error={activeGenerateWizard.error}
+          pending={Boolean(activeGenerateWizard.pending)}
+          onConfirm={confirmGenerateWizard}
+          onCancel={cancelGenerateWizard}
+        />
+      )}
     </ReportPrintView>
   );
 }
