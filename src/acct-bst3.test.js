@@ -4,7 +4,7 @@ import { register } from 'node:module';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { seed } from './seed.js';
-import { applyFilters, create, groupRecords, read, search } from './orm.js';
+import { applyFilters, create, groupRecords, matches, read, search } from './orm.js';
 import { models } from './models/index.js';
 import { shiftMonth, today } from './models/common.js';
 import { ensureBankSuspense } from './models/ledger.js';
@@ -214,4 +214,12 @@ test('acct-bst3: List view renders row decoration classes using db', () => {
   const rowClasses = [...tbody.matchAll(/<tr[^>]*class="([^"]*)"/g)]
     .map((m) => m[1].trim());
   assert.deepEqual(rowClasses, ['', 'danger', 'danger', 'muted']);
+});
+
+test('acct-bst3: searching statements by date or year-month matches the statement date', () => {
+  const db = seed();
+  const rec = { id: 99001, name: 'BNK1 Statement', date: '2026-03-14', journal_id: null };
+  assert.ok(matches(db, 'account.bank.statement', rec, ['2026-03-14']));
+  assert.ok(matches(db, 'account.bank.statement', rec, ['2026-03']));
+  assert.ok(!matches(db, 'account.bank.statement', rec, ['2026-04']));
 });
