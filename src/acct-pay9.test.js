@@ -2,16 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { applyFilters, create, groupRecords, read, search, write } from './orm.js';
+import { applyFilters, create, groupRecords, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { models, menusFor } from './models/index.js';
 import { duplicateValues } from './duplicate.js';
 import { applyDiff, diffDb } from './sync.js';
 import { today } from './models/common.js';
 import { postMove, payMove } from './models/accounting.js';
-import { agedBalance } from './models/finance.js';
+import { agedBalance, moveDeleteGuard, paymentInvariant } from './models/finance.js';
+import { reconciledJournalItems } from './models/ledger.js';
 import { partnerLedger } from './models/reports.js';
 import {
+  applyPaymentCredit,
   cancelPayment,
   customerPaymentView,
   isPaymentReconciled,
@@ -282,15 +284,25 @@ test('Reject action, rejected state, statusbar visibility, Reset to Draft from r
   assert.deepEqual(applyFilters('account.payment', all, ['rejected'], p2.db, vendorPaymentView.filters).map((r) => r.id), [p1.id]);
   assert.deepEqual(applyFilters('account.payment', all, ['rejected'], p2.db, customerPaymentView.filters).map((r) => r.id), [p1.id]);
 
-  // Reset to Draft from rejected works and is diff-verifiable (move->draft step then payment reset)
+  // Reset to Draft from rejected works and is diff-verifiable (resetting move alone is blocked; unlink payment + move->draft then delete move succeeds)
   assert.equal(btn('Reset to Draft').when(rejPay, syncedRej), true);
   assert.equal(btn('Reject').when(rejPay, syncedRej), false);
   const resetDb = resetPaymentToDraft(syncedRej, p1.id);
   const resetPay = read(resetDb, 'account.payment', p1.id);
   assert.equal(resetPay.state, 'draft');
   assert.equal(resetPay.move_id, null);
-  const moveDrafted = write(syncedRej, 'account.move', rejPay.move_id, { state: 'draft' });
-  const syncedMoveDrafted = applyDiff(syncedRej, diffDb(syncedRej, moveDrafted), { isAdmin: true });
+  const moveDraftedAlone = write(syncedRej, 'account.move', rejPay.move_id, { state: 'draft' });
+  assert.throws(
+    () => applyDiff(syncedRej, diffDb(syncedRej, moveDraftedAlone), { isAdmin: true }),
+    /records a payment/i,
+  );
+  const rejStep1 = write(
+    write(syncedRej, 'account.move', rejPay.move_id, { state: 'draft' }),
+    'account.payment',
+    p1.id,
+    { state: 'draft', move_id: null, destination_move_id: null, unapplied: 0, is_sent: false },
+  );
+  const syncedMoveDrafted = applyDiff(syncedRej, diffDb(syncedRej, rejStep1), { isAdmin: true });
   const resetFromRej = resetPaymentToDraft(syncedMoveDrafted, p1.id);
   const syncedReset = applyDiff(syncedMoveDrafted, diffDb(syncedMoveDrafted, resetFromRej), { isAdmin: true });
   assert.equal(read(syncedReset, 'account.payment', p1.id).state, 'draft');
@@ -450,6 +462,305 @@ test('Payment Receipt print: form menuActions, listAction, titles, settled invoi
   }
 });
 
+test('Regression 8: Unsent payments cannot be rejected via forged pairing or direct single-leg rejection', () => {
+  let db = seed();
+  const banks = search(db, 'account.journal').filter((j) => j.type === 'bank' || j.type === 'cash');
+  const [srcJournal, dstJournal] = banks;
+  const partner = search(db, 'res.partner')[0];
+  const d0 = today();
+
+  // Sent payment to use as a rogue pairing target
+  const sentRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 150,
+    date: d0,
+    journal_id: srcJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(sentRes.db, read(sentRes.db, 'account.payment', sentRes.id));
+  db = markAsSent(db, sentRes.id);
+
+  // Unsent posted payment cannot be linked to sentRes and rejected
+  const unsentRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 150,
+    date: d0,
+    journal_id: srcJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(unsentRes.db, read(unsentRes.db, 'account.payment', unsentRes.id));
+  assert.throws(
+    () => write(db, 'account.payment', unsentRes.id, { paired_internal_transfer_payment_id: sentRes.id }),
+    /internal transfer/i,
+  );
+  assert.throws(
+    () => create(db, 'account.payment', {
+      partner_id: partner.id,
+      partner_type: 'customer',
+      payment_type: 'inbound',
+      amount: 100,
+      date: d0,
+      journal_id: srcJournal.id,
+      paired_internal_transfer_payment_id: sentRes.id,
+      company_id: 1,
+    }),
+    /internal transfer/i,
+  );
+  const forgedLinkAndReject = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (
+        p.id === unsentRes.id ? { ...p, paired_internal_transfer_payment_id: sentRes.id, state: 'rejected' } : p
+      )),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedLinkAndReject), { isAdmin: true }), /internal transfer|sent/i);
+
+  // Even on a genuine internal transfer pair, direct rejection of the unsent leg is refused when the sent leg is not rejected
+  const transferAcc = create(db, 'account.account', {
+    code: '101798',
+    name: 'Transfers Guard',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+  const xferRes = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    payment_type: 'outbound',
+    amount: 200,
+    date: d0,
+    journal_id: srcJournal.id,
+    destination_journal_id: dstJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(xferRes.db, read(xferRes.db, 'account.payment', xferRes.id));
+  const dstId = read(db, 'account.payment', xferRes.id).paired_internal_transfer_payment_id;
+  // Neither half sent -> batch applyDiff rejecting both halves fails
+  const bothUnsentRej = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (
+        [xferRes.id, dstId].includes(p.id) ? { ...p, state: 'rejected' } : p
+      )),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, bothUnsentRej), { isAdmin: true }), /sent/i);
+
+  // Only src leg marked sent -> direct rejection of unsent dst leg alone fails (both write and applyDiff)
+  const asymDb = write(db, 'account.payment', xferRes.id, { is_sent: true });
+  assert.throws(() => write(asymDb, 'account.payment', dstId, { state: 'rejected' }), /sent/i);
+  const singleUnsentRej = {
+    ...asymDb,
+    records: {
+      ...asymDb.records,
+      'account.payment': asymDb.records['account.payment'].map((p) => (p.id === dstId ? { ...p, state: 'rejected' } : p)),
+    },
+  };
+  assert.throws(() => applyDiff(asymDb, diffDb(asymDb, singleUnsentRej), { isAdmin: true }), /sent/i);
+
+  // Draft transfer cannot be forged with paired_internal_transfer_payment_id
+  const draftXfer = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    payment_type: 'outbound',
+    amount: 50,
+    date: d0,
+    journal_id: srcJournal.id,
+    destination_journal_id: dstJournal.id,
+    company_id: 1,
+  });
+  assert.throws(
+    () => write(draftXfer.db, 'account.payment', draftXfer.id, { paired_internal_transfer_payment_id: sentRes.id }),
+    /reciprocal transfer/i,
+  );
+});
+
+test('Regression 9: Rejected payment entry cannot be reset to draft or deleted while linked, preserving aging credit', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partner = search(db, 'res.partner')[0];
+  const d0 = today();
+
+  const pRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 320,
+    date: d0,
+    journal_id: bank.id,
+    company_id: 1,
+  });
+  db = postPayment(pRes.db, read(pRes.db, 'account.payment', pRes.id));
+  db = markAsSent(db, pRes.id);
+  db = rejectPayment(db, pRes.id);
+  const rejPay = read(db, 'account.payment', pRes.id);
+  assert.equal(rejPay.state, 'rejected');
+  assert.ok(rejPay.move_id);
+
+  // 1. Resetting the rejected payment's entry to draft via applyDiff is blocked
+  const draftedMoveDb = write(db, 'account.move', rejPay.move_id, { state: 'draft' });
+  assert.throws(
+    () => applyDiff(db, diffDb(db, draftedMoveDb), { isAdmin: true }),
+    /records a payment/i,
+  );
+
+  // 2. Deleting the entry (directly or after client-side draft write) is blocked by moveDeleteGuard / unlink
+  assert.match(moveDeleteGuard(draftedMoveDb, read(draftedMoveDb, 'account.move', rejPay.move_id)) ?? '', /records a payment/i);
+  assert.throws(() => unlink(draftedMoveDb, 'account.move', [rejPay.move_id]), /records a payment/i);
+  const deletedMoveDb = {
+    ...draftedMoveDb,
+    records: {
+      ...draftedMoveDb.records,
+      'account.move': draftedMoveDb.records['account.move'].filter((m) => m.id !== rejPay.move_id),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, deletedMoveDb), { isAdmin: true }),
+    /Posted entries cannot be deleted|records a payment/i,
+  );
+
+  // 3. Aging credit remains backed by the posted entry and matches partner ledger
+  const aging = agedBalance(db, 'receivable', d0, 1);
+  const ledger = partnerLedger(db, { from: d0, to: d0, company_id: 1, partnerIds: [partner.id] }, 'receivable');
+  const agingRow = aging.rows.find((r) => r.partner_id === partner.id);
+  const ledgerRow = ledger.find((r) => r.partner_id === partner.id);
+  assert.equal(ledgerRow?.end, -320);
+  assert.equal(agingRow?.total, -320);
+});
+
+test('Regression 10: Legacy cross-currency receipts use booked cash via paymentCompanyAmount or leave unknown empty', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const gbp = create(db, 'res.currency', {
+    name: 'GBP',
+    symbol: '£',
+    rounding: 0.01,
+    rate_ids: [{ date: '2026-01-01', rate: 0.8 }, { date: '2026-02-01', rate: 0.8 }],
+  });
+  db = gbp.db;
+  // EUR: 0.5 on invoice date (100 EUR = 200 USD), 0.5 on payment date too, while actual cash booked is 180 USD (144 GBP)
+  db = write(db, 'res.currency', eur.id, { rate_ids: [{ date: '2026-01-01', rate: 0.5 }] });
+
+  const inv = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    currency_id: eur.id,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ name: 'Imported goods', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  // Create a legacy payment + move whose booked cash in USD is 180 (not the 200 invoice-rate estimate) and lacks payment_company_amount
+  const payableAcc = search(db, 'account.account').find((a) => a.account_type === 'liability_payable' && (a.company_id ?? 1) === 1);
+  const outAcc = bank.default_account_id;
+  const legacyMoveRes = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'posted',
+    name: 'BNK1/2026/LEG1',
+    date: '2026-02-01',
+    invoice_date: '2026-02-01',
+    journal_id: bank.id,
+    currency_id: gbp.id,
+    company_id: 1,
+    line_ids: [
+      { account_id: payableAcc.id, partner_id: partner.id, debit: 180, credit: 0 },
+      { account_id: outAcc, partner_id: partner.id, debit: 0, credit: 180 },
+    ],
+  });
+  db = legacyMoveRes.db;
+  const legacyPayRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'supplier',
+    payment_type: 'outbound',
+    amount: 144,
+    currency_id: gbp.id,
+    date: '2026-02-01',
+    journal_id: bank.id,
+    invoice_id: inv.id,
+    state: 'posted',
+    name: 'PAY-LEG-1',
+    move_id: legacyMoveRes.id,
+    outstanding_account_id: outAcc,
+    company_id: 1,
+  });
+  db = legacyPayRes.db;
+  // Attach legacy settlement row missing payment_company_amount directly onto the invoice snapshot
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => (
+        m.id === inv.id
+          ? { ...m, payments: [{ move_id: legacyMoveRes.id, amount: 100, date: '2026-02-01' }], amount_paid: 100 }
+          : m
+      )),
+    },
+  };
+
+  // 1. Recoverable legacy payment: uses booked cash 180 USD -> 144.00 GBP, NOT 200 USD -> 160.00 GBP
+  const recovered = paymentReceiptData(db, read(db, 'account.payment', legacyPayRes.id));
+  assert.equal(recovered.invoices[0].rows[0].amountPayment, 144);
+  assert.equal(recovered.invoices[0].rows[0].currencyPayment.id, gbp.id);
+
+  // 2. Unrecoverable legacy payment (e.g., missing outstanding_account_id): leaves amountPayment null instead of estimating from invoice rate
+  const unrecoverableDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (
+        p.id === legacyPayRes.id ? { ...p, outstanding_account_id: null } : p
+      )),
+    },
+  };
+  const unknownReceipt = paymentReceiptData(unrecoverableDb, read(unrecoverableDb, 'account.payment', legacyPayRes.id));
+  assert.equal(unknownReceipt.invoices[0].rows[0].amountPayment, null);
+
+  // 3. Row without a linked payment (e.g., cross-currency manual/credit entry) preserves invoice-rate conversion
+  const manualEntryRes = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'posted',
+    name: 'MISC/2026/001',
+    date: '2026-02-01',
+    invoice_date: '2026-02-01',
+    journal_id: bank.id,
+    currency_id: usd.id,
+    company_id: 1,
+    line_ids: [
+      { account_id: payableAcc.id, partner_id: partner.id, debit: 50, credit: 0 },
+      { account_id: outAcc, debit: 0, credit: 50 },
+    ],
+  });
+  const withManualRowDb = {
+    ...manualEntryRes.db,
+    records: {
+      ...manualEntryRes.db.records,
+      'account.move': manualEntryRes.db.records['account.move'].map((m) => (
+        m.id === inv.id
+          ? {
+            ...m,
+            payments: [
+              { move_id: legacyMoveRes.id, amount: 75, date: '2026-02-01' },
+              { move_id: manualEntryRes.id, amount: 25, date: '2026-02-01' },
+            ],
+            amount_paid: 100,
+          }
+          : m
+      )),
+    },
+  };
+  const manualReceipt = paymentReceiptData(withManualRowDb, read(withManualRowDb, 'account.payment', legacyPayRes.id));
+  assert.equal(manualReceipt.invoices[0].rows[1].amountPayment, 50);
+});
+
 test('List decoration-warning renders on paid unreconciled payments and clears when reconciled', async () => {
   let db = seed();
   const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
@@ -579,6 +890,11 @@ test('Arabic translations cover all new payment action, state, receipt, and erro
       'Amount In Currency', 'Due Amount for {name}',
       'Only paid, unreconciled payments can be marked as sent',
       'Only sent payments can be rejected',
+      'Payment rejected',
+      'Payment cancelled',
+      'Only internal transfers can reference a paired transfer payment or destination entry',
+      'Paired internal transfer payment link does not match a valid reciprocal transfer',
+      'Paired internal transfer legs must match and share the same status',
       'Payment receipts can only be printed for posted payments.',
     ]) {
       assert.notEqual(t(key), key, `Missing Arabic translation for ${key}`);
@@ -684,20 +1000,37 @@ test('Regression 4: isPaymentReconciled requires every reconcilable line to be z
   const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
   const partner = search(db, 'res.partner')[0];
   const recvAcc = search(db, 'account.account').find((a) => a.account_type === 'asset_receivable' && (a.company_id ?? 1) === 1);
+  const clearingAccRes = create(db, 'account.account', {
+    code: '109990',
+    name: 'Reconcilable Clearing',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: 1,
+  });
+  db = clearingAccRes.db;
   const d0 = today();
+
+  const invRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: d0,
+    invoice_line_ids: [{ name: 'Consulting', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(invRes.db, invRes.id);
 
   const moveRes = create(db, 'account.move', {
     move_type: 'entry',
     state: 'posted',
     name: 'BNK1/2026/0099',
     date: d0,
+    invoice_date: d0,
     journal_id: bank.id,
     company_id: 1,
     line_ids: [
-      { account_id: bank.default_account_id, debit: 100, credit: 0 },
+      { account_id: bank.default_account_id, partner_id: partner.id, debit: 100, credit: 0 },
       { account_id: recvAcc.id, partner_id: partner.id, debit: 0, credit: 100 },
-      { account_id: recvAcc.id, partner_id: partner.id, debit: 60, credit: 0 },
-      { account_id: recvAcc.id, partner_id: partner.id, debit: 0, credit: 60 },
+      { account_id: clearingAccRes.id, partner_id: partner.id, debit: 60, credit: 0 },
+      { account_id: clearingAccRes.id, partner_id: partner.id, debit: 0, credit: 60 },
     ],
   });
   db = moveRes.db;
@@ -706,6 +1039,7 @@ test('Regression 4: isPaymentReconciled requires every reconcilable line to be z
     partner_type: 'customer',
     payment_type: 'inbound',
     amount: 100,
+    unapplied: 100,
     date: d0,
     journal_id: bank.id,
     state: 'posted',
@@ -714,8 +1048,17 @@ test('Regression 4: isPaymentReconciled requires every reconcilable line to be z
     outstanding_account_id: bank.default_account_id,
     company_id: 1,
   });
-  db = pRes.db;
+  db = applyPaymentCredit(pRes.db, pRes.id, invRes.id, d0);
   const pay = read(db, 'account.payment', pRes.id);
+  assert.equal(paymentInvariant(db, pay), null);
+
+  const recLines = reconciledJournalItems(db, read(db, 'account.move', pay.move_id)).filter(
+    (l) => l.account_id !== pay.outstanding_account_id && read(db, 'account.account', l.account_id)?.reconcile === true,
+  );
+  // Line residuals are [0, +60, -60]: signed sum is 0, yet two reconcilable lines remain open.
+  const signedSum = recLines.reduce((sum, l) => sum + Number(l.amount_residual || 0), 0);
+  assert.equal(signedSum, 0);
+  assert.ok(recLines.some((l) => !l.reconciled && Number(l.amount_residual) !== 0));
   assert.equal(isPaymentReconciled(db, pay), false);
 });
 
@@ -843,4 +1186,303 @@ test('Regression 7: Missing exchange rate on an invoice partial does not break P
   } finally {
     await React.act(async () => root.unmount());
   }
+});
+
+test('Regression 8: Unsent payments cannot be rejected via forged pairing or direct single-leg rejection', () => {
+  let db = seed();
+  const banks = search(db, 'account.journal').filter((j) => j.type === 'bank' || j.type === 'cash');
+  const [srcJournal, dstJournal] = banks;
+  const partner = search(db, 'res.partner')[0];
+  const d0 = today();
+
+  // Sent payment to use as a rogue pairing target
+  const sentRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 150,
+    date: d0,
+    journal_id: srcJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(sentRes.db, read(sentRes.db, 'account.payment', sentRes.id));
+  db = markAsSent(db, sentRes.id);
+
+  // Unsent posted payment cannot be linked to sentRes and rejected
+  const unsentRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 150,
+    date: d0,
+    journal_id: srcJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(unsentRes.db, read(unsentRes.db, 'account.payment', unsentRes.id));
+  assert.throws(
+    () => write(db, 'account.payment', unsentRes.id, { paired_internal_transfer_payment_id: sentRes.id }),
+    /internal transfer/i,
+  );
+  assert.throws(
+    () => create(db, 'account.payment', {
+      partner_id: partner.id,
+      partner_type: 'customer',
+      payment_type: 'inbound',
+      amount: 100,
+      date: d0,
+      journal_id: srcJournal.id,
+      paired_internal_transfer_payment_id: sentRes.id,
+      company_id: 1,
+    }),
+    /internal transfer/i,
+  );
+  const forgedLinkAndReject = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (
+        p.id === unsentRes.id ? { ...p, paired_internal_transfer_payment_id: sentRes.id, state: 'rejected' } : p
+      )),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, forgedLinkAndReject), { isAdmin: true }), /internal transfer|sent/i);
+
+  // Even on a genuine internal transfer pair, direct rejection of the unsent leg is refused when the sent leg is not rejected
+  const transferAcc = create(db, 'account.account', {
+    code: '101798',
+    name: 'Transfers Guard',
+    account_type: 'asset_current',
+    reconcile: true,
+    company_id: 1,
+  });
+  db = write(transferAcc.db, 'res.company', 1, { transfer_account_id: transferAcc.id });
+  const xferRes = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    payment_type: 'outbound',
+    amount: 200,
+    date: d0,
+    journal_id: srcJournal.id,
+    destination_journal_id: dstJournal.id,
+    company_id: 1,
+  });
+  db = postPayment(xferRes.db, read(xferRes.db, 'account.payment', xferRes.id));
+  const dstId = read(db, 'account.payment', xferRes.id).paired_internal_transfer_payment_id;
+  // Neither half sent -> batch applyDiff rejecting both halves fails
+  const bothUnsentRej = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (
+        [xferRes.id, dstId].includes(p.id) ? { ...p, state: 'rejected' } : p
+      )),
+    },
+  };
+  assert.throws(() => applyDiff(db, diffDb(db, bothUnsentRej), { isAdmin: true }), /sent/i);
+
+  // Only src leg marked sent -> direct rejection of unsent dst leg alone fails (both write and applyDiff)
+  const asymDb = write(db, 'account.payment', xferRes.id, { is_sent: true });
+  assert.throws(() => write(asymDb, 'account.payment', dstId, { state: 'rejected' }), /sent/i);
+  const singleUnsentRej = {
+    ...asymDb,
+    records: {
+      ...asymDb.records,
+      'account.payment': asymDb.records['account.payment'].map((p) => (p.id === dstId ? { ...p, state: 'rejected' } : p)),
+    },
+  };
+  assert.throws(() => applyDiff(asymDb, diffDb(asymDb, singleUnsentRej), { isAdmin: true }), /sent/i);
+
+  // Draft transfer cannot be forged with paired_internal_transfer_payment_id
+  const draftXfer = create(db, 'account.payment', {
+    is_internal_transfer: true,
+    payment_type: 'outbound',
+    amount: 50,
+    date: d0,
+    journal_id: srcJournal.id,
+    destination_journal_id: dstJournal.id,
+    company_id: 1,
+  });
+  assert.throws(
+    () => write(draftXfer.db, 'account.payment', draftXfer.id, { paired_internal_transfer_payment_id: sentRes.id }),
+    /reciprocal transfer/i,
+  );
+});
+
+test('Regression 9: Rejected payment entry cannot be reset to draft or deleted while linked, preserving aging credit', () => {
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const partner = search(db, 'res.partner')[0];
+  const d0 = today();
+
+  const pRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 320,
+    date: d0,
+    journal_id: bank.id,
+    company_id: 1,
+  });
+  db = postPayment(pRes.db, read(pRes.db, 'account.payment', pRes.id));
+  db = markAsSent(db, pRes.id);
+  db = rejectPayment(db, pRes.id);
+  const rejPay = read(db, 'account.payment', pRes.id);
+  assert.equal(rejPay.state, 'rejected');
+  assert.ok(rejPay.move_id);
+
+  // 1. Resetting the rejected payment's entry to draft via applyDiff is blocked
+  const draftedMoveDb = write(db, 'account.move', rejPay.move_id, { state: 'draft' });
+  assert.throws(
+    () => applyDiff(db, diffDb(db, draftedMoveDb), { isAdmin: true }),
+    /records a payment/i,
+  );
+
+  // 2. Deleting the entry (directly or after client-side draft write) is blocked by moveDeleteGuard / unlink
+  assert.match(moveDeleteGuard(draftedMoveDb, read(draftedMoveDb, 'account.move', rejPay.move_id)) ?? '', /records a payment/i);
+  assert.throws(() => unlink(draftedMoveDb, 'account.move', [rejPay.move_id]), /records a payment/i);
+  const deletedMoveDb = {
+    ...draftedMoveDb,
+    records: {
+      ...draftedMoveDb.records,
+      'account.move': draftedMoveDb.records['account.move'].filter((m) => m.id !== rejPay.move_id),
+    },
+  };
+  assert.throws(
+    () => applyDiff(db, diffDb(db, deletedMoveDb), { isAdmin: true }),
+    /Posted entries cannot be deleted|records a payment/i,
+  );
+
+  // 3. Aging credit remains backed by the posted entry and matches partner ledger
+  const aging = agedBalance(db, 'receivable', d0, 1);
+  const ledger = partnerLedger(db, { from: d0, to: d0, company_id: 1, partnerIds: [partner.id] }, 'receivable');
+  const agingRow = aging.rows.find((r) => r.partner_id === partner.id);
+  const ledgerRow = ledger.find((r) => r.partner_id === partner.id);
+  assert.equal(ledgerRow?.end, -320);
+  assert.equal(agingRow?.total, -320);
+});
+
+test('Regression 10: Legacy cross-currency receipts use booked cash via paymentCompanyAmount or leave unknown empty', () => {
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const gbp = create(db, 'res.currency', {
+    name: 'GBP',
+    symbol: '£',
+    rounding: 0.01,
+    rate_ids: [{ date: '2026-01-01', rate: 0.8 }, { date: '2026-02-01', rate: 0.8 }],
+  });
+  db = gbp.db;
+  // EUR: 0.5 on invoice date (100 EUR = 200 USD), 0.5 on payment date too, while actual cash booked is 180 USD (144 GBP)
+  db = write(db, 'res.currency', eur.id, { rate_ids: [{ date: '2026-01-01', rate: 0.5 }] });
+
+  const inv = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    currency_id: eur.id,
+    invoice_date: '2026-01-01',
+    invoice_line_ids: [{ name: 'Imported goods', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+
+  // Create a legacy payment + move whose booked cash in USD is 180 (not the 200 invoice-rate estimate) and lacks payment_company_amount
+  const payableAcc = search(db, 'account.account').find((a) => a.account_type === 'liability_payable' && (a.company_id ?? 1) === 1);
+  const outAcc = bank.default_account_id;
+  const legacyMoveRes = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'posted',
+    name: 'BNK1/2026/LEG1',
+    date: '2026-02-01',
+    invoice_date: '2026-02-01',
+    journal_id: bank.id,
+    currency_id: gbp.id,
+    company_id: 1,
+    line_ids: [
+      { account_id: payableAcc.id, partner_id: partner.id, debit: 180, credit: 0 },
+      { account_id: outAcc, partner_id: partner.id, debit: 0, credit: 180 },
+    ],
+  });
+  db = legacyMoveRes.db;
+  const legacyPayRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    partner_type: 'supplier',
+    payment_type: 'outbound',
+    amount: 144,
+    currency_id: gbp.id,
+    date: '2026-02-01',
+    journal_id: bank.id,
+    invoice_id: inv.id,
+    state: 'posted',
+    name: 'PAY-LEG-1',
+    move_id: legacyMoveRes.id,
+    outstanding_account_id: outAcc,
+    company_id: 1,
+  });
+  db = legacyPayRes.db;
+  // Attach legacy settlement row missing payment_company_amount directly onto the invoice snapshot
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': db.records['account.move'].map((m) => (
+        m.id === inv.id
+          ? { ...m, payments: [{ move_id: legacyMoveRes.id, amount: 100, date: '2026-02-01' }], amount_paid: 100 }
+          : m
+      )),
+    },
+  };
+
+  // 1. Recoverable legacy payment: uses booked cash 180 USD -> 144.00 GBP, NOT 200 USD -> 160.00 GBP
+  const recovered = paymentReceiptData(db, read(db, 'account.payment', legacyPayRes.id));
+  assert.equal(recovered.invoices[0].rows[0].amountPayment, 144);
+  assert.equal(recovered.invoices[0].rows[0].currencyPayment.id, gbp.id);
+
+  // 2. Unrecoverable legacy payment (e.g., missing outstanding_account_id): leaves amountPayment null instead of estimating from invoice rate
+  const unrecoverableDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment': db.records['account.payment'].map((p) => (
+        p.id === legacyPayRes.id ? { ...p, outstanding_account_id: null } : p
+      )),
+    },
+  };
+  const unknownReceipt = paymentReceiptData(unrecoverableDb, read(unrecoverableDb, 'account.payment', legacyPayRes.id));
+  assert.equal(unknownReceipt.invoices[0].rows[0].amountPayment, null);
+
+  // 3. Row without a linked payment (e.g., cross-currency manual/credit entry) preserves invoice-rate conversion
+  const manualEntryRes = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'posted',
+    name: 'MISC/2026/001',
+    date: '2026-02-01',
+    invoice_date: '2026-02-01',
+    journal_id: bank.id,
+    currency_id: usd.id,
+    company_id: 1,
+    line_ids: [
+      { account_id: payableAcc.id, partner_id: partner.id, debit: 50, credit: 0 },
+      { account_id: outAcc, debit: 0, credit: 50 },
+    ],
+  });
+  const withManualRowDb = {
+    ...manualEntryRes.db,
+    records: {
+      ...manualEntryRes.db.records,
+      'account.move': manualEntryRes.db.records['account.move'].map((m) => (
+        m.id === inv.id
+          ? {
+            ...m,
+            payments: [
+              { move_id: legacyMoveRes.id, amount: 75, date: '2026-02-01' },
+              { move_id: manualEntryRes.id, amount: 25, date: '2026-02-01' },
+            ],
+            amount_paid: 100,
+          }
+          : m
+      )),
+    },
+  };
+  const manualReceipt = paymentReceiptData(withManualRowDb, read(withManualRowDb, 'account.payment', legacyPayRes.id));
+  assert.equal(manualReceipt.invoices[0].rows[1].amountPayment, 50);
 });

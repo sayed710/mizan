@@ -370,9 +370,9 @@ function settlementCapacity(db, entry, inv) {
     .reduce((s, l) => s + (settledByCredit(inv) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0));
 }
 
-/** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
+/** Whether entry `id` records a posted or rejected payment or settles another entry, so resetting or deleting it would orphan them. */
 function backsSettlement(db, id) {
-  return (db.records['account.payment'] ?? []).some((p) => p.state === 'posted' && p.move_id === id)
+  return (db.records['account.payment'] ?? []).some((p) => ['posted', 'rejected'].includes(p.state) && (p.move_id === id || p.destination_move_id === id))
     || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id || g.exchange_move_id === id))
     || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
 }

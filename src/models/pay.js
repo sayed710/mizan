@@ -1792,18 +1792,22 @@ export function paymentReceiptData(db, payment) {
       let amountPayment = amountInvoice;
       if (payCurr && invCurr && payCurr.id !== invCurr.id) {
         const convDate = row.date ?? inv.invoice_date;
-        const knownCompanyAmount = row.payment_company_amount != null;
-        const invoiceToCompany = knownCompanyAmount ? 1 : conversionRate(db, invCurr.id, companyCurr.id, convDate, inv.company_id);
         const companyToPayment = conversionRate(db, companyCurr.id, payCurr.id, convDate, inv.company_id);
-        // Without a rate on the settlement date the receipt leaves "Amount In Currency" empty.
-        if (invoiceToCompany == null || companyToPayment == null) {
-          amountPayment = null;
+        let companyAmt = null;
+        if (linkedPay) {
+          companyAmt = paymentCompanyAmount(db, inv, row);
+        } else if (row.payment_company_amount != null) {
+          companyAmt = Number.isFinite(Number(row.payment_company_amount)) ? Number(row.payment_company_amount) : null;
         } else {
-          const companyAmt = knownCompanyAmount
-            ? Number(row.payment_company_amount)
-            : roundCurrency(amountInvoice * invoiceToCompany, companyCurr);
-          amountPayment = roundCurrency(companyAmt * companyToPayment, payCurr);
+          const invoiceToCompany = conversionRate(db, invCurr.id, companyCurr.id, convDate, inv.company_id);
+          if (invoiceToCompany != null) {
+            companyAmt = roundCurrency(amountInvoice * invoiceToCompany, companyCurr);
+          }
         }
+        // Without booked cash or a rate on the settlement date the receipt leaves "Amount In Currency" empty.
+        amountPayment = companyAmt == null || companyToPayment == null
+          ? null
+          : roundCurrency(companyAmt * companyToPayment, payCurr);
       }
       return {
         date: row.date,
@@ -2018,31 +2022,94 @@ const paymentMethodGuard = (db, before, after) => {
   return null;
 };
 
+function isReciprocalInternalTransferPair(db, a, b) {
+  if (!a || !b || a.id === b.id) return false;
+  if (!a.is_internal_transfer || !b.is_internal_transfer) return false;
+  if (a.paired_internal_transfer_payment_id !== b.id || b.paired_internal_transfer_payment_id !== a.id) return false;
+  if ((a.company_id ?? 1) !== (b.company_id ?? 1)) return false;
+  if (!['inbound', 'outbound'].includes(a.payment_type) || !['inbound', 'outbound'].includes(b.payment_type) || a.payment_type === b.payment_type) return false;
+  if (!a.journal_id || !b.journal_id || a.journal_id !== b.destination_journal_id || b.journal_id !== a.destination_journal_id) return false;
+  if (Number(a.amount) !== Number(b.amount) || (a.currency_id ?? null) !== (b.currency_id ?? null) || a.date !== b.date) return false;
+  if (!a.move_id || !b.move_id || a.move_id === b.move_id) return false;
+  if (a.move_id !== b.destination_move_id || b.move_id !== a.destination_move_id) return false;
+  const moveA = read(db, 'account.move', a.move_id);
+  const moveB = read(db, 'account.move', b.move_id);
+  if (moveA?.state !== 'posted' || moveA.move_type !== 'entry' || (moveA.company_id ?? 1) !== (a.company_id ?? 1)) return false;
+  if (moveB?.state !== 'posted' || moveB.move_type !== 'entry' || (moveB.company_id ?? 1) !== (b.company_id ?? 1)) return false;
+  return true;
+}
+
+function validTransferPairingWrite(db, before, after) {
+  if (!after.is_internal_transfer) {
+    if (after.paired_internal_transfer_payment_id != null || after.destination_move_id != null) {
+      return 'Only internal transfers can reference a paired transfer payment or destination entry';
+    }
+    return null;
+  }
+  const pairingChanged = !before || (before.paired_internal_transfer_payment_id ?? null) !== (after.paired_internal_transfer_payment_id ?? null);
+  if (pairingChanged && after.paired_internal_transfer_payment_id != null) {
+    if (after.state !== 'posted' || (before && before.state !== 'draft')) {
+      return 'Paired internal transfer payment link does not match a valid reciprocal transfer';
+    }
+    const paired = read(db, 'account.payment', after.paired_internal_transfer_payment_id);
+    if (!paired) return 'Paired internal transfer payment link does not match a valid reciprocal transfer';
+    if (isReciprocalInternalTransferPair(db, after, paired)) return null;
+    // Sequential postPayment creates/updates the inbound destination leg before updating the draft outbound leg.
+    const moveA = after.move_id ? read(db, 'account.move', after.move_id) : null;
+    const moveB = after.destination_move_id ? read(db, 'account.move', after.destination_move_id) : null;
+    const sequentialDestLeg = paired.state === 'draft'
+      && after.payment_type === 'inbound'
+      && paired.is_internal_transfer === true
+      && (paired.company_id ?? 1) === (after.company_id ?? 1)
+      && Boolean(after.journal_id && paired.journal_id && paired.journal_id === after.destination_journal_id && after.journal_id === paired.destination_journal_id)
+      && Number(paired.amount) === Number(after.amount)
+      && (paired.currency_id ?? null) === (after.currency_id ?? null)
+      && paired.date === after.date
+      && (!paired.paired_internal_transfer_payment_id || paired.paired_internal_transfer_payment_id === after.id)
+      && Boolean(moveA && moveB && moveA.id !== moveB.id && moveA.state === 'posted' && moveA.move_type === 'entry' && moveB.state === 'posted' && moveB.move_type === 'entry')
+      && (moveA.company_id ?? 1) === (after.company_id ?? 1)
+      && (moveB.company_id ?? 1) === (after.company_id ?? 1);
+    if (!sequentialDestLeg) return 'Paired internal transfer payment link does not match a valid reciprocal transfer';
+  }
+  return null;
+}
+
 function internalTransferInvariant(db, after) {
-  if (after.state !== 'posted') return null;
-  if (!Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) {
-    return 'An internal transfer needs a positive amount';
+  if (!['posted', 'rejected'].includes(after.state)) return null;
+  if (after.state === 'posted') {
+    if (!Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) {
+      return 'An internal transfer needs a positive amount';
+    }
+    if (!after.move_id || !after.destination_move_id) {
+      return 'A posted internal transfer needs source and destination journal entries';
+    }
+    const sourceEntry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
+    const destEntry = (db.records['account.move'] ?? []).find((m) => m.id === after.destination_move_id);
+    if (sourceEntry?.state !== 'posted' || sourceEntry.move_type !== 'entry' || destEntry?.state !== 'posted' || destEntry.move_type !== 'entry') {
+      return 'A posted internal transfer needs its posted journal entries';
+    }
+    const co = read(db, 'res.company', after.company_id ?? 1);
+    if (!co?.transfer_account_id) return 'Internal transfer account is not set for this company';
+    const ta = read(db, 'account.account', co.transfer_account_id);
+    if (!ta || ta.active === false || ta.account_type !== 'asset_current') {
+      return 'Internal transfer account must be an active current-asset account of the company';
+    }
+    const partials = (db.records['account.partial.reconcile'] ?? []).filter(
+      (g) => g && g.active !== false && !g.reversed
+        && ((g.debit_move_id === sourceEntry.id && g.credit_move_id === destEntry.id)
+          || (g.debit_move_id === destEntry.id && g.credit_move_id === sourceEntry.id)),
+    );
+    if (!partials.length) return 'Transfer account entries must be reconciled together';
   }
-  if (!after.move_id || !after.destination_move_id) {
-    return 'A posted internal transfer needs source and destination journal entries';
+  const paired = after.paired_internal_transfer_payment_id
+    ? read(db, 'account.payment', after.paired_internal_transfer_payment_id)
+    : null;
+  if (!paired || !isReciprocalInternalTransferPair(db, after, paired) || paired.state !== after.state) {
+    return 'Paired internal transfer legs must match and share the same status';
   }
-  const sourceEntry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
-  const destEntry = (db.records['account.move'] ?? []).find((m) => m.id === after.destination_move_id);
-  if (sourceEntry?.state !== 'posted' || sourceEntry.move_type !== 'entry' || destEntry?.state !== 'posted' || destEntry.move_type !== 'entry') {
-    return 'A posted internal transfer needs its posted journal entries';
+  if (after.state === 'rejected' && !after.is_sent && !paired.is_sent) {
+    return 'Only sent, paid, unreconciled payments can be rejected';
   }
-  const co = read(db, 'res.company', after.company_id ?? 1);
-  if (!co?.transfer_account_id) return 'Internal transfer account is not set for this company';
-  const ta = read(db, 'account.account', co.transfer_account_id);
-  if (!ta || ta.active === false || ta.account_type !== 'asset_current') {
-    return 'Internal transfer account must be an active current-asset account of the company';
-  }
-  const partials = (db.records['account.partial.reconcile'] ?? []).filter(
-    (g) => g && g.active !== false && !g.reversed
-      && ((g.debit_move_id === sourceEntry.id && g.credit_move_id === destEntry.id)
-        || (g.debit_move_id === destEntry.id && g.credit_move_id === sourceEntry.id)),
-  );
-  if (!partials.length) return 'Transfer account entries must be reconciled together';
   return null;
 }
 
@@ -2079,12 +2146,19 @@ export const payModels = {
           }
         }
       }
+      const pairingErr = validTransferPairingWrite(db, before, after);
+      if (pairingErr) return pairingErr;
       if (before && after.state === 'rejected' && before.state !== 'rejected') {
-        const pairedSentOrRejected = Boolean(before.paired_internal_transfer_payment_id && (() => {
-          const paired = read(db, 'account.payment', before.paired_internal_transfer_payment_id);
-          return paired && (paired.is_sent || paired.state === 'rejected');
-        })());
-        if (before.state !== 'posted' || (!before.is_sent && !pairedSentOrRejected) || isPaymentMatched(db, before)) {
+        const paired = before.paired_internal_transfer_payment_id
+          ? read(db, 'account.payment', before.paired_internal_transfer_payment_id)
+          : null;
+        const pairedTransferRejected = Boolean(
+          paired
+          && paired.state === 'rejected'
+          && paired.is_sent
+          && isReciprocalInternalTransferPair(db, before, paired),
+        );
+        if (before.state !== 'posted' || (!before.is_sent && !pairedTransferRejected) || isPaymentMatched(db, before)) {
           return 'Only sent, paid, unreconciled payments can be rejected';
         }
       }
@@ -2098,7 +2172,7 @@ export const payModels = {
         const m = read(db, 'account.move', after.move_id);
         if (m?.state === 'posted') return 'A draft payment cannot be linked to a posted journal entry';
       }
-      if (before && before.state === 'posted' && after.state === 'posted' && before.is_internal_transfer) {
+      if (before && before.state === 'posted' && ['posted', 'rejected'].includes(after.state) && (before.is_internal_transfer || after.is_internal_transfer)) {
         const transferFields = [
           'amount', 'currency_id', 'journal_id', 'destination_journal_id',
           'date', 'company_id', 'is_internal_transfer', 'move_id', 'destination_move_id',
