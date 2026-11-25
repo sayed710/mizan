@@ -146,7 +146,7 @@ test('budget reports filter account prefixes and periods and prorate inclusive d
 
 test('mandatory plans require positive allocations per product line; unavailable plans reject allocations', () => {
   const { db: base, a, b } = setup();
-  const plan = create(base, 'account.analytic.plan', { name: 'Projects', default_applicability: 'mandatory' });
+  const plan = create(write(base, 'res.company', 1, { group_analytic_accounting: true }), 'account.analytic.plan', { name: 'Projects', default_applicability: 'mandatory' });
   const db = write(plan.db, 'account.analytic.account', a, { plan_id: plan.id });
   // A mandatory plan needs the full 100% of each product line.
   const base0 = moveValues(a, b);

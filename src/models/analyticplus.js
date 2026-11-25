@@ -10,6 +10,7 @@ import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, invoiceLineA
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { hasMultiCurrency } from './money.js';
 import { currentCompany } from './company.js';
+import { analyticAccountingEnabled } from './analytic-setting.js';
 import { isSectionOrNote } from './taxes.js';
 import { categoryHierarchy, findAnalyticDistribution, planOf } from './analytic-distribution-models.js';
 export { isSectionOrNote } from './taxes.js';
@@ -139,6 +140,7 @@ export function checkMandatoryPlans(db, move, { systemGenerated = false } = {}) 
   const isEntry = move?.move_type === 'entry';
   if (!isInvoiceDoc && !isEntry) return;
   if (isEntry && systemGenerated) return;
+  if (!analyticAccountingEnabled(db, move?.company_id ?? 1)) return;
 
   const plans = search(db, 'account.analytic.plan');
   if (!plans.length) return;

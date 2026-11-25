@@ -1,3 +1,4 @@
+import { analyticAccountingEnabled } from './analytic-setting.js';
 import { incrementPartnerRank } from './crm.js';
 import { purchaseLineId } from './purchase-links.js';
 import { countryReferenceError } from './country.js';
@@ -1989,6 +1990,7 @@ const invoiceLineTaxDomain = (tax, line, db) => {
 
 const invoiceLineField = {
   ...invoiceLineBase,
+  columnsFor: (record, db) => Object.entries(invoiceLineField.fields).filter(([key]) => key !== 'analytic_distribution' || analyticAccountingEnabled(db, record?.company_id)),
   newLine: (move, db) => {
     const baseLine = (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db);
     const mismatch = move && db ? quickEditMismatch(db, move) : null;
@@ -2572,7 +2574,7 @@ const lineItem = {
       ['tax_ids', { ...lineItem.fields.tax_ids, widget: 'many2many_tags', hidden: false }],
       ['debit', lineItem.fields.debit],
       ['credit', lineItem.fields.credit],
-      ...(db && search(db, 'account.analytic.plan').length
+      ...(db && analyticAccountingEnabled(db, record?.company_id) && search(db, 'account.analytic.plan').length
         ? [['analytic_distribution', { ...lineItem.fields.analytic_distribution, hidden: false }]]
         : []),
       ['tax_tag_ids', { ...lineItem.fields.tax_tag_ids, label: 'Tax Grids', hidden: false, optional: 'hide' }],
