@@ -87,6 +87,13 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Percentages on the Payment Terms lines must be between 0 and 100.': 'يجب أن تكون النسب في بنود شروط الدفع بين 0 و100.',
+  'The Payment Term must have at least one percent line and the sum of the percent must be 100%.': 'يجب أن يحتوي شرط الدفع على بند نسبة واحد على الأقل وأن يكون مجموع النسب 100%.',
+  'The Early Payment Discount functionality can only be used with payment terms using a single 100% line. ': 'لا يمكن استخدام خصم الدفع المبكر إلا مع شروط دفع تحتوي على بند واحد بنسبة 100%. ',
+  'The Early Payment Discount must be strictly positive.': 'يجب أن يكون خصم الدفع المبكر أكبر من صفر.',
+  'The Early Payment Discount days must be strictly positive.': 'يجب أن يكون عدد أيام خصم الدفع المبكر أكبر من صفر.',
+  "Uh-oh! Those payment terms are quite popular and can't be deleted since there are still some records referencing them. How about archiving them instead?": 'لا يمكن حذف شروط الدفع هذه لأن هناك سجلات ما زالت تستخدمها. يمكنك أرشفتها بدلاً من ذلك.',
+
   'res_id must be a nonnegative record id': 'يجب أن يكون معرّف السجل رقماً صحيحاً غير سالب',
   'Report Sections': 'أقسام التقرير', 'Section Type': 'نوع القسم', 'Financial Report': 'التقرير المالي',
   'Invalid report sections': 'أقسام التقرير غير صالحة', 'Invalid report section type': 'نوع قسم التقرير غير صالح',
