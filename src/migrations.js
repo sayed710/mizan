@@ -2039,7 +2039,7 @@ MIGRATIONS.push({ version: 68, name: 'reconcile-model-cap-percentage-tolerance',
 export function migrateAnalyticAccountPlanToPlanId(db) {
   const accounts = db?.records?.['account.analytic.account'];
   if (!Array.isArray(accounts) || !accounts.length) return db;
-  const legacyAccounts = accounts.filter((a) => a && typeof a === 'object' && a.plan_id == null && a.plan);
+  const legacyAccounts = accounts.filter((a) => a && typeof a === 'object' && !a.plan_id);
   if (!legacyAccounts.length) return db;
 
   const LEGACY_PLAN_NAMES = {
@@ -2050,7 +2050,7 @@ export function migrateAnalyticAccountPlanToPlanId(db) {
 
   const plans = [...(db.records?.['account.analytic.plan'] ?? [])];
   let plansChanged = false;
-  let maxPlanId = plans.reduce((max, p) => Math.max(max, Number(p.id) || 0), 0);
+  let maxPlanId = Math.max(Number(db.seq?.['account.analytic.plan']) || 0, ...plans.map((p) => Number(p.id) || 0));
   let maxSeq = plans.reduce((max, p) => Math.max(max, Number(p.sequence) || 0), 0);
 
   const getOrCreatePlan = (planKey) => {
@@ -2076,9 +2076,10 @@ export function migrateAnalyticAccountPlanToPlanId(db) {
 
   let accountsChanged = false;
   const nextAccounts = accounts.map((a) => {
-    if (!a || typeof a !== 'object' || a.plan_id != null || !a.plan) return a;
+    if (!a || typeof a !== 'object' || a.plan_id) return a;
     accountsChanged = true;
-    const planId = getOrCreatePlan(a.plan);
+    const legacyPlan = typeof a.plan === 'string' ? a.plan.trim() : a.plan;
+    const planId = getOrCreatePlan(legacyPlan || 'project');
     const { plan: _legacy, ...rest } = a;
     return { ...rest, plan_id: planId };
   });
@@ -2086,6 +2087,7 @@ export function migrateAnalyticAccountPlanToPlanId(db) {
   if (!accountsChanged && !plansChanged) return db;
   return {
     ...db,
+    ...(plansChanged ? { seq: { ...(db.seq ?? {}), 'account.analytic.plan': maxPlanId } } : {}),
     records: {
       ...db.records,
       ...(plansChanged ? { 'account.analytic.plan': plans } : {}),

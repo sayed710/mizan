@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { models } from './models/index.js';
-import { create, read } from './orm.js';
+import { create, read, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { diffDb, applyDiff } from './sync.js';
-import { planOf } from './analytic_distribution.js';
+import { normalizeDistribution, planOf, planTotals } from './analytic_distribution.js';
+import { findAnalyticDistribution } from './models/analytic-distribution-models.js';
 import {
   completePlanName,
   planAccountCount,
@@ -69,7 +70,8 @@ test('ANA-1: account.analytic.account has no stale plan field or default, plan_i
   assert.equal(acc102.plan_id, 2, 'mapped project to plan 2');
   assert.equal(acc103.plan_id, 2, 'preserved existing plan_id 2 despite old plan being internal');
   assert.ok(acc104.plan_id != null, 'created plan for custom_marketing and assigned plan_id');
-  assert.equal(acc105.plan_id, null, 'empty plan remains null');
+  assert.equal(acc105.plan_id, 2, 'empty legacy plan falls back to Projects plan');
+  assert.equal('plan' in acc105, false, 'legacy plan field is removed');
 
   // Migration is idempotent
   assert.equal(migrate(migrated), migrated, 'migration 69 is idempotent');
@@ -338,4 +340,123 @@ test('ANA-4: account.analytic.account requires plan_id through create and diffDb
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('Finding 1: migration 76 advances account.analytic.plan sequence and avoids duplicate or reused plan IDs', () => {
+  const emptyPlansDb = {
+    schema_version: 68,
+    settings: { current_company_id: 1, allowed_company_ids: [1] },
+    messages: [],
+    seq: {},
+    records: {
+      'account.analytic.plan': [],
+      'account.analytic.account': [
+        { id: 1, name: 'Legacy Project', plan: 'project', plan_id: null, company_id: 1, active: true },
+      ],
+    },
+  };
+
+  const migrated = migrate(emptyPlansDb);
+  const migratedPlanId = read(migrated, 'account.analytic.account', 1).plan_id;
+  assert.equal(migratedPlanId, 1);
+  assert.equal(migrated.seq['account.analytic.plan'], 1);
+
+  const created = create(migrated, 'account.analytic.plan', { name: 'Departments' });
+  assert.notEqual(created.id, migratedPlanId, 'ORM create must not reuse migrated plan ID');
+  assert.equal(created.id, 2);
+
+  // Sequence ahead of existing plan records because prior plans were deleted.
+  const aheadSeqDb = {
+    schema_version: 68,
+    settings: { current_company_id: 1, allowed_company_ids: [1] },
+    messages: [],
+    seq: { 'account.analytic.plan': 5 },
+    records: {
+      'account.analytic.plan': [{ id: 2, name: 'Internal', color: 1 }],
+      'account.analytic.account': [
+        { id: 10, name: 'Legacy Project', plan: 'project', plan_id: null, company_id: 1, active: true },
+      ],
+    },
+  };
+
+  const migratedAhead = migrate(aheadSeqDb);
+  const newPlanId = read(migratedAhead, 'account.analytic.account', 10).plan_id;
+  assert.equal(newPlanId, 6, 'migration must allocate above existing sequence');
+  assert.equal(migratedAhead.seq['account.analytic.plan'], 6);
+  const nextCreated = create(migratedAhead, 'account.analytic.plan', { name: 'Regions' });
+  assert.equal(nextCreated.id, 7);
+});
+
+test('Finding 2: migration 76 defaults legacy accounts without plan or plan_id to Projects so edits and distributions work', () => {
+  const noPlanFieldDb = {
+    schema_version: 68,
+    settings: { current_company_id: 1, allowed_company_ids: [1] },
+    messages: [],
+    seq: {},
+    records: {
+      'account.analytic.plan': [],
+      'account.analytic.account': [
+        { id: 1, name: 'Unplanned Account', company_id: 1, active: true },
+      ],
+    },
+  };
+
+  const migrated = migrate(noPlanFieldDb);
+  const acc = read(migrated, 'account.analytic.account', 1);
+  assert.equal(acc.plan_id, 1, 'account without legacy plan falls back to Projects plan');
+  assert.equal(read(migrated, 'account.analytic.plan', 1)?.name, 'Projects');
+
+  const edited = write(migrated, 'account.analytic.account', 1, { name: 'Renamed Account' });
+  assert.equal(read(edited, 'account.analytic.account', 1).name, 'Renamed Account');
+
+  assert.deepEqual(normalizeDistribution({ 1: 100 }, edited), { 1: 100 });
+  const totals = planTotals([{ accountId: 1, percent: 100 }], edited);
+  assert.equal(totals.length, 1);
+  assert.equal(totals[0].total, 100);
+});
+
+test('Finding 3: deleted analytic accounts in distribution models are skipped by findAnalyticDistribution and invoice line onchange', () => {
+  let db = seed();
+  const planId = db.records['account.analytic.plan'][0].id;
+  const toDelete = create(db, 'account.analytic.account', { name: 'Stale Analytic', plan_id: planId });
+  db = toDelete.db;
+  const toKeep = create(db, 'account.analytic.account', { name: 'Live Analytic', plan_id: planId });
+  db = toKeep.db;
+
+  const partnerId = db.records['res.partner'][0].id;
+  const productId = db.records['product'][0].id;
+
+  // High-priority model with one deleted account and one live account.
+  db = create(db, 'account.analytic.distribution.model', {
+    partner_id: partnerId,
+    product_id: productId,
+    sequence: 1,
+    company_id: 1,
+    analytic_distribution: { [toDelete.id]: 60, [toKeep.id]: 40 },
+  }).db;
+  // Separate model referencing only a deleted account.
+  const onlyDeleted = create(db, 'account.analytic.account', { name: 'Only Deleted', plan_id: planId });
+  db = onlyDeleted.db;
+  db = create(db, 'account.analytic.distribution.model', {
+    account_prefix: '400',
+    sequence: 2,
+    company_id: 1,
+    analytic_distribution: { [onlyDeleted.id]: 100 },
+  }).db;
+
+  db = unlink(db, 'account.analytic.account', [toDelete.id, onlyDeleted.id]);
+
+  // Partial model drops the deleted account and keeps the live account.
+  const partialDist = findAnalyticDistribution(db, { partner_id: partnerId, product_id: productId, company_id: 1 });
+  assert.deepEqual(partialDist, { [toKeep.id]: 40 });
+
+  // Model referencing only a deleted account resolves to empty without throwing.
+  const deletedOnlyDist = findAnalyticDistribution(db, { account_code: '400000', company_id: 1 });
+  assert.deepEqual(deletedOnlyDist, {});
+
+  // Invoice line onchange on product_id succeeds without throwing and omits deleted accounts.
+  const lineOnchange = models['account.move'].fields.invoice_line_ids.onchange;
+  const move = { move_type: 'out_invoice', partner_id: partnerId, company_id: 1 };
+  const changed = lineOnchange({ product_id: productId, qty: 1, price_unit: 100 }, 'product_id', db, move);
+  assert.deepEqual(changed.analytic_distribution, { [toKeep.id]: 40 });
 });
