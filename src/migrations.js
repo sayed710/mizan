@@ -1,4 +1,5 @@
 import { purchaseLineId } from './models/purchase-links.js';
+import { ensureCountries } from './models/country.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -2191,6 +2192,228 @@ export function migrateSalesCreditLimit(db) {
   };
 }
 MIGRATIONS.push({ version: 70, name: 'sales-credit-limit-partner-and-company-flags', up: migrateSalesCreditLimit });
+
+export function migratePartnerTags(db) {
+  if (!db?.records) return db;
+  const existingCategories = [...(db.records['res.partner.category'] ?? [])];
+  const byName = new Map();
+  let maxId = 0;
+  for (const cat of existingCategories) {
+    if (cat.id > maxId) maxId = cat.id;
+    if (cat.name) byName.set(String(cat.name).trim().toLowerCase(), cat.id);
+  }
+
+  let categoriesChanged = false;
+  const categoryFor = (name) => {
+    const key = name.toLowerCase();
+    if (!byName.has(key)) {
+      maxId += 1;
+      existingCategories.push({ id: maxId, name, color: 0, active: true });
+      byName.set(key, maxId);
+      categoriesChanged = true;
+    }
+    return byName.get(key);
+  };
+  let partnersChanged = false;
+
+  const partners = db.records['res.partner'];
+  const nextPartners = Array.isArray(partners) ? partners.map((p) => {
+    if (!p) return p;
+    const rawTags = p.tag_ids;
+    if (rawTags == null) return p;
+    const list = Array.isArray(rawTags) ? rawTags : [rawTags];
+    if (!list.length) return p;
+
+    let partnerTagsChanged = false;
+    const tagSet = new Set();
+
+    for (const item of list) {
+      if (item == null || item === '') {
+        partnerTagsChanged = true;
+        continue;
+      }
+      const num = Number(typeof item === 'object' ? item.id : item);
+      if (typeof item === 'number' && Number.isSafeInteger(num) && num > 0) {
+        tagSet.add(num);
+        continue;
+      }
+      if (typeof item === 'string') {
+        const trimmed = item.trim();
+        if (!trimmed) {
+          partnerTagsChanged = true;
+          continue;
+        }
+        partnerTagsChanged = true;
+        const catId = categoryFor(trimmed);
+        tagSet.add(catId);
+        continue;
+      }
+      if (typeof item === 'object') {
+        partnerTagsChanged = true;
+        if (Number.isSafeInteger(num) && num > 0) {
+          tagSet.add(num);
+        } else if (item.name) {
+          const trimmed = String(item.name).trim();
+          if (!trimmed) continue;
+          const catId = categoryFor(trimmed);
+          tagSet.add(catId);
+        }
+      }
+    }
+
+    if (tagSet.size !== list.length) {
+      partnerTagsChanged = true;
+    }
+
+    if (partnerTagsChanged) {
+      partnersChanged = true;
+      return { ...p, tag_ids: [...tagSet] };
+    }
+    return p;
+  }) : partners;
+
+  const distModels = db.records['account.analytic.distribution.model'];
+  let distModelsChanged = false;
+  let nextDistModels = distModels;
+  if (Array.isArray(distModels)) {
+    nextDistModels = distModels.map((m) => {
+      if (!m || m.partner_category_id == null) return m;
+      if (typeof m.partner_category_id === 'string' && m.partner_category_id.trim() !== '') {
+        const trimmed = m.partner_category_id.trim();
+        const catId = categoryFor(trimmed);
+        distModelsChanged = true;
+        return { ...m, partner_category_id: catId };
+      }
+      return m;
+    });
+  }
+
+  if (!partnersChanged && !categoriesChanged && !distModelsChanged) return db;
+
+  const nextSeq = Math.max(db.seq?.['res.partner.category'] ?? 0, maxId);
+
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(partnersChanged ? { 'res.partner': nextPartners } : {}),
+      ...(categoriesChanged ? { 'res.partner.category': existingCategories } : {}),
+      ...(distModelsChanged ? { 'account.analytic.distribution.model': nextDistModels } : {}),
+    },
+    seq: {
+      ...(db.seq ?? {}),
+      'res.partner.category': nextSeq,
+    },
+  };
+}
+MIGRATIONS.push({ version: 71, name: 'partner-tags-res-partner-category', up: migratePartnerTags });
+
+function normalizeLegacyCountry(next, country) {
+  if (country == null) return null;
+  if (Number.isInteger(country)) {
+    return (next.records['res.country'] ?? []).some((r) => r.id === country) ? country : null;
+  }
+  const raw = String(country).trim();
+  if (!raw) return null;
+  const countries = next.records['res.country'] ?? [];
+  const lower = raw.toLowerCase();
+  const byCodeOrName = countries.filter((r) => r.code?.toLowerCase() === lower || r.name?.toLowerCase() === lower);
+  if (byCodeOrName.length === 1) return byCodeOrName[0].id;
+  return null;
+}
+
+function normalizeLegacyState(next, state, countryId) {
+  if (state == null) return null;
+  if (Number.isInteger(state)) {
+    return (next.records['res.country.state'] ?? []).some((r) => r.id === state && (countryId == null || r.country_id === countryId)) ? state : null;
+  }
+  const raw = String(state).trim();
+  if (!raw) return null;
+  const states = next.records['res.country.state'] ?? [];
+  const lower = raw.toLowerCase();
+  const byCodeOrName = states.filter((r) => (countryId == null || r.country_id === countryId) && (r.code?.toLowerCase() === lower || r.name?.toLowerCase() === lower));
+  if (byCodeOrName.length === 1) return byCodeOrName[0].id;
+
+  if (countryId) {
+    let stateSeq = Math.max(next.seq?.['res.country.state'] ?? 0, 0, ...states.map((r) => r.id));
+    const code = raw.length <= 5 ? raw.toUpperCase() : raw;
+    const newState = { id: ++stateSeq, name: raw, code, country_id: countryId };
+    states.push(newState);
+    next.seq = { ...next.seq, 'res.country.state': stateSeq };
+    return newState.id;
+  }
+  return null;
+}
+
+export function migrateCountries(db) {
+  const next = ensureCountries(db);
+  const records = { ...next.records };
+  for (const model of ['account.tax.group', 'account.tax', 'account.account.tag', 'account.fiscal.position']) {
+    if (!Array.isArray(records[model])) continue;
+    records[model] = records[model].map((record) => {
+      const countryId = record.country_id ?? normalizeLegacyCountry(next, record.country);
+      const hadCountryTarget = Boolean(record.country);
+      const unresolvedCountry = hadCountryTarget && countryId == null;
+
+      let result = { ...record };
+      if (countryId != null) {
+        delete result.country;
+        result.country_id = countryId;
+      } else {
+        result.country_id = null;
+        if (!hadCountryTarget) delete result.country;
+      }
+
+      if (model === 'account.fiscal.position') {
+        const rawStates = record.state_ids ?? [];
+        let unresolvedState = false;
+        const resolvedStates = [];
+
+        for (const s of rawStates) {
+          const sid = normalizeLegacyState(next, s, countryId);
+          if (sid != null) {
+            resolvedStates.push(sid);
+          } else {
+            unresolvedState = true;
+          }
+        }
+
+        result.state_ids = resolvedStates;
+        if (unresolvedState) {
+          result.states = record.states ?? rawStates;
+        }
+
+        if (unresolvedCountry || unresolvedState) {
+          result.unresolved_targeting = true;
+          if (record.auto_apply) {
+            result.auto_apply = false;
+            console.warn(`Fiscal position "${record.name}" auto_apply disabled due to unresolved targeting (country: "${record.country}", states: ${JSON.stringify(rawStates)})`);
+          }
+        }
+      }
+      return result;
+    });
+  }
+  return { ...next, records };
+}
+MIGRATIONS.push({ version: 72, name: 'country-records', up: migrateCountries });
+
+MIGRATIONS.push({ version: 73, name: 'analytic-general-account-id', up: (db) => {
+  const unresolved = [];
+  const accounts = db.records['account.account'] ?? [];
+  const lines = (db.records['account.analytic.line'] ?? []).map((line) => {
+    if (typeof line.general_account !== 'string') return line;
+    if (!line.general_account) return { ...line, general_account: null };
+    const matches = accounts.filter((account) => account.code === line.general_account
+      && (!account.company_id || account.company_id === (line.company_id ?? 1)));
+    if (matches.length === 1) return { ...line, general_account: matches[0].id };
+    unresolved.push([line.id, line.general_account]);
+    return { ...line, legacy_general_account: line.general_account, general_account: null };
+  });
+  const next = { ...db, messages: db.messages ?? [], records: { ...db.records, 'account.analytic.line': lines } };
+  return unresolved.reduce((result, [id, code]) => postNote(result, 'account.analytic.line', id,
+    `Upgrade: general account code ${code} could not be uniquely matched in the line company; select the account manually.`), next);
+} });
 
 MIGRATIONS.push({ version: 74, name: 'preserve-legacy-analytic-accounting', up: (db) => {
   const companies = db.records?.['res.company'];

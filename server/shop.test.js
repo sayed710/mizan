@@ -100,7 +100,8 @@ test('a selectable pricelist applies, a non-selectable one is ignored; a known e
   const known = checkout(seed(), { email: 'SARA.H@mail.example', street: 'Elsewhere' });
   const order = lastOrder(known.db);
   assert.notEqual(order.partner_id, 3);
-  assert.ok(read(known.db, 'res.partner', order.partner_id).tag_ids.includes('To Merge'));
+  const toMergeCat = search(known.db, 'res.partner.category').find((c) => c.name === 'To Merge');
+  assert.ok(read(known.db, 'res.partner', order.partner_id).tag_ids.includes(toMergeCat.id));
   assert.equal(read(known.db, 'res.partner', 3).street, undefined);
 });
 

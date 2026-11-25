@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diffDb } from '../src/sync.js';
-import { create } from '../src/orm.js';
+import { create, write } from '../src/orm.js';
 import { createCompany } from '../src/models/company.js';
 
 const PASSWORD = 'company-admin-pw';
@@ -138,3 +138,41 @@ test('a rejected change does not keep the company switch that came with it', asy
     await stop();
   }
 });
+
+test('category PATCH responses for company-limited users do not expose hidden company contact IDs in partner_ids', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    const { body: db } = await admin('GET', '/api/db');
+    const branch = createCompany(db, { name: 'Branch Two', currency_id: db.records['res.company'][0].currency_id });
+    const mainPartner = db.records['res.company'][0].partner_id;
+    const branchPartner = branch.db.records['res.company'].find((c) => c.id === branch.id).partner_id;
+    const category = create(branch.db, 'res.partner.category', { name: 'Shared Tag', color: 1 });
+    const taggedMain = write(category.db, 'res.partner', mainPartner, { tag_ids: [category.id] });
+    const taggedBranch = write(taggedMain, 'res.partner', branchPartner, { tag_ids: [category.id] });
+    assert.equal((await admin('POST', '/api/diff', diffDb(db, taggedBranch))).status, 200);
+
+    assert.equal((await admin('POST', '/api/users', { login: 'c1user', name: 'Company 1 User', password: 'c1-password', companies: '1' })).status, 201);
+    const c1User = client(url);
+    await c1User('POST', '/api/login', { login: 'c1user', password: 'c1-password' });
+
+    const { body: { key } } = await c1User('POST', '/api/keys', { name: 'c1key' });
+    const rest = client(url, `Bearer ${key}`);
+
+    const patchRes = await rest('PATCH', `/api/v1/res.partner.category/${category.id}`, { color: 4 });
+    assert.equal(patchRes.status, 200);
+    assert.equal(patchRes.body.color, 4);
+
+    assert.ok(patchRes.body.partner_ids.includes(mainPartner), 'visible partner must be present');
+    assert.ok(!patchRes.body.partner_ids.includes(branchPartner), 'hidden branch contact must not be exposed in partner_ids');
+
+    const getRes = await rest('GET', `/api/v1/res.partner.category/${category.id}`);
+    assert.equal(getRes.status, 200);
+    assert.ok(getRes.body.partner_ids.includes(mainPartner));
+    assert.ok(!getRes.body.partner_ids.includes(branchPartner));
+  } finally {
+    await stop();
+  }
+});
+

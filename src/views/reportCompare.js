@@ -232,9 +232,9 @@ export function executiveColumns(db, periods, { analyticAccountIds, company_id, 
 }
 
 /** Align tax and fiscal report rows by their stable identities across periods. */
-export function detailReportColumns(db, report, periods, { company_id = null, analyticAccountIds, includeUnposted, variant = 'generic' } = {}) {
+export function detailReportColumns(db, report, periods, { company_id = null, analyticAccountIds, includeUnposted, variant = 'generic', taxIds } = {}) {
   const snapshots = periods.map((period) => {
-    const options = { ...period, company_id };
+    const options = { ...period, company_id, ...(taxIds?.length ? { taxIds } : {}) };
     if (report === 'fiscal') {
       const result = fiscalReport(db, { ...options, analyticAccountIds, includeUnposted });
       return [...result.rows.flatMap((row) => [

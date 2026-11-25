@@ -293,8 +293,8 @@ test('TaxReportTable renders generic table when returnRecord has tax_return_temp
     const allText = textOf(host);
     assert.match(allText, /Sales/);
     assert.match(allText, /Purchases/);
-    assert.match(allText, /Output Tax/);
-    assert.match(allText, /Input Tax/);
+    assert.match(allText, /Total Sales/);
+    assert.match(allText, /Total Purchases/);
     assert.match(allText, /Tax Payable/);
     assert.doesNotMatch(allText, /BOX-1/);
 

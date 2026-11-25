@@ -69,6 +69,7 @@ function expenseLineKey(line) {
     Boolean(line.tax_base_signed), Boolean(line.tax_zero), Boolean(line.tax_grid_base), Boolean(line.tax_grid_release),
     line.use_in_tax_closing !== false,
     line.type_tax_use || null, [...(line.tax_tag_ids ?? [])].sort((a, b) => a - b),
+    [...(line.tax_ids ?? [])].sort((a, b) => a - b),
   ]);
 }
 
@@ -221,8 +222,14 @@ function employeeRule(db, before, r, ctx) {
   return null;
 }
 
+const countryWriteRule = (_db, before, after, ctx) => deciding(ctx) && (!before || JSON.stringify(before) !== JSON.stringify(after))
+  ? 'Only administrators can change countries and states'
+  : null;
+
 /** Server-side authorization rules per model: (db, stored, after, { isAdmin, login, name }) => error or null. */
 export const authorityRules = {
+  'res.country': countryWriteRule,
+  'res.country.state': countryWriteRule,
   'hr.leave': leaveAuthorization,
   'hr.leave.allocation': leaveRule,
   'hr.expense.sheet': sheetRule,
@@ -234,6 +241,8 @@ export const authorityRules = {
 
 /** Rules for deleting a stored record: (db, stored, { isAdmin, login, name }) => error or null. */
 export const authorityDeleteRules = {
+  'res.country': (_db, _stored, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
+  'res.country.state': (_db, _stored, ctx) => deciding(ctx) ? 'Only administrators can change countries and states' : null,
   'hr.leave': leaveDeleteRule,
   'hr.leave.allocation': leaveDeleteRule,
   'approval.request': (_db, stored, ctx) => deciding(ctx) && requestStatus(stored) !== 'new' ? 'Submitted or decided approval requests cannot be deleted' : null,

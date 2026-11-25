@@ -31,6 +31,8 @@ test('AST-6 increase creates a linked asset without changing parent value', () =
   assert.equal(children.length, 1);
   assert.equal(children[0].original_value, 200);
   assert.equal(search(sync(db, next), 'account.asset').filter((a) => a.parent_id === id).length, 1);
+  const forgedChild = forged(next, children[0].id, { gross_increase_move_id: null });
+  assert.throws(() => sync(db, forgedChild), /gross increase/i);
   assert.equal(read(next, 'account.asset', id).original_value, 1000);
   assert.ok(models['account.asset'].form.smart.some((s) => s.label === 'Gross Increases' && s.field === 'parent_id'));
 });
@@ -95,6 +97,35 @@ test('activation transfers the remaining value after posted depreciation and syn
   assert.ok(transfer.line_ids.some((l) => l.account_id === target && l.debit === 800));
   assert.ok(transfer.line_ids.some((l) => l.account_id === accountId(db, '151000') && l.credit === 800));
   assert.equal(search(sync(db, next), 'account.asset').filter((a) => a.origin_asset_id === initial.id).length, 1);
+  const forgedTransfer = forged(next, derived.id, { transfer_move_id: null });
+  assert.throws(() => sync(db, forgedTransfer), /invalid asset transfer/i);
+});
+
+test('activation retains analytic allocation on posted child depreciation', () => {
+  const initial = running();
+  const analytic = create(initial.db, 'account.analytic.account', { name: 'Asset project' });
+  const allocated = write(analytic.db, 'account.asset', initial.id, { analytic_distribution: { [analytic.id]: 100 } });
+  const activated = sync(allocated, activateDepreciation(allocated, read(allocated, 'account.asset', initial.id), { date: '2026-02-01', newAccountAssetId: accountId(allocated, '151000') }));
+  const child = search(activated, 'account.asset').find((asset) => asset.origin_asset_id === initial.id);
+  const posted = postDepreciation(activated, child, '2026-12-31');
+  const entry = read(posted, 'account.move', read(posted, 'account.asset', child.id).depreciation_ids.find((line) => line.posted).move_id);
+  assert.deepEqual(entry.line_ids.find((line) => line.account_id === child.account_depreciation_expense_id).analytic_distribution, { [analytic.id]: 100 });
+  const replayed = sync(activated, posted);
+  assert.deepEqual(read(replayed, 'account.move', entry.id).line_ids.find((line) => line.account_id === child.account_depreciation_expense_id).analytic_distribution, { [analytic.id]: 100 });
+});
+
+test('a transferred bill asset cannot be incorrectly adjusted by a refund', () => {
+  let db = seed();
+  const model = create(db, 'account.asset.model', { name: 'Asset model', method: 'linear', method_number: 4, method_period: '12', account_depreciation_id: accountId(db, '152000'), account_depreciation_expense_id: accountId(db, '680000') });
+  const account = create(model.db, 'account.account', { name: 'Bill assets', code: '154444', account_type: 'asset_fixed', asset_model_id: model.id, create_asset: 'validate' });
+  const bill = create(account.db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ line_id: 'asset-line', name: 'Asset', qty: 1, price_unit: 1000, tax: 0, account_id: account.id }] });
+  db = postMove(bill.db, bill.id);
+  const asset = search(db, 'account.asset').find((record) => record.bill_id === bill.id);
+  db = activateDepreciation(db, asset, { date: '2026-02-01', newAccountAssetId: accountId(db, '151000') });
+  const refund = create(db, 'account.move', { move_type: 'in_refund', partner_id: 2, invoice_date: '2026-03-01', reversed_entry_id: bill.id, invoice_line_ids: [{ name: 'Refund', qty: 1, price_unit: 200, tax: 0, account_id: account.id, source_line_id: 'asset-line' }] });
+  assert.throws(() => postMove(refund.db, refund.id), /Cannot refund a transferred asset/);
+  assert.equal(read(refund.db, 'account.asset', asset.id).original_value, 1000);
+  assert.equal(read(refund.db, 'account.move', refund.id).state, 'draft');
 });
 
 test('re-evaluation uses separate gross increase and counterpart accounts', () => {
