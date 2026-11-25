@@ -8,7 +8,7 @@ import { create, read, search, unlink, write, writeMany } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor } from './models/index.js';
 import { postMove } from './models/accounting.js';
-import { reconcileWith, setStatementLinePartner, bankModels } from './models/bank.js';
+import { bookToAccount, reconcileWith, setStatementLinePartner, bankModels } from './models/bank.js';
 import { closeStatement } from './models/bankstatement.js';
 import { autoReconcile, mapStatementPartner } from './models/reconcile.js';
 import { runScheduledJobs } from './models/scheduler.js';
@@ -621,4 +621,243 @@ test('STM2-8: Escaping reconciliation error in runScheduledJobs reports identifi
   });
   assert.ok(reportedJobs.includes('autoReconcile'), `Expected onError to report 'autoReconcile', got: ${reportedJobs}`);
   assert.ok(!reportedJobs.includes('job'), `onError must not fall back to generic 'job' name`);
+});
+
+test('STM2-9: Directly created cash-difference lines cannot bypass booking on open or closed statements (Finding 1 regression)', async () => {
+  let db = seed();
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash' && (j.company_id ?? 1) === 1);
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '450000' && (a.company_id ?? 1) === 1);
+  const lossAccount = search(db, 'account.account').find((a) => a.code === '690000' && (a.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', cashJournal.id, {
+    profit_account_id: profitAccount.id,
+    loss_account_id: lossAccount.id,
+  });
+  const partner = search(db, 'res.partner')[0];
+
+  const cashStmt = create(db, 'account.bank.statement', {
+    name: 'CASH/STM2/F1',
+    journal_id: cashJournal.id,
+    date: '2026-06-10',
+    balance_start: 100,
+    balance_end_real: 220,
+    line_ids: [
+      { date: '2026-06-10', payment_ref: 'Cash Sale', partner_id: partner.id, amount: 100 },
+    ],
+  });
+  db = cashStmt.db;
+  const line1 = search(db, 'account.bank.statement.line').find((l) => l.statement_id === cashStmt.id);
+  const inv = makePostedInvoice(db, { partnerId: partner.id, price: 100, date: '2026-06-10' });
+  db = reconcileWith(inv.db, line1, inv.id);
+
+  // 1. Direct create with exact diff & profit_account_id (with or without forged fields/ctx) is rejected
+  assert.throws(
+    () => create(db, 'account.bank.statement.line', {
+      statement_id: cashStmt.id,
+      journal_id: cashJournal.id,
+      company_id: 1,
+      date: '2026-06-10',
+      payment_ref: 'Direct Unbooked Diff',
+      amount: 20,
+      counterpart_account_id: profitAccount.id,
+      state: 'to_check',
+    }),
+    /Cannot add lines to a statement with reconciled lines/
+  );
+  assert.throws(
+    () => create(db, 'account.bank.statement.line', {
+      statement_id: cashStmt.id,
+      journal_id: cashJournal.id,
+      company_id: 1,
+      date: '2026-06-10',
+      payment_ref: 'Forged Provenance',
+      amount: 20,
+      counterpart_account_id: profitAccount.id,
+      state: 'to_check',
+      is_cash_difference: true,
+    }, { cashDifferenceClose: true }),
+    /Cannot add lines to a statement with reconciled lines/
+  );
+
+  // 2. Sync diff trying to insert an unbooked line on open or closing statement is rejected
+  const rawStmt = db.records['account.bank.statement'].find((s) => s.id === cashStmt.id);
+  const forgedLineId = (db.seq['account.bank.statement.line'] ?? 0) + 1;
+  const forgedOpenDiff = {
+    upserts: {
+      'account.bank.statement.line': [{
+        id: forgedLineId,
+        statement_id: cashStmt.id,
+        journal_id: cashJournal.id,
+        company_id: 1,
+        date: '2026-06-10',
+        payment_ref: 'Bypass Diff',
+        amount: 20,
+        counterpart_account_id: profitAccount.id,
+        state: 'to_check',
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(db, forgedOpenDiff, { author: 'Clerk', isAdmin: false }), /Cannot add lines to a statement with reconciled lines/);
+
+  const forgedUnbookedCloseDiff = {
+    upserts: {
+      'account.bank.statement': [{ ...rawStmt, state: 'closed' }],
+      'account.bank.statement.line': [{
+        id: forgedLineId,
+        statement_id: cashStmt.id,
+        journal_id: cashJournal.id,
+        company_id: 1,
+        date: '2026-06-10',
+        payment_ref: 'Unbooked Close Diff',
+        amount: 20,
+        counterpart_account_id: profitAccount.id,
+        state: 'to_check',
+        is_cash_difference: true,
+      }],
+    },
+  };
+  assert.throws(() => applyDiff(db, forgedUnbookedCloseDiff, { author: 'Clerk', isAdmin: false }), /Cash difference provenance can only be set when closing a cash statement/);
+
+  // 3. Forging is_cash_difference on an ordinary unlocked statement or mutating an existing line is rejected
+  const unlockedStmt = create(db, 'account.bank.statement', {
+    name: 'CASH/STM2/UNLOCKED',
+    journal_id: cashJournal.id,
+    date: '2026-06-11',
+    balance_start: 0,
+    balance_end_real: 20,
+  });
+  assert.throws(
+    () => create(unlockedStmt.db, 'account.bank.statement.line', {
+      statement_id: unlockedStmt.id,
+      journal_id: cashJournal.id,
+      company_id: 1,
+      date: '2026-06-11',
+      payment_ref: 'Forged on unlocked',
+      amount: 20,
+      counterpart_account_id: profitAccount.id,
+      is_cash_difference: true,
+    }),
+    /Cash difference provenance can only be set when closing a cash statement/
+  );
+  assert.throws(
+    () => write(db, 'account.bank.statement.line', line1.id, { is_cash_difference: true }),
+    /Cash difference provenance cannot be changed/
+  );
+
+  // 4. Legitimate closeStatement creates, books, and marks the difference line, and replays cleanly via applyDiff
+  const closedDb = closeStatement(db, cashStmt.id);
+  const syncedClosedDb = applyDiff(db, diffDb(db, closedDb), { author: 'Clerk', isAdmin: false });
+  assert.equal(read(syncedClosedDb, 'account.bank.statement', cashStmt.id).state, 'closed');
+  const diffLine = search(syncedClosedDb, 'account.bank.statement.line').find((l) => l.statement_id === cashStmt.id && l.id !== line1.id);
+  assert.ok(diffLine);
+  assert.equal(diffLine.amount, 20);
+  assert.equal(diffLine.is_cash_difference, true);
+  assert.equal(diffLine.state, 'reconciled');
+  assert.ok(diffLine.bank_move_id);
+
+  // 5. Already-closed statement with manual balance_end_real mismatch rejects direct line creation even with profit account
+  const emptyClosed = create(db, 'account.bank.statement', {
+    name: 'CASH/STM2/ALREADYCLOSED',
+    journal_id: cashJournal.id,
+    date: '2026-06-12',
+    balance_start: 0,
+    balance_end_real: 50,
+  });
+  const closedDirect = write(emptyClosed.db, 'account.bank.statement', emptyClosed.id, { state: 'closed' });
+  assert.throws(
+    () => create(closedDirect, 'account.bank.statement.line', {
+      statement_id: emptyClosed.id,
+      journal_id: cashJournal.id,
+      company_id: 1,
+      date: '2026-06-12',
+      payment_ref: 'Sneak on closed',
+      amount: 50,
+      counterpart_account_id: profitAccount.id,
+    }),
+    /Cannot add lines to a closed statement/
+  );
+});
+
+test('STM2-10: Cash statements with ordinary lines on profit/loss accounts close cleanly, while duplicate closing adjustments are blocked (Finding 2 regression)', async () => {
+  let db = seed();
+  const cashJournal = search(db, 'account.journal').find((j) => j.type === 'cash' && (j.company_id ?? 1) === 1);
+  const profitAccount = search(db, 'account.account').find((a) => a.code === '450000' && (a.company_id ?? 1) === 1);
+  const lossAccount = search(db, 'account.account').find((a) => a.code === '690000' && (a.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', cashJournal.id, {
+    profit_account_id: profitAccount.id,
+    loss_account_id: lossAccount.id,
+  });
+
+  // Statement with an ordinary cash transaction booked directly to loss_account_id (and another to profit_account_id)
+  const cashStmt = create(db, 'account.bank.statement', {
+    name: 'CASH/STM2/F2',
+    journal_id: cashJournal.id,
+    date: '2026-06-15',
+    balance_start: 100,
+    balance_end_real: 115, // 100 - 30 + 50 = 120 computed -> -5 shortage
+    line_ids: [
+      { date: '2026-06-15', payment_ref: 'Ordinary Expense on Loss Acct', amount: -30 },
+      { date: '2026-06-15', payment_ref: 'Ordinary Income on Profit Acct', amount: 50 },
+    ],
+  });
+  db = cashStmt.db;
+  const lines = search(db, 'account.bank.statement.line').filter((l) => l.statement_id === cashStmt.id);
+  const expLine = lines.find((l) => l.amount === -30);
+  const incLine = lines.find((l) => l.amount === 50);
+
+  db = write(db, 'account.bank.statement.line', expLine.id, { counterpart_account_id: lossAccount.id });
+  db = bookToAccount(db, read(db, 'account.bank.statement.line', expLine.id)).db;
+  db = write(db, 'account.bank.statement.line', incLine.id, { counterpart_account_id: profitAccount.id });
+  db = bookToAccount(db, read(db, 'account.bank.statement.line', incLine.id)).db;
+
+  assert.equal(read(db, 'account.bank.statement.line', expLine.id).state, 'reconciled');
+  assert.equal(read(db, 'account.bank.statement.line', incLine.id).state, 'reconciled');
+  assert.ok(!read(db, 'account.bank.statement.line', expLine.id).is_cash_difference);
+  assert.ok(!read(db, 'account.bank.statement.line', incLine.id).is_cash_difference);
+
+  // Closing must succeed and create + book the -5 shortage difference line
+  const closedDb = closeStatement(db, cashStmt.id);
+  const syncedDb = applyDiff(db, diffDb(db, closedDb), { author: 'Clerk', isAdmin: false });
+  assert.equal(read(syncedDb, 'account.bank.statement', cashStmt.id).state, 'closed');
+  const stmtLines = search(syncedDb, 'account.bank.statement.line').filter((l) => l.statement_id === cashStmt.id);
+  assert.equal(stmtLines.length, 3);
+  const diffLine = stmtLines.find((l) => l.id !== expLine.id && l.id !== incLine.id);
+  assert.ok(diffLine, 'Cash difference line must be created even when ordinary lines use profit/loss accounts');
+  assert.equal(diffLine.amount, -5);
+  assert.equal(diffLine.counterpart_account_id, lossAccount.id);
+  assert.equal(diffLine.is_cash_difference, true);
+  assert.equal(diffLine.state, 'reconciled');
+  assert.ok(diffLine.bank_move_id);
+
+  // Duplicate closing-generated cash-difference line on an open statement must still be rejected
+  const dupStmt = create(db, 'account.bank.statement', {
+    name: 'CASH/STM2/DUP',
+    journal_id: cashJournal.id,
+    date: '2026-06-16',
+    balance_start: 0,
+    balance_end_real: 40,
+  });
+  let dupDb = dupStmt.db;
+  const existingDiffLine = create(dupDb, 'account.bank.statement.line', {
+    statement_id: dupStmt.id,
+    journal_id: cashJournal.id,
+    company_id: 1,
+    date: '2026-06-16',
+    payment_ref: 'Prior Diff',
+    amount: 10,
+    counterpart_account_id: profitAccount.id,
+    state: 'to_check',
+  });
+  dupDb = existingDiffLine.db;
+  dupDb = bookToAccount(dupDb, read(dupDb, 'account.bank.statement.line', existingDiffLine.id)).db;
+  // Simulate pre-existing closing-generated provenance on that line
+  dupDb = {
+    ...dupDb,
+    records: {
+      ...dupDb.records,
+      'account.bank.statement.line': dupDb.records['account.bank.statement.line'].map((l) => (
+        l.id === existingDiffLine.id ? { ...l, is_cash_difference: true } : l
+      )),
+    },
+  };
+  assert.throws(() => closeStatement(dupDb, dupStmt.id), /Cannot add lines to a statement with reconciled lines/);
 });

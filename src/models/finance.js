@@ -2511,7 +2511,8 @@ export const financeModels = {
     },
     defaults: () => ({ sequence: 10, journal_ids: [] }),
     createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
-    guard: (db, before, record) => (record.journal_ids ?? []).some((id) => {
+    guard: (db, before, record) => ((!before || record.name !== before.name) && (db.records['account.journal.group'] ?? []).some((group) => group.id !== record.id && group.name === record.name))
+      ? 'A Ledger group name must be unique.' : (record.journal_ids ?? []).some((id) => {
       const journal = read(db, 'account.journal', id);
       return !journal || (journal.company_id && journal.company_id !== record.company_id);
     }) ? 'Select journals belonging to this company or shared journals' : null,

@@ -1,11 +1,11 @@
 // Bank statements (account.bank.statement) tracking opening, ending, and computed balances across statement lines.
 import { create, read, search, unlink, write } from '../orm.js';
-import { isLiquidityJournal } from './ledger.js';
+import { isLiquidityJournal, paymentJournal, statementCompanyAmount } from './ledger.js';
 import { bookToAccount } from './bank.js';
 import { today } from './common.js';
 import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
-import { findCompanyCurrencyRecord, formatCurrency, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency, roundCurrency } from '../money.js';
 
 const statementLinesCache = new WeakMap();
 
@@ -307,6 +307,96 @@ function statementProtectDelete(db, statement, staged = db) {
   return null;
 }
 
+const CASH_DIFFERENCE_CONTEXT = Symbol('cashDifferenceClose');
+const SYNC_CASH_DIFFERENCE_CONTEXT = Symbol('syncCashDifferenceClose');
+
+/** Whether `ctx` comes from an internal `closeStatement` call or a verified server sync close. */
+export function isCashDifferenceCloseContext(ctx, lineId = null) {
+  return Boolean(ctx && (ctx[CASH_DIFFERENCE_CONTEXT] === true || (lineId != null && ctx[SYNC_CASH_DIFFERENCE_CONTEXT]?.has(lineId))));
+}
+
+/**
+ * Validate that `line` is a valid closing-generated cash difference line for `statement`
+ * without mistaking ordinary lines using the profit/loss accounts for an existing adjustment.
+ */
+export function validateCashDifferenceLine(db, statement, line) {
+  if (!db || !statement || !line || line.statement_id !== statement.id) return { ok: false };
+  if (!line.counterpart_account_id || !line.amount) return { ok: false };
+  const journal = read(db, 'account.journal', line.journal_id);
+  if (journal?.type !== 'cash' || statement.journal_id !== journal.id) return { ok: false };
+  const expectedAccount = line.amount > 0 ? journal.profit_account_id : journal.loss_account_id;
+  if (!expectedAccount || line.counterpart_account_id !== expectedAccount) return { ok: false };
+  const otherLines = (db.records?.['account.bank.statement.line'] ?? []).filter(
+    (l) => l.statement_id === statement.id && l.id !== line.id && l.active !== false,
+  );
+  if (otherLines.some((l) => l.is_cash_difference === true)) return { ok: false };
+  const otherSum = otherLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
+  const expectedDiff = roundStatementAmount(
+    db,
+    statement,
+    Number(statement.balance_end_real || 0) - (Number(statement.balance_start || 0) + otherSum),
+  );
+  if (expectedDiff === 0 || roundStatementAmount(db, statement, line.amount) !== expectedDiff) {
+    return { ok: false };
+  }
+  return { ok: true, journal, expectedAccount };
+}
+
+/**
+ * Verify cash difference lines submitted in a sync diff: must be newly created with `is_cash_difference`,
+ * transition the cash statement to `closed`, match the exact count difference with no prior cash-difference
+ * adjustment, and be booked and reconciled to a newly posted move on the configured profit/loss account.
+ */
+export function authorizeSyncCashDifferenceLines(seen, original, changed, requestedIds) {
+  const verifiedIds = new Set();
+  const seenStatements = new Map();
+  const origLines = new Set((original.records?.['account.bank.statement.line'] ?? []).map((l) => l.id));
+  const origMoves = new Set((original.records?.['account.move'] ?? []).map((m) => m.id));
+  const origStatements = new Map((original.records?.['account.bank.statement'] ?? []).map((s) => [s.id, s]));
+
+  for (const [model, line] of changed) {
+    if (model !== 'account.bank.statement.line' || !requestedIds.has(line.id) || origLines.has(line.id)) continue;
+    const afterStmt = line.statement_id ? read(seen, 'account.bank.statement', line.statement_id) : null;
+    const beforeStmt = line.statement_id ? origStatements.get(line.statement_id) ?? null : null;
+    if (!afterStmt || afterStmt.state !== 'closed' || beforeStmt?.state === 'closed') continue;
+    if (seenStatements.has(afterStmt.id)) {
+      verifiedIds.delete(seenStatements.get(afterStmt.id));
+      continue;
+    }
+    const valid = validateCashDifferenceLine(seen, afterStmt, line);
+    if (!valid.ok) continue;
+    if (line.state !== 'reconciled' || line.open_amount !== 0 || !line.move_id || line.move_id !== line.bank_move_id) continue;
+    if (origMoves.has(line.bank_move_id)) continue;
+    const bankMove = read(seen, 'account.move', line.bank_move_id);
+    const company = line.company_id ?? 1;
+    if (!bankMove || bankMove.state !== 'posted' || bankMove.journal_id !== valid.journal.id || (bankMove.company_id ?? 1) !== company) continue;
+    const round = (n) => roundCurrency(n, companyCurrencyRecord(seen, company));
+    const expectedCompanyAmount = statementCompanyAmount(seen, line);
+    const via = paymentJournal(seen, valid.journal.id, company);
+    if (!via?.accountId || via.accountId === valid.expectedAccount) continue;
+    const moveLines = bankMove.line_ids ?? [];
+    const liqLines = moveLines.filter((ml) => ml.account_id === via.accountId);
+    const cpLines = moveLines.filter((ml) => ml.account_id === valid.expectedAccount);
+    if (moveLines.length !== 2 || liqLines.length !== 1 || cpLines.length !== 1) continue;
+    const incoming = line.amount > 0;
+    if (
+      round(incoming ? liqLines[0].debit : liqLines[0].credit) !== expectedCompanyAmount
+      || round(incoming ? liqLines[0].credit : liqLines[0].debit) !== 0
+      || round(incoming ? cpLines[0].credit : cpLines[0].debit) !== expectedCompanyAmount
+      || round(incoming ? cpLines[0].debit : cpLines[0].credit) !== 0
+    ) continue;
+    if (
+      !Array.isArray(line.allocations)
+      || line.allocations.length !== 1
+      || line.allocations[0].payment_move_id !== bankMove.id
+      || round(line.allocations[0].amount) !== expectedCompanyAmount
+    ) continue;
+    seenStatements.set(afterStmt.id, line.id);
+    verifiedIds.add(line.id);
+  }
+  return { verifiedIds, ctx: { [SYNC_CASH_DIFFERENCE_CONTEXT]: verifiedIds } };
+}
+
 /**
  * Close a cash or bank statement. On cash statements with a difference between ending balance and
  * computed ending balance, posts the difference to the cash journal's profit_account_id (surplus)
@@ -344,7 +434,8 @@ export function closeStatement(db, statementId) {
       statement_id: statement.id,
       counterpart_account_id: accountId,
       state: 'to_check',
-    });
+      is_cash_difference: true,
+    }, { [CASH_DIFFERENCE_CONTEXT]: true });
     currentDb = lineRes.db;
     const createdLine = read(currentDb, 'account.bank.statement.line', lineRes.id);
     const booked = bookToAccount(currentDb, createdLine, {

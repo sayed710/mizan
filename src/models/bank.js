@@ -7,7 +7,7 @@ import { rateAt, toCompany } from './currency.js';
 import { markAsReviewed, payMove, settleWriteoff } from './accounting.js';
 import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
-import { roundStatementAmount, statementHasReconciledLines, statementLineOrder } from './bankstatement.js';
+import { isCashDifferenceCloseContext, statementHasReconciledLines, statementLineOrder, validateCashDifferenceLine } from './bankstatement.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
@@ -848,27 +848,10 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
 /**
  * Validate a cash difference line created when closing a cash statement with an ending count gap.
  */
-function isAuthorizedCashDifferenceLine(db, statement, before, after) {
+function isAuthorizedCashDifferenceLine(db, statement, before, after, ctx = null) {
   if (before) return false;
-  if (!after.counterpart_account_id || !after.amount) return false;
-  const journal = read(db, 'account.journal', after.journal_id);
-  if (journal?.type !== 'cash') return false;
-  const expectedAccount = after.amount > 0 ? journal.profit_account_id : journal.loss_account_id;
-  if (!expectedAccount || after.counterpart_account_id !== expectedAccount) return false;
-  const otherLines = search(db, 'account.bank.statement.line').filter(
-    (l) => l.statement_id === statement.id && l.id !== after.id && l.active !== false
-  );
-  const hasExistingDiff = otherLines.some(
-    (l) => l.counterpart_account_id === journal.profit_account_id || l.counterpart_account_id === journal.loss_account_id
-  );
-  if (hasExistingDiff) return false;
-  const otherSum = otherLines.reduce((acc, l) => acc + (Number(l.amount) || 0), 0);
-  const expectedDiff = roundStatementAmount(
-    db,
-    statement,
-    Number(statement.balance_end_real || 0) - (Number(statement.balance_start || 0) + otherSum)
-  );
-  return expectedDiff !== 0 && roundStatementAmount(db, statement, after.amount) === expectedDiff;
+  if (!isCashDifferenceCloseContext(ctx, after.id)) return false;
+  return validateCashDifferenceLine(db, statement, after).ok;
 }
 
 /**
@@ -939,6 +922,9 @@ function partnerIdentifiedByReconciliation(db, before, after) {
 function lineGuard(db, before, after, ctx = null) {
   const clearingBooking = before?.bank_move_id && (!after.bank_move_id || after.open_amount == null || (after.allocations ?? []).length < (before.allocations ?? []).length);
   if (before && after.state === 'to_check' && !after.move_id && (before.state === 'reconciled' || clearingBooking)) return unreconcileError(db, before, after, ctx);
+  if (before && Boolean(before.is_cash_difference) !== Boolean(after.is_cash_difference)) {
+    return 'Cash difference provenance cannot be changed';
+  }
 
   if (before?.statement_id) {
     const prevStmt = read(db, 'account.bank.statement', before.statement_id);
@@ -960,7 +946,7 @@ function lineGuard(db, before, after, ctx = null) {
     if (statement.journal_id !== after.journal_id || (statement.company_id ?? 1) !== comp) {
       return 'Statement lines must belong to the statement journal and company';
     }
-    const isCashDiff = isAuthorizedCashDifferenceLine(db, statement, before, after);
+    const isCashDiff = isAuthorizedCashDifferenceLine(db, statement, before, after, ctx);
     if ((!before || before.statement_id !== after.statement_id) && statement.state !== 'closed' && statementHasReconciledLines(db, after.statement_id)) {
       if (!isCashDiff) {
         return before
@@ -973,6 +959,11 @@ function lineGuard(db, before, after, ctx = null) {
         return 'Cannot add lines to a closed statement';
       }
     }
+    if (!before && after.is_cash_difference && !isCashDiff) {
+      return 'Cash difference provenance can only be set when closing a cash statement';
+    }
+  } else if (!before && after.is_cash_difference) {
+    return 'Cash difference provenance can only be set when closing a cash statement';
   }
 
   if (before?.state === 'reconciled') {
@@ -1198,6 +1189,7 @@ export const bankModels = {
       } },
       unique_import_id: { type: 'char', label: 'Import ID', readonly: true },
       counterpart_account_id: { type: 'many2one', relation: 'account.account', label: 'Book to Account', domain: (account, record) => eligibleCounterpart(account, record?.company_id ?? 1) },
+      is_cash_difference: { type: 'boolean', label: 'Cash Difference', readonly: true, hidden: true },
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
     defaults: () => ({ sequence: 10, date: today(), state: 'to_check' }),
