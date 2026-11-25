@@ -70,6 +70,25 @@ function validMoveHash(move, previous) {
 
 const SEQUENCE_REGEX = /^(.*\D)(\d+)$/;
 
+function moveSequencePrefix(move, journal) {
+  const match = SEQUENCE_REGEX.exec(move?.name ?? '');
+  if (match) return match[1];
+  return journal?.invoice_sequence_prefix || journal?.code || journal?.name || '';
+}
+
+function moveJournalId(db, move) {
+  return move?.journal_id ?? resolveDocumentJournal(db, move)?.id ?? null;
+}
+
+function isSequenceConflictDraft(db, move, company, lastSecuredNameByJournal) {
+  if ((move.company_id ?? 1) !== company || move.state !== 'draft') return false;
+  if (!move.name || move.name === '/') return false;
+  const lastSecuredName = lastSecuredNameByJournal.get(moveJournalId(db, move));
+  return lastSecuredName != null && (move.name ?? '').localeCompare(lastSecuredName) <= 0;
+}
+
+const WARNING_ORDER = { danger: 0, warning: 1, info: 2 };
+
 /** Finds sequence gaps in a list of moves sorted by sequence. */
 export function findSequenceGaps(moves) {
   const gaps = [];
@@ -92,61 +111,258 @@ export function findSequenceGaps(moves) {
 /**
  * Analyses journal chains to report:
  * - unhashed posted moves to be secured
+ * - unreconciled bank statement lines blocking their journal prefixes
  * - draft moves dated before/on hashDate that cannot be hashed
  * - gaps in sequences
  * - max date
+ * - actionable warnings with Odoo 20 levels and action targets
  */
 export function analyzeJournalChains(db, { companyId = null, hashDate = null } = {}) {
   const company = companyId ?? currentCompany(db);
+  const companyRec = read(db, 'res.company', company);
   const allJournals = search(db, 'account.journal', { includeArchived: true });
+  const journalById = new Map(allJournals.map((j) => [j.id, j]));
   const restrictedJournals = allJournals.filter((j) => Boolean(j.restrict_mode_hash_table));
   const restrictedIds = new Set(restrictedJournals.map((j) => j.id));
 
   const allMoves = (db.records['account.move'] ?? []).filter((m) => {
     if ((m.company_id ?? 1) !== company) return false;
-
-
     const jId = resolveDocumentJournal(db, m)?.id ?? null;
     return restrictedIds.has(jId);
   });
 
-
-  // Find max date among posted moves in restricted journals
   const postedDates = allMoves.filter((m) => m.state === 'posted').map((m) => m.invoice_date ?? m.date).filter(Boolean);
   const maxDate = postedDates.length ? postedDates.sort().at(-1) : today();
   const targetDate = hashDate || maxDate;
 
-  const targetMoves = allMoves.filter((m) => (m.invoice_date ?? m.date ?? '') <= targetDate);
-  const unhashedPostedMoves = targetMoves.filter((m) => m.state === 'posted' && !m.inalterable_hash);
+  const companyUnhashedPosted = allMoves.filter(
+    (m) => m.state === 'posted' && !m.inalterable_hash && (m.invoice_date ?? m.date ?? '') <= targetDate,
+  );
+  const companyUnhashedMoveMap = new Map(companyUnhashedPosted.map((m) => [m.id, m]));
 
-  const unhashedDates = unhashedPostedMoves.map((m) => m.invoice_date ?? m.date ?? '').filter(Boolean);
-  const proposedLockDate = unhashedDates.length ? unhashedDates.sort().at(-1) : '';
-
-  const draftMoves = (db.records['account.move'] ?? []).filter((m) => {
-    if ((m.company_id ?? 1) !== company || m.state !== 'draft') return false;
-    const date = m.invoice_date ?? m.date ?? '';
-    if (proposedLockDate && date <= proposedLockDate) return true;
-    const jId = resolveDocumentJournal(db, m)?.id ?? null;
-    return restrictedIds.has(jId) && date <= targetDate;
+  const unreconciledLines = (db.records['account.bank.statement.line'] ?? []).filter((l) => {
+    if ((l.company_id ?? 1) !== company) return false;
+    if (l.state === 'reconciled' || l.is_reconciled === true) return false;
+    if (l.bank_move_id && companyUnhashedMoveMap.has(l.bank_move_id)) return true;
+    return (l.date ?? '') <= targetDate && restrictedIds.has(l.journal_id);
   });
 
+  const ignoredChainKeys = new Set();
+  const ignoredJournalIds = new Set();
+  const ignoredPrefixList = [];
+  for (const line of unreconciledLines) {
+    const linkedMove = line.bank_move_id ? (companyUnhashedMoveMap.get(line.bank_move_id) ?? read(db, 'account.move', line.bank_move_id)) : null;
+    if (linkedMove) {
+      const jId = linkedMove.journal_id ?? resolveDocumentJournal(db, linkedMove)?.id ?? line.journal_id;
+      const prefix = moveSequencePrefix(linkedMove, journalById.get(jId));
+      ignoredChainKeys.add(`${jId}:${prefix}`);
+      if (prefix) ignoredPrefixList.push(prefix);
+    } else if (line.journal_id) {
+      ignoredJournalIds.add(line.journal_id);
+      const journal = journalById.get(line.journal_id);
+      const prefix = journal?.invoice_sequence_prefix || journal?.code || journal?.name || '';
+      if (prefix) ignoredPrefixList.push(prefix);
+    }
+  }
+  const ignoredPrefixes = [...new Set(ignoredPrefixList)];
+
   const chainsWithGaps = [];
+  const gapMoveIds = [];
+  const notHashablePostedIds = [];
+  const unhashedPostedMoves = [];
+  const lastNewlySecuredByJournal = new Map();
+  const deferredByUnreconciledPrefixes = [];
+  const deferredByLaterEntryPrefixes = [];
+
   for (const journal of restrictedJournals) {
-    const jMoves = allMoves.filter((m) => m.journal_id === journal.id && (m.invoice_date ?? m.date ?? '') <= targetDate)
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-    const gaps = findSequenceGaps(jMoves);
-    if (gaps.length) {
-      chainsWithGaps.push(`${journal.code || journal.name}: ${gaps.map((g) => `${g.prefix}${g.from}..${g.to}`).join(', ')}`);
+    if (ignoredJournalIds.has(journal.id)) continue;
+    const journalMoves = allMoves
+      .filter((m) => (m.journal_id ?? resolveDocumentJournal(db, m)?.id) === journal.id)
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
+    const journalPosted = journalMoves.filter((m) => m.state === 'posted');
+    const journalLastHashed = journalPosted.filter((m) => Boolean(m.inalterable_hash)).at(-1);
+
+    const byPrefix = new Map();
+    for (const m of journalMoves) {
+      const prefix = moveSequencePrefix(m, journal);
+      if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+      byPrefix.get(prefix).push(m);
+    }
+    const prefixCandidates = [];
+    for (const [prefix, allChainMoves] of byPrefix.entries()) {
+      if (ignoredChainKeys.has(`${journal.id}:${prefix}`)) continue;
+      const postedChain = allChainMoves.filter((m) => m.state === 'posted');
+      const lastHashed = journalLastHashed ?? postedChain.filter((m) => Boolean(m.inalterable_hash)).at(-1);
+      const localNotHashable = new Set();
+      if (lastHashed) {
+        for (const m of postedChain) {
+          if (!m.inalterable_hash
+            && (m.invoice_date ?? m.date ?? '') <= targetDate
+            && (m.name ?? '').localeCompare(lastHashed.name ?? '') < 0
+            && (m.invoice_date ?? m.date ?? '') > (companyRec?.hard_lock_date ?? '')) {
+            notHashablePostedIds.push(m.id);
+            localNotHashable.add(m.id);
+          }
+        }
+      }
+      const inDateUnhashed = postedChain.filter(
+        (m) => !m.inalterable_hash && !localNotHashable.has(m.id) && (m.invoice_date ?? m.date ?? '') <= targetDate,
+      );
+      const lastInDate = inDateUnhashed.at(-1);
+      const chainMovesToHash = lastInDate
+        ? postedChain.filter(
+          (m) => !m.inalterable_hash
+            && !localNotHashable.has(m.id)
+            && (m.name ?? '').localeCompare(lastInDate.name ?? '') <= 0
+            && (!lastHashed || (m.name ?? '').localeCompare(lastHashed.name ?? '') > 0),
+        )
+        : [];
+      prefixCandidates.push({ prefix, allChainMoves, chainMovesToHash });
+    }
+    const candidateIds = new Set(prefixCandidates.flatMap((c) => c.chainMovesToHash.map((m) => m.id)));
+    const firstBlocker = journalPosted.find(
+      (m) => !m.inalterable_hash
+        && (!journalLastHashed || (m.name ?? '').localeCompare(journalLastHashed.name ?? '') > 0)
+        && !candidateIds.has(m.id),
+    );
+    const blockerPrefix = firstBlocker ? moveSequencePrefix(firstBlocker, journal) : '';
+    const blockedByUnreconciled = Boolean(firstBlocker && ignoredChainKeys.has(`${journal.id}:${blockerPrefix}`));
+
+    let lastNewlySecuredName = null;
+    for (const { prefix, allChainMoves, chainMovesToHash } of prefixCandidates) {
+      const kept = firstBlocker
+        ? chainMovesToHash.filter((m) => (m.name ?? '').localeCompare(firstBlocker.name ?? '') < 0)
+        : chainMovesToHash;
+      if (kept.length < chainMovesToHash.length && prefix) {
+        (blockedByUnreconciled ? deferredByUnreconciledPrefixes : deferredByLaterEntryPrefixes).push(prefix);
+      }
+      if (!kept.length) continue;
+      for (const m of kept) {
+        unhashedPostedMoves.push(m);
+        const moveName = m.name ?? '';
+        if (lastNewlySecuredName === null || moveName.localeCompare(lastNewlySecuredName) > 0) {
+          lastNewlySecuredName = moveName;
+        }
+      }
+      const keptSet = new Set(kept.map((m) => m.id));
+      const gapScope = allChainMoves.filter(
+        (m) => (m.invoice_date ?? m.date ?? '') <= targetDate || keptSet.has(m.id),
+      );
+      const gaps = findSequenceGaps(gapScope);
+      if (gaps.length) {
+        chainsWithGaps.push(`${journal.code || journal.name}: ${gaps.map((g) => `${g.prefix}${g.from}..${g.to}`).join(', ')}`);
+        for (const m of gapScope) gapMoveIds.push(m.id);
+      }
+    }
+    if (lastNewlySecuredName !== null) {
+      lastNewlySecuredByJournal.set(journal.id, lastNewlySecuredName);
     }
   }
 
+  const unhashedDates = unhashedPostedMoves.map((m) => m.invoice_date ?? m.date ?? '').filter(Boolean);
+  const rawLockDate = unhashedDates.length ? unhashedDates.sort().at(-1) : '';
+  const proposedLockDate = rawLockDate && rawLockDate > targetDate ? targetDate : rawLockDate;
+
+  const dateDraftMoves = [];
+  const sequenceConflictDraftMoves = [];
+  for (const m of db.records['account.move'] ?? []) {
+    if ((m.company_id ?? 1) !== company || m.state !== 'draft') continue;
+    const date = m.invoice_date ?? m.date ?? '';
+    const jId = moveJournalId(db, m);
+    if ((proposedLockDate && date <= proposedLockDate) || (restrictedIds.has(jId) && date <= targetDate)) {
+      dateDraftMoves.push(m);
+    } else if (isSequenceConflictDraft(db, m, company, lastNewlySecuredByJournal)) {
+      sequenceConflictDraftMoves.push(m);
+    }
+  }
+  const draftMoves = [...dateDraftMoves, ...sequenceConflictDraftMoves];
+
+  const afterSelectedDateMoves = unhashedPostedMoves.filter((m) => (m.invoice_date ?? m.date ?? '') > targetDate);
+
   const warnings = [];
+  const warningItems = [];
+  const deferredUnreconciled = [...new Set(deferredByUnreconciledPrefixes)];
+  const deferredLater = [...new Set(deferredByLaterEntryPrefixes)];
+
+  if (unreconciledLines.length) {
+    const baseMsg = t(
+      'There are still unreconciled bank transactions before the selected date. The entries from journal prefixes containing them will not be secured: {prefixes}',
+      { prefixes: ignoredPrefixes.join(', ') },
+    );
+    const msg = deferredUnreconciled.length
+      ? `${baseMsg} ${t('Later prefixes in the same journal are also deferred until those earlier entries are reconciled: {prefixes}', { prefixes: deferredUnreconciled.join(', ') })}`
+      : baseMsg;
+    warnings.push(msg);
+    warningItems.push({
+      key: 'account_unreconciled_bank_statement_line_ids',
+      level: 'danger',
+      message: msg,
+      action_text: 'Review Statements',
+      go: `#/accounting/bank?view=list&rel=id:${unreconciledLines.map((l) => l.id).join(',')}`,
+    });
+  }
+  if (deferredLater.length) {
+    const msg = t(
+      'Later prefixes cannot be secured while earlier prefixes still have unsecured entries after the selected date: {prefixes}',
+      { prefixes: deferredLater.join(', ') },
+    );
+    warnings.push(msg);
+    warningItems.push({
+      key: 'account_deferred_prefixes',
+      level: 'warning',
+      message: msg,
+    });
+  }
   if (draftMoves.length) {
-    warnings.push(t('{count} draft entries found before or on {date}. Draft entries cannot be hashed.', { count: draftMoves.length, date: targetDate }));
+    if (dateDraftMoves.length) {
+      warnings.push(t('{count} draft entries found before or on {date}. Draft entries cannot be hashed.', { count: dateDraftMoves.length, date: targetDate }));
+    }
+    if (sequenceConflictDraftMoves.length) {
+      warnings.push(t('{count} numbered draft entries precede entries to be secured. Post or cancel them before securing.', { count: sequenceConflictDraftMoves.length }));
+    }
+    const draftMsg = dateDraftMoves.length && sequenceConflictDraftMoves.length
+      ? t('There are still draft entries before the selected date and numbered draft entries in the sequence being secured.')
+      : sequenceConflictDraftMoves.length
+        ? t('There are numbered draft entries in the sequence being secured. Post or cancel them before securing.')
+        : t('There are still draft entries before the selected date.');
+    warningItems.push({
+      key: 'account_unhashed_draft_entries',
+      level: 'warning',
+      message: draftMsg,
+      action_text: 'Review Entries',
+      go: `#/accounting/entries?view=list&rel=id:${draftMoves.map((m) => m.id).join(',')}`,
+    });
+  }
+  if (notHashablePostedIds.length) {
+    warningItems.push({
+      key: 'account_not_hashable_unlocked_moves',
+      level: 'warning',
+      message: t('There are entries that cannot be hashed. They can be protected by the Hard Lock Date.'),
+      action_text: 'Review Entries',
+      go: `#/accounting/entries?view=list&rel=id:${notHashablePostedIds.join(',')}`,
+    });
   }
   if (chainsWithGaps.length) {
     warnings.push(t('Sequence gaps detected: {gaps}.', { gaps: chainsWithGaps.join('; ') }));
+    warningItems.push({
+      key: 'account_sequence_gap',
+      level: 'warning',
+      message: t('Securing these entries will create at least one gap in the sequence.'),
+      action_text: 'Review Entries',
+      go: `#/accounting/entries?view=list&rel=id:${gapMoveIds.join(',')}`,
+    });
   }
+  if (afterSelectedDateMoves.length) {
+    warningItems.push({
+      key: 'account_move_to_secure_after_selected_date',
+      level: 'warning',
+      message: t('Securing these entries will also secure entries after the selected date.'),
+      action_text: 'Review Entries',
+      go: `#/accounting/entries?view=list&rel=id:${afterSelectedDateMoves.map((m) => m.id).join(',')}`,
+    });
+  }
+
+  warningItems.sort((a, b) => (WARNING_ORDER[a.level ?? 'warning'] ?? 1) - (WARNING_ORDER[b.level ?? 'warning'] ?? 1));
 
   return {
     company,
@@ -154,9 +370,11 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
     max_hash_date: maxDate,
     move_to_hash_ids: unhashedPostedMoves.map((m) => m.id),
     entries_count: unhashedPostedMoves.length,
+    unreconciled_bank_statement_line_ids: unreconciledLines.map((l) => l.id),
     not_hashable_unlocked_move_ids: draftMoves.map((m) => m.id),
     chains_to_hash_with_gaps: chainsWithGaps.join('; '),
     warnings: warnings.join('\n'),
+    warning_items: warningItems,
   };
 }
 
@@ -184,26 +402,29 @@ export function checkChainHeadCorruption(journal, company, securedMoves) {
  * With `throughMoveId` (the entry form's Lock button) only that entry's journal is hashed, up to and including it,
  * and no company lock date changes.
  */
-export function secureEntries(db, { companyId = null, hashDate = null, throughMoveId = null } = {}) {
+export function secureEntries(db, { companyId = null, hashDate = null, throughMoveId = null, moveIds = null, skipHardLock = false } = {}) {
   const through = throughMoveId ? read(db, 'account.move', throughMoveId) : null;
   if (throughMoveId && !through) throw new Error('Select an existing entry');
   const company = through ? (through.company_id ?? 1) : (companyId ?? currentCompany(db));
   const restrictedJournals = search(db, 'account.journal', { includeArchived: true })
     .filter((j) => Boolean(j.restrict_mode_hash_table) && (!through || j.id === through.journal_id));
   const targetDate = hashDate || today();
-  const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : (m.invoice_date ?? m.date ?? '') <= targetDate);
+  const moveIdSet = Array.isArray(moveIds) ? new Set(moveIds) : null;
+  const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : moveIdSet ? moveIdSet.has(m.id) : (m.invoice_date ?? m.date ?? '') <= targetDate);
   // A numbered draft before the entry (reset to draft keeps its number) would land unhashed inside the chain once re-posted.
-  if (through && (db.records['account.move'] ?? []).some((m) => m.state === 'draft' && m.journal_id === through.journal_id
-    && (m.company_id ?? 1) === company && m.name && m.name !== '/' && inScope(m))) {
+  if (through && (db.records['account.move'] ?? []).some((m) => isSequenceConflictDraft(
+    db, m, company, new Map([[moveJournalId(db, through), through.name ?? '']]),
+  ))) {
     throw new Error('Post or cancel the earlier draft entries of this journal before locking this entry');
   }
 
   let next = db;
   let securedThrough = '';
+  const lastNewlySecuredByJournal = new Map();
   for (const journal of restrictedJournals) {
     const journalMoves = (next.records['account.move'] ?? [])
       .filter((m) => (m.company_id ?? 1) === company && m.journal_id === journal.id && m.state === 'posted')
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
     const moves = journalMoves.filter(inScope);
     const securedMoves = journalMoves.filter((m) => m.inalterable_hash);
     if (checkChainHeadCorruption(journal, company, securedMoves)) throw new Error('Cannot extend a corrupted secure entry chain');
@@ -212,8 +433,16 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
     let lastSeqNum = lastSecured ? (lastSecured.secure_sequence_number || 0) : 0;
 
     const unhashed = moves.filter((m) => !m.inalterable_hash);
-    if (unhashed.length && journalMoves.some((m) => !m.inalterable_hash && !unhashed.includes(m) && (m.name ?? '').localeCompare(unhashed.at(-1).name ?? '') < 0)) throw new Error('Cannot secure entries while an earlier sequence remains unsecured');
+    if (unhashed.length && journalMoves.some((m) => !m.inalterable_hash
+      && !unhashed.includes(m)
+      && (!lastSecured || (m.name ?? '').localeCompare(lastSecured.name ?? '') > 0)
+      && (m.name ?? '').localeCompare(unhashed.at(-1).name ?? '') < 0)) {
+      throw new Error('Cannot secure entries while an earlier sequence remains unsecured');
+    }
     if (lastSecured && unhashed.some((m) => (m.name ?? '').localeCompare(lastSecured.name ?? '') <= 0)) throw new Error('Cannot secure an entry before the last secured sequence');
+    if (unhashed.length && !through) {
+      lastNewlySecuredByJournal.set(journal.id, unhashed.at(-1).name ?? '');
+    }
     for (const move of unhashed) {
       lastSeqNum += 1;
       const hash = computeMoveHash(move, previousHash, 3);
@@ -238,12 +467,16 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   const currentComp = read(next, 'res.company', company);
   if (!currentComp) throw new Error('Select an existing company');
   if (through) return next;
-  if (securedThrough) {
-    const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (m.invoice_date ?? m.date ?? '') <= securedThrough);
+  const lockDate = hashDate && securedThrough > hashDate ? hashDate : securedThrough;
+  if (lockDate) {
+    const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (m.invoice_date ?? m.date ?? '') <= lockDate);
     if (drafts.length) throw new Error('Cannot secure entries while draft entries exist on or before the secured date');
   }
-  if (securedThrough && (!currentComp.hard_lock_date || securedThrough > currentComp.hard_lock_date)) {
-    next = write(next, 'res.company', company, { hard_lock_date: securedThrough });
+  if (lastNewlySecuredByJournal.size && (db.records['account.move'] ?? []).some((m) => isSequenceConflictDraft(db, m, company, lastNewlySecuredByJournal))) {
+    throw new Error('Cannot secure entries while numbered draft entries precede entries to be secured');
+  }
+  if (!skipHardLock && lockDate && (!currentComp.hard_lock_date || lockDate > currentComp.hard_lock_date)) {
+    next = write(next, 'res.company', company, { hard_lock_date: lockDate });
   }
 
   return next;
@@ -280,7 +513,8 @@ export function secureMoveInvariant(db, after, before) {
   let sawUnsecured = false;
   for (const move of all) {
     if (!move.inalterable_hash) { sawUnsecured = true; continue; }
-    if (sawUnsecured || move.secure_sequence_number !== ++sequence || !validMoveHash(move, previous)) return 'Invalid secure entry hash chain';
+    if ((sawUnsecured && move.id === after.id) || move.secure_sequence_number !== ++sequence || !validMoveHash(move, previous)) return 'Invalid secure entry hash chain';
+    sawUnsecured = false;
     previous = move.inalterable_hash;
   }
   const head = (journal.secure_chain_heads ?? []).find((h) => h.company_id === company);

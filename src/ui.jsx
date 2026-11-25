@@ -678,9 +678,9 @@ export function DistributionInput({ value, onChange, db = null, record = null, f
 
   const planGroups = planTotals(rows, db);
   const unassignedRows = rows.filter((r) => !planGroups.some((g) => g.rows.includes(r)));
-  const planName = (account) => account.plan_id
+  const planName = (account) => (account?.plan_id
     ? display(db, models['account.analytic.account'].fields.plan_id, account.plan_id)
-    : display(db, models['account.analytic.account'].fields.plan, account.plan || 'project');
+    : '');
 
 
   const invalid = Number.isNaN(value);

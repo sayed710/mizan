@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
+import { waitFor } from './test-support/dom.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -122,14 +123,7 @@ function findAll(node, predicate, out = []) {
 const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
 
 // Let React flush pending work (the lazy page import, an awaited commit) until `check` yields a value.
-async function until(React, check, attempts = 50) {
-  for (let i = 0; i < attempts; i++) {
-    const found = check();
-    if (found) return found;
-    await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  }
-  return check();
-}
+const until = (React, check) => waitFor(React, check);
 
 test('the menu resolves to the Lock Dates dialog (not general settings)', async () => {
   const accounting = apps.find((a) => a.id === 'accounting');

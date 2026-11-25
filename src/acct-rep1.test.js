@@ -104,7 +104,7 @@ test('other-company reports compute and format in the selected company currency 
   const rev2 = create(branch.db, 'account.account', { code: '400002', name: 'Branch Revenue', account_type: 'income', company_id: branch.id });
   const saleJournal2 = create(rev2.db, 'account.journal', { name: 'Branch sales journal', code: 'INV2', type: 'sale', company_id: branch.id, default_account_id: rev2.id, invoice_sequence_prefix: 'INV2/', invoice_sequence_next_number: 1 });
   db = write(saleJournal2.db, 'res.company', branch.id, { currency_id: eur.id, default_sale_journal_id: saleJournal2.id });
-  const analytic2 = create(db, 'account.analytic.account', { name: 'Branch Project', company_id: branch.id });
+  const analytic2 = create(db, 'account.analytic.account', { name: 'Branch Project', company_id: branch.id, plan_id: db.records['account.analytic.plan'][0].id });
   const date = today();
   const move2 = create(analytic2.db, 'account.move', {
     move_type: 'out_invoice',

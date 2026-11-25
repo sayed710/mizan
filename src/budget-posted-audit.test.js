@@ -10,7 +10,7 @@ import { createCompany } from './models/company.js';
 
 test('budget report uses posted analytic lines for each company and line period, with refund and drill-down', () => {
   let db = seed();
-  const analytic = create(db, 'account.analytic.account', { name: 'Budget project' }); db = analytic.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Budget project', plan_id: db.records['account.analytic.plan'][0].id }); db = analytic.db;
   const company = createCompany(db, { name: 'Other company', ...invoiceJournalDefaults(db) }); db = company.db;
   const post = (type, date, amount, companyId) => {
     const move = create(db, 'account.move', { move_type: type, partner_id: 1, company_id: companyId, invoice_date: date,

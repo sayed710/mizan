@@ -190,7 +190,9 @@ test('Accounting > Closing > Secure Entries (#/accounting/secure-entries/new) re
       })));
     });
     assert.ok(formEl.textContent.includes('Secure Entries'));
-    assert.ok(formEl.textContent.includes('Confirm'));
+    assert.ok(formEl.textContent.includes('Cancel'));
+    assert.ok(formEl.textContent.includes('Secure entries up to'));
+    assert.ok(formEl.textContent.includes('inclusive, to make them immutable'));
   } finally {
     await React.act(async () => formRoot.unmount());
   }

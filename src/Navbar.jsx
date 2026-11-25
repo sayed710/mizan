@@ -1,3 +1,4 @@
+import { visibleAccountingMenus } from './models/analytic-setting.js';
 import { useEffect, useRef, useState } from 'react';
 import { companiesOf, currentCompany, getUser, isServer, logout, switchCompany, useDb } from './store.js';
 import { myEmployeeId } from './access.js';
@@ -95,7 +96,7 @@ export function Navbar({ app, active }) {
       <button type="button" className="nav-toggle" aria-expanded={menuOpen} aria-controls="nav-menus" aria-label={t('Menu')}
         onClick={() => setMenuOpen(!menuOpen)}>☰</button>
       <nav id="nav-menus" className={`nav-menus${menuOpen ? ' open' : ''}`} aria-label={t(app.name)} onClick={(e) => { if (e.target.closest?.('a')) setMenuOpen(false); }}>
-        {app.menus.map((m) => (m.children
+        {(app.id === 'accounting' ? visibleAccountingMenus(app.menus, db) : app.menus).map((m) => (m.children
           ? <MenuGroup key={m.label} app={app} menu={m} active={active} />
           : <a key={m.key} href={`#/${app.id}/${m.key}`} className={m.key === active ? 'active' : ''}>{t(m.label)}</a>))}
       </nav>

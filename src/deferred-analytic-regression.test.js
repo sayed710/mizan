@@ -9,7 +9,8 @@ const press = (db, model, id, label) => models[model].form.buttons.find((button)
 
 for (const [type, code, sign] of [['out_invoice', '410000', 1], ['in_invoice', '600000', -1]]) {
   test(`deferred ${type} analytics follow recognition and reverse on reset`, () => {
-    const analytic = create(seed(), 'account.analytic.account', { name: 'Deferral project' });
+    const db0 = seed();
+    const analytic = create(db0, 'account.analytic.account', { name: 'Deferral project', plan_id: db0.records['account.analytic.plan'][0].id });
     let db = write(analytic.db, 'res.company', 1, { deferred_generation_method: 'manual' });
     const invoice = create(db, 'account.move', {
       move_type: type, partner_id: 1, invoice_date: '2025-01-01',
