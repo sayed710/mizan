@@ -87,6 +87,7 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Hide lines at 0': 'إخفاء البنود الصفرية',
   'Percentages on the Payment Terms lines must be between 0 and 100.': 'يجب أن تكون النسب في بنود شروط الدفع بين 0 و100.',
   'The Payment Term must have at least one percent line and the sum of the percent must be 100%.': 'يجب أن يحتوي شرط الدفع على بند نسبة واحد على الأقل وأن يكون مجموع النسب 100%.',
   'The Early Payment Discount functionality can only be used with payment terms using a single 100% line. ': 'لا يمكن استخدام خصم الدفع المبكر إلا مع شروط دفع تحتوي على بند واحد بنسبة 100%. ',
