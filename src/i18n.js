@@ -3903,6 +3903,22 @@ const ar = {
   'Configure the deferred expense account on the company': 'حدّد حساب المصروفات المؤجلة على الشركة',
   'Configure the recognition account on the source line': 'حدّد حساب الاعتراف على البند المصدر',
   'Saving...': 'جارٍ الحفظ...',
+  'Contacts & Addresses': 'جهات الاتصال والعناوين',
+  'Sales & Purchase': 'المبيعات والمشتريات',
+  English: 'الإنجليزية',
+  Industry: 'القطاع',
+  Industries: 'القطاعات',
+  'Full Name': 'الاسم الكامل',
+  'Address Type': 'نوع العنوان',
+  'Total Invoiced': 'إجمالي المفوتر',
+  'Customer Invoices Count': 'عدد فواتير العملاء',
+  'e.g. Sales Director': 'مثال: مدير المبيعات',
+  'e.g. https://www.example.com': 'مثال: https://www.example.com',
+  'Select a state belonging to the selected country': 'اختر ولاية تتبع الدولة المحددة',
+  'Selected industry does not exist': 'القطاع المحدد غير موجود',
+  'Parent contact hierarchy cannot contain a cycle': 'لا يمكن أن يحتوي التسلسل الهرمي لجهة الاتصال الأم على حلقة',
+  'Name is required for contact addresses': 'الاسم مطلوب لعناوين جهات الاتصال',
+  'The selected child contact is invalid': 'جهة الاتصال الفرعية المحددة غير صالحة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

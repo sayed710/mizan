@@ -1,8 +1,239 @@
-import { create, read, write } from '../orm.js';
+import { create, getActiveCompany, read, search, write, writeMany } from '../orm.js';
 import { commercialPartnerId, today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
 import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
+import { LANGUAGES } from '../i18n.js';
+import { countryIdFor, countryReferenceError, stateIdFor } from './country.js';
+import { models } from '../registry.js';
+
+const ADDRESS_TYPE_LABELS = { invoice: 'Invoice', delivery: 'Delivery', other: 'Other' };
+const CHILD_LINE_FIELDS = ['type', 'name', 'email', 'phone', 'function', 'street', 'city', 'state_id', 'zip', 'country_id', 'comment'];
+
+/** Display name including the parent company for non-company child contacts, matching Odoo's res.partner.complete_name. */
+export function partnerCompleteName(db, r) {
+  if (!r) return '';
+  let name = r.name || '';
+  if (r.parent_id) {
+    if (!name && ADDRESS_TYPE_LABELS[r.type]) name = ADDRESS_TYPE_LABELS[r.type];
+    if (!r.is_company) {
+      const all = db?.records?.['res.partner'] ?? [];
+      let cur = all.find((p) => p.id === r.parent_id);
+      const seen = new Set();
+      while (cur?.parent_id && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        const next = all.find((p) => p.id === cur.parent_id);
+        if (!next) break;
+        cur = next;
+      }
+      if (cur?.name) name = name ? `${cur.name}, ${name}` : `${cur.name},`;
+    }
+  }
+  return name.trim();
+}
+
+/** All partner IDs in the subtree rooted at `partnerId` (including archived child contacts, cycle-safe). */
+export function partnerDescendantIds(db, partnerId) {
+  const ids = new Set();
+  if (!partnerId || !db?.records?.['res.partner']) return ids;
+  const childrenByParent = new Map();
+  for (const p of db.records['res.partner']) {
+    if (p?.parent_id != null) {
+      const list = childrenByParent.get(p.parent_id);
+      if (list) list.push(p.id);
+      else childrenByParent.set(p.parent_id, [p.id]);
+    }
+  }
+  const queue = [partnerId];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (ids.has(cur)) continue;
+    ids.add(cur);
+    for (const childId of childrenByParent.get(cur) ?? []) {
+      if (!ids.has(childId)) queue.push(childId);
+    }
+  }
+  return ids;
+}
+
+const isVisibleMove = (db, move) => {
+  if (!move || move.active === false) return false;
+  const activeCo = getActiveCompany();
+  if (activeCo && (move.company_id ?? 1) !== activeCo) return false;
+  const allowed = db?.settings?.allowed_company_ids;
+  return !Array.isArray(allowed) || !allowed.length || allowed.includes(move.company_id ?? 1);
+};
+
+/** Customer invoices and credit notes belonging to `partner` or any of its child contacts. */
+export function partnerCustomerInvoices(db, partner, { postedOnly = false } = {}) {
+  if (!db || !partner?.id) return [];
+  const ids = partnerDescendantIds(db, partner.id);
+  return (db.records?.['account.move'] ?? []).filter(
+    (m) => isVisibleMove(db, m)
+      && ids.has(m.partner_id)
+      && ['out_invoice', 'out_refund'].includes(m.move_type)
+      && (!postedOnly || m.state === 'posted'),
+  );
+}
+
+/** Signed company-currency total of posted customer invoices and credit notes for `partner` and its child contacts. */
+export function partnerTotalInvoiced(db, partner) {
+  const computeSigned = models['account.move']?.fields?.amount_total_signed?.compute;
+  return partnerCustomerInvoices(db, partner, { postedOnly: true }).reduce((sum, m) => {
+    const val = computeSigned ? computeSigned(m, db) : m.amount_total_signed;
+    return sum + (Number.isFinite(val) ? val : 0);
+  }, 0);
+}
+
+/** Vendor bills and vendor refunds belonging to `partner` or any of its child contacts. */
+export function partnerSupplierBills(db, partner) {
+  if (!db || !partner?.id) return [];
+  const ids = partnerDescendantIds(db, partner.id);
+  return (db.records?.['account.move'] ?? []).filter(
+    (m) => isVisibleMove(db, m)
+      && ids.has(m.partner_id)
+      && ['in_invoice', 'in_refund'].includes(m.move_type),
+  );
+}
+
+function partnerMoveTarget(invoiceRoute, refundRoute, invoiceMoveType, moves, partner) {
+  const route = moves.length && !moves.some((m) => m.move_type === invoiceMoveType) ? refundRoute : invoiceRoute;
+  const partnerIds = new Set(moves.map((m) => m.partner_id));
+  if (!moves.length || (partnerIds.size === 1 && partnerIds.has(partner.id))) {
+    return `${route}?view=list&rel=partner_id:${partner.id}`;
+  }
+  return `${route}?view=list&rel=id:${moves.map((m) => m.id).join(',')}`;
+}
+
+function normalizePartnerVals(db, vals, before = null) {
+  if (!vals || typeof vals !== 'object' || !db) return vals;
+  const next = { ...vals };
+  if ('country_id' in next && !('country' in next)) {
+    const countryRec = next.country_id ? read(db, 'res.country', next.country_id) : null;
+    next.country = countryRec?.name ?? '';
+  } else if ('country' in next && !('country_id' in next)) {
+    const cid = countryIdFor(db, next.country);
+    if (cid != null) next.country_id = cid;
+    else if (!next.country) next.country_id = null;
+  }
+
+  const effectiveCountryId = 'country_id' in next ? next.country_id : (before?.country_id ?? null);
+  if ('country_id' in next && !('state_id' in next) && before?.state_id) {
+    const st = read(db, 'res.country.state', before.state_id);
+    if (st && next.country_id != null && st.country_id !== next.country_id) {
+      next.state_id = null;
+      if (!('state' in next)) next.state = '';
+    }
+  }
+
+  if ('state_id' in next && !('state' in next)) {
+    const st = next.state_id ? read(db, 'res.country.state', next.state_id) : null;
+    next.state = st?.name ?? '';
+    if (st && !effectiveCountryId && !('country_id' in next)) {
+      next.country_id = st.country_id;
+      if (!('country' in next)) next.country = read(db, 'res.country', st.country_id)?.name ?? '';
+    }
+  } else if ('state' in next && !('state_id' in next)) {
+    const sid = stateIdFor(db, next.state, effectiveCountryId);
+    if (sid != null) next.state_id = sid;
+    else if (!next.state) next.state_id = null;
+  }
+
+  if ('parent_id' in next && next.parent_id && !('company_id' in next)) {
+    const parent = read(db, 'res.partner', next.parent_id);
+    if (parent?.company_id != null) next.company_id = parent.company_id;
+  }
+  return next;
+}
+
+/** Validate `child_ids` one2many lines submitted on a partner form or API write. */
+export function validatePartnerChildLines(db, partnerId, childLines = []) {
+  if (!Array.isArray(childLines)) return null;
+  const allPartners = db?.records?.['res.partner'] ?? [];
+  const seenIds = new Set();
+  for (const line of childLines) {
+    if (!line || (line.id != null && (!Number.isSafeInteger(line.id) || line.id < 1))) {
+      return 'The selected child contact is invalid';
+    }
+    if (line.id) {
+      if (line.id === partnerId || seenIds.has(line.id)) return 'The selected child contact is invalid';
+      const existing = allPartners.find((p) => p.id === line.id);
+      if (!existing || existing.parent_id !== partnerId) return 'The selected child contact is invalid';
+      seenIds.add(line.id);
+    }
+    if ((line.type ?? 'contact') === 'contact' && !String(line.name ?? '').trim()) {
+      return 'Name is required for contact addresses';
+    }
+    const countryErr = countryReferenceError(db, line);
+    if (countryErr) return countryErr;
+    if (line.state_id != null) {
+      const st = (db?.records?.['res.country.state'] ?? []).find((s) => s.id === line.state_id);
+      if (!st) return 'Selected state does not exist';
+      if (line.country_id != null && st.country_id !== line.country_id) return 'Select a state belonging to the selected country';
+    }
+  }
+  return null;
+}
+
+/** Synchronize child `res.partner` records from a parent partner's `child_ids` lines. */
+export function syncPartnerChildren(db, partnerId, childLines) {
+  if (!Array.isArray(childLines)) return db;
+  const err = validatePartnerChildLines(db, partnerId, childLines);
+  if (err) throw new Error(err);
+  const parent = read(db, 'res.partner', partnerId);
+  const existingChildren = (db.records?.['res.partner'] ?? []).filter((p) => p.parent_id === partnerId && p.active !== false);
+  const lineIds = new Set(childLines.map((l) => l.id).filter(Boolean));
+  const valuesOf = (line) => Object.fromEntries(CHILD_LINE_FIELDS.filter((f) => Object.hasOwn(line, f) && line[f] !== undefined).map((f) => [f, line[f]]));
+  let next = db;
+  const updates = new Map(existingChildren.filter((c) => !lineIds.has(c.id)).map((c) => [c.id, { active: false }]));
+  for (const line of childLines) {
+    if (line.id) updates.set(line.id, { ...valuesOf(line), active: true });
+  }
+  if (updates.size) next = writeMany(next, 'res.partner', updates);
+  for (const line of childLines) {
+    if (!line.id) {
+      next = create(next, 'res.partner', {
+        ...valuesOf(line),
+        parent_id: partnerId,
+        is_company: false,
+        ...(parent?.company_id != null ? { company_id: parent.company_id } : {}),
+        ...(parent?.lang ? { lang: parent.lang } : {}),
+        ...(parent?.user_id != null ? { user_id: parent.user_id } : {}),
+      }).db;
+    }
+  }
+  return next;
+}
+
+export function guardPartner(db, before, after) {
+  if (after?.credit_limit != null && after?.credit_limit !== '') {
+    const n = Number(after.credit_limit);
+    if (!Number.isFinite(n) || n < 0) return 'Credit Limit must be non-negative';
+  }
+  const countryErr = countryReferenceError(db, after ?? {});
+  if (countryErr) return countryErr;
+  if (after?.state_id != null) {
+    const st = (db?.records?.['res.country.state'] ?? []).find((s) => s.id === after.state_id);
+    if (!st) return 'Selected state does not exist';
+    if (after.country_id != null && st.country_id !== after.country_id) return 'Select a state belonging to the selected country';
+  }
+  if (after?.industry_id != null && !(db?.records?.['res.partner.industry'] ?? []).some((i) => i.id === after.industry_id)) {
+    return 'Selected industry does not exist';
+  }
+  if (after?.parent_id != null) {
+    const targetId = before?.id ?? after.id;
+    const seen = new Set(targetId ? [targetId] : []);
+    const find = (key) => (db?.records?.['res.partner'] ?? []).find((p) => p.id === key);
+    let cur = after.parent_id;
+    while (cur) {
+      if (seen.has(cur)) return 'Parent contact hierarchy cannot contain a cycle';
+      seen.add(cur);
+      cur = find(cur)?.parent_id;
+    }
+  }
+  return validatePartnerBankLines(db, after?.id, after?.bank_ids)
+    ?? validatePartnerChildLines(db, after?.id, after?.child_ids);
+}
 
 export function partnerCategoryCompleteName(db, r) {
   if (!r?.name) return '';
@@ -248,20 +479,49 @@ export const crmModels = {
     },
   },
 
+  'res.partner.industry': {
+    label: 'Industries',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      full_name: { type: 'char', label: 'Full Name' },
+      active: { type: 'boolean', label: 'Active' },
+    },
+    defaults: () => ({ active: true }),
+    searchFields: ['name', 'full_name'],
+    list: ['name', 'full_name'],
+    form: {
+      title: 'name',
+      groups: [['name', 'full_name', 'active']],
+    },
+  },
+
   'res.partner': {
     label: 'Contacts',
     fields: {
-      name: { type: 'char', label: 'Name', required: true },
+      name: { type: 'char', label: 'Name', required: (r) => !r?.parent_id || (r?.type ?? 'contact') === 'contact' },
+      complete_name: { type: 'char', label: 'Complete Name', readonly: true, compute: (r, db) => partnerCompleteName(db, r) },
       customer_rank: { type: 'integer', label: 'Customer Rank', readonly: true },
       supplier_rank: { type: 'integer', label: 'Vendor Rank', readonly: true },
       is_company: { type: 'boolean', label: 'Company' },
-      parent_id: { type: 'many2one', relation: 'res.partner', label: 'Parent Contact', hidden: true },
-      email: { type: 'char', label: 'Email' },
-      phone: { type: 'char', label: 'Phone' },
-      city: { type: 'char', label: 'City' },
+      type: { type: 'selection', label: 'Address Type', options: [['contact', 'Contact'], ['invoice', 'Invoice'], ['delivery', 'Delivery'], ['other', 'Other']], default: 'contact' },
+      parent_id: { type: 'many2one', relation: 'res.partner', label: 'Parent Contact', domain: (p, r) => p.id !== r?.id && !p.parent_id },
+      email: { type: 'char', label: 'Email', optional: 'show' },
+      phone: { type: 'char', label: 'Phone', optional: 'show' },
+      street: { type: 'char', label: 'Street' },
+      street2: { type: 'char', label: 'Street 2' },
+      city: { type: 'char', label: 'City', optional: 'hide' },
+      state: { type: 'char', label: 'State' },
+      state_id: { type: 'many2one', relation: 'res.country.state', label: 'State', optional: 'hide', domain: (s, r) => !r?.country_id || s.country_id === r.country_id },
       zip: { type: 'char', label: 'Zip' },
       country: { type: 'char', label: 'Country' },
-      vat: { type: 'char', label: 'Tax ID' },
+      country_id: { type: 'many2one', relation: 'res.country', label: 'Country', optional: 'show' },
+      vat: { type: 'char', label: 'Tax ID', optional: 'hide' },
+      function: { type: 'char', label: 'Job Position', placeholder: 'e.g. Sales Director' },
+      website: { type: 'char', label: 'Website', placeholder: 'e.g. https://www.example.com' },
+      lang: { type: 'selection', label: 'Language', options: LANGUAGES },
+      ref: { type: 'char', label: 'Reference' },
+      industry_id: { type: 'many2one', relation: 'res.partner.industry', label: 'Industry' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide', placeholder: 'Visible to all', readonly: (r) => Boolean(r?.parent_id) },
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
       use_partner_credit_limit: { type: 'boolean', label: 'Partner Limit', hideWhen: (_r, db) => !creditLimitEnabled(db) },
       credit_limit: {
@@ -276,7 +536,10 @@ export const crmModels = {
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       property_account_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
       property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
-      user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson', hidden: true },
+      user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson', optional: 'hide' },
+      total_invoiced: { type: 'monetary', label: 'Total Invoiced', currency: 'company', readonly: true, compute: (r, db) => partnerTotalInvoiced(db, r) },
+      account_move_count: { type: 'integer', label: 'Customer Invoices Count', readonly: true, compute: (r, db) => partnerCustomerInvoices(db, r).length },
+      supplier_invoice_count: { type: 'integer', label: 'Vendor Bills', readonly: true, compute: (r, db) => partnerSupplierBills(db, r).length },
       followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible' },
       followup_reminder_type: { type: 'selection', label: 'Reminders', options: [['automatic', 'Automatic'], ['manual', 'Manual']], default: 'automatic' },
       followup_next_action_date: {
@@ -307,7 +570,59 @@ export const crmModels = {
           no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
-      tag_ids: { type: 'many2many', relation: 'res.partner.category', label: 'Tags' },
+      tag_ids: { type: 'many2many', relation: 'res.partner.category', label: 'Tags', widget: 'many2many_tags', optional: 'hide' },
+      child_ids: {
+        type: 'one2many',
+        relation: 'res.partner',
+        label: 'Contacts & Addresses',
+        compute: (r, db) => (r?.id ? (db?.records?.['res.partner'] ?? [])
+          .filter((c) => c.parent_id === r.id && c.active !== false)
+          .map((c) => ({
+            id: c.id,
+            type: c.type ?? 'contact',
+            name: c.name ?? '',
+            email: c.email ?? '',
+            phone: c.phone ?? '',
+            function: c.function ?? '',
+            street: c.street ?? '',
+            city: c.city ?? '',
+            state_id: c.state_id ?? null,
+            zip: c.zip ?? '',
+            country_id: c.country_id ?? null,
+            comment: c.comment ?? '',
+          })) : []),
+        fields: {
+          id: { type: 'integer', label: 'ID', hidden: true, readonly: true },
+          type: { type: 'selection', label: 'Address Type', options: [['contact', 'Contact'], ['invoice', 'Invoice'], ['delivery', 'Delivery'], ['other', 'Other']] },
+          name: { type: 'char', label: 'Name' },
+          email: { type: 'char', label: 'Email' },
+          phone: { type: 'char', label: 'Phone' },
+          function: { type: 'char', label: 'Job Position' },
+          street: { type: 'char', label: 'Street', optional: 'hide' },
+          city: { type: 'char', label: 'City', optional: 'hide' },
+          state_id: { type: 'many2one', relation: 'res.country.state', label: 'State', optional: 'hide', domain: (s, r) => !r?.country_id || s.country_id === r.country_id },
+          zip: { type: 'char', label: 'Zip', optional: 'hide' },
+          country_id: { type: 'many2one', relation: 'res.country', label: 'Country', optional: 'hide' },
+          comment: { type: 'text', label: 'Notes', optional: 'hide' },
+        },
+        newLine: (r) => ({
+          type: 'contact',
+          name: '',
+          email: '',
+          phone: '',
+          function: '',
+          street: r?.street ?? '',
+          city: r?.city ?? '',
+          state_id: r?.state_id ?? null,
+          zip: r?.zip ?? '',
+          country_id: r?.country_id ?? null,
+          comment: '',
+        }),
+        onchange: (line, key) => {
+          if (key === 'country_id' && line.state_id) return { ...line, state_id: null };
+          return line;
+        },
+      },
       bank_ids: {
         type: 'one2many',
         relation: 'res.partner.bank',
@@ -342,7 +657,7 @@ export const crmModels = {
         },
       },
     },
-    defaults: () => ({ tag_ids: [], customer_rank: 0, supplier_rank: 0, followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
+    defaults: () => ({ tag_ids: [], customer_rank: 0, supplier_rank: 0, type: 'contact', followup_reminder_type: 'automatic', autopost_bills: 'ask' }),
     onchange: (r, key, db) => {
       if (key === 'use_partner_credit_limit') {
         const comp = db ? read(db, 'res.company', db.settings?.current_company_id ?? 1) : null;
@@ -356,10 +671,32 @@ export const crmModels = {
           }).followup_lines,
         };
       }
+      if (key === 'country_id') {
+        const countryRec = r.country_id && db ? read(db, 'res.country', r.country_id) : null;
+        const curState = r.state_id && db ? read(db, 'res.country.state', r.state_id) : null;
+        const clearState = curState && r.country_id != null && curState.country_id !== r.country_id;
+        return {
+          country: countryRec?.name ?? '',
+          ...(clearState ? { state_id: null, state: '' } : {}),
+        };
+      }
+      if (key === 'state_id') {
+        const st = r.state_id && db ? read(db, 'res.country.state', r.state_id) : null;
+        const out = { state: st?.name ?? '' };
+        if (st && !r.country_id && db) {
+          out.country_id = st.country_id;
+          out.country = read(db, 'res.country', st.country_id)?.name ?? '';
+        }
+        return out;
+      }
+      if (key === 'parent_id' && r.parent_id && db) {
+        const parent = read(db, 'res.partner', r.parent_id);
+        if (parent?.company_id != null) return { company_id: parent.company_id };
+      }
       return {};
     },
     prepareWrite: (db, vals, before) => {
-      let nextVals = vals;
+      let nextVals = normalizePartnerVals(db, vals, before);
       if (nextVals?.use_partner_credit_limit === false && nextVals.credit_limit !== null) {
         nextVals = { ...nextVals, credit_limit: null };
       }
@@ -371,10 +708,10 @@ export const crmModels = {
         });
         return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
-      return nextVals !== vals ? { db, vals: nextVals } : null;
+      return { db, vals: nextVals };
     },
     prepareCreate: (db, vals) => {
-      let nextVals = vals;
+      let nextVals = normalizePartnerVals(db, vals);
       if (nextVals && !nextVals.use_partner_credit_limit && 'credit_limit' in nextVals) {
         const { credit_limit: _cl, ...rest } = nextVals;
         nextVals = rest;
@@ -386,32 +723,52 @@ export const crmModels = {
         });
         return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
-      return nextVals !== vals ? { db, vals: nextVals } : null;
+      return { db, vals: nextVals };
     },
-    guard: (db, before, after) => {
-      if (after?.credit_limit != null && after?.credit_limit !== '') {
-        const n = Number(after.credit_limit);
-        if (!Number.isFinite(n) || n < 0) return 'Credit Limit must be non-negative';
+    guard: guardPartner,
+    onWrite: (db, after, before, vals) => {
+      let next = syncPartnerBankAccounts(db, after.id, vals?.bank_ids);
+      next = syncPartnerChildren(next, after.id, vals?.child_ids);
+      if (before && (before.company_id ?? null) !== (after.company_id ?? null)) {
+        const childUpdates = new Map(
+          (next.records?.['res.partner'] ?? [])
+            .filter((p) => p.parent_id === after.id && (p.company_id ?? null) !== (after.company_id ?? null))
+            .map((p) => [p.id, { company_id: after.company_id ?? null }]),
+        );
+        if (childUpdates.size) next = writeMany(next, 'res.partner', childUpdates);
       }
-      return validatePartnerBankLines(db, after?.id, after?.bank_ids);
+      return next;
     },
-    onWrite: (db, after, before, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
       { id: 'customers', label: 'Customers', fn: (r) => (r.customer_rank ?? 0) > 0 },
       { id: 'vendors', label: 'Vendors', fn: (r) => (r.supplier_rank ?? 0) > 0 },
       { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
       { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
     ]],
-    groupBys: ['country', 'city', 'is_company'],
-    kanban: { title: 'name', lines: ['email', 'city', 'country'], tags: 'tag_ids', avatar: true },
-    list: ['name', 'email', 'phone', 'city', 'country'],
+    groupBys: ['country_id', 'user_id', 'parent_id', 'city', 'is_company'],
+    kanban: { title: 'name', lines: ['email', 'city', 'country_id'], tags: 'tag_ids', avatar: true },
+    list: ['complete_name', 'email', 'phone', 'user_id', 'city', 'state_id', 'country_id', 'vat', 'tag_ids', 'company_id'],
+    listLabels: { complete_name: 'Name' },
     form: {
       title: 'name',
       prepare: (r, db) => (!r?.use_partner_credit_limit && creditLimitEnabled(db) ? { ...r, credit_limit: read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.account_default_credit_limit ?? 0 } : r),
       smart: [
         { label: 'Opportunities', model: 'crm.lead', field: 'partner_id', target: 'crm/pipeline' },
         { label: 'Sales', model: 'sale.order', field: 'partner_id', target: 'sales/quotations' },
-        { label: 'Invoiced', model: 'account.move', field: 'partner_id', target: 'accounting/invoices', sum: 'amount_total' },
+        {
+          label: 'Invoiced',
+          app: 'accounting',
+          valueField: 'total_invoiced',
+          value: (db, r) => partnerTotalInvoiced(db, r),
+          target: (r, db) => partnerMoveTarget('accounting/invoices', 'accounting/credit-notes', 'out_invoice', partnerCustomerInvoices(db, r), r),
+        },
+        {
+          label: 'Vendor Bills',
+          app: 'accounting',
+          when: (r, db) => partnerSupplierBills(db, r).length > 0,
+          value: (db, r) => partnerSupplierBills(db, r).length,
+          target: (r, db) => partnerMoveTarget('accounting/bills', 'accounting/refunds', 'in_invoice', partnerSupplierBills(db, r), r),
+        },
       ],
       buttons: [{
         label: 'Send Follow-up',
@@ -420,7 +777,10 @@ export const crmModels = {
         visible: (_r, db, user) => appOpen(db, user, 'accounting'),
         run: (db, r) => ({ db, go: `#/followup/send/${r.id}?company=${db.settings?.current_company_id ?? 1}` }),
       }, { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
-      groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'zip', 'country', 'pricelist_id', 'credit_limit', 'tag_ids']],
+      groups: [
+        ['is_company', 'parent_id', 'email', 'phone', 'vat', 'function', 'website', 'lang'],
+        ['street', 'street2', 'city', 'state_id', 'zip', 'country_id', 'tag_ids', 'credit_limit'],
+      ],
       tabs: [
         {
           label: 'Accounting',
@@ -428,6 +788,15 @@ export const crmModels = {
           groups: [['use_partner_credit_limit']],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
+        { label: 'Contacts & Addresses', fields: ['child_ids'] },
+        {
+          label: 'Sales & Purchase',
+          groups: [
+            { title: 'Sales', fields: ['user_id', 'property_payment_term_id', 'pricelist_id'] },
+            { title: 'Purchase', fields: ['property_supplier_payment_term_id'] },
+            { title: 'Misc', fields: ['ref', 'company_id', 'industry_id'] },
+          ],
+        },
       ],
       chatter: true,
     },
