@@ -6,8 +6,16 @@ import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LOCK = '2026-12-31';
+const clearOpenItemsThrough = (db, lockDate) => ({
+  ...db,
+  records: {
+    ...db.records,
+    'account.move': (db.records['account.move'] ?? []).filter((m) => !(m.state === 'draft' && (m.date ?? m.invoice_date ?? '') <= lockDate)),
+    'account.bank.statement.line': (db.records['account.bank.statement.line'] ?? []).filter((l) => !(l.state !== 'reconciled' && (l.date ?? '') <= lockDate)),
+  },
+});
 const locked = () => {
-  let db = seed();
+  let db = clearOpenItemsThrough(seed(), LOCK);
   const usd = db.records['res.currency'].find((c) => c.name === 'USD');
   db = create(db, 'res.company', { id: 2, name: 'Second Co', currency_id: usd.id }).db;
   return write({ ...db, settings: { ...db.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
@@ -71,7 +79,7 @@ test('an early-payment discount after the lock settles a locked invoice', async 
   const made = create(base, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-12-30', invoice_payment_term_id: term, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   const { models } = await import('./models/index.js');
   const posted = models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(made.db, read(made.db, 'account.move', made.id)).db;
-  const db = write({ ...posted, settings: { ...posted.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
+  const db = write({ ...clearOpenItemsThrough(posted, LOCK), settings: { ...posted.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
   const saved = save(db, payWithDiscount(db, made.id, 98, '2027-01-02'));
   assert.equal(read(saved, 'account.move', made.id).amount_residual, 0);
 });

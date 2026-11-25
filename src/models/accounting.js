@@ -5,7 +5,7 @@ import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
-import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
+import { accountingDateForPost, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
@@ -194,7 +194,7 @@ export function journalInvoiceSequence(journal, move) {
   if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) {
     throw new Error(`Configure a positive next ${refund ? 'refund' : 'invoice'} sequence number on the selected journal`);
   }
-  const year = (move.invoice_date ?? move.date ?? today()).slice(0, 4);
+  const year = (move.date ?? move.invoice_date ?? today()).slice(0, 4);
   return {
     name: `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
     numberField,
@@ -856,6 +856,13 @@ export function postMove(db, id, { autoPost = false } = {}) {
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   const matchWarnings = checkBillMatch(db, r);
+  const moveWithJournal = { ...r, journal_id: journal };
+  const currentAccountingDate = moveDate(moveWithJournal);
+  const hardLock = hardBlockingLockDate(db, moveWithJournal);
+  if (hardLock && currentAccountingDate <= hardLock) throw new Error(`The period up to ${hardLock} is locked`);
+  const effectiveAccountingDate = accountingDateForPost(db, moveWithJournal);
+  const dateUpdate = effectiveAccountingDate !== currentAccountingDate ? { date: effectiveAccountingDate } : {};
+  if (dateUpdate.date) r = { ...r, ...dateUpdate };
   const sequence = journalInvoiceSequence(journalRecord, r);
   const name = enteredName ?? sequence.name;
   if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
@@ -877,7 +884,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
         ? { payment_reference: r.ref.trim() }
         : {});
   const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
-  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...dateUpdate, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
   if (r.move_type === 'out_invoice' || r.move_type === 'in_invoice') posted = incrementPartnerRank(posted, r.partner_id, r.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);

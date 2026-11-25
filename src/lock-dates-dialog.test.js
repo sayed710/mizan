@@ -175,7 +175,7 @@ test('the menu resolves to the Lock Dates dialog (not general settings)', async 
     const labels = findAll(dialog, (n) => n.tagName === 'LABEL').map((l) => l.textContent.replaceAll('*', ''));
     assert.ok(labels.includes('Sales Lock Date'), 'Has Sales Lock Date');
     assert.ok(labels.includes('Purchase Lock Date'), 'Has Purchase Lock Date');
-    assert.ok(labels.includes('Lock Date'), 'Has Lock Date');
+    assert.ok(labels.includes('Global Lock Date'), 'Has Global Lock Date');
     assert.ok(labels.includes('Tax Return Lock Date'), 'Has Tax Return Lock Date');
     assert.ok(labels.includes('Hard Lock Date'), 'Has Hard Lock Date');
 
@@ -554,6 +554,40 @@ test('moving the hard lock forward requires confirmation; cancel writes nothing'
     assert.equal(read(getDb(), 'res.company', 1).hard_lock_date, '2026-06-30');
   } finally {
     globalThis.confirm = prevConfirm;
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('setting hard_lock_date in dialog surfaces Odoo validation error when draft entries exist in period', async () => {
+  const { addDays, today } = await import('./models/common.js');
+  const lockTarget = addDays(today(), 5);
+  let db = structuredClone(seeded);
+  db = updateSettings(db, { current_company_id: 1 });
+  commit(db);
+
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const origConfirm = globalThis.confirm;
+  globalThis.confirm = () => true;
+  const root = createRoot(container);
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(LockDates, { db }));
+    });
+    const dialog = find(container, (n) => n.tagName === 'FORM');
+    const hardInput = find(dialog, (n) => n.id === 'w-hard_lock_date');
+    await React.act(async () => {
+      props(hardInput).onChange({ target: { value: lockTarget } });
+    });
+    await React.act(async () => {
+      props(dialog).onSubmit({ preventDefault: () => {} });
+    });
+    const alert = find(dialog, (n) => n.className === 'alert' || n.role === 'alert');
+    assert.ok(alert, 'Validation error is displayed in alert');
+    assert.match(alert.textContent, /There are still draft entries in the period you want to hard lock\./);
+  } finally {
+    globalThis.confirm = origConfirm;
     await React.act(async () => root.unmount());
   }
 });

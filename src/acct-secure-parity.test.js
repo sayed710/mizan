@@ -504,9 +504,19 @@ test('wizard-to-posting regression: confirmation is blocked while drafts exist o
   assert.ok(links.length > 0, 'draft entries rendered with link');
   assert.ok(links.some((l) => l.href === `#/open/account.move/${draftInv.id}`), 'link points to draft move');
 
-  // If entries were secured prematurely, the company hard lock would advance to 2026-02-10,
-  // stranding the draft invoice so it could never be posted!
-  const prematurelyLockedDb = write(db, 'res.company', companyId, { hard_lock_date: '2026-02-10' });
+  // Odoo 20 _validate_locks also blocks advancing company hard_lock_date while draft entries remain in period;
+  // and if hard_lock_date were set in state, the draft dated 2026-02-05 would be stranded and refused on post.
+  assert.throws(
+    () => write(db, 'res.company', companyId, { hard_lock_date: '2026-02-10' }),
+    /still draft entries in the period you want to hard lock/i,
+  );
+  const prematurelyLockedDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === companyId ? { ...c, hard_lock_date: '2026-02-10' } : c)),
+    },
+  };
   assert.throws(() => postMove(prematurelyLockedDb, draftInv.id), /locked/i, 'draft dated 2026-02-05 is stranded by hard lock 2026-02-10');
 
   // Resolution: User follows the link, posts the draft entry
