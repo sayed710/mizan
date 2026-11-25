@@ -1,8 +1,6 @@
 import '../src/models/index.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,8 +9,9 @@ import { create, write } from '../src/orm.js';
 import { seed } from '../src/seed.js';
 import { hashPagePassword, websitePlusModels } from '../src/models/websiteplus.js';
 import { openStorage } from './storage.js';
+import { startServer } from './test-server.js';
 
-let child, directory, origin;
+let server, directory, origin;
 const get = (path, options = {}) => fetch(`${origin}${path}`, { redirect: 'manual', ...options });
 const unlock = (password, headers = {}) => get('/secret', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers }, body: new URLSearchParams({ password }) });
 
@@ -35,23 +34,13 @@ before(async () => {
   await mkdir(join(directory, 'dist', 'assets'), { recursive: true });
   await writeFile(join(directory, 'dist', 'index.html'), '<!doctype html><html><head><script type="module" src="/assets/app.js"></script></head><body><div id="root"></div></body></html>');
   await writeFile(join(directory, 'dist', 'assets', 'app.js'), 'export {};');
-  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_DIST: join(directory, 'dist'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_PUBLIC_URL: 'https://website.example', MIZAN_TRUST_PROXY: '1', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  origin = await new Promise((resolve, reject) => {
-    let output = '';
-    const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
-    child.stdout.on('data', (chunk) => {
-      output += chunk;
-      const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
-      if (match) { clearTimeout(timeout); resolve(match[1]); }
-    });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
-  });
+  server = await startServer({ env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_DIST: join(directory, 'dist'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_PUBLIC_URL: 'https://website.example', MIZAN_TRUST_PROXY: '1', MIZAN_SMTP_HOST: '' } });
+  origin = server.origin;
 });
 
 after(async () => {
-  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
-  if (directory) await rm(directory, { recursive: true, force: true });
+  await server?.stop();
+  if (directory) await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 test('permanent redirects preserve Location and redirect loops return the 404 SPA', async () => {

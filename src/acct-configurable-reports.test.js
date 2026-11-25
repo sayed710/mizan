@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { setupDom, find } from './test-support/dom.js';
+import { setupDom, find, waitFor } from './test-support/dom.js';
 import { create, read, write, updateSettings } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
@@ -14,7 +14,7 @@ const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__r
 const press = (db, id) => models['account.report'].form.buttons.find((button) => button.label === 'Open Report').run(db, read(db, 'account.report', id));
 const line = (code, formula, sequence = 10) => ({ code, name: code, formula, sequence });
 
-const rendered = async (React, container, text) => { for (let i = 0; i < 200 && !container.textContent.includes(text); i++) await React.act(() => new Promise((resolve) => setTimeout(resolve, 50))); };
+const rendered = (React, container, text) => waitFor(React, () => container.textContent.includes(text));
 test('report save rejects malformed formulas, missing codes and both formula and parent cycles', () => {
   const base = seed();
   for (const [lines, error] of [
