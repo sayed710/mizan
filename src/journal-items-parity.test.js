@@ -12,6 +12,8 @@ import { secureEntries } from './models/hash_chain.js';
 import { postPayment } from './models/pay.js';
 import { addDays, today } from './models/common.js';
 import { t } from './i18n.js';
+import { fromCsv } from './csv.js';
+import { readXlsx } from './xlsx.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -93,6 +95,7 @@ function optionalMenuButtons(thead) {
 
 function buildRichJournalItemsDb() {
   let db = seed();
+  db = write(db, 'res.company', 1, { group_analytic_accounting: true });
   const dateNow = today();
   const yesterday = addDays(dateNow, -1);
   const tomorrow = addDays(dateNow, 10);
@@ -129,12 +132,16 @@ function buildRichJournalItemsDb() {
     ],
   });
   db = splitTermRes.db;
+  const discountTermRes = create(db, 'account.payment.term', {
+    name: '2/10 Net 30 Discount',
+    early_discount: true,
+    discount_percent: 2,
+    discount_days: 10,
+    line_ids: [{ value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
+  });
+  db = discountTermRes.db;
 
-  const discountTerm = create(db, 'account.payment.term', { name: 'Early Discount', early_discount: true, discount_percent: 2, discount_days: 10, line_ids: [{ value_type: 'percent', value: 100, nb_days: -1 }] });
-  const discountInvoice = create(discountTerm.db, 'account.move', { move_type: 'out_invoice', partner_id: partner.id, journal_id: saleJ.id, date: dateNow, invoice_date: dateNow, invoice_payment_term_id: discountTerm.id, invoice_line_ids: [{ name: 'Discounted service', account_id: inc, qty: 1, price_unit: 100, tax: 0 }] });
-  db = postMove(discountInvoice.db, discountInvoice.id);
-
-  // 1. Overdue split-term customer invoice with tax, product, analytic distribution, and tax grid.
+  // 1. Overdue & split-term customer invoice with tax, product, analytic distribution, and tax grid.
   const splitInvRes = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: partner.id,
@@ -293,12 +300,34 @@ function buildRichJournalItemsDb() {
   });
   db = draftRes.db;
 
-    return { db, splitInvId: splitInvRes.id, discountInvId: discountInvoice.id, bridgedInvId: bridgedInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
+  // 6. Customer invoice with single-line early-payment discount term (Discount Date & Discount Amount columns).
+  const discountInvRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    journal_id: saleJ.id,
+    date: dateNow,
+    invoice_date: dateNow,
+    invoice_payment_term_id: discountTermRes.id,
+    ref: 'INV-DISC-REF',
+    invoice_line_ids: [{
+      name: 'Discounted Retainer',
+      account_id: inc,
+      qty: 1,
+      price_unit: 100,
+      tax: 0,
+      tax_ids: [],
+    }],
+  });
+  db = postMove(discountInvRes.db, discountInvRes.id);
+
+  return { db, splitInvId: splitInvRes.id, discountInvId: discountInvRes.id, bridgedInvId: bridgedInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
 }
 
 test('Journal Items list columns match Odoo 20 order, optional state, multi-company and multi-currency gating', async () => {
   // Single-company + multi-currency default seed DB.
-  const singleCtx = await mountJournalItems(seed());
+  let singleDb = seed();
+  singleDb = write(singleDb, 'res.company', 1, { group_analytic_accounting: true });
+  const singleCtx = await mountJournalItems(singleDb);
   try {
     const { thead, visibleHeaders, toggleBtn } = journalColumnsAndMenus(singleCtx.host);
     assert.deepEqual(
@@ -320,6 +349,7 @@ test('Journal Items list columns match Odoo 20 order, optional state, multi-comp
 
   // Single-currency DB hides In Currency, Currency, and Residual in Currency.
   let oneCurrDb = seed();
+  oneCurrDb = write(oneCurrDb, 'res.company', 1, { group_analytic_accounting: true });
   for (const c of search(oneCurrDb, 'res.currency')) {
     if (c.id !== 1) oneCurrDb = write(oneCurrDb, 'res.currency', c.id, { active: false });
   }
@@ -337,6 +367,7 @@ test('Journal Items list columns match Odoo 20 order, optional state, multi-comp
 
   // Multi-company + multi-currency DB exposes all 25 columns in exact Odoo 20 order when enabled.
   let multiDb = seed();
+  multiDb = write(multiDb, 'res.company', 1, { group_analytic_accounting: true });
   const branchRes = createCompany(multiDb, { name: 'Branch Co', code: 'BRC' });
   multiDb = setCompanies(branchRes.db, { current: 1, allowed: [1, branchRes.id] });
   const multiCtx = await mountJournalItems(multiDb);
@@ -410,11 +441,11 @@ test('Journal Items renders decorations, muted zeros, blanked company currency/n
     assert.equal(consultingRow.childNodes[colIndex('Residual in Currency')].textContent.trim(), '');
     assert.match(consultingRow.childNodes[colIndex('Analytic Distribution')].textContent, /R&D Dept: 100%/);
 
-    // The discount invoice carries an early-payment Discount Date and non-zero Discount Amount.
+    // Early-discount invoice carries early-payment Discount Date & non-zero Discount Amount.
     const discountMoveName = read(fixture.db, 'account.move', fixture.discountInvId).name;
-    const splitArRows = rows.filter((tr) => tr.childNodes[colIndex('Journal Entry')]?.textContent.trim() === discountMoveName && tr.childNodes[colIndex('Discount Date')]?.textContent.trim());
-    assert.ok(splitArRows.length >= 1);
-    assert.ok(splitArRows.some((tr) => tr.childNodes[colIndex('Discount Amount')].textContent.trim() !== '' && !/^[^\d]*0\.00$/.test(tr.childNodes[colIndex('Discount Amount')].textContent.trim())));
+    const discountArRows = rows.filter((tr) => tr.childNodes[colIndex('Journal Entry')]?.textContent.trim() === discountMoveName && tr.childNodes[colIndex('Discount Date')]?.textContent.trim());
+    assert.ok(discountArRows.length >= 1);
+    assert.ok(discountArRows.some((tr) => tr.childNodes[colIndex('Discount Amount')].textContent.trim() !== '' && !/^[^\d]*0\.00$/.test(tr.childNodes[colIndex('Discount Amount')].textContent.trim())));
 
     // Foreign-currency EUR invoice AR line populates In Currency, Currency (EUR), Residual, and Residual in Currency, and has danger Due Date.
     const fxMoveName = read(fixture.db, 'account.move', fixture.fxInvId).name;
@@ -563,5 +594,165 @@ test('Arabic i18n covers all Journal Items columns, footer sums, filters, and gr
     }
   } finally {
     globalThis.localStorage = prevStorage;
+  }
+});
+
+function installDownloadSpy() {
+  const downloads = [];
+  const origCreateElement = globalThis.document.createElement;
+  const origCreateUrl = URL.createObjectURL;
+  const origRevokeUrl = URL.revokeObjectURL;
+
+  globalThis.document.createElement = (tag) => {
+    const el = origCreateElement(tag);
+    el.click = () => {
+      if (tag.toLowerCase() === 'a') {
+        downloads.push({ filename: el.download, blob: downloads.at(-1)?.blob });
+      }
+    };
+    return el;
+  };
+  URL.createObjectURL = (blob) => {
+    downloads.push({ filename: null, blob });
+    return 'blob:test';
+  };
+  URL.revokeObjectURL = () => {};
+
+  return {
+    takeLast: async () => {
+      const entry = downloads.pop();
+      if (!entry?.blob) return null;
+      return {
+        filename: entry.filename,
+        bytes: new Uint8Array(await entry.blob.arrayBuffer()),
+        text: async () => entry.blob.text(),
+      };
+    },
+    restore: () => {
+      globalThis.document.createElement = origCreateElement;
+      URL.createObjectURL = origCreateUrl;
+      URL.revokeObjectURL = origRevokeUrl;
+    },
+  };
+}
+
+test('Journal Items analytic column availability follows scoped companies in table, menu, and exports', async () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { group_analytic_accounting: false });
+  const branch = createCompany(db, { name: 'Branch Analytic Co', code: 'BRA' });
+  db = write(branch.db, 'res.company', branch.id, { group_analytic_accounting: true });
+
+  const plan = create(db, 'account.analytic.plan', { name: 'Branch Plan' }); db = plan.db;
+  const branchAnalytic = create(db, 'account.analytic.account', { name: 'Branch Dept', plan_id: plan.id, company_id: branch.id }); db = branchAnalytic.db;
+
+  const co1Exp = search(db, 'account.account').find((a) => a.account_type === 'expense' && (a.company_id ?? 1) === 1);
+  const co1Cash = search(db, 'account.account').find((a) => a.account_type === 'asset_cash' && (a.company_id ?? 1) === 1);
+  const co1Misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const co2Exp = create(db, 'account.account', { code: '600200', name: 'Branch Expense', account_type: 'expense', company_id: branch.id }); db = co2Exp.db;
+  const co2Cash = create(db, 'account.account', { code: '101600', name: 'Branch Cash', account_type: 'asset_cash', company_id: branch.id }); db = co2Cash.db;
+  const co2Misc = search(db, 'account.journal').find((j) => j.type === 'general' && j.company_id === branch.id);
+
+  const dateNow = today();
+  const m1 = create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: 1,
+    journal_id: co1Misc.id,
+    date: dateNow,
+    line_ids: [
+      { account_id: co1Exp.id, name: 'Main Co Expense', debit: 50, credit: 0 },
+      { account_id: co1Cash.id, name: 'Main Co Cash', debit: 0, credit: 50 },
+    ],
+  });
+  db = postMove(m1.db, m1.id);
+
+  const m2 = create(db, 'account.move', {
+    move_type: 'entry',
+    company_id: branch.id,
+    journal_id: co2Misc.id,
+    date: dateNow,
+    line_ids: [
+      { account_id: co2Exp.id, name: 'Branch Co Expense', debit: 80, credit: 0, analytic_distribution: { [branchAnalytic.id]: 100 } },
+      { account_id: co2Cash.id, name: 'Branch Co Cash', debit: 0, credit: 80 },
+    ],
+  });
+  db = postMove(m2.db, m2.id);
+
+  // 1. Mixed-company view while active company (1) has Analytic Accounting OFF, but Branch Co has it ON.
+  const mixedDb = setCompanies(db, { current: 1, allowed: [1, branch.id] });
+  const mixedCtx = await mountJournalItems(mixedDb);
+  const spy1 = installDownloadSpy();
+  try {
+    const { thead, toggleBtn } = journalColumnsAndMenus(mixedCtx.host);
+    await click(mixedCtx.React, toggleBtn);
+    const menuBtns = optionalMenuButtons(thead);
+    const analyticBtn = menuBtns.find((b) => b.textContent.replace('✓', '').trim() === 'Analytic Distribution');
+    assert.ok(analyticBtn, 'Optional columns menu includes Analytic Distribution when a displayed company has it enabled');
+    await click(mixedCtx.React, analyticBtn);
+
+    const headers = allFind(find(mixedCtx.host, (n) => n.tagName === 'THEAD'), (n) => n.tagName === 'TH' && !hasClass(n, 'o2m-cols-th'))
+      .map((n) => n.textContent.trim());
+    assert.ok(headers.includes('Analytic Distribution'), 'Table displays Analytic Distribution column');
+    const analyticColIdx = headers.indexOf('Analytic Distribution');
+    const bodyRows = allFind(find(mixedCtx.host, (n) => n.tagName === 'TBODY'), (n) => n.tagName === 'TR' && !hasClass(n, 'group-row'));
+    const branchRow = bodyRows.find((tr) => tr.textContent.includes('Branch Co Expense'));
+    assert.ok(branchRow);
+    assert.match(branchRow.childNodes[analyticColIdx].textContent, /Branch Dept: 100%/);
+
+    const csvBtn = allFind(mixedCtx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Export CSV')[0];
+    await click(mixedCtx.React, csvBtn);
+    const csvDl = await spy1.takeLast();
+    const csvRows = fromCsv(await csvDl.text());
+    assert.ok(csvRows[0].includes('Analytic Distribution'), 'CSV export includes Analytic Distribution header');
+    assert.ok(csvRows.some((r) => r.includes('Branch Dept: 100%')), 'CSV export includes enabled company analytic allocation');
+
+    const xlsxBtn = allFind(mixedCtx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Export XLSX')[0];
+    await click(mixedCtx.React, xlsxBtn);
+    const xlsxDl = await spy1.takeLast();
+    const xlsxData = readXlsx(xlsxDl.bytes);
+    assert.ok(xlsxData.rows[0].includes('Analytic Distribution'), 'XLSX export includes Analytic Distribution header');
+    assert.ok(xlsxData.rows.some((r) => r.includes('Branch Dept: 100%')), 'XLSX export includes enabled company analytic allocation');
+  } finally {
+    spy1.restore();
+    await mixedCtx.done();
+  }
+
+  // 2. Active company (Branch Co) has Analytic Accounting ON, but view is scoped to disabled Company 1.
+  const activeOnScopedOffDb = setCompanies(db, { current: branch.id, allowed: [1, branch.id] });
+  const scopedOffCtx = await mountJournalItems(activeOnScopedOffDb, '#/accounting/journal-items?company=1');
+  const spy2 = installDownloadSpy();
+  try {
+    const { thead, visibleHeaders, toggleBtn } = journalColumnsAndMenus(scopedOffCtx.host);
+    assert.ok(!visibleHeaders.includes('Analytic Distribution'), 'Table hides Analytic Distribution when scoped to disabled company');
+    await click(scopedOffCtx.React, toggleBtn);
+    const menuLabels = optionalMenuButtons(thead).map((b) => b.textContent.replace('✓', '').trim());
+    assert.ok(!menuLabels.includes('Analytic Distribution'), 'Menu hides Analytic Distribution when scoped to disabled company');
+
+    const csvBtn = allFind(scopedOffCtx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Export CSV')[0];
+    await click(scopedOffCtx.React, csvBtn);
+    const csvRows = fromCsv(await (await spy2.takeLast()).text());
+    assert.ok(!csvRows[0].includes('Analytic Distribution'), 'CSV export hides Analytic Distribution when scoped to disabled company');
+
+    const xlsxBtn = allFind(scopedOffCtx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Export XLSX')[0];
+    await click(scopedOffCtx.React, xlsxBtn);
+    const xlsxData = readXlsx((await spy2.takeLast()).bytes);
+    assert.ok(!xlsxData.rows[0].includes('Analytic Distribution'), 'XLSX export hides Analytic Distribution when scoped to disabled company');
+  } finally {
+    spy2.restore();
+    await scopedOffCtx.done();
+  }
+
+  // 3. Active company (1) has Analytic Accounting OFF, but view is scoped to enabled Branch Co.
+  const scopedOnCtx = await mountJournalItems(mixedDb, `#/accounting/journal-items?company=${branch.id}`);
+  try {
+    const { thead, toggleBtn } = journalColumnsAndMenus(scopedOnCtx.host);
+    await click(scopedOnCtx.React, toggleBtn);
+    const analyticBtn = optionalMenuButtons(thead).find((b) => b.textContent.replace('✓', '').trim() === 'Analytic Distribution');
+    assert.ok(analyticBtn, 'Menu shows Analytic Distribution when scoped to enabled company');
+    await click(scopedOnCtx.React, analyticBtn);
+    const headers = allFind(find(scopedOnCtx.host, (n) => n.tagName === 'THEAD'), (n) => n.tagName === 'TH' && !hasClass(n, 'o2m-cols-th'))
+      .map((n) => n.textContent.trim());
+    assert.ok(headers.includes('Analytic Distribution'));
+  } finally {
+    await scopedOnCtx.done();
   }
 });

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { read, search, write } from '../orm.js';
+import { read, search } from '../orm.js';
 import { models } from '../registry.js';
 import { today } from '../models/common.js';
 import { categoryPath } from '../models/productconfig-helpers.js';
@@ -26,7 +26,7 @@ import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
 import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
-import { TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
+import { GENERIC_TAX_TOTALS, TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowAnalyticColumns, cashflowColumns, detailReportColumns, executiveColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
 import { customPeriodError, DEFAULT_REPORT_PERIOD, PERIODS, reportPage, updateReportParam } from './reportNavigation.js';
@@ -221,6 +221,11 @@ export function resolveTaxReportTemplate(db, companyId, companies = null) {
   return null;
 }
 
+const exportTaxReturnXml = (db, retOrSpec, baseName = retOrSpec?.name || 'tax-return') => {
+  const safeBase = String(baseName).replace(/[^a-zA-Z0-9_-]+/g, '-');
+  downloadXml(`${safeBase}.xml`, taxReturnToXml(db, retOrSpec));
+};
+
 export function TaxReportTable({ db, period, returnRecord = null }) {
   const safeBase = String(returnRecord?.name || 'tax-return').replace(/[^a-zA-Z0-9_-]+/g, '-');
   const template = returnRecord?.tax_return_template;
@@ -233,7 +238,7 @@ export function TaxReportTable({ db, period, returnRecord = null }) {
         <div className="row" style={{ marginBottom: 8 }}>
           <button type="button" className="btn sm" onClick={() => downloadCsv(`${safeBase}.csv`, taxReturnToCsv(db, returnRecord))}>{t('Export CSV')}</button>
           <button type="button" className="btn sm" onClick={() => downloadXlsx(`${safeBase}.xlsx`, taxReturnToCsv(db, returnRecord), { sheetName: safeBase, columnTypes: ['text', 'text', 'number', 'number'] })}>{t('Export XLSX')}</button>
-          <button type="button" className="btn sm" onClick={() => downloadXml(`${safeBase}.xml`, taxReturnToXml(db, returnRecord))}>{t('Export XML')}</button>
+          <button type="button" className="btn sm" onClick={() => exportTaxReturnXml(db, returnRecord, safeBase)}>{t('Export XML')}</button>
         </div>
       )}
       <table className="list report">
@@ -324,7 +329,8 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
   });
 
   if (periods) {
-    const specs = periods.map((p) => ({ ...p, ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}), tax_return_template: activeVariant }));
+    const taxFilter = period?.taxIds?.length ? { taxIds: period.taxIds } : {};
+    const specs = periods.map((p) => ({ ...p, ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}), ...taxFilter, tax_return_template: activeVariant }));
     const reports = specs.map((spec) => activeVariant === 'generic' ? genericTaxRows(taxesByTax(db, spec)) : taxReturnBoxes(db, spec).boxes);
     const rowKey = (row) => activeVariant === 'generic' ? taxItemKey({ ...row, tax_name: row.name }) : row.code;
     const rowsByReport = reports.map((rows) => new Map(rows.map((row) => [rowKey(row), row])));
@@ -340,7 +346,7 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
       {activeVariant === 'generic' ? <>{section('Sales')}{renderRows(mergedRows.filter((row) => row.side === 'sale'))}{section('Purchases')}{renderRows(mergedRows.filter((row) => row.side === 'purchase'))}</> : renderRows(mergedRows)}
       {grids.size > 0 && section('Tax Grids')}
       {[...grids.values()].map((row) => <tr key={`grid-${row.id}`} className="rep-detail"><td>{row.name}</td>{gridsByReport.flatMap((byId, index) => { const value = byId.get(row.id); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>)}
-      {activeVariant === 'generic' && ['output', 'input', 'payable'].map((key) => <tr key={key} className={`rep-total ${key === 'payable' ? 'strong' : ''}`}><td>{t(key === 'output' ? 'Output Tax' : key === 'input' ? 'Input Tax' : 'Tax Payable')}</td>{totals.flatMap((total, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} className="num">{fmtMoney(total[key])}</td>])}</tr>)}
+      {activeVariant === 'generic' && GENERIC_TAX_TOTALS.map(({ key, label, strong }) => <tr key={key} className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td>{totals.flatMap((total, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} className="num">{fmtMoney(total[key])}</td>])}</tr>)}
     </tbody>;
   }
 
@@ -422,14 +428,12 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
       {renderSection('Purchases', rows.filter((x) => x.side === 'purchase'))}
       {grids.length > 0 && <tr className="rep-section"><td>{t('Tax Grids')}</td><td /><td /></tr>}
       {grids.map((x) => <tr key={x.id} className="rep-detail"><td>{x.name}</td><td className="num">{fmtMoney(x.base)}</td><td className="num">{fmtMoney(x.tax)}</td></tr>)}
-      {renderTotalLine('Output Tax', 'TOTAL-OUT', r.output)}
-      {renderTotalLine('Input Tax', 'TOTAL-IN', r.input)}
-      {renderTotalLine('Tax Payable', 'PAYABLE', r.payable, true)}
+      {GENERIC_TAX_TOTALS.map(({ key, code, label, strong }) => renderTotalLine(label, code, r[key], strong))}
     </tbody>
   );
 }
 
-function DetailComparison({ db, data, report, companyId, variant, money: fmtMoney = money }) {
+function DetailComparison({ db, data, report, companyId, variant, taxIds, money: fmtMoney = money }) {
   const [open, setOpen] = useState(null);
   const isStatutoryTax = report === 'tax' && variant !== 'generic';
   const width = (isStatutoryTax ? 2 : 1) + data.periods.length * (report === 'tax' ? 2 : 3);
@@ -451,7 +455,7 @@ function DetailComparison({ db, data, report, companyId, variant, money: fmtMone
       )}
     </tr>
     {report === 'tax' && row.columns.map((column, index) => column?.code && open === `${row.id}:${index}` ? (
-      <TaxBoxDetailRow key={index} db={db} returnOrPeriod={{ ...data.periods[index], company_id: companyId === 'all' ? null : Number(companyId), tax_return_template: variant }} code={column.code} colSpan={width} money={fmtMoney} />
+      <TaxBoxDetailRow key={index} db={db} returnOrPeriod={{ ...data.periods[index], company_id: companyId === 'all' ? null : Number(companyId), tax_return_template: variant, ...(taxIds?.length ? { taxIds } : {}) }} code={column.code} colSpan={width} money={fmtMoney} />
     ) : null)}
   </Fragment>)}</tbody>;
 }
@@ -622,8 +626,8 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   );
 }
 
-export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money }) {
-  const availableCompanies = companiesOf(db);
+export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money: moneyProp }) {
+  const fmtMoney = moneyProp ?? money;
   const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
@@ -631,17 +635,23 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
     const general = acc ? `${acc.code} ${acc.name}` : l.general_account;
     return [analytic, general].filter(Boolean).join(' · ') || '—';
   };
-  const selectCompany = (budgetId, value) => {
-    const companyId = Number(value);
-    if (!companyId || !availableCompanies.some((company) => company.id === companyId)) return;
-    commit(write(getDb(), 'account.budget', budgetId, { company_id: companyId }));
-  };
   const targetPeriods = periods?.length ? periods : [period];
   const minFrom = targetPeriods.map((p) => p.from).filter(Boolean).sort()[0];
   const maxTo = targetPeriods.map((p) => p.to).filter(Boolean).sort().at(-1);
   const datesOverlap = (from1, to1, from2, to2) =>
     (!to1 || !from2 || to1 >= from2) && (!from1 || !to2 || from1 <= to2);
-
+  const zeroBudgetLine = (line) => ({
+    ...line,
+    planned_amount: 0,
+    achieved_amount: 0,
+    committed_amount: 0,
+    budget_variance: 0,
+    achievement: 0,
+    budget_achievement: 0,
+    budget_theoretical: 0,
+    analytic_lines: [],
+    commitment_lines: [],
+  });
   return (
     <tbody>
       {search(db, 'account.budget').filter((b) => {
@@ -673,18 +683,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
             for (const p of targetPeriods) {
               const budgetOverlaps = datesOverlap(b.date_from, b.date_to, p.from, p.to);
               if (!budgetOverlaps) {
-                const zeroLines = baseBudgetLines.map((line) => ({
-                  ...line,
-                  planned_amount: 0,
-                  achieved_amount: 0,
-                  committed_amount: 0,
-                  budget_variance: 0,
-                  budget_achievement: 0,
-                  budget_theoretical: 0,
-                  analytic_lines: [],
-                  commitment_lines: [],
-                }));
-                periodReports.push({ period: p, lines: zeroLines, error: null });
+                periodReports.push({ period: p, lines: baseBudgetLines.map(zeroBudgetLine), error: null });
               } else {
                 try {
                   const asOfDate = p.to && p.to < today() ? p.to : today();
@@ -694,20 +693,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                   const lines = rawLines.map((line) => {
                     const lineFrom = line.date_from || b.date_from;
                     const lineTo = line.date_to || b.date_to;
-                    if (!datesOverlap(lineFrom, lineTo, p.from, p.to)) {
-                      return {
-                        ...line,
-                        planned_amount: 0,
-                        achieved_amount: 0,
-                        committed_amount: 0,
-                        budget_variance: 0,
-                        budget_achievement: 0,
-                        budget_theoretical: 0,
-                        analytic_lines: [],
-                        commitment_lines: [],
-                      };
-                    }
-                    return line;
+                    return !datesOverlap(lineFrom, lineTo, p.from, p.to) ? zeroBudgetLine(line) : line;
                   });
                   periodReports.push({ period: p, lines, error: null });
                 } catch (error) {
@@ -727,16 +713,9 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
         return [
           <tr key={b.id} className="rep-section"><td colSpan={colSpan}>
             <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
-            {companyMissing
-              ? <label className="inline-select">{t('Company')}
-                <select aria-label={`${t('Company')} for ${b.name}`} value="" onChange={(event) => selectCompany(b.id, event.target.value)}>
-                  <option value="">{t('Select a company')}</option>
-                  {availableCompanies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-              </label>
-              : <span className="muted"> · {company.name}</span>}
+            {company && <span className="muted"> · {company.name}</span>}
           </td></tr>,
-          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company to show this budget report.')}</td></tr>] : []),
+          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company on the budget record to show this budget report.')} {t('Select a company to show this budget report.')}</td></tr>] : []),
           ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{reportError}</td></tr>] : []),
           ...firstReportLines.map((l, i) => {
             const pr0Line = periodReports[0]?.lines?.[i];
@@ -757,21 +736,21 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                     }
                     const pLine = pr.lines[i];
                     return [
-                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={money} />,
-                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={money} />,
-                      <td key={`${pIdx}-a`} className="num">{pLine.budget_theoretical ? `${pLine.budget_achievement}%` : ''}</td>,
+                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount ?? pLine.planned} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={fmtMoney} />,
+                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={fmtMoney} />,
+                      <td key={`${pIdx}-a`} className="num">{(pLine.planned_amount ?? pLine.planned) ? `${pLine.budget_achievement ?? pLine.achievement}%` : ''}</td>,
                     ];
                   })}
                 </tr>
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.analytic_lines ?? []).map((item) => <tr className="rep-detail" key={item.id}>
                   <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td /><td />
+                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td /><td />
                 </tr>)}
                 {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.commitment_lines ?? []).map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
                   <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
-                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={money} /><td /><td />
+                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td />
                 </tr>)}
               </Fragment>
             );
@@ -918,22 +897,24 @@ function Valuation({ db, period, companyId, categoryId, productId, warehouseId, 
 }
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
-function Depreciation({ db, period, companyId, includeDraft = false, money: moneyProp }) {
+function Depreciation({ db, period, companyId, groupBy = '', includeDraft = false, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const { rows, totals } = depreciationReport(db, period, companyId, { includeDraft });
+  const { rows, totals, groups } = depreciationReport(db, period, companyId, { groupBy, includeDraft });
+  const renderRow = ({ a, original, inPeriod, accumulated, book }) => (
+    <tr key={a.id} className="rep-detail">
+      <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td><td>{a.acquisition_date}</td>
+      {[original, inPeriod, accumulated, book].map((value, i) => <td key={i} className="num">{fmtMoney(value)}</td>)}
+    </tr>
+  );
+  const totalRow = (label, values) => (
+    <tr className="rep-total strong">
+      <td>{label}</td><td />{['original', 'inPeriod', 'accumulated', 'book'].map((key) => <td key={key} className="num">{fmtMoney(values[key])}</td>)}
+    </tr>
+  );
   return (
     <tbody>
-      {rows.map(({ a, original, inPeriod, accumulated, book }) => (
-        <tr key={a.id} className="rep-detail">
-          <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td>
-          <td>{a.acquisition_date}</td>
-          <td className="num">{fmtMoney(original)}</td>
-          <td className="num">{fmtMoney(inPeriod)}</td>
-          <td className="num">{fmtMoney(accumulated)}</td>
-          <td className="num">{fmtMoney(book)}</td>
-        </tr>
-      ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td className="num">{fmtMoney(totals.original)}</td><td className="num">{fmtMoney(totals.inPeriod)}</td><td className="num">{fmtMoney(totals.accumulated)}</td><td className="num">{fmtMoney(totals.book)}</td></tr>
+      {groupBy ? groups.map((group) => <Fragment key={group.id ?? 'none'}><tr className="rep-section"><td colSpan={6}>{group.name || t('Undefined')}</td></tr>{group.rows.map(renderRow)}{totalRow(t('Subtotal'), group.totals)}</Fragment>) : rows.map(renderRow)}
+      {totalRow(t('Total'), totals)}
     </tbody>
   );
 }
@@ -1090,6 +1071,7 @@ function ReportPage({ leaf, params }) {
   const [showInitialBalance, setShowInitialBalance] = useState(true);
   const [showEndBalance, setShowEndBalance] = useState(true);
   const [auditSort, setAuditSort] = useState('date');
+  const [depreciationGroupBy, setDepreciationGroupBy] = useState('');
   const [agingInterval, setAgingInterval] = useState(30);
   const [agingBasis, setAgingBasis] = useState('base_on_maturity_date');
   const agingOptions = useMemo(() => ({ aging_interval: agingInterval, aging_based_on: agingBasis }), [agingInterval, agingBasis]);
@@ -1169,15 +1151,27 @@ function ReportPage({ leaf, params }) {
   const countryTemplateKey = leaf.report === 'tax' ? resolveTaxReportTemplate(companyDb, selectedCompany, companies) : null;
   const countryTemplate = countryTemplateKey ? TAX_RETURN_TEMPLATES[countryTemplateKey] : null;
   const [taxVariant, setTaxVariant] = useState(null);
+  const [taxIds, setTaxIds] = useState([]);
   const [taxVariantCompany, setTaxVariantCompany] = useState(selectedCompany);
   if (taxVariantCompany !== selectedCompany) {
     setTaxVariantCompany(selectedCompany);
     setTaxVariant(null);
   }
+  const availableTaxes = useMemo(() => {
+    if (leaf.report !== 'tax') return [];
+    return search(scopedCompanyDb, 'account.tax')
+      .filter((tax) => selectedCompany === 'all' || !tax.company_id || tax.company_id === Number(selectedCompany))
+      .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.name ?? '').localeCompare(b.name ?? '') || (a.id ?? 0) - (b.id ?? 0));
+  }, [leaf.report, scopedCompanyDb, selectedCompany]);
+  const selectedTaxIds = useMemo(
+    () => taxIds.filter((taxId) => availableTaxes.some((tax) => tax.id === taxId)),
+    [taxIds, availableTaxes],
+  );
   const activeTaxVariant = (taxVariant && (taxVariant === 'generic' || taxVariant === countryTemplateKey))
     ? taxVariant
     : (countryTemplateKey ?? 'generic');
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
+  const xmlCompanyId = selectedCompanyId ?? (companies.length === 1 ? companies[0].id : null);
   const period = useMemo(
     () => (isAged || isValuation ? { from: '', to: agedReportDate(asOfState.date) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
     [isAged, isValuation, asOfState.date, periodKey, customPeriod],
@@ -1261,8 +1255,12 @@ function ReportPage({ leaf, params }) {
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement', 'depreciation'].includes(leaf.report);
   const effectivePeriod = useMemo(
-    () => (showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period),
-    [showUnpostedOption, includeUnposted, period]
+    () => ({
+      ...period,
+      ...(showUnpostedOption && includeUnposted ? { reviewMode: 'all' } : {}),
+      ...(leaf.report === 'tax' && selectedTaxIds.length > 0 ? { taxIds: selectedTaxIds } : {}),
+    }),
+    [showUnpostedOption, includeUnposted, period, leaf.report, selectedTaxIds]
   );
   const rootPlans = useMemo(() => {
     if (leaf.report !== 'analytic') return [];
@@ -1329,7 +1327,7 @@ function ReportPage({ leaf, params }) {
           : null
   );
   const detailComparison = !periodError && periods && ['tax', 'fiscal'].includes(leaf.report)
-    ? detailReportColumns(db, leaf.report, periods, { company_id: selectedCompany === 'all' ? null : Number(selectedCompany), analyticAccountIds, includeUnposted, variant: activeTaxVariant }) : null;
+    ? detailReportColumns(db, leaf.report, periods, { company_id: selectedCompany === 'all' ? null : Number(selectedCompany), analyticAccountIds, includeUnposted, variant: activeTaxVariant, taxIds: selectedTaxIds }) : null;
   const tableRef = useRef(null);
   const isAudit = leaf.report === 'audit';
   const [auditUser, setAuditUser] = useState('');
@@ -1551,6 +1549,12 @@ function ReportPage({ leaf, params }) {
           <option value="number">{t('Journal Entry Number')}</option>
         </select>
       </label>}
+      {leaf.report === 'depreciation' && <label className="inline-select">{t('Group By')}
+        <select aria-label={t('Group By')} value={depreciationGroupBy} onChange={(e) => setDepreciationGroupBy(e.target.value)}>
+          <option value="">{t('None')}</option>
+          <option value="asset_group_id">{t('Asset Group')}</option>
+        </select>
+      </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
         <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={allowAllCompanies} />
       )}
@@ -1627,6 +1631,14 @@ function ReportPage({ leaf, params }) {
           <select aria-label={t('Variant')} value={activeTaxVariant} onChange={(e) => setTaxVariant(e.target.value)}>
             <option value={countryTemplateKey}>{t(countryTemplate.label)}</option>
             <option value="generic">{t('Generic')}</option>
+          </select>
+        </label>
+      )}
+      {leaf.report === 'tax' && (
+        <label className="inline-select">
+          {t('Taxes')}
+          <select aria-label={t('Taxes')} multiple value={selectedTaxIds.map(String)} onChange={(e) => setTaxIds(selectedOptionIds(e))}>
+            {availableTaxes.map((tax) => <option key={tax.id} value={tax.id}>{tax.name}</option>)}
           </select>
         </label>
       )}
@@ -1733,6 +1745,25 @@ function ReportPage({ leaf, params }) {
       <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
       <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={exportCsv}>{t('Download CSV')}</button>
       <button type="button" className="btn sm" disabled={Boolean(periodError)} onClick={exportXlsx}>{t('Export XLSX')}</button>
+      {isTaxBoxes && xmlCompanyId != null && (
+        <button
+          type="button"
+          className="btn sm"
+          disabled={Boolean(periodError) || selectedTaxIds.length > 0}
+          title={selectedTaxIds.length > 0 ? t('Clear the Taxes filter to export the statutory XML return') : undefined}
+          onClick={() => {
+            if (periodError || selectedTaxIds.length > 0) return;
+            exportTaxReturnXml(db, {
+              ...period,
+              company_id: xmlCompanyId,
+              tax_return_template: activeTaxVariant,
+              name: TAX_RETURN_TEMPLATES[activeTaxVariant].label,
+            }, `tax-return-${activeTaxVariant}`);
+          }}
+        >
+          {t('Export XML')}
+        </button>
+      )}
       </div>
       {periodError && (
         <div className="alert" role="alert" style={{ margin: '0 16px 12px' }}>
@@ -1782,7 +1813,7 @@ function ReportPage({ leaf, params }) {
               </tr>
             </thead>
             {detailComparison ? (
-              <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} money={fmtMoney} />
+              <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} taxIds={selectedTaxIds} money={fmtMoney} />
             ) : periods && PERIODIC_BODY_REPORTS.has(leaf.report) ? (
               <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} money={fmtMoney} />
             ) : data ? (
@@ -1807,6 +1838,7 @@ function ReportPage({ leaf, params }) {
                 variant={activeTaxVariant}
                 sort={auditSort}
                 kind={deferredKind}
+                groupBy={depreciationGroupBy}
                 journalId={leaf.report === 'inalterability' ? activeInalterabilityJournalId : undefined}
                 agedData={agedData}
                 agingOptions={agingOptions}

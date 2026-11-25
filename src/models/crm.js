@@ -4,6 +4,93 @@ import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank
 import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 
+export function partnerCategoryCompleteName(db, r) {
+  if (!r?.name) return '';
+  const names = [r.name];
+  const seen = new Set(r.id ? [r.id] : []);
+  const find = (key) => (db?.records?.['res.partner.category'] ?? []).find((c) => c.id === key);
+  for (let c = find(r.parent_id); c && !seen.has(c.id); c = find(c.parent_id)) {
+    seen.add(c.id);
+    names.unshift(c.name);
+  }
+  return names.join(' / ');
+}
+
+// Reusable inverse index caches per records snapshot for partner tags and child categories
+const categoryPartnerIndexCache = new WeakMap();
+export function partnersByCategory(db) {
+  if (!db?.records || typeof db.records !== 'object') return new Map();
+  let index = categoryPartnerIndexCache.get(db.records);
+  if (!index) {
+    index = new Map();
+    for (const p of db.records['res.partner'] ?? []) {
+      const tags = p?.tag_ids;
+      if (!tags) continue;
+      const list = Array.isArray(tags) ? tags : [tags];
+      for (const t of list) {
+        const id = typeof t === 'object' && t !== null ? t.id : t;
+        if (id != null) {
+          const arr = index.get(id);
+          if (arr) arr.push(p.id); else index.set(id, [p.id]);
+        }
+      }
+    }
+    categoryPartnerIndexCache.set(db.records, index);
+  }
+  return index;
+}
+
+const categoryChildIndexCache = new WeakMap();
+export function childrenByCategory(db) {
+  if (!db?.records || typeof db.records !== 'object') return new Map();
+  let index = categoryChildIndexCache.get(db.records);
+  if (!index) {
+    index = new Map();
+    for (const c of db.records['res.partner.category'] ?? []) {
+      if (c?.parent_id != null) {
+        const arr = index.get(c.parent_id);
+        if (arr) arr.push(c.id); else index.set(c.parent_id, [c.id]);
+      }
+    }
+    categoryChildIndexCache.set(db.records, index);
+  }
+  return index;
+}
+
+export function partnerTagIds(db, names) {
+  let currentDb = db;
+  const ids = [];
+  const list = Array.isArray(names) ? names : names ? [names] : [];
+  for (const raw of list) {
+    const trimmed = String(raw ?? '').trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    const categories = currentDb?.records?.['res.partner.category'] ?? [];
+    const existing = categories.find((c) => c.active !== false && String(c.name ?? '').trim().toLowerCase() === lower);
+    if (existing) {
+      if (!ids.includes(existing.id)) ids.push(existing.id);
+    } else {
+      const { db: nextDb, id } = create(currentDb, 'res.partner.category', { name: trimmed });
+      currentDb = nextDb;
+      if (!ids.includes(id)) ids.push(id);
+    }
+  }
+  return { db: currentDb, ids };
+}
+
+export function guardPartnerCategory(db, before, r) {
+  let id = r.parent_id;
+  const targetId = before?.id ?? r.id;
+  const seen = new Set(targetId ? [targetId] : []);
+  const find = (key) => (db?.records?.['res.partner.category'] ?? []).find((c) => c.id === key);
+  while (id) {
+    if (seen.has(id)) return 'Category hierarchy cannot contain a cycle';
+    seen.add(id);
+    id = find(id)?.parent_id;
+  }
+  return null;
+}
+
 /** Mark a commercial partner as a customer or vendor. Sets the rank to 1 only when it is 0 (activity flag), so concurrent postings never write conflicting ranks. */
 export function incrementPartnerRank(db, partnerId, field) {
   const id = commercialPartnerId(db, partnerId);
@@ -116,6 +203,51 @@ export const crmModels = {
     },
   },
 
+  'res.partner.category': {
+    label: 'Contact Tags',
+    fields: {
+      name: { type: 'char', label: 'Tag Name', required: true },
+      color: { type: 'integer', label: 'Color' },
+      parent_id: { type: 'many2one', relation: 'res.partner.category', label: 'Parent Category' },
+      complete_name: {
+        type: 'char',
+        label: 'Complete Name',
+        compute: (r, db) => partnerCategoryCompleteName(db, r),
+      },
+      display_name: {
+        type: 'char',
+        label: 'Complete Name',
+        compute: (r, db) => partnerCategoryCompleteName(db, r),
+      },
+      active: { type: 'boolean', label: 'Active' },
+      partner_ids: {
+        type: 'many2many',
+        relation: 'res.partner',
+        label: 'Partners',
+        readonly: true,
+        compute: (r, db) => [...(partnersByCategory(db).get(r?.id) ?? [])],
+      },
+      child_ids: {
+        type: 'many2many',
+        relation: 'res.partner.category',
+        label: 'Child Tags',
+        readonly: true,
+        compute: (r, db) => [...(childrenByCategory(db).get(r?.id) ?? [])],
+      },
+    },
+    defaults: () => ({ active: true, color: 0 }),
+    guard: guardPartnerCategory,
+    searchFields: ['name', 'complete_name'],
+    list: ['display_name', 'color'],
+    listLabels: { display_name: 'Tag Name' },
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'parent_id', 'color', 'active'],
+      ],
+    },
+  },
+
   'res.partner': {
     label: 'Contacts',
     fields: {
@@ -175,7 +307,7 @@ export const crmModels = {
           no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
-      tag_ids: { type: 'tags', label: 'Tags' },
+      tag_ids: { type: 'many2many', relation: 'res.partner.category', label: 'Tags' },
       bank_ids: {
         type: 'one2many',
         relation: 'res.partner.bank',

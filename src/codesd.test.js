@@ -99,7 +99,7 @@ test('codesd 5: analytic lines retain the actual booked account rather than a fa
   const draft = invoice(db, null, { move_type: 'in_invoice', invoice_line_ids: [{ name: 'Allocated', account_id: expense.id, qty: 1, price_unit: 100, tax: 0, analytic_distribution: { [analytic.id]: 100 } }] });
   db = postMove(draft.db, draft.id);
   const lines = analyticLinesForMove(db, read(db, 'account.move', draft.id));
-  assert.equal(lines.find((line) => line.account_id === analytic.id).general_account, 'CUSTOM-ANALYTIC');
+  assert.equal(lines.find((line) => line.account_id === analytic.id).general_account, expense.id);
 });
 
 test('codesd 6: single expenses use expenseDebits product and tax settings, with no category inference', () => {
@@ -146,7 +146,7 @@ test('codesd migration 33 maps installer roles only on a unique company-owned co
   const company = read(db, 'res.company', 1);
   const old = { ...db, schema_version: 32, records: { ...db.records, 'res.company': [{ ...company, current_year_earnings_account_id: null }], 'account.tax': [{ id: 999, name: 'Cash', company_id: 1, type_tax_use: 'sale', tax_exigibility: 'on_payment' }] } };
   const migrated = migrate(old);
-  assert.equal(migrated.schema_version, 70);
+  assert.equal(migrated.schema_version, 74);
   const transition = read(migrated, 'account.tax', 999).cash_basis_transition_account_id;
   assert.equal(read(migrated, 'account.account', transition).code, '251100');
   const renamed = { ...old, records: { ...old.records, 'account.account': old.records['account.account'].map((a) => ({ ...a, code: `CUSTOM-${a.id}` })) } };
