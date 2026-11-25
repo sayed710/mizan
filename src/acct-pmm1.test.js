@@ -287,11 +287,11 @@ test('migration v77 seeds online payment methods for existing databases upgraded
   const { 'payment.method': _removedSeq, ...restSeq } = fresh.seq;
   const legacyDb = { ...fresh, schema_version: 68, records: restRecords, seq: restSeq };
 
-  assert.equal(SCHEMA_VERSION, 77);
+  assert.ok(SCHEMA_VERSION >= 77);
   assert.equal(search(legacyDb, 'payment.method', { includeArchived: true }).length, 0);
 
   const upgraded = migrate(legacyDb);
-  assert.equal(upgraded.schema_version, 77);
+  assert.equal(upgraded.schema_version, SCHEMA_VERSION);
   const providersByCode = Object.fromEntries(search(upgraded, 'payment.provider').map((p) => [p.code, p]));
   assert.deepEqual(
     search(upgraded, 'payment.method').map((m) => ({ code: m.code, name: m.name, active: m.active, provider_ids: m.provider_ids })),
@@ -317,7 +317,7 @@ test('migration v77 seeds online payment methods for existing databases upgraded
     },
   };
   const minimalUpgraded = migrate(minimalLegacy);
-  assert.equal(minimalUpgraded.schema_version, 77);
+  assert.equal(minimalUpgraded.schema_version, SCHEMA_VERSION);
   const methods = search(minimalUpgraded, 'payment.method', { includeArchived: true });
   assert.equal(methods.find((m) => m.code === 'wire_transfer')?.active, false);
   assert.deepEqual(methods.find((m) => m.code === 'cod')?.provider_ids, [2]);
