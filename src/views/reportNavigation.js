@@ -4,11 +4,13 @@ import { today, validDate } from '../models/common.js';
 export const DEFAULT_REPORT_PERIOD = 'year';
 
 /** Validate a custom report period range (From/To); returns an English error message or null when valid. */
-export function customPeriodError(periodKey, period) {
+export function customPeriodError(periodKey, period, { requireFrom = false } = {}) {
   if (periodKey !== 'custom') return null;
   const from = period?.from;
   const to = period?.to;
-  // An empty From means "from the beginning" (as-of reports, statements opened from aged balances).
+  // An empty From means "from the beginning" (as-of reports, statements opened from aged balances),
+  // unless comparison periods must shift a bounded range.
+  if (requireFrom && !from) return to ? 'Enter a From date' : 'Enter both From and To dates';
   if (!to) return 'Enter a To date';
   if ((from && !validDate(from)) || !validDate(to)) return 'Enter valid From and To dates';
   if (from && from > to) return 'From date cannot be after To date';

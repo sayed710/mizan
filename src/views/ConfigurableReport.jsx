@@ -123,7 +123,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const period = statementKind ? (periodKey === 'custom' ? { from, to } : PERIODS[periodKey]()) : { from, to };
   const comparable = !statementKind || periodKey !== 'all';
   const activePeriodKey = statementKind ? periodKey : 'custom';
-  const periodError = customPeriodError(activePeriodKey, period);
+  const periodError = customPeriodError(activePeriodKey, period, { requireFrom: comparable && comparison !== 'none' });
   const canComputePeriods = !periodError;
   const reportCompany = report.company_id ?? 1;
   const groups = comparable
@@ -138,13 +138,13 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const analyticAccounts = search(companyDb, 'account.analytic.account').filter(
     (a) => !a.company_id || (statementKind ? companyIds.includes(a.company_id) : a.company_id === reportCompany),
   );
-  const periods = comparable && comparison !== 'none' && canComputePeriods
-    ? periodsFor(activePeriodKey, comparison, period)
-    : [{ ...period, label: '' }];
   let data = null;
   let computeError = null;
   if (!periodError && !groupSelectionError) {
     try {
+      const periods = comparable && comparison !== 'none' && canComputePeriods
+        ? periodsFor(activePeriodKey, comparison, period)
+        : [{ ...period, label: '' }];
       data = compareConfigurableReport(
         db,
         report,
@@ -154,6 +154,12 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
         { companyIds, analyticAccountIds, includeUnposted },
       );
     } catch (error) {
+      console.error('Could not compute configurable report:', error, {
+        reportId: report.id,
+        statementKind,
+        period,
+        comparison,
+      });
       computeError = error?.message || 'Could not compute report';
     }
   }

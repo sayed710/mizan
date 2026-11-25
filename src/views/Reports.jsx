@@ -1014,13 +1014,15 @@ function ReportPage({ leaf, params }) {
     () => (isAged ? { from: '', to: agedReportDate(asOf) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
     [isAged, asOf, periodKey, customPeriod],
   );
-  const periodError = !isAged && !['inalterability', 'valuation'].includes(leaf.report) ? customPeriodError(periodKey, period) : null;
+  const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'tax', 'fiscal'].includes(leaf.report) && periodKey !== 'all';
+  const periodError = !isAged && !['inalterability', 'valuation'].includes(leaf.report)
+    ? customPeriodError(periodKey, period, { requireFrom: comparable && comparison !== 'none' })
+    : null;
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
   const isTrial = leaf.report === 'trial';
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
-  const comparable = ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'tax', 'fiscal'].includes(leaf.report) && periodKey !== 'all';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement'].includes(leaf.report);
   const effectivePeriod = useMemo(
     () => (showUnpostedOption && includeUnposted ? { ...period, reviewMode: 'all' } : period),

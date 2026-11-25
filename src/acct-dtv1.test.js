@@ -31,6 +31,11 @@ test('DTV-1: canonical reportNavigation customPeriodError validates custom range
   assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '2026-12-31' }), null);
 
   assert.equal(customPeriodError('custom', { from: '', to: '2026-12-31' }), null);
+  assert.equal(customPeriodError('custom', { from: '', to: '2026-12-31' }, { requireFrom: true }), 'Enter a From date');
+  assert.equal(customPeriodError('custom', { from: '', to: '' }, { requireFrom: true }), 'Enter both From and To dates');
+  assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '' }, { requireFrom: true }), 'Enter a To date');
+  assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '2026-12-31' }, { requireFrom: true }), null);
+  assert.equal(customPeriodError('year', { from: '', to: '' }, { requireFrom: true }), null);
   assert.equal(customPeriodError('custom', { from: '2026-01-01', to: '' }), 'Enter a To date');
   assert.equal(customPeriodError('custom', { from: '2026-02-30', to: '2026-03-01' }), 'Enter valid From and To dates');
   assert.equal(customPeriodError('custom', { from: '2026-01-01', to: 'not-a-date' }), 'Enter valid From and To dates');
@@ -300,5 +305,183 @@ test('DTV-2: Invalid horizontal group selection in ConfigurableReport surfaces a
     assert.ok(find(host, (n) => n.tagName === 'TABLE'));
   } finally {
     await React.act(async () => root.unmount());
+  }
+});
+
+test('DTV-1 regression: clearing From with an active comparison shows inline error instead of crashing in ConfigurableReport and Reports', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/reports/pnl' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
+  const yr = Number(today().slice(0, 4));
+  const cashAcc = search(db, 'account.account').find((a) => a.code === '101401');
+  const revAcc = search(db, 'account.account').find((a) => a.code === '400000');
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: `${yr}-03-10`,
+    lines: [
+      { account_id: cashAcc.id, debit: 500 },
+      { account_id: revAcc.id, credit: 500 },
+    ],
+  }).db;
+  const customRep = create(db, 'account.report', {
+    name: 'DTV Comparison Custom Report',
+    company_id: 1,
+    date_scope: 'range',
+    line_ids: [{ name: 'Sales', code: 'SALES', sequence: 10, parent_code: '', formula: '400', sign: -1, foldable: false, strong: true }],
+  });
+  db = customRep.db;
+  await React.act(async () => commit(db));
+
+  const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  const findActionBtn = (label) => find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === label);
+  const assertActionsDisabled = (disabled) => {
+    for (const label of ['Print', 'Download CSV', 'Export XLSX']) {
+      assert.equal(Boolean(props(findActionBtn(label))?.disabled), disabled, `${label} disabled=${disabled}`);
+    }
+  };
+
+  try {
+    // 1. ConfigurableReportPage (P&L and Balance Sheet)
+    for (const [statementKind, title] of [['pnl', 'Profit and Loss'], ['balance', 'Balance Sheet']]) {
+      await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { key: `cmp-${statementKind}`, statementKind, title })));
+      const periodSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
+      await React.act(async () => props(periodSelect).onChange({ target: { value: 'custom' } }));
+      const [fromInput] = findDateInputs(host);
+      await React.act(async () => props(fromInput).onChange({ target: { value: '' } }));
+
+      // Non-comparison empty From remains valid
+      assert.equal(findAlert(host), null, `${statementKind} allows empty From without comparison`);
+      assert.ok(find(host, (n) => n.tagName === 'TABLE'));
+      assertActionsDisabled(false);
+
+      // Selecting each comparison mode shows inline error instead of crashing
+      for (const mode of ['previous', 'lastYear', 'last3']) {
+        const compSelect = find(host, (n) => n.tagName === 'SELECT' && ['none', 'previous', 'lastYear', 'last3'].includes(props(n)?.value));
+        await React.act(async () => props(compSelect).onChange({ target: { value: mode } }));
+        assert.equal(textOf(findAlert(host)), 'Enter a From date', `${statementKind} (${mode}) must show inline From error`);
+        assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
+        assertActionsDisabled(true);
+      }
+
+      // Entering From restores comparison table
+      const [fromAgain] = findDateInputs(host);
+      await React.act(async () => props(fromAgain).onChange({ target: { value: `${yr}-01-01` } }));
+      assert.equal(findAlert(host), null);
+      assert.ok(find(host, (n) => n.tagName === 'TABLE'));
+      assertActionsDisabled(false);
+    }
+
+    // 2. ConfigurableReportPage custom account.report (always custom period)
+    await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { key: 'cmp-custom', id: customRep.id })));
+    const compSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Comparison');
+    await React.act(async () => props(compSelect).onChange({ target: { value: 'previous' } }));
+    const [custFrom] = findDateInputs(host);
+    await React.act(async () => props(custFrom).onChange({ target: { value: '' } }));
+    assert.equal(textOf(findAlert(host)), 'Enter a From date');
+    assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
+    assertActionsDisabled(true);
+
+    // 3. Reports.jsx comparable reports (P&L, Balance Sheet, Cash Flow, Executive, Trial, Tax, Fiscal)
+    for (const report of ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'tax', 'fiscal']) {
+      await React.act(async () => root.render(React.createElement(Reports, { key: `rep-${report}`, leaf: { report, key: report } })));
+      const periodSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
+      await React.act(async () => props(periodSelect).onChange({ target: { value: 'custom' } }));
+      const [rFrom] = findDateInputs(host);
+      await React.act(async () => props(rFrom).onChange({ target: { value: '' } }));
+
+      assert.equal(findAlert(host), null, `${report} allows empty From without comparison`);
+      assert.ok(find(host, (n) => n.tagName === 'TABLE'));
+
+      const comp = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'none');
+      await React.act(async () => props(comp).onChange({ target: { value: 'previous' } }));
+      assert.equal(textOf(findAlert(host)), 'Enter a From date', `${report} must show inline From error when comparison is active`);
+      assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
+      assertActionsDisabled(true);
+
+      await React.act(async () => props(comp).onChange({ target: { value: 'none' } }));
+      assert.equal(findAlert(host), null);
+      assert.ok(find(host, (n) => n.tagName === 'TABLE'));
+      assertActionsDisabled(false);
+    }
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('DTV-2 regression: ConfigurableReportPage logs unexpected computation error with stack and context while showing inline alert', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/reports/custom' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  let db = seed();
+  // Bypass ORM validation to store a broken custom report whose computation throws inside compareConfigurableReport.
+  const brokenId = 99001;
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.report': [
+        ...(db.records['account.report'] ?? []),
+        { id: brokenId, name: 'Broken Report', company_id: 1, date_scope: 'range', active: true, line_ids: null },
+      ],
+    },
+  };
+  await React.act(async () => commit(db));
+
+  const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  const logged = [];
+  const origError = console.error;
+  console.error = (...args) => logged.push(args);
+  try {
+    await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { id: brokenId })));
+
+    const alert = findAlert(host);
+    assert.ok(alert, 'Inline alert must render on computation failure');
+    assert.ok(textOf(alert).length > 0);
+    assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
+    for (const label of ['Print', 'Download CSV', 'Export XLSX']) {
+      const btn = find(host, (n) => n.tagName === 'BUTTON' && textOf(n) === label);
+      assert.equal(Boolean(props(btn)?.disabled), true, `${label} must be disabled when report computation fails`);
+    }
+
+    const reportLog = logged.find((args) => args.some((a) => a instanceof Error));
+    assert.ok(reportLog, 'Original exception must be logged via console.error');
+    const errArg = reportLog.find((a) => a instanceof Error);
+    assert.ok(errArg.stack && errArg.stack.includes('configurableReport'), 'Logged error must include stack trace');
+    const ctxArg = reportLog.find((a) => a && typeof a === 'object' && !(a instanceof Error));
+    assert.equal(ctxArg?.reportId, brokenId);
+  } finally {
+    console.error = origError;
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('DTV-1 i18n: Arabic translations exist for new custom From date errors', async () => {
+  globalThis.localStorage = { getItem: () => 'ar', setItem() {} };
+  try {
+    const { t } = await import(`./i18n.js?dtv1-ar=${Date.now()}`);
+    assert.notEqual(t('Enter a From date'), 'Enter a From date');
+    assert.notEqual(t('Enter both From and To dates'), 'Enter both From and To dates');
+  } finally {
+    delete globalThis.localStorage;
   }
 });
