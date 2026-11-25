@@ -165,11 +165,11 @@ test('Finding 2 & 3: Direct applyRule cross-company rejection and global rule ma
     /Reconciliation model belongs to another company/,
   );
 
-  // Global rule (company_id: null) can match C2 line
+  // Rule with shared account (globalAcc) for C2 matches C2 line
   const globalAcc = create(db, 'account.account', { code: '600099', name: 'Global Fees', account_type: 'expense' });
   db = globalAcc.db;
   const ruleGlobal = create(db, 'account.reconcile.model', {
-    name: 'Global Rule', company_id: null, rule_type: 'writeoff_suggestion', sequence: 50,
+    name: 'Global Rule', company_id: c2.id, rule_type: 'writeoff_suggestion', sequence: 50,
     match_label: 'contains', match_label_param: 'Global',
     line_ids: [{ account_id: globalAcc.id, amount_type: 'percentage', amount: 100 }],
   });

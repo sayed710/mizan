@@ -556,7 +556,9 @@ test('account.account.tag model is registered with correct fields', () => {
   assert.equal(m.fields.applicability.type, 'selection');
   assert.ok(m.fields.color, 'color field');
   assert.ok(m.fields.active, 'active field');
-  assert.ok(m.fields.country, 'country field');
+  assert.ok(m.fields.country_id, 'country_id field');
+  assert.equal(m.fields.country_id.type, 'many2one');
+  assert.equal(m.fields.country_id.relation, 'res.country');
   assert.ok(m.fields.balance_negate, 'balance_negate field');
 });
 

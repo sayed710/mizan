@@ -85,7 +85,7 @@ test('migration fills budget_type: both on legacy budgets and allows status chan
   // Before migration, writing or confirming throws because budget_type is missing
   assert.throws(() => write(unmigrated, 'account.budget', 991, { state: 'confirmed' }), /Budget Type is required/);
 
-  // Migrating upgrades database to SCHEMA_VERSION and fills budget_type: 'both'
+  // Migrating upgrades database to schema_version 72 and fills budget_type: 'both'
   const upgraded = migrate(unmigrated);
   assert.equal(upgraded.schema_version, 79);
   assert.equal(read(upgraded, 'account.budget', 991).budget_type, 'both');

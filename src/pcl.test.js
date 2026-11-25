@@ -8,7 +8,7 @@ import { taxLockFor } from './models/finance.js';
 import { createCompany } from './models/company.js';
 import { reviewReturn, submitReturn, resetReturnToDraft } from './models/taxreturn.js';
 import { applyDiff } from './sync.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 
 test('pcl: lock dates live on res.company and isolate between companies', () => {
   let db = seed();
@@ -288,6 +288,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
   };
 
   const migrated = migrate(legacyDb);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
   assert.equal(migrated.schema_version, 79);
 
   // Company 1 has migrated values
