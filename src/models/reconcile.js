@@ -606,9 +606,12 @@ export function suggestRule(db, line) {
   return activeRules(db).find((r) => ruleMatches(r, line)) ?? null;
 }
 
-function guardReconcileModel(db, _before, rule) {
+function guardReconcileModel(db, before, rule) {
   if (!rule.company_id) {
     return 'Company is required';
+  }
+  if (before?.company_id && rule.company_id !== before.company_id) {
+    return 'Company cannot be changed once assigned';
   }
   for (const journalId of rule.match_journal_ids ?? []) {
     const journal = read(db, 'account.journal', journalId);
@@ -695,7 +698,16 @@ export const reconcileModels = {
     label: 'Reconciliation Models',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, readonly: true, default: (db) => currentCompany(db), multiCompanyOnly: true },
+      company_id: {
+        type: 'many2one',
+        relation: 'res.company',
+        label: 'Company',
+        required: true,
+        copy: false,
+        readonly: (r, _db, { isNew, stored } = {}) => Boolean(isNew || (stored ? stored.company_id : r?.company_id)),
+        default: (db) => currentCompany(db),
+        multiCompanyOnly: true,
+      },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       trigger: {
         type: 'selection',

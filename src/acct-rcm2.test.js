@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { create, read, write } from './orm.js';
 import { models } from './models/index.js';
+import { fieldReadonly } from './field-metadata.js';
 import { setCompanies } from './models/company.js';
 import { ruleMatches } from './models/reconcile.js';
 import { defaultTaxRepartitionLines } from './models/taxes.js';
@@ -64,7 +65,7 @@ async function mountView(renderElement, initialDb) {
   globalThis.document.createElementNS = (_, tag) => globalThis.document.createElement(tag);
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
-  const { initStore, commit } = await import('./store.js');
+  const { initStore, commit, getDb } = await import('./store.js');
   await initStore();
   await commit(initialDb);
   const host = globalThis.document.createElement('div');
@@ -74,6 +75,7 @@ async function mountView(renderElement, initialDb) {
   return {
     host,
     React,
+    getDb,
     async done() {
       await React.act(async () => root.unmount());
       if (prevStorage === undefined) delete globalThis.localStorage;
@@ -85,8 +87,11 @@ async function mountView(renderElement, initialDb) {
 test('RCM-1: company_id is required, defaults to current company, enforces company guards over diff, and leaves legacy companyless records until resaved', async () => {
   const def = models[MODEL];
   assert.equal(def.fields.company_id.required, true);
-  assert.equal(def.fields.company_id.readonly, true);
+  assert.equal(def.fields.company_id.copy, false);
   assert.equal(def.fields.company_id.multiCompanyOnly, true);
+  assert.equal(fieldReadonly(def.fields.company_id, { company_id: 1 }, {}), true);
+  assert.equal(fieldReadonly(def.fields.company_id, { company_id: null }, {}), false);
+  assert.equal(fieldReadonly(def.fields.company_id, { company_id: null }, {}, { isNew: true }), true);
 
   let db = seed();
   const co2 = create(db, 'res.company', { name: 'Second Co', currency_id: 1 });
@@ -215,6 +220,30 @@ test('RCM-1: company_id is required, defaults to current company, enforces compa
   };
   assert.throws(() => applyDiff(migrated, diffDb(migrated, forgedResave), { isAdmin: true }), /Company is required/);
 
+  // One-time assignment succeeds via write and applyDiff, then company becomes immutable
+  const assigned = write(migrated, MODEL, 9200, { company_id: 1 });
+  assert.equal(read(assigned, MODEL, 9200).company_id, 1);
+  assert.throws(() => write(assigned, MODEL, 9200, { company_id: co2.id }), /Company cannot be changed once assigned/);
+  const forgedReassign = {
+    ...assigned,
+    records: {
+      ...assigned.records,
+      [MODEL]: assigned.records[MODEL].map((r) => (r.id === 9200 ? { ...r, company_id: co2.id } : r)),
+    },
+  };
+  assert.throws(() => applyDiff(assigned, diffDb(assigned, forgedReassign), { isAdmin: true }), /Company cannot be changed once assigned/);
+
+  const legacyForDiff = {
+    ...migrated,
+    records: {
+      ...migrated.records,
+      [MODEL]: migrated.records[MODEL].map((r) => (r.id === 9200 ? { ...r, company_id: 1, active: false } : r)),
+    },
+  };
+  const syncedAssign = applyDiff(migrated, diffDb(migrated, legacyForDiff), { isAdmin: true });
+  assert.equal(read(syncedAssign, MODEL, 9200).company_id, 1);
+  assert.equal(read(syncedAssign, MODEL, 9200).active, false);
+
   // Arabic translations exist for every new validation message
   const prevStorage = globalThis.localStorage;
   globalThis.localStorage = { getItem: () => 'ar' };
@@ -222,6 +251,7 @@ test('RCM-1: company_id is required, defaults to current company, enforces compa
     const { t: tAr } = await import(`./i18n.js?rcm2=${Date.now()}`);
     for (const msg of [
       'Company is required',
+      'Company cannot be changed once assigned',
       'Journals in the reconciliation model must belong to the model company',
       'Partner in counterpart item must belong to the model company',
       'Reconciliation accounts must be active and belong to the model company',
@@ -330,7 +360,124 @@ test('RCM-2: company_id is shown in form and list only in multi-company, readonl
     });
     const alertBox = find(legacyForm.host, (n) => hasClass(n, 'alert'));
     assert.ok(alertBox?.textContent.includes('Company is required'), 'shows validation error when resaving companyless record');
+
+    // Legacy companyless rule exposes an editable Company select, keeps it editable until saved, then locks it
+    const companySelect = find(legacyForm.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id');
+    assert.ok(companySelect, 'legacy companyless rule shows editable Company select');
+    await legacyForm.React.act(async () => {
+      props(companySelect).onChange({ target: { value: '1' } });
+    });
+    assert.ok(
+      find(legacyForm.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id'),
+      'Company select remains editable before Save so user can adjust choice',
+    );
+    const saveBtn = find(legacyForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    assert.ok(saveBtn);
+    await legacyForm.React.act(async () => {
+      props(saveBtn).onClick();
+    });
+    assert.equal(find(legacyForm.host, (n) => hasClass(n, 'alert')), null);
+    assert.equal(read(legacyForm.getDb(), MODEL, 9300).company_id, 1);
+    assert.equal(find(legacyForm.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id'), null, 'Company select becomes readonly after assignment');
+
+    // User can now edit and disable the rule
+    const nameInput = find(legacyForm.host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-name');
+    const activeInput = find(legacyForm.host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-active');
+    await legacyForm.React.act(async () => {
+      props(nameInput).onChange({ target: { value: 'Legacy Fixed Rule' } });
+      props(activeInput).onChange({ target: { checked: false } });
+    });
+    const saveEditBtn = find(legacyForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    await legacyForm.React.act(async () => {
+      props(saveEditBtn).onClick();
+    });
+    const updated = read(legacyForm.getDb(), MODEL, 9300);
+    assert.equal(updated.name, 'Legacy Fixed Rule');
+    assert.equal(updated.active, false);
+    assert.equal(updated.company_id, 1);
   } finally {
     await legacyForm.done();
+  }
+});
+
+test('RCM-3: single-company form reveals editable Company field only for companyless legacy rules, allows one-time assignment, and then hides/locks it', async () => {
+  const { menusFor } = await import('./models/index.js');
+  const { FormView } = await import('./views/FormView.jsx');
+  const leaf = findLeafByKey(menusFor('accounting'), 'reconcile-models');
+
+  const base = seed();
+  const migrated = migrate({
+    ...base,
+    schema_version: 39,
+    records: {
+      ...base.records,
+      [MODEL]: [...(base.records[MODEL] ?? []), {
+        id: 9400,
+        name: 'Single Co Legacy Rule',
+        sequence: 10,
+        trigger: 'manual',
+        rule_type: 'reco_model',
+        active: true,
+        line_ids: [],
+      }],
+    },
+  });
+  assert.equal(read(migrated, MODEL, 9400).company_id ?? null, null, 'migration still does not guess company');
+
+  // New form in single-company still hides Company (defaults to current company)
+  const newForm = await mountView(
+    (React) => React.createElement(FormView, { leaf, id: 'new', base: '#/accounting/reconcile-models', params: new URLSearchParams('view=list') }),
+    migrated,
+  );
+  try {
+    assert.equal(fieldLabelsOf(newForm.host).includes('Company'), false, 'new single-company form hides Company');
+  } finally {
+    await newForm.done();
+  }
+
+  const singleLegacyForm = await mountView(
+    (React) => React.createElement(FormView, { leaf, id: '9400', base: '#/accounting/reconcile-models', params: new URLSearchParams('view=list') }),
+    migrated,
+  );
+  try {
+    assert.ok(fieldLabelsOf(singleLegacyForm.host).includes('Company'), 'single-company form reveals Company when missing on legacy rule');
+    const companySelect = find(singleLegacyForm.host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id');
+    assert.ok(companySelect, 'Company field is editable in single-company form for legacy rule');
+
+    // Actions -> Archive without company surfaces validation error on form instead of throwing
+    const actionsBtn = find(singleLegacyForm.host, (n) => n.tagName === 'BUTTON' && props(n)?.['aria-label'] === 'Actions');
+    await singleLegacyForm.React.act(async () => {
+      props(actionsBtn).onClick();
+    });
+    const archiveBtn = find(singleLegacyForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Archive');
+    await singleLegacyForm.React.act(async () => {
+      props(archiveBtn).onClick();
+    });
+    assert.ok(find(singleLegacyForm.host, (n) => hasClass(n, 'alert'))?.textContent.includes('Company is required'));
+
+    // Assign company and save -> Company hides again in single-company DB and rule can be disabled
+    await singleLegacyForm.React.act(async () => {
+      props(companySelect).onChange({ target: { value: '1' } });
+    });
+    assert.ok(fieldLabelsOf(singleLegacyForm.host).includes('Company'), 'stays visible until saved');
+    const saveBtn = find(singleLegacyForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    await singleLegacyForm.React.act(async () => {
+      props(saveBtn).onClick();
+    });
+    assert.equal(read(singleLegacyForm.getDb(), MODEL, 9400).company_id, 1);
+    assert.equal(fieldLabelsOf(singleLegacyForm.host).includes('Company'), false, 'Company hides again after assignment in single-company DB');
+
+    // Disable rule via Actions -> Archive after company assignment
+    const actionsBtn2 = find(singleLegacyForm.host, (n) => n.tagName === 'BUTTON' && props(n)?.['aria-label'] === 'Actions');
+    await singleLegacyForm.React.act(async () => {
+      props(actionsBtn2).onClick();
+    });
+    const archiveBtn2 = find(singleLegacyForm.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Archive');
+    await singleLegacyForm.React.act(async () => {
+      props(archiveBtn2).onClick();
+    });
+    assert.equal(read(singleLegacyForm.getDb(), MODEL, 9400).active, false);
+  } finally {
+    await singleLegacyForm.done();
   }
 });
