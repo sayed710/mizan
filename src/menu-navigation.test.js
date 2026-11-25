@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
+import { waitFor } from './test-support/dom.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -154,9 +155,7 @@ test('clicking a submenu button keeps the mobile panel open, while anchor clicks
 });
 
 // Report views load lazily; wait until the route's content renders (slow CI runners need more than one act tick).
-const rendered = async (React, container, text) => {
-  for (let i = 0; i < 200 && !container.textContent.includes(text); i++) await React.act(() => new Promise((resolve) => setTimeout(resolve, 50)));
-};
+const rendered = (React, container, text) => waitFor(React, () => container.textContent.includes(text));
 
 test('Unrealized Currencies report date and revaluation button operate through the menu route', async () => {
   const container = setupDom();

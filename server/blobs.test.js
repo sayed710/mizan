@@ -7,8 +7,6 @@ import { seed } from '../src/seed.js';
 import { cleanValue } from '../src/validate.js';
 import { openBlobs } from './blobs.js';
 import { safeImage } from './api.js';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { diffDb } from '../src/sync.js';
 import { createCompany } from '../src/models/company.js';
 import { claimWriter } from './storage.js';
+import { startServer } from './test-server.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgo=';
 const PDF = `data:application/pdf;base64,${Buffer.from('%PDF-1.4 receipt').toString('base64')}`;
@@ -98,19 +97,12 @@ test('blob schema and inserts require the writer lease', () => {
 
 test('blob downloads require access to the referencing model and company', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-blobs-'));
-  const child = spawn(process.execPath, ['server/index.js'], {
-    cwd: new URL('..', import.meta.url),
-    env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: 'blob-admin-password', MIZAN_SECURE_COOKIE: '0' },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  let server;
   try {
-    const url = await new Promise((resolve, reject) => {
-      let output = '';
-      child.stdout.on('data', (b) => { output += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output); if (m) resolve(m[1]); });
-      child.stderr.on('data', (b) => { output += b; });
-      child.on('error', reject);
-      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${output}`)));
+    server = await startServer({
+      env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: 'blob-admin-password', MIZAN_SECURE_COOKIE: '0' },
     });
+    const { url } = server;
     const client = () => {
       let cookie = '';
       return async (method, path, body) => {
@@ -159,8 +151,8 @@ test('blob downloads require access to the referencing model and company', async
       assert.ok([403, 404].includes((await restricted('GET', path)).status), login);
     }
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
-    rmSync(dir, { recursive: true, force: true });
+    await server?.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -181,20 +173,13 @@ test('public image requests cache allowed images per revision without rebuilding
     });
   `);
 
-  const child = spawn(process.execPath, ['--import', pathToFileURL(preloadPath).href, 'server/index.js'], {
-    cwd: new URL('..', import.meta.url),
-    env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '', MIZAN_ALLOW_RESET: '' },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-
+  let server;
   try {
-    const origin = await new Promise((resolve, reject) => {
-      let out = '';
-      let err = '';
-      child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
-      child.stderr.on('data', (b) => { err += b; });
-      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out} ${err}`)));
+    server = await startServer({
+      preload: preloadPath,
+      env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '', MIZAN_ALLOW_RESET: '' },
     });
+    const { origin, child } = server;
 
     const getRebuilds = () => new Promise((resolve) => {
       const handler = (msg) => {
@@ -243,8 +228,8 @@ test('public image requests cache allowed images per revision without rebuilding
     const rebuildDelta = afterRequests - initialRebuilds;
     assert.equal(rebuildDelta, 1, 'first image request builds cache; subsequent requests for same revision reuse cache');
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
-    rmSync(dir, { recursive: true, force: true });
+    await server?.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
