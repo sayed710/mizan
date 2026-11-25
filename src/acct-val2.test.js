@@ -580,3 +580,42 @@ test('VAL-2 regression: companyId "all" with warehouse or location filter values
   const repAllLocs = valuationReport(db, { companyId: 'all', locationId: rootLoc.id, at: '2026-01-31' });
   assert.deepEqual(repAllLocs[shared.id], { qty: 10, value: 220, unitCost: 22 });
 });
+
+test('VAL-2 regression: warehouse and location valuation aggregates quants once instead of rescanning per product', async () => {
+  let db = seed();
+  const loc = create(db, 'stock.location', { name: 'Fast Loc', usage: 'internal', company_id: 1 });
+  db = loc.db;
+  const wh = create(db, 'stock.warehouse', { name: 'Fast WH', code: 'FWH', lot_stock_id: loc.id, company_id: 1 });
+  db = wh.db;
+
+  const prods = [];
+  for (let i = 0; i < 5; i++) {
+    const p = create(db, 'product', { name: `Fast Product ${i}`, type: 'goods', cost: 10 + i });
+    db = p.db;
+    prods.push(p);
+  }
+
+  const quants = prods.map((p, idx) => ({
+    id: 9900 + idx,
+    product_id: p.id,
+    location_id: loc.id,
+    company_id: 1,
+    quantity: 2 + idx,
+  }));
+
+  let scanCount = 0;
+  const originalIterator = quants[Symbol.iterator];
+  quants[Symbol.iterator] = function* () {
+    scanCount++;
+    yield* originalIterator.call(this);
+  };
+  db.records['stock.quant'] = quants;
+
+  const rep = valuationReport(db, { warehouseId: wh.id, at: today() });
+  assert.equal(scanCount, 1, `Expected quants to be scanned once, but was scanned ${scanCount} times`);
+  for (let i = 0; i < prods.length; i++) {
+    const p = prods[i];
+    assert.deepEqual(rep[p.id], { qty: 2 + i, value: (2 + i) * (10 + i), unitCost: 10 + i });
+  }
+});
+

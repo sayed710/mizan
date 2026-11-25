@@ -400,6 +400,22 @@ export function valuationReport(db, {
     return true;
   });
 
+  let quantsByProduct = null;
+  if (allowedLocIds) {
+    quantsByProduct = new Map();
+    for (const q of db.records['stock.quant'] ?? []) {
+      if (!allowedLocIds.has(q.location_id)) continue;
+      const cId = q.company_id ?? 1;
+      if (comp !== 'all' && cId !== comp) continue;
+      let compMap = quantsByProduct.get(q.product_id);
+      if (!compMap) {
+        compMap = new Map();
+        quantsByProduct.set(q.product_id, compMap);
+      }
+      compMap.set(cId, (compMap.get(cId) ?? 0) + (q.quantity || 0));
+    }
+  }
+
   const rows = {};
   for (const p of products) {
     if (allowedLocIds) {
@@ -408,13 +424,8 @@ export function valuationReport(db, {
       // (omitting products with no quantity there), and value is the sum across companies
       // of each company's selected quantity × that company's unit cost at the valuation date
       // (falling back to product cost when no layers exist for that company).
-      const qtyByComp = new Map();
-      for (const q of db.records['stock.quant'] ?? []) {
-        if (q.product_id !== p.id || !allowedLocIds.has(q.location_id)) continue;
-        const cId = q.company_id ?? 1;
-        if (comp !== 'all' && cId !== comp) continue;
-        qtyByComp.set(cId, (qtyByComp.get(cId) ?? 0) + q.quantity);
-      }
+      const qtyByComp = quantsByProduct.get(p.id);
+      if (!qtyByComp) continue;
       let qty = 0;
       let value = 0;
       let unavailable = false;
