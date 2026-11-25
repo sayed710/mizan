@@ -693,9 +693,11 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         ? (({ fx_payment_move_id, fx_invoice_id, system_generated, ...rest }) => rest)(submitted)
         : submitted;
       const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
-      const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
-      if (model === 'account.move' && rec.state === 'draft' && rec.posting_order != null && (!submitted || submitted.posting_order === undefined)) delete rec.posting_order;
-      if (companies) scopeNestedCompanyArrays(model, rec, companies, { prior, submitted, write: true });
+      const cleaned = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
+      if (model === 'account.move' && cleaned.state === 'draft' && cleaned.posting_order != null && (!submitted || submitted.posting_order === undefined)) delete cleaned.posting_order;
+      if (companies) scopeNestedCompanyArrays(model, cleaned, companies, { prior, submitted, write: true });
+      // Server-owned values (e.g. currency rate write_date) are recomputed from the stored record, never trusted from the client.
+      const rec = models[model]?.finalizeWrite?.(db, cleaned, prior) ?? cleaned;
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
       const old = current.get(rec.id);
