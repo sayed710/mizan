@@ -3786,6 +3786,12 @@ const ar = {
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
   "The cash rounding strategy of a POS must be 'Add a rounding line'": 'يجب أن تكون استراتيجية التقريب النقدي لنقطة البيع «إضافة بند تقريب»',
+  'Percentages on the Payment Terms lines must be between 0 and 100.': 'يجب أن تكون النسب المئوية في بنود شروط الدفع بين 0 و100.',
+  'The Payment Term must have at least one percent line and the sum of the percent must be 100%.': 'يجب أن يحتوي شرط الدفع على بند نسبة مئوية واحد على الأقل وأن يكون مجموع النسب 100%.',
+  'The Early Payment Discount functionality can only be used with payment terms using a single 100% line.': 'لا يمكن استخدام ميزة خصم السداد المبكر إلا مع شروط دفع تستخدم بنداً واحداً بنسبة 100%.',
+  'The Early Payment Discount must be strictly positive.': 'يجب أن يكون خصم السداد المبكر موجباً تماماً.',
+  'The Early Payment Discount days must be strictly positive.': 'يجب أن تكون أيام خصم السداد المبكر موجبة تماماً.',
+  'You can not delete payment terms as other records still reference it. However, you can archive it.': 'لا يمكنك حذف شروط الدفع لأن سجلات أخرى ما زالت تشير إليها. يمكنك أرشفتها بدلاً من ذلك.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

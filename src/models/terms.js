@@ -66,6 +66,10 @@ function lineDate(line, invoiceDate) {
   return addDays(base, days);
 }
 
+const isBalanceLine = (line) => line?.value_type === 'balance' || (!line?.value_type && line?.value === 'balance');
+const isPercentLine = (line) => line?.value_type === 'percent';
+const roundPercent = (value) => Math.round(value * 1e6) / 1e6;
+
 /** Return an error message when transient preview inputs (`example_amount`, `example_date`) are invalid, or null. */
 export function exampleInputsError(vals) {
   if (!vals) return null;
@@ -94,6 +98,50 @@ export function dueTermLinesError(term) {
   return null;
 }
 
+/** Validate payment term line percentages, balance line placement, and early-discount rules (Odoo _check_lines/_check_percent). */
+export function paymentTermLinesError(term) {
+  const lines = term?.line_ids ?? [];
+  if (!lines.length) return 'Add at least one due term';
+  const balanceIndex = lines.findIndex(isBalanceLine);
+  if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) return 'The balance due term must be the last one';
+
+  let totalPercent = 0;
+  let hasPercent = false;
+  for (const line of lines) {
+    if (!isPercentLine(line)) continue;
+    hasPercent = true;
+    const pct = Number(line.value ?? 0);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      return 'Percentages on the Payment Terms lines must be between 0 and 100.';
+    }
+    totalPercent += pct;
+  }
+  totalPercent = roundPercent(totalPercent);
+
+  if (balanceIndex < 0) {
+    if (!hasPercent || totalPercent !== 100) {
+      return 'The Payment Term must have at least one percent line and the sum of the percent must be 100%.';
+    }
+  } else if (totalPercent > 100) {
+    return 'Payment terms must allocate 100% of the total';
+  }
+
+  if (term?.early_discount) {
+    if (lines.length !== 1 || !isPercentLine(lines[0]) || totalPercent !== 100) {
+      return 'The Early Payment Discount functionality can only be used with payment terms using a single 100% line.';
+    }
+    const discountPercent = Number(term.discount_percent);
+    if (!Number.isFinite(discountPercent) || discountPercent <= 0) {
+      return 'The Early Payment Discount must be strictly positive.';
+    }
+    const discountDays = Number(term.discount_days);
+    if (!Number.isFinite(discountDays) || discountDays <= 0) {
+      return 'The Early Payment Discount days must be strictly positive.';
+    }
+  }
+  return null;
+}
+
 /** Return the first validation error for a payment term schedule against `total`, or null when valid. */
 export function termScheduleError(term, total, currency = null) {
   const lines = term?.line_ids ?? [];
@@ -103,11 +151,14 @@ export function termScheduleError(term, total, currency = null) {
   const fixed = lines.map((line) => (line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0));
   const fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
   if (fixedRemaining > totalCents) return 'Fixed amounts exceed the total';
-  const balanceIndex = lines.findIndex((line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance'));
+  const balanceIndex = lines.findIndex(isBalanceLine);
   if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) return 'The balance due term must be the last one';
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
-  const hasPercent = lines.some((line) => line.value_type === 'percent');
-  const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
+  const hasPercent = lines.some(isPercentLine);
+  const lastPercentIndex = balanceIndex < 0 && hasFixed && hasPercent ? lines.findLastIndex(isPercentLine) : -1;
+  const requestedTotal = lines.reduce((sum, line, index) => sum + (
+    line.value_type === 'fixed' ? fixed[index] : isPercentLine(line) && index !== lastPercentIndex ? totalCents * (Number(line.value) || 0) / 100 : 0
+  ), 0);
   if (balanceIndex >= 0 || (hasFixed && hasPercent)) {
     if (requestedTotal > totalCents + lines.length / 2) {
       return 'Payment terms must allocate 100% of the total';
@@ -132,9 +183,8 @@ export function installments(term, total, invoiceDate, currency = null) {
   const fixed = lines.map((line) => (line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0));
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
 
-  const isBalanceLine = (line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance');
   const hasBalance = lines.some(isBalanceLine);
-  const lastPercentIndex = lines.findLastIndex((line) => line.value_type === 'percent');
+  const lastPercentIndex = lines.findLastIndex(isPercentLine);
   const isResidualLine = (line, index) => (hasBalance ? isBalanceLine(line) : index === lastPercentIndex);
 
   let remaining = totalCents;
@@ -301,11 +351,14 @@ export const termModels = {
       if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) && !legacyUnset) {
         return 'Select a discount tax computation mode';
       }
-      return dueTermLinesError(after);
+      return paymentTermLinesError(after) ?? dueTermLinesError(after);
     },
+    protectDelete: (db, term) => ((db.records['account.move'] ?? []).some((move) => move.invoice_payment_term_id === term.id)
+      ? 'You can not delete payment terms as other records still reference it. However, you can archive it.'
+      : null),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     views: ['list', 'kanban'],
-    kanban: { title: 'name', lines: ['early_discount'] },
+    kanban: { title: 'name', lines: ['note'] },
     list: ['sequence', 'name', 'company_id'],
     listDecoration: (r) => (r.active === false ? 'muted' : ''),
     searchFields: ['name'],

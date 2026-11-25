@@ -122,18 +122,23 @@ function buildRichJournalItemsDb() {
   const analyticRes = create(db, 'account.analytic.account', { name: 'R&D Dept', code: 'RD' });
   db = analyticRes.db;
   const splitTermRes = create(db, 'account.payment.term', {
-    name: '50/50 Split with Early Discount',
-    early_discount: true,
-    discount_percent: 2,
-    discount_days: 10,
+    name: '50/50 Split',
     line_ids: [
       { value_type: 'percent', value: 50, nb_days: -1 },
       { value_type: 'balance', nb_days: 30 },
     ],
   });
   db = splitTermRes.db;
+  const discountTermRes = create(db, 'account.payment.term', {
+    name: '2/10 Net 30 Discount',
+    early_discount: true,
+    discount_percent: 2,
+    discount_days: 10,
+    line_ids: [{ value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
+  });
+  db = discountTermRes.db;
 
-  // 1. Overdue & split-term customer invoice with early discount, tax, product, analytic distribution, and tax grid.
+  // 1. Overdue & split-term customer invoice with tax, product, analytic distribution, and tax grid.
   const splitInvRes = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: partner.id,
@@ -292,7 +297,27 @@ function buildRichJournalItemsDb() {
   });
   db = draftRes.db;
 
-    return { db, splitInvId: splitInvRes.id, bridgedInvId: bridgedInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
+  // 6. Customer invoice with single-line early-payment discount term (Discount Date & Discount Amount columns).
+  const discountInvRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    journal_id: saleJ.id,
+    date: dateNow,
+    invoice_date: dateNow,
+    invoice_payment_term_id: discountTermRes.id,
+    ref: 'INV-DISC-REF',
+    invoice_line_ids: [{
+      name: 'Discounted Retainer',
+      account_id: inc,
+      qty: 1,
+      price_unit: 100,
+      tax: 0,
+      tax_ids: [],
+    }],
+  });
+  db = postMove(discountInvRes.db, discountInvRes.id);
+
+    return { db, splitInvId: splitInvRes.id, discountInvId: discountInvRes.id, bridgedInvId: bridgedInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
 }
 
 test('Journal Items list columns match Odoo 20 order, optional state, multi-company and multi-currency gating', async () => {
@@ -409,10 +434,11 @@ test('Journal Items renders decorations, muted zeros, blanked company currency/n
     assert.equal(consultingRow.childNodes[colIndex('Residual in Currency')].textContent.trim(), '');
     assert.match(consultingRow.childNodes[colIndex('Analytic Distribution')].textContent, /R&D Dept: 100%/);
 
-    // Split-term invoice carries early-payment Discount Date & non-zero Discount Amount on installment 1.
-    const splitArRows = rows.filter((tr) => tr.childNodes[colIndex('Journal Entry')]?.textContent.trim() === splitMoveName && tr.childNodes[colIndex('Discount Date')]?.textContent.trim());
-    assert.ok(splitArRows.length >= 1);
-    assert.ok(splitArRows.some((tr) => tr.childNodes[colIndex('Discount Amount')].textContent.trim() !== '' && !/^[^\d]*0\.00$/.test(tr.childNodes[colIndex('Discount Amount')].textContent.trim())));
+    // Early-discount invoice carries early-payment Discount Date & non-zero Discount Amount.
+    const discountMoveName = read(fixture.db, 'account.move', fixture.discountInvId).name;
+    const discountArRows = rows.filter((tr) => tr.childNodes[colIndex('Journal Entry')]?.textContent.trim() === discountMoveName && tr.childNodes[colIndex('Discount Date')]?.textContent.trim());
+    assert.ok(discountArRows.length >= 1);
+    assert.ok(discountArRows.some((tr) => tr.childNodes[colIndex('Discount Amount')].textContent.trim() !== '' && !/^[^\d]*0\.00$/.test(tr.childNodes[colIndex('Discount Amount')].textContent.trim())));
 
     // Foreign-currency EUR invoice AR line populates In Currency, Currency (EUR), Residual, and Residual in Currency, and has danger Due Date.
     const fxMoveName = read(fixture.db, 'account.move', fixture.fxInvId).name;
