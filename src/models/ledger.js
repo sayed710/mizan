@@ -502,10 +502,11 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
         }
         const tax_name = taxLabel(t);
         const tax_id = t.tax_id ?? null;
+        const tax_group_id = t.tax_group_id ?? (db && t.tax_id ? read(db, 'account.tax', t.tax_id)?.tax_group_id ?? null : null);
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
         const use_in_tax_closing = t.tax_cash_basis ? false : (row.use_in_tax_closing === true);
-        const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}|${use_in_tax_closing}`;
-        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, use_in_tax_closing, cash_basis: !!t.tax_cash_basis, document_base: 0, document_amount: 0 };
+        const key = `${account_id}|${tax_id ?? `label:${tax_name}`}|${tax_group_id ?? ''}|${tax_tag_ids.join(',')}|${use_in_tax_closing}`;
+        const g = by.get(key) ?? { account_id, tax_id, tax_group_id, tax_name, tax_tag_ids, use_in_tax_closing, cash_basis: !!t.tax_cash_basis, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + docBase, document_amount: g.document_amount + docAmt });
       }
     }
