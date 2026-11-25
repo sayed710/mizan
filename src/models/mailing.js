@@ -1,6 +1,6 @@
 // Email Marketing: mailing lists, contacts, mailings with A/B tests, delivery traces and the blacklist.
 import { create, read, search, write } from '../orm.js';
-import { addDays, today } from './common.js';
+import { addDays, partnerHasTag, today } from './common.js';
 
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
 const norm = (email) => String(email ?? '').trim().toLowerCase();
@@ -21,7 +21,7 @@ const matches = (db, m) => (r) => (!m.partner_country || norm(r.country) === nor
   && (!m.partner_tag || (
     m.mailing_model === 'crm.lead'
       ? (r.tag_ids ?? []).includes(m.partner_tag)
-      : (r.tag_ids ?? []).some((id) => norm(read(db, 'res.partner.category', id)?.name) === norm(m.partner_tag))
+      : partnerHasTag(db, r, m.partner_tag)
   ));
 
 /** Recipients of a mailing: list contacts not opted out, or partners/leads by tag and country; deduped, minus the blacklist. */
