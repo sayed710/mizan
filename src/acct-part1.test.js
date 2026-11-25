@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read } from './orm.js';
 import { models, menusFor, apps, findLeaf } from './models/index.js';
 import { incrementPartnerRank } from './models/crm.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { seed } from './seed.js';
 import { newDefaults } from './views/formDefaults.js';
 
@@ -159,7 +159,7 @@ test('migration 65 aggregates ranks efficiently without repeatedly remapping par
   const migrated = migrate({ schema_version: 62, records: { 'res.partner': partners, 'account.move': moves } });
   const elapsed = performance.now() - start;
 
-  assert.equal(migrated.schema_version, 76);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
   assert.ok(elapsed < 300, `Migration took too long: ${elapsed}ms`);
 
   const p1 = migrated.records['res.partner'].find((p) => p.id === 1);

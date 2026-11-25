@@ -1,13 +1,15 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { analyticPlusModels, planApplicability } from './models/analyticplus.js';
 
+const analyticSeed = () => write(seed(), 'res.company', 1, { group_analytic_accounting: true });
+
 test('mandatory default with a product-less line rejected', () => {
-  let db = seed();
+  let db = analyticSeed();
   const plan = create(db, 'account.analytic.plan', {
     name: 'Operating Plan',
     default_applicability: 'mandatory',
@@ -62,7 +64,7 @@ test('mandatory default with a product-less line rejected', () => {
 });
 
 test('a rule making a plan mandatory only for account prefix 6 on bills', () => {
-  let db = seed();
+  let db = analyticSeed();
   const plan = create(db, 'account.analytic.plan', {
     name: 'Cost Plan',
     default_applicability: 'optional',
@@ -136,7 +138,7 @@ test('a rule making a plan mandatory only for account prefix 6 on bills', () => 
 });
 
 test('a rule making a plan unavailable for one product category', () => {
-  let db = seed();
+  let db = analyticSeed();
   const parentCat = create(db, 'product.category', { name: 'Hardware' });
   db = parentCat.db;
 
@@ -234,7 +236,7 @@ test('a rule making a plan unavailable for one product category', () => {
 });
 
 test('most specific rule wins', () => {
-  let db = seed();
+  let db = analyticSeed();
   const plan = create(db, 'account.analytic.plan', {
     name: 'Tiered Plan',
     default_applicability: 'optional',
@@ -342,7 +344,7 @@ test('section and note lines are ignored during mandatory plan checks', () => {
 });
 
 test('journal entry posting validates analytic applicability for general domain', () => {
-  let db = seed();
+  let db = analyticSeed();
   const plan = create(db, 'account.analytic.plan', {
     name: 'General Audit Plan',
     default_applicability: 'optional',

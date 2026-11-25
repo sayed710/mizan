@@ -11,7 +11,7 @@ import { openSession, payCart, priceLines, startSession } from './models/pos.js'
 const date = '2026-06-01';
 
 function expenseFixture() {
-  let db = seed();
+  let db = write(seed(), 'res.company', 1, { group_analytic_accounting: true });
   const payable = accountId(db, '230100');
   db = write(db, 'account.account', payable, { account_type: 'liability_payable', company_id: 1 });
   db = write(db, 'res.company', 1, { account_default_payable_id: payable });
@@ -69,7 +69,7 @@ test('direct and approved-report expenses post their single analytic account as 
 });
 
 test('POS checkout applies its product distribution model, validates mandatory plans, and posts analytic items', () => {
-  let db = startSession(seed(), 100).db;
+  let db = startSession(write(seed(), 'res.company', 1, { group_analytic_accounting: true }), 100).db;
   const session = openSession(db);
   const plan = create(db, 'account.analytic.plan', {
     name: 'POS Revenue Allocation',

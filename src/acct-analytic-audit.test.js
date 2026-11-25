@@ -5,19 +5,23 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { models } from './models/index.js';
+import { diffDb, applyDiff } from './sync.js';
 
 test('journal posting chooses the most matching criteria then sequence within the document company', () => {
   let db = seed();
+  const seedDb = db;
   const [first, second] = search(db, 'account.analytic.account');
   const expense = search(db, 'account.account').find((account) => account.code === '600000');
   const cash = search(db, 'account.account').find((account) => account.account_type === 'asset_cash');
   const company = create(db, 'res.company', { name: 'Other analytic company' });
+  const priorityCategory = create(company.db, 'res.partner.category', { name: 'Priority' });
   // Models only compete within one plan: the weaker rule allocates to the same plan as the winning one.
-  const rival = create(company.db, 'account.analytic.account', { name: 'Rival region', plan_id: second.plan_id });
+  const rival = create(priorityCategory.db, 'account.analytic.account', { name: 'Rival region', plan_id: second.plan_id });
   db = create(rival.db, 'account.analytic.distribution.model', { partner_id: 1, sequence: 1, company_id: 1, analytic_distribution: { [rival.id]: 100 } }).db;
-  db = create(db, 'account.analytic.distribution.model', { account_prefix: '600', partner_category_id: 'priority', sequence: 5, company_id: 1, analytic_distribution: { [second.id]: 100 } }).db;
+  db = create(db, 'account.analytic.distribution.model', { account_prefix: '600', partner_category_id: priorityCategory.id, sequence: 5, company_id: 1, analytic_distribution: { [second.id]: 100 } }).db;
   db = create(db, 'account.analytic.distribution.model', { partner_id: 1, account_prefix: '600', sequence: 0, company_id: company.id, analytic_distribution: { [first.id]: 100 } }).db;
-  db = write(db, 'res.partner', 1, { tag_ids: ['priority'] });
+  db = write(db, 'res.partner', 1, { tag_ids: [priorityCategory.id] });
+  assert.doesNotThrow(() => applyDiff(seedDb, diffDb(seedDb, db), { isAdmin: true }));
   const move = create(db, 'account.move', { move_type: 'entry', partner_id: 1, company_id: 1, invoice_date: '2026-10-20', line_ids: [
     { account_id: expense.id, debit: 10 }, { account_id: cash.id, credit: 10 },
   ] });

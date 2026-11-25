@@ -9,7 +9,7 @@ import { ACTIVITY_TYPES } from './mail.js';
 import { currentActor, employeeFor } from './actor.js';
 import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, validStornoMove } from './ledger.js';
 import { toCompany } from './currency.js';
-import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
+import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, isSectionOrNote, resolveLineTaxes, taxBaseTags, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, formatCurrency, round, roundCurrency } from '../money.js';
@@ -250,13 +250,17 @@ export function accountCurrencyError(db, before, after) {
   return bad ? 'The account forces journal items in its currency' : null;
 }
 
-/** An account cannot adopt a currency that its already posted journal items do not use. */
+/** An account cannot adopt a currency when an item explicitly uses another currency. */
 export function accountCurrencyChangeError(db, before, after) {
   if ((before?.currency_id ?? null) === (after?.currency_id ?? null) || !after.currency_id) return null;
   const moves = db.records?.['account.move'] ?? [];
-  const bad = moves.some((move) => move.state === 'posted'
-    && (move.line_ids ?? []).some((line) => line.account_id === after.id
-      && lineCurrencyMismatch(db, line, after, move.company_id ?? after.company_id ?? 1)));
+  const bad = moves.some((move) => (move.line_ids ?? []).some((line) => {
+    if (line.account_id !== after.id) return false;
+    if (move.state === 'posted') {
+      return lineCurrencyMismatch(db, line, after, move.company_id ?? after.company_id ?? 1);
+    }
+    return line.currency_id && line.currency_id !== after.currency_id;
+  }));
   return bad ? 'The account has journal items in another currency' : null;
 }
 
@@ -840,6 +844,7 @@ export function moveDeleteGuard(db, move, staged = db, ctx = null) {
   const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
   if (audited && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
+  if ((db.records['account.asset'] ?? []).some((a) => a.source_move_id === move.id && a.state !== 'cancel')) return "Handle the entry's linked assets before deleting it";
   if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
 }
@@ -871,6 +876,31 @@ export function taxAccounts(db, companyId) {
   return { sale: of('sale'), purchase: of('purchase') };
 }
 
+const normalizeTaxIds = (ids) => {
+  const list = ids instanceof Set ? [...ids] : Array.isArray(ids) ? ids : [];
+  return [...new Set(list.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+};
+
+/** Expand `account.tax` IDs (including group children) into a deduplicated Set of positive integer IDs. */
+function expandTaxIdSet(db, ids) {
+  const expanded = new Set();
+  const visit = (rawId) => {
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id) || id <= 0 || expanded.has(id)) return;
+    expanded.add(id);
+    const tax = read(db, 'account.tax', id);
+    for (const childId of tax?.children_tax_ids ?? []) visit(childId);
+  };
+  for (const id of ids ?? []) visit(id);
+  return expanded;
+}
+
+/** Expand selected `account.tax` IDs (including group children), or null when unfiltered. */
+function selectedTaxIdSet(db, period) {
+  const raw = normalizeTaxIds(period?.taxIds);
+  return raw.length ? expandTaxIdSet(db, raw) : null;
+}
+
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 export function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
@@ -878,8 +908,10 @@ export function taxItems(db, period) {
   const accounts = taxAccounts(db, companyId);
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
   const transitions = new Set(cashBasisTransitionAccounts(db, companyId));
+  const selectedTaxes = selectedTaxIdSet(db, period);
   return journalItems(db, period).flatMap((l) => {
     if (l.is_closing || l.is_tax_closing || l.is_tax_payment || isNonZeroBaseGridLine(l)) return [];
+    if (selectedTaxes && (l.tax_id == null || !selectedTaxes.has(Number(l.tax_id)))) return [];
     const move = l.tax_name && moves.get(l.move_id);
     const documentSide = ['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null;
     const sale = accounts.sale.has(l.account_id), purchase = accounts.purchase.has(l.account_id);
@@ -1432,22 +1464,120 @@ export function taxRowsFromItems(items) {
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
 }
 
+/** Resolve originating tax IDs per base tag from an invoice or cash-basis origin's immutable line snapshots. */
+function snapshotBaseTagTaxes(move, line, { cashBasis = false } = {}) {
+  const invLines = move?.invoice_line_ids ?? [];
+  if (!invLines.length) return null;
+  const side = ['out_refund', 'in_refund'].includes(move.move_type) ? 'refund' : 'invoice';
+  const indices = !cashBasis && Array.isArray(line?.invoice_sources) && line.invoice_sources.length
+    ? [...new Set(line.invoice_sources.map((s) => s.index).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < invLines.length))]
+    : invLines.map((_, idx) => idx);
+  const tagMap = new Map();
+  for (const idx of indices) {
+    const invLine = invLines[idx];
+    if (!invLine || isSectionOrNote(invLine)) continue;
+    for (const t of resolveLineTaxes(invLine)) {
+      if (Boolean(t.tax_cash_basis) !== cashBasis || t.tax_id == null) continue;
+      for (const tagId of taxBaseTags(t, side, invLine)) {
+        if (!tagMap.has(tagId)) tagMap.set(tagId, new Set());
+        tagMap.get(tagId).add(Number(t.tax_id));
+      }
+    }
+  }
+  return tagMap;
+}
+
+/** Resolve which base-grid tag IDs on `line` belong to `selectedTaxes` using posted provenance. */
+function matchingBaseGridTagIds(db, moves, move, line, selectedTaxes) {
+  const tagIds = line.tax_tag_ids ?? [];
+  if (!tagIds.length) return new Set();
+
+  const isRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id);
+  const originMove = isRelease
+    ? moves.get(move.cash_basis_origin_move_id)
+    : (move?.reversed_entry_id && !(move?.invoice_line_ids?.length) ? moves.get(move.reversed_entry_id) : move);
+  const snapshotMap = originMove?.invoice_line_ids?.length
+    ? snapshotBaseTagTaxes(originMove, isRelease ? null : line, { cashBasis: isRelease })
+    : null;
+
+  let rawTaxIds = Array.isArray(line.tax_ids) && line.tax_ids.length
+    ? line.tax_ids
+    : null;
+
+  if (!rawTaxIds && snapshotMap) {
+    const inferred = new Set();
+    for (const tagId of tagIds) {
+      for (const taxId of snapshotMap.get(tagId) ?? []) inferred.add(taxId);
+    }
+    rawTaxIds = [...inferred];
+  }
+  if (!rawTaxIds && move) {
+    const siblingTaxIds = (move.line_ids ?? [])
+      .filter((l) => !l.tax_grid_base && l.tax_id != null && (!line.tax_base_line_key || !l.tax_base_line_key || l.tax_base_line_key === line.tax_base_line_key))
+      .map((l) => Number(l.tax_id));
+    rawTaxIds = [...new Set(siblingTaxIds)];
+  }
+  if (!rawTaxIds?.length) return new Set();
+
+  const lineTaxes = [...expandTaxIdSet(db, rawTaxIds)];
+  if (!lineTaxes.some((id) => selectedTaxes.has(id))) return new Set();
+  if (lineTaxes.every((id) => selectedTaxes.has(id))) return new Set(tagIds);
+
+  if (snapshotMap) {
+    const allowedLineTaxSet = new Set(lineTaxes);
+    return new Set(tagIds.filter((tagId) => {
+      const owners = snapshotMap.get(tagId);
+      return owners && [...owners].some((id) => allowedLineTaxSet.has(id) && selectedTaxes.has(id));
+    }));
+  }
+
+  // Multi-tax manual/legacy line without an invoice snapshot: attribute tags across the line's taxes.
+  const currentOwners = new Map();
+  for (const id of lineTaxes) {
+    const tax = read(db, 'account.tax', id);
+    for (const row of [...(tax?.invoice_repartition_line_ids ?? []), ...(tax?.refund_repartition_line_ids ?? [])]) {
+      if (row.repartition_type !== 'base') continue;
+      for (const tagId of row.tag_ids ?? []) {
+        if (!currentOwners.has(tagId)) currentOwners.set(tagId, []);
+        currentOwners.get(tagId).push(id);
+      }
+    }
+  }
+  return new Set(tagIds.filter((tagId) => {
+    const owners = currentOwners.get(tagId);
+    return owners ? owners.some((id) => selectedTaxes.has(id)) : true;
+  }));
+}
+
 /** Tax grid amounts from tags on posted journal items. */
 export function taxesByGrid(db, period = {}) {
   const rows = new Map();
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+  const selectedTaxes = selectedTaxIdSet(db, period);
   const items = period.tax_unit_id
     ? returnCompanies(db, period).flatMap((company_id) => journalItems(db, { ...period, tax_unit_id: null, company_id }))
     : journalItems(db, period);
   for (const line of items) {
     if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
+    if (selectedTaxes) {
+      if (line.tax_id != null) {
+        if (!selectedTaxes.has(Number(line.tax_id))) continue;
+      } else if (!line.tax_grid_base) {
+        continue;
+      }
+    }
     const move = moves.get(line.move_id);
     const side = line.tax_side || (['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null);
     if (!side) continue;
+    const allowedBaseTags = selectedTaxes && line.tax_grid_base && line.tax_id == null
+      ? matchingBaseGridTagIds(db, moves, move, line, selectedTaxes)
+      : null;
+    if (allowedBaseTags && !allowedBaseTags.size) continue;
     const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
     const value = side === 'sale' ? -balance : balance;
     const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && isLegacyCashBasisRelease(move));
     for (const id of line.tax_tag_ids ?? []) {
+      if (allowedBaseTags && !allowedBaseTags.has(id)) continue;
       const tag = read(db, 'account.account.tag', id);
       if (!tag) continue;
       const row = rows.get(id) ?? { id, name: tag.name, base: 0, tax: 0 };
@@ -1463,7 +1593,7 @@ export function taxesByGrid(db, period = {}) {
 }
 
 /** Open installments in company currency, using the schedule recorded when the document was posted. */
-function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
+export function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
   const payments = m.payments ?? [];
   const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
@@ -1471,7 +1601,8 @@ function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
     .map((l, index) => ({ l, index }))
     .filter(({ l }) => read(db, 'account.account', l.account_id)?.account_type === accountType);
   const counterpart = items.reduce((sum, { l }) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-  const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
+  const currency = documentCurrency(db, m);
+  const booked = Math.abs(counterpart) || toCompany(db, currency?.id ?? m.currency_id, Number(m.amount_total) || 0, m.invoice_date ?? m.date, m.company_id) || Number(m.amount_total) || 0;
   const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
   const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
   const legacyPaid = m.payment_date && m.payment_date <= at ? companyRound(booked * legacy / (Number(m.amount_total) || 1)) : 0;
@@ -1575,10 +1706,27 @@ function ageOtherEntries(db, kind, at, moves, add) {
 }
 
 /** Use the requested reporting cutoff, defaulting to today. */
-export const agedReportDate = (end, now = today()) => end || now;
+export const agedReportDate = (end, now = today()) => {
+  const date = end || now;
+  if (!validDate(date)) throw new Error('Enter a valid As of Date');
+  return date;
+};
+
+/** Validate an As of Date edit against the last valid date, keeping it and returning an inline error when empty or invalid. */
+export function resolveAgedAsOfDate(input, lastValidDate) {
+  if (validDate(input)) return { input, date: input, error: '' };
+  if (!validDate(lastValidDate)) throw new Error('Enter a valid As of Date');
+  const raw = input == null ? '' : String(input);
+  return {
+    input: raw,
+    date: lastValidDate,
+    error: raw.trim() === '' ? 'As of Date is required' : 'Enter a valid As of Date',
+  };
+}
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date' } = {}) {
+  if (!validDate(at)) throw new Error('Enter a valid As of Date');
   const buckets = BUCKETS(aging_interval);
   const rows = new Map();
   const add = (partner, date, amount, document = null, source = document) => {
@@ -1738,7 +1886,7 @@ export function journalCards(db, at = today()) {
   });
 }
 
-function followUpSummary(invoices) {
+export function followUpSummary(invoices) {
   const byCurrency = new Map();
   for (const invoice of invoices) {
     const currency = invoice.followup_currency;
@@ -1748,6 +1896,210 @@ function followUpSummary(invoices) {
   }
   const totals = [...byCurrency.values()];
   return { totals, total: totals.length === 1 ? totals[0].amount : null };
+}
+
+export function classifyDue(dueDate, at = today(), beforeCutoff = null) {
+  if (!dueDate) return null;
+  if (dueDate < at) return 'overdue';
+  if (beforeCutoff && dueDate <= beforeCutoff) return 'upcoming';
+  return null;
+}
+
+function buildPartnerReceivable(db, partnerId, moves, partnerCredits, cId, compCurr, at, upcoming = false) {
+  if (!moves || moves.length === 0) {
+    return { total_due: 0, total_overdue: 0, lines: [], invoices: [], due: [], overdue: [] };
+  }
+  const lines = [];
+  const invoices = [];
+  for (const m of moves) {
+    const hasReceivableLines = (m.line_ids ?? []).some((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable');
+    if (!hasReceivableLines) {
+      const res = models['account.move'].fields.amount_residual.compute(m, db);
+      if (!(res > 0)) {
+        continue;
+      }
+      const compResidual = toCompany(db, m.currency_id, res, m.invoice_date ?? m.date, cId);
+      const rawDues = openInstallments(db, m, 'receivable', at, { includeBlocked: true });
+      const duesTotal = rawDues.reduce((s, d) => s + d.amount, 0);
+      let dues = [];
+      if (rawDues.length && duesTotal > compResidual) {
+        let toDeduct = roundCurrency(duesTotal - compResidual, compCurr);
+        for (const due of rawDues) {
+          if (toDeduct > 0) {
+            const deduct = Math.min(due.amount, toDeduct);
+            const newAmt = roundCurrency(due.amount - deduct, compCurr);
+            toDeduct = roundCurrency(toDeduct - deduct, compCurr);
+            if (newAmt > 0) dues.push({ ...due, amount: newAmt });
+          } else {
+            dues.push(due);
+          }
+        }
+      } else if (rawDues.length) {
+        dues = rawDues;
+      } else {
+        dues = [{ date: m.invoice_date_due ?? m.invoice_date ?? m.date, amount: compResidual, blocked: false }];
+      }
+      for (const due of dues) {
+        const isOverdue = !due.blocked && classifyDue(due.date, at) === 'overdue';
+        lines.push({
+          move_id: m.id,
+          invoice_date: m.invoice_date ?? m.date,
+          due_date: due.date,
+          number: m.name,
+          reference: m.ref ?? '',
+          residual_amount: roundCurrency(due.amount, compCurr),
+          is_credit: false,
+          is_overdue: isOverdue,
+          move: m,
+        });
+      }
+    } else {
+      const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: true });
+      for (const due of dues) {
+        const isOverdue = !due.blocked && classifyDue(due.date, at) === 'overdue';
+        lines.push({
+          move_id: m.id,
+          invoice_date: m.invoice_date ?? m.date,
+          due_date: due.date,
+          number: m.name,
+          reference: m.ref ?? '',
+          residual_amount: roundCurrency(due.amount, compCurr),
+          is_credit: false,
+          is_overdue: isOverdue,
+          move: m,
+        });
+      }
+    }
+
+    const moveLines = lines.filter((line) => line.move_id === m.id);
+    const openCompanyAmount = moveLines.reduce((sum, line) => sum + line.residual_amount, 0);
+    if (openCompanyAmount > 0) {
+      const currency = documentCurrency(db, m);
+      const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+      const bookedAmount = Math.abs(booked) || toCompany(db, currency.id, Number(m.amount_total) || 0, m.invoice_date ?? m.date, cId) || Number(m.amount_total) || 1;
+      const residual = roundCurrency(openCompanyAmount * (Number(m.amount_total) || 0) / bookedAmount, currency);
+      const late = moveLines.filter((line) => line.is_overdue).reduce((sum, line) => sum + line.residual_amount, 0);
+      const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / bookedAmount, currency);
+      invoices.push({ ...m, amount_residual: residual, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount });
+    }
+  }
+
+  const creditList = partnerCredits instanceof Map ? [...partnerCredits.values()] : (partnerCredits ?? []);
+  const creditRows = creditList.map(({ document, date, amount }) => {
+    const isRefund = document.move_type === 'out_refund';
+    const docCurr = documentCurrency(db, document) ?? compCurr;
+    const currency = isRefund ? docCurr : compCurr;
+    let residual;
+    if (isRefund) {
+      const booked = (document.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.credit) || 0) - (Number(l.debit) || 0), 0);
+      const bookedAmount = Math.abs(booked) || toCompany(db, docCurr.id, Number(document.amount_total) || 0, document.invoice_date ?? document.date, cId) || Number(document.amount_total) || 1;
+      residual = roundCurrency(amount * (Number(document.amount_total) || 0) / bookedAmount, docCurr);
+    } else {
+      residual = roundCurrency(amount, compCurr);
+    }
+    const compAmount = roundCurrency(amount, compCurr);
+    return {
+      ...document,
+      invoice_date: document.invoice_date ?? document.date ?? '',
+      invoice_date_due: document.invoice_date_due ?? date,
+      amount_residual: residual,
+      followup_currency: currency,
+      overdue: false,
+      overdueAmount: 0,
+      companyAmount: compAmount,
+    };
+  });
+
+  for (const credit of creditRows) {
+    lines.push({
+      move_id: credit.id,
+      invoice_date: credit.invoice_date,
+      due_date: credit.invoice_date_due,
+      number: credit.name,
+      reference: credit.ref ?? '',
+      residual_amount: credit.companyAmount,
+      is_credit: true,
+      is_overdue: false,
+      move: credit,
+    });
+  }
+
+  invoices.push(...creditRows);
+  lines.sort((a, b) => String(a.due_date ?? '').localeCompare(String(b.due_date ?? '')) || String(a.number ?? '').localeCompare(String(b.number ?? '')));
+  const total_due = roundCurrency(Math.max(0, lines.reduce((s, l) => s + l.residual_amount, 0)), compCurr);
+  const total_overdue = roundCurrency(Math.max(0, lines.filter((l) => l.is_overdue || l.is_credit).reduce((s, l) => s + l.residual_amount, 0)), compCurr);
+  return {
+    total_due,
+    total_overdue,
+    lines,
+    invoices,
+    due: followUpSummary(invoices).totals,
+    overdue: upcoming || total_overdue === 0 ? [] : followUpSummary([...invoices.filter((m) => m.overdue).map((m) => ({ ...m, amount_residual: m.overdueAmount })), ...creditRows]).totals,
+  };
+}
+
+export function companyReceivableLines(db, companyId = 1, at = today(), { upcoming = false } = {}) {
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const compCurr = companyCurrencyRecord(db, cId);
+  const scopeMoves = search(db, 'account.move').filter((m) => (m.company_id ?? 1) === cId);
+
+  const movesByPartner = new Map();
+  for (const m of scopeMoves) {
+    if (m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && !m.exclude_from_followup && (!m.invoice_date || m.invoice_date <= at)) {
+      let list = movesByPartner.get(m.partner_id);
+      if (!list) {
+        list = [];
+        movesByPartner.set(m.partner_id, list);
+      }
+      list.push(m);
+    }
+  }
+
+  const creditsByPartner = new Map();
+  const addCredit = (partner, date, amount, document) => {
+    if (!(amount < 0) || !document || document.exclude_from_followup || (document.company_id ?? 1) !== cId) return;
+    let partnerCredits = creditsByPartner.get(partner);
+    if (!partnerCredits) {
+      partnerCredits = new Map();
+      creditsByPartner.set(partner, partnerCredits);
+    }
+    const previous = partnerCredits.get(document.id) ?? { document, date, amount: 0 };
+    previous.amount += amount;
+    partnerCredits.set(document.id, previous);
+  };
+  ageDocumentInstallments(db, 'receivable', at, scopeMoves, addCredit);
+  ageUnappliedCredits(db, 'receivable', at, scopeMoves, addCredit, cId);
+
+  const result = new Map();
+  for (const [partnerId, moves] of movesByPartner.entries()) {
+    const credits = creditsByPartner.get(partnerId);
+    result.set(partnerId, buildPartnerReceivable(db, partnerId, moves, credits, cId, compCurr, at, upcoming));
+  }
+  return result;
+}
+
+export function partnerReceivableLines(db, partnerId, companyId = 1, at = today(), { upcoming = false } = {}) {
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const byPartner = companyReceivableLines(db, cId, at, { upcoming });
+  return byPartner.get(partnerId) ?? { total_due: 0, total_overdue: 0, lines: [], invoices: [], due: [], overdue: [] };
+}
+
+export function partnerTotalDue(db, partnerId, companyId = null, at = today()) {
+  if (!partnerId || !db) return 0;
+  if (companyId == null) {
+    const companies = db.records?.['res.company'] ?? [{ id: 1 }];
+    return roundCurrency(companies.reduce((sum, c) => sum + partnerReceivableLines(db, partnerId, c.id, at).total_due, 0), companyCurrencyRecord(db, 1));
+  }
+  return partnerReceivableLines(db, partnerId, companyId, at).total_due;
+}
+
+export function partnerTotalOverdue(db, partnerId, companyId = null, at = today()) {
+  if (!partnerId || !db) return 0;
+  if (companyId == null) {
+    const companies = db.records?.['res.company'] ?? [{ id: 1 }];
+    return roundCurrency(companies.reduce((sum, c) => sum + partnerReceivableLines(db, partnerId, c.id, at).total_overdue, 0), companyCurrencyRecord(db, 1));
+  }
+  return partnerReceivableLines(db, partnerId, companyId, at).total_overdue;
 }
 
 
@@ -1844,11 +2196,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
   const levels = search(db, 'account.followup.level');
   const minNegative = levels.reduce((min, l) => Math.min(min, Number(l.delay) || 0), 0);
   const beforeCutoff = minNegative < 0 ? addDays(at, -minNegative) : null;
-  const classifyDue = (dueDate) => {
-    if (!dueDate) return null;
-    if (dueDate < at) return 'overdue';
-    return beforeCutoff && dueDate <= beforeCutoff ? 'upcoming' : null;
-  };
+  const bucketDue = (dueDate) => classifyDue(dueDate, at, beforeCutoff);
 
   const groups = new Map();
   const ensureGroup = (partnerId, compId) => {
@@ -1873,7 +2221,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
     if (!ignoreNextActionDate && compLine?.followup_next_action_date && compLine.followup_next_action_date > at) continue;
 
     if (!m.invoice_date || !(m.line_ids ?? []).length) {
-      const bucket = m.amount_residual > 0 ? classifyDue(m.invoice_date_due) : null;
+      const bucket = m.amount_residual > 0 ? bucketDue(m.invoice_date_due) : null;
       if (!bucket) continue;
       const group = ensureGroup(m.partner_id, compId);
       const companyAmount = Number(m.amount_residual);
@@ -1885,7 +2233,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
 
     const openDues = openInstallments(db, m, 'receivable', at, { includeBlocked: false });
     const overdueDues = openDues.filter((due) => due.date < at);
-    const upcomingDues = openDues.filter((due) => classifyDue(due.date) === 'upcoming');
+    const upcomingDues = openDues.filter((due) => bucketDue(due.date) === 'upcoming');
     if (!overdueDues.length && !upcomingDues.length) continue;
     const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
     const docCurr = documentCurrency(db, m);
@@ -1948,7 +2296,14 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
   return [...by].map(([partner_id, invoices]) => {
     const upcoming = invoices.some((m) => Number(m.amount_residual) > 0 && m.upcoming)
       && !invoices.some((m) => Number(m.amount_residual) > 0 && !m.upcoming);
-    return { partner_id, invoices, ...followUpSummary(invoices), oldest: oldestOverdueDate(invoices), ...(upcoming ? { upcoming: true } : {}) };
+    const summary = followUpSummary(invoices);
+    return {
+      partner_id,
+      invoices,
+      ...summary,
+      oldest: oldestOverdueDate(invoices),
+      ...(upcoming ? { upcoming: true } : {}),
+    };
   });
 }
 
@@ -2335,26 +2690,7 @@ export function followUpLetter(db, partnerId, companyId, at = today()) {
   if (!reminder) throw new Error('This customer has no overdue invoices');
   const level = followUpLevel(db, reminder, at);
   if (!level) throw new Error('No follow-up level applies to this customer');
-  const openInvoices = search(db, 'account.move').filter((m) => m.partner_id === partnerId && (m.company_id ?? 1) === companyId && m.state === 'posted' && m.move_type === 'out_invoice' && m.active !== false && !m.exclude_from_followup && Number(m.amount_residual) > 0 && (!m.invoice_date || m.invoice_date <= at)).map((m) => {
-    const currency = documentCurrency(db, m);
-    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false });
-    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-    const late = dues.filter((d) => d.date && d.date < at).reduce((sum, d) => sum + d.amount, 0);
-    const overdueAmount = roundCurrency(late * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), currency);
-    return { ...m, followup_currency: currency, overdue: overdueAmount > 0, overdueAmount };
-  });
-  const creditRows = (reminder.invoices ?? [])
-    .filter((m) => Number(m.amount_residual) < 0)
-    .map((c) => ({
-      ...c,
-      invoice_date: c.invoice_date ?? c.date ?? '',
-      followup_currency: c.followup_currency ?? documentCurrency(db, c) ?? companyCurrencyRecord(db, companyId),
-      overdue: false,
-      overdueAmount: 0,
-    }));
-  const invoices = [...openInvoices, ...creditRows];
-  const due = followUpSummary(invoices).totals;
-  const overdue = reminder.upcoming ? [] : reminder.totals;
+  const { invoices, due, overdue } = partnerReceivableLines(db, partnerId, companyId, at, { upcoming: reminder.upcoming });
   return { reminder, level, invoices, due, overdue };
 }
 
@@ -2500,7 +2836,7 @@ export function analyticActualLines(db, period = {}) {
     if (!line.account_id || (period.from && line.date < period.from) || (period.to && line.date > period.to)) return false;
     if (period.company_id != null && (line.company_id ?? 1) !== period.company_id) return false;
     if (period.account_id != null && line.account_id !== period.account_id) return false;
-    if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) return false;
+    if (period.general_account && !(read(db, 'account.account', line.general_account)?.code ?? '').startsWith(period.general_account)) return false;
     const move = line.move_id && read(db, 'account.move', line.move_id);
     return (!line.move_id && !period.posted_only) || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
   });
@@ -2521,6 +2857,8 @@ export function analyticActuals(db, period = {}) {
   return totals;
 }
 
+const includedJournalIds = (group, db) => (db.records['account.journal'] ?? []).filter((journal) => journal.journal_group_id === group.id).map((journal) => journal.id);
+
 export const financeModels = {
   'account.journal.group': {
     label: 'Multi-Ledger',
@@ -2530,15 +2868,25 @@ export const financeModels = {
       name: { type: 'char', label: 'Ledger group', placeholder: 'e.g. CONSO, IFRS, ...', required: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle', hidden: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, hidden: true },
-      journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', domain: (journal, record) => !journal.company_id || journal.company_id === record.company_id },
+      journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', compute: includedJournalIds, domain: (journal, record) => !journal.company_id || journal.company_id === record.company_id },
+      included_journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', compute: includedJournalIds, hidden: true },
     },
-    defaults: () => ({ sequence: 10, journal_ids: [] }),
+    defaults: () => ({ sequence: 10 }),
     createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
-    guard: (db, before, record) => ((!before || record.name !== before.name) && (db.records['account.journal.group'] ?? []).some((group) => group.id !== record.id && group.name === record.name))
-      ? 'A Ledger group name must be unique.' : (record.journal_ids ?? []).some((id) => {
-      const journal = read(db, 'account.journal', id);
-      return !journal || (journal.company_id && journal.company_id !== record.company_id);
-    }) ? 'Select journals belonging to this company or shared journals' : null,
+    onCreate: (db, group, _before, vals) => (vals.journal_ids ?? []).reduce((next, id) => write(next, 'account.journal', id, { journal_group_id: group.id }), db),
+    onWrite: (db, group, _before, vals) => vals.journal_ids === undefined ? db : (db.records['account.journal'] ?? []).reduce((next, journal) => {
+      const target = vals.journal_ids.includes(journal.id) ? group.id : journal.journal_group_id === group.id ? null : journal.journal_group_id;
+      return target === journal.journal_group_id ? next : write(next, 'account.journal', journal.id, { journal_group_id: target });
+    }, db),
+    onUnlink: (db, group) => (db.records['account.journal'] ?? []).reduce((next, journal) => journal.journal_group_id === group.id ? write(next, 'account.journal', journal.id, { journal_group_id: null }) : next, db),
+    guard: (db, before, record, _ctx, vals) => {
+      if ((!before || record.name !== before.name) && (db.records['account.journal.group'] ?? []).some((group) => group.id !== record.id && group.name === record.name)) return 'A Ledger group name must be unique.';
+      const journalIds = vals?.journal_ids !== undefined ? vals.journal_ids : includedJournalIds(record, db);
+      return journalIds.some((id) => {
+        const journal = read(db, 'account.journal', id);
+        return !journal || (journal.company_id && journal.company_id !== record.company_id);
+      }) ? 'Select journals belonging to this company or shared journals' : null;
+    },
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
     list: ['sequence', 'name', 'journal_ids'],
     listFields: {

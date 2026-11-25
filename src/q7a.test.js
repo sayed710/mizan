@@ -11,6 +11,7 @@ import { postMove, payMove } from './models/accounting.js';
 import { secureEntries } from './models/hash_chain.js';
 import { confirmAsset, modifyAsset, postDepreciation } from './models/assets.js';
 import { applyDiff } from './sync.js';
+import { taxSnapshot } from './models/taxes.js';
 
 test('1. Posted check numbers cannot be forged by supplying voided_check_numbers via write or sync', () => {
   let db = seed();
@@ -87,11 +88,19 @@ test('6. Mixed-discount invoices with multiple distinct tax groups match the pos
   ({ db, id: termId } = create(db, 'account.payment.term', {
     name: '2% 10 Net 30 Mixed',
     early_discount: true,
-    discount_percentage: 2,
+    discount_percent: 2,
     discount_days: 10,
-    early_pay_discount_computation: 'mixed',
-    line_ids: [{ value: 'balance', days: 30 }],
+    discount_tax_computation: 'mixed',
+    line_ids: [{ value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
   }));
+
+  const sourceTax = search(db, 'account.tax').find((tax) => tax.type_tax_use === 'sale' && !tax.price_include && tax.tax_exigibility === 'on_invoice');
+  const taxSnapshots = [];
+  for (const name of ['Tax A 12%', 'Tax B 12%', 'Tax C 12%']) {
+    const made = create(db, 'account.tax', { ...sourceTax, id: undefined, name, amount: 12 });
+    db = made.db;
+    taxSnapshots.push(taxSnapshot(read(db, 'account.tax', made.id)));
+  }
 
   // Three distinct tax groups with raw tax 0.12 each:
   // Aggregate: round(0.36 * 0.98) = round(0.3528) = 0.35
@@ -104,9 +113,7 @@ test('6. Mixed-discount invoices with multiple distinct tax groups match the pos
     invoice_date: '2026-04-01',
     invoice_payment_term_id: termId,
     invoice_line_ids: [
-      { account_id: incomeAcc.id, qty: 1, price_unit: 1.00, tax: 12, tax_name: 'Tax A 12%', tax_account_id: taxAcc.id },
-      { account_id: incomeAcc.id, qty: 1, price_unit: 1.00, tax: 12, tax_name: 'Tax B 12%', tax_account_id: taxAcc.id },
-      { account_id: incomeAcc.id, qty: 1, price_unit: 1.00, tax: 12, tax_name: 'Tax C 12%', tax_account_id: taxAcc.id },
+      ...taxSnapshots.map((tax) => ({ account_id: incomeAcc.id, qty: 1, price_unit: 1.00, ...tax, tax_account_id: taxAcc.id })),
     ],
   }));
 

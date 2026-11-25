@@ -1,6 +1,7 @@
 // Appointments: bookable types with staff, weekly availabilities and questions; bookings with slots computed in the type's timezone.
 import { create, postNote, read, search, write } from '../orm.js';
 import { addDays } from './common.js';
+import { partnerTagIds } from './crm.js';
 
 const LOCAL = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d)$/;
 const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$/;
@@ -100,7 +101,9 @@ const meetingUrl = () => `https://meet.example/${crypto.randomUUID().replace(/-/
 /** Contact matched by email (case-insensitive), else created. */
 function contactFor(db, { name, email, phone }) {
   const known = search(db, 'res.partner').find((p) => p.email?.toLowerCase() === email.toLowerCase());
-  return known ? { db, id: known.id } : create(db, 'res.partner', { name, email, phone, tag_ids: ['Appointment'] });
+  if (known) return { db, id: known.id };
+  const { db: withTags, ids } = partnerTagIds(db, ['Appointment']);
+  return create(withTags, 'res.partner', { name, email, phone, tag_ids: ids });
 }
 
 /**
