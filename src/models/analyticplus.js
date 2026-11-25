@@ -282,6 +282,9 @@ const budgetCompanyError = (db, budget, selectedCompanyId = null) => {
   return !companyId || !read(db, 'res.company', companyId) ? 'Select an existing company for the budget' : null;
 };
 
+/** Whether a budget record is missing a valid existing company (eligible for guarded company assignment). */
+export const isCompanylessBudget = (db, budget) => Boolean(budget && (!db ? !budget.company_id : budgetCompanyError(db, budget)));
+
 /** Posted bills consume commitments only through explicit order-line links, never product or reference guesses. */
 function postedPurchaseQuantities(db, order) {
   const billed = new Map();
@@ -759,6 +762,10 @@ export const analyticPlusModels = {
     },
     form: {
       ...budgetModel.form, statusbarClickable: false, lockedWhen: (r) => r.state !== 'draft',
+      unlockedFields: (r, db) => {
+        const stored = r?.id && db ? (db.records?.['account.budget'] ?? []).find((b) => b.id === r.id) : null;
+        return isCompanylessBudget(db, stored ?? r) ? ['company_id'] : [];
+      },
       buttons: [
         transition('Confirm', ['draft'], 'confirmed'), transition('Approve', ['confirmed'], 'validated'),
         transition('Done', ['validated'], 'done'), transition('Cancel', ['draft', 'confirmed', 'validated'], 'cancel'),

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import './models/index.js';
-import { models } from './registry.js';
+import { menusFor, models } from './models/index.js';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
@@ -10,6 +10,7 @@ import { budgetReport } from './models/analyticplus.js';
 import { createCompany, setCompanies } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
 import { invoiceJournalDefaults } from './test-support/accounting-company.js';
+import { setupDom, find } from './test-support/dom.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -162,4 +163,128 @@ test('BUD-2: Planned, Actual and Achievement use one period time basis matching 
   );
   assert.match(futureHtml, /Future Budget/);
   assert.match(futureHtml, />0%</);
+});
+
+const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
+
+const findLeafByKey = (items, key) => {
+  for (const item of items) {
+    if (item.key === key) return item;
+    if (item.children) {
+      const found = findLeafByKey(item.children, key);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
+test('confirmed companyless budgets allow assigning a valid company on the form and via non-admin sync while keeping other locked fields protected', async () => {
+  let db = seed();
+  const branch = createCompany(db, { name: 'Recovery Branch', ...invoiceJournalDefaults(db) });
+  db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
+  const created = create(db, 'account.budget', {
+    name: 'Locked Companyless Budget',
+    company_id: 1,
+    state: 'confirmed',
+    date_from: '2026-01-01',
+    date_to: '2026-12-31',
+    lines: [{ planned: 250 }],
+  });
+  db = replaceRecord(created.db, 'account.budget', created.id, { company_id: null });
+  const nonAdmin = { author: 'Accountant', isAdmin: false };
+
+  // Non-admin sync rejects tampering with other locked fields while repairing company_id.
+  const tamperedName = write(db, 'account.budget', created.id, { company_id: branch.id, name: 'Renamed' });
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedName), nonAdmin),
+    /This record is locked: Budget Name cannot change/,
+  );
+  const tamperedLines = write(db, 'account.budget', created.id, { company_id: branch.id, lines: [{ planned: 999 }] });
+  assert.throws(
+    () => applyDiff(db, diffDb(db, tamperedLines), nonAdmin),
+    /This record is locked: Budget Lines cannot change/,
+  );
+
+  // Still rejects empty or non-existent company on the confirmed record.
+  assert.throws(
+    () => applyDiff(db, diffDb(db, replaceRecord(db, 'account.budget', created.id, { company_id: 99999 })), nonAdmin),
+    /Select an existing company for the budget/,
+  );
+
+  // Repairing a stale/invalid company id (99999) to a valid company succeeds for non-admin users.
+  const staleDb = replaceRecord(db, 'account.budget', created.id, { company_id: 99999 });
+  const repairedFromStale = write(staleDb, 'account.budget', created.id, { company_id: branch.id });
+  const syncedStale = applyDiff(staleDb, diffDb(staleDb, repairedFromStale), nonAdmin);
+  assert.equal(read(syncedStale, 'account.budget', created.id).company_id, branch.id);
+
+  // Repairing from company_id: null succeeds for non-admin users, preserves confirmed state, and locks company_id afterward.
+  const repaired = write(db, 'account.budget', created.id, { company_id: branch.id });
+  const synced = applyDiff(db, diffDb(db, repaired), nonAdmin);
+  const repairedRec = read(synced, 'account.budget', created.id);
+  assert.equal(repairedRec.company_id, branch.id);
+  assert.equal(repairedRec.state, 'confirmed');
+  assert.throws(
+    () => applyDiff(synced, diffDb(synced, write(synced, 'account.budget', created.id, { company_id: 1 })), nonAdmin),
+    /This record is locked: Company cannot change/,
+  );
+
+  // UI FormView: company_id is editable on the confirmed companyless budget while other fields stay locked, and locks once saved.
+  const prevStorage = globalThis.localStorage;
+  const mem = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => { mem.set(k, String(v)); },
+    removeItem: (k) => { mem.delete(k); },
+    clear: () => { mem.clear(); },
+  };
+  const { makeEl } = setupDom();
+  globalThis.document.createElementNS = (_ns, tag) => makeEl(tag);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit, getDb } = await import('./store.js');
+  const { FormView } = await import('./views/FormView.jsx');
+  const budgetsLeaf = findLeafByKey(menusFor('accounting'), 'budgets');
+
+  await initStore();
+  await commit(db);
+  const host = globalThis.document.createElement('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(FormView, {
+      leaf: budgetsLeaf,
+      id: String(created.id),
+      base: '#/accounting/budgets',
+      params: new URLSearchParams(),
+    })));
+
+    const nameInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-name');
+    assert.equal(props(nameInput)?.readOnly, true);
+    assert.equal(find(host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-date_from'), null);
+    assert.equal(find(host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-budget_type'), null);
+
+    const companySelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id');
+    assert.ok(companySelect, 'company_id select must be editable on a confirmed companyless budget');
+
+    await React.act(async () => {
+      props(companySelect).onChange({ target: { value: String(branch.id) } });
+    });
+
+    // Remains editable while unsaved so the user can adjust before saving.
+    assert.ok(find(host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id'));
+    const saveBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Save');
+    assert.ok(saveBtn, 'Save button must appear after selecting a company');
+
+    await React.act(async () => {
+      props(saveBtn).onClick();
+    });
+
+    const saved = read(getDb(), 'account.budget', created.id);
+    assert.equal(saved.company_id, branch.id);
+    assert.equal(saved.state, 'confirmed');
+    assert.equal(find(host, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id'), null, 'company_id locks after a valid company is saved');
+  } finally {
+    await React.act(async () => root.unmount());
+    globalThis.localStorage = prevStorage;
+  }
 });
