@@ -8,7 +8,7 @@ import { deferredReport, generalLedger } from '../models/reports.js';
 import { deferredSettings, generateGroupedEntries } from '../models/deferred.js';
 import { FollowUpWizard } from './FollowUpLetter.jsx';
 import { Wizard } from './Wizard.jsx';
-import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { BUCKETS, agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, companyReceivableLines, followUps, followUpCompanies, followUpLevel, followUpText, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerReceivableLines, taxReport, taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -21,7 +21,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { money, PagerButtons } from '../ui.jsx';
-import { companyCurrencyRecord, findCompanyCurrencyRecord } from '../money.js';
+import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency } from '../money.js';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
@@ -537,6 +537,59 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
     }
   }
 
+  const companyBalances = new Map();
+  for (const cId of allowed) {
+    companyBalances.set(cId, companyReceivableLines(db, cId));
+  }
+
+  const renderCustomerLines = (f, cId) => {
+    const compCurr = companyCurrencyRecord(db, cId);
+    const info = companyBalances.get(cId)?.get(f.partner_id) ?? partnerReceivableLines(db, f.partner_id, cId);
+    return (
+      <Fragment key={`${cId}-${f.partner_id}`}>
+        <tr className="rep-detail">
+          <td>
+            <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
+            <FollowUpActions db={db} reminder={f} companyId={cId} />
+          </td>
+          <td className="num">{f.oldest ?? '—'}</td>
+          <td className="num">{formatCurrency(info.total_due, compCurr)}</td>
+          <td className="num">{formatCurrency(info.total_overdue, compCurr)}</td>
+        </tr>
+        {info.lines.length > 0 && (
+          <tr className="rep-detail no-export">
+            <td colSpan={4} style={{ paddingLeft: '1.5rem', paddingBottom: '1rem' }}>
+              <table className="list report" style={{ margin: '0.25rem 0', width: '100%' }}>
+                <thead>
+                  <tr>
+                    <th>{t('Invoice Date')}</th>
+                    <th>{t('Due Date')}</th>
+                    <th>{t('Number')}</th>
+                    <th>{t('Reference')}</th>
+                    <th className="num">{t('Residual Amount')}</th>
+                    <th>{t('Overdue')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {info.lines.map((l, i) => (
+                    <tr key={l.move_id ? `${l.move_id}-${i}` : i}>
+                      <td>{l.invoice_date}</td>
+                      <td>{l.due_date}</td>
+                      <td><a href={`#/open/account.move/${l.move_id}`}>{l.number}</a></td>
+                      <td>{l.reference}</td>
+                      <td className="num">{formatCurrency(l.residual_amount, compCurr)}</td>
+                      <td>{l.is_credit ? '—' : (l.is_overdue ? t('Overdue') : '—')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </td>
+          </tr>
+        )}
+      </Fragment>
+    );
+  };
+
   if (multiCompany) {
     const sections = allowed
       .map((cId) => ({
@@ -550,21 +603,9 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
         {sections.map(({ company, items }) => (
           <Fragment key={company.id}>
             <tr className="rep-section">
-              <td colSpan={3}><strong>{company.name}</strong></td>
+              <td colSpan={4}><strong>{company.name}</strong></td>
             </tr>
-            {items.map((f) => {
-              return (
-                <tr key={`${company.id}-${f.partner_id}`} className="rep-detail">
-                  <td>
-                    <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
-                    <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-                    <FollowUpActions db={db} reminder={f} companyId={company.id} />
-                  </td>
-                  <td className="num">{f.oldest}</td>
-                  <td className="num">{formatFollowUpTotals(f)}</td>
-                </tr>
-              );
-            })}
+            {items.map((f) => renderCustomerLines(f, company.id))}
           </Fragment>
         ))}
       </tbody>
@@ -576,19 +617,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
 
   return (
     <tbody>
-      {singleItems.map((f) => {
-        return (
-          <tr key={f.partner_id} className="rep-detail">
-            <td>
-              <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
-              <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              <FollowUpActions db={db} reminder={f} companyId={singleCompanyId} />
-            </td>
-            <td className="num">{f.oldest}</td>
-            <td className="num">{formatFollowUpTotals(f)}</td>
-          </tr>
-        );
-      })}
+      {singleItems.map((f) => renderCustomerLines(f, singleCompanyId))}
     </tbody>
   );
 }
@@ -979,7 +1008,7 @@ export const REPORTS = {
   tax: { title: 'Tax Report', Body: Tax, cols: ['Base', 'Tax'] },
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: [] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: [] },
-  followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
+  followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Total Due', 'Total Overdue'] },
   budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Committed', 'Variance', 'Achievement'] },
   analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
   pnl: { title: 'Profit and Loss', cols: ['Balance'] },
