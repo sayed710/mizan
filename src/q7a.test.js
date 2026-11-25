@@ -89,7 +89,7 @@ test('6. Mixed-discount invoices with multiple distinct tax groups match the pos
     early_discount: true,
     discount_percent: 2,
     discount_days: 10,
-    discount_tax_computation: 'included',
+    discount_tax_computation: 'mixed',
     line_ids: [{ value_type: 'percent', value: 100, nb_days: 30, delay_type: 'days_after' }],
   }));
 

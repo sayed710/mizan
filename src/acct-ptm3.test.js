@@ -6,6 +6,7 @@ import { create, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { menusFor, models } from './models/index.js';
+import { installments, termScheduleError } from './models/terms.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -351,4 +352,152 @@ test('PTM-3: search Archived filter and kanban card note display match Odoo 20',
   } finally {
     await ctx.done();
   }
+});
+
+test('PTM-4: residual percentage line identity is consistent between schedule validation and due-date allocation', () => {
+  // Invalid schedule: 300 fixed due now, 90% due in 30 days, 10% stored first but due in 60 days.
+  // In due-date order, the 10% line is residual; requested non-residual is 300 + 900 = 1200 > 1000.
+  const invalidTerm = {
+    line_ids: [
+      { value_type: 'percent', value: 10, nb_days: 60, delay_type: 'days_after' },
+      { value_type: 'fixed', value: 300, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 90, nb_days: 30, delay_type: 'days_after' },
+    ],
+  };
+  assert.equal(termScheduleError(invalidTerm, 1000, null, '2026-01-01'), 'Payment terms must allocate 100% of the total');
+  assert.throws(
+    () => installments(invalidTerm, 1000, '2026-01-01'),
+    /Payment terms must allocate 100% of the total/,
+  );
+
+  // Valid schedule: 300 fixed due now, 10% due in 30 days, 90% stored first but due in 60 days.
+  // In due-date order, the 90% line is residual; requested non-residual is 300 + 100 = 400 <= 1000.
+  const validTerm = {
+    line_ids: [
+      { value_type: 'percent', value: 90, nb_days: 60, delay_type: 'days_after' },
+      { value_type: 'fixed', value: 300, nb_days: 0, delay_type: 'days_after' },
+      { value_type: 'percent', value: 10, nb_days: 30, delay_type: 'days_after' },
+    ],
+  };
+  assert.equal(termScheduleError(validTerm, 1000, null, '2026-01-01'), null);
+  const schedule = installments(validTerm, 1000, '2026-01-01');
+  assert.deepEqual(schedule, [
+    { date: '2026-01-01', amount: 300 },
+    { date: '2026-01-31', amount: 100 },
+    { date: '2026-03-02', amount: 600 },
+  ]);
+});
+
+test('PTM-5: sync diff removing an invoice reference and deleting its term in the same batch succeeds', () => {
+  const base = seed();
+  const term = create(base, 'account.payment.term', {
+    name: 'Term To Delete With Move',
+    line_ids: [{ value_type: 'percent', value: 100, nb_days: 15, delay_type: 'days_after' }],
+  });
+  const inv = create(term.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-04-01',
+    invoice_payment_term_id: term.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+
+  // Batch delete invoice and term in same sync diff (term first in delete map)
+  const synced1 = applyDiff(inv.db, {
+    deletes: {
+      'account.payment.term': [term.id],
+      'account.move': [inv.id],
+    },
+  }, { isAdmin: true });
+  assert.equal(read(synced1, 'account.payment.term', term.id), undefined);
+  assert.equal(read(synced1, 'account.move', inv.id), undefined);
+
+  // Batch delete invoice and term in same sync diff (move first in delete map)
+  const synced2 = applyDiff(inv.db, {
+    deletes: {
+      'account.move': [inv.id],
+      'account.payment.term': [term.id],
+    },
+  }, { isAdmin: true });
+  assert.equal(read(synced2, 'account.payment.term', term.id), undefined);
+  assert.equal(read(synced2, 'account.move', inv.id), undefined);
+
+  // Reassign invoice in upserts and delete term in deletes in same diff
+  const synced3 = applyDiff(inv.db, {
+    upserts: {
+      'account.move': [{ ...read(inv.db, 'account.move', inv.id), invoice_payment_term_id: null }],
+    },
+    deletes: {
+      'account.payment.term': [term.id],
+    },
+  }, { isAdmin: true });
+  assert.equal(read(synced3, 'account.payment.term', term.id), undefined);
+  assert.equal(read(synced3, 'account.move', inv.id).invoice_payment_term_id, null);
+
+  // Still rejects deleting term when invoice reference is not removed
+  assert.throws(
+    () => applyDiff(inv.db, { deletes: { 'account.payment.term': [term.id] } }, { isAdmin: true }),
+    /You can not delete payment terms as other records still reference it/,
+  );
+  assert.throws(
+    () => unlink(inv.db, 'account.payment.term', [term.id]),
+    /You can not delete payment terms as other records still reference it/,
+  );
+});
+
+test('PTM-6: legacy payment terms violating new validation rules can be archived and renamed without re-triggering line validation', () => {
+  let db = seed();
+  const legacyTerm = {
+    id: (db.seq['account.payment.term'] ?? 0) + 1,
+    name: 'Invalid Legacy Term',
+    active: true,
+    display_on_invoice: true,
+    early_discount: true,
+    discount_percent: 2,
+    discount_days: 0, // Invalid: days <= 0
+    line_ids: [{ value_type: 'balance', nb_days: 30, delay_type: 'days_after' }], // Invalid: early_discount on balance line
+  };
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment.term': [...(db.records['account.payment.term'] ?? []), legacyTerm],
+    },
+    seq: { ...db.seq, 'account.payment.term': legacyTerm.id },
+  };
+
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-04-01',
+    invoice_payment_term_id: legacyTerm.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = inv.db;
+
+  // Deletion is blocked because invoice references it
+  assert.throws(
+    () => unlink(db, 'account.payment.term', [legacyTerm.id]),
+    /You can not delete payment terms as other records still reference it. However, you can archive it./,
+  );
+
+  // Archiving the legacy invalid term succeeds
+  const archived = write(db, 'account.payment.term', legacyTerm.id, { active: false });
+  assert.equal(read(archived, 'account.payment.term', legacyTerm.id).active, false);
+
+  // Renaming the legacy invalid term succeeds
+  const renamed = write(db, 'account.payment.term', legacyTerm.id, { name: 'Archived Legacy Term' });
+  assert.equal(read(renamed, 'account.payment.term', legacyTerm.id).name, 'Archived Legacy Term');
+
+  // But modifying its configuration enforces the validation rules
+  assert.throws(
+    () => write(db, 'account.payment.term', legacyTerm.id, { discount_days: 10 }),
+    /The Early Payment Discount functionality can only be used with payment terms using a single 100% line./,
+  );
+  assert.throws(
+    () => write(db, 'account.payment.term', legacyTerm.id, {
+      line_ids: [{ value_type: 'percent', value: 80, nb_days: 30, delay_type: 'days_after' }],
+    }),
+    /The Payment Term must have at least one percent line and the sum of the percent must be 100%./,
+  );
 });

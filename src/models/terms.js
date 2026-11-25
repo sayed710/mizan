@@ -39,7 +39,7 @@ export function invoiceInstallments(db, move, term = null) {
 
   const currency = documentCurrency(db, move);
   const baseDate = validDate(move?.invoice_date) ? move.invoice_date : today();
-  const error = termScheduleError(termRecord, move?.amount_total, currency) ?? dueTermLinesError(termRecord);
+  const error = termScheduleError(termRecord, move?.amount_total, currency, baseDate) ?? dueTermLinesError(termRecord);
   if (error) return null;
   return installments(termRecord, move?.amount_total, baseDate, currency);
 }
@@ -143,16 +143,19 @@ export function paymentTermLinesError(term) {
 }
 
 /** Return the first validation error for a payment term schedule against `total`, or null when valid. */
-export function termScheduleError(term, total, currency = null) {
-  const lines = term?.line_ids ?? [];
-  if (!lines.length) return 'Add at least one due term';
+export function termScheduleError(term, total, currency = null, invoiceDate = null) {
+  const rawLines = term?.line_ids ?? [];
+  if (!rawLines.length) return 'Add at least one due term';
+
+  const baseDate = validDate(invoiceDate) ? invoiceDate : today();
+  const lines = [...rawLines].sort((a, b) => lineDate(a, baseDate).localeCompare(lineDate(b, baseDate)));
 
   const totalCents = Math.abs(currencyUnits(total, currency));
   const fixed = lines.map((line) => (line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0));
   const fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
   if (fixedRemaining > totalCents) return 'Fixed amounts exceed the total';
-  const balanceIndex = lines.findIndex(isBalanceLine);
-  if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) return 'The balance due term must be the last one';
+  const balanceIndex = rawLines.findIndex(isBalanceLine);
+  if (balanceIndex >= 0 && balanceIndex !== rawLines.length - 1) return 'The balance due term must be the last one';
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
   const hasPercent = lines.some(isPercentLine);
   const lastPercentIndex = balanceIndex < 0 && hasFixed && hasPercent ? lines.findLastIndex(isPercentLine) : -1;
@@ -171,7 +174,7 @@ export function termScheduleError(term, total, currency = null) {
 
 /** Split an invoice total into dated installments according to a payment term. */
 export function installments(term, total, invoiceDate, currency = null) {
-  const error = termScheduleError(term, total, currency);
+  const error = termScheduleError(term, total, currency, invoiceDate);
   if (error) throw new Error(error);
 
   const baseDate = validDate(invoiceDate) ? invoiceDate : today();
@@ -351,9 +354,14 @@ export const termModels = {
       if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) && !legacyUnset) {
         return 'Select a discount tax computation mode';
       }
-      return paymentTermLinesError(after) ?? dueTermLinesError(after);
+      // Legacy terms that predate these rules stay archivable/editable until their lines or discount change (compared, not taken from vals, so sync re-checks the same way).
+      const shouldValidateLines = !before || ['line_ids', 'early_discount', 'discount_percent', 'discount_days'].some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+      if (shouldValidateLines) {
+        return paymentTermLinesError(after) ?? dueTermLinesError(after);
+      }
+      return null;
     },
-    protectDelete: (db, term) => ((db.records['account.move'] ?? []).some((move) => move.invoice_payment_term_id === term.id)
+    protectDelete: (db, term, staged) => (((staged?.records ?? db.records)['account.move'] ?? []).some((move) => move.invoice_payment_term_id === term.id)
       ? 'You can not delete payment terms as other records still reference it. However, you can archive it.'
       : null),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),

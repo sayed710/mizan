@@ -693,9 +693,11 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         ? (({ fx_payment_move_id, fx_invoice_id, system_generated, ...rest }) => rest)(submitted)
         : submitted;
       const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
-      const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
-      if (model === 'account.move' && rec.state === 'draft' && rec.posting_order != null && (!submitted || submitted.posting_order === undefined)) delete rec.posting_order;
-      if (companies) scopeNestedCompanyArrays(model, rec, companies, { prior, submitted, write: true });
+      const cleaned = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
+      if (model === 'account.move' && cleaned.state === 'draft' && cleaned.posting_order != null && (!submitted || submitted.posting_order === undefined)) delete cleaned.posting_order;
+      if (companies) scopeNestedCompanyArrays(model, cleaned, companies, { prior, submitted, write: true });
+      // Server-owned values (e.g. currency rate write_date) are recomputed from the stored record, never trusted from the client.
+      const rec = models[model]?.finalizeWrite?.(db, cleaned, prior) ?? cleaned;
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
       const old = current.get(rec.id);
@@ -876,12 +878,18 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     growth += json(numbered.records[model].find((r) => r.id === id)) - json(records[model].find((r) => r.id === id));
   }
   records = numbered.records;
+  const allDeletes = Object.fromEntries(
+    Object.entries(d.deletes ?? {}).map(([m, ids]) => [m, new Set(Array.isArray(ids) ? ids : [])])
+  );
+  const stagedRecords = Object.fromEntries(
+    Object.entries(records).map(([m, recs]) => [m, recs.filter((r) => !allDeletes[m]?.has(r.id))])
+  );
   for (const [model, ids] of Object.entries(d.deletes ?? {})) {
     check(model);
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records }, baseCtx)).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records: stagedRecords }, baseCtx)).find(Boolean);
     if (blocked) throw new Error(blocked);
     const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
     if (unauthorized) throw new Error(unauthorized);
