@@ -33,7 +33,7 @@ test('wizard action persists isolated company chains and lock dates through serv
   for (const id of [1, company]) {
     const wizard = create(db, leaf.model, { company: id, hash_date: '2026-01-31' }); db = wizard.db;
     assert.equal(read(db, leaf.model, wizard.id).move_to_hash_ids.length, 1);
-    const next = wizardModel.form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, leaf.model, wizard.id)).db;
+    const next = wizardModel.form.buttons.find((b) => b.label === 'Secure Entries').run(db, read(db, leaf.model, wizard.id)).db;
     db = server(db, next);
     if (id === 1) assert.doesNotThrow(() => entry(db, company, '2026-01-15'));
   }
@@ -135,7 +135,7 @@ function securedFixture(count = 3) {
   const ids = [];
   for (let i = 0; i < count; i++) { const result = entry(db, 1, `2026-01-0${i + 1}`); db = result.db; ids.push(result.id); }
   const wizard = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-31' }); db = wizard.db;
-  const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Confirm');
+  const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Secure Entries');
   db = server(db, action.run(db, read(db, 'account.secure.entries.wizard', wizard.id)).db);
   return { db, journal, ids };
 }
@@ -210,7 +210,7 @@ test('invoice secured through the wizard survives server field cleaning and SQLi
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: db.records['res.partner'][0].id, invoice_date: '2027-01-01', invoice_line_ids: [{ name: 'Taxed service', qty: 1, price_unit: 100, tax: 14 }] });
   db = server(db, postMove(invoice.db, invoice.id));
   const wizard = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2027-12-31' }); db = wizard.db;
-  const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Confirm');
+  const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Secure Entries');
   db = server(db, action.run(db, read(db, 'account.secure.entries.wizard', wizard.id)).db);
   const sql = new DatabaseSync(':memory:'); const storage = openStorage(sql); storage.save(null, db);
   assert.equal(checkInalterability(storage.load(), { journalId: journal.id, companyId: 1 })[0].status, 'ok');
@@ -219,7 +219,7 @@ test('invoice secured through the wizard survives server field cleaning and SQLi
 
 
 test('empty secure wizard leaves the hard lock unchanged and explains why', () => {
-  const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Confirm');
+  const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Secure Entries');
   for (const scenario of ['no restricted journal', 'no entries', 'before first entry']) {
     let { db, journal } = setup();
     if (scenario === 'no restricted journal') db = write(db, 'account.journal', journal, { restrict_mode_hash_table: false });
