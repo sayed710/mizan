@@ -4425,7 +4425,7 @@ export const accountingModels = {
       banner: (r, db) => suggestBillAutopost(db, r) ? 'Automatically post future digitized bills from this vendor?' : null,
       warning: (r, db) => {
         const base = r.move_type === 'out_invoice'
-          ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r)
+          ? ((!r.state || r.state === 'draft') ? creditWarning(db, r.partner_id, total(r, db), r) : '')
           : ['in_invoice', 'in_refund'].includes(r.move_type)
             ? duplicateBillWarning(db, r)
             : unbalancedEntryWarning(db, r);
