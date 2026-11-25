@@ -36,8 +36,9 @@ test('sale uses the posted invoice line account and reverses depreciation before
 
 test('reversing and reposting depreciation offsets analytic actuals through synced actions', () => {
   let db = seed();
-  const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'DEP-A' });
-  const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'DEP-B' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'DEP-A', plan_id: planId });
+  const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'DEP-B', plan_id: planId });
   const distribution = { [first.id]: 60, [second.id]: 40 };
   const asset = create(second.db, 'account.asset', { ...assetAccounts(second.db), name: 'Allocated asset', original_value: 100,
     acquisition_date: '2020-01-01', method: 'linear', method_number: 1, method_period: '12', analytic_distribution: distribution });
@@ -88,8 +89,9 @@ test('resetting deferred invoices and bills offsets recognition analytic actuals
     ['in_invoice', '600000', '132000', -1],
   ]) {
     let db = seed();
-    const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'PROJECT-A' });
-    const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'PROJECT-B' });
+    const planId = db.records['account.analytic.plan'][0].id;
+    const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'PROJECT-A', plan_id: planId });
+    const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'PROJECT-B', plan_id: planId });
     db = write(second.db, 'res.company', 1, {
       deferred_generation_method: 'on_validation',
       [moveType === 'out_invoice' ? 'deferred_revenue_account_id' : 'deferred_expense_account_id']: accountId(second.db, deferred),

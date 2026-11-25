@@ -33,7 +33,7 @@ test('unapplied outgoing customer and incoming vendor refund payments age as pos
 });
 
 test('analytic split allocates a rounded cent only once within a plan', () => {
- let db = seed(); const a = create(db, 'account.analytic.account', { name: 'Cent A' }); const b = create(a.db, 'account.analytic.account', { name: 'Cent B' }); db = b.db;
+ let db = seed(); const planId = db.records['account.analytic.plan'][0].id; const a = create(db, 'account.analytic.account', { name: 'Cent A', plan_id: planId }); const b = create(a.db, 'account.analytic.account', { name: 'Cent B', plan_id: planId }); db = b.db;
  const m = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 0.01, tax: 0, analytic_distribution: { [a.id]: 50, [b.id]: 50 } }] }); db = postMove(m.db, m.id);
  const lines = db.records['account.analytic.line'].filter((l) => l.move_id === m.id);
  assert.equal(lines.reduce((sum, l) => sum + l.amount, 0), 0.01);
@@ -41,15 +41,16 @@ test('analytic split allocates a rounded cent only once within a plan', () => {
 
 test('posted foreign analytic items use company currency', () => {
  let db = seed(); const fx = create(db, 'res.currency', { name: 'ANALYTICFX', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
- const a = create(fx.db, 'account.analytic.account', { name: 'Foreign plan' });
+ const a = create(fx.db, 'account.analytic.account', { name: 'Foreign plan', plan_id: fx.db.records['account.analytic.plan'][0].id });
  const m = create(a.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', currency_id: fx.id, invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0, analytic_distribution: { [a.id]: 100 } }] }); db = postMove(m.db, m.id);
  assert.equal(db.records['account.analytic.line'].find((l) => l.move_id === m.id).amount, 50);
 });
 
 test('posted foreign analytic lines share the ledger group rounded cent', () => {
  const fx = create(seed(), 'res.currency', { name: 'ANALYTICCENTS', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
- const a = create(fx.db, 'account.analytic.account', { name: 'First cent' });
- const b = create(a.db, 'account.analytic.account', { name: 'Second cent' });
+ const planId = fx.db.records['account.analytic.plan'][0].id;
+ const a = create(fx.db, 'account.analytic.account', { name: 'First cent', plan_id: planId });
+ const b = create(a.db, 'account.analytic.account', { name: 'Second cent', plan_id: planId });
  const m = create(b.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', currency_id: fx.id, invoice_line_ids: [a.id, b.id].map((id) => ({ product_id: 5, qty: 1, price_unit: 0.01, tax: 0, analytic_distribution: { [id]: 100 } })) });
  const db = postMove(m.db, m.id);
  const posted = read(db, 'account.move', m.id);

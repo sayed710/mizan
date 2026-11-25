@@ -8,7 +8,7 @@ import { postMove } from './models/accounting.js';
 
 test('invoice posting creates analytic lines that reset to draft removes', () => {
   let db = seed();
-  const account = create(db, 'account.analytic.account', { name: 'Project Nile' });
+  const account = create(db, 'account.analytic.account', { name: 'Project Nile', plan_id: db.records['account.analytic.plan'][0].id });
   const inv = create(account.db, 'account.move', {
     move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-10-20',
     invoice_line_ids: [{ product_id: 1, name: 'Desk', qty: 2, price_unit: 50, tax: 0, analytic_distribution: { [account.id]: 100 } }],

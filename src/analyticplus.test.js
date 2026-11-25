@@ -12,8 +12,10 @@ import { analyticPlusModels, normalizeDistribution, distributionOfLine, analytic
 const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
 
 const setup = () => {
-  const first = create(seed(), 'account.analytic.account', { name: 'Consulting' });
-  const second = create(first.db, 'account.analytic.account', { name: 'Support' });
+  const db0 = seed();
+  const planId = search(db0, 'account.analytic.plan')[0].id;
+  const first = create(db0, 'account.analytic.account', { name: 'Consulting', plan_id: planId });
+  const second = create(first.db, 'account.analytic.account', { name: 'Support', plan_id: planId });
   return { db: second.db, a: first.id, b: second.id };
 };
 const moveValues = (a, b, move_type = 'out_invoice') => ({
@@ -34,13 +36,14 @@ test('analytic distributions are copied and reject invalid percentages, accounts
   assert.throws(() => normalizeDistribution({ 99999: 100 }, seed()), /not found/);
 });
 
-test('distribution totals are independent per plan, including legacy plan selections', () => {
+test('distribution totals are independent per plan', () => {
   const { db, a, b } = setup();
   assert.throws(() => normalizeDistribution({ [a]: 100, [b]: 100 }, db), /100%/);
   const p = create(db, 'account.analytic.plan', { name: 'Departments' });
   const otherPlan = write(p.db, 'account.analytic.account', b, { plan_id: p.id });
   assert.deepEqual(normalizeDistribution({ [a]: 100, [b]: 100 }, otherPlan), { [a]: 100, [b]: 100 });
-  assert.deepEqual(normalizeDistribution({ [a]: 100, [b]: 100 }, write(db, 'account.analytic.account', b, { plan: 'region' })), { [a]: 100, [b]: 100 });
+  const regions = search(db, 'account.analytic.plan').find((r) => r.name === 'Regions');
+  assert.deepEqual(normalizeDistribution({ [a]: 100, [b]: 100 }, write(db, 'account.analytic.account', b, { plan_id: regions.id })), { [a]: 100, [b]: 100 });
 });
 
 test('legacy analytic allocation falls back to 100%, while explicit empty distribution wins', () => {
@@ -173,8 +176,11 @@ test('budget buttons enforce transitions and retain the existing report action',
 
 test('seed and timesheet fields, defaults, views and hours remain compatible', () => {
   const db = seed();
-  assert.equal(search(db, 'account.analytic.plan').length, 0);
-  assert.ok(search(db, 'account.analytic.account').some((r) => r.plan === 'region'));
+  const plans = search(db, 'account.analytic.plan');
+  assert.deepEqual(plans.map((p) => p.name), ['Projects', 'Regions']);
+  const accounts = search(db, 'account.analytic.account');
+  assert.ok(accounts.length >= 2);
+  assert.ok(accounts.every((r) => r.plan_id && plans.some((p) => p.id === r.plan_id)));
   assert.ok(search(db, 'account.budget').length);
   assert.ok(search(db, 'account.analytic.line').length);
   const def = analyticPlusModels['account.analytic.line'];

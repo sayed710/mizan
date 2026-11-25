@@ -84,8 +84,9 @@ test('multi-ledger selector limits journals to selected ledger on financial repo
 
 test('horizontal grouping by analytic group provides comparison columns in financial reports', () => {
   let db = seed();
-  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Project' });
-  const a2 = create(a1.db, 'account.analytic.account', { name: 'Beta Project' });
+  const planId = db.records['account.analytic.plan'][0].id;
+  const a1 = create(db, 'account.analytic.account', { name: 'Alpha Project', plan_id: planId });
+  const a2 = create(a1.db, 'account.analytic.account', { name: 'Beta Project', plan_id: planId });
   db = a2.db;
 
   const date = `${today().slice(0, 4)}-05-10`;

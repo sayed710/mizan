@@ -250,13 +250,17 @@ export function accountCurrencyError(db, before, after) {
   return bad ? 'The account forces journal items in its currency' : null;
 }
 
-/** An account cannot adopt a currency that its already posted journal items do not use. */
+/** An account cannot adopt a currency when an item explicitly uses another currency. */
 export function accountCurrencyChangeError(db, before, after) {
   if ((before?.currency_id ?? null) === (after?.currency_id ?? null) || !after.currency_id) return null;
   const moves = db.records?.['account.move'] ?? [];
-  const bad = moves.some((move) => move.state === 'posted'
-    && (move.line_ids ?? []).some((line) => line.account_id === after.id
-      && lineCurrencyMismatch(db, line, after, move.company_id ?? after.company_id ?? 1)));
+  const bad = moves.some((move) => (move.line_ids ?? []).some((line) => {
+    if (line.account_id !== after.id) return false;
+    if (move.state === 'posted') {
+      return lineCurrencyMismatch(db, line, after, move.company_id ?? after.company_id ?? 1);
+    }
+    return line.currency_id && line.currency_id !== after.currency_id;
+  }));
   return bad ? 'The account has journal items in another currency' : null;
 }
 
@@ -2854,6 +2858,8 @@ export function analyticActuals(db, period = {}) {
   return totals;
 }
 
+const includedJournalIds = (group, db) => (db.records['account.journal'] ?? []).filter((journal) => journal.journal_group_id === group.id).map((journal) => journal.id);
+
 export const financeModels = {
   'account.journal.group': {
     label: 'Multi-Ledger',
@@ -2863,15 +2869,25 @@ export const financeModels = {
       name: { type: 'char', label: 'Ledger group', placeholder: 'e.g. CONSO, IFRS, ...', required: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle', hidden: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, hidden: true },
-      journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', domain: (journal, record) => !journal.company_id || journal.company_id === record.company_id },
+      journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', compute: includedJournalIds, domain: (journal, record) => !journal.company_id || journal.company_id === record.company_id },
+      included_journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', compute: includedJournalIds, hidden: true },
     },
-    defaults: () => ({ sequence: 10, journal_ids: [] }),
+    defaults: () => ({ sequence: 10 }),
     createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
-    guard: (db, before, record) => ((!before || record.name !== before.name) && (db.records['account.journal.group'] ?? []).some((group) => group.id !== record.id && group.name === record.name))
-      ? 'A Ledger group name must be unique.' : (record.journal_ids ?? []).some((id) => {
-      const journal = read(db, 'account.journal', id);
-      return !journal || (journal.company_id && journal.company_id !== record.company_id);
-    }) ? 'Select journals belonging to this company or shared journals' : null,
+    onCreate: (db, group, _before, vals) => (vals.journal_ids ?? []).reduce((next, id) => write(next, 'account.journal', id, { journal_group_id: group.id }), db),
+    onWrite: (db, group, _before, vals) => vals.journal_ids === undefined ? db : (db.records['account.journal'] ?? []).reduce((next, journal) => {
+      const target = vals.journal_ids.includes(journal.id) ? group.id : journal.journal_group_id === group.id ? null : journal.journal_group_id;
+      return target === journal.journal_group_id ? next : write(next, 'account.journal', journal.id, { journal_group_id: target });
+    }, db),
+    onUnlink: (db, group) => (db.records['account.journal'] ?? []).reduce((next, journal) => journal.journal_group_id === group.id ? write(next, 'account.journal', journal.id, { journal_group_id: null }) : next, db),
+    guard: (db, before, record, _ctx, vals) => {
+      if ((!before || record.name !== before.name) && (db.records['account.journal.group'] ?? []).some((group) => group.id !== record.id && group.name === record.name)) return 'A Ledger group name must be unique.';
+      const journalIds = vals?.journal_ids !== undefined ? vals.journal_ids : includedJournalIds(record, db);
+      return journalIds.some((id) => {
+        const journal = read(db, 'account.journal', id);
+        return !journal || (journal.company_id && journal.company_id !== record.company_id);
+      }) ? 'Select journals belonging to this company or shared journals' : null;
+    },
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
     list: ['sequence', 'name', 'journal_ids'],
     listFields: {
@@ -3049,14 +3065,15 @@ export const financeModels = {
     fields: {
       name: { type: 'char', label: 'Analytic Account', required: true },
       code: { type: 'char', label: 'Reference' },
-      plan: { type: 'selection', label: 'Plan', options: [['project', 'Projects'], ['department', 'Departments'], ['region', 'Regions']] },
+      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan', required: true },
+      color: { type: 'integer', label: 'Color' },
       balance: { type: 'monetary', label: 'Balance', readonly: true },
     },
-    defaults: () => ({ plan: 'project' }),
-    groupBys: ['plan'],
-    kanban: { title: 'name', lines: ['code', 'plan'] },
-    list: ['code', 'name', 'plan'],
-    form: { title: 'name', groups: [['code', 'plan'], []], chatter: true },
+    defaults: () => ({ color: 0 }),
+    groupBys: ['plan_id'],
+    kanban: { title: 'name', lines: ['code', 'plan_id'] },
+    list: ['code', 'name', 'plan_id'],
+    form: { title: 'name', groups: [['code', 'plan_id'], []], chatter: true },
   },
 
   'account.budget': {
