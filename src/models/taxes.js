@@ -359,16 +359,11 @@ export function autoFiscalPosition(db, address, companyId = null) {
     if (fp.unresolved_targeting) return false;
     if (fp.vat_required && !String(p.vat ?? '').trim()) return false;
     if (!zipMatches(fp)) return false;
-    const hasRawCountry = typeof fp.country === 'string' && fp.country.trim().length > 0;
     const fpCountry = fpCountryFor(fp);
-    if (hasRawCountry && !fpCountry) return false;
     if (fpCountry && fpCountry !== country) return false;
     if (fp.country_group_id && !matchesCountryGroup(fp.country_group_id)) return false;
-    const rawStates = fp.state_ids ?? [];
-    const hasRawStates = Array.isArray(fp.states) ? fp.states.length > 0 : Boolean(String(fp.states ?? '').trim());
     const states = fpStates(fp, fpCountry);
-    if (hasRawStates && !states.length) return false;
-    if (rawStates.length && (!state || !states.includes(state))) return false;
+    if ((fp.state_ids ?? []).length && (!state || !states.includes(state))) return false;
     return true;
   };
   const specificity = (fp) => {
