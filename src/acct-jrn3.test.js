@@ -195,29 +195,75 @@ test('JRN-3: form smart button opens the journal items and list optional/group-g
 
   let db = seed();
   const saleJ = search(db, 'account.journal').find((j) => j.code === 'INV');
+  const purchJ = search(db, 'account.journal').find((j) => j.code === 'BILL');
   const inv = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: search(db, 'res.partner')[0].id,
     journal_id: saleJ.id,
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
   });
-  db = inv.db;
+  const otherBill = create(inv.db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: search(inv.db, 'res.partner')[0].id,
+    journal_id: purchJ.id,
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 0 }],
+  });
+  const { postMove } = await import('./models/accounting.js');
+  const { journalItems } = await import('./models/ledger.js');
+  db = postMove(otherBill.db, inv.id);
+  db = postMove(db, otherBill.id);
 
   const { FormView } = await import('./views/FormView.jsx');
   const { ActionView } = await import('./views/ActionView.jsx');
+  const { JournalItems } = await import('./views/JournalItems.jsx');
 
   // Form smart button opens the journal's items (jcf1), like Odoo's Journal Items action
   const formCtx = await mountView(
     (React) => React.createElement(FormView, { leaf: journalsLeaf(), id: String(saleJ.id), base: '#/accounting/journals', params: new URLSearchParams('view=list') }),
     db,
   );
+  let smartHref;
+  let expectedLines;
   try {
     const smart = find(formCtx.host, (n) => n.tagName === 'A' && hasClass(n, 'smart'));
     assert.ok(smart, 'Journal form renders smart button');
     assert.ok(smart.textContent.includes('Journal Items'));
-    assert.equal(props(smart)?.href ?? '', `#/accounting/journal-items?journal=${saleJ.id}`);
+    smartHref = props(smart)?.href ?? '';
+    assert.equal(smartHref, `#/accounting/journal-items?journal=${saleJ.id}`);
+
+    const targetParams = new URLSearchParams(smartHref.split('?')[1]);
+    const journalParam = Number(targetParams.get('journal'));
+    assert.equal(journalParam, saleJ.id);
+
+    expectedLines = journalItems(db).filter((line) => line.journal_id === journalParam);
+    const smartCount = Number(find(smart, (n) => n.tagName === 'B')?.textContent);
+    assert.equal(smartCount, expectedLines.length);
+    assert.ok(expectedLines.some((line) => line.move_id === inv.id), 'Invoice line for saleJ is present');
+    assert.ok(expectedLines.every((line) => line.journal_id === saleJ.id), 'Every returned line belongs to saleJ');
   } finally {
     await formCtx.done();
+  }
+
+  // Destination view checks: journal-items filtered by journal= lists the journal lines and excludes others
+  const previousLocation = globalThis.location;
+  globalThis.location = { hash: smartHref };
+  const itemsCtx = await mountView(
+    (React) => React.createElement(JournalItems),
+    db,
+  );
+  try {
+    const invMove = read(db, 'account.move', inv.id);
+    const otherMove = read(db, 'account.move', otherBill.id);
+    const tbody = find(itemsCtx.host, (n) => n.tagName === 'TBODY');
+    const renderedRows = allFind(tbody, (n) => n.tagName === 'TR');
+    assert.equal(renderedRows.length, expectedLines.length, 'Rendered JournalItems rows match only the selected journal lines');
+    assert.ok(itemsCtx.host.textContent.includes(invMove.name), 'Invoice line is displayed in JournalItems');
+    assert.equal(itemsCtx.host.textContent.includes(otherMove.name), false, 'Other journal entries are excluded from JournalItems');
+    const facet = find(itemsCtx.host, (n) => n.tagName === 'SPAN' && n.textContent.includes(`Journal: ${saleJ.name}`));
+    assert.ok(facet, 'Journal facet is shown in JournalItems');
+  } finally {
+    globalThis.location = previousLocation;
+    await itemsCtx.done();
   }
 
   // Single-company optional columns menu excludes Company and defaults Active off

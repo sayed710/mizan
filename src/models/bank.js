@@ -242,7 +242,8 @@ export function paymentMatchError(db, line, payment, { journal = null, companyCu
   if (!allowMatched && (isPaymentMatched(db, payment, line?.id) || (!allowLinePayments && allocatedPaymentIds(line).has(payment.id)))) return 'Payment is already matched';
   const statementJournal = journal ?? (line?.journal_id ? read(db, 'account.journal', line.journal_id) : null);
   const compCurrency = companyCurrency ?? read(db, 'res.company', company)?.currency_id;
-  if (statementJournal?.currency_id && (payment.currency_id ?? compCurrency) !== statementJournal.currency_id) {
+  const lineCurrencyId = line?.currency_id ?? statementJournal?.currency_id;
+  if (lineCurrencyId && lineCurrencyId !== compCurrency && (payment.currency_id ?? compCurrency) !== lineCurrencyId) {
     return 'Payment currency must match the bank journal currency';
   }
   const outstandingAccount = paymentOutstandingAccountId(db, payment);
@@ -368,8 +369,9 @@ export function matchPayment(db, line) {
   const amount = line.bank_move_id ? round(line.open_amount) : bookedTotal;
   const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
   const incoming = line.amount > 0;
-  const foreign = journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id;
-  const journalCurr = foreign ? read(db, 'res.currency', journal.currency_id) : null;
+  const statementCurrencyId = line.currency_id ?? journal?.currency_id;
+  const foreign = statementCurrencyId && statementCurrencyId !== companyCurrencyRecord(db, company)?.id;
+  const journalCurr = foreign ? read(db, 'res.currency', statementCurrencyId) : null;
   const fxAmounts = foreign ? payments.map((p) => roundCurrency(p.amount, journalCurr)) : [];
   const foreignAmount = foreign
     ? (line.bank_move_id
@@ -395,7 +397,7 @@ export function matchPayment(db, line) {
     if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label for the bank difference');
     if (line.writeoff_amount != null) {
       const configuredAmount = Number(line.writeoff_amount);
-      const currency = read(db, 'res.currency', journal?.currency_id) ?? companyCurrencyRecord(db, company);
+      const currency = read(db, 'res.currency', statementCurrencyId) ?? companyCurrencyRecord(db, company);
       const expected = Math.abs(foreign ? foreignDifference : difference);
       if (!Number.isFinite(configuredAmount) || configuredAmount < 0 || roundCurrency(configuredAmount, currency) !== configuredAmount || configuredAmount !== expected) {
         throw new Error('Write-off amount must equal the payment difference in statement currency');
@@ -435,7 +437,7 @@ export function matchPayment(db, line) {
     currentDb = bookedBank.db;
     bankMoveId = bookedBank.bankMoveId;
   }
-  const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
+  const fx = (value) => foreign ? { currency_id: statementCurrencyId, amount_currency: value } : {};
   let lines;
   const writeoff = needsWriteoff ? (foreign ? statementCompanyAmount(db, line, foreignDifference) : difference) : 0;
   const writeoffLines = [];
@@ -475,9 +477,9 @@ export function matchPayment(db, line) {
     const includeBankFx = foreign && (
       netFx !== 0
       || !outstandingItems.some((item) => item.isDirect)
-      || outstandingItems.some((item) => item.isDirect && item.currency_id === journal.currency_id)
+      || outstandingItems.some((item) => item.isDirect && item.currency_id === statementCurrencyId)
     );
-    const bankFx = includeBankFx ? { currency_id: journal.currency_id, amount_currency: netFx } : {};
+    const bankFx = includeBankFx ? { currency_id: statementCurrencyId, amount_currency: netFx } : {};
     const bankLines = netLiquidity
       ? [netLiquidity > 0
           ? { account: via.accountId, debit: netLiquidity, ...bankFx }
@@ -786,7 +788,7 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
           return 'Bank transaction allocations must match its amount';
         }
       }
-      const journalCurrId = read(db, 'account.journal', after.journal_id)?.currency_id;
+      const journalCurrId = after.currency_id ?? read(db, 'account.journal', after.journal_id)?.currency_id;
       if (journalCurrId && directCurrencyLines.every((l) => l.currency_id === journalCurrId)) {
         const curr = read(db, 'res.currency', journalCurrId);
         const sumFx = directCurrencyLines.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0);

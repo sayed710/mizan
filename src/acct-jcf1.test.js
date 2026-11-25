@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
 import { accountId, postEntry, statementCompanyAmount } from './models/ledger.js';
+import { eligiblePayments, matchPayment, paymentMatchError } from './models/bank.js';
+import { postPayment } from './models/pay.js';
+import { applyRule } from './models/reconcile.js';
 import { models, viewsOf } from './models/index.js';
 import { create, matches, read, search, write } from './orm.js';
 import { seed } from './seed.js';
@@ -256,4 +259,217 @@ test('JCF-6: SearchPanel suppresses duplicate generic Archived control when mode
   } finally {
     await React.act(async () => root.unmount());
   }
+});
+
+test('JCF-7: matching an old-currency statement line to a posted payment after journal currency changes', () => {
+  let db = seed();
+  const companyId = 1;
+  const companyCurr = read(db, 'res.company', companyId).currency_id;
+
+  const eurRes = create(db, 'res.currency', {
+    name: 'EUR',
+    symbol: '€',
+    rounding: 0.01,
+    rate_ids: [{ date: '2026-01-01', rate: 0.5, company_id: companyId }],
+  });
+  db = eurRes.db;
+  const eurId = eurRes.id;
+
+  const defaultAccount = search(db, 'account.account').find((a) => a.account_type === 'asset_cash');
+  const suspenseAccount = search(db, 'account.account').find((a) => a.code === '101404');
+  const outstandingReceipts = accountId(db, '101402', companyId);
+  const feeAccount = search(db, 'account.account').find((a) => a.code === '600000') ?? search(db, 'account.account').find((a) => a.account_type === 'expense');
+  const bankJournalRes = create(db, 'account.journal', {
+    name: 'EUR Bank',
+    code: 'EUBK',
+    type: 'bank',
+    currency_id: eurId,
+    company_id: companyId,
+    default_account_id: defaultAccount.id,
+    suspense_account_id: suspenseAccount.id,
+    outstanding_receipts_account_id: outstandingReceipts,
+  });
+  db = bankJournalRes.db;
+  const bankJournalId = bankJournalRes.id;
+
+  const partner = search(db, 'res.partner')[0];
+  const payRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    company_id: companyId,
+    journal_id: bankJournalId,
+    currency_id: eurId,
+    amount: 100,
+    date: '2026-04-10',
+    payment_type: 'inbound',
+    partner_type: 'customer',
+  });
+  db = postPayment(payRes.db, read(payRes.db, 'account.payment', payRes.id));
+  const payment = read(db, 'account.payment', payRes.id);
+
+  const lineRes = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournalId,
+    payment_ref: 'Old EUR statement line',
+    amount: 100,
+    date: '2026-04-10',
+  });
+  db = lineRes.db;
+  const lineId = lineRes.id;
+  const lineBefore = read(db, 'account.bank.statement.line', lineId);
+  assert.equal(lineBefore.currency_id, eurId);
+
+  const woLineRes = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournalId,
+    payment_ref: 'Old EUR statement line with fee writeoff',
+    amount: 95,
+    date: '2026-04-10',
+  });
+  db = woLineRes.db;
+  const woLineId = woLineRes.id;
+
+  const woPayRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    company_id: companyId,
+    journal_id: bankJournalId,
+    currency_id: eurId,
+    amount: 100,
+    date: '2026-04-10',
+    payment_type: 'inbound',
+    partner_type: 'customer',
+  });
+  db = postPayment(woPayRes.db, read(woPayRes.db, 'account.payment', woPayRes.id));
+  const woPayment = read(db, 'account.payment', woPayRes.id);
+
+  // Change journal currency to company currency
+  db = write(db, 'account.journal', bankJournalId, { currency_id: companyCurr });
+  assert.equal(read(db, 'account.journal', bankJournalId).currency_id, companyCurr);
+
+  // Also post a payment in the journal's new currency; it must NOT match the old EUR line
+  const newCurrPayRes = create(db, 'account.payment', {
+    partner_id: partner.id,
+    company_id: companyId,
+    journal_id: bankJournalId,
+    currency_id: companyCurr,
+    amount: 100,
+    date: '2026-04-10',
+    payment_type: 'inbound',
+    partner_type: 'customer',
+  });
+  db = postPayment(newCurrPayRes.db, read(newCurrPayRes.db, 'account.payment', newCurrPayRes.id));
+  const newCurrPayment = read(db, 'account.payment', newCurrPayRes.id);
+
+  // Existing statement line retains its EUR currency
+  const lineAfter = read(db, 'account.bank.statement.line', lineId);
+  assert.equal(lineAfter.currency_id, eurId);
+
+  // Payment matching must accept the EUR payment and reject the new-currency payment
+  assert.equal(paymentMatchError(db, lineAfter, payment), null);
+  assert.match(paymentMatchError(db, lineAfter, newCurrPayment) ?? '', /currency/i);
+  const eligibleIds = eligiblePayments(db, lineAfter).map((p) => p.id);
+  assert.ok(eligibleIds.includes(payment.id));
+  assert.ok(!eligibleIds.includes(newCurrPayment.id));
+
+  const matched = matchPayment(db, { ...lineAfter, payment_id: payment.id });
+  const reconciledLine = read(matched.db, 'account.bank.statement.line', lineId);
+  assert.equal(reconciledLine.state, 'reconciled');
+  const matchMove = read(matched.db, 'account.move', reconciledLine.move_id);
+  const matchBankLine = matchMove.line_ids.find((l) => l.account_id === defaultAccount.id);
+  const matchOutLine = matchMove.line_ids.find((l) => l.account_id === outstandingReceipts);
+  assert.equal(matchBankLine.currency_id, eurId);
+  assert.equal(matchBankLine.amount_currency, 100);
+  assert.equal(matchBankLine.debit, 200);
+  assert.equal(matchOutLine.currency_id, eurId);
+  assert.equal(matchOutLine.amount_currency, -100);
+  assert.equal(matchOutLine.credit, 200);
+
+  // Matching with a write-off difference also uses the statement line's EUR currency
+  const woLineAfter = read(matched.db, 'account.bank.statement.line', woLineId);
+  const woMatched = matchPayment(matched.db, {
+    ...woLineAfter,
+    payment_id: woPayment.id,
+    writeoff_account_id: feeAccount.id,
+    writeoff_label: 'EUR bank fee',
+    writeoff_amount: 5,
+  });
+  const woReconciled = read(woMatched.db, 'account.bank.statement.line', woLineId);
+  assert.equal(woReconciled.state, 'reconciled');
+  const woMove = read(woMatched.db, 'account.move', woReconciled.move_id);
+  const woFeeLine = woMove.line_ids.find((l) => l.account_id === feeAccount.id);
+  assert.ok(woFeeLine);
+  assert.equal(woFeeLine.currency_id, eurId);
+  assert.equal(woFeeLine.amount_currency, 5);
+  assert.equal(woFeeLine.debit, 10);
+});
+
+test('JCF-8: reconciliation-rule write-off on an old-currency line after journal currency changes', () => {
+  let db = seed();
+  const companyId = 1;
+  const companyCurr = read(db, 'res.company', companyId).currency_id;
+
+  const eurRes = create(db, 'res.currency', {
+    name: 'EUR',
+    symbol: '€',
+    rounding: 0.01,
+    rate_ids: [{ date: '2026-01-01', rate: 0.5, company_id: companyId }],
+  });
+  db = eurRes.db;
+  const eurId = eurRes.id;
+
+  const defaultAccount = search(db, 'account.account').find((a) => a.account_type === 'asset_cash');
+  const suspenseAccount = search(db, 'account.account').find((a) => a.code === '101404');
+  const feeAccount = search(db, 'account.account').find((a) => a.code === '600000') ?? search(db, 'account.account').find((a) => a.account_type === 'expense');
+
+  const bankJournalRes = create(db, 'account.journal', {
+    name: 'EUR Bank 2',
+    code: 'EUB2',
+    type: 'bank',
+    currency_id: eurId,
+    company_id: companyId,
+    default_account_id: defaultAccount.id,
+    suspense_account_id: suspenseAccount.id,
+  });
+  db = bankJournalRes.db;
+  const bankJournalId = bankJournalRes.id;
+
+  const lineRes = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournalId,
+    payment_ref: 'Old EUR fee line',
+    amount: -50,
+    date: '2026-04-10',
+  });
+  db = lineRes.db;
+  const lineId = lineRes.id;
+  const lineBefore = read(db, 'account.bank.statement.line', lineId);
+  assert.equal(lineBefore.currency_id, eurId);
+
+  // Change journal currency to company currency
+  db = write(db, 'account.journal', bankJournalId, { currency_id: companyCurr });
+  assert.equal(read(db, 'account.journal', bankJournalId).currency_id, companyCurr);
+
+  // Existing statement line retains its EUR currency
+  const lineAfter = read(db, 'account.bank.statement.line', lineId);
+  assert.equal(lineAfter.currency_id, eurId);
+
+  const rule = {
+    name: 'Bank Fee Writeoff',
+    rule_type: 'writeoff_button',
+    line_ids: [{ account_id: feeAccount.id, amount_type: 'percentage', amount: 100 }],
+  };
+
+  const nextDb = applyRule(db, rule, lineAfter);
+  const reconciledLine = read(nextDb, 'account.bank.statement.line', lineId);
+  assert.equal(reconciledLine.state, 'reconciled');
+
+  // Verify posted entry lines are tagged with the line's recorded currency (EUR), not the journal's new currency
+  const entry = read(nextDb, 'account.move', reconciledLine.move_id ?? reconciledLine.bank_move_id ?? reconciledLine.allocations?.[0]?.payment_move_id);
+  assert.ok(entry, 'A write-off entry was posted');
+  const feeLine = entry.line_ids.find((l) => l.account_id === feeAccount.id);
+  assert.ok(feeLine, 'Fee line exists in entry');
+  assert.equal(feeLine.currency_id, eurId, 'Counterpart item currency must be the line original currency (EUR)');
+  assert.equal(feeLine.amount_currency, 50, 'Counterpart amount_currency must equal line amount in original currency');
+  assert.equal(feeLine.debit, 100, 'Counterpart debit must equal converted company amount');
+  const bankLine = entry.line_ids.find((l) => l.account_id === defaultAccount.id);
+  assert.ok(bankLine, 'Bank line exists in entry');
+  assert.equal(bankLine.currency_id, eurId, 'Bank item currency must be the line original currency (EUR)');
+  assert.equal(bankLine.amount_currency, -50, 'Bank amount_currency must equal signed line amount in original currency');
+  assert.equal(bankLine.credit, 100, 'Bank credit must equal converted company amount');
 });
