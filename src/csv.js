@@ -2,6 +2,7 @@
 import { models } from './registry.js';
 import { create, read, search, write } from './orm.js';
 import { fieldReadonly } from './field-metadata.js';
+import { cleanValue } from './validate.js';
 import { t } from './i18n.js';
 
 const sanitizeFormula = (s) => {
@@ -49,6 +50,45 @@ export function fromCsv(text) {
   return rows;
 }
 
+const parseJsonCell = (raw, label) => {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`Invalid value for ${label}`);
+  }
+};
+
+const validateMany2One = (db, field, value, label = field.label) => {
+  if (value == null || value === '') return null;
+  let id = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
+  if ((!Number.isSafeInteger(id) || id <= 0) && field.relation === 'res.country' && typeof value === 'string') {
+    const found = search(db, 'res.country').find((record) => record.code && record.code.toUpperCase() === value.toUpperCase());
+    if (found) id = found.id;
+  }
+  if (!Number.isSafeInteger(id) || id <= 0 || !search(db, field.relation).some((record) => record.id === id)) {
+    throw new Error(`Enter an existing record ID for ${label}`);
+  }
+  return id;
+};
+
+const validateMany2Many = (db, field, tokens, label = field.label) => {
+  if (!tokens.length) return [];
+  const ids = [];
+  const existing = search(db, field.relation);
+  for (const token of tokens) {
+    let id = typeof token === 'number' || typeof token === 'string' ? Number(token) : NaN;
+    if ((!Number.isSafeInteger(id) || id <= 0) && field.relation === 'res.country.state' && typeof token === 'string') {
+      const found = existing.find((record) => record.code && record.code.toUpperCase() === token.toUpperCase());
+      if (found) id = found.id;
+    }
+    if (!Number.isSafeInteger(id) || id <= 0 || !existing.some((record) => record.id === id)) {
+      throw new Error(`Enter existing record IDs for ${label}`);
+    }
+    ids.push(id);
+  }
+  return [...new Set(ids)];
+};
+
 /** Import rows whose headers match field labels (or technical names); many2one cells hold explicit record IDs. */
 export function importCsvRows(db, model, defaults, rows, listLabels = null) {
   const fields = models[model].fields;
@@ -87,45 +127,74 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
       // A field may parse its own import text (e.g. legacy boolean exports of a now-selection field).
       if (field.parseImport) vals[key] = field.parseImport(raw);
       else if (field.type === 'many2one') {
-        if (!raw) {
-          vals[key] = null;
-          return;
-        }
-        let id = Number(raw);
-        if ((!Number.isSafeInteger(id) || id <= 0) && field.relation === 'res.country') {
-          const found = search(next, 'res.country').find((record) => record.code && record.code.toUpperCase() === raw.toUpperCase());
-          if (found) id = found.id;
-        }
-        if (!Number.isSafeInteger(id) || id <= 0 || !search(next, field.relation).some((record) => record.id === id)) {
-          throw new Error(`Enter an existing record ID for ${field.label}`);
-        }
-        vals[key] = id;
+        vals[key] = validateMany2One(next, field, raw);
       }
       else if (field.type === 'many2many') {
+        const tokens = raw ? raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean) : [];
+        vals[key] = validateMany2Many(next, field, tokens);
+      }
+      else if (field.type === 'one2many') {
         if (!raw) {
           vals[key] = [];
           return;
         }
-        const tokens = raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean);
-        const ids = [];
-        const existing = search(next, field.relation);
-        for (const token of tokens) {
-          let id = Number(token);
-          if ((!Number.isSafeInteger(id) || id <= 0) && field.relation === 'res.country.state') {
-            const found = existing.find((record) => record.code && record.code.toUpperCase() === token.toUpperCase());
-            if (found) id = found.id;
-          }
-          if (!Number.isSafeInteger(id) || id <= 0 || !existing.some((record) => record.id === id)) {
-            throw new Error(`Enter existing record IDs for ${field.label}`);
-          }
-          ids.push(id);
+        const parsed = parseJsonCell(raw, field.label);
+        if (!Array.isArray(parsed)) throw new Error(`Invalid value for ${field.label}`);
+        if (!field.fields) {
+          vals[key] = field.relation ? validateMany2Many(next, field, parsed) : parsed;
+          return;
         }
-        vals[key] = [...new Set(ids)];
+        if (parsed.some((line) => line === null || typeof line !== 'object' || Array.isArray(line))) {
+          throw new Error(`Invalid value for ${field.label}`);
+        }
+        const normalizedLines = parsed.map((line) => {
+          const nextLine = { ...line };
+          for (const [subKey, subField] of Object.entries(field.fields)) {
+            const v = nextLine[subKey];
+            if (v == null || v === '') continue;
+            if (subField.type === 'many2one' && subField.relation) {
+              nextLine[subKey] = validateMany2One(next, subField, v, subField.label ?? field.label);
+            } else if (subField.type === 'many2many' && subField.relation) {
+              if (!Array.isArray(v)) throw new Error(`Invalid value for ${subField.label ?? field.label}`);
+              nextLine[subKey] = validateMany2Many(next, subField, v, subField.label ?? field.label);
+            }
+          }
+          return nextLine;
+        });
+        vals[key] = cleanValue(field, normalizedLines, field.label);
       }
-      else if (['one2many', 'json', 'distribution'].includes(field.type)) vals[key] = raw ? JSON.parse(raw) : (field.type === 'one2many' ? [] : {});
+      else if (['json', 'distribution'].includes(field.type)) {
+        if (!raw) {
+          vals[key] = {};
+          return;
+        }
+        vals[key] = cleanValue(field, parseJsonCell(raw, field.label), field.label);
+      }
+      else if (field.type === 'binary') {
+        if (!raw) {
+          vals[key] = null;
+          return;
+        }
+        const parsed = parseJsonCell(raw, field.label);
+        vals[key] = parsed === null ? null : cleanValue(field, parsed, field.label);
+      }
       else if (['monetary', 'float', 'integer', 'priority'].includes(field.type)) vals[key] = raw === '' ? null : Number(raw);
       else if (field.type === 'boolean') vals[key] = /^(1|true|yes|نعم)$/i.test(raw);
-      else if (field.type === 'tags') vals[key] = raw ? raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean) : [];
+      else if (field.type === 'tags') {
+        if (!raw) {
+          vals[key] = [];
+          return;
+        }
+        if (raw.startsWith('[')) {
+          const parsed = parseJsonCell(raw, field.label);
+          if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+            throw new Error(`Invalid value for ${field.label}`);
+          }
+          vals[key] = cleanValue(field, parsed.map((value) => value.trim()).filter(Boolean), field.label);
+          return;
+        }
+        vals[key] = cleanValue(field, raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean), field.label);
+      }
       else if (field.type === 'selection') vals[key] = field.options.find((option) => option[0] === raw || option[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
       else vals[key] = raw;
     });

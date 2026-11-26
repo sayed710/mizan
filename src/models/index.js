@@ -215,7 +215,7 @@ const allApps = [
       { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' && r.invoice_status === 'to_invoice' },
       { label: 'Products', children: [products, { key: 'pricelists', label: 'Pricelists', model: 'product.pricelist' }, { key: 'quote-templates', label: 'Quotation Templates', model: 'sale.order.template' }, { key: 'loyalty', label: 'Discount & Loyalty', model: 'loyalty.program' }, { key: 'cards', label: 'Coupons & Cards', model: 'loyalty.card' }] },
       { key: 'marketplaces', label: 'Marketplaces', model: 'marketplace.connector' },
-      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }] },
+      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }, { key: 'combo-choices', label: 'Combo Choices', model: 'product.combo' }] },
       { key: 'report', label: 'Reporting', model: 'sale.order', view: 'graph' },
     ],
   },

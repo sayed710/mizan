@@ -27,7 +27,9 @@ test('text variants inherit legacy rates and explicitly empty tax selections', (
 });
 
 test('combo products cannot enter public channels or purchase confirmation', () => {
-  const p = create(seed(), 'product', { name: 'Combo', type: 'combo', sale_ok: true, list_price: 10 });
+  const item = create(seed(), 'product', { name: 'Combo item', type: 'goods', sale_ok: true, list_price: 10 });
+  const choice = create(item.db, 'product.combo', { name: 'Main', combo_item_ids: [{ product_id: item.id, extra_price: 0 }] });
+  const p = create(choice.db, 'product', { name: 'Combo', type: 'combo', sale_ok: true, list_price: 10, combo_ids: [choice.id] });
   const product = read(p.db, 'product', p.id);
   assert.equal(isSellable(product), false);
   assert.throws(() => validatePosProducts(p.db, [{ product_id: p.id }], 1), /not available/);
@@ -73,10 +75,13 @@ test('structured variants preserve both legacy percentage taxes', () => {
 });
 
 test('combo sales confirmation rejects programmatic order lines', () => {
-  const p = create(seed(), 'product', { name: 'Combo sale', type: 'combo', sale_ok: true, list_price: 10 });
+  // Odoo 20 requires at least one combo choice on a combo product; an unconfigured combo line still cannot be confirmed.
+  const item = create(seed(), 'product', { name: 'Combo item', type: 'goods', sale_ok: true, list_price: 10 });
+  const choice = create(item.db, 'product.combo', { name: 'Main', combo_item_ids: [{ product_id: item.id, extra_price: 0 }] });
+  const p = create(choice.db, 'product', { name: 'Combo sale', type: 'combo', sale_ok: true, list_price: 10, combo_ids: [choice.id] });
   const order = create(p.db, 'sale.order', { partner_id: 1, order_line: [{ product_id: p.id, qty: 1, price_unit: 10 }] });
   const confirm = salesModels['sale.order'].form.buttons.find((b) => b.label === 'Confirm');
-  assert.throws(() => confirm.run(order.db, read(order.db, 'sale.order', order.id)), /cannot be fulfilled/);
+  assert.throws(() => confirm.run(order.db, read(order.db, 'sale.order', order.id)), /Configure each combo before confirming the order/);
   assert.equal(read(order.db, 'sale.order', order.id).state, 'draft');
 });
 

@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create, search, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
+import { setActor } from './models/authority.js';
 import { seed } from './seed.js';
 import { fromCsv, tableToRows } from './csv.js';
 import { parseCellNumber, readXlsx } from './xlsx.js';
 import { today } from './models/common.js';
-import { postMove } from './models/accounting.js';
+import { payMove, postMove } from './models/accounting.js';
 import { accountId, postEntry } from './models/ledger.js';
 import { confirmLoan } from './models/loans.js';
 
@@ -815,4 +816,405 @@ test('EXP dialog saves, loads and deletes a template', async () => {
     await React.act(async () => props(find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Delete template')).onClick());
     assert.equal(search(store.getDb(), 'ir.exports').length, 0);
   } finally { await React.act(async () => root.unmount()); }
+});
+
+test('EXP review F1 & F6: ExportDialog awaits server save/delete, surfaces refusal errors, and reconciles remapped template IDs', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  const { ExportDialog } = await import('./views/ExportDialog.jsx');
+
+  const baseDb = seed();
+  const origFetch = globalThis.fetch;
+  const origSetInterval = globalThis.setInterval;
+  const origAlert = globalThis.alert;
+  const alerts = [];
+  globalThis.alert = (msg) => alerts.push(msg);
+  globalThis.setInterval = () => ({ unref() {} });
+  const jsonResponse = (data, ok = true) => new Response(JSON.stringify(data), {
+    status: ok ? 200 : 400,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  let mode = 'reject-save';
+  let lastDeletedId = null;
+  let serverDb = baseDb;
+  globalThis.fetch = async (url, opts) => {
+    if (url === '/api/session') return jsonResponse({ login: 'admin', name: 'Admin', isAdmin: true });
+    if (url === '/api/db') return jsonResponse(serverDb);
+    if (url === '/api/diff') {
+      const diff = JSON.parse(opts?.body ?? '{}');
+      if (mode === 'reject-save') return jsonResponse({ error: 'Template refused by server' }, false);
+      if (mode === 'remap-save') {
+        const created = diff.upserts?.['ir.exports']?.[0];
+        const serverId = 42;
+        const stored = { ...created, id: serverId };
+        serverDb = {
+          ...serverDb,
+          records: { ...serverDb.records, 'ir.exports': [...(serverDb.records['ir.exports'] ?? []), stored] },
+          seq: { ...serverDb.seq, 'ir.exports': serverId },
+        };
+        return jsonResponse({
+          ok: true,
+          remapped: { 'ir.exports': { [created.id]: serverId } },
+          ...serverDb,
+        });
+      }
+      if (mode === 'reject-delete') return jsonResponse({ error: 'Delete refused by server' }, false);
+      if (mode === 'accept-delete') {
+        lastDeletedId = diff.deletes?.['ir.exports']?.[0] ?? null;
+        serverDb = {
+          ...serverDb,
+          records: {
+            ...serverDb.records,
+            'ir.exports': (serverDb.records['ir.exports'] ?? []).filter((r) => r.id !== lastDeletedId),
+          },
+        };
+        return jsonResponse({ ok: true, ...serverDb });
+      }
+    }
+    return jsonResponse({});
+  };
+
+  await store.initStore();
+  function Wrapper() {
+    const db = store.useDb();
+    return React.createElement(ExportDialog, { db, model: 'res.partner', records: [], columns: ['name', 'email'], title: 'Contacts', onClose: () => {} });
+  }
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(Wrapper)));
+    const nameInput = find(host, (n) => props(n)?.['aria-label'] === 'Export template name');
+    const saveBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Save template');
+    const selector = () => find(host, (n) => props(n)?.['aria-label'] === 'Saved exports');
+    const deleteBtn = () => find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Delete template');
+
+    // F1: rejected save keeps template unselected and shows dialog error instead of clearing it
+    await React.act(async () => props(nameInput).onChange({ target: { value: 'Server Export' } }));
+    await React.act(async () => props(saveBtn).onClick());
+    assert.equal(props(selector()).value, '', 'Rejected save must not select the optimistic template');
+    assert.equal(find(host, (n) => props(n)?.role === 'alert')?.textContent, 'Template refused by server');
+    assert.equal(alerts.length, 0, 'Dialog owns commit error handling quietly');
+
+    // F6: accepted save with server ID remap updates templateId to the remapped ID
+    mode = 'remap-save';
+    await React.act(async () => props(saveBtn).onClick());
+    assert.equal(find(host, (n) => props(n)?.role === 'alert'), null, 'Error clears only after server acceptance');
+    assert.equal(props(selector()).value, '42', 'Selected template uses the remapped server ID');
+    const optionValues = findAll(selector(), (n) => n.tagName === 'OPTION').map((o) => String(props(o)?.value ?? ''));
+    assert.ok(optionValues.includes('42'), 'Refreshed select options include the remapped server ID');
+
+    // F1: rejected delete keeps template selected and surfaces server refusal
+    mode = 'reject-delete';
+    await React.act(async () => props(deleteBtn()).onClick());
+    assert.equal(props(selector()).value, '42', 'Rejected delete must not clear selected template');
+    assert.equal(find(host, (n) => props(n)?.role === 'alert')?.textContent, 'Delete refused by server');
+
+    // F6: accepted delete targets the reconciled ID (42) and clears selection
+    mode = 'accept-delete';
+    await React.act(async () => props(deleteBtn()).onClick());
+    assert.equal(lastDeletedId, 42, 'Delete targets the reconciled server ID');
+    assert.equal(props(selector()).value, '', 'Selection clears after confirmed delete');
+    assert.equal(find(host, (n) => props(n)?.role === 'alert'), null);
+  } finally {
+    await React.act(async () => root.unmount());
+    globalThis.fetch = origFetch;
+    globalThis.setInterval = origSetInterval;
+    globalThis.alert = origAlert;
+    setActor(null);
+    await store.initStore();
+  }
+});
+
+test('EXP review F2 & F9: CSV import validates one2many nested relations and reports translatable errors on bad JSON', async () => {
+  const { importCsvRows } = await import('./csv.js');
+  const { exportTable } = await import('./views/ExportDialog.jsx');
+  const { translatePattern } = await import('./i18n-patterns.js');
+  const { t } = await import('./i18n.js');
+
+  let db = seed();
+  const product = create(db, 'product', { name: 'Valid Product', list_price: 50, type: 'consu' });
+  const inv = create(product.db, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: 1,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [{ product_id: product.id, name: 'Valid Line', qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = inv.db;
+
+  // F2: nonexistent nested product_id in one2many JSON is rejected
+  const badProductRows = [
+    ['.id', 'invoice_line_ids'],
+    [String(inv.id), JSON.stringify([{ product_id: 999999, name: 'Broken', qty: 1, price_unit: 10 }])],
+  ];
+  assert.throws(
+    () => importCsvRows(db, 'account.move', {}, badProductRows),
+    /Enter an existing record ID for Product/,
+  );
+
+  // F2 follow-up: nested string id for missing/non-numeric record and non-array many2many are rejected; numeric-string id imports as number
+  assert.throws(
+    () => importCsvRows(db, 'account.move', {}, [
+      ['.id', 'invoice_line_ids'],
+      [String(inv.id), JSON.stringify([{ product_id: '999999', name: 'Missing Str ID', qty: 1, price_unit: 10 }])],
+    ]),
+    /Enter an existing record ID for Product/,
+  );
+  assert.throws(
+    () => importCsvRows(db, 'account.move', {}, [
+      ['.id', 'invoice_line_ids'],
+      [String(inv.id), JSON.stringify([{ account_id: 'abc', name: 'Bad Str ID', qty: 1, price_unit: 10 }])],
+    ]),
+    /Enter an existing record ID for Account/,
+  );
+  assert.throws(
+    () => importCsvRows(db, 'account.move', {}, [
+      ['.id', 'invoice_line_ids'],
+      [String(inv.id), JSON.stringify([{ product_id: product.id, name: 'Bad Tax Type', qty: 1, price_unit: 10, tax_ids: '1' }])],
+    ]),
+    /Invalid value for Taxes/,
+  );
+  const tax = search(db, 'account.tax')[0];
+  const numericStrImported = importCsvRows(db, 'account.move', {}, [
+    ['.id', 'invoice_line_ids'],
+    [String(inv.id), JSON.stringify([{ product_id: String(product.id), name: 'String ID Line', qty: 1, price_unit: 50, ...(tax ? { tax_ids: [String(tax.id)] } : {}) }])],
+  ]);
+  const importedLine = read(numericStrImported.db, 'account.move', inv.id).invoice_line_ids[0];
+  assert.equal(typeof importedLine.product_id, 'number');
+  assert.equal(importedLine.product_id, product.id);
+  if (tax) assert.deepEqual(importedLine.tax_ids, [tax.id]);
+
+  // F2: nonexistent nested many2many tax_ids in one2many JSON is rejected
+  const badTaxRows = [
+    ['.id', 'invoice_line_ids'],
+    [String(inv.id), JSON.stringify([{ product_id: product.id, name: 'Bad Tax', qty: 1, price_unit: 10, tax_ids: [999999] }])],
+  ];
+  assert.throws(
+    () => importCsvRows(db, 'account.move', {}, badTaxRows),
+    /Enter existing record IDs for Taxes/,
+  );
+
+  // F2: invalid one2many JSON shape (object instead of array) is rejected
+  const badShapeRows = [
+    ['.id', 'invoice_line_ids'],
+    [String(inv.id), JSON.stringify({ product_id: product.id })],
+  ];
+  assert.throws(
+    () => importCsvRows(db, 'account.move', {}, badShapeRows),
+    /Invalid value for Invoice Lines/,
+  );
+
+  // F2: valid compatible round-trip updates invoice lines
+  const exported = exportTable(db, 'account.move', [read(db, 'account.move', inv.id)], ['invoice_line_ids'], true).rows.map((r) => r.map(String));
+  const updated = importCsvRows(db, 'account.move', {}, exported);
+  assert.equal(updated.count, 1);
+
+  // F9: malformed JSON in one2many/distribution/binary throws a translatable Invalid value message (not raw SyntaxError)
+  for (const [model, col, badCell, expectedLabel] of [
+    ['account.move', 'invoice_line_ids', '{not-json', 'Invoice Lines'],
+    ['account.asset.model', 'analytic_distribution', '{not-json', 'Analytic Distribution'],
+    ['blog.post', 'cover', '{not-json', 'Cover Image'],
+  ]) {
+    let thrown = null;
+    try {
+      importCsvRows(db, model, {}, [[col], [badCell]]);
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown, `${model}.${col} rejects malformed JSON`);
+    assert.equal(thrown instanceof SyntaxError, false, 'Must not leak raw SyntaxError');
+    assert.equal(thrown.message, `Invalid value for ${expectedLabel}`);
+    const arabic = translatePattern(thrown.message, (label) => (t(label) === label ? null : label));
+    assert.ok(arabic && arabic.includes('قيمة غير صالحة للحقل'), 'Error matches Arabic translation pattern');
+  }
+});
+
+test('EXP review F3 & F5: Compatible export/import round-trips binary attachments and comma/semicolon tags', async () => {
+  const { exportTable } = await import('./views/ExportDialog.jsx');
+  const { fromCsv, importCsvRows, toCsv } = await import('./csv.js');
+  const { applyDiff, diffDb } = await import('./sync.js');
+
+  let db = seed();
+  const blog = create(db, 'blog.blog', { name: 'Engineering' });
+  const originalCover = { name: 'cover.png', type: 'image/png', size: 12, data: 'data:image/png;base64,AAAA' };
+  const post = create(blog.db, 'blog.post', {
+    blog_id: blog.id,
+    name: 'Release Notes',
+    cover: originalCover,
+    tag_ids: ['red,blue', 'a;b', 'plain'],
+  });
+  db = post.db;
+
+  const exportedRows = exportTable(db, 'blog.post', [read(db, 'blog.post', post.id)], ['name', 'cover', 'tag_ids'], true).rows;
+  const roundTripped = fromCsv(toCsv(exportedRows));
+  const newCover = { name: 'cover-v2.png', type: 'image/png', size: 16, data: 'data:image/png;base64,BBBB' };
+  const coverCol = roundTripped[0].indexOf('cover');
+  const tagsCol = roundTripped[0].indexOf('tag_ids');
+  roundTripped[1][coverCol] = JSON.stringify(newCover);
+
+  // Import unchanged tags and updated cover attachment
+  const imported = importCsvRows(db, 'blog.post', {}, roundTripped);
+  const updatedPost = read(imported.db, 'blog.post', post.id);
+  assert.deepEqual(updatedPost.cover, newCover, 'Binary attachment round-trips and updates as attachment object');
+  assert.deepEqual(updatedPost.tag_ids, ['red,blue', 'a;b', 'plain'], 'Tags containing commas and semicolons do not split');
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, imported.db), { isAdmin: true }), 'Re-imported attachment passes server diff validation');
+
+  // Legacy delimiter-separated tag imports remain supported
+  const legacyTags = importCsvRows(db, 'blog.post', {}, [
+    ['.id', 'tag_ids'],
+    [String(post.id), 'one, two; three'],
+  ]);
+  assert.deepEqual(read(legacyTags.db, 'blog.post', post.id).tag_ids, ['one', 'two', 'three']);
+
+  // Invalid binary payload is rejected against attachment contract
+  assert.throws(
+    () => importCsvRows(db, 'blog.post', {}, [['.id', 'cover'], [String(post.id), JSON.stringify('plain-string')]]),
+    /Invalid value for Cover Image/,
+  );
+
+  // Unchanged export (without editing cover) also round-trips cleanly
+  assert.equal(JSON.parse(roundTripped[1][tagsCol]).length, 3);
+});
+
+test('EXP review F4: Import-compatible mode excludes unsupported related paths and explains the limitation', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { ExportDialog, exportFields, exportTable } = await import('./views/ExportDialog.jsx');
+
+  const db = seed();
+  assert.ok(exportFields('blog.post', null, false).some((f) => f.path === 'blog_id/name'), 'Display mode includes related paths');
+  assert.equal(exportFields('blog.post', null, true).some((f) => f.path === 'blog_id/name'), false, 'Compatible mode excludes unsupported related paths');
+  assert.ok(exportFields('res.partner', null, true).some((f) => f.path === 'country_id/code'), 'Compatible mode retains supported country_id/code alias');
+  assert.throws(
+    () => exportTable(db, 'blog.post', [], ['blog_id/name'], true),
+    /Invalid export fields/,
+  );
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(ExportDialog, {
+      db,
+      model: 'account.move',
+      records: [],
+      columns: ['name', 'partner_id/name'],
+      title: 'Journal Entries',
+      onClose: () => {},
+    })));
+    assert.ok(find(host, (n) => props(n)?.['aria-label'] === 'Remove field: Partner/Name'));
+    const compatCheckbox = find(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox');
+    await React.act(async () => props(compatCheckbox).onChange({ target: { checked: true } }));
+
+    assert.equal(find(host, (n) => props(n)?.['aria-label'] === 'Remove field: Partner/Name'), null, 'Checking compatible strips unsupported related fields from chosen list');
+    const searchInput = find(host, (n) => props(n)?.['aria-label'] === 'Search fields');
+    await React.act(async () => props(searchInput).onChange({ target: { value: 'partner_id/name' } }));
+    assert.equal(find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Partner/Name'), null, 'Picker hides unsupported related paths in compatible mode');
+    assert.ok(find(host, (n) => n.tagName === 'P' && n.textContent.includes('Related fields cannot be updated through import')), 'Field picker explains limitation');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('EXP review F7: Display export runs empty-value fallbacks for empty currency_id and legacy analytic account', async () => {
+  const { exportTable } = await import('./views/ExportDialog.jsx');
+  let db = seed();
+  const plan = search(db, 'account.analytic.plan')[0] ?? create(db, 'account.analytic.plan', { name: 'Projects' });
+  if (plan.db) db = plan.db;
+  const analytic = create(db, 'account.analytic.account', { name: 'Legacy Project', company_id: 1, plan_id: plan.id });
+  db = analytic.db;
+  const inv = create(db, 'account.move', {
+    name: 'INV-F7-EMPTY-CURR',
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: 1,
+    currency_id: null,
+    invoice_date: '2026-06-01',
+    invoice_line_ids: [{ name: 'Line', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = inv.db;
+  const invRec = { ...read(db, 'account.move', inv.id), currency_id: null };
+  const legacyAsset = { id: 9001, name: 'Legacy Asset', company_id: 1, analytic_account_id: analytic.id, analytic_distribution: null };
+
+  const invTable = exportTable(db, 'account.move', [invRec], ['currency_id'], false);
+  assert.equal(invTable.rows[1][0], 'USD', 'Empty currency_id exports company currency in display mode');
+  const invCompat = exportTable(db, 'account.move', [invRec], ['currency_id'], true);
+  assert.equal(invCompat.rows[1][1], '', 'Empty currency_id remains blank in compatible mode');
+
+  const assetTable = exportTable(db, 'account.asset', [legacyAsset], ['analytic_distribution'], false);
+  assert.equal(assetTable.rows[1][0], 'Legacy Project 100%', 'Legacy analytic_account_id exports as 100% distribution in display mode');
+  const assetCompat = exportTable(db, 'account.asset', [legacyAsset], ['analytic_distribution'], true);
+  assert.equal(assetCompat.rows[1][1], '', 'Null analytic_distribution remains blank in compatible mode');
+});
+
+test('EXP review F8: ExportDialog download passes listFields overrides for labels, widgets, and hideWhen rules', async () => {
+  const { makeEl } = setupDom();
+  const spy = setupDownloadSpy(makeEl);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { ExportDialog } = await import('./views/ExportDialog.jsx');
+  const { apps, findLeaf } = await import('./models/index.js');
+
+  let db = seed();
+  const inv = create(db, 'account.move', {
+    name: 'INV-F8-DUE',
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: 1,
+    invoice_date: today(),
+    invoice_date_due: today(),
+    invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = inv.db;
+  const paidInv = create(db, 'account.move', {
+    name: 'INV-F8-PAID',
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: 1,
+    invoice_date: today(),
+    invoice_date_due: today(),
+    invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(paidInv.db, paidInv.id);
+  db = payMove(db, paidInv.id, 100, today());
+
+  const invoicesLeaf = findLeaf(apps.find((a) => a.id === 'accounting'), 'invoices');
+  const customListFields = {
+    ...invoicesLeaf.listFields,
+    invoice_date_due: { ...invoicesLeaf.listFields.invoice_date_due, label: 'Due Window' },
+  };
+  const records = [read(db, 'account.move', inv.id), read(db, 'account.move', paidInv.id)];
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(ExportDialog, {
+      db,
+      model: 'account.move',
+      records,
+      columns: ['name', 'invoice_date_due'],
+      labels: {},
+      listFields: customListFields,
+      title: 'Invoices',
+      onClose: () => {},
+    })));
+    const exportBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Export');
+    await React.act(async () => props(exportBtn).onClick());
+    const dl = await spy.takeLast();
+    assert.ok(dl, 'CSV downloaded');
+    const rows = fromCsv(await dl.text());
+    assert.deepEqual(rows[0], ['Number', 'Due Window'], 'Header uses listFields overridden label');
+    assert.deepEqual(rows[1], ['INV-F8-DUE', 'Today'], 'Unpaid invoice due date uses listFields remaining_days widget');
+    assert.deepEqual(rows[2], ['INV-F8-PAID', ''], 'Paid invoice due date is hidden by listFields hideWhen rule');
+  } finally {
+    await React.act(async () => root.unmount());
+    spy.restore();
+  }
 });
