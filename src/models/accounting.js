@@ -3854,6 +3854,9 @@ export const accountingModels = {
       }
       const moveType = nextVals.move_type ?? before.move_type;
       const state = nextVals.state ?? before.state;
+      if (moveType !== 'entry' && state === 'draft' && 'invoice_date' in vals && vals.invoice_date !== before.invoice_date && !('date' in vals)) {
+        nextVals.date = vals.invoice_date;
+      }
       if (state === 'draft' && before.posting_order != null && vals.posting_order === undefined) {
         nextVals.posting_order = null;
       }
@@ -4056,11 +4059,12 @@ export const accountingModels = {
         if (key === 'line_ids' || key === 'currency_id') return { line_ids: computeEntryTaxLines(r.line_ids, r, db) };
       }
       if (key === 'invoice_date') {
-        if (r.invoice_payment_term_id) return termDue(db, r);
+        const accountingDate = r.move_type !== 'entry' && r.state === 'draft' ? { date: r.invoice_date } : {};
+        if (r.invoice_payment_term_id) return { ...accountingDate, ...termDue(db, r) };
         const prev = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null);
         const prevDate = prev?.invoice_date;
         const shouldFollow = !r.invoice_date_due || Boolean(prevDate && r.invoice_date_due === prevDate);
-        return shouldFollow && r.invoice_date ? { invoice_date_due: r.invoice_date } : {};
+        return { ...accountingDate, ...(shouldFollow && r.invoice_date ? { invoice_date_due: r.invoice_date } : {}) };
       }
       if (key === 'invoice_payment_term_id') return termDue(db, r);
       if (key === 'purchase_id') {

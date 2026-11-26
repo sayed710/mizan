@@ -78,7 +78,25 @@ function moveSequencePrefix(move, journal) {
 }
 
 function moveJournalId(db, move) {
-  return move?.journal_id ?? resolveDocumentJournal(db, move)?.id ?? null;
+  if (move?.journal_id != null) return move.journal_id;
+  if (move?.inalterable_hash) {
+    // Legacy hashes did not persist their resolved journal. Recover ownership only
+    // from an anchored chain, never from today's mutable company defaults.
+    const owners = [];
+    const company = move.company_id ?? 1;
+    const candidates = (db.records['account.move'] ?? []).filter((m) => m.inalterable_hash && (m.company_id ?? 1) === company);
+    for (const journal of db.records['account.journal'] ?? []) {
+      const head = (journal.secure_chain_heads ?? []).find((h) => h.company_id === company);
+      let current = candidates.find((m) => m.id === head?.last_move_id && m.inalterable_hash === head.last_hash);
+      while (current) {
+        if (current.id === move.id) { owners.push(journal.id); break; }
+        const previous = candidates.filter((m) => m.secure_sequence_number === current.secure_sequence_number - 1 && validMoveHash(current, m.inalterable_hash));
+        current = previous.length === 1 ? previous[0] : null;
+      }
+    }
+    return owners.length === 1 ? owners[0] : null;
+  }
+  return resolveDocumentJournal(db, move)?.id ?? null;
 }
 
 function isSequenceConflictDraft(db, move, company, lastSecuredNameByJournal) {
@@ -447,8 +465,9 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
     }
     for (const move of unhashed) {
       lastSeqNum += 1;
-      const hash = computeMoveHash(move, previousHash, 3);
+      const hash = computeMoveHash({ ...move, journal_id: journal.id }, previousHash, 3);
       next = write(next, 'account.move', move.id, {
+        journal_id: journal.id,
         inalterable_hash: hash,
         secure_sequence_number: lastSeqNum,
         inalterable_hash_version: 3,
@@ -503,10 +522,11 @@ export function secureMoveInvariant(db, after, before) {
   if (!after.inalterable_hash && !after.secure_sequence_number) return postedBeforeSecuredChain(db, after, before) ? SECURED_ORDER_ERROR : null;
   if (before?.inalterable_hash) return null;
   if (!after.inalterable_hash || !Number.isInteger(after.secure_sequence_number) || after.secure_sequence_number < 1) return 'Invalid secure entry hash chain';
-  const journal = (db.records['account.journal'] ?? []).find((j) => j.id === after.journal_id);
+  const journalId = moveJournalId(db, after);
+  const journal = (db.records['account.journal'] ?? []).find((j) => j.id === journalId);
   if (!journal || after.state !== 'posted') return 'Only posted entries in secure journals can be hashed';
   const company = after.company_id ?? 1;
-  const all = (db.records['account.move'] ?? []).filter((m) => moveJournalId(db, m) === journal.id && (m.company_id ?? 1) === company && m.state === 'posted')
+  const all = (db.records['account.move'] ?? []).filter((m) => moveJournalId(db, m) === journalId && (m.company_id ?? 1) === company && m.state === 'posted')
     .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
   let previous = '';
   let sequence = 0;
@@ -526,7 +546,6 @@ export function secureMoveInvariant(db, after, before) {
 export function journalHasSecuredEntries(db, journal) {
   if (!journal) return false;
   if ((journal.secure_chain_heads ?? []).length > 0) return true;
-  // A hashed move always carries its journal: secureMoveInvariant hashes only against after.journal_id.
   return (db?.records?.['account.move'] ?? []).some((m) => Boolean(m.inalterable_hash) && moveJournalId(db, m) === journal.id);
 }
 

@@ -359,3 +359,30 @@ test('server ID assignment rejects malformed analytic keys and remapping collisi
     }
   }
 });
+
+test('journal-less secured entries persist their resolved journal and legacy heads retain ownership', () => {
+  let { db, journal } = setup();
+  db = write(db, 'res.company', 1, { default_general_journal_id: journal });
+  const result = entry(db, 1); db = result.db;
+  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => m.id === result.id ? { ...m, journal_id: null } : m) } };
+  const saved = server(db, secureEntries(db, { throughMoveId: result.id }));
+  assert.equal(read(saved, 'account.move', result.id).journal_id, journal);
+  assert.equal(checkInalterability(saved, { journalId: journal, companyId: 1 })[0].status, 'ok');
+  const original = read(db, 'account.move', result.id);
+  const hash = computeMoveHash(original, '', 3);
+  const legacy = { ...saved, records: { ...saved.records,
+    'account.move': saved.records['account.move'].map((m) => m.id === result.id ? { ...m, journal_id: null, inalterable_hash: hash } : m),
+    'account.journal': saved.records['account.journal'].map((j) => j.id === journal ? { ...j, secure_chain_heads: j.secure_chain_heads.map((h) => ({ ...h, last_hash: hash })) } : j),
+  } };
+  const other = legacy.records['account.journal'].find((j) => j.id !== journal && j.type === 'general');
+  assert.ok(other);
+  const changed = { ...legacy, records: { ...legacy.records, 'res.company': legacy.records['res.company'].map((c) => c.id === 1 ? { ...c, default_general_journal_id: other.id } : c) } };
+  assert.equal(checkInalterability(changed, { journalId: journal, companyId: 1 })[0].status, 'ok');
+});
+
+test('changing a draft invoice date updates its accounting date', () => {
+  const { db } = setup();
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', date: '2026-02-01' });
+  const changed = write(invoice.db, 'account.move', invoice.id, { invoice_date: '2026-03-01' });
+  assert.equal(read(changed, 'account.move', invoice.id).date, '2026-03-01');
+});

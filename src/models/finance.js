@@ -395,7 +395,8 @@ const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'cu
 function postedMoveRule(db, before, after) {
   if (before && changedFields(before, after, ['tax_closing_lines'])) return 'Tax closing line links cannot be changed';
   if (before?.state === 'posted' && after.state === 'posted') {
-    if (changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    const pinningJournal = before.journal_id == null && !before.inalterable_hash && after.inalterable_hash && after.journal_id === resolveDocumentJournal(db, before)?.id;
+    if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
     if (before.reversed_entry_id && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
     if ((before.is_storno || after.is_storno) && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
   }
