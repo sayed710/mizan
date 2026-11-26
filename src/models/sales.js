@@ -274,6 +274,11 @@ export const qtyToInvoice = (db, line, order = null) => {
 const comboLines = (db, order) => (order?.order_line ?? []).filter((line) => line.combo_parent_key || read(db, 'product', line.product_id)?.type === 'combo')
   .map(({ sale_line_key, combo_parent_key, combo_choice_id, product_id, qty, price_unit, discount }) => ({ sale_line_key, combo_parent_key, combo_choice_id, product_id, qty, price_unit, discount }));
 
+/** Confirmed combo components with delivery or invoicing history must retain their identities. */
+const activeComboKeys = (order) => new Set(order?.state === 'sale'
+  ? (order.order_line ?? []).filter((line) => line.combo_parent_key && (Number(line.qty_delivered) || Number(line.qty_invoiced))).map((line) => line.combo_parent_key)
+  : []);
+
 /** Build the linked lines for one selected product in each choice of a combo. */
 export function configureComboLines(db, order, line, selections) {
   const product = read(db, 'product', line.product_id);
@@ -308,10 +313,15 @@ export function configureComboLines(db, order, line, selections) {
   return [parent, ...children];
 }
 
-function comboOrderError(db, order) {
+function comboOrderError(db, order, before = null) {
   const lines = order.order_line ?? [];
+  const activeKeys = activeComboKeys(before);
   for (const parent of lines.filter((line) => read(db, 'product', line.product_id)?.type === 'combo')) {
     const children = lines.filter((line) => line.combo_parent_key && line.combo_parent_key === parent.sale_line_key);
+    if (activeKeys.has(parent.sale_line_key)) {
+      const related = (r) => (r.order_line ?? []).filter((line) => line.sale_line_key === parent.sale_line_key || line.combo_parent_key === parent.sale_line_key);
+      if (stableValue(related(before)) === stableValue(related(order))) continue;
+    }
     const product = read(db, 'product', parent.product_id);
     if (!parent.sale_line_key || Number(parent.price_unit) !== 0 || children.length !== product.combo_ids.length) return 'Configure each combo before confirming the order';
     const selections = Object.fromEntries(children.map((line) => [line.combo_choice_id, line.product_id]));
@@ -385,7 +395,7 @@ const orderLines = (label, priceField = 'list_price') => {
     const updated = base.onchange(line, key, db, record);
     return priceField === 'list_price' && read(db, 'product', updated.product_id)?.type === 'combo'
       ? { ...updated, price_unit: 0, tax_id: null, tax_ids: [], ...replaceTaxSnapshot(taxSnapshot(null)) } : updated;
-  }, fields: { ...base.fields, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, combo_parent_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, combo_choice_id: { type: 'many2one', relation: 'product.combo', label: 'Combo Choices', readonly: true, hidden: true }, qty_delivered: { type: 'float', label: 'Delivered', readonly: true }, qty_invoiced: { type: 'float', label: 'Invoiced', readonly: true }, route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' }, package_id: { type: 'many2one', relation: 'stock.quant.package', label: 'Package' }, procurement_route: { type: 'selection', label: 'Route', hidden: true, readonly: true, options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] }, so_line: { type: 'integer', label: 'Order Line', hidden: true } } };
+  }, fields: { ...base.fields, invoice_legal_notes: { type: 'text', label: 'Legal Notes', hidden: true }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, combo_parent_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, combo_choice_id: { type: 'many2one', relation: 'product.combo', label: 'Combo Choices', readonly: true, hidden: true }, qty_delivered: { type: 'float', label: 'Delivered', readonly: true }, qty_invoiced: { type: 'float', label: 'Invoiced', readonly: true }, route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' }, package_id: { type: 'many2one', relation: 'stock.quant.package', label: 'Package' }, procurement_route: { type: 'selection', label: 'Route', hidden: true, readonly: true, options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] }, so_line: { type: 'integer', label: 'Order Line', hidden: true } } };
 };
 const invoiceStatus = (r, confirmed) => {
   if (r.state !== confirmed) return 'no';
@@ -893,7 +903,7 @@ export const salesModels = {
       });
       return { ...(key === 'partner_id' && p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id } : {}), ...(p || key === 'company_id' ? { fiscal_position_id } : {}), ...(r.order_line ? { order_line } : {}) };
     },
-    guard: (db, before, r) => r.state === 'sale' && (before?.state !== 'sale' || JSON.stringify(comboLines(db, before)) !== JSON.stringify(comboLines(db, r))) ? comboOrderError(db, r) : null,
+    guard: (db, before, r) => r.state === 'sale' && (before?.state !== 'sale' || JSON.stringify(comboLines(db, before)) !== JSON.stringify(comboLines(db, r))) ? comboOrderError(db, r, before) : null,
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [
       [{ id: 'quotations', label: 'Quotations', fn: (r) => ['draft', 'sent'].includes(r.state) }, { id: 'orders', label: 'Sales Orders', fn: (r) => r.state === 'sale' }],
@@ -914,10 +924,10 @@ export const salesModels = {
         { label: 'Send by Email', email: 'document', vals: { state: 'sent' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         {
           label: 'Configure Combos',
-          when: (r, db) => ['draft', 'sent', 'sale'].includes(r.state) && (r.order_line ?? []).some((line) => read(db, 'product', line.product_id)?.type === 'combo'),
+          when: (r, db) => ['draft', 'sent', 'sale'].includes(r.state) && (r.order_line ?? []).some((line) => read(db, 'product', line.product_id)?.type === 'combo' && !activeComboKeys(r).has(line.sale_line_key)),
           wizard: (db, r) => ({ title: 'Configure Combos', fields: (r.order_line ?? []).flatMap((line, index) => {
             const product = read(db, 'product', line.product_id);
-            if (product?.type !== 'combo') return [];
+            if (product?.type !== 'combo' || activeComboKeys(r).has(line.sale_line_key)) return [];
             return product.combo_ids.map((id) => {
               const choice = read(db, 'product.combo', id);
               const previous = (r.order_line ?? []).find((child) => child.combo_parent_key && child.combo_parent_key === line.sale_line_key && child.combo_choice_id === id);
@@ -925,10 +935,11 @@ export const salesModels = {
             });
           }) }),
           run: (db, r, values) => {
+            const activeKeys = activeComboKeys(r);
             const lines = (r.order_line ?? []).flatMap((line, index) => {
-              if (line.combo_parent_key) return [];
+              if (line.combo_parent_key) return activeKeys.has(line.combo_parent_key) ? [line] : [];
               const product = read(db, 'product', line.product_id);
-              if (product?.type !== 'combo') return [line];
+              if (product?.type !== 'combo' || activeKeys.has(line.sale_line_key)) return [line];
               const selections = Object.fromEntries(product.combo_ids.map((id) => [id, values[`combo_${index}_${id}`]]));
               return configureComboLines(db, r, line, selections);
             });

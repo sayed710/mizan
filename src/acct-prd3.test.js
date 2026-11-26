@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
-import { create, read } from './orm.js';
+import { create, read, write } from './orm.js';
 import { applyDiff, diffDb } from './sync.js';
 import { newDefaults } from './views/formDefaults.js';
 import { productTax } from './models/taxes.js';
@@ -108,6 +108,54 @@ test('invoice copies linked combo item lines and their allocated prices', () => 
   assert.ok(invoice.invoice_line_ids.slice(1).every((l) => l.combo_parent_key === invoice.invoice_line_ids[0].sale_line_key));
   db = models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.move', invoice.id)).db;
   assert.equal(read(db, 'account.move', invoice.id).state, 'posted');
+});
+
+test('configuring a confirmed order preserves fulfilled combos and configures newly added ones', () => {
+  for (const activity of ['qty_delivered', 'qty_invoiced']) {
+    const setup = comboOrder();
+    let db = setup.button.run(setup.db, read(setup.db, 'sale.order', setup.orderId), setup.values).db;
+    const confirm = models['sale.order'].form.buttons.find((button) => button.label === 'Confirm');
+    db = confirm.run(db, read(db, 'sale.order', setup.orderId)).db;
+    const original = read(db, 'sale.order', setup.orderId);
+    const withActivity = original.order_line.map((line, i) => i === 1 ? { ...line, [activity]: 1 } : line);
+    db = write(db, 'sale.order', setup.orderId, { order_line: withActivity });
+    // Historic prices need not be recomputed when another combo is added later.
+    db = structuredClone(db);
+    db.records.product.find((product) => product.id === setup.products[1]).list_price = 2;
+    const confirmed = read(db, 'sale.order', setup.orderId);
+    const preserved = structuredClone(confirmed.order_line);
+    const newParent = models['sale.order'].fields.order_line.onchange({ product_id: preserved[0].product_id, qty: 1 }, 'product_id', db, confirmed);
+    const pending = { ...confirmed, order_line: [...confirmed.order_line, newParent] };
+    assert.equal(setup.button.when(confirmed, db), false);
+    assert.equal(setup.button.when(pending, db), true);
+    const index = preserved.length;
+    const fields = setup.button.wizard(db, pending).fields;
+    assert.deepEqual(fields.map((field) => field.name), setup.choices.map((id) => `combo_${index}_${id}`));
+    const values = Object.fromEntries(setup.choices.map((id, i) => [`combo_${index}_${id}`, String(setup.products[i])]));
+    const staged = structuredClone(db);
+    staged.records['sale.order'].find((order) => order.id === setup.orderId).order_line.push(newParent);
+    const result = setup.button.run(staged, pending, values).db;
+    const saved = sync(db, result);
+    const lines = read(saved, 'sale.order', setup.orderId).order_line;
+    assert.deepEqual(lines.slice(0, preserved.length), preserved);
+    assert.equal(lines[1][activity], 1);
+    assert.ok(lines[index].sale_line_key);
+    assert.equal(lines.slice(index + 1).length, setup.choices.length);
+    assert.ok(lines.slice(index + 1).every((line) => line.combo_parent_key === lines[index].sale_line_key));
+  }
+});
+
+test('draft and sent combo lines remain configurable even when they carry quantities', () => {
+  for (const state of ['draft', 'sent']) {
+    const setup = comboOrder();
+    let db = setup.button.run(setup.db, read(setup.db, 'sale.order', setup.orderId), setup.values).db;
+    const record = read(db, 'sale.order', setup.orderId);
+    db = write(db, 'sale.order', setup.orderId, { state, order_line: record.order_line.map((line, index) => index === 1 ? { ...line, qty_delivered: 1 } : line) });
+    const order = read(db, 'sale.order', setup.orderId);
+    assert.equal(setup.button.wizard(db, order).fields.length, setup.choices.length);
+    const updated = setup.button.run(db, order, setup.values).db;
+    assert.notEqual(read(updated, 'sale.order', setup.orderId).order_line[1].sale_line_key, order.order_line[1].sale_line_key);
+  }
 });
 test('a product without taxes leaves line taxes to the account defaults', () => {
   assert.equal(productTax(seed(), { taxes_id: [], supplier_taxes_id: [] }, 'sale', null, 1), null);
