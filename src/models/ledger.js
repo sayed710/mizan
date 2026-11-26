@@ -1043,6 +1043,14 @@ export function isPaymentMatched(db, payment, excludeLineId = null) {
   return matches.some((lineId) => !excludeLineId || lineId !== excludeLineId);
 }
 
+/** Statement lines currently matched to a payment, using the same index as matching guards. */
+export function paymentStatementLines(db, payment) {
+  if (!db || !payment) return [];
+  const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
+  const ids = new Set([...(paymentLinesById.get(payment.id) ?? []), ...(paymentLinesByMove.get(payment.move_id) ?? [])]);
+  return (db.records['account.bank.statement.line'] ?? []).filter((line) => ids.has(line.id));
+}
+
 /** Settlement links per move, built once per immutable records object (journalItems runs on every report). */
 const reconcileIndexes = new WeakMap();
 function reconcileIndex(db) {

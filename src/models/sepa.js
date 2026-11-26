@@ -27,6 +27,8 @@ const escapeXml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '
 const normalizedIban = (value) => String(value ?? '').replace(/\s/g, '').toUpperCase();
 
 export const DEFAULT_SEPA_PAIN_VERSION = 'pain.001.001.09';
+export const CHARGE_BEARERS = [['CRED', 'Borne by Creditor'], ['DEBT', 'Borne by Debtor'], ['SHAR', 'Shared'], ['SLEV', 'Following Service Level']];
+export const DEFAULT_CHARGE_BEARER = 'SHAR';
 
 export const SEPA_PAIN_VERSIONS = [
   ['pain.001.001.03', 'Generic'],
@@ -51,7 +53,7 @@ export function isValidSepaPainVersion(version) {
 }
 
 /** Build a pain.001.001.03 or pain.001.001.09 document from already resolved payment data. */
-export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, painVersion = DEFAULT_SEPA_PAIN_VERSION, debtor, payments }) {
+export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, painVersion = DEFAULT_SEPA_PAIN_VERSION, debtor, payments, chargeBearer = DEFAULT_CHARGE_BEARER }) {
   const variant = isValidSepaPainVersion(painVersion) ? PAIN_VARIANTS[painVersion] : null;
   if (!variant) throw new Error('Unsupported SEPA pain version');
   const effectiveId = id ?? msgId;
@@ -67,8 +69,12 @@ export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, painVersion
   if (!debtor.name || !debtor.bic) throw new Error('The debtor name and BIC are required');
   if (String(debtor.name).length > 70) throw new Error('Debtor name cannot exceed 70 characters');
   if (!payments?.length) throw new Error('Add at least one payment to the batch');
+  const bearers = payments.map((payment) => payment.chargeBearer ?? chargeBearer);
+  if (bearers.some((bearer) => !CHARGE_BEARERS.some(([code]) => code === bearer))) throw new Error('Invalid charge bearer');
+  const uniformBearer = bearers.every((bearer) => bearer === bearers[0]) ? bearers[0] : null;
   let total = 0;
-  const transactions = payments.map((payment) => {
+  // ISO 20022 allows ChrgBr at payment-info level or per transaction, never both.
+  const transactions = payments.map((payment, index) => {
     if (payment.id != null && String(payment.id).length > 35) throw new Error('Payment reference cannot exceed 35 characters');
     if (!payment.iban) throw new Error('A payment has no recipient IBAN');
     if (!isValidIban(payment.iban)) throw new Error('A payment has an invalid recipient IBAN');
@@ -80,9 +86,9 @@ export function buildSepaXml({ id, msgId, pmtInfId, createdAt, date, painVersion
     if (String(payment.name).length > 70) throw new Error('Creditor name cannot exceed 70 characters');
     if (payment.memo && String(payment.memo).length > 140) throw new Error('Remittance information cannot exceed 140 characters');
     total += Math.round(amount * 100);
-    return `<CdtTrfTxInf><PmtId><EndToEndId>${escapeXml(payment.id)}</EndToEndId></PmtId><Amt><InstdAmt Ccy="EUR">${amount.toFixed(2)}</InstdAmt></Amt><Cdtr><Nm>${escapeXml(payment.name)}</Nm></Cdtr><CdtrAcct><Id><IBAN>${normalizedIban(payment.iban)}</IBAN></Id></CdtrAcct>${payment.memo ? `<RmtInf><Ustrd>${escapeXml(payment.memo)}</Ustrd></RmtInf>` : ''}</CdtTrfTxInf>`;
+    return `<CdtTrfTxInf><PmtId><EndToEndId>${escapeXml(payment.id)}</EndToEndId></PmtId><Amt><InstdAmt Ccy="EUR">${amount.toFixed(2)}</InstdAmt></Amt>${uniformBearer ? '' : `<ChrgBr>${bearers[index]}</ChrgBr>`}<Cdtr><Nm>${escapeXml(payment.name)}</Nm></Cdtr><CdtrAcct><Id><IBAN>${normalizedIban(payment.iban)}</IBAN></Id></CdtrAcct>${payment.memo ? `<RmtInf><Ustrd>${escapeXml(payment.memo)}</Ustrd></RmtInf>` : ''}</CdtTrfTxInf>`;
   }).join('');
   const sum = (total / 100).toFixed(2);
   const count = payments.length;
-  return `<?xml version="1.0" encoding="UTF-8"?><Document xmlns="${variant.namespace}"><CstmrCdtTrfInitn><GrpHdr><MsgId>${escapeXml(effectiveMsgId)}</MsgId><CreDtTm>${escapeXml(createdAt)}</CreDtTm><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><InitgPty><Nm>${escapeXml(debtor.name)}</Nm></InitgPty></GrpHdr><PmtInf><PmtInfId>${escapeXml(effectivePmtInfId)}</PmtInfId><PmtMtd>TRF</PmtMtd><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf>${variant.formatExecutionDate(date)}<Dbtr><Nm>${escapeXml(debtor.name)}</Nm></Dbtr><DbtrAcct><Id><IBAN>${normalizedIban(debtor.iban)}</IBAN></Id></DbtrAcct><DbtrAgt><FinInstnId><${variant.bicTag}>${escapeXml(debtor.bic)}</${variant.bicTag}></FinInstnId></DbtrAgt><ChrgBr>SLEV</ChrgBr>${transactions}</PmtInf></CstmrCdtTrfInitn></Document>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Document xmlns="${variant.namespace}"><CstmrCdtTrfInitn><GrpHdr><MsgId>${escapeXml(effectiveMsgId)}</MsgId><CreDtTm>${escapeXml(createdAt)}</CreDtTm><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><InitgPty><Nm>${escapeXml(debtor.name)}</Nm></InitgPty></GrpHdr><PmtInf><PmtInfId>${escapeXml(effectivePmtInfId)}</PmtInfId><PmtMtd>TRF</PmtMtd><NbOfTxs>${count}</NbOfTxs><CtrlSum>${sum}</CtrlSum><PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl></PmtTpInf>${variant.formatExecutionDate(date)}<Dbtr><Nm>${escapeXml(debtor.name)}</Nm></Dbtr><DbtrAcct><Id><IBAN>${normalizedIban(debtor.iban)}</IBAN></Id></DbtrAcct><DbtrAgt><FinInstnId><${variant.bicTag}>${escapeXml(debtor.bic)}</${variant.bicTag}></FinInstnId></DbtrAgt>${uniformBearer ? `<ChrgBr>${uniformBearer}</ChrgBr>` : ''}${transactions}</PmtInf></CstmrCdtTrfInitn></Document>`;
 }
