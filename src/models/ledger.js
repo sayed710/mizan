@@ -843,7 +843,7 @@ export function reversalLine(line) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, state = 'posted', auto_post = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, state = 'posted', auto_post = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, reversed_entry_id = null, automatic_entry_source_move_ids = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
   if (!['posted', 'draft'].includes(state)) throw new Error('Entry state must be posted or draft');
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
@@ -920,6 +920,8 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ...(tax_return_id ? { tax_return_id } : {}),
     ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
     ...(deferred_entry_type ? { deferred_entry_type } : {}),
+    ...(reversed_entry_id ? { reversed_entry_id } : {}),
+    ...(Array.isArray(automatic_entry_source_move_ids) && automatic_entry_source_move_ids.length ? { automatic_entry_source_move_ids } : {}),
     ...(system_generated ? { system_generated: true } : {}),
   }, { archivedOriginIds, includeCashBasisTargets });
   if (isDraft) return made;
