@@ -1,6 +1,6 @@
 // RFC 4180-style CSV: quoted fields, doubled quotes, CRLF/LF line breaks.
 import { models } from './registry.js';
-import { create, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { fieldReadonly } from './field-metadata.js';
 import { t } from './i18n.js';
 
@@ -74,10 +74,15 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
   let next = db;
   let count = 0;
   for (const row of body.filter((cells) => cells.some((cell) => cell.trim()))) {
-    const vals = { ...defaults };
+    const idIndex = header.indexOf('.id');
+    const rawId = idIndex < 0 ? '' : (row[idIndex] ?? '').trim();
+    const id = rawId ? Number(rawId) : null;
+    if (rawId && (!Number.isSafeInteger(id) || id <= 0 || !search(next, model, { includeArchived: true }).some((record) => record.id === id))) throw new Error('Enter an existing record ID for update');
+    const vals = id ? {} : { ...defaults };
+    const current = id ? read(next, model, id) : null;
     keys.forEach((key, index) => {
       const field = fields[key];
-      if (!key || fieldReadonly(field, vals, next)) return;
+      if (!key || fieldReadonly(field, { ...current, ...vals }, next)) return;
       const raw = (row[index] ?? '').trim();
       // A field may parse its own import text (e.g. legacy boolean exports of a now-selection field).
       if (field.parseImport) vals[key] = field.parseImport(raw);
@@ -117,13 +122,14 @@ export function importCsvRows(db, model, defaults, rows, listLabels = null) {
         }
         vals[key] = [...new Set(ids)];
       }
+      else if (['one2many', 'json', 'distribution'].includes(field.type)) vals[key] = raw ? JSON.parse(raw) : (field.type === 'one2many' ? [] : {});
       else if (['monetary', 'float', 'integer', 'priority'].includes(field.type)) vals[key] = raw === '' ? null : Number(raw);
       else if (field.type === 'boolean') vals[key] = /^(1|true|yes|نعم)$/i.test(raw);
       else if (field.type === 'tags') vals[key] = raw ? raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean) : [];
       else if (field.type === 'selection') vals[key] = field.options.find((option) => option[0] === raw || option[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
       else vals[key] = raw;
     });
-    next = create(next, model, vals).db;
+    next = id ? write(next, model, id, vals) : create(next, model, vals).db;
     count += 1;
   }
   return { db: next, count };

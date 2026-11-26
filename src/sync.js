@@ -837,7 +837,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     }
   }
   const seen = { ...db, records };
-  const baseCtx = { isAdmin, login, name: author, companies };
+  const baseCtx = { isAdmin, login, name: author, companies, allowed };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
     // An origin link only unlocks archived accounts for verified workflows: generated moves, server-rebuilt exchange

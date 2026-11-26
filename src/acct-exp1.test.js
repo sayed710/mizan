@@ -129,17 +129,20 @@ test('EXP-1: ActionView list exports XLSX next to CSV with identical rows/column
       }));
     });
 
-    const csvBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export') && !n.textContent.includes('XLSX'));
-    const xlsxBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export XLSX'));
-    assert.ok(csvBtn, 'CSV Export button exists');
-    assert.ok(xlsxBtn, 'Export XLSX button exists next to CSV export');
-
-    await React.act(async () => props(csvBtn).onClick());
-    const csvDl = await spy.takeLast();
+    const openExport = async (format) => {
+      const button = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export'));
+      await React.act(async () => props(button).onClick());
+      const dialog = find(host, (n) => props(n)?.role === 'dialog');
+      assert.ok(dialog, 'Export dialog opens');
+      const formatSelect = find(dialog, (n) => props(n)?.['aria-label'] === 'Format');
+      await React.act(async () => props(formatSelect).onChange({ target: { value: format } }));
+      const exportButton = find(dialog, (n) => n.tagName === 'BUTTON' && n.textContent === 'Export');
+      await React.act(async () => props(exportButton).onClick());
+      return spy.takeLast();
+    };
+    const csvDl = await openExport('csv');
     const csvRows = fromCsv(await csvDl.text());
-
-    await React.act(async () => props(xlsxBtn).onClick());
-    const xlsxDl = await spy.takeLast();
+    const xlsxDl = await openExport('xlsx');
     assert.equal(xlsxDl.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     const parsedAll = readXlsx(xlsxDl.bytes);
     assert.equal(parsedAll.rows.length, csvRows.length);
@@ -151,12 +154,10 @@ test('EXP-1: ActionView list exports XLSX next to CSV with identical rows/column
     assert.ok(cbA, 'Checkbox for INV-EXP1-A exists');
     await React.act(async () => props(cbA).onChange({ target: { checked: true } }));
 
-    await React.act(async () => props(csvBtn).onClick());
-    const csvSelDl = await spy.takeLast();
+    const csvSelDl = await openExport('csv');
     const csvSelRows = fromCsv(await csvSelDl.text());
 
-    await React.act(async () => props(xlsxBtn).onClick());
-    const xlsxSelDl = await spy.takeLast();
+    const xlsxSelDl = await openExport('xlsx');
     const parsedSel = readXlsx(xlsxSelDl.bytes);
     assert.equal(parsedSel.rows.length, 2, 'Selected export contains header + 1 selected row');
     assert.equal(parsedSel.rows.length, csvSelRows.length);
@@ -717,4 +718,101 @@ test('EXP-8: Filtered JournalItems totals round with reporting company currency 
     await React.act(async () => root.unmount());
     spy.restore();
   }
+});
+
+test('EXP dialog adds, removes, reorders and searches fields including related fields', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { ExportDialog } = await import('./views/ExportDialog.jsx');
+  const host = makeEl('div'); host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(ExportDialog, { db: seed(), model: 'account.move', records: [], columns: ['name', 'partner_id'], title: 'Journal Entries', onClose: () => {} })));
+    const search = find(host, (n) => props(n)?.['aria-label'] === 'Search fields');
+    await React.act(async () => props(search).onChange({ target: { value: 'partner_id/name' } }));
+    const add = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Partner/Name');
+    assert.ok(add);
+    await React.act(async () => props(add).onClick());
+    let buttons = findAll(host, (n) => n.tagName === 'BUTTON');
+    assert.ok(buttons.some((n) => props(n)?.['aria-label'] === 'Move up: Partner/Name'));
+    await React.act(async () => props(buttons.find((n) => props(n)?.['aria-label'] === 'Move up: Partner/Name')).onClick());
+    buttons = findAll(host, (n) => n.tagName === 'BUTTON');
+    assert.ok(buttons.findIndex((n) => props(n)?.['aria-label'] === 'Remove field: Partner/Name') < buttons.findLastIndex((n) => String(props(n)?.['aria-label'] ?? '').startsWith('Remove field:')));
+    await React.act(async () => props(buttons.find((n) => props(n)?.['aria-label'] === 'Remove field: Partner/Name')).onClick());
+    assert.equal(find(host, (n) => props(n)?.['aria-label'] === 'Remove field: Partner/Name'), null);
+  } finally { await React.act(async () => root.unmount()); }
+});
+
+test('EXP templates persist ordered fields through sync and reject cross-user and invalid writes', async () => {
+  const { applyDiff, diffDb } = await import('./sync.js');
+  const { unlink } = await import('./orm.js');
+  const db = seed();
+  const actor = { login: 'alice', companies: new Set([1]) };
+  const created = create(db, 'ir.exports', { name: 'My export', resource: 'res.partner', owner_login: 'alice', company_id: 1, export_fields: [{ name: 'name', sequence: 10 }, { name: 'email', sequence: 20 }] });
+  const saved = applyDiff(db, diffDb(db, created.db), actor);
+  assert.deepEqual(search(saved, 'ir.exports')[0].export_fields.map((line) => line.name), ['name', 'email']);
+  const changed = write(saved, 'ir.exports', created.id, { name: 'Changed' });
+  assert.throws(() => applyDiff(saved, diffDb(saved, changed), { login: 'bob', companies: new Set([1]) }), /another user/);
+  const deleted = unlink(saved, 'ir.exports', [created.id]);
+  assert.throws(() => applyDiff(saved, diffDb(saved, deleted), { login: 'bob', companies: new Set([1]) }), /another user/);
+  assert.equal(search(applyDiff(saved, diffDb(saved, deleted), actor), 'ir.exports').length, 0);
+  const bad = { ...created.db, records: { ...created.db.records, 'ir.exports': [{ ...created.db.records['ir.exports'][0], export_fields: [{ name: 'not_a_field', sequence: 10 }] }] } };
+  assert.throws(() => applyDiff(db, diffDb(db, bad), actor), /Invalid export fields/);
+  const forged = { ...created.db, records: { ...created.db.records, 'ir.exports': [{ ...created.db.records['ir.exports'][0], owner_login: 'bob' }] } };
+  assert.throws(() => applyDiff(db, diffDb(db, forged), actor), /another user/);
+  const foreignCompany = { ...created.db, records: { ...created.db.records, 'ir.exports': [{ ...created.db.records['ir.exports'][0], company_id: 2 }] } };
+  assert.throws(() => applyDiff(db, diffDb(db, foreignCompany), actor), /No access/);
+});
+
+test('EXP update-compatible rows contain database IDs and raw selection and numeric values', async () => {
+  const { exportTable } = await import('./views/ExportDialog.jsx');
+  const db = seed();
+  assert.equal(exportTable(db, 'res.partner', [search(db, 'res.partner')[0]], ['name'], false, null).rows[0][0], 'Name');
+  const record = { id: 42, partner_id: 1, state: 'draft', amount_total: 12.5 };
+  const table = exportTable(db, 'account.move', [record], ['partner_id', 'state', 'amount_total'], true);
+  assert.deepEqual(table.rows[0], ['.id', 'partner_id', 'state', 'amount_total']);
+  assert.deepEqual(table.rows[1], [42, 1, 'draft', 12.5]);
+});
+
+
+test('EXP compatible export updates the existing record on import', async () => {
+  const { exportTable } = await import('./views/ExportDialog.jsx');
+  const { importCsvRows } = await import('./csv.js');
+  const db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const exported = exportTable(db, 'res.partner', [partner], ['name'], true).rows.map((row) => row.map(String));
+  exported[1][1] = 'Updated through export';
+  const result = importCsvRows(db, 'res.partner', {}, exported);
+  assert.equal(search(result.db, 'res.partner').length, search(db, 'res.partner').length);
+  assert.equal(search(result.db, 'res.partner').find((r) => r.id === partner.id).name, 'Updated through export');
+});
+
+
+test('EXP dialog saves, loads and deletes a template', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+  await React.act(async () => store.commit(seed()));
+  const { ExportDialog } = await import('./views/ExportDialog.jsx');
+  function Wrapper() { const db = store.useDb(); return React.createElement(ExportDialog, { db, model: 'res.partner', records: [], columns: ['name', 'email'], title: 'Contacts', onClose: () => {} }); }
+  const host = makeEl('div'); host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Wrapper)));
+    const name = find(host, (n) => props(n)?.['aria-label'] === 'Export template name');
+    await React.act(async () => props(name).onChange({ target: { value: 'Contact fields' } }));
+    await React.act(async () => props(find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Save template')).onClick());
+    const template = search(store.getDb(), 'ir.exports')[0];
+    assert.deepEqual(template.export_fields.map((line) => line.name), ['name', 'email']);
+    const remove = find(host, (n) => props(n)?.['aria-label'] === 'Remove field: Email');
+    await React.act(async () => props(remove).onClick());
+    const selector = find(host, (n) => props(n)?.['aria-label'] === 'Saved exports');
+    await React.act(async () => props(selector).onChange({ target: { value: String(template.id) } }));
+    assert.ok(find(host, (n) => props(n)?.['aria-label'] === 'Remove field: Email'));
+    await React.act(async () => props(find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Delete template')).onClick());
+    assert.equal(search(store.getDb(), 'ir.exports').length, 0);
+  } finally { await React.act(async () => root.unmount()); }
 });
