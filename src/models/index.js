@@ -63,7 +63,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels, isFollowUpSmsDiff } from './finance.js';
+import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -79,6 +79,7 @@ import { ecommerceModels } from './ecommerce.js';
 import { blogModels } from './blog.js';
 import { appointmentModels } from './appointments.js';
 import { whatsappModels } from './whatsapp.js';
+import { appOpen } from '../access.js';
 import { today } from './common.js';
 import { companyModels, withCompany } from './company.js';
 import { withLocks } from './locks.js';
@@ -139,10 +140,34 @@ export const viewsOf = (model) => {
   return views.length ? views : ['list'];
 };
 
-const customers = { key: 'customers', label: 'Customers', model: 'res.partner', listActions: [{
-  label: 'Customer Statement', requiresSelection: true,
-  run: (db, ids) => ({ go: statementUrl(ids, { companyId: db.settings?.current_company_id ?? 1 }) }),
-}] };
+const customers = {
+  key: 'customers',
+  label: 'Customers',
+  model: 'res.partner',
+  optionalList: ['followup_status', 'followup_next_action_date', 'last_reminder', 'followup_line_id', 'followup_reminder_type'],
+  listActions: [
+    {
+      label: 'Customer Statement', requiresSelection: true,
+      run: (db, ids) => ({ go: statementUrl(ids, { companyId: db.settings?.current_company_id ?? 1 }) }),
+    },
+    {
+      label: 'Process follow-ups',
+      requiresSelection: true,
+      app: 'accounting',
+      when: (db, user) => appOpen(db, user, 'accounting'),
+      // Executed by ActionView through runBatchFollowUpsAction (server email delivery and commit); there is no `run`.
+      batchFollowUp: true,
+    },
+    {
+      label: 'Postpone',
+      requiresSelection: true,
+      app: 'accounting',
+      when: (db, user) => appOpen(db, user, 'accounting'),
+      wizard: () => postponeFollowUpWizardSpec(),
+      run: (db, ids, values) => ({ db: postponeFollowUp(db, ids, values.date, { companyId: db.settings?.current_company_id ?? 1 }) }),
+    },
+  ],
+};
 const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
 const products = { key: 'products', label: 'Products', model: 'product' };
 
