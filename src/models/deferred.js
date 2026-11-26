@@ -1149,12 +1149,13 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
       }
     }
 
-    const schedules = (currentDb.records['account.deferral'] ?? []).filter((d) =>
-      d.state !== 'cancel' &&
-      (d.company_id ?? 1) === companyId &&
-      d.kind === k &&
-      (!d.source_move_id || read(currentDb, 'account.move', d.source_move_id)?.state === 'posted')
-    );
+    const schedules = (currentDb.records['account.deferral'] ?? []).filter((d) => {
+      if (d.state === 'cancel' || (d.company_id ?? 1) !== companyId || d.kind !== k) return false;
+      if (!d.source_move_id) return true;
+      const source = read(currentDb, 'account.move', d.source_move_id);
+      const sourceDate = source?.date ?? source?.invoice_date;
+      return source?.state === 'posted' && (!sourceDate || sourceDate <= date);
+    });
 
     const recognizedItems = [];
     for (const s of schedules) {

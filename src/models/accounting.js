@@ -5,7 +5,7 @@ import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
@@ -3918,6 +3918,23 @@ export const accountingModels = {
                 ? 'Customer invoices and credit notes only accept sale taxes'
                 : 'Vendor bills and refunds only accept purchase taxes';
             }
+          }
+        }
+        const linesChanged = !before || JSON.stringify(before.invoice_line_ids ?? []) !== JSON.stringify(after.invoice_line_ids ?? []);
+        const postingTransition = after.state === 'posted' && (before?.state !== 'posted' || linesChanged);
+        const journal = postingTransition ? resolveDocumentJournal(db, after) : null;
+        for (const line of after.invoice_line_ids ?? []) {
+          if (isSectionOrNote(line)) {
+            if (line.deferred_start_date || line.deferred_end_date) return 'Set valid deferred start and end dates';
+            continue;
+          }
+          const hasAnyDate = Boolean(line.deferred_start_date || line.deferred_end_date);
+          if (hasAnyDate && (!validDate(line.deferred_start_date) || !validDate(line.deferred_end_date) || line.deferred_start_date > line.deferred_end_date)) {
+            return 'Set valid deferred start and end dates';
+          }
+          if (journal) {
+            const res = invoiceLineAccountResult(db, after, line, journal);
+            if (res.deferred && res.error) return res.error;
           }
         }
       }
