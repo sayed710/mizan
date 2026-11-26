@@ -145,10 +145,10 @@ test('payment leaves configure Odoo 20 column order, customer/vendor labels, opt
 
   // Multi-company + all optional columns shown: exact Odoo 20 order.
   const visAll = visibleListColumns(models['account.payment'], multiCurrMultiCo, {
-    company_id: true, amount_signed: true, currency_id: true, activities: true,
+    company_id: true, payment_method_line_id: true, amount_signed: true, currency_id: true, activities: true,
   }, vendLeaf);
   assert.deepEqual(visAll.cols, [
-    'date', 'name', 'journal_id', 'company_id', 'partner_id',
+    'date', 'name', 'journal_id', 'company_id', 'payment_method_line_id', 'partner_id',
     'amount_signed', 'currency_id', 'activities', 'amount_company_currency_signed', 'display_state',
   ]);
 
@@ -334,7 +334,7 @@ test('payment search, filters (OR groups, isPaymentMatched Outstanding, monthFil
   assert.deepEqual(applyFilters('account.payment', rawRecords, ['date_year'], db, customerPaymentView.filters).map((r) => r.id), [pOut.id, pRec.id, pVend.id]);
 
   // Group Bys: exact order, labels, Currency gated on multi-currency, Company gated on multi-company.
-  assert.deepEqual(customerPaymentView.groupBys, ['partner_id', 'journal_id', 'display_state', 'date', 'currency_id', 'company_id']);
+  assert.deepEqual(customerPaymentView.groupBys, ['partner_id', 'journal_id', 'payment_method_line_id', 'display_state', 'date', 'currency_id', 'company_id']);
   for (const key of customerPaymentView.groupBys) {
     assert.ok(groupRecords(db, 'account.payment', all, key).length >= 1, `groupRecords works for ${key}`);
   }
@@ -353,10 +353,10 @@ test('payment search, filters (OR groups, isPaymentMatched Outstanding, monthFil
     }
   };
 
-  assert.deepEqual(await groupByButtonTexts(db), ['Partner', 'Journal', 'Status', 'Payment Date', 'Currency']);
-  assert.deepEqual(await groupByButtonTexts(singleCurrencyDb(db)), ['Partner', 'Journal', 'Status', 'Payment Date']);
+  assert.deepEqual(await groupByButtonTexts(db), ['Partner', 'Journal', 'Payment Method Line', 'Status', 'Payment Date', 'Currency']);
+  assert.deepEqual(await groupByButtonTexts(singleCurrencyDb(db)), ['Partner', 'Journal', 'Payment Method Line', 'Status', 'Payment Date']);
   const multiDb = createCompany(db, { name: 'Branch Co', currency_id: usd.id }).db;
-  assert.deepEqual(await groupByButtonTexts(multiDb), ['Partner', 'Journal', 'Status', 'Payment Date', 'Currency', 'Company']);
+  assert.deepEqual(await groupByButtonTexts(multiDb), ['Partner', 'Journal', 'Payment Method Line', 'Status', 'Payment Date', 'Currency', 'Company']);
 });
 
 test('Arabic translations cover every payment list column, status, filter, and group-by label', async () => {
