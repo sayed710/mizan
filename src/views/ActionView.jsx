@@ -4,7 +4,9 @@ import { applyFilters, matches, read, search as searchRecords, unlink } from '..
 import { display, PagerButtons, SimulatedNote } from '../ui.jsx';
 import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
-import { commit, getDb, serverAction, useDb } from '../store.js';
+import { commit, getDb, getUser, serverAction, useDb } from '../store.js';
+import { appOpen } from '../access.js';
+import { FollowUpBatchResultModal, runBatchFollowUpsAction } from './FollowUpLetter.jsx';
 import { classifySendError, confirmUnconfiguredSend, postUnsentNote, sendTarget, shouldSendEmail } from './documentSend.js';
 import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
@@ -70,6 +72,7 @@ export function ActionView({ leaf, base, params }) {
   const [selected, setSelected] = useState(() => new Set());
   const [selectedImportJournalId, setSelectedImportJournalId] = useState('');
   const [wizard, setWizard] = useState(null);
+  const [batchReport, setBatchReport] = useState(null);
   const [error, setError] = useState(null);
   const [isPrinting, setIsPrinting] = useState(false);
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
@@ -146,7 +149,20 @@ export function ActionView({ leaf, base, params }) {
       <PagerButtons prevLabel={t('Previous page')} nextLabel={t('Next page')} prevDisabled={win.prev == null} nextDisabled={win.next == null} onPrev={() => goTo(win.prev)} onNext={() => goTo(win.next)} />
     </span>
   );
-  const listActions = leaf?.listActions ?? def.listActions ?? [];
+  const user = getUser();
+  const listActions = (leaf?.listActions ?? def.listActions ?? [])
+    .filter((a) => (!a.app || appOpen(db, user, a.app)) && (!a.when || a.when(db, user)));
+  const applyActionResult = (res) => {
+    if (res?.go) {
+      if (res.db) commit(res.db);
+      setSelected(new Set());
+      location.hash = res.go;
+      return;
+    }
+    if (res?.results && res?.summary) setBatchReport(res);
+    if (res) commit(res.db ?? res);
+    setSelected(new Set());
+  };
   const confirmWizard = async (values) => {
     try {
       setError(null);
@@ -154,13 +170,13 @@ export function ActionView({ leaf, base, params }) {
       const { endpoint, live, channel } = sendTarget(wizard.action);
       if (hasEmail && channel && !confirmUnconfiguredSend(channel)) return;
 
-      const res = wizard.action.run(
+      const res = await wizard.action.run(
         getDb(),
         wizard.ids,
         hasEmail && live ? { ...values, live: true } : values,
         { defaults: leaf?.defaults ?? {} },
       );
-      const nextDb = res?.db ?? (res && !('db' in res) && !('go' in res) && !('message' in res) ? res : null);
+      const nextDb = res?.db ?? (res && !('db' in res) && !('go' in res) && !('message' in res) && !('results' in res) ? res : null);
       if (nextDb) {
         const saved = await commit(nextDb, { quiet: true });
         if (!saved.ok) throw new Error(saved.error || 'Could not save changes');
@@ -223,6 +239,7 @@ export function ActionView({ leaf, base, params }) {
       const go = wizard.go ?? res?.go;
       setWizard(null);
       setSelected(new Set());
+      if (res?.results && res?.summary) setBatchReport(res);
       if (res?.message) alert(t(res.message));
       if (go) location.hash = go;
     } catch (e) {
@@ -239,6 +256,13 @@ export function ActionView({ leaf, base, params }) {
           if (action.requiresSelection && !visibleSelection.length) throw new Error(selected.size ? 'None of the selected records match the current filter' : 'Select at least one record first');
           const ids = selected.size ? visibleSelection : records.map((r) => r.id);
           if (!ids.length && !action.noSelection) return;
+          if (action.batchFollowUp) {
+            const company = currentCompany(getDb());
+            return runBatchFollowUpsAction(ids.map((partnerId) => ({ partnerId, companyId: company }))).then(
+              (report) => { setBatchReport(report); setSelected(new Set()); },
+              (e) => alert(t(e.message)),
+            );
+          }
           if (action.wizard) {
             const spec = typeof action.wizard === 'function' ? action.wizard(getDb(), ids) : action.wizard;
             if (spec) {
@@ -267,14 +291,10 @@ export function ActionView({ leaf, base, params }) {
             options = duration;
           }
           const res = action.run(getDb(), ids, options, { defaults: leaf?.defaults ?? {} });
-          if (res?.go) {
-            if (res.db) commit(res.db);
-            setSelected(new Set());
-            location.hash = res.go;
-            return;
+          if (res && typeof res.then === 'function') {
+            return res.then(applyActionResult, (e) => alert(t(e.message)));
           }
-          if (res) commit(res.db ?? res);
-          setSelected(new Set());
+          applyActionResult(res);
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       {(leaf.key === 'draft-entries' || leaf.key === 'to-check') && <button type="button" className="btn sm" onClick={() => { if (leaf.key === 'draft-entries') { setIsPrinting(true); globalThis.print(); } else globalThis.print(); }}>{t('Print')}</button>}
@@ -338,6 +358,7 @@ export function ActionView({ leaf, base, params }) {
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}
       {view === 'gantt' && <Gantt db={db} model={model} records={records} open={open} />}
       {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
+      {batchReport && <FollowUpBatchResultModal report={batchReport} onClose={() => setBatchReport(null)} />}
     </main>
   );
 }
