@@ -1,7 +1,7 @@
 import { create, getActiveCompany, read, write, writeMany } from '../orm.js';
-import { commercialPartnerId, today } from './common.js';
+import { commercialPartnerId, today, validDate } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { creditLimitEnabled, updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 import { LANGUAGES } from '../i18n.js';
 import { countryIdFor, countryReferenceError, stateIdFor } from './country.js';
@@ -437,6 +437,11 @@ export function guardPartner(db, before, after) {
       cur = byId.get(cur)?.parent_id;
     }
   }
+  for (const line of after?.followup_lines ?? []) {
+    if (line?.followup_next_action_date != null && line.followup_next_action_date !== '' && !validDate(line.followup_next_action_date)) {
+      return 'Next reminder date must be a valid date';
+    }
+  }
   return validatePartnerBankLines(db, after?.id, after?.bank_ids)
     ?? validatePartnerChildLines(db, after?.id, after?.child_ids);
 }
@@ -756,6 +761,20 @@ export const crmModels = {
       },
       last_reminder: { type: 'date', label: 'Last Reminder Date', readonly: true, compute: (r, db) => r.followup_lines?.find((line) => line.company_id === (db.settings?.current_company_id ?? 1))?.followup_date ?? null },
       followup_line_id: { type: 'many2one', relation: 'account.followup.level', label: 'Reminder Level', readonly: true, compute: (r, db) => r.followup_lines?.find((line) => line.company_id === (db.settings?.current_company_id ?? 1))?.followup_last_level ?? null },
+      followup_status: {
+        type: 'selection',
+        label: 'Follow-up Status',
+        options: [
+          ['in_need_of_action', 'In need of action'],
+          ['with_overdue_invoices', 'With overdue invoices'],
+          ['no_action_needed', 'No action needed'],
+        ],
+        badge: { in_need_of_action: 'warn', with_overdue_invoices: 'info', no_action_needed: 'ok' },
+        hidden: true,
+        // Scans every move and payment: evaluated only when a view or filter reads it, not on every partner lookup.
+        lazy: true,
+        compute: (r, db) => partnerFollowUpStatus(db, r, db?.settings?.current_company_id ?? 1),
+      },
       followup_lines: {
         type: 'one2many',
         label: 'Follow-up Progress',
@@ -765,6 +784,8 @@ export const crmModels = {
           followup_level_delay: { type: 'integer', label: 'Last Reminder Level (days)' },
           followup_date: { type: 'date', label: 'Last Reminder' },
           followup_oldest_date: { type: 'date', label: 'Oldest Overdue Date', hidden: true },
+          followup_sms_level_delay: { type: 'integer', label: 'SMS Queued for Level (days)', hidden: true },
+          followup_sms_oldest_date: { type: 'date', label: 'SMS Queued for Overdue Date', hidden: true },
           followup_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level' },
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },
@@ -951,6 +972,10 @@ export const crmModels = {
       { id: 'vendors', label: 'Vendors', fn: (r) => (r.supplier_rank ?? 0) > 0 },
       { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
       { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
+    ], [
+      { id: 'in_need_of_action', label: 'In need of action', fn: (r, db) => partnerFollowUpStatus(db, r) === 'in_need_of_action' },
+      { id: 'overdue_invoices', label: 'With overdue invoices', fn: (r, db) => ['in_need_of_action', 'with_overdue_invoices'].includes(partnerFollowUpStatus(db, r)) },
+      { id: 'postponed', label: 'Postponed', fn: (r, db) => isPartnerFollowUpPostponed(db, r) },
     ]],
     groupBys: ['country_id', 'user_id', 'parent_id', 'city', 'is_company'],
     kanban: { title: 'name', lines: ['email', 'city', 'country_id'], tags: 'tag_ids', avatar: true },

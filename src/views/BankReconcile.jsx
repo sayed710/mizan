@@ -1,7 +1,10 @@
 // Two-pane bank reconciliation widget: unreconciled statement lines on the left, matching/payment/manual tabs on the right.
 import { useEffect, useMemo, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
-import { read, search } from '../orm.js';
+import { read, search, unlink } from '../orm.js';
+import { downloadCsv } from '../csv.js';
+import { documentCompany } from '../models/company.js';
+import { ReportPrintView } from './ReportPrintView.jsx';
 import { commit, getDb, useDb } from '../store.js';
 import { companyFilter } from '../models/company.js';
 import { isLiquidityJournal } from '../models/ledger.js';
@@ -14,9 +17,13 @@ import {
   matchPayment,
   reconcileWith,
   setStatementLinePartner,
+  setStatementLineReview,
+  statementCounterpartAccount,
+  unreconcile,
   statementCompanyAmount,
 } from '../models/bank.js';
 import { applyRule, isWriteoffButtonModel, mapStatementPartner, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
+import { statementCurrency, statementLineOrder } from '../models/bankstatement.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { display, money } from '../ui.jsx';
@@ -57,6 +64,8 @@ export function BankReconcile() {
   const [writeoffAmount, setWriteoffAmount] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showReconciled, setShowReconciled] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
 
   const journals = useMemo(
     () => companyFilter(db, search(db, 'account.journal').filter((j) => isLiquidityJournal(j)), 'account.journal'),
@@ -74,11 +83,11 @@ export function BankReconcile() {
 
   const openLines = useMemo(
     () => companyFilter(db, search(db, 'account.bank.statement.line'), 'account.bank.statement.line')
-      .filter((l) => l.state === 'to_check'
+      .filter((l) => (showReconciled || l.state === 'to_check')
         && (!journalFilter || String(l.journal_id) === journalFilter)
         && (!hasStatementFilter || String(l.statement_id) === statementFilter))
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id),
-    [db, journalFilter, hasStatementFilter, statementFilter],
+    [db, journalFilter, hasStatementFilter, statementFilter, showReconciled],
   );
 
   const selectedLine = useMemo(
@@ -87,9 +96,9 @@ export function BankReconcile() {
   );
 
   const selectedStatement = useMemo(() => {
-    if (!selectedLine?.statement_id) return null;
-    return read(db, 'account.bank.statement', selectedLine.statement_id);
-  }, [db, selectedLine?.statement_id]);
+    const id = hasStatementFilter ? Number(statementFilter) : selectedLine?.statement_id;
+    return id ? read(db, 'account.bank.statement', id) : null;
+  }, [db, selectedLine?.statement_id, hasStatementFilter, statementFilter]);
 
   const selectedLineKey = selectedLine?.id ?? null;
   const selectedCounterpartId = selectedLine?.counterpart_account_id ? String(selectedLine.counterpart_account_id) : '';
@@ -110,6 +119,10 @@ export function BankReconcile() {
     setWriteoffAmount('');
     setError('');
   }, [selectedLineKey, selectedCounterpartId, selectedPaymentRef, selectedOpenAmount]);
+
+  const statementRows = useMemo(() => selectedStatement ? companyFilter(db, search(db, 'account.bank.statement.line'), 'account.bank.statement.line')
+    .filter((line) => line.statement_id === selectedStatement.id)
+    .sort(statementLineOrder) : [], [db, selectedStatement]);
 
   const candidateMoves = useMemo(
     () => (selectedLine ? candidates(db, selectedLine) : []),
@@ -199,7 +212,8 @@ export function BankReconcile() {
         throw new Error('This bank transaction is already reconciled');
       }
       // applyRule maps the partner first when the line has none.
-      const nextDb = applyRule(currentDb, model, freshLine);
+      let nextDb = applyRule(currentDb, model, freshLine);
+      if (freshLine.review_requested && read(nextDb, 'account.bank.statement.line', freshLine.id)?.bank_move_id) nextDb = setStatementLineReview(nextDb, freshLine.id, true);
       const res = await commit(nextDb);
       if (res.ok) {
         const afterLine = read(nextDb, 'account.bank.statement.line', selectedLine.id);
@@ -272,6 +286,7 @@ export function BankReconcile() {
           counterpart_account_id: Number(manualAccountId),
         }, { label: manualLabel, amount: amountNum, tax_ids: manualTaxIds }).db;
       }
+      if (freshLine.review_requested && read(nextDb, 'account.bank.statement.line', freshLine.id)?.bank_move_id) nextDb = setStatementLineReview(nextDb, freshLine.id, true);
       const res = await commit(nextDb);
       if (res.ok) {
         setSelectedLineId(null);
@@ -283,14 +298,66 @@ export function BankReconcile() {
     }
   };
 
+  const runLineAction = async (action) => {
+    if (!selectedLine) return;
+    setError('');
+    setBusy(true);
+    try {
+      const current = getDb();
+      const line = read(current, 'account.bank.statement.line', selectedLine.id);
+      if (!line) throw new Error('Bank transaction does not exist');
+      let next = current;
+      if (action === 'reset') {
+        if (line.bank_move_id || line.state === 'reconciled') {
+          const review = Boolean(read(current, 'account.move', line.bank_move_id)?.to_check);
+          next = setStatementLineReview(unreconcile(current, line).db, line.id, review);
+        }
+        setManualAccountId(line.counterpart_account_id ? String(line.counterpart_account_id) : '');
+        setManualTaxIds([]);
+        setManualLabel(line.payment_ref ?? '');
+        setManualAmount(String(line.open_amount ?? statementCompanyAmount(current, line)));
+        setSelectedCandidateIds(new Set());
+        setSelectedPaymentIds([]);
+        setWriteoffAccountId('');
+        setWriteoffLabel('');
+        setWriteoffAmount('');
+      } else if (action === 'delete') {
+        if (!globalThis.confirm(t('Delete this bank transaction?'))) return;
+        next = unlink(current, 'account.bank.statement.line', [line.id]);
+      } else {
+        next = setStatementLineReview(current, line.id, action === 'review');
+      }
+      const result = await commit(next);
+      if (result.ok && action === 'delete') setSelectedLineId(null);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseCounterpart = (kind) => {
+    try {
+      const accountId = statementCounterpartAccount(getDb(), selectedLine, kind);
+      setManualAccountId(String(accountId));
+      setManualTaxIds([]);
+      setActiveTab('manual');
+      setError('');
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const partnerName = (id) => (id ? read(db, 'res.partner', id)?.name ?? '' : '');
   const journalName = (id) => (id ? read(db, 'account.journal', id)?.name ?? '' : '');
-  const openBalance = (line) => (Number(line.amount) < 0 ? -1 : 1) * (line.open_amount ?? statementCompanyAmount(db, line));
+  const openBalance = (line) => line.state === 'reconciled' ? 0 : (Number(line.amount) < 0 ? -1 : 1) * (line.open_amount ?? statementCompanyAmount(db, line));
 
   /** Accessible name for a bank reconciliation line item. */
   const lineAriaLabel = (label, partner, amount) => (partner
     ? t('{label}, {partner}, {amount}', { label, partner, amount })
     : t('{label}, {amount}', { label, amount }));
+
+  const needsReview = selectedLine?.bank_move_id ? Boolean(read(db, 'account.move', selectedLine.bank_move_id)?.to_check) : Boolean(selectedLine?.review_requested);
 
   const selectedLineCurrency = selectedLine
     ? documentCurrency(db, {
@@ -298,6 +365,18 @@ export function BankReconcile() {
       currency_id: read(db, 'account.journal', selectedLine.journal_id)?.currency_id ?? selectedLine.currency_id,
     })
     : null;
+
+  const statementExportRows = selectedStatement ? [
+    [t('Statement'), selectedStatement.name],
+    [t('Starting Balance'), selectedStatement.balance_start ?? 0],
+    [t('Ending Balance'), selectedStatement.balance_end_real ?? 0],
+    [t('Date'), t('Label'), t('Partner'), t('Reference'), t('Amount'), t('Status')],
+    ...statementRows.map((line) => [line.date, line.payment_ref, partnerName(line.partner_id), line.ref, Number(line.amount), t(line.state === 'reconciled' ? 'Reconciled' : 'To Reconcile')]),
+  ] : [];
+  if (isPrinting && selectedStatement) return <ReportPrintView active company={documentCompany(db, selectedStatement)} title={t('Bank Statement')} subtitle={selectedStatement.name} onBack={() => setIsPrinting(false)} autoPrint={false}>
+    <p>{t('Starting Balance')}: {formatInCurrency(selectedStatement.balance_start, statementCurrency(db, selectedStatement))} · {t('Ending Balance')}: {formatInCurrency(selectedStatement.balance_end_real, statementCurrency(db, selectedStatement))}</p>
+    <div className="list-wrap"><table className="list report"><thead><tr>{statementExportRows[3].map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{statementExportRows.slice(4).map((row, index) => <tr key={statementRows[index].id}>{row.map((cell, i) => <td key={i}>{cell}</td>)}</tr>)}</tbody></table></div>
+  </ReportPrintView>;
 
   return (
     <div className="page bank-reconcile-page">
@@ -317,6 +396,9 @@ export function BankReconcile() {
             {statements.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </label>
+        <label><input type="checkbox" checked={showReconciled} onChange={(e) => { setShowReconciled(e.target.checked); setSelectedLineId(null); }} /> {t('Show Reconciled')}</label>
+        <button type="button" className="btn sm" disabled={!selectedStatement} onClick={() => setIsPrinting(true)}>{t('Print Statement')}</button>
+        <button type="button" className="btn sm" disabled={!selectedStatement} onClick={() => downloadCsv('bank-statement.csv', statementExportRows)}>{t('Export Statement')}</button>
         <a className="btn sm" href="#/accounting/bank">{t('Bank Transactions')}</a>
       </div>
 
@@ -368,7 +450,7 @@ export function BankReconcile() {
                       {t('Partner')}
                       <select
                         aria-label={t('Partner')}
-                        disabled={busy}
+                        disabled={busy || selectedLine.state === 'reconciled'}
                         value={selectedLine.partner_id ? String(selectedLine.partner_id) : ''}
                         onChange={(e) => handlePartnerChange(e.target.value)}
                       >
@@ -406,7 +488,17 @@ export function BankReconcile() {
                 )}
               </header>
 
-              {quickActionModels.length > 0 && (
+              <div className="control-panel">
+                <button type="button" className="btn sm" disabled={busy} onClick={() => runLineAction('reset')}>{t('Reset')}</button>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => runLineAction(needsReview ? 'checked' : 'review')}>{t(needsReview ? 'Set as Checked' : 'To Check')}</button>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => runLineAction('delete')}>{t('Delete line')}</button>
+              </div>
+              {selectedLine.state !== 'reconciled' && <div className="control-panel">
+                <button type="button" className="btn sm" disabled={busy} onClick={() => chooseCounterpart('receivable')}>{t('Receivable')}</button>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => chooseCounterpart('payable')}>{t('Payable')}</button>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => chooseCounterpart('transfer')}>{t('Internal Transfer')}</button>
+              </div>}
+              {selectedLine.state !== 'reconciled' && quickActionModels.length > 0 && (
                 <div className="bank-reconcile-quick-actions" role="toolbar" aria-label={t('Quick Actions')}>
                   {quickActionModels.map((model) => (
                     <button
@@ -422,6 +514,7 @@ export function BankReconcile() {
                 </div>
               )}
 
+              {selectedLine.state !== 'reconciled' && <>
               <div className="tabs" role="tablist">
                 {TABS.map((tab) => (
                   <button
@@ -539,6 +632,7 @@ export function BankReconcile() {
                       {t('Counterpart Account')}
                       <select aria-label={t('Counterpart Account')} value={manualAccountId} onChange={(e) => setManualAccountId(e.target.value)}>
                         <option value="">{t('Select an account')}</option>
+                        {manualAccountId && !counterpartAccounts.some((a) => String(a.id) === manualAccountId) && <option value={manualAccountId}>{read(db, 'account.account', Number(manualAccountId))?.name}</option>}
                         {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
                       </select>
                     </label>
@@ -571,10 +665,11 @@ export function BankReconcile() {
                 )}
               </div>
 
-              {error && <p role="alert">{t(error)}</p>}
               <div className="control-panel">
                 <button type="button" className="btn primary" disabled={busy} onClick={validate}>{t('Validate')}</button>
               </div>
+              </>}
+              {error && <p role="alert">{t(error)}</p>}
             </>
           )}
         </section>
