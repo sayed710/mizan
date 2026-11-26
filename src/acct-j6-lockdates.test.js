@@ -1540,7 +1540,8 @@ test('unbooked imported bank transactions block company locks', () => {
   db = { ...db, records: { ...db.records, 'account.move': [], 'account.bank.statement.line': [] } };
   const journal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
   const line = create(db, 'account.bank.statement.line', { journal_id: journal.id, company_id: 1, date: '2026-01-01', payment_ref: 'Imported', amount: 20, state: 'to_check' });
-  assert.ok(!read(line.db, 'account.bank.statement.line', line.id).bank_move_id);
+  // Odoo 20 books every statement line on its own bank entry; what blocks the lock is that it is not reconciled.
+  assert.ok(!read(line.db, 'account.bank.statement.line', line.id).is_reconciled);
   for (const field of ['lock_date', 'hard_lock_date']) assert.throws(() => write(line.db, 'res.company', 1, { [field]: '2026-01-31' }), /unreconciled bank transactions/);
 });
 
