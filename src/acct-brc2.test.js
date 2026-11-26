@@ -3,7 +3,10 @@ import { register } from 'node:module';
 import assert from 'node:assert/strict';
 import { create, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
-import { bookToAccount, setStatementLineReview, statementCounterpartAccount, unreconcile } from './models/bank.js';
+import { bookToAccount, matchPayment, reconcileWith, setStatementLineReview, statementCounterpartAccount, unreconcile } from './models/bank.js';
+import { postMove } from './models/accounting.js';
+import { models } from './models/index.js';
+import { applyRule } from './models/reconcile.js';
 import { diffDb, applyDiff } from './sync.js';
 import { find, setupDom } from './test-support/dom.js';
 
@@ -62,6 +65,61 @@ test('review flag is separate from matching and deletion retains the saved-diff 
   assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: true }), /cannot be deleted/);
 });
 
+test('a rule may book a non-default receivable account through the saved-diff guard', () => {
+  const { db, lineId } = fixture();
+  const account = create(db, 'account.account', { code: '199997', name: 'Other receivable', account_type: 'asset_receivable', company_id: 1, reconcile: true });
+  const rule = create(account.db, 'account.reconcile.model', { name: 'Custom receivable', rule_type: 'writeoff_button', line_ids: [{ account_id: account.id, amount_type: 'percentage', amount: 100 }] });
+  const after = applyRule(rule.db, read(rule.db, 'account.reconcile.model', rule.id), read(rule.db, 'account.bank.statement.line', lineId));
+  const synced = applyDiff(rule.db, diffDb(rule.db, after), { isAdmin: true });
+  assert.equal(read(synced, 'account.bank.statement.line', lineId).state, 'reconciled');
+});
+
+function invoiceFixture() {
+  const db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
+  return { db: postMove(invoice.db, invoice.id), invoiceId: invoice.id, journalId: journal.id };
+}
+
+test('exact invoice settlement accepts a child contact through the saved-diff guard', () => {
+  let { db, invoiceId, journalId } = invoiceFixture();
+  const child = create(db, 'res.partner', { name: 'Invoice contact', parent_id: 3 });
+  const line = create(child.db, 'account.bank.statement.line', { journal_id: journalId, date: '2026-01-02', payment_ref: 'Contact payment', amount: 100, partner_id: child.id });
+  db = line.db;
+  const matched = reconcileWith(db, read(db, 'account.bank.statement.line', line.id), invoiceId);
+  const synced = applyDiff(db, diffDb(db, matched), { isAdmin: true });
+  assert.equal(read(synced, 'account.bank.statement.line', line.id).state, 'reconciled');
+});
+
+test('exact invoice settlement uses its booked receivable after partner configuration changes', () => {
+  let { db, invoiceId, journalId } = invoiceFixture();
+  const oldAccount = read(db, 'account.move', invoiceId).line_ids.find((item) => read(db, 'account.account', item.account_id)?.account_type === 'asset_receivable').account_id;
+  const replacement = create(db, 'account.account', { code: '199996', name: 'New receivable', account_type: 'asset_receivable', company_id: 1, reconcile: true });
+  db = write(replacement.db, 'res.partner', 3, { property_account_receivable_id: replacement.id });
+  const line = create(db, 'account.bank.statement.line', { journal_id: journalId, date: '2026-01-02', payment_ref: 'Old account payment', amount: 100, partner_id: 3 });
+  db = line.db;
+  const matched = reconcileWith(db, read(db, 'account.bank.statement.line', line.id), invoiceId);
+  const synced = applyDiff(db, diffDb(db, matched), { isAdmin: true });
+  const booked = read(synced, 'account.bank.statement.line', line.id);
+  assert.equal(booked.state, 'reconciled');
+  assert.ok(read(synced, 'account.move', booked.bank_move_id).line_ids.some((item) => item.account_id === oldAccount));
+});
+
+test('partnerless statement matches a direct payment through the saved-diff guard', () => {
+  let db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', journal.id, { outstanding_receipts_account_id: null });
+  const payment = create(db, 'account.payment', { partner_id: 3, payment_type: 'inbound', partner_type: 'customer', amount: 100, journal_id: journal.id, date: '2026-01-02' });
+  db = models['account.payment'].form.buttons.find((button) => button.label === 'Confirm').run(payment.db, read(payment.db, 'account.payment', payment.id)).db;
+  assert.equal(read(db, 'account.payment', payment.id).outstanding_account_id, null);
+  const line = create(db, 'account.bank.statement.line', { journal_id: journal.id, date: '2026-01-03', payment_ref: 'Direct payment', amount: 100, payment_ids: [payment.id] });
+  db = line.db;
+  assert.equal(read(db, 'account.bank.statement.line', line.id).partner_id ?? null, null);
+  const matched = matchPayment(db, read(db, 'account.bank.statement.line', line.id)).db;
+  const synced = applyDiff(db, diffDb(db, matched), { isAdmin: true });
+  assert.equal(read(synced, 'account.bank.statement.line', line.id).state, 'reconciled');
+});
+
 test('workspace exposes actions, statement preview and reconciled selection', async () => {
   const { makeEl } = setupDom();
   const React = await import('react');
@@ -118,4 +176,74 @@ test('workspace exposes actions, statement preview and reconciled selection', as
   } finally {
     await React.act(async () => root.unmount());
   }
+});
+
+test('statement preview and export preserve saved order and use the journal currency with no selected line', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { BankReconcile } = await import('./views/BankReconcile.jsx');
+  let { db, lineId, statementId } = fixture();
+  const journalId = read(db, 'account.bank.statement', statementId).journal_id;
+  const currency = create(db, 'res.currency', { name: 'TST', symbol: '¤', position: 'before', rounding: 0.01, rate_ids: [{ date: '2020-01-01', rate: 1 }] });
+  db = write(currency.db, 'account.journal', journalId, { currency_id: currency.id });
+  db = write(db, 'account.bank.statement.line', lineId, { sequence: 20 });
+  const other = create(db, 'account.bank.statement.line', { statement_id: statementId, journal_id: journalId, company_id: 1, date: '2026-10-01', payment_ref: 'First ordered', amount: 5, sequence: 10, state: 'to_check' });
+  await initStore();
+  await commit(other.db);
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(BankReconcile)));
+    const props = (node) => node?.[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+    const button = (name) => find(host, (node) => node.tagName === 'BUTTON' && node.textContent === name);
+    const select = find(host, (node) => node.tagName === 'SELECT' && props(node)?.['aria-label'] === 'Statement');
+    await React.act(async () => props(select).onChange({ target: { value: String(statementId) } }));
+    let exported;
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = (blob) => { exported = blob; return 'blob:test'; };
+    URL.revokeObjectURL = () => {};
+    try {
+      await React.act(async () => props(button('Export Statement')).onClick());
+      const csv = await exported.text();
+      assert.ok(csv.indexOf('First ordered') < csv.indexOf('Action line'));
+    } finally { URL.createObjectURL = originalCreate; URL.revokeObjectURL = originalRevoke; }
+    await React.act(async () => props(button('Print Statement')).onClick());
+    assert.ok(host.textContent.indexOf('First ordered') < host.textContent.indexOf('Action line'));
+    assert.match(host.textContent, /¤/);
+    assert.ok(!host.textContent.includes(' ? '));
+  } finally { await React.act(async () => root.unmount()); }
+});
+
+test('empty statement print header uses its journal currency', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { BankReconcile } = await import('./views/BankReconcile.jsx');
+  let db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const currency = create(db, 'res.currency', { name: 'TST', symbol: '¤', position: 'before', rounding: 0.01, rate_ids: [{ date: '2020-01-01', rate: 1 }] });
+  db = write(currency.db, 'account.journal', journal.id, { currency_id: currency.id });
+  const statement = create(db, 'account.bank.statement', { name: 'Empty foreign statement', journal_id: journal.id, date: '2026-10-01', balance_start: 10, balance_end_real: 10 });
+  await initStore();
+  await commit(statement.db);
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(BankReconcile)));
+    const props = (node) => node?.[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+    const select = find(host, (node) => node.tagName === 'SELECT' && props(node)?.['aria-label'] === 'Statement');
+    await React.act(async () => props(select).onChange({ target: { value: String(statement.id) } }));
+    const button = find(host, (node) => node.tagName === 'BUTTON' && node.textContent === 'Print Statement');
+    await React.act(async () => props(button).onClick());
+    const header = find(host, (node) => node.tagName === 'P' && node.textContent.includes('Starting Balance'));
+    assert.equal((header.textContent.match(/¤/g) ?? []).length, 2);
+    assert.ok(header.textContent.includes(' · '));
+    assert.ok(!header.textContent.includes('?'));
+  } finally { await React.act(async () => root.unmount()); }
 });

@@ -23,6 +23,7 @@ import {
   statementCompanyAmount,
 } from '../models/bank.js';
 import { applyRule, isWriteoffButtonModel, mapStatementPartner, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
+import { statementCurrency, statementLineOrder } from '../models/bankstatement.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
 import { display, money } from '../ui.jsx';
@@ -121,7 +122,7 @@ export function BankReconcile() {
 
   const statementRows = useMemo(() => selectedStatement ? companyFilter(db, search(db, 'account.bank.statement.line'), 'account.bank.statement.line')
     .filter((line) => line.statement_id === selectedStatement.id)
-    .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id) : [], [db, selectedStatement]);
+    .sort(statementLineOrder) : [], [db, selectedStatement]);
 
   const candidateMoves = useMemo(
     () => (selectedLine ? candidates(db, selectedLine) : []),
@@ -373,7 +374,7 @@ export function BankReconcile() {
     ...statementRows.map((line) => [line.date, line.payment_ref, partnerName(line.partner_id), line.ref, Number(line.amount), t(line.state === 'reconciled' ? 'Reconciled' : 'To Reconcile')]),
   ] : [];
   if (isPrinting && selectedStatement) return <ReportPrintView active company={documentCompany(db, selectedStatement)} title={t('Bank Statement')} subtitle={selectedStatement.name} onBack={() => setIsPrinting(false)} autoPrint={false}>
-    <p>{t('Starting Balance')}: {formatInCurrency(selectedStatement.balance_start, selectedLineCurrency)} ? {t('Ending Balance')}: {formatInCurrency(selectedStatement.balance_end_real, selectedLineCurrency)}</p>
+    <p>{t('Starting Balance')}: {formatInCurrency(selectedStatement.balance_start, statementCurrency(db, selectedStatement))} · {t('Ending Balance')}: {formatInCurrency(selectedStatement.balance_end_real, statementCurrency(db, selectedStatement))}</p>
     <div className="list-wrap"><table className="list report"><thead><tr>{statementExportRows[3].map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{statementExportRows.slice(4).map((row, index) => <tr key={statementRows[index].id}>{row.map((cell, i) => <td key={i}>{cell}</td>)}</tr>)}</tbody></table></div>
   </ReportPrintView>;
 

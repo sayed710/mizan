@@ -861,12 +861,16 @@ function bankEntryGuardError(db, after, { before, company, round, referenceAmoun
     return 'The bank entry must book the transaction amount once';
   }
   // A direct receivable/payable booking must use the saved partner and its configured account.
-  for (const item of before?.bank_move_id ? [] : (bankEntry.line_ids ?? [])) {
+  const manualAllocation = (after.allocations ?? []).length === 1 && after.allocations[0].payment_move_id === after.bank_move_id
+    && !after.allocations[0].invoice_id && !after.allocations[0].reconcile_model_id && !after.allocations[0].payment_ids?.length;
+  const directManual = !before?.bank_move_id && !after.payment_move_id && !after.payment_id && !(after.payment_ids ?? []).length
+    && (after.counterpart_account_id && !(after.allocations ?? []).length || manualAllocation);
+  for (const item of directManual ? (bankEntry.line_ids ?? []) : []) {
     const type = read(db, 'account.account', item.account_id)?.account_type;
     const kind = type === 'asset_receivable' ? 'receivable' : type === 'liability_payable' ? 'payable' : null;
     if (!kind) continue;
     try {
-      if (!after.partner_id || item.partner_id !== after.partner_id || partnerAccount(db, after.partner_id, company, kind) !== item.account_id) return 'Select a valid counterpart account for this company';
+      if (!after.partner_id || !sameCommercialPartner(db, item.partner_id, after.partner_id) || partnerAccount(db, after.partner_id, company, kind) !== item.account_id) return 'Select a valid counterpart account for this company';
     } catch {
       return 'Select a valid counterpart account for this company';
     }

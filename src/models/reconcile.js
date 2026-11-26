@@ -485,7 +485,7 @@ const byMatchingOrder = (order) => (a, b) => {
 };
 
 /** Apply a rule to a statement line: match an eligible invoice/bill per matching_order/tolerance, or post its write-off entry. */
-export function applyRule(db, rule, line) {
+function applyRuleInternal(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) throw new Error('Reconciliation model belongs to another company');
@@ -555,6 +555,12 @@ export function applyRule(db, rule, line) {
     return db;
   }
   return writeOff(db, rule, line);
+}
+
+export function applyRule(db, rule, line) {
+  const result = applyRuleInternal(db, rule, line);
+  const bankMoveId = read(result, 'account.bank.statement.line', line.id)?.bank_move_id;
+  return line.review_requested && bankMoveId ? write(result, 'account.move', bankMoveId, { to_check: true }) : result;
 }
 
 const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => r.active !== false).sort(bySequence);
