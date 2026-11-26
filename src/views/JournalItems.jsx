@@ -2,7 +2,7 @@ import { anyAnalyticAccountingEnabled } from '../models/analytic-setting.js';
 import { Fragment, useRef, useState } from 'react';
 import { canCreateAssetFromJournalItem, createAssetsFromJournalItems } from '../models/assets.js';
 import { companyViewDb } from '../companyView.js';
-import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, matchedMoveIds } from '../models/ledger.js';
+import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, reconciledItemFilter } from '../models/ledger.js';
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
 import { RateNote } from './RateNote.jsx';
 import { read } from '../orm.js';
@@ -270,12 +270,12 @@ export function JournalItems({ leaf = {} } = {}) {
     : filterMove
       ? (filterMove.company_id ?? scopedCompanyParam ?? db.settings?.current_company_id ?? 1)
       : (scopedCompanyParam ?? null);
-  const matchedMoves = reconciledOf ? matchedMoveIds(db, reconciledOf) : null;
+  const matchesReconciliation = filterMove ? reconciledItemFilter(db, filterMove) : null;
   const multiCompany = companiesOf(db).length > 1;
   const multiCurrency = hasMultiCurrency(db);
   const stateField = models['account.move'].fields.state;
   const enriched = journalItems(db, { from, to, reviewMode: 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
-    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!matchedMoves || (matchedMoves.has(line.move_id) && line.reconciled)))
+    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line))))
     .map((line) => {
       const move = read(db, 'account.move', line.move_id);
       const lineCompanyCurr = findCompanyCurrencyRecord(db, line.company_id);
