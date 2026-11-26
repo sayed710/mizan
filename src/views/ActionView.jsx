@@ -337,7 +337,7 @@ export function ActionView({ leaf, base, params }) {
       {view === 'gantt' && <Gantt db={db} model={model} records={records} open={open} />}
       {exporting && <ExportDialog db={db} model={model} records={selected.size ? records.filter((r) => selected.has(r.id)) : records}
         columns={visibleListColumns(def, db, readOptionalCols(leaf.key ? `mizan-list-cols:${leaf.key}` : `mizan-list-cols:${model}`), { list: listCols, optionalList, listFields }).cols}
-        labels={listLabels} title={leaf.label || def.label || model} onClose={() => setExporting(false)} />}
+        labels={listLabels} listFields={listFields} title={leaf.label || def.label || model} onClose={() => setExporting(false)} />}
       {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
       {batchReport && <FollowUpBatchResultModal report={batchReport} onClose={() => setBatchReport(null)} />}
     </main>

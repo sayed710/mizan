@@ -7,9 +7,10 @@ import { t } from '../i18n.js';
 import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 
-export function exportFields(model) {
+export function exportFields(model, listFields = null) {
   const fields = models[model].fields;
-  return Object.entries(fields).flatMap(([name, field]) => {
+  return Object.entries(fields).flatMap(([name, baseField]) => {
+    const field = listFields?.[name] ? { ...baseField, ...listFields[name] } : baseField;
     const entry = { path: name, label: field.label ?? name, field };
     if (field.type !== 'many2one' || !models[field.relation]) return [entry];
     return [entry, ...Object.entries(models[field.relation].fields).map(([sub, child]) => ({ path: `${name}/${sub}`, label: `${field.label ?? name}/${child.label ?? sub}`, field: child }))];
@@ -18,8 +19,8 @@ export function exportFields(model) {
 
 const translateLabel = (label) => label.split('/').map((part) => t(part)).join('/');
 
-export function exportTable(db, model, records, paths, compatible, labels = {}) {
-  const fields = exportFields(model);
+export function exportTable(db, model, records, paths, compatible, labels = {}, listFields = null) {
+  const fields = exportFields(model, listFields);
   const effective = compatible && !paths.includes('.id') ? ['.id', ...paths] : paths;
   const info = effective.map((path) => path === '.id' ? { path, label: 'Database ID', field: { type: 'integer' } } : fields.find((entry) => entry.path === path));
   if (info.some((item) => !item)) throw new Error('Invalid export fields');
@@ -27,17 +28,18 @@ export function exportTable(db, model, records, paths, compatible, labels = {}) 
     if (path === '.id') return record.id;
     const [first, second] = path.split('/');
     const parent = second ? read(db, models[model].fields[first].relation, record[first]) : record;
-    const value = parent?.[second ?? first];
+    const raw = parent?.[second ?? first];
+    const value = parent && field.valueFallback && !raw?.length ? field.valueFallback(parent) : raw;
     if (value == null) return '';
     if (compatible) return Array.isArray(value) && ['many2many', 'tags'].includes(field.type) ? value.join(',') : typeof value === 'object' ? JSON.stringify(value) : value;
-    if (['integer', 'float', 'monetary', 'priority'].includes(field.type) && typeof value === 'number') return value;
+    if (['integer', 'float', 'monetary', 'priority'].includes(field.type) && typeof value === 'number' && Number.isFinite(value)) return value;
     return display(db, field, value, parent);
   }));
   return { rows: [info.map(({ path, label }) => compatible ? path : translateLabel(labels?.[path] ?? label)), ...rows],
     columnTypes: info.map(({ field }) => ['integer', 'float', 'monetary', 'priority'].includes(field.type) ? 'number' : 'text') };
 }
 
-export function ExportDialog({ db, model, records, columns, labels, title, onClose }) {
+export function ExportDialog({ db, model, records, columns, labels, listFields = null, title, onClose }) {
   const [chosen, setChosen] = useState(columns);
   const [query, setQuery] = useState('');
   const [compatible, setCompatible] = useState(false);
@@ -48,7 +50,7 @@ export function ExportDialog({ db, model, records, columns, labels, title, onClo
   const owner = getUser()?.login ?? 'local';
   const company = db.settings?.current_company_id ?? 1;
   const templates = (db.records['ir.exports'] ?? []).filter((r) => r.resource === model && r.owner_login === owner && (r.company_id ?? 1) === company);
-  const available = exportFields(model);
+  const available = exportFields(model, listFields);
   const label = (path) => translateLabel(labels?.[path] ?? available.find((f) => f.path === path)?.label ?? path);
   const change = (paths) => { setChosen(paths); setTemplateId(''); };
   const move = (index, delta) => {
@@ -92,7 +94,7 @@ export function ExportDialog({ db, model, records, columns, labels, title, onClo
     <label>{t('Format')}<select aria-label={t('Format')} value={format} onChange={(e) => setFormat(e.target.value)}><option value="csv">{t('CSV')}</option><option value="xlsx">{t('XLSX')}</option></select></label>
     <div style={{ display: 'flex', gap: 16 }}><section style={{ flex: 1 }}><h3>{t('Available fields')}</h3><input aria-label={t('Search fields')} value={query} onChange={(e) => setQuery(e.target.value)} />
       <div style={{ maxHeight: 240, overflow: 'auto' }}>{available.filter((f) => `${f.path} ${translateLabel(f.label)}`.toLowerCase().includes(query.toLowerCase())).map((f) => <button type="button" key={f.path} disabled={chosen.includes(f.path)} onClick={() => change([...chosen, f.path])}>{label(f.path)}</button>)}</div></section>
-      <section style={{ flex: 1 }}><h3>{t('Fields to export')}</h3>{chosen.map((path, i) => <div key={path}>{label(path)} <button type="button" aria-label={`${t('Move up')}: ${label(path)}`} disabled={!i} onClick={() => move(i, -1)}>?</button><button type="button" aria-label={`${t('Move down')}: ${label(path)}`} disabled={i === chosen.length - 1} onClick={() => move(i, 1)}>?</button><button type="button" aria-label={`${t('Remove field')}: ${label(path)}`} onClick={() => change(chosen.filter((p) => p !== path))}>?</button></div>)}</section></div>
+      <section style={{ flex: 1 }}><h3>{t('Fields to export')}</h3>{chosen.map((path, i) => <div key={path}>{label(path)} <button type="button" aria-label={`${t('Move up')}: ${label(path)}`} disabled={!i} onClick={() => move(i, -1)}>↑</button><button type="button" aria-label={`${t('Move down')}: ${label(path)}`} disabled={i === chosen.length - 1} onClick={() => move(i, 1)}>↓</button><button type="button" aria-label={`${t('Remove field')}: ${label(path)}`} onClick={() => change(chosen.filter((p) => p !== path))}>×</button></div>)}</section></div>
     {error && <p role="alert">{error}</p>}<button type="button" onClick={download}>{t('Export')}</button><button type="button" onClick={onClose}>{t('Cancel')}</button>
   </div></div>;
 }
