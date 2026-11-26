@@ -3291,6 +3291,7 @@ const ar = {
   'Payment Amount': 'مبلغ الدفعة',
   'Customer invoices and credit notes only accept sale taxes': 'فواتير العملاء وإشعارات الدائن تقبل ضرائب المبيعات فقط',
   'Vendor bills and refunds only accept purchase taxes': 'فواتير الموردين وإشعارات الاسترداد تقبل ضرائب المشتريات فقط',
+  'Expenses do not support multiple product taxes': 'لا تدعم المصروفات ضرائب متعددة للمنتج',
   'Print Deposit Slip': 'طباعة إشعار الإيداع',
   'Batch Deposit': 'إيداع الدفعة',
   'Deposit Slip': 'إشعار الإيداع',

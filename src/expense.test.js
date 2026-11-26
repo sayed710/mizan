@@ -6,6 +6,28 @@ import { accountId, isBalanced } from './models/ledger.js';
 import { seed } from './seed.js';
 
 const run = (db, id, label) => models['hr.expense'].form.buttons.find((b) => b.label === label).run(db, read(db, 'hr.expense', id)).db;
+test('selecting a taxable product carries its tax through posting and rejects multiple taxes', () => {
+  let db = seed();
+  const payable = accountId(db, '230100');
+  db = write(db, 'account.account', payable, { account_type: 'liability_payable', company_id: 1 });
+  db = write(db, 'res.company', 1, { account_default_payable_id: payable });
+  const taxes = search(db, 'account.tax').filter((t) => t.type_tax_use === 'purchase' && t.amount_type === 'percent' && t.active !== false && (!t.company_id || t.company_id === 1));
+  const tax = taxes.find((t) => t.amount === 14);
+  const product = create(db, 'product', { name: 'Taxable expense', type: 'service', cost: 100, supplier_taxes_id: [tax.id], property_account_expense_id: accountId(db, '610000') });
+  db = product.db;
+  const values = models['hr.expense'].onchange({ product_id: product.id, quantity: 1 }, 'product_id', db);
+  assert.equal(values.tax_id, tax.id);
+  const expense = create(db, 'hr.expense', { ...values, product_id: product.id, state: 'approved' });
+  db = run(expense.db, expense.id, 'Post Journal Entries');
+  const move = read(db, 'account.move', read(db, 'hr.expense', expense.id).move_id);
+  assert.ok(isBalanced(move.line_ids));
+  assert.ok(move.line_ids.some((line) => line.tax_id === tax.id));
+  const other = taxes.find((t) => t.id !== tax.id);
+  assert.ok(other);
+  db = write(db, 'product', product.id, { supplier_taxes_id: [tax.id, other.id] });
+  assert.equal(models['hr.expense'].onchange({ product_id: product.id }, 'product_id', db).tax_id, null);
+  assert.match(models['hr.expense'].guard(db, { state: 'draft' }, { state: 'submitted', product_id: product.id }), /multiple product taxes/);
+});
 const flow = (vals) => {
   let base = seed();
   const payable = accountId(base, '230100');

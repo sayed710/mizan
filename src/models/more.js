@@ -13,6 +13,7 @@ import { computeLineTaxes, productTax } from './taxes.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
+const hasMultipleExpenseTaxes = (snapshot) => !!(snapshot?.tax_breakdown?.length || snapshot?.tax_ids?.length > 1);
 const components = {
   type: 'one2many',
   label: 'Components',
@@ -334,13 +335,19 @@ export const moreModels = {
     },
     defaults: () => ({ date: today(), category: 'other', state: 'draft', employee_id: 1, quantity: 1, tax: 0, payment_mode: 'own_account' }),
     // A product fills the unit price and tax; quantity × unit price (tax included) gives the total.
+    guard: (db, before, after) => {
+      if (after.state === 'submitted' && before?.state !== 'submitted') {
+        const snapshot = productTax(db, read(db, 'product', after.product_id), 'purchase', null, after.company_id);
+        if (hasMultipleExpenseTaxes(snapshot)) return 'Expenses do not support multiple product taxes';
+      }
+    },
     onchange: (r, key, db) => {
       if (key === 'product_id' && r.product_id) {
         const p = read(db, 'product', r.product_id);
         const unit = Number(p?.cost) || 0;
         const snapshot = productTax(db, p, 'purchase', null, r.company_id);
         const tax = snapshot?.tax_breakdown?.length ? snapshot.tax_breakdown.reduce((sum, item) => sum + (Number(item.tax) || 0), 0) : snapshot?.tax ?? p?.purchase_tax ?? r.tax;
-        return { unit_amount: unit, tax, name: r.name || p?.name || '', total_amount: round2(computeLineTaxes({ qty: Number(r.quantity) || 1, price_unit: unit, ...(snapshot ?? { tax }) }).total) };
+        return { unit_amount: unit, tax, tax_id: hasMultipleExpenseTaxes(snapshot) ? null : snapshot?.tax_id ?? null, name: r.name || p?.name || '', total_amount: round2(computeLineTaxes({ qty: Number(r.quantity) || 1, price_unit: unit, ...(snapshot ?? { tax }) }).total) };
       }
       if (['quantity', 'unit_amount', 'tax'].includes(key) && Number(r.unit_amount) > 0) return { total_amount: round2((Number(r.quantity) || 0) * Number(r.unit_amount) * (1 + (Number(r.tax) || 0) / 100)) };
       return {};
