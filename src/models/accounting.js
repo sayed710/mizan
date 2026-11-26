@@ -3928,8 +3928,9 @@ export const accountingModels = {
             if (line.deferred_start_date || line.deferred_end_date) return 'Set valid deferred start and end dates';
             continue;
           }
-          const hasAnyDate = Boolean(line.deferred_start_date || line.deferred_end_date);
-          if (hasAnyDate && (!validDate(line.deferred_start_date) || !validDate(line.deferred_end_date) || line.deferred_start_date > line.deferred_end_date)) {
+          // Odoo _check_deferred_dates: a start date needs an end date on or after it on every save; an end date alone may wait for posting.
+          const { deferred_start_date: start, deferred_end_date: end } = line;
+          if ((start && (!validDate(start) || !end)) || (end && !validDate(end)) || (start && end && start > end)) {
             return 'Set valid deferred start and end dates';
           }
           if (journal) {

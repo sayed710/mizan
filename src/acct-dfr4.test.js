@@ -167,11 +167,14 @@ test('dfr4-2: deferred dates are per invoice/bill line, visible on lines, and va
 
   const invalidLineSpecs = [
     { name: 'Only start', qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, '410000'), deferred_start_date: '2026-01-01' },
-    { name: 'Only end', qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, '410000'), deferred_end_date: '2026-01-31' },
     { name: 'Start after end', qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, '410000'), deferred_start_date: '2026-03-01', deferred_end_date: '2026-02-01' },
     { name: 'Invalid calendar date', qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, '410000'), deferred_start_date: '2026-02-30', deferred_end_date: '2026-03-31' },
     { display_type: 'line_section', name: 'Section', qty: 0, price_unit: 0, deferred_start_date: '2026-01-01', deferred_end_date: '2026-01-31' },
   ];
+
+  // Odoo lets a draft keep an end date alone while the user is still entering dates.
+  const endOnly = write(baseDraftDb, 'account.move', draftInv.id, { invoice_line_ids: [{ name: 'Only end', qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, '410000'), deferred_end_date: '2026-01-31' }] });
+  assert.equal(read(endOnly, 'account.move', draftInv.id).invoice_line_ids[0].deferred_end_date, '2026-01-31');
 
   for (const badLine of invalidLineSpecs) {
     assert.throws(
