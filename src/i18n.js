@@ -3955,6 +3955,11 @@ const ar = {
   'Combo products cannot be fulfilled': 'لا يمكن تنفيذ منتجات الكومبو',
   'Combo products cannot be purchased': 'لا يمكن شراء منتجات الباقة',
   'Combo products cannot have attributes': 'لا يمكن أن تحتوي منتجات الباقة على خصائص',
+  'Accumulated Depreciation': 'مجمع الإهلاك',
+  'Depreciation Expense': 'مصروف الإهلاك',
+  'Set a valid modification date': 'حدد تاريخ تعديل صالحاً',
+  'Modification date cannot precede acquisition date': 'لا يمكن أن يسبق تاريخ التعديل تاريخ الاستحواذ',
+  'Change depreciation accounts only on a gross increase': 'تغيير حسابات الإهلاك متاح فقط عند الزيادة الإجمالية',
   'Is Sent': 'تم الإرسال',
   'Is Reconciled': 'تمت التسوية',
   'Mark as Sent': 'تحديد كمُرسل',
@@ -4005,6 +4010,9 @@ const ar = {
   'There are still draft entries before the selected date and numbered draft entries in the sequence being secured.': 'لا تزال هناك قيود مسودة قبل التاريخ المحدد وقيود مسودة مرقّمة ضمن التسلسل الجاري تأمينه.',
   'Cannot secure entries while numbered draft entries precede entries to be secured': 'لا يمكن تأمين القيود ما دامت هناك قيود مسودة مرقّمة تسبق القيود المطلوب تأمينها',
   Empty: 'فارغ',
+  'Problem Description': 'وصف المشكلة',
+  'Initial balance ({amount}) does not match previous statement': 'الرصيد الافتتاحي ({amount}) لا يطابق كشف الحساب السابق',
+  'Incorrect ending balance, expected {amount}': 'الرصيد النهائي غير صحيح، المتوقع {amount}',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

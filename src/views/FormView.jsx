@@ -47,15 +47,12 @@ function PortalLink({ model, id }) {
 
 function withComputed(model, vals, db) {
   const computed = Object.entries(models[model].fields).filter(([, f]) => f.compute);
-  return {
-    ...vals,
-    ...Object.fromEntries(
-      computed.map(([k, f]) => [
-        k,
-        f.editable && vals[k] !== undefined ? vals[k] : f.compute(vals, db),
-      ]),
-    ),
-  };
+  if (!computed.length) return vals;
+  const out = { ...vals };
+  for (const [k, f] of computed) {
+    out[k] = f.editable && out[k] !== undefined ? out[k] : f.compute(out, db);
+  }
+  return out;
 }
 
 function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record, isNew = false, stored = null }) {
