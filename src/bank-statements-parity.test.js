@@ -9,10 +9,11 @@ import { applyFilters, create, groupRecords, matches, read, search } from './orm
 import { menusFor, models } from './models/index.js';
 import { addDays, shiftMonth, today } from './models/common.js';
 import { ensureBankSuspense } from './models/ledger.js';
+import { createCompany } from './models/company.js';
 import { setupDom, find } from './test-support/dom.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
-const { List } = await import('./views/List.jsx');
+const { List, visibleListColumns } = await import('./views/List.jsx');
 
 const STMT = 'account.bank.statement';
 
@@ -320,7 +321,7 @@ test('Bank Statements search/filter/group labels have Arabic translations and no
   globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null) };
   try {
     const { t } = await import(`./i18n.js?bank-stmt-ar=${Date.now()}`);
-    for (const key of ['Empty', 'Invalid', 'Date: This Month', 'Date: This Year', 'Journal', 'Date']) {
+    for (const key of ['Empty', 'Invalid', 'Date: This Month', 'Date: This Year', 'Journal', 'Date', 'Problem Description', 'Initial balance ({amount}) does not match previous statement', 'Incorrect ending balance, expected {amount}']) {
       assert.notEqual(t(key), key, `Arabic translation exists for "${key}"`);
     }
   } finally {
@@ -339,4 +340,199 @@ test('Bank Statements search/filter/group labels have Arabic translations and no
     seen.add(k);
   }
   assert.deepEqual(dups, [], 'No duplicate keys in src/i18n.js');
+});
+
+test('account.bank.statement list columns match Odoo 20 view_bank_statement_tree (single-company vs multi-company)', () => {
+  const db = seed();
+  const def = models[STMT];
+
+  assert.deepEqual(def.list, ['name', 'date', 'journal_id', 'company_id', 'balance_start', 'balance_end_real']);
+  assert.equal(def.fields.company_id.multiCompanyOnly, true);
+
+  // Single-company hides company_id (Odoo groups="base.group_multi_company"), and omits column_invisible balance_end / state
+  const single = visibleListColumns(def, db, {});
+  assert.deepEqual(single.cols, ['name', 'date', 'journal_id', 'balance_start', 'balance_end_real']);
+  assert.deepEqual(single.optionalCols, []);
+
+  const singleHtml = renderToStaticMarkup(createElement(List, {
+    db, model: STMT, records: [], open: () => {}, selected: new Set(), setSelected: () => {}, groupBy: [],
+  }));
+  const singleHeaders = [...singleHtml.matchAll(/<th[^>]*>(?:<button[^>]*>)?([^<]+)/g)].map((m) => m[1].trim()).filter(Boolean);
+  assert.deepEqual(singleHeaders, ['Reference', 'Date', 'Journal', 'Starting Balance', 'Ending Balance']);
+
+  // Multi-company includes company_id between journal_id and balance_start
+  const multiDb = createCompany(db, { name: 'Branch Co', currency_code: 'USD' }).db;
+  const multi = visibleListColumns(def, multiDb, {});
+  assert.deepEqual(multi.cols, ['name', 'date', 'journal_id', 'company_id', 'balance_start', 'balance_end_real']);
+  assert.deepEqual(multi.optionalCols, []);
+
+  const multiHtml = renderToStaticMarkup(createElement(List, {
+    db: multiDb, model: STMT, records: [], open: () => {}, selected: new Set(), setSelected: () => {}, groupBy: [],
+  }));
+  const multiHeaders = [...multiHtml.matchAll(/<th[^>]*>(?:<button[^>]*>)?([^<]+)/g)].map((m) => m[1].trim()).filter(Boolean);
+  assert.deepEqual(multiHeaders, ['Reference', 'Date', 'Journal', 'Company', 'Starting Balance', 'Ending Balance']);
+});
+
+test('account.bank.statement problem_description matches Odoo 20 _compute_problem_description', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+
+  const firstOk = create(db, STMT, {
+    name: 'PD/001',
+    journal_id: bankJournal.id,
+    date: '2026-04-01',
+    balance_start: 100,
+    balance_end_real: 150,
+    line_ids: [{ date: '2026-04-01', payment_ref: 'Inflow', amount: 50 }],
+  });
+  db = firstOk.db;
+  assert.equal(read(db, STMT, firstOk.id).problem_description, null);
+
+  // Invalid (initial balance 200 !== 150) AND incomplete (200 + 25 = 225 !== 300): invalid wins per Odoo elif
+  const bothBad = create(db, STMT, {
+    name: 'PD/002',
+    journal_id: bankJournal.id,
+    date: '2026-04-02',
+    balance_start: 200,
+    balance_end_real: 300,
+    line_ids: [{ date: '2026-04-02', payment_ref: 'Part', amount: 25 }],
+  });
+  db = bothBad.db;
+  assert.match(
+    read(db, STMT, bothBad.id).problem_description ?? '',
+    /^Initial balance \(.*200\.00\) does not match previous statement$/,
+  );
+
+  // Valid initial balance (300 === previous 300), but incomplete (300 + 40 = 340 !== 400)
+  const incompleteOnly = create(db, STMT, {
+    name: 'PD/003',
+    journal_id: bankJournal.id,
+    date: '2026-04-03',
+    balance_start: 300,
+    balance_end_real: 400,
+    line_ids: [{ date: '2026-04-03', payment_ref: 'Deposit', amount: 40 }],
+  });
+  db = incompleteOnly.db;
+  assert.match(
+    read(db, STMT, incompleteOnly.id).problem_description ?? '',
+    /^Incorrect ending balance, expected .*340\.00$/,
+  );
+});
+
+test('account.bank.statement read and search do not repeat validity scans for problem_description', () => {
+  let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+
+  const s1 = create(db, STMT, {
+    name: 'SCAN/001',
+    journal_id: bankJournal.id,
+    date: '2026-04-01',
+    balance_start: 100,
+    balance_end_real: 150,
+    line_ids: [{ date: '2026-04-01', payment_ref: 'Inflow', amount: 50 }],
+  });
+  db = s1.db;
+
+  const s2 = create(db, STMT, {
+    name: 'SCAN/002',
+    journal_id: bankJournal.id,
+    date: '2026-04-02',
+    balance_start: 200,
+    balance_end_real: 300,
+    line_ids: [{ date: '2026-04-02', payment_ref: 'Part', amount: 25 }],
+  });
+  db = s2.db;
+
+  const s3 = create(db, STMT, {
+    name: 'SCAN/003',
+    journal_id: bankJournal.id,
+    date: '2026-04-03',
+    balance_start: 300,
+    balance_end_real: 400,
+    line_ids: [{ date: '2026-04-03', payment_ref: 'Deposit', amount: 40 }],
+  });
+  db = s3.db;
+
+  let statementScans = 0;
+  const countedDb = {
+    ...db,
+    records: new Proxy(db.records, {
+      get(target, prop, receiver) {
+        if (prop === STMT) statementScans += 1;
+        return Reflect.get(target, prop, receiver);
+      },
+    }),
+  };
+
+  statementScans = 0;
+  const readInvalid = read(countedDb, STMT, s2.id);
+  // 1 lookup + 1 linesByStatement/computeRunningBalance cache population + 1 computeIsValid scan (not 2)
+  assert.equal(statementScans, 3, 'cold read() should not run a second validity scan for problem_description');
+  assert.equal(readInvalid.is_valid, false);
+  assert.equal(readInvalid.is_complete, false);
+  assert.match(readInvalid.problem_description ?? '', /^Initial balance \(.*200\.00\) does not match previous statement$/);
+
+  statementScans = 0;
+  const readIncomplete = read(countedDb, STMT, s3.id);
+  // With linesByStatement cached on countedDb: 1 lookup + 1 computeIsValid scan (not 2)
+  assert.equal(statementScans, 2, 'read() on valid-but-incomplete statement should not repeat validity scan');
+  assert.equal(readIncomplete.is_valid, true);
+  assert.equal(readIncomplete.is_complete, false);
+  assert.match(readIncomplete.problem_description ?? '', /^Incorrect ending balance, expected .*340\.00$/);
+
+  const totalStatements = db.records[STMT].length;
+  statementScans = 0;
+  const all = search(countedDb, STMT);
+  assert.equal(statementScans, 1 + totalStatements, 'search() should scan once per statement for is_valid, not twice');
+  const byId = Object.fromEntries(all.map((s) => [s.id, s]));
+  assert.equal(byId[s1.id].is_valid, true);
+  assert.equal(byId[s1.id].is_complete, true);
+  assert.equal(byId[s1.id].problem_description, null);
+  assert.equal(byId[s2.id].is_valid, false);
+  assert.equal(byId[s2.id].is_complete, false);
+  assert.match(byId[s2.id].problem_description ?? '', /^Initial balance/);
+  assert.equal(byId[s3.id].is_valid, true);
+  assert.equal(byId[s3.id].is_complete, false);
+  assert.match(byId[s3.id].problem_description ?? '', /^Incorrect ending balance/);
+
+  // Materialized is_valid / is_complete prevents any statement table scan inside computeProblemDescription
+  const computePD = models[STMT].fields.problem_description.compute;
+  const noStatementScanDb = {
+    ...countedDb,
+    records: new Proxy(db.records, {
+      get(target, prop, receiver) {
+        if (prop === STMT) throw new Error('Unexpected statement scan in computeProblemDescription');
+        return Reflect.get(target, prop, receiver);
+      },
+    }),
+  };
+  assert.match(
+    computePD({ ...byId[s2.id] }, noStatementScanDb) ?? '',
+    /^Initial balance \(.*200\.00\) does not match previous statement$/,
+  );
+  assert.match(
+    computePD({ ...byId[s3.id] }, noStatementScanDb) ?? '',
+    /^Incorrect ending balance, expected .*340\.00$/,
+  );
+
+  // Fallback for raw saved records and unsaved draft records without precomputed is_valid / is_complete
+  const rawS2 = db.records[STMT].find((s) => s.id === s2.id);
+  assert.equal(rawS2.is_valid, undefined);
+  assert.match(computePD(rawS2, db) ?? '', /^Initial balance \(.*200\.00\) does not match previous statement$/);
+  const unsavedInvalid = {
+    journal_id: bankJournal.id,
+    date: '2026-04-04',
+    balance_start: 999,
+    balance_end_real: 1000,
+    line_ids: [{ date: '2026-04-04', payment_ref: 'Draft', amount: 1 }],
+  };
+  assert.match(computePD(unsavedInvalid, db) ?? '', /^Initial balance \(.*999\.00\) does not match previous statement$/);
+  const unsavedIncomplete = {
+    journal_id: bankJournal.id,
+    date: '2026-04-04',
+    balance_start: 400,
+    balance_end_real: 500,
+    line_ids: [{ date: '2026-04-04', payment_ref: 'Draft', amount: 25 }],
+  };
+  assert.match(computePD(unsavedIncomplete, db) ?? '', /^Incorrect ending balance, expected .*425\.00$/);
 });

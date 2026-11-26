@@ -2889,25 +2889,121 @@ const invoiceListDecoration = (r) => (r.state === 'draft' ? 'info' : r.state ===
 
 /** Build Odoo 20 search panel filter groups for sales or purchase invoice/refund lists. */
 const invoiceSearchFilters = ({ purchases = false } = {}) => [
-  [{ id: 'myinvoices', label: 'My Invoices', fn: (r, db) => Boolean(r.invoice_user_id && r.invoice_user_id === currentUserId(db)) }],
+  ...(!purchases ? [[
+    { id: 'myinvoices', label: 'My Invoices', fn: (r, db) => Boolean(r.invoice_user_id && r.invoice_user_id === currentUserId(db)) },
+  ]] : []),
   [
     { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
     { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' },
     { id: 'cancel', label: 'Cancelled', fn: (r) => r.state === 'cancel' },
   ],
   [
-    { id: 'unpaid', label: 'To Pay', fn: (r, db) => r.state !== 'cancel' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) },
-    { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
-    { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
+    { id: 'not_secured', label: 'Not Secured', fn: (r) => !r.inalterable_hash && r.state === 'posted' },
   ],
   ...(!purchases ? [[
     { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
     { id: 'is_not_sent', label: 'Not Sent', fn: (r) => !r.is_move_sent },
   ]] : []),
-  monthFilters('invoice_date', 'Invoice Date'),
+  purchases
+    ? [
+      { id: 'in_invoice', label: 'Bills', fn: (r) => r.move_type === 'in_invoice' },
+      { id: 'in_receipt', label: 'Receipt', fn: (r) => r.move_type === 'in_receipt' },
+      { id: 'in_refund', label: 'Refunds', fn: (r) => r.move_type === 'in_refund' },
+    ]
+    : [
+      { id: 'out_invoice', label: 'Invoices', fn: (r) => r.move_type === 'out_invoice' },
+      { id: 'out_receipt', label: 'Receipts', fn: (r) => r.move_type === 'out_receipt' },
+      { id: 'out_refund', label: 'Credit Notes', fn: (r) => r.move_type === 'out_refund' },
+    ],
+  [
+    {
+      id: 'to_check',
+      label: 'To Review',
+      fn: (r) => r.state === 'posted' && (r.to_check === true || ['todo', 'anomaly'].includes(r.review_state)),
+    },
+  ],
+  [
+    { id: 'unpaid', label: 'To Pay', fn: (r, db) => r.state !== 'cancel' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) },
+    { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
+    { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
+  ],
+  monthFilters('invoice_date', purchases ? 'Bill Date' : 'Invoice Date'),
   ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
   monthFilters('invoice_date_due', 'Due Date'),
 ];
+
+const isSalesDocument = (r) => Boolean(r && ['out_invoice', 'out_refund', 'out_receipt'].includes(r.move_type));
+
+function resolveMoveSelection(db, moveOrIds) {
+  if (Array.isArray(moveOrIds)) {
+    if (!moveOrIds.length) throw new Error('Select at least one record first');
+    return moveOrIds.map((id) => {
+      const move = read(db, 'account.move', id);
+      if (!move) throw new Error('Journal entry not found');
+      return move;
+    });
+  }
+  const move = moveOrIds?.id ? (read(db, 'account.move', moveOrIds.id) ?? moveOrIds) : moveOrIds;
+  if (!move) throw new Error('Journal entry not found');
+  return [move];
+}
+
+function resolveSendMoves(db, moveOrIds) {
+  const moves = resolveMoveSelection(db, moveOrIds);
+  if (moves.some((m) => m.state !== 'posted')) {
+    throw new Error("You can't generate invoices that are not posted.");
+  }
+  if (moves.some((m) => !isSalesDocument(m))) {
+    throw new Error('You can only generate sales documents or purchase documents for self-billing.');
+  }
+  return moves;
+}
+
+function sendMovesWizard(db, moveOrIds) {
+  const moves = resolveSendMoves(db, moveOrIds);
+  const allHaveEmail = moves.every((m) => Boolean(m.partner_id && read(db, 'res.partner', m.partner_id)?.email?.trim?.()));
+  return {
+    title: 'Send',
+    fields: [
+      { name: 'email', type: 'boolean', label: 'Email', default: allHaveEmail },
+      { name: 'download', type: 'boolean', label: 'Download', default: false },
+    ],
+  };
+}
+
+function runSendMoves(db, moveOrIds, values = {}) {
+  const moves = resolveSendMoves(db, moveOrIds);
+  if (!values?.email && !values?.download) {
+    throw new Error('Select at least one channel: Email or Download');
+  }
+  const markSent = !values.live && Boolean(values.download);
+  return {
+    db: markSent ? moves.reduce((acc, m) => write(acc, 'account.move', m.id, { is_move_sent: true }), db) : db,
+    ...(values.download ? { go: `#/print/account.move/${moves.map((m) => m.id).join(',')}` } : {}),
+  };
+}
+
+function downloadMoves(db, moveOrIds) {
+  const moves = resolveMoveSelection(db, moveOrIds);
+  if (moves.some((m) => !isInvoice(m))) {
+    throw new Error('Only invoices, credit notes, bills, and refunds can be downloaded');
+  }
+  return { db, go: `#/print/account.move/${moves.map((m) => m.id).join(',')}` };
+}
+
+const sendMovesListAction = {
+  label: 'Send',
+  email: 'document',
+  requiresSelection: true,
+  wizard: sendMovesWizard,
+  run: runSendMoves,
+};
+
+const downloadMovesListAction = {
+  label: 'Download',
+  requiresSelection: true,
+  run: downloadMoves,
+};
 
 const registerMethodField = (db, journalId, direction) => ({
   name: 'payment_method_line_id', type: 'many2one', relation: 'account.payment.method.line', label: 'Payment Method',
@@ -2987,10 +3083,15 @@ export const salesInvoiceView = {
   listLabels: { display_name: 'Number', partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
-  listActions: [registerPaymentsListAction],
+  listActions: [sendMovesListAction, registerPaymentsListAction, downloadMovesListAction],
   searchFields: INVOICE_SEARCH_FIELDS,
   filters: invoiceSearchFilters({ purchases: false }),
   groupBys: INVOICE_GROUP_BYS,
+};
+
+export const creditNoteView = {
+  ...salesInvoiceView,
+  listLabels: { ...salesInvoiceView.listLabels, currency_id: 'Credit Note Currency' },
 };
 
 export const purchaseInvoiceView = {
@@ -3004,10 +3105,15 @@ export const purchaseInvoiceView = {
   listLabels: { display_name: 'Number', partner_id: 'Vendor', invoice_date: 'Bill Date', currency_id: 'Bill Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
-  listActions: [registerPaymentsListAction],
+  listActions: [registerPaymentsListAction, downloadMovesListAction],
   searchFields: INVOICE_SEARCH_FIELDS,
   filters: invoiceSearchFilters({ purchases: true }),
   groupBys: INVOICE_GROUP_BYS,
+};
+
+export const vendorRefundView = {
+  ...purchaseInvoiceView,
+  listLabels: { ...purchaseInvoiceView.listLabels, currency_id: 'Refund Currency' },
 };
 
 /** Create a statement line for cash moved into or out of a cash journal. */
@@ -4181,7 +4287,7 @@ export const accountingModels = {
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
     menuActions: [
-      { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+      { label: 'Print', when: (r) => isInvoice(r), run: downloadMoves },
       {
         label: 'Proforma Invoice',
         when: (r) => r.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r.move_type),
@@ -4489,27 +4595,9 @@ export const accountingModels = {
           label: 'Send',
           email: 'document',
           primary: (r) => !r.is_move_sent,
-          when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type),
-          wizard: (db, r) => {
-            const partner = r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
-            return {
-              title: 'Send',
-              fields: [
-                { name: 'email', type: 'boolean', label: 'Email', default: Boolean(partner?.email?.trim?.()) },
-                { name: 'download', type: 'boolean', label: 'Download', default: false },
-              ],
-            };
-          },
-          run: (db, r, values = {}) => {
-            if (!values?.email && !values?.download) {
-              throw new Error('Select at least one channel: Email or Download');
-            }
-            const markSent = !values.live && Boolean(values.download);
-            return {
-              db: markSent ? write(db, 'account.move', r.id, { is_move_sent: true }) : db,
-              ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
-            };
-          },
+          when: (r) => r.state === 'posted' && isSalesDocument(r),
+          wizard: sendMovesWizard,
+          run: runSendMoves,
         },
         {
           label: 'Credit Note',
@@ -4554,7 +4642,7 @@ export const accountingModels = {
           run: debitNote,
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
-        { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+        { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: downloadMoves },
         {
           label: 'Reset to Draft',
           when: (r, db) => canResetMove(r, db),
