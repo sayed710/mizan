@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 import { seed } from './seed.js';
+import { models } from './models/index.js';
+import { saveFormRecord } from './views/formSave.js';
 import { create, read, search, write } from './orm.js';
 import { newDefaults } from './views/formDefaults.js';
 import { createCompany } from './models/company.js';
@@ -125,6 +127,13 @@ test('Finding 3: accounting lock dates are scoped to res.company and sister comp
   const inv1Posted = read(posted1, 'account.move', inv1.id);
   assert.equal(inv1Posted.invoice_date, '2026-03-15');
   assert.ok(inv1Posted.date > '2026-03-31', 'Company 1 invoice shifts accounting date out of soft-locked period');
+  const reset = models['account.move'].form.buttons.find((button) => button.label === 'Reset to Draft');
+  const draftDb = reset.run(posted1, inv1Posted).db;
+  const draft = read(draftDb, 'account.move', inv1.id);
+  const changes = models['account.move'].onchange(draft, 'invoice_date', draftDb, { previous: draft });
+  const saved = saveFormRecord(draftDb, 'account.move', inv1.id, { invoice_date: draft.invoice_date, ...changes });
+  assert.equal(read(saved.db, 'account.move', inv1.id).date, inv1Posted.date);
+
   assert.throws(() => {
     postEntry(db, {
       journal: 'MISC',

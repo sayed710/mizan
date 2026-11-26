@@ -4059,9 +4059,9 @@ export const accountingModels = {
         if (key === 'line_ids' || key === 'currency_id') return { line_ids: computeEntryTaxLines(r.line_ids, r, db) };
       }
       if (key === 'invoice_date') {
-        const accountingDate = r.move_type !== 'entry' && r.state === 'draft' ? { date: r.invoice_date } : {};
-        if (r.invoice_payment_term_id) return { ...accountingDate, ...termDue(db, r) };
         const prev = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null);
+        const accountingDate = r.move_type !== 'entry' && r.state === 'draft' && r.invoice_date !== prev?.invoice_date ? { date: r.invoice_date } : {};
+        if (r.invoice_payment_term_id) return { ...accountingDate, ...termDue(db, r) };
         const prevDate = prev?.invoice_date;
         const shouldFollow = !r.invoice_date_due || Boolean(prevDate && r.invoice_date_due === prevDate);
         return { ...accountingDate, ...(shouldFollow && r.invoice_date ? { invoice_date_due: r.invoice_date } : {}) };

@@ -7,7 +7,7 @@ import { assetAccounts } from './test-support/asset-accounts.js';
 import { create, read, write } from './orm.js';
 import { apps, leavesOf, models } from './models/index.js';
 import { postEntry } from './models/ledger.js';
-import { sha256, checkInalterability, computeMoveHash, secureEntries } from './models/hash_chain.js';
+import { sha256, checkInalterability, computeMoveHash, secureEntries, analyzeJournalChains } from './models/hash_chain.js';
 import { journalAudit } from './models/journal_audit.js';
 import { applyDiff, assignIds, diffDb } from './sync.js';
 import { parseDistributionInput } from './analytic_distribution.js';
@@ -385,4 +385,31 @@ test('changing a draft invoice date updates its accounting date', () => {
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', date: '2026-02-01' });
   const changed = write(invoice.db, 'account.move', invoice.id, { invoice_date: '2026-03-01' });
   assert.equal(read(changed, 'account.move', invoice.id).date, '2026-03-01');
+});
+
+
+test('legacy chain ownership is indexed once during wizard analysis', () => {
+  let { db, journal } = setup();
+  let previous = '';
+  let reads = 0;
+  const moves = Array.from({ length: 80 }, (_, i) => {
+    const move = { id: 80000 + i, company_id: 1, state: 'posted', date: '2026-01-01', name: `SEC/${String(i + 1).padStart(4, '0')}`, secure_sequence_number: i + 1, line_ids: [] };
+    const hash = computeMoveHash(move, previous);
+    previous = hash;
+    return { ...move, get inalterable_hash() { reads++; return hash; } };
+  });
+  const last = moves.at(-1);
+  db = { ...db, records: { ...db.records, 'account.move': moves, 'account.journal': db.records['account.journal'].map((j) => j.id === journal ? { ...j, secure_chain_heads: [{ company_id: 1, last_move_id: last.id, last_hash: previous, last_move_name: last.name, count: 80, last_sequence: 80 }] } : j) } };
+  reads = 0;
+  assert.equal(analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-31' }).entries_count, 0);
+  assert.ok(reads < 5000, `chain ownership performed ${reads} hash reads`);
+});
+
+test('unchanged invoice date onchange preserves a shifted draft accounting date', () => {
+  const db = seed();
+  const previous = { id: 99999, state: 'draft', move_type: 'out_invoice', invoice_date: '2026-03-15', date: '2026-04-01' };
+  const onchange = models['account.move'].onchange;
+  const unchanged = onchange({ ...previous }, 'invoice_date', db, { previous });
+  assert.equal(unchanged.date, undefined);
+  assert.equal(onchange({ ...previous, invoice_date: '2026-04-05' }, 'invoice_date', db, { previous }).date, '2026-04-05');
 });
