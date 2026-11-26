@@ -1,6 +1,7 @@
 import { purchaseLineId } from './models/purchase-links.js';
 import { ensureOnlinePaymentMethods, ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
-import { ensureCountries } from './models/country.js';
+import { ensureCountries, countryIdFor, stateIdFor } from './models/country.js';
+import { ensurePartnerIndustries } from './models/crm.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -2548,6 +2549,50 @@ export function migrateReconcileAndAssetModelCompany(db) {
   };
 }
 MIGRATIONS.push({ version: 78, name: 'assign-default-company-to-reconcile-and-asset-models', up: migrateReconcileAndAssetModelCompany });
+
+MIGRATIONS.push({ version: 79, name: 'partner-industries', up: ensurePartnerIndustries });
+
+/** Backfill country_id and state_id from legacy text fields on res.partner while preserving existing text values. */
+export function migratePartnerCountryAndState(db) {
+  const partners = db?.records?.['res.partner'];
+  if (!Array.isArray(partners) || !partners.length) return db;
+  const states = db.records['res.country.state'] ?? [];
+  let changed = false;
+  const nextPartners = partners.map((p) => {
+    if (!p || typeof p !== 'object') return p;
+    let countryId = p.country_id ?? null;
+    let stateId = p.state_id ?? null;
+    let rowChanged = false;
+    if (countryId == null && p.country) {
+      const resolved = countryIdFor(db, p.country);
+      if (resolved != null) {
+        countryId = resolved;
+        rowChanged = true;
+      }
+    }
+    if (stateId == null && p.state) {
+      const resolved = stateIdFor(db, p.state, countryId);
+      if (resolved != null) {
+        stateId = resolved;
+        rowChanged = true;
+        if (countryId == null && !p.country) {
+          const st = states.find((s) => s.id === resolved);
+          if (st?.country_id != null) countryId = st.country_id;
+        }
+      }
+    }
+    if (!rowChanged) return p;
+    changed = true;
+    return {
+      ...p,
+      ...(countryId != null && p.country_id == null ? { country_id: countryId } : {}),
+      ...(stateId != null && p.state_id == null ? { state_id: stateId } : {}),
+    };
+  });
+  if (!changed) return db;
+  return { ...db, records: { ...db.records, 'res.partner': nextPartners } };
+}
+MIGRATIONS.push({ version: 80, name: 'partner-country-state-ids', up: migratePartnerCountryAndState });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

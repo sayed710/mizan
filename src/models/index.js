@@ -472,6 +472,7 @@ const allApps = [
       { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
       { label: 'Configuration', children: [
         { key: 'tags', label: 'Tags', model: 'res.partner.category' },
+        { key: 'industries', label: 'Industries', model: 'res.partner.industry' },
         { key: 'banks', label: 'Banks', model: 'res.bank' },
       ] },
     ],
@@ -825,7 +826,7 @@ export const leavesOf = (app) => {
   return walk(app?.menus);
 };
 
-const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'product'];
+const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
   'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];

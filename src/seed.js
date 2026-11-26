@@ -10,6 +10,7 @@ import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, post
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
+import { ensurePartnerIndustries } from './models/crm.js';
 import { migrateCountries, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { countryIdFor, ensureCountries } from './models/country.js';
 import { ensureOnlinePaymentMethods, ensurePaymentMethods } from './models/paymentmethod.js';
@@ -552,6 +553,9 @@ export function seed() {
   add('account.payment.term', { name: '10 Days after End of Next Month', sequence: 7, line_ids: [line(100, 10, 'percent', 'days_after_end_of_next_month')] });
   add('account.payment.term', { name: '90 days, on the 10th', sequence: 10, line_ids: [line(100, 90, 'percent', 'days_end_of_month_on_the', { days_next_month: 10 })] });
   set('res.partner', 3, { property_payment_term_id: t30 });
+
+  // Standard Odoo partner industries (odoo/addons/base/data/res_partner_data.xml)
+  db = ensurePartnerIndustries(db);
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {
