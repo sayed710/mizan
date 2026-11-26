@@ -119,14 +119,14 @@ test('sales and purchases menus configure exact Odoo 20 column order, optional s
 
   const salesMulti = visibleListColumns(models['account.move'], multiDb, {
     journal_id: true, date: true, invoice_origin: true, ref: true, invoice_user_id: true,
-    activities: true, company_id: true, amount_tax_in_currency_signed: true, currency_id: true,
+    activities: true, company_id: true, amount_tax_signed: true, currency_id: true, move_sent_values: true,
   }, invoicesLeaf);
   assert.deepEqual(salesMulti.cols, salesInvoiceView.list, 'showing all sales optional columns preserves exact Odoo 20 order');
   assert.ok(salesMulti.optionalCols.some(([k]) => k === 'company_id'), 'multi-company exposes Company optional column');
 
   const purchMulti = visibleListColumns(models['account.move'], multiDb, {
     journal_id: true, date: true, invoice_origin: true, payment_reference: true, ref: true,
-    activities: true, company_id: true, amount_tax_in_currency_signed: true, currency_id: true,
+    activities: true, company_id: true, amount_tax_signed: true, currency_id: true,
   }, billsLeaf);
   assert.deepEqual(purchMulti.cols, purchaseInvoiceView.list, 'showing all purchase optional columns preserves exact Odoo 20 order');
 
