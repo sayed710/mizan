@@ -113,3 +113,68 @@ test('a product without taxes leaves line taxes to the account defaults', () => 
   assert.equal(productTax(seed(), { taxes_id: [], supplier_taxes_id: [] }, 'sale', null, 1), null);
   assert.equal(productTax(seed(), { taxes_id: [], supplier_taxes_id: [] }, 'purchase', null, 1), null);
 });
+
+test('combo choices are reachable from Sales configuration and shared across companies', async () => {
+  const { apps } = await import('./models/index.js');
+  const { SHARED_MODELS } = await import('./orm.js');
+  const sales = apps.find((app) => app.id === 'sales');
+  const leaves = sales.menus.flatMap((menu) => menu.children ?? [menu]);
+  assert.ok(leaves.some((leaf) => leaf.model === 'product.combo'));
+  assert.ok(SHARED_MODELS.has('product.combo'));
+});
+
+test('an unsellable choice product is neither offered nor accepted', () => {
+  const setup = comboOrder();
+  const db = structuredClone(setup.db);
+  db.records.product.find((p) => p.id === setup.products[3]).sale_ok = false;
+  const order = read(db, 'sale.order', setup.orderId);
+  const field = setup.button.wizard(db, order).fields.find((f) => f.name === `combo_0_${setup.choices[0]}`);
+  assert.deepEqual(field.options.map(([id]) => Number(id)), [setup.products[0]]);
+  assert.throws(() => setup.button.run(db, order, setup.values), /only contain sellable products/);
+});
+
+test('a confirmed order re-checks combo lines whenever they change', () => {
+  const setup = comboOrder();
+  let db = setup.button.run(setup.db, read(setup.db, 'sale.order', setup.orderId), setup.values).db;
+  db = sync(setup.db, db);
+  db = models['sale.order'].form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'sale.order', setup.orderId)).db;
+  const confirmed = read(db, 'sale.order', setup.orderId);
+  assert.ok(setup.button.when(confirmed, db));
+  const added = structuredClone(db);
+  const order = added.records['sale.order'].find((o) => o.id === setup.orderId);
+  order.order_line.push({ ...order.order_line[0], sale_line_key: null });
+  assert.throws(() => sync(db, added), /Configure each combo/);
+  const delivered = structuredClone(db);
+  delivered.records['sale.order'].find((o) => o.id === setup.orderId).order_line[1].qty_delivered = 2;
+  assert.doesNotThrow(() => sync(db, delivered));
+});
+
+test('a delivered combo parent becomes invoiceable with its components', async () => {
+  const { qtyToInvoice } = await import('./models/sales.js');
+  const setup = comboOrder();
+  const db = structuredClone(setup.db);
+  for (const id of setup.products) db.records.product.find((p) => p.id === id).invoice_policy = 'delivery';
+  const lines = setup.button.run(db, read(db, 'sale.order', setup.orderId), setup.values).db.records['sale.order'].find((o) => o.id === setup.orderId).order_line;
+  const order = { order_line: lines.map((line, i) => (i === 1 ? { ...line, qty_delivered: 1 } : i > 1 ? { ...line, qty_delivered: 2 } : line)) };
+  assert.equal(qtyToInvoice(db, order.order_line[0], order), 1);
+  const invoiced = { order_line: order.order_line.map((line) => ({ ...line, qty_delivered: 2, qty_invoiced: 2 })) };
+  assert.equal(qtyToInvoice(db, invoiced.order_line[0], invoiced), 0);
+});
+
+test('a fixed pricelist price converts to a foreign order currency like the list price', () => {
+  const setup = comboOrder();
+  let db = structuredClone(setup.db);
+  const combo = db.records.product.find((p) => p.type === 'combo' && p.name === 'Menu');
+  const pricelist = create(db, 'product.pricelist', { name: 'Fixed', items: [{ product_id: combo.id, min_qty: 0, fixed_price: 10, percent: 0 }] }); db = pricelist.db;
+  const company = read(db, 'res.company', 1);
+  const foreign = db.records['res.currency'].find((c) => c.id !== company.currency_id);
+  db.records['res.currency'] = db.records['res.currency'].map((c) => (c.id === foreign.id ? { ...c, rate_ids: [{ date: '2000-01-01', rate: 2 }] } : c));
+  const priced = (vals) => {
+    const next = structuredClone(db);
+    Object.assign(next.records['sale.order'].find((o) => o.id === setup.orderId), vals);
+    const order = read(next, 'sale.order', setup.orderId);
+    return setup.button.run(next, order, setup.values).db.records['sale.order'].find((o) => o.id === setup.orderId).order_line.slice(1).reduce((sum, line) => sum + line.price_unit, 0);
+  };
+  assert.equal(Math.round(priced({ currency_id: foreign.id }) * 100), 2 * Math.round(priced({}) * 100));
+  assert.equal(Math.round(priced({ currency_id: foreign.id, pricelist_id: pricelist.id }) * 100), Math.round(priced({ currency_id: foreign.id }) * 100));
+});

@@ -262,11 +262,17 @@ export function refreshAdvanceDeductions(db, order, lines, exceptId = null) {
 const invoiceableQty = (db, line) => (read(db, 'product', line.product_id)?.invoice_policy === 'delivery' ? Number(line.qty_delivered) || 0 : Number(line.qty) || 0);
 export const qtyToInvoice = (db, line, order = null) => {
   if (order && read(db, 'product', line.product_id)?.type === 'combo') {
-    const hasItem = (order.order_line ?? []).some((item) => item.combo_parent_key === line.sale_line_key && qtyToInvoice(db, item) > 1e-9);
-    if (!hasItem) return 0;
+    const items = (order.order_line ?? []).filter((item) => line.sale_line_key && item.combo_parent_key === line.sale_line_key);
+    if (!items.some((item) => qtyToInvoice(db, item) > 1e-9)) return 0;
+    // The parent follows its components: invoiceable in proportion to the least-invoiceable one.
+    const ratio = Math.min(...items.map((item) => (Number(item.qty) ? invoiceableQty(db, item) / Number(item.qty) : 0)));
+    return (Number(line.qty) || 0) * ratio - (Number(line.qty_invoiced) || 0);
   }
   return invoiceableQty(db, line) - (Number(line.qty_invoiced) || 0);
 };
+/** Combo parents and their components, the lines a confirmed order must keep configured. */
+const comboLines = (db, order) => (order?.order_line ?? []).filter((line) => line.combo_parent_key || read(db, 'product', line.product_id)?.type === 'combo')
+  .map(({ sale_line_key, combo_parent_key, combo_choice_id, product_id, qty, price_unit, discount }) => ({ sale_line_key, combo_parent_key, combo_choice_id, product_id, qty, price_unit, discount }));
 
 /** Build the linked lines for one selected product in each choice of a combo. */
 export function configureComboLines(db, order, line, selections) {
@@ -276,6 +282,7 @@ export function configureComboLines(db, order, line, selections) {
   if (choices.some((choice) => !choice)) throw new Error('Select existing combo choices');
   const items = choices.map((choice) => choice.combo_item_ids.find((item) => item.product_id === Number(selections[choice.id])));
   if (items.some((item) => !item)) throw new Error('Select one product for each combo choice');
+  if (items.some((item) => read(db, 'product', item.product_id)?.sale_ok === false)) throw new Error('A sellable combo product can only contain sellable products');
   const currency = documentCurrency(db, order);
   const rate = rateAt(db, currency.id, order.date_order ?? today(), order.company_id ?? 1);
   const basePrices = choices.map((choice) => roundCurrency(choice.base_price * rate, currency));
@@ -284,8 +291,9 @@ export function configureComboLines(db, order, line, selections) {
   const stockUom = product.uom_id ?? uomForLegacy(db, product.uom ?? 'unit')?.id;
   const orderUom = line.uom_id ?? stockUom;
   const stockQty = orderUom && stockUom ? convert(db, quantity, orderUom, stockUom, { round: false }) : quantity;
-  const basePrice = roundCurrency((Number(product.list_price) || 0) * rate, currency);
-  const unitPrice = order.pricelist_id ? priceFor(db, order.pricelist_id, product.id, stockQty, basePrice) : basePrice;
+  const listPrice = Number(product.list_price) || 0;
+  // Pricelist rules (fixed or percent) are in the company currency, like list_price; convert the result once.
+  const unitPrice = roundCurrency((order.pricelist_id ? priceFor(db, order.pricelist_id, product.id, stockQty, listPrice) : listPrice) * rate, currency);
   const price = orderUom && stockUom ? convertPrice(db, unitPrice, stockUom, orderUom) : unitPrice;
   const shares = basePrices.map((base) => roundCurrency(totalBase ? price * base / totalBase : price / choices.length, currency));
   shares[shares.length - 1] += price - shares.reduce((a, b) => a + b, 0);
@@ -885,7 +893,7 @@ export const salesModels = {
       });
       return { ...(key === 'partner_id' && p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id } : {}), ...(p || key === 'company_id' ? { fiscal_position_id } : {}), ...(r.order_line ? { order_line } : {}) };
     },
-    guard: (db, before, r) => r.state === 'sale' && before?.state !== 'sale' ? comboOrderError(db, r) : null,
+    guard: (db, before, r) => r.state === 'sale' && (before?.state !== 'sale' || JSON.stringify(comboLines(db, before)) !== JSON.stringify(comboLines(db, r))) ? comboOrderError(db, r) : null,
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [
       [{ id: 'quotations', label: 'Quotations', fn: (r) => ['draft', 'sent'].includes(r.state) }, { id: 'orders', label: 'Sales Orders', fn: (r) => r.state === 'sale' }],
@@ -906,14 +914,14 @@ export const salesModels = {
         { label: 'Send by Email', email: 'document', vals: { state: 'sent' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         {
           label: 'Configure Combos',
-          when: (r, db) => ['draft', 'sent'].includes(r.state) && (r.order_line ?? []).some((line) => read(db, 'product', line.product_id)?.type === 'combo'),
+          when: (r, db) => ['draft', 'sent', 'sale'].includes(r.state) && (r.order_line ?? []).some((line) => read(db, 'product', line.product_id)?.type === 'combo'),
           wizard: (db, r) => ({ title: 'Configure Combos', fields: (r.order_line ?? []).flatMap((line, index) => {
             const product = read(db, 'product', line.product_id);
             if (product?.type !== 'combo') return [];
             return product.combo_ids.map((id) => {
               const choice = read(db, 'product.combo', id);
               const previous = (r.order_line ?? []).find((child) => child.combo_parent_key && child.combo_parent_key === line.sale_line_key && child.combo_choice_id === id);
-              return { name: `combo_${index}_${id}`, label: choice.name, type: 'selection', required: true, default: previous ? String(previous.product_id) : null, options: choice.combo_item_ids.map((item) => [String(item.product_id), read(db, 'product', item.product_id).name]) };
+              return { name: `combo_${index}_${id}`, label: choice.name, type: 'selection', required: true, default: previous ? String(previous.product_id) : null, options: choice.combo_item_ids.filter((item) => read(db, 'product', item.product_id)?.sale_ok !== false).map((item) => [String(item.product_id), read(db, 'product', item.product_id).name]) };
             });
           }) }),
           run: (db, r, values) => {
