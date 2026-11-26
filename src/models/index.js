@@ -927,5 +927,8 @@ export function targetOf(model, uninstalled = []) {
   }
   return '#/';
 }
-export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
+// A record-set action may contain customer and vendor payments together.
+const allPaymentsAction = { key: 'all-payments', label: 'Payments', model: 'account.payment', ...customerPaymentView, listLabels: { ...customerPaymentView.listLabels, partner_id: 'Partner' } };
+export const findLeaf = (app, key) => (app?.id === 'accounting' && key === 'all-payments' ? allPaymentsAction : null)
+  ?? leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
 export const menusFor = (appId) => apps.find((a) => a.id === appId)?.menus ?? [];

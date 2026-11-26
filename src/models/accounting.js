@@ -2596,8 +2596,28 @@ const lineItem = {
 /** Reversal entries linked to `r` via `reversed_entry_id`. */
 const moveReversalEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.reversed_entry_id === r.id) : []);
 
-/** Posted or draft payments whose journal entry is `r`. */
-const movePayments = (db, r) => (db && r?.id ? search(db, 'account.payment').filter((p) => p.move_id === r.id) : []);
+/** Payments reconciled with a move, including legacy settlement rows. */
+const movePayments = (db, r) => {
+  if (!db || !r?.id) return [];
+  const moveIds = new Set((r.payments ?? []).filter((row) => !row.reversed && !row.unapplied)
+    .flatMap((row) => [row.move_id, row.payment_move_id]).filter(Boolean));
+  for (const link of db.records['account.partial.reconcile'] ?? []) {
+    if (!link || link.active === false || link.reversed || !(Number(link.amount) > 0)) continue;
+    const otherId = link.debit_move_id === r.id ? link.credit_move_id : link.credit_move_id === r.id ? link.debit_move_id : null;
+    if (!otherId || otherId === r.id) continue;
+    const other = read(db, 'account.move', otherId);
+    const index = link.debit_move_id === otherId ? link.debit_line_index : link.credit_line_index;
+    const account = read(db, 'account.account', other?.line_ids?.[index]?.account_id);
+    if (other?.state === 'posted' && ['asset_receivable', 'liability_payable'].includes(account?.account_type)) moveIds.add(otherId);
+  }
+  return (db.records['account.payment'] ?? []).filter((p) => moveIds.has(p.move_id));
+};
+
+/** The payment whose journal entry is this move. */
+const originPayment = (db, r) => (db && r?.id ? (db.records['account.payment'] ?? []).find((p) => p.move_id === r.id) : null);
+
+/** Cash basis entries created from this move. */
+const moveCashBasisEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.cash_basis_origin_move_id === r.id) : []);
 
 /** Adjusting entries linked to `r` via `deferred_adjustment_of_id`. */
 const moveAdjustingEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.deferred_adjustment_of_id === r.id) : []);
@@ -4334,36 +4354,51 @@ export const accountingModels = {
       unlockedFields: ['to_check'],
       smart: [
         {
-          label: 'Reversal Entries',
-          when: (r, db) => r.move_type === 'entry' && moveReversalEntries(db, r).length > 0,
+          label: (r) => ({ out_invoice: 'Credit Notes', in_invoice: 'Refunds', entry: 'Reversal Entries' }[r.move_type] ?? ''),
+          when: (r, db) => moveReversalEntries(db, r).length > 0,
           value: (db, r) => moveReversalEntries(db, r).length,
           target: (r) => `accounting/entries?view=list&rel=reversed_entry_id:${r.id}`,
         },
         {
-          label: 'Reversed Entry',
-          when: (r) => r.move_type === 'entry' && Boolean(r.reversed_entry_id),
+          label: (r) => ({ out_refund: 'Invoice', in_refund: 'Vendor Bill', entry: 'Journal Entry' }[r.move_type] ?? ''),
+          when: (r) => Boolean(r.reversed_entry_id),
           value: () => '',
           target: (r) => `accounting/entries/${r.reversed_entry_id}`,
         },
         {
+          label: 'Payment',
+          when: (r, db) => r.move_type === 'entry' && Boolean(r.id && originPayment(db, r)),
+          value: () => 1,
+          target: (r, db) => {
+            const payment = originPayment(db, r);
+            return `${payment.partner_type === 'supplier' ? 'accounting/vendor-payments' : 'accounting/payments'}/${payment.id}`;
+          },
+        },
+        {
           label: 'Payments',
-          when: (r, db) => r.move_type === 'entry' && movePayments(db, r).length > 0,
+          when: (r, db) => movePayments(db, r).length > 0,
           value: (db, r) => movePayments(db, r).length,
           target: (r, db) => {
             const list = movePayments(db, r);
             if (list.length === 1) return `${list[0].partner_type === 'supplier' ? 'accounting/vendor-payments' : 'accounting/payments'}/${list[0].id}`;
-            return `${list.every((p) => p.partner_type === 'supplier') ? 'accounting/vendor-payments' : 'accounting/payments'}?view=list&rel=move_id:${r.id}`;
+            return `accounting/all-payments?view=list&rel=id:${list.map((p) => p.id).join(',')}`;
           },
         },
         {
-          label: 'Reconciled items',
+          label: 'Reconciled Items',
           when: (r, db) => r.move_type === 'entry' && Boolean(r.id) && r.state === 'posted' && reconciledJournalItems(db, r).some((l) => l.reconciled),
           value: () => '',
           target: (r) => `accounting/journal-items?reconciled_of=${r.id}`,
         },
         {
+          label: 'Cash Basis Entries',
+          when: (r, db) => moveCashBasisEntries(db, r).length > 0,
+          value: () => '',
+          target: (r, db) => `accounting/entries?view=list&rel=id:${moveCashBasisEntries(db, r).map((m) => m.id).join(',')}`,
+        },
+        {
           label: 'Adjusting Entries',
-          when: (r, db) => r.move_type === 'entry' && moveAdjustingEntries(db, r).length > 0,
+          when: (r, db) => moveAdjustingEntries(db, r).length > 0,
           value: (db, r) => moveAdjustingEntries(db, r).length,
           target: (r) => `accounting/entries?view=list&rel=deferred_adjustment_of_id:${r.id}`,
         },
