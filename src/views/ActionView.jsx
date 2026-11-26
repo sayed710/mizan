@@ -265,7 +265,7 @@ export function ActionView({ leaf, base, params }) {
             );
           }
           if (action.wizard) {
-            const spec = typeof action.wizard === 'function' ? action.wizard(getDb(), ids) : action.wizard;
+            const spec = typeof action.wizard === 'function' ? action.wizard(getDb(), ids, { defaults: leaf?.defaults ?? {} }) : action.wizard;
             if (spec) {
               setWizard({ action, ids, allIds: ids, spec, error: null, hasRecordingError: false, recordingError: null });
               return;

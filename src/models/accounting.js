@@ -4,11 +4,11 @@ import { purchaseLineId } from './purchase-links.js';
 import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js';
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { addDays, amounts, commercialPartnerId, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { accountingDateForPost, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
+import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, postPayment, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
 import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
@@ -40,6 +40,7 @@ import {
   isMethodLineJournal,
   journalMethodLineGuard,
   journalMethodLines,
+  partnerPaymentMethodDefaults,
   paymentMethodLineError,
   METHOD_LINE_FIELDS,
   methodLineAccountDomain,
@@ -1230,10 +1231,16 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const excess = excessAmount != null ? docRound(excessAmount) : docRound(amount - value);
   const sale = isInbound(r);
   const counterpartCode = invoiceCounterpartAccount(db, r);
-  const via = paymentJournal(db, payJournal, r.company_id ?? 1);
+  const payDefaults = partnerPaymentMethodDefaults(db, r.partner_id, sale ? 'inbound' : 'outbound', r.company_id ?? 1);
+  const resolvedPayJournal = payJournal ?? (!paymentId && !directBank && !liquidityAccountId && !statementLineId ? payDefaults.journal_id : undefined);
+  const via = paymentJournal(db, resolvedPayJournal, r.company_id ?? 1);
   const journal = read(db, 'account.journal', via.id);
   const chosenMethodLineId = paymentMethodLineId ?? null;
-  const methodLineId = payRec?.payment_method_line_id ?? chosenMethodLineId ?? defaultPaymentMethodLineId(db, via.id, sale ? 'inbound' : 'outbound');
+  const methodLineId = payRec?.payment_method_line_id
+    ?? chosenMethodLineId
+    ?? (via.id === payDefaults.journal_id
+      ? payDefaults.payment_method_line_id
+      : partnerPaymentMethodDefaults(db, r.partner_id, sale ? 'inbound' : 'outbound', r.company_id ?? 1, { journalId: via.id }).payment_method_line_id);
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale, methodLineId);
   const liquidity = liquidityAccountId ?? outstanding ?? via.accountId;
   const allocatedPay = isForeignPayment ? paymentCurrencyAmount(db, r, value, date, payCurrId) : value;
@@ -2982,12 +2989,23 @@ function resolveSendMoves(db, moveOrIds) {
 
 function sendMovesWizard(db, moveOrIds) {
   const moves = resolveSendMoves(db, moveOrIds);
-  const allHaveEmail = moves.every((m) => Boolean(m.partner_id && read(db, 'res.partner', m.partner_id)?.email?.trim?.()));
+  const partnerSendingMethod = (p) => {
+    if (!p) return null;
+    if (p.invoice_sending_method) return p.invoice_sending_method;
+    const commId = commercialPartnerId(db, p.id);
+    return commId && commId !== p.id ? (read(db, 'res.partner', commId)?.invoice_sending_method ?? null) : null;
+  };
+  const partners = moves.map((m) => (m.partner_id ? read(db, 'res.partner', m.partner_id) : null));
+  const methods = partners.map(partnerSendingMethod);
+  const hasEmailTarget = methods.some((m) => m !== 'manual');
+  const allEmailTargetsReady = hasEmailTarget
+    && partners.every((p, i) => methods[i] === 'manual' || Boolean(p?.email?.trim?.()));
+  const anyManual = methods.some((m) => m === 'manual');
   return {
     title: 'Send',
     fields: [
-      { name: 'email', type: 'boolean', label: 'Email', default: allHaveEmail },
-      { name: 'download', type: 'boolean', label: 'Download', default: false },
+      { name: 'email', type: 'boolean', label: 'Email', default: allEmailTargetsReady },
+      { name: 'download', type: 'boolean', label: 'Download', default: anyManual },
     ],
   };
 }
@@ -3026,9 +3044,247 @@ const downloadMovesListAction = {
   run: downloadMoves,
 };
 
-const registerMethodField = (db, journalId, direction) => ({
+function resolvePartners(db, partnerOrIds) {
+  const ids = Array.isArray(partnerOrIds) ? partnerOrIds : [partnerOrIds?.id].filter(Boolean);
+  if (!ids.length) throw new Error('Select at least one partner first');
+  return ids.map((id) => {
+    const partner = read(db, 'res.partner', id);
+    if (!partner || partner.active === false) throw new Error('Select active partners');
+    return partner;
+  });
+}
+
+/** Create a draft customer invoice or vendor bill for each selected partner. */
+export function createPartnerInvoices(db, partnerOrIds, moveType = 'out_invoice') {
+  if (!['out_invoice', 'in_invoice'].includes(moveType)) {
+    throw new Error('Unsupported document type');
+  }
+  const partners = resolvePartners(db, partnerOrIds);
+  const companyId = currentCompany(db);
+  let nextDb = db;
+  const createdIds = [];
+  for (const partner of partners) {
+    const commId = commercialPartnerId(nextDb, partner.id);
+    const commercial = commId && commId !== partner.id ? read(nextDb, 'res.partner', commId) : null;
+    const termField = moveType === 'in_invoice' ? 'property_supplier_payment_term_id' : 'property_payment_term_id';
+    const termId = (partner[termField] ?? commercial?.[termField]) ?? null;
+    const invoiceDate = today();
+    const dueFields = termDue(nextDb, { partner_id: partner.id, company_id: companyId, invoice_date: invoiceDate, invoice_payment_term_id: termId }, { clear: true });
+    const eligibleVendorBank = moveType === 'in_invoice'
+      ? search(nextDb, 'res.partner.bank')
+        .filter((b) => b.active !== false && (!b.company_id || b.company_id === companyId) && sameCommercialPartner(nextDb, b.partner_id, partner.id))
+        .sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment)))[0]?.id ?? null
+      : null;
+    const created = create(nextDb, 'account.move', {
+      move_type: moveType,
+      partner_id: partner.id,
+      company_id: companyId,
+      invoice_date: invoiceDate,
+      date: invoiceDate,
+      invoice_payment_term_id: termId,
+      fiscal_position_id: fiscalPositionFor(nextDb, partner.id, companyId),
+      ...(eligibleVendorBank ? { partner_bank_id: eligibleVendorBank } : {}),
+      ...dueFields,
+    });
+    nextDb = created.db;
+    createdIds.push(created.id);
+  }
+  const route = moveType === 'in_invoice' ? 'accounting/bills' : 'accounting/invoices';
+  return {
+    db: nextDb,
+    ids: createdIds,
+    go: createdIds.length === 1 ? `#/${route}/${createdIds[0]}` : `#/${route}?view=list&rel=id:${createdIds.join(',')}`,
+  };
+}
+
+function partnerOpenResidual(db, partnerId, direction, companyId) {
+  const targetType = direction === 'outbound' ? 'in_invoice' : 'out_invoice';
+  return search(db, 'account.move')
+    .filter((m) => m.state === 'posted' && m.move_type === targetType && (m.company_id ?? 1) === companyId && sameCommercialPartner(db, m.partner_id, partnerId))
+    .reduce((sum, m) => sum + Math.max(0, Number(residual(m, db)) || 0), 0);
+}
+
+/** Build the Register Payment wizard spec for one or more selected partners. */
+export function partnerRegisterPaymentWizard(db, partnerOrIds, context = {}) {
+  const partners = resolvePartners(db, partnerOrIds);
+  const companyId = currentCompany(db);
+  const singlePartner = partners.length === 1 ? partners[0] : null;
+  const defaults = context?.defaults ?? {};
+  const defaultDirection = defaults.supplier_rank
+    ? 'outbound'
+    : defaults.customer_rank
+      ? 'inbound'
+      : singlePartner && (singlePartner.supplier_rank ?? 0) > 0 && !((singlePartner.customer_rank ?? 0) > 0)
+        ? 'outbound'
+        : 'inbound';
+  const payDefaults = partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, defaultDirection, companyId);
+  const defaultAmountFor = (dir) => {
+    if (!singlePartner) return '';
+    const open = partnerOpenResidual(db, singlePartner.id, dir, companyId);
+    return open > 0 ? String(roundCurrency(open, companyCurrencyRecord(db, companyId))) : '';
+  };
+  const defaultBankFor = () => (singlePartner
+    ? (search(db, 'res.partner.bank').find((b) => isEligibleRecipientBank(db, b, singlePartner.id, companyId))?.id ?? null)
+    : null);
+  return {
+    title: 'Register Payment',
+    fields: [
+      {
+        name: 'payment_type',
+        type: 'selection',
+        label: 'Payment Type',
+        required: true,
+        options: [['inbound', 'Receive'], ['outbound', 'Send']],
+        default: defaultDirection,
+      },
+      {
+        name: 'amount',
+        type: 'monetary',
+        label: 'Payment Amount',
+        required: true,
+        default: defaultAmountFor(defaultDirection),
+      },
+      { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
+      {
+        name: 'journal_id',
+        type: 'many2one',
+        relation: 'account.journal',
+        label: 'Payment Journal',
+        required: true,
+        default: payDefaults.journal_id,
+        domain: (j) => (!j.company_id || j.company_id === companyId) && isLiquidityJournal(j),
+      },
+      {
+        name: 'payment_method_line_id',
+        type: 'many2one',
+        relation: 'account.payment.method.line',
+        label: 'Payment Method',
+        default: payDefaults.payment_method_line_id,
+        domain: (line, values) => journalMethodLines(db, values?.journal_id, values?.payment_type ?? defaultDirection).some((candidate) => candidate.id === line.id),
+      },
+      ...(singlePartner ? [{
+        name: 'partner_bank_id',
+        type: 'many2one',
+        relation: 'res.partner.bank',
+        label: 'Recipient Bank Account',
+        default: defaultDirection === 'outbound' ? defaultBankFor() : null,
+        domain: (b) => isEligibleRecipientBank(db, b, singlePartner.id, companyId),
+        invisible: (vals) => vals?.payment_type !== 'outbound',
+      }] : []),
+      { name: 'memo', type: 'char', label: 'Memo', default: '' },
+    ],
+    onchange: (vals, key) => {
+      const dir = vals?.payment_type ?? defaultDirection;
+      if (key === 'payment_type') {
+        const nextDefaults = partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, dir, companyId);
+        return {
+          ...nextDefaults,
+          ...(singlePartner ? { partner_bank_id: dir === 'outbound' ? defaultBankFor() : null } : {}),
+          ...(singlePartner && (!vals.amount || vals.amount === defaultAmountFor(dir === 'outbound' ? 'inbound' : 'outbound'))
+            ? { amount: defaultAmountFor(dir) }
+            : {}),
+        };
+      }
+      if (key === 'journal_id') {
+        return {
+          payment_method_line_id: partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, dir, companyId, { journalId: vals.journal_id }).payment_method_line_id,
+        };
+      }
+      return {};
+    },
+  };
+}
+
+/** Create and post a customer or vendor payment for each selected partner. */
+export function registerPartnerPayments(db, partnerOrIds, values = {}, context = {}) {
+  const partners = resolvePartners(db, partnerOrIds);
+  const companyId = currentCompany(db);
+  const defaults = context?.defaults ?? {};
+  const paymentType = values.payment_type ?? (defaults.supplier_rank ? 'outbound' : 'inbound');
+  if (!['inbound', 'outbound'].includes(paymentType)) throw new Error('Unsupported payment type');
+  const partnerType = paymentType === 'outbound' ? 'supplier' : 'customer';
+  const amount = promptedAmount(values.amount);
+  if (!(amount > 0)) throw new Error('Enter a payment amount greater than zero');
+  const date = values.date || today();
+  if (!validDate(date)) throw new Error('A valid payment date is required');
+  const defaultJournal = partnerPaymentMethodDefaults(db, partners.length === 1 ? partners[0].id : null, paymentType, companyId).journal_id;
+  const via = paymentJournal(db, values.journal_id ?? defaultJournal, companyId);
+  let nextDb = db;
+  const createdIds = [];
+  for (const partner of partners) {
+    const methodLineId = values.payment_method_line_id && journalMethodLines(nextDb, via.id, paymentType).some((l) => l.id === values.payment_method_line_id)
+      ? values.payment_method_line_id
+      : partnerPaymentMethodDefaults(nextDb, partner.id, paymentType, companyId, { journalId: via.id }).payment_method_line_id;
+    const created = create(nextDb, 'account.payment', {
+      payment_type: paymentType,
+      partner_type: partnerType,
+      partner_id: partner.id,
+      company_id: companyId,
+      amount,
+      date,
+      journal_id: via.id,
+      payment_method_line_id: methodLineId,
+      memo: values.memo ?? '',
+      ...(paymentType === 'outbound' && values.partner_bank_id ? { partner_bank_id: values.partner_bank_id } : {}),
+    });
+    nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
+    createdIds.push(created.id);
+  }
+  const route = partnerType === 'supplier' ? 'accounting/vendor-payments' : 'accounting/payments';
+  return {
+    db: nextDb,
+    ids: createdIds,
+    go: createdIds.length === 1 ? `#/${route}/${createdIds[0]}` : `#/${route}?view=list&rel=id:${createdIds.join(',')}`,
+  };
+}
+
+export const partnerCreateInvoiceAction = {
+  label: 'Create Invoice',
+  app: 'accounting',
+  requiresSelection: true,
+  run: (db, ids) => createPartnerInvoices(db, ids, 'out_invoice'),
+};
+
+export const partnerCreateBillAction = {
+  label: 'Create Bill',
+  app: 'accounting',
+  requiresSelection: true,
+  run: (db, ids) => createPartnerInvoices(db, ids, 'in_invoice'),
+};
+
+export const partnerRegisterPaymentAction = {
+  label: 'Register Payment',
+  app: 'accounting',
+  requiresSelection: true,
+  wizard: partnerRegisterPaymentWizard,
+  run: registerPartnerPayments,
+};
+
+export const partnerMenuActions = [
+  {
+    label: 'Create Invoice',
+    app: 'accounting',
+    when: (r) => Boolean(r?.id && r.active !== false),
+    run: (db, r) => createPartnerInvoices(db, r, 'out_invoice'),
+  },
+  {
+    label: 'Create Bill',
+    app: 'accounting',
+    when: (r) => Boolean(r?.id && r.active !== false),
+    run: (db, r) => createPartnerInvoices(db, r, 'in_invoice'),
+  },
+  {
+    label: 'Register Payment',
+    app: 'accounting',
+    when: (r) => Boolean(r?.id && r.active !== false),
+    wizard: partnerRegisterPaymentWizard,
+    run: registerPartnerPayments,
+  },
+];
+
+const registerMethodField = (db, journalId, direction, defaultLineId = null) => ({
   name: 'payment_method_line_id', type: 'many2one', relation: 'account.payment.method.line', label: 'Payment Method',
-  default: defaultPaymentMethodLineId(db, journalId, direction),
+  default: defaultLineId ?? defaultPaymentMethodLineId(db, journalId, direction),
   domain: (line, values) => journalMethodLines(db, values?.journal_id, direction).some((candidate) => candidate.id === line.id),
 });
 
@@ -3043,8 +3299,11 @@ const registerPaymentsListAction = {
       if (!(paymentDocumentsNetAmount(db, group, today()) > 0)) throw new Error('The net payment amount must be greater than zero');
     }
     const companyId = docs[0].company_id ?? 1;
-    const journalId = defaultPaymentJournalId(db, companyId);
     const direction = isInbound(docs[0]) ? 'inbound' : 'outbound';
+    const commercialIds = new Set(docs.map((d) => commercialPartnerId(db, d.partner_id) ?? d.partner_id ?? null).filter(Boolean));
+    const sharedPartnerId = commercialIds.size === 1 ? docs[0].partner_id : null;
+    const payDefaults = partnerPaymentMethodDefaults(db, sharedPartnerId, direction, companyId);
+    const journalId = payDefaults.journal_id;
     const singleGroup = (vals) => {
       const groups = paymentDocumentGroups(db, docs, vals?.group_payment !== false);
       return groups.size === 1 ? groups.values().next().value : null;
@@ -3073,14 +3332,18 @@ const registerPaymentsListAction = {
           relation: 'account.journal',
           label: 'Payment Journal',
           required: true,
-          default: defaultPaymentJournalId(db, companyId),
+          default: journalId,
           domain: (j) => (!j.company_id || j.company_id === companyId) && isLiquidityJournal(j),
         },
-        registerMethodField(db, journalId, direction),
+        registerMethodField(db, journalId, direction, payDefaults.payment_method_line_id),
         { name: 'memo', type: 'char', label: 'Memo', default: '' },
       ],
       onchange: (vals, key) => {
-        if (key === 'journal_id') return { payment_method_line_id: defaultPaymentMethodLineId(db, vals.journal_id, direction) };
+        if (key === 'journal_id') {
+          return {
+            payment_method_line_id: partnerPaymentMethodDefaults(db, sharedPartnerId, direction, companyId, { journalId: vals.journal_id }).payment_method_line_id,
+          };
+        }
         if (key === 'date' || key === 'group_payment') return { amount: defaultAmount(vals) };
         return {};
       },
@@ -4536,6 +4799,9 @@ export const accountingModels = {
             };
             const hasDiff = (vals) => computeDiff(vals) > 0.000001;
 
+            const direction = isInbound(r) ? 'inbound' : 'outbound';
+            const companyId = r.company_id ?? 1;
+            const payDefaults = partnerPaymentMethodDefaults(db, r.partner_id, direction, companyId);
             const fields = [
               {
                 name: 'amount',
@@ -4560,12 +4826,12 @@ export const accountingModels = {
                 relation: 'account.journal',
                 label: 'Payment Journal',
                 required: true,
-                default: defaultPaymentJournalId(db, r.company_id ?? 1),
-                domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && isLiquidityJournal(j),
+                default: payDefaults.journal_id,
+                domain: (j) => (!j.company_id || j.company_id === companyId) && isLiquidityJournal(j),
               },
             ];
 
-            fields.push(registerMethodField(db, defaultPaymentJournalId(db, r.company_id ?? 1), isInbound(r) ? 'inbound' : 'outbound'));
+            fields.push(registerMethodField(db, payDefaults.journal_id, direction, payDefaults.payment_method_line_id));
 
             if (isPurchase(r) && !isInbound(r)) {
               fields.push({
@@ -4619,7 +4885,11 @@ export const accountingModels = {
               title: 'Register Payment',
               fields,
               onchange: (vals, key) => {
-                if (key === 'journal_id') return { payment_method_line_id: defaultPaymentMethodLineId(db, vals.journal_id, isInbound(r) ? 'inbound' : 'outbound') };
+                if (key === 'journal_id') {
+                  return {
+                    payment_method_line_id: partnerPaymentMethodDefaults(db, r.partner_id, direction, companyId, { journalId: vals.journal_id }).payment_method_line_id,
+                  };
+                }
                 if (key === 'date' || key === 'currency_id') {
                   const d = vals?.date || today();
                   const c = vals?.currency_id ?? initialCurrId;

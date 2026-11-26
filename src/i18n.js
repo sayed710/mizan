@@ -4072,6 +4072,19 @@ const ar = {
   'Problem Description': 'وصف المشكلة',
   'Initial balance ({amount}) does not match previous statement': 'الرصيد الافتتاحي ({amount}) لا يطابق كشف الحساب السابق',
   'Incorrect ending balance, expected {amount}': 'الرصيد النهائي غير صحيح، المتوقع {amount}',
+  'Customer Payment Method': 'طريقة الدفع للعميل',
+  'Vendor Payment Method': 'طريقة الدفع للمورد',
+  'Invoice Sending': 'إرسال الفواتير',
+  'Preferred Payment Method': 'طريقة الدفع المفضلة',
+  'Invoice Sending must be Email or Download': 'يجب أن يكون إرسال الفواتير عبر البريد الإلكتروني أو التنزيل',
+  'Customer preferred payment method must be inbound': 'يجب أن تكون طريقة الدفع المفضلة للعميل واردة',
+  'Vendor preferred payment method must be outbound': 'يجب أن تكون طريقة الدفع المفضلة للمورد صادرة',
+  'Preferred payment method must belong to the partner company': 'يجب أن تنتمي طريقة الدفع المفضلة إلى شركة الشريك',
+  'Unsupported document type': 'نوع المستند غير مدعوم',
+  'Select at least one partner first': 'اختر شريكاً واحداً على الأقل أولاً',
+  'Select active partners': 'اختر شركاء نشطين',
+  'Unsupported payment type': 'نوع الدفعة غير مدعوم',
+  'A valid payment date is required': 'مطلوب تاريخ دفع صالح',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

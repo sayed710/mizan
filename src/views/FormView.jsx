@@ -340,7 +340,9 @@ function ActionsMenu({ model, rec, backHash, base, query, onAction, isNew, onErr
       <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
       {open && (
         <div className="nav-dropdown" role="menu">
-          {(models[model].menuActions ?? []).filter((a) => a.when?.(rec) ?? true).map((a) => (
+          {(models[model].menuActions ?? [])
+            .filter((a) => (!a.app || appOpen(getDb(), getUser(), a.app)) && (!a.when || a.when(rec, getDb(), getUser())))
+            .map((a) => (
             <button key={a.label} type="button" role="menuitem" onClick={() => run(() => onAction(a))}>{t(a.label)}</button>
           ))}
           {!isNew && <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>}
@@ -686,6 +688,8 @@ export function FormView({ leaf, id, base, params }) {
   // A readonly sequence title still holding the '/' placeholder reads as Draft in the breadcrumb and the heading alike.
   const displayTitle = (titleField?.readonly || titleField?.compute) && current[def.form.title] === '/' ? t('Draft') : current[def.form.title];
 
+  const visibleMenuActions = (models[model].menuActions ?? []).filter((a) => (!a.app || appOpen(db, getUser(), a.app)) && (!a.when || a.when(isNew ? current : rec, db, getUser())));
+
   return (
     <main className="form-page">
       <div className="control-panel">
@@ -695,7 +699,7 @@ export function FormView({ leaf, id, base, params }) {
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : displayTitle}</span>
           </nav>
-          {(!isNew || (models[model].menuActions ?? []).length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} onError={fail} />}
+          {(!isNew || visibleMenuActions.length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} onError={fail} />}
           {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && current.move_type === 'out_invoice')) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
           {dirty && (
             <span className="dirty">
