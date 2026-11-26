@@ -100,11 +100,11 @@ test('account.journal defaults restrict_mode_hash_table to false', () => {
 
 // â”€â”€â”€ 3. Secure Entries: analyzeJournalChains â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-test('analyzeJournalChains: no restricted journals â†’ empty', () => {
+test('analyzeJournalChains: wizard includes unrestricted journals', () => {
   const db = seed();
   const result = analyzeJournalChains(db);
-  assert.deepEqual(result.move_to_hash_ids, []);
-  assert.equal(result.chains_to_hash_with_gaps, '');
+  // Odoo account_secure_entries_wizard.py:84-89 uses force_hash=True.
+  assert.ok(result.move_to_hash_ids.length > 0);
 });
 
 test('analyzeJournalChains: detects posted entries in restricted journals', () => {
@@ -189,7 +189,7 @@ test('secureEntries: hashes posted entries in sequence order, links chain correc
   }
 });
 
-test('secureEntries: sets company hard_lock_date when later than current', () => {
+test('secureEntries: leaves company hard_lock_date unchanged', () => {
   let db = seed();
   const inv = search(db, 'account.journal').find((j) => j.code === 'INV') ?? search(db, 'account.journal')[0];
   db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== inv.id) } };
@@ -202,7 +202,7 @@ test('secureEntries: sets company hard_lock_date when later than current', () =>
   const secured = secureEntries(r.db, { hashDate: '2026-03-31' });
 
   const lockDate = read(secured, 'res.company', 1)?.hard_lock_date ?? '';
-  assert.ok(lockDate === '2026-03-15', `hard_lock_date set to ${lockDate}`);
+  assert.equal(lockDate, '', 'hashing does not set the hard lock (Odoo account_secure_entries_wizard.py:241-250)');
 });
 
 test('secureEntries: does not re-hash already hashed entries', () => {

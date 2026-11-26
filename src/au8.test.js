@@ -673,17 +673,30 @@ test('Regression: Locks apply through every entry point', () => {
     'Manual entry on locked date must be rejected'
   );
 
-  // 2. Invoice
+  // 2. Invoice: soft lock shifts accounting date to first open period; tax/hard lock still rejects
   const inv = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: 1,
     invoice_date: '2026-03-15',
     invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 100 }],
   });
+  const postedSoftLockedInv = postMove(inv.db, inv.id);
+  const postedSoftMove = read(postedSoftLockedInv, 'account.move', inv.id);
+  assert.equal(postedSoftMove.state, 'posted');
+  assert.equal(postedSoftMove.invoice_date, '2026-03-15');
+  assert.ok(postedSoftMove.date > lockDate, 'Soft-locked invoice shifts accounting date past lock');
+
+  const taxedDb = write(db, 'res.company', 1, { tax_lock_date: lockDate });
+  const taxedInv = create(taxedDb, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_date: '2026-03-15',
+    invoice_line_ids: [{ name: 'Taxed Item', qty: 1, price_unit: 100, tax: 15 }],
+  });
   assert.throws(
-    () => postMove(inv.db, inv.id),
+    () => postMove(taxedInv.db, taxedInv.id),
     /locked/i,
-    'Invoice on locked date must be rejected'
+    'Tax-locked invoice on locked date must be rejected'
   );
 
   // 3. Payment
