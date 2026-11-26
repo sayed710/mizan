@@ -602,9 +602,11 @@ export function mapStatementPartner(db, line) {
  * line left the rest for another match, so it is not applied to that line again; other rules and manual
  * matching remain available for the remainder.
  */
-export function autoReconcile(db) {
+export function autoReconcile(db, options = null) {
   const rules = activeRules(db).filter(isAutoRule);
-  return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
+  const rawIds = Array.isArray(options) ? options : (options && typeof options === 'object' ? options.lineIds : null);
+  const idSet = rawIds == null ? null : new Set(rawIds);
+  return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check' && (!idSet || idSet.has(l.id))).reduce((acc, l) => {
     const mappedDb = mapStatementPartner(acc, read(acc, 'account.bank.statement.line', l.id));
     const line = read(mappedDb, 'account.bank.statement.line', l.id);
     for (const rule of rules) {
@@ -632,10 +634,23 @@ function guardReconcileModel(db, before, rule) {
   if (before?.company_id && rule.company_id !== before.company_id) {
     return 'Company cannot be changed once assigned';
   }
+  const priorJournals = new Set(before?.match_journal_ids ?? []);
   for (const journalId of rule.match_journal_ids ?? []) {
+    if (priorJournals.has(journalId)) continue;
     const journal = read(db, 'account.journal', journalId);
     if (!journal || (journal.company_id && journal.company_id !== rule.company_id)) {
       return 'Journals in the reconciliation model must belong to the model company';
+    }
+    if (journal.active === false || !isLiquidityJournal(journal)) {
+      return 'Journals in the reconciliation model must be bank, cash, or credit journals';
+    }
+  }
+  const priorPartners = new Set(before?.match_partner_ids ?? []);
+  for (const partnerId of rule.match_partner_ids ?? []) {
+    if (priorPartners.has(partnerId)) continue;
+    const partner = read(db, 'res.partner', partnerId);
+    if (!partner || partner.active === false || (partner.company_id && partner.company_id !== rule.company_id)) {
+      return 'Partners in the reconciliation model must belong to the model company';
     }
   }
   if (['greater', 'between'].includes(rule.match_amount) && isBlank(rule.match_amount_min)) {
@@ -754,6 +769,7 @@ export const reconcileModels = {
         relation: 'res.partner',
         label: 'Partners',
         help: 'The reconciliation model will only be applied to the selected customers/vendors.',
+        domain: (p, r) => p.active !== false && (!r?.company_id || !p.company_id || p.company_id === r.company_id),
       },
       match_amount: {
         type: 'selection',

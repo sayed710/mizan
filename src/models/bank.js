@@ -267,6 +267,39 @@ export function paymentMatchError(db, line, payment, { journal = null, companyCu
   return null;
 }
 
+/** Total amount of active (non-cancelled) payments in a batch payment. */
+export function batchLineTotal(db, batch) {
+  return (batch?.lines ?? [])
+    .filter((l) => !l.cancelled)
+    .reduce((sum, l) => {
+      const payment = l.payment_id ? read(db, 'account.payment', l.payment_id) : null;
+      return sum + (Number(payment?.amount ?? l.amount) || 0);
+    }, 0);
+}
+
+/** Posted, unmatched batch payments of the statement line's company and direction eligible for matching. */
+export function eligibleBatches(db, line) {
+  if (!line || !(Number(line.amount) > 0 || Number(line.amount) < 0)) return [];
+  const company = line.company_id ?? 1;
+  const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
+  if (journal && (journal.active === false || !isLiquidityJournal(journal))) return [];
+  if (journal?.company_id && journal.company_id !== company) return [];
+  const companyCurrency = read(db, 'res.company', company)?.currency_id;
+  const incoming = Number(line.amount) > 0;
+  const allocatedBatches = allocatedBatchIds(line);
+  return search(db, 'account.batch.payment')
+    .filter((batch) => {
+      if (batch.state !== 'posted' || allocatedBatches.has(batch.id)) return false;
+      if (batchPaymentCompany(db, batch) !== company) return false;
+      if ((batch.batch_type === 'inbound') !== incoming) return false;
+      const payments = (batch.lines ?? [])
+        .filter((l) => !l.cancelled && l.payment_id)
+        .map((l) => read(db, 'account.payment', l.payment_id));
+      return payments.length > 0 && payments.every((p) => p && !paymentMatchError(db, line, p, { journal, companyCurrency }));
+    })
+    .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id);
+}
+
 /** Posted, unmatched payments of the statement line's company and direction eligible for matching. */
 export function eligiblePayments(db, line) {
   if (!line || !(Number(line.amount) > 0 || Number(line.amount) < 0)) return [];
@@ -1067,6 +1100,10 @@ function lineGuard(db, before, after, ctx = null) {
     const batch = read(db, 'account.batch.payment', after.batch_payment_id);
     const batchCompany = batchPaymentCompany(db, batch);
     if (!batch || batchCompany !== company) return 'The linked payment belongs to another company or does not exist';
+    if (batch.state !== 'posted') return 'Select a posted batch payment';
+    if (!(Number(after.amount) > 0 || Number(after.amount) < 0) || (batch.batch_type === 'inbound') !== (Number(after.amount) > 0)) {
+      return 'Statement amount and direction must match the payment';
+    }
     for (const l of (batch.lines ?? []).filter((line) => !line.cancelled && line.payment_id)) {
       const payment = read(db, 'account.payment', l.payment_id);
       if (payment) {
@@ -1211,7 +1248,7 @@ export const bankModels = {
       statement_id: { type: 'many2one', relation: 'account.bank.statement', label: 'Statement', readonly: lineStatementLocked },
       running_balance: { type: 'monetary', label: 'Running Balance', readonly: true, sum: false, compute: computeRunningBalance },
       review_requested: { type: 'boolean', label: 'To Check', default: false },
-      state: { type: 'selection', label: 'Status', tracking: true, optional: 'hide', badge: { to_check: 'info', reconciled: 'success' }, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
+      state: { type: 'selection', label: 'Status', tracking: true, optional: 'hide', badge: { to_check: 'info', reconciled: 'success' }, options: [['to_check', 'Not Matched'], ['reconciled', 'Matched']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true, domain: (j) => isLiquidityJournal(j), readonly: lineStatementLocked },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Existing Payment' },
@@ -1268,7 +1305,7 @@ export const bankModels = {
     searchFields: ['payment_ref', 'partner_id', 'ref', 'account_number', 'narration', 'transaction_type', 'journal_id', 'bank_move_id', 'move_id'],
     defaultFilters: ['open'],
     filters: [
-      [{ id: 'open', label: 'To Reconcile', fn: (r) => r.state === 'to_check' }, { id: 'done', label: 'Reconciled', fn: (r) => r.state === 'reconciled' }],
+      [{ id: 'open', label: 'Not Matched', fn: (r) => r.state === 'to_check' }, { id: 'done', label: 'Matched', fn: (r) => r.state === 'reconciled' }],
       [{ id: 'in', label: 'Cash In', fn: (r) => r.amount > 0 }, { id: 'out', label: 'Cash Out', fn: (r) => r.amount < 0 }],
       [
         { id: 'bank', label: 'Bank', fn: (r, db) => statementJournalType(db, r) === 'bank' },

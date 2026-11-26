@@ -4072,6 +4072,20 @@ const ar = {
   'Problem Description': 'وصف المشكلة',
   'Initial balance ({amount}) does not match previous statement': 'الرصيد الافتتاحي ({amount}) لا يطابق كشف الحساب السابق',
   'Incorrect ending balance, expected {amount}': 'الرصيد النهائي غير صحيح، المتوقع {amount}',
+  More: 'المزيد',
+  'Set Account': 'تحديد الحساب',
+  Batches: 'الدفعات المجمعة',
+  'Upload bills': 'رفع الفواتير',
+  'Manage Models': 'إدارة النماذج',
+  'Auto-Reconcile': 'تسوية تلقائية',
+  'Not Matched': 'غير مطابق',
+  Matched: 'مطابق',
+  'Select a batch payment to match': 'اختر دفعة مجمعة للمطابقة',
+  'No unmatched batch payments match this transaction.': 'لا توجد دفعات مجمعة غير مطابقة تتوافق مع هذه المعاملة.',
+  '{n} payment(s)': '{n} دفعة',
+  'Vendor bill created and digitized': 'تم إنشاء فاتورة المورد ورقمنتها',
+  'Journals in the reconciliation model must be bank, cash, or credit journals': 'يجب أن تكون دفاتر اليومية في نموذج التسوية دفاتر بنكية أو نقدية أو بطاقات ائتمان',
+  'Partners in the reconciliation model must belong to the model company': 'يجب أن ينتمي الشركاء في نموذج التسوية إلى شركة النموذج',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
