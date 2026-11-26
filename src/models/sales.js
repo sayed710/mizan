@@ -397,6 +397,7 @@ export const parseAttributes = (text = '') => String(text).split(';')
 
 /** Create one product per combination of attribute values (skips combinations that already exist). */
 export function generateVariants(db, template) {
+  const templateTaxes = { taxes_id: [...(template.taxes_id?.length ? template.taxes_id : template.tax_id != null ? [template.tax_id] : [])], supplier_taxes_id: [...(template.supplier_taxes_id?.length ? template.supplier_taxes_id : template.supplier_tax_id != null ? [template.supplier_tax_id] : [])], sale_tax: template.sale_tax ?? null, purchase_tax: template.purchase_tax ?? null };
   const lines = template.attribute_line_ids ?? [];
   if (lines.length) {
     const groups = [...lines].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map((line) => {
@@ -417,6 +418,7 @@ export function generateVariants(db, template) {
         cost: template.cost, cost_method: template.cost_method, valuation: template.valuation,
         property_account_income_id: template.property_account_income_id, property_account_expense_id: template.property_account_expense_id,
         property_stock_valuation_account_id: template.property_stock_valuation_account_id, property_stock_journal: template.property_stock_journal,
+        ...templateTaxes,
         sale_ok: template.sale_ok, purchase_ok: template.purchase_ok, available_in_pos: template.available_in_pos, tag_ids: [...(template.tag_ids ?? [])],
         qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values.map((v) => v.name), variant_value_ids: ids,
       }).db;
@@ -428,7 +430,7 @@ export function generateVariants(db, template) {
     name: `${template.name} (${values.join(', ')})`,
     default_code: template.default_code ? `${template.default_code}-${String(i + 1).padStart(2, '0')}` : '',
     type: template.type, categ: template.categ, uom: template.uom, ...(template.uom_id ? { uom_id: template.uom_id } : {}), ...(template.uom_po_id ? { uom_po_id: template.uom_po_id } : {}), list_price: template.list_price, cost: template.cost,
-    qty_available: 0, variant_of: template.id, variant_values: values,
+    ...templateTaxes, qty_available: 0, variant_of: template.id, variant_values: values,
   }).db, db);
 }
 
@@ -443,6 +445,72 @@ export function openWhatsApp(db, r) {
 }
 
 const orderState = (labels) => ({ type: 'selection', label: 'Status', tracking: true, options: labels });
+
+const EXCLUDED_PRODUCT_ACCOUNT_TYPES = new Set([
+  'asset_receivable', 'liability_payable', 'asset_cash', 'liability_credit_card', 'off_balance',
+]);
+const productAccountDomain = (account, product) => (
+  account.active !== false
+  && !EXCLUDED_PRODUCT_ACCOUNT_TYPES.has(account.account_type)
+  && (!account.company_id || !product?.company_id || account.company_id === product.company_id)
+);
+const productTaxDomain = (use) => (tax, product) => (
+  tax.active !== false
+  && tax.type_tax_use === use
+  && (!tax.company_id || !product?.company_id || tax.company_id === product.company_id)
+);
+
+function normalizeProductTaxVals(vals) {
+  if (!vals || typeof vals !== 'object') return vals;
+  const next = { ...vals };
+  if (('taxes_id' in vals || 'tax_id' in vals) && !('sale_tax' in vals)) next.sale_tax = null;
+  if (('supplier_taxes_id' in vals || 'supplier_tax_id' in vals) && !('purchase_tax' in vals)) next.purchase_tax = null;
+  if ('taxes_id' in next && !('tax_id' in next)) {
+    next.tax_id = next.taxes_id?.[0] ?? null;
+  } else if ('tax_id' in next && !('taxes_id' in next)) {
+    next.taxes_id = next.tax_id != null ? [next.tax_id] : [];
+  } else if ('sale_tax' in next && !('tax_id' in next) && !('taxes_id' in next)) {
+    next.tax_id = null;
+    next.taxes_id = [];
+  }
+  if ('supplier_taxes_id' in next && !('supplier_tax_id' in next)) {
+    next.supplier_tax_id = next.supplier_taxes_id?.[0] ?? null;
+  } else if ('supplier_tax_id' in next && !('supplier_taxes_id' in next)) {
+    next.supplier_taxes_id = next.supplier_tax_id != null ? [next.supplier_tax_id] : [];
+  } else if ('purchase_tax' in next && !('supplier_tax_id' in next) && !('supplier_taxes_id' in next)) {
+    next.supplier_tax_id = null;
+    next.supplier_taxes_id = [];
+  }
+  return next;
+}
+
+/** Default sales/purchase taxes from company settings (omitted for combo products, as in Odoo 20). */
+export function defaultProductTaxes(db, vals) {
+  if (vals?.type === 'combo') {
+    return { purchase_ok: false, taxes_id: [], tax_id: null, supplier_taxes_id: [], supplier_tax_id: null };
+  }
+  if (!db) return { taxes_id: [], tax_id: null, supplier_taxes_id: [], supplier_tax_id: null };
+  const activeId = db.settings?.current_company_id ?? getActiveCompany() ?? 1;
+  const companies = [read(db, 'res.company', vals?.company_id ?? activeId)].filter(Boolean);
+  const collect = (key) => {
+    const ids = [];
+    for (const company of companies) {
+      const id = company?.[key];
+      if (!id || ids.includes(id)) continue;
+      const tax = read(db, 'account.tax', id);
+      if (tax && tax.active !== false) ids.push(id);
+    }
+    return ids;
+  };
+  const taxes_id = collect('account_sale_tax_id');
+  const supplier_taxes_id = collect('account_purchase_tax_id');
+  return {
+    taxes_id,
+    tax_id: taxes_id[0] ?? null,
+    supplier_taxes_id,
+    supplier_tax_id: supplier_taxes_id[0] ?? null,
+  };
+}
 
 export const salesModels = {
   'stock.picking': {
@@ -615,26 +683,43 @@ export const salesModels = {
     fields: {
       name: { type: 'char', label: 'Product Name', required: true },
       default_code: { type: 'char', label: 'Internal Reference', optional: 'show' },
-      barcode: { type: 'char', label: 'Barcode', optional: 'hide' },
+      barcode: { type: 'char', label: 'Barcode', optional: 'hide', hideWhen: (r) => ['service', 'combo'].includes(r?.type) },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide', placeholder: 'Visible to all' },
       is_favorite: { type: 'boolean', label: 'Favorite', widget: 'boolean_favorite' },
       sale_ok: { type: 'boolean', label: 'Can be Sold' },
-      purchase_ok: { type: 'boolean', label: 'Can be Purchased' },
+      purchase_ok: { type: 'boolean', label: 'Can be Purchased', hideWhen: (r) => r?.type === 'combo' },
       available_in_pos: { type: 'boolean', label: 'Available in POS' },
       can_be_expensed: { type: 'boolean', label: 'Can be Expensed' },
       invoice_policy: { type: 'selection', label: 'Invoicing Policy', options: [['order', 'Ordered quantities'], ['delivery', 'Delivered quantities']] },
-      sale_tax: { type: 'float', label: 'Sales Tax %' },
-      purchase_tax: { type: 'float', label: 'Purchase Tax %' },
-      tax_id: { type: 'many2one', relation: 'account.tax', label: 'Sales Taxes' },
-      supplier_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Purchase Taxes' },
-      taxes_id: { type: 'many2many', relation: 'account.tax', label: 'Sales Taxes', widget: 'many2many_tags' },
-      supplier_taxes_id: { type: 'many2many', relation: 'account.tax', label: 'Purchase Taxes', widget: 'many2many_tags' },
-      property_account_income_id: { type: 'many2one', relation: 'account.account', label: 'Income Account' },
-      property_account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
+      sale_tax: { type: 'float', label: 'Sales Tax %', hidden: true },
+      purchase_tax: { type: 'float', label: 'Purchase Tax %', hidden: true },
+      tax_id: { type: 'many2one', relation: 'account.tax', label: 'Sales Taxes', hidden: true },
+      supplier_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Purchase Taxes', hidden: true },
+      taxes_id: {
+        type: 'many2many',
+        relation: 'account.tax',
+        label: 'Sales Taxes',
+        widget: 'many2many_tags',
+        domain: productTaxDomain('sale'),
+        valueFallback: (p) => (p.tax_id != null ? [p.tax_id] : []),
+        hideWhen: (r) => r?.type === 'combo',
+      },
+      supplier_taxes_id: {
+        type: 'many2many',
+        relation: 'account.tax',
+        label: 'Purchase Taxes',
+        widget: 'many2many_tags',
+        domain: productTaxDomain('purchase'),
+        valueFallback: (p) => (p.supplier_tax_id != null ? [p.supplier_tax_id] : []),
+        hideWhen: (r) => !r?.purchase_ok || r?.type === 'combo',
+      },
+      property_account_income_id: { type: 'many2one', relation: 'account.account', label: 'Income Account', placeholder: 'From Category', domain: productAccountDomain },
+      property_account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account', placeholder: 'From Category', domain: productAccountDomain },
       description: { type: 'text', label: 'Internal Notes' },
-      type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service'], ['combo', 'Combo']] },
-      combo_ids: { type: 'many2many', relation: 'product.combo', label: 'Combo Choices', widget: 'many2many_tags', hideWhen: (r) => r.type !== 'combo' },
+      type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service'], ['combo', 'Combo']], optional: 'hide' },
+      combo_ids: { type: 'many2many', relation: 'product.combo', label: 'Combo Choices', widget: 'many2many_tags', hideWhen: (r) => r?.type !== 'combo' },
       is_storable: { type: 'boolean', label: 'Track Inventory' },
-      categ: { type: 'char', label: 'Category' },
+      categ: { type: 'char', label: 'Category', optional: 'hide' },
       pos_categ_ids: { type: 'many2many', relation: 'pos.category', label: 'Point of Sale Categories' },
       route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' },
       weight: { type: 'float', label: 'Weight (kg)' },
@@ -650,42 +735,61 @@ export const salesModels = {
       variant_of: { type: 'many2one', relation: 'product', label: 'Variant of', readonly: true },
       variant_values: { type: 'tags', label: 'Variant Values', readonly: true },
       list_price: { type: 'monetary', label: 'Sales Price', optional: 'show' },
-      cost: { type: 'monetary', label: 'Cost', optional: 'show' },
+      cost: { type: 'monetary', label: 'Cost', optional: 'show', hideWhen: (r) => r?.type === 'combo' },
       qty_available: { type: 'float', label: 'On Hand', readonly: true, optional: 'show' },
       reorder_min: { type: 'float', label: 'Min. Quantity' },
       reorder_max: { type: 'float', label: 'Max. Quantity' },
       below_min: { type: 'boolean', label: 'Below Minimum', compute: (r, db) => (db.records['stock.warehouse.orderpoint'] ?? []).some((op) => op.product_id === r.id && op.active !== false && (op.qty_forecast < op.product_min_qty || Number(r.qty_available) < Number(op.product_min_qty))) },
       website_published: { type: 'boolean', label: 'Sold Online' },
     },
+    prepareCreate: (db, vals) => ({ db, vals: normalizeProductTaxVals(vals) }),
+    prepareWrite: (db, vals) => ({ db, vals: normalizeProductTaxVals(vals) }),
+    createDefaults: (db, vals) => vals?.type === 'combo' ? { purchase_ok: false } : defaultProductTaxes(db, vals),
+    onchange: (r, key) => {
+      if (key === 'type' && r.type === 'combo') {
+        return { purchase_ok: false, taxes_id: [], tax_id: null, supplier_taxes_id: [], supplier_tax_id: null, sale_tax: null, purchase_tax: null };
+      }
+      if (key === 'taxes_id') return { tax_id: r.taxes_id?.[0] ?? null };
+      if (key === 'tax_id') return { taxes_id: r.tax_id != null ? [r.tax_id] : [] };
+      if (key === 'supplier_taxes_id') return { supplier_tax_id: r.supplier_taxes_id?.[0] ?? null };
+      if (key === 'supplier_tax_id') return { supplier_taxes_id: r.supplier_tax_id != null ? [r.supplier_tax_id] : [] };
+      return {};
+    },
     guard: (db, before, r) => {
-      if (!['goods', 'service', 'combo'].includes(r.type)) return 'Select a valid product type';
       if (r.type === 'combo' && (r.is_storable || (r.tracking && r.tracking !== 'none'))) return 'A combo product cannot be stockable or tracked';
       if (r.type === 'combo' && !r.combo_ids?.length) return 'A combo product must contain at least 1 combo choice';
       if (r.type === 'combo' && (r.combo_ids ?? []).some((id) => !read(db, 'product.combo', id))) return 'Select existing combo choices';
       if (r.type === 'combo' && r.sale_ok !== false && r.combo_ids.some((id) => read(db, 'product.combo', id).combo_item_ids.some((item) => read(db, 'product', item.product_id)?.sale_ok === false))) return 'A sellable combo product can only contain sellable products';
+      if (r.type === 'combo') {
+        if (r.purchase_ok) return 'Combo products cannot be purchased';
+        if (r.taxes_id?.length || r.tax_id != null || r.supplier_taxes_id?.length || r.supplier_tax_id != null || Number(r.sale_tax) || Number(r.purchase_tax)) {
+          return 'Combo products cannot have taxes';
+        }
+        if (r.attribute_line_ids?.length || parseAttributes(r.attributes).length) {
+          return 'Combo products cannot have attributes';
+        }
+      }
+      for (const id of [...(r.taxes_id ?? []), r.tax_id, ...(r.supplier_taxes_id ?? []), r.supplier_tax_id]) {
+        if (id == null || id === '') continue;
+        const tax = read(db, 'account.tax', id);
+        if (!tax) return 'Select an existing tax';
+        if (r.company_id && tax.company_id && tax.company_id !== r.company_id) return 'Tax belongs to another company';
+      }
       if (!r.uom_po_id) return null;
       const stock = r.uom_id ? read(db, 'uom.uom', r.uom_id) : uomForLegacy(db, r.uom ?? 'unit');
       const purchase = read(db, 'uom.uom', r.uom_po_id);
       return !stock || !purchase ? 'Select existing stock and purchase units of measure'
         : stock.category_id !== purchase.category_id ? 'Stock and purchase units must belong to the same category' : null;
     },
-    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', pos_categ_ids: [], combo_ids: [] }),
-    createDefaults: (db, vals) => {
-      const company = read(db, 'res.company', vals.company_id ?? getActiveCompany() ?? 1);
-      return { ...(vals.tax_id != null || vals.sale_tax != null ? {} : { taxes_id: company?.account_sale_tax_id ? [company.account_sale_tax_id] : [] }), ...(vals.supplier_tax_id != null || vals.purchase_tax != null ? {} : { supplier_taxes_id: company?.account_purchase_tax_id ? [company.account_purchase_tax_id] : [] }), ...(vals.type === 'combo' ? { purchase_ok: false } : {}) };
-    },
-    prepareWrite: (db, vals) => ({ db, vals: { ...vals,
-      ...('taxes_id' in vals ? { tax_id: null, sale_tax: null } : {}),
-      ...('supplier_taxes_id' in vals ? { supplier_tax_id: null, purchase_tax: null } : {}),
-    } }),
+    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', pos_categ_ids: [], taxes_id: [], supplier_taxes_id: [], combo_ids: [] }),
     filters: [
-      [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }],
+      [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }, { id: 'combo', label: 'Combo', fn: (r) => r.type === 'combo' }],
       [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && Boolean(r.below_min) }],
       [{ id: 'sale_ok', label: 'Can be Sold', fn: (r) => r.sale_ok !== false }, { id: 'purchase_ok', label: 'Can be Purchased', fn: (r) => r.purchase_ok !== false }, { id: 'pos', label: 'Available in POS', fn: (r) => r.available_in_pos }],
     ],
     groupBys: ['type', 'categ'],
     kanban: { title: 'name', lines: ['list_price', 'qty_available'], avatar: true },
-    list: ['is_favorite', 'name', 'default_code', 'tag_ids', 'barcode', 'list_price', 'taxes_id', 'cost', 'supplier_taxes_id', 'qty_available', 'categ', 'type', 'uom_id'],
+    list: ['is_favorite', 'name', 'default_code', 'barcode', 'company_id', 'list_price', 'taxes_id', 'cost', 'supplier_taxes_id', 'qty_available', 'categ', 'type', 'uom_id'],
     graph: { groupBy: 'categ', measure: 'qty_available' },
     pivot: { row: 'categ', col: 'type', measure: 'qty_available' },
     form: {
@@ -713,8 +817,8 @@ export const salesModels = {
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
         { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' },
         { label: 'Reordering Rules', model: 'stock.warehouse.orderpoint', field: 'product_id', target: 'inventory/replenishment' }],
-      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'pos_categ_ids', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'combo_ids', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'volume', 'tracking', 'landed_cost_ok'], ['list_price', 'taxes_id', 'cost', 'supplier_taxes_id', 'qty_available', 'route', 'route_id'], ['attributes', 'variant_of', 'variant_values']],
-      tabs: [{ label: 'Sales', when: (r) => r.sale_ok !== false, fields: ['invoice_policy'] }, { label: 'Purchase', when: (r) => r.purchase_ok !== false && r.type !== 'combo', fields: ['vendor_id'] }, { label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'pos_categ_ids', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'combo_ids', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'volume', 'tracking', 'landed_cost_ok', 'company_id'], ['list_price', 'taxes_id', 'cost', 'supplier_taxes_id', 'invoice_policy', 'qty_available', 'route', 'route_id', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+      tabs: [{ label: 'Accounting', groups: [{ title: 'Cost and Revenue', fields: ['property_account_income_id', 'property_account_expense_id'] }] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },
   },
@@ -865,6 +969,8 @@ export const salesModels = {
           when: (r) => ['draft', 'sent'].includes(r.state),
           // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
           run: (db, r) => {
+            const comboErr = comboOrderError(db, r);
+            if (comboErr) throw new Error(comboErr);
             const lines = (r.order_line ?? []).map((l) => {
               const product = read(db, 'product', l.product_id);
               return product?.type === 'goods' ? { ...l, procurement_route: routeAction(db, product, l) } : l;
@@ -922,7 +1028,7 @@ export const salesModels = {
       origin: { type: 'char', label: 'Source Document', readonly: true },
       dropship_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Dropship Address', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
-      order_line: orderLines('Products', 'cost'),
+      order_line: { ...orderLines('Products', 'cost'), fields: { ...orderLines('Products', 'cost').fields, product_id: { ...orderLines('Products', 'cost').fields.product_id, domain: (p) => p.type !== 'combo' } } },
       ...amountFields('order_line'),
     },
     defaults: (id) => ({ name: 'P' + pad(id), date_order: today(), date_planned: addDays(today(), 7), state: 'draft', order_line: [], receipt_done: false }),
@@ -948,6 +1054,7 @@ export const salesModels = {
           label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),
           // Dropship orders go vendor → customer directly: no receipt into our stock.
           run: (db, r) => {
+            if ((r.order_line ?? []).some((l) => read(db, 'product', l.product_id)?.type === 'combo')) throw new Error('Combo products cannot be purchased');
             const confirmed = write(incrementPartnerRank(db, r.partner_id, 'supplier_rank'), 'purchase.order', r.id, { state: 'purchase' });
             if (!r.dropship_partner_id) return { db: createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
             const moves = r.order_line.map((l, i) => ({ product_id: l.product_id, qty: toStock(confirmed, l, Number(l.qty)), so_line: l.so_line, po_line: i }));

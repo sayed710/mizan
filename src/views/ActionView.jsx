@@ -123,7 +123,8 @@ export function ActionView({ leaf, base, params }) {
       listCols.map((f) => colLabel(def.fields, f, listLabels)),
       ...rows.map((r) => listCols.map((f) => {
         const field = listFields?.[f] ? { ...def.fields[f], ...listFields[f] } : def.fields[f];
-        return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f], r);
+        const value = field.valueFallback && !r[f]?.length ? field.valueFallback(r) : r[f];
+        return field.type === 'many2one' ? value ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof value === 'number' && Number.isFinite(value) ? value : display(db, field, value, r);
       })),
     ];
   };

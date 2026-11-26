@@ -1,5 +1,5 @@
 // Taxes (percent/fixed, price-included, cash basis) and fiscal positions that remap taxes and accounts per partner.
-import { nextSequence, read, search } from '../orm.js';
+import { getActiveCompany, nextSequence, read, search } from '../orm.js';
 import { allocateCents, roundCurrency } from '../money.js';
 
 import { configuredAccount } from './configured-account.js';
@@ -427,14 +427,23 @@ export function mapTaxIds(db, sourceIds, fpId, companyId = null) {
 
 /** Line tax values for a product (sales or purchase side) after the fiscal position. */
 export function productTax(db, product, side, fpId, companyId = null) {
-  const own = product?.[side === 'purchase' ? 'supplier_tax_id' : 'tax_id'];
-  if (own != null) return mapTaxIds(db, [own], fpId, companyId);
-  const percent = product?.[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];
-  if (percent != null) return { ...taxSnapshot(null), tax: Number(percent) || 0 };
-  const ids = product?.[side === 'purchase' ? 'supplier_taxes_id' : 'taxes_id'];
-  if (ids?.length) return mapTaxIds(db, ids, fpId, companyId);
+  if (!product || product.type === 'combo') return null;
+  const listKey = side === 'purchase' ? 'supplier_taxes_id' : 'taxes_id';
+  const scalarKey = side === 'purchase' ? 'supplier_tax_id' : 'tax_id';
+  const rawIds = product[scalarKey] === null
+    ? []
+    : (product[listKey]?.length ? product[listKey] : (product[scalarKey] != null ? [product[scalarKey]] : []));
+  if (rawIds.length) {
+    const activeId = companyId ?? db?.settings?.current_company_id ?? getActiveCompany() ?? 1;
+    const ids = rawIds.filter((id) => {
+      const tax = read(db, 'account.tax', id);
+      return tax && tax.active !== false && (!tax.company_id || tax.company_id === activeId);
+    });
+    if (ids.length) return mapTaxIds(db, ids, fpId, activeId);
+  }
   // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
-  return null;
+  const percent = product[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];
+  return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
 }
 
 /** Line tax values for an account's default taxes on `side`, mapped through `fpId`. */

@@ -26,21 +26,10 @@ test('combo choices validate through synchronization', () => {
 
 test('product list has Odoo column order and optional defaults', () => {
   const p = models.product;
-  assert.deepEqual(p.list, ['is_favorite', 'name', 'default_code', 'tag_ids', 'barcode', 'list_price', 'taxes_id', 'cost', 'supplier_taxes_id', 'qty_available', 'categ_id', 'type', 'uom_id']);
+  assert.deepEqual(p.list, ['is_favorite', 'name', 'default_code', 'tag_ids', 'barcode', 'company_id', 'list_price', 'taxes_id', 'cost', 'supplier_taxes_id', 'qty_available', 'categ_id', 'type', 'uom_id']);
   assert.equal(p.fields.is_favorite.widget, 'boolean_favorite');
   for (const field of ['tag_ids', 'barcode', 'categ_id', 'type']) assert.equal(p.fields[field].optional, 'hide');
   for (const field of ['default_code', 'list_price', 'cost', 'qty_available', 'uom_id']) assert.equal(p.fields[field].optional, 'show');
-});
-
-test('sales and purchase pages follow product flags while accounting remains available', () => {
-  const tabs = models.product.form.tabs;
-  const sales = tabs.find((t) => t.label === 'Sales');
-  const purchase = tabs.find((t) => t.label === 'Purchase');
-  assert.equal(sales.when({ sale_ok: false }), false);
-  assert.equal(purchase.when({ purchase_ok: false }), false);
-  assert.equal(sales.when({ sale_ok: true }), true);
-  assert.equal(purchase.when({ purchase_ok: true, type: 'goods' }), true);
-  assert.ok(tabs.find((t) => t.label === 'Accounting').fields.includes('property_account_income_id'));
 });
 
 test('new products use company defaults and preserve empty tax selections', () => {

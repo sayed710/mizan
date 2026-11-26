@@ -215,7 +215,8 @@ test('pcl: updateSettings throws user-readable error when lock dates are passed'
 });
 
 test('pcl: sync security - non-admin cannot alter lock dates or audit trail on res.company', () => {
-  const db = seed();
+  const base = seed();
+  const db = { ...base, records: { ...base.records, 'account.bank.statement.line': [] } };
   const comp = read(db, 'res.company', 1);
 
   for (const field of ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail']) {

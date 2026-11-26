@@ -139,15 +139,20 @@ export const productConfigModels = {
   'product.tag': { label: 'Product Tags', fields: { name: { type: 'char', label: 'Name', required: true }, sequence: { type: 'integer', label: 'Sequence' }, color: { type: 'integer', label: 'Color' }, visible_to_customers: { type: 'boolean', label: 'Visible to Customers' } }, defaults: () => ({ sequence: 10, color: 0, visible_to_customers: false }), list: ['name', 'sequence', 'color', 'visible_to_customers'], form: { title: 'name', groups: [['sequence', 'color', 'visible_to_customers']] } },
   get product() {
     const base = ecommerceModels.product;
-    return { ...base, fields: { ...base.fields, type: { ...base.fields.type, optional: 'hide' }, categ_id: { ...relation('product.category', 'Product Category'), optional: 'hide' }, property_stock_valuation_account_id: account('Stock Valuation Account'), property_stock_journal: relation('account.journal', 'Stock Journal'), tag_ids: { ...many('product.tag', 'Product Tags'), widget: 'many2many_tags', optional: 'hide' }, attribute_line_ids: { type: 'one2many', label: 'Attribute Lines', fields: lineFields, newLine: () => ({ attribute_id: null, value_ids: [], sequence: 10 }), onchange: (line, key) => key === 'attribute_id' ? { ...line, value_ids: [] } : line }, variant_value_ids: { ...many('product.attribute.value', 'Variant Values'), readonly: true } },
+    return { ...base, fields: { ...base.fields, categ_id: { ...relation('product.category', 'Product Category'), optional: 'hide' }, property_stock_valuation_account_id: account('Stock Valuation Account'), property_stock_journal: relation('account.journal', 'Stock Journal'), tag_ids: { ...many('product.tag', 'Product Tags'), widget: 'many2many_tags', optional: 'hide' }, attribute_line_ids: { type: 'one2many', label: 'Attribute Lines', fields: lineFields, newLine: () => ({ attribute_id: null, value_ids: [], sequence: 10 }), onchange: (line, key) => key === 'attribute_id' ? { ...line, value_ids: [] } : line }, variant_value_ids: { ...many('product.attribute.value', 'Variant Values'), readonly: true } },
       defaults: (id) => ({ ...base.defaults(id), tag_ids: [], attribute_line_ids: [] }),
-      createDefaults: (db, vals) => ({ ...base.createDefaults?.(db, vals), ...(vals.categ_id ? { cost_method: null, valuation: null } : {}) }),
-      onchange: (r, key, db) => ({ ...base.onchange?.(r, key, db), ...(key === 'categ_id' ? { cost_method: null, valuation: null } : {}), ...(key === 'type' && r.type === 'combo' ? { purchase_ok: false } : {}) }),
+      createDefaults: (db, vals) => ({ ...base.createDefaults?.(db, vals), ...(vals?.categ_id ? { cost_method: null, valuation: null } : {}) }),
+      onchange: (r, key, db) => ({ ...base.onchange?.(r, key, db), ...(key === 'categ_id' ? { cost_method: null, valuation: null } : {}) }),
       guard: (db, before, r) => base.guard?.(db, before, r) || ((r.attribute_line_ids ?? []).some((l) => !read(db, 'product.attribute', l.attribute_id) || !l.value_ids?.length || l.value_ids.some((id) => read(db, 'product.attribute.value', id)?.attribute_id !== l.attribute_id)) ? 'Select values belonging to each attribute' : null),
       filters: [...base.filters, [{ id: 'tagged', label: 'Tagged Products', fn: (r) => !!r.tag_ids?.length }]],
-      list: base.list.map((f) => f === 'categ' ? 'categ_id' : f), groupBys: base.groupBys.map((f) => f === 'categ' ? 'categ_id' : f),
+      list: (() => {
+        const cols = base.list.map((f) => (f === 'categ' ? 'categ_id' : f));
+        const ix = cols.indexOf('default_code');
+        return ix >= 0 ? [...cols.slice(0, ix + 1), 'tag_ids', ...cols.slice(ix + 1)] : [...cols, 'tag_ids'];
+      })(),
+      groupBys: base.groupBys.map((f) => f === 'categ' ? 'categ_id' : f),
       graph: { ...base.graph, groupBy: 'categ_id' }, pivot: { ...base.pivot, row: 'categ_id' },
-      form: { ...base.form, groups: base.form.groups.map((g) => g.map((f) => f === 'categ' ? 'categ_id' : f)).concat([['tag_ids', 'property_stock_valuation_account_id', 'property_stock_journal']]), tabs: [...base.form.tabs, { label: 'Attributes & Variants', fields: ['attribute_line_ids', 'variant_value_ids'] }] },
+      form: { ...base.form, groups: base.form.groups.map((g) => g.map((f) => f === 'categ' ? 'categ_id' : f)).concat([['tag_ids', 'property_stock_valuation_account_id', 'property_stock_journal']]), tabs: [...base.form.tabs, { label: 'Attributes & Variants', fields: ['attribute_line_ids', 'variant_value_ids'], when: (r) => r?.type !== 'combo' }] },
     };
   },
 };
