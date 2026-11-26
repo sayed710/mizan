@@ -3530,7 +3530,7 @@ const ar = {
   'Borne by Debtor': 'يتحملها الدافع',
   'Following Service Level': 'حسب مستوى الخدمة',
   'Only draft batches can be deleted.': 'يمكن حذف الدفعات المجمعة المسودة فقط.',
-  'Invalid charge bearer': 'متحمل الرسوم غير صالح',
+  'The charge bearer of a posted payment cannot be changed.': 'لا يمكن تغيير متحمل الرسوم لدفعة مُرحّلة.',
   'Please define a payment method line on your payment.': 'يرجى تحديد بند طريقة الدفع في الدفعة.',
   'Outstanding Receipts Account': 'حساب المقبوضات المعلقة',
   'Outstanding Payments Account': 'حساب المدفوعات المعلقة',

@@ -2120,6 +2120,9 @@ export const payModels = {
     label: 'Payments',
     auditDelete: true,
     guard: (db, before, after, ctx) => {
+      if (before?.state === 'posted' && (before.iso20022_charge_bearer ?? null) !== (after.iso20022_charge_bearer ?? null)) {
+        return 'The charge bearer of a posted payment cannot be changed.';
+      }
       if (after.check_number != null && (!before || before.check_number !== after.check_number) && !paymentPaysByCheck(db, after)) {
         return 'Payments not paying by check cannot have a check number';
       }

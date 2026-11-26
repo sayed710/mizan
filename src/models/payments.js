@@ -9,7 +9,7 @@ import { journalMethodLines } from './paymentmethod.js';
 import { customerPaymentView, vendorPaymentView, payModels, paymentPaysByCheck, printBatchChecks, nextCheckNumber, postPayments, printPaymentsChecks, printPaymentReceipts, validatePaymentsListAction, printChecksListAction, printPaymentReceiptListAction } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
-import { buildSepaXml, CHARGE_BEARERS, DEFAULT_CHARGE_BEARER, DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
+import { buildSepaXml, DEFAULT_SEPA_PAIN_VERSION } from './sepa.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
@@ -346,7 +346,7 @@ export function generateSepaFile(db, batch, createdAt = new Date().toISOString()
     if (!payment.partner_bank_id) throw new Error('The selected bank account is invalid or inactive');
     resolveAndValidateRecipientBank(db, payment.partner_id, payment.partner_bank_id, { companyId: company?.id ?? payment.company_id ?? 1 });
     const recipient = read(db, 'res.partner.bank', payment.partner_bank_id);
-    return { id: String(payment.id), amount: payment.amount, name: read(db, 'res.partner', payment.partner_id)?.name, iban: recipient?.account_number, memo: payment.memo, chargeBearer: payment.iso20022_charge_bearer ?? batch.iso20022_charge_bearer ?? DEFAULT_CHARGE_BEARER };
+    return { id: String(payment.id), amount: payment.amount, name: read(db, 'res.partner', payment.partner_id)?.name, iban: recipient?.account_number, memo: payment.memo };
   });
   return {
     name: `sepa-${batch.id}.xml`,
@@ -377,7 +377,7 @@ function validBatchLinesTransition(beforeLines = [], afterLines = []) {
 function sepaBatchGuard(db, before, after) {
   if (before?.state === 'posted' && before.sepa_file) {
     if (before.sepa_file !== after.sepa_file) return 'The SEPA file cannot be changed after validation';
-    if (['state', 'name', 'batch_type', 'journal_id', 'company_id', 'date', 'payment_method_id', 'iso20022_charge_bearer'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return 'A validated SEPA batch cannot be changed';
+    if (['state', 'name', 'batch_type', 'journal_id', 'company_id', 'date', 'payment_method_id'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null))) return 'A validated SEPA batch cannot be changed';
     if (!validBatchLinesTransition(before.lines, after.lines)) return 'A validated SEPA batch cannot be changed';
 
     if (after.replacement_date !== before.replacement_date) {
@@ -535,7 +535,6 @@ export const paymentModels = {
     },
     fields: {
       name: { type: 'char', label: 'Reference', required: true },
-      iso20022_charge_bearer: { type: 'selection', label: 'Charge Bearer', options: CHARGE_BEARERS },
       sepa_file: { type: 'text', label: 'SEPA file', readonly: true },
       sepa_file_eligible: {
         type: 'boolean',
@@ -624,7 +623,7 @@ export const paymentModels = {
         return currency.error ? null : roundCurrency((r.lines ?? []).reduce((sum, line) => sum + (Number(line.amount) || 0), 0), currency.currency);
       } },
     },
-    defaults: () => ({ name: 'New', date: today(), state: 'draft', lines: [], iso20022_charge_bearer: DEFAULT_CHARGE_BEARER }),
+    defaults: () => ({ name: 'New', date: today(), state: 'draft', lines: [] }),
     onchange: (r, key, db) => {
       if ((key === 'journal_id' || key === 'batch_type') && r.payment_method_id && db) {
         if (resolveBatchMethodLine(db, r).error) return { payment_method_id: null };
@@ -718,7 +717,7 @@ export const paymentModels = {
       title: 'name',
       groups: (r) => [
         ['batch_type'],
-        ['date', 'journal_id', 'payment_method_id', 'iso20022_charge_bearer', ...((r?.lines ?? []).some((l) => l.cancelled) ? ['replacement_date'] : [])],
+        ['date', 'journal_id', 'payment_method_id', ...((r?.lines ?? []).some((l) => l.cancelled) ? ['replacement_date'] : [])],
         ['currency_id', 'amount_total', 'currency_warning'],
       ],
       tabs: [{ label: 'Payment Lines', fields: ['lines'] }],
