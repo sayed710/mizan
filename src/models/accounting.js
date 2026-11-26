@@ -5,7 +5,7 @@ import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { accountingDateForPost, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
@@ -3932,6 +3932,24 @@ export const accountingModels = {
                 ? 'Customer invoices and credit notes only accept sale taxes'
                 : 'Vendor bills and refunds only accept purchase taxes';
             }
+          }
+        }
+        const linesChanged = !before || JSON.stringify(before.invoice_line_ids ?? []) !== JSON.stringify(after.invoice_line_ids ?? []);
+        const postingTransition = after.state === 'posted' && (before?.state !== 'posted' || linesChanged);
+        const journal = postingTransition ? resolveDocumentJournal(db, after) : null;
+        for (const line of after.invoice_line_ids ?? []) {
+          if (isSectionOrNote(line)) {
+            if (line.deferred_start_date || line.deferred_end_date) return 'Set valid deferred start and end dates';
+            continue;
+          }
+          // Odoo _check_deferred_dates: a start date needs an end date on or after it on every save; an end date alone may wait for posting.
+          const { deferred_start_date: start, deferred_end_date: end } = line;
+          if ((start && (!validDate(start) || !end)) || (end && !validDate(end)) || (start && end && start > end)) {
+            return 'Set valid deferred start and end dates';
+          }
+          if (journal) {
+            const res = invoiceLineAccountResult(db, after, line, journal);
+            if (res.deferred && res.error) return res.error;
           }
         }
       }

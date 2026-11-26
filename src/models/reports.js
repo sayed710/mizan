@@ -451,14 +451,15 @@ export function deferredReport(db, { from, to, company_id } = {}, kind) {
     const previous = from ? new Date(Date.parse(from + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10) : null;
     const total = schedule.board.reduce((sum, line) => {
       if (line.cancelled) return sum;
+      const amt = Number(line.amount) || 0;
       const credited = lineCreditAdjustmentAmount(db, schedule, line, to);
-      return sum + Math.max(0, (Number(line.amount) || 0) - credited);
+      return sum + (amt < 0 ? amt + credited : Math.max(0, amt - credited));
     }, 0);
     const through = (date) => date ? schedule.board.reduce((sum, line, index) => {
       if (line.cancelled) return sum;
       const target = recognitionTargetThroughDate(schedule, index, date, method, currency);
       const credited = lineCreditAdjustmentAmount(db, schedule, line, to && date > to ? to : date);
-      return sum + Math.max(0, target - credited);
+      return sum + (target < 0 ? target + credited : Math.max(0, target - credited));
     }, 0) : 0;
     const before = through(previous);
     const untilEnd = to ? through(to) : total;
