@@ -322,10 +322,10 @@ function descendantCompanyIds(db, companyId) {
   return ids;
 }
 
-/** Validate Odoo 20 `_validate_locks` preconditions when setting `hard_lock_date`. */
-function hardLockValidationError(db, companyId, hardLockDate) {
+/** Validate Odoo 20 draft and unreconciled statement line lock preconditions. */
+function hardLockValidationError(db, companyId, hardLockDate, fiscalLockDate) {
   const companyIds = descendantCompanyIds(db, companyId);
-  const hasDraftEntries = (db.records?.['account.move'] ?? []).some((m) => m.active !== false
+  const hasDraftEntries = hardLockDate && (db.records?.['account.move'] ?? []).some((m) => m.active !== false
     && m.state === 'draft'
     && companyIds.has(m.company_id ?? 1)
     && moveDate(m) <= hardLockDate);
@@ -333,13 +333,13 @@ function hardLockValidationError(db, companyId, hardLockDate) {
     return 'There are still draft entries in the period you want to hard lock. You should either post or delete them.';
   }
   const hasUnreconciledBank = (db.records?.['account.bank.statement.line'] ?? []).some((l) => {
-    if (l.active === false || l.state === 'reconciled') return false;
+    if (l.active === false || l.state === 'reconciled' || l.is_reconciled === true) return false;
     if (!companyIds.has(l.company_id ?? 1)) return false;
-    if (!l.date || l.date > hardLockDate) return false;
+    if (!fiscalLockDate || !l.date || l.date > fiscalLockDate) return false;
     const moveId = l.bank_move_id || l.move_id;
-    if (!moveId) return true;
+    if (!moveId) return false;
     const move = read(db, 'account.move', moveId);
-    return !move || move.state === 'draft' || move.state === 'posted';
+    return move?.state === 'draft' || move?.state === 'posted';
   });
   if (hasUnreconciledBank) {
     return 'There are still unreconciled bank transactions in the period you want to lock. You should either reconcile or delete them.';
@@ -395,8 +395,10 @@ function companyGuard(db, before, r, ctx) {
   ))) {
     return 'Only administrators can change lock dates or the audit trail or other company accounting settings';
   }
-  if (r.hard_lock_date && (before?.hard_lock_date || null) !== r.hard_lock_date) {
-    const err = hardLockValidationError(db, r.id, r.hard_lock_date);
+  const changedHardLock = (before?.hard_lock_date || null) !== (r.hard_lock_date || null) ? r.hard_lock_date : null;
+  const changedGlobalLock = (before?.lock_date || null) !== (r.lock_date || null) ? r.lock_date : null;
+  if (changedHardLock || changedGlobalLock) {
+    const err = hardLockValidationError(db, r.id, changedHardLock, [changedHardLock, changedGlobalLock].filter(Boolean).sort().at(-1));
     if (err) return err;
   }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);

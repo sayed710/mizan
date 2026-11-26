@@ -122,8 +122,9 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   const companyRec = read(db, 'res.company', company);
   const allJournals = search(db, 'account.journal', { includeArchived: true });
   const journalById = new Map(allJournals.map((j) => [j.id, j]));
-  const restrictedJournals = allJournals.filter((j) => Boolean(j.restrict_mode_hash_table));
-  const restrictedIds = new Set(restrictedJournals.map((j) => j.id));
+  // The wizard asks Odoo for chains with force_hash=True, including journals without hash-on-post.
+  const restrictedJournals = allJournals;
+  const restrictedIds = new Set(allJournals.map((j) => j.id));
 
   const allMoves = (db.records['account.move'] ?? []).filter((m) => {
     if ((m.company_id ?? 1) !== company) return false;
@@ -398,16 +399,16 @@ export function checkChainHeadCorruption(journal, company, securedMoves) {
 
 /**
  * Secures posted entries in journals with restrict_mode_hash_table up to hashDate.
- * Computes hashes and sequence numbers in sequence order, and sets the company's hard lock date.
+ * Computes hashes and sequence numbers in sequence order. Like Odoo, it does not touch the company's hard lock date.
  * With `throughMoveId` (the entry form's Lock button) only that entry's journal is hashed, up to and including it,
  * and no company lock date changes.
  */
-export function secureEntries(db, { companyId = null, hashDate = null, throughMoveId = null, moveIds = null, skipHardLock = false } = {}) {
+export function secureEntries(db, { companyId = null, hashDate = null, throughMoveId = null, moveIds = null } = {}) {
   const through = throughMoveId ? read(db, 'account.move', throughMoveId) : null;
   if (throughMoveId && !through) throw new Error('Select an existing entry');
   const company = through ? (through.company_id ?? 1) : (companyId ?? currentCompany(db));
   const restrictedJournals = search(db, 'account.journal', { includeArchived: true })
-    .filter((j) => Boolean(j.restrict_mode_hash_table) && (!through || j.id === through.journal_id));
+    .filter((j) => (Array.isArray(moveIds) || Boolean(j.restrict_mode_hash_table)) && (!through || j.id === through.journal_id));
   const targetDate = hashDate || today();
   const moveIdSet = Array.isArray(moveIds) ? new Set(moveIds) : null;
   const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : moveIdSet ? moveIdSet.has(m.id) : (m.invoice_date ?? m.date ?? '') <= targetDate);
@@ -475,9 +476,7 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   if (lastNewlySecuredByJournal.size && (db.records['account.move'] ?? []).some((m) => isSequenceConflictDraft(db, m, company, lastNewlySecuredByJournal))) {
     throw new Error('Cannot secure entries while numbered draft entries precede entries to be secured');
   }
-  if (!skipHardLock && lockDate && (!currentComp.hard_lock_date || lockDate > currentComp.hard_lock_date)) {
-    next = write(next, 'res.company', company, { hard_lock_date: lockDate });
-  }
+  // Odoo's action_secure_entries only hashes moves (account_secure_entries_wizard.py:241-250); it never writes hard_lock_date.
 
   return next;
 }
@@ -504,7 +503,7 @@ export function secureMoveInvariant(db, after, before) {
   if (before?.inalterable_hash) return null;
   if (!after.inalterable_hash || !Number.isInteger(after.secure_sequence_number) || after.secure_sequence_number < 1) return 'Invalid secure entry hash chain';
   const journal = (db.records['account.journal'] ?? []).find((j) => j.id === after.journal_id);
-  if (!journal?.restrict_mode_hash_table || after.state !== 'posted') return 'Only posted entries in secure journals can be hashed';
+  if (!journal || after.state !== 'posted') return 'Only posted entries in secure journals can be hashed';
   const company = after.company_id ?? 1;
   const all = (db.records['account.move'] ?? []).filter((m) => m.journal_id === journal.id && (m.company_id ?? 1) === company && m.state === 'posted')
     .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);

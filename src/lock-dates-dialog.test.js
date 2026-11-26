@@ -354,7 +354,7 @@ test('a non-admin is rejected by the server-side company guard', async () => {
   const db = seed();
   commit(db);
 
-  const next = saveLockDates(db, 1, { lock_date: '2026-12-31' });
+  const next = saveLockDates(db, 1, { lock_date: '1900-12-31' });
   const { applyDiff, diffDb } = await import('./sync.js');
 
   // The server applies the same guard Settings relies on; a non-admin cannot change lock dates.
@@ -365,7 +365,7 @@ test('a non-admin is rejected by the server-side company guard', async () => {
 
   // An administrator can apply the same change.
   const saved = applyDiff(db, diffDb(db, next), { author: 'Admin', isAdmin: true });
-  assert.equal(read(saved, 'res.company', 1).lock_date, '2026-12-31');
+  assert.equal(read(saved, 'res.company', 1).lock_date, '1900-12-31');
 });
 
 test('cancel / close discards changes', async () => {

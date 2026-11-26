@@ -5037,22 +5037,10 @@ Object.assign(accountingModels, {
               );
             }
             const count = analysis.entries_count;
-            const unreconciledIds = analysis.unreconciled_bank_statement_line_ids ?? [];
-            const maxSecuredDate = analysis.move_to_hash_ids.reduce((max, id) => {
-              const m = read(db, 'account.move', id);
-              const d = m?.invoice_date ?? m?.date ?? '';
-              return d > max ? d : max;
-            }, '');
-            const lockCeiling = maxSecuredDate && r.hash_date && maxSecuredDate > r.hash_date ? r.hash_date : maxSecuredDate;
-            const blocksUnreconciled = unreconciledIds.some((id) => {
-              const line = read(db, 'account.bank.statement.line', id);
-              return line && lockCeiling && (line.date ?? '') <= lockCeiling;
-            });
             const securedDb = secureEntries(db, {
               companyId: r.company,
               hashDate: r.hash_date,
               moveIds: analysis.move_to_hash_ids,
-              skipHardLock: blocksUnreconciled,
             });
             return { db: securedDb, ...(count ? { go: '#/accounting/entries' } : { message: t('No entries were secured; the hard lock date was not changed.') }) };
           },

@@ -1463,6 +1463,9 @@ test('Odoo 20: setting hard_lock_date validates draft entries and unreconciled b
     /There are still draft entries in the period you want to hard lock\. You should either post or delete them\./,
   );
 
+  // Global lock dates do not check draft entries.
+  assert.doesNotThrow(() => write(draftInv.db, 'res.company', 1, { lock_date: lockDate }));
+
   // Posting the draft clears the draft blocker
   db = postMove(draftInv.db, draftInv.id);
 
@@ -1477,9 +1480,15 @@ test('Odoo 20: setting hard_lock_date validates draft entries and unreconciled b
     amount: 75,
     state: 'to_check',
   });
+  const linkedBankDb = { ...bankLine.db, records: { ...bankLine.db.records, 'account.bank.statement.line': bankLine.db.records['account.bank.statement.line'].map((line) => line.id === bankLine.id ? { ...line, bank_move_id: draftInv.id } : line) } };
   assert.throws(
-    () => write(bankLine.db, 'res.company', 1, { hard_lock_date: lockDate }),
+    () => write(linkedBankDb, 'res.company', 1, { hard_lock_date: lockDate }),
     /There are still unreconciled bank transactions in the period you want to lock\. You should either reconcile or delete them\./,
+  );
+
+  assert.throws(
+    () => write(linkedBankDb, 'res.company', 1, { lock_date: lockDate }),
+    /There are still unreconciled bank transactions/,
   );
 
   // Reconciling clears the blocker, and child company draft is also validated

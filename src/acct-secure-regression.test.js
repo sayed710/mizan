@@ -26,6 +26,7 @@ const setup = () => {
 
 test('wizard action persists isolated company chains and lock dates through server diffs and SQLite', () => {
   let { db, company, journal } = setup();
+    db = { ...db, records: { ...db.records, 'account.move': [] } };
   let result = entry(db, 1); db = result.db; const first = result.id;
   result = entry(db, company); db = result.db; const second = result.id;
   const leaf = leavesOf(apps.find((a) => a.id === 'accounting')).find((l) => l.key === 'secure-entries');
@@ -37,6 +38,9 @@ test('wizard action persists isolated company chains and lock dates through serv
     db = server(db, next);
     if (id === 1) assert.doesNotThrow(() => entry(db, company, '2026-01-15'));
   }
+  // Odoo's action_secure_entries only hashes (account_secure_entries_wizard.py:241-250); the hard lock date is set separately.
+  assert.equal(read(db, 'res.company', company).hard_lock_date ?? null, null);
+  db = write(db, 'res.company', company, { hard_lock_date: '2026-01-01' });
   assert.equal(read(db, 'res.company', company).hard_lock_date, '2026-01-01');
   const storage = openStorage(new DatabaseSync(':memory:')); storage.save(null, db); db = storage.load();
   assert.equal(read(db, 'account.move', first).secure_sequence_number, 1);
@@ -118,6 +122,7 @@ test('incoterm order action copies both fields to a server-persisted invoice', (
 
 test('wizard warns of draft entries and sequence gaps and displays the posted entry count', () => {
   let { db, journal } = setup();
+    db = { ...db, records: { ...db.records, 'account.move': [] } };
   const accounts = db.records['account.account'];
   const lines = [{ account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 }, { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 }];
   for (const number of [1, 3]) db = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: journal, invoice_date: '2026-01-01', name: `SEC/2026/${String(number).padStart(4, '0')}`, line_ids: lines }).db;
@@ -222,6 +227,7 @@ test('empty secure wizard leaves the hard lock unchanged and explains why', () =
   const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Secure Entries');
   for (const scenario of ['no restricted journal', 'no entries', 'before first entry']) {
     let { db, journal } = setup();
+    db = { ...db, records: { ...db.records, 'account.move': [] } };
     if (scenario === 'no restricted journal') db = write(db, 'account.journal', journal, { restrict_mode_hash_table: false });
     if (scenario === 'before first entry') db = entry(db, 1, '2026-02-01').db;
     const wizard = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-01' }); db = wizard.db;

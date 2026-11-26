@@ -132,9 +132,9 @@ test('secure entries: hash chain computation, wizard analysis, sequence ordering
   const expectedHash2 = computeMoveHash(m2, m1.inalterable_hash);
   assert.equal(m2.inalterable_hash, expectedHash2, 'm2 hash chains from m1');
 
-  // Verify hard lock date is updated
+  // Odoo's wizard never writes hard_lock_date (account_secure_entries_wizard.py:241-250)
   const comp = read(securedDb, 'res.company', companyId);
-  assert.equal(comp.hard_lock_date, '2026-02-02', 'company hard_lock_date updated');
+  assert.equal(comp.hard_lock_date ?? null, null, 'wizard leaves hard_lock_date unchanged');
 });
 
 test('secure entries immutability: write, reset to draft, unlink, and server diffs refused', () => {
@@ -597,8 +597,8 @@ test('wizard-to-posting regression with the draft in an unrestricted journal', a
 
   // Draft in unrestricted journal dated 2026-02-05 must be detected and listed in not_hashable_unlocked_move_ids
   assert.ok(wizRecord.not_hashable_unlocked_move_ids.includes(draftEarly.id), 'draft in unrestricted journal is listed');
-  // Draft dated 2026-02-15 is after proposed hard-lock date (2026-02-10), so it is not listed
-  assert.ok(!wizRecord.not_hashable_unlocked_move_ids.includes(draftLater.id), 'draft after proposed lock date is not listed');
+  // Odoo lists drafts through the selected hash date (wizard.py:216-218).
+  assert.ok(wizRecord.not_hashable_unlocked_move_ids.includes(draftLater.id), 'draft before the selected date is listed');
 
   // Confirmation must be BLOCKED while draft entries exist on or before proposed lock date
   const confirmBtn = (wizModel.form?.buttons ?? []).find((b) => b.label === 'Secure Entries');
@@ -626,14 +626,14 @@ test('wizard-to-posting regression with the draft in an unrestricted journal', a
   db = postMove(db, draftEarly.id);
 
   // Now analysis shows no blocking draft entries
-  const unblockedWiz = wizModel.createDefaults(db, { company: companyId, hash_date: '2026-02-20' });
+  const unblockedWiz = wizModel.createDefaults(db, { company: companyId, hash_date: '2026-02-10' });
   assert.equal(unblockedWiz.not_hashable_unlocked_move_ids.length, 0, 'no blocking drafts remain');
   assert.equal(confirmBtn.when?.(unblockedWiz, db), true, 'confirmation is now unblocked');
 
-  // Confirming secures entries and sets company hard lock date to 2026-02-10
+  // Confirming secures entries; Odoo's wizard does not touch the company hard lock date
   const result = confirmBtn.run(db, unblockedWiz);
   assert.ok(result.db, 'securing succeeded');
-  assert.equal(read(result.db, 'res.company', companyId).hard_lock_date, '2026-02-10');
+  assert.equal(read(result.db, 'res.company', companyId).hard_lock_date ?? null, null);
 
   // Draft dated 2026-02-15 in unrestricted journal was not stranded and can still be posted
   const finalDb = postMove(result.db, draftLater.id);
