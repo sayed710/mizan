@@ -521,3 +521,64 @@ test('ji3 UI + i18n: JournalItems shows Post, Move to Account, and Change Period
     globalThis.localStorage = prevStorage;
   }
 });
+
+const syncDb = (base, next) => applyDiff(base, diffDb(base, next), { isAdmin: true });
+const itemsOf = (db, moveId, accountId) => journalItems(db).filter((l) => l.move_id === moveId && l.account_id === accountId)
+  .map((l) => ({ move_id: l.move_id, line_identity: l.line_identity }));
+function expenseSource() {
+  let db = seed();
+  const expense = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'expense');
+  const cash = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'asset_cash');
+  const prepaid = findAccount(db, (a) => (a.company_id ?? 1) === 1 && ['asset_prepayments', 'asset_current'].includes(a.account_type));
+  const src = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-10', ref: 'SRC', lines: [
+    { account_id: expense.id, debit: 100, name: 'Rent' }, { account_id: cash.id, credit: 100, name: 'Cash' }] });
+  db = src.db;
+  return { db, src: src.id, expense, cash, prepaid };
+}
+
+test('ji3 Qodo: resetting a source keeps its automatic entries editable, and posted entries never gain origins', () => {
+  const s = expenseSource();
+  let db = syncDb(s.db, moveToAccount(s.db, itemsOf(s.db, s.src, s.expense.id), { destinationAccountId: s.prepaid.id, date: '2026-02-20' }));
+  const auto = db.records['account.move'].find((m) => (m.automatic_entry_source_move_ids ?? []).includes(s.src));
+  db = syncDb(db, write(db, 'account.move', s.src, { state: 'draft' }));
+  assert.doesNotThrow(() => syncDb(db, write(db, 'account.move', auto.id, { state: 'draft' })));
+  const other = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-11', ref: 'OTHER', lines: [
+    { account_id: s.expense.id, debit: 5, name: 'x' }, { account_id: s.cash.id, credit: 5, name: 'y' }] });
+  db = syncDb(db, other.db);
+  const posted = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-12', ref: 'PLAIN', lines: [
+    { account_id: s.expense.id, debit: 7, name: 'x' }, { account_id: s.cash.id, credit: 7, name: 'y' }] });
+  db = syncDb(db, posted.db);
+  assert.throws(() => syncDb(db, write(db, 'account.move', posted.id, { automatic_entry_source_move_ids: [other.id] })), /cannot be edited/);
+});
+
+test('ji3 Qodo: both wizards process items whose account was archived since posting', () => {
+  const s = expenseSource();
+  const sel = itemsOf(s.db, s.src, s.expense.id);
+  const archived = syncDb(s.db, write(s.db, 'account.account', s.expense.id, { active: false }));
+  assert.doesNotThrow(() => syncDb(archived, moveToAccount(archived, sel, { destinationAccountId: s.prepaid.id, date: '2026-02-20' })));
+  assert.doesNotThrow(() => syncDb(archived, changePeriod(archived, sel, { date: '2026-03-31', accountId: s.prepaid.id })));
+});
+
+test('ji3 Qodo: Change Period rejects an income or expense account as the accrual account', () => {
+  const s = expenseSource();
+  const otherPl = findAccount(s.db, (a) => (a.company_id ?? 1) === 1 && ['expense', 'income'].includes(a.account_type) && a.id !== s.expense.id);
+  assert.throws(() => changePeriod(s.db, itemsOf(s.db, s.src, s.expense.id), { date: '2026-03-31', accountId: otherPl.id }), /balance sheet account/);
+});
+
+test('ji3 Qodo: a foreign group netting to zero in company currency transfers without reconciling a zero line', () => {
+  let db = seed();
+  const ar = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'asset_receivable');
+  const income = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'income');
+  const cash = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'asset_cash');
+  const prepaid = findAccount(db, (a) => (a.company_id ?? 1) === 1 && ['asset_prepayments', 'asset_current'].includes(a.account_type) && a.id !== ar.id);
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const partner = search(db, 'res.partner')[0].id;
+  const a = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-01', ref: 'A', lines: [
+    { account_id: ar.id, partner_id: partner, debit: 100, currency_id: eur.id, amount_currency: 90, name: 'a' }, { account_id: income.id, credit: 100, name: 'i' }] });
+  db = a.db;
+  const b = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-02', ref: 'B', lines: [
+    { account_id: cash.id, debit: 100, name: 'c' }, { account_id: ar.id, partner_id: partner, credit: 100, currency_id: eur.id, amount_currency: -80, name: 'b' }] });
+  db = b.db;
+  const sel = [...itemsOf(db, a.id, ar.id), ...itemsOf(db, b.id, ar.id)];
+  assert.doesNotThrow(() => syncDb(db, moveToAccount(db, sel, { destinationAccountId: prepaid.id, date: '2026-02-20' })));
+});

@@ -2637,17 +2637,18 @@ const moveAutomaticEntries = (db, r) => (db && r?.id
 
 /** Validate automatic entry origin links, company isolation, and journal company membership. */
 function automaticEntryMoveError(db, before, after) {
-  const hadSources = Array.isArray(before?.automatic_entry_source_move_ids) && before.automatic_entry_source_move_ids.length > 0;
-  if (before?.state === 'posted' && after?.state === 'posted' && hadSources
-    && JSON.stringify(before.automatic_entry_source_move_ids ?? []) !== JSON.stringify(after.automatic_entry_source_move_ids ?? [])) {
-    return 'Posted entries cannot be edited; reset them to draft first';
-  }
+  const links = (m) => JSON.stringify(m?.automatic_entry_source_move_ids ?? []);
+  const linksChanged = !before || links(before) !== links(after);
+  // Origin links are set when the wizard creates the entry; a posted entry never gains or loses one.
+  if (before?.state === 'posted' && linksChanged) return 'Posted entries cannot be edited; reset them to draft first';
   const sourceIds = after?.automatic_entry_source_move_ids;
   if (!Array.isArray(sourceIds) || !sourceIds.length) return null;
   if (after.move_type !== 'entry') return 'Automatic entries must be miscellaneous journal entries';
   const companyId = after.company_id ?? 1;
   const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
   if (journal?.company_id && journal.company_id !== companyId) return 'Journal and entry must belong to the same company';
+  // Sources are checked when linked; resetting a source later must not freeze the entries made from it.
+  if (!linksChanged) return null;
   for (const srcId of sourceIds) {
     const src = read(db, 'account.move', srcId);
     if (!src || src.state !== 'posted') return 'Automatic entries can only reference posted journal entries';

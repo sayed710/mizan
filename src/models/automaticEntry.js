@@ -239,7 +239,7 @@ export function moveToAccount(db, selections, { destinationAccountId, date = tod
       if (!sourceMoveIds.includes(it.move.id)) sourceMoveIds.push(it.move.id);
     }
     const srcAcc = read(db, 'account.account', g.accountId);
-    if (isReconcilableAccount(srcAcc)) {
+    if (isReconcilableAccount(srcAcc) && !isCurrencyZero(g.balance, ownCurrency)) {
       reconcilePlans.push({ items: g.items, counterIndex });
     }
     const destKey = JSON.stringify([g.partnerId, g.currencyId]);
@@ -281,6 +281,7 @@ export function moveToAccount(db, selections, { destinationAccountId, date = tod
     ref: label,
     lines,
     automatic_entry_source_move_ids: sourceMoveIds,
+    archivedOriginIds: sourceMoveIds,
   });
   let next = created.db;
   const createdMove = read(next, 'account.move', created.id);
@@ -340,6 +341,7 @@ export function changePeriod(db, selections, { date = today(), percentage = 100,
     'Select an active accrual account for this company',
     { disallowTypes: ['asset_receivable', 'liability_payable', 'off_balance'] },
   );
+  if (isIncomeOrExpenseAccount(accrualAcc)) throw new Error('Select a balance sheet account as the accrual account');
   const journal = resolveGeneralJournal(db, journalId, companyId, side);
   const ownCurrency = companyCurrencyRecord(db, companyId);
 
@@ -399,6 +401,7 @@ export function changePeriod(db, selections, { date = today(), percentage = 100,
       ref: `Period adjustment to ${date} (${pct}%)`,
       lines,
       automatic_entry_source_move_ids: dateSourceIds,
+      archivedOriginIds: dateSourceIds,
     });
     next = adj.db;
     createdAdjIds.push(adj.id);
@@ -424,6 +427,7 @@ export function changePeriod(db, selections, { date = today(), percentage = 100,
     ref: `Period recognition (${pct}%)`,
     lines: combinedReversalLines,
     automatic_entry_source_move_ids: allSourceMoveIds,
+    archivedOriginIds: allSourceMoveIds,
     ...(singleOriginId ? { reversed_entry_id: singleOriginId } : {}),
   });
   next = recognition.db;

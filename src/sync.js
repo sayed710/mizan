@@ -574,9 +574,14 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
  * opposite side (reversal, credit note, correction) or same side (debit note), never for a larger amount.
  */
 function mirrorsOriginOnArchived(db, rec, originId, opposite) {
-  if (!Number.isInteger(originId)) return false;
-  const origin = (db.records['account.move'] ?? []).find((m) => m.id === originId);
-  if (origin?.state !== 'posted') return false;
+  return Number.isInteger(originId) && mirrorsOriginsOnArchived(db, rec, [originId], opposite);
+}
+
+/** Whether `rec`'s archived-account lines stay within what the posted origins booked there (summed across origins). */
+function mirrorsOriginsOnArchived(db, rec, originIds, opposite) {
+  const origins = originIds.map((id) => (db.records['account.move'] ?? []).find((m) => m.id === id));
+  if (!origins.length || origins.some((m) => m?.state !== 'posted')) return false;
+  const origin = { line_ids: origins.flatMap((m) => m.line_ids ?? []), invoice_line_ids: origins.flatMap((m) => m.invoice_line_ids ?? []) };
   const archived = (id) => (db.records['account.account'] ?? []).find((a) => a.id === id)?.active === false;
   // Totals per archived account: the new move may not post more on an account than the origin booked on the matching side.
   const totals = (lines, keep) => {
@@ -852,6 +857,9 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       ...(mirrorsOriginOnArchived(seen, rec, rec.correction_of_id, true) ? [rec.correction_of_id] : []),
       ...(mirrorsOriginOnArchived(seen, rec, rec.debit_origin_id, false) ? [rec.debit_origin_id] : []),
       ...(settlementOrigins.get(rec.id) ?? []),
+      // Move to Account / Change Period entries may book on a source account archived since; their lines mirror the sources.
+      ...(!before && (rec.automatic_entry_source_move_ids ?? []).length
+        && [true, false].some((opposite) => mirrorsOriginsOnArchived(seen, rec, rec.automatic_entry_source_move_ids, opposite)) ? rec.automatic_entry_source_move_ids : []),
       ...((seen.records['account.fiscal.year'] ?? []).filter((y) => y.opening_move_id === rec.id).map((y) => y.closing_move_id)),
     ].filter(Number.isInteger) : [];
     const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
