@@ -306,38 +306,21 @@ function returnLockChange(db, companyId, from, to) {
   return (db.records['account.return'] ?? []).some((ret) => ret.date_to === from && !['submitted', 'paid'].includes(ret.state) && returnCompanies(db, ret).includes(companyId));
 }
 
-/** Cycle-safe set of `companyId` and all descendant branch company IDs (matching Odoo `child_of`). */
-function descendantCompanyIds(db, companyId) {
-  const ids = new Set([companyId]);
-  let expanded = true;
-  while (expanded) {
-    expanded = false;
-    for (const c of db.records?.['res.company'] ?? []) {
-      if (c.parent_id && ids.has(c.parent_id) && !ids.has(c.id)) {
-        ids.add(c.id);
-        expanded = true;
-      }
-    }
-  }
-  return ids;
-}
-
 /** Validate Odoo 20 draft and unreconciled statement line lock preconditions. */
 function hardLockValidationError(db, companyId, hardLockDate, fiscalLockDate) {
-  const companyIds = descendantCompanyIds(db, companyId);
   const hasDraftEntries = hardLockDate && (db.records?.['account.move'] ?? []).some((m) => m.active !== false
     && m.state === 'draft'
-    && companyIds.has(m.company_id ?? 1)
+    && (m.company_id ?? 1) === companyId
     && moveDate(m) <= hardLockDate);
   if (hasDraftEntries) {
     return 'There are still draft entries in the period you want to hard lock. You should either post or delete them.';
   }
   const hasUnreconciledBank = (db.records?.['account.bank.statement.line'] ?? []).some((l) => {
     if (l.active === false || l.state === 'reconciled' || l.is_reconciled === true) return false;
-    if (!companyIds.has(l.company_id ?? 1)) return false;
+    if ((l.company_id ?? 1) !== companyId) return false;
     if (!fiscalLockDate || !l.date || l.date > fiscalLockDate) return false;
     const moveId = l.bank_move_id || l.move_id;
-    if (!moveId) return false;
+    if (!moveId) return l.state === 'to_check';
     const move = read(db, 'account.move', moveId);
     return move?.state === 'draft' || move?.state === 'posted';
   });

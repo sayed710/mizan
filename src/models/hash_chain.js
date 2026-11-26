@@ -3,6 +3,7 @@ import { read, search, write } from '../orm.js';
 import { currentCompany } from './company.js';
 import { resolveDocumentJournal } from './ledger.js';
 import { today } from './common.js';
+import { moveDate } from './finance.js';
 import { t } from '../i18n.js';
 
 /** Synchronous UTF-8 SHA-256 for browser, ORM, and Node execution. */
@@ -128,16 +129,16 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
 
   const allMoves = (db.records['account.move'] ?? []).filter((m) => {
     if ((m.company_id ?? 1) !== company) return false;
-    const jId = resolveDocumentJournal(db, m)?.id ?? null;
+    const jId = moveJournalId(db, m);
     return restrictedIds.has(jId);
   });
 
-  const postedDates = allMoves.filter((m) => m.state === 'posted').map((m) => m.invoice_date ?? m.date).filter(Boolean);
+  const postedDates = allMoves.filter((m) => m.state === 'posted').map((m) => moveDate(m)).filter(Boolean);
   const maxDate = postedDates.length ? postedDates.sort().at(-1) : today();
   const targetDate = hashDate || maxDate;
 
   const companyUnhashedPosted = allMoves.filter(
-    (m) => m.state === 'posted' && !m.inalterable_hash && (m.invoice_date ?? m.date ?? '') <= targetDate,
+    (m) => m.state === 'posted' && !m.inalterable_hash && (moveDate(m)) <= targetDate,
   );
   const companyUnhashedMoveMap = new Map(companyUnhashedPosted.map((m) => [m.id, m]));
 
@@ -178,7 +179,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   for (const journal of restrictedJournals) {
     if (ignoredJournalIds.has(journal.id)) continue;
     const journalMoves = allMoves
-      .filter((m) => (m.journal_id ?? resolveDocumentJournal(db, m)?.id) === journal.id)
+      .filter((m) => moveJournalId(db, m) === journal.id)
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
     const journalPosted = journalMoves.filter((m) => m.state === 'posted');
     const journalLastHashed = journalPosted.filter((m) => Boolean(m.inalterable_hash)).at(-1);
@@ -198,16 +199,16 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
       if (lastHashed) {
         for (const m of postedChain) {
           if (!m.inalterable_hash
-            && (m.invoice_date ?? m.date ?? '') <= targetDate
+            && (moveDate(m)) <= targetDate
             && (m.name ?? '').localeCompare(lastHashed.name ?? '') < 0
-            && (m.invoice_date ?? m.date ?? '') > (companyRec?.hard_lock_date ?? '')) {
+            && (moveDate(m)) > (companyRec?.hard_lock_date ?? '')) {
             notHashablePostedIds.push(m.id);
             localNotHashable.add(m.id);
           }
         }
       }
       const inDateUnhashed = postedChain.filter(
-        (m) => !m.inalterable_hash && !localNotHashable.has(m.id) && (m.invoice_date ?? m.date ?? '') <= targetDate,
+        (m) => !m.inalterable_hash && !localNotHashable.has(m.id) && (moveDate(m)) <= targetDate,
       );
       const lastInDate = inDateUnhashed.at(-1);
       const chainMovesToHash = lastInDate
@@ -247,7 +248,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
       }
       const keptSet = new Set(kept.map((m) => m.id));
       const gapScope = allChainMoves.filter(
-        (m) => (m.invoice_date ?? m.date ?? '') <= targetDate || keptSet.has(m.id),
+        (m) => (moveDate(m)) <= targetDate || keptSet.has(m.id),
       );
       const gaps = findSequenceGaps(gapScope);
       if (gaps.length) {
@@ -260,7 +261,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
     }
   }
 
-  const unhashedDates = unhashedPostedMoves.map((m) => m.invoice_date ?? m.date ?? '').filter(Boolean);
+  const unhashedDates = unhashedPostedMoves.map((m) => moveDate(m)).filter(Boolean);
   const rawLockDate = unhashedDates.length ? unhashedDates.sort().at(-1) : '';
   const proposedLockDate = rawLockDate && rawLockDate > targetDate ? targetDate : rawLockDate;
 
@@ -268,7 +269,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   const sequenceConflictDraftMoves = [];
   for (const m of db.records['account.move'] ?? []) {
     if ((m.company_id ?? 1) !== company || m.state !== 'draft') continue;
-    const date = m.invoice_date ?? m.date ?? '';
+    const date = moveDate(m);
     const jId = moveJournalId(db, m);
     if ((proposedLockDate && date <= proposedLockDate) || (restrictedIds.has(jId) && date <= targetDate)) {
       dateDraftMoves.push(m);
@@ -278,7 +279,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
   }
   const draftMoves = [...dateDraftMoves, ...sequenceConflictDraftMoves];
 
-  const afterSelectedDateMoves = unhashedPostedMoves.filter((m) => (m.invoice_date ?? m.date ?? '') > targetDate);
+  const afterSelectedDateMoves = unhashedPostedMoves.filter((m) => (moveDate(m)) > targetDate);
 
   const warnings = [];
   const warningItems = [];
@@ -408,10 +409,10 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   if (throughMoveId && !through) throw new Error('Select an existing entry');
   const company = through ? (through.company_id ?? 1) : (companyId ?? currentCompany(db));
   const restrictedJournals = search(db, 'account.journal', { includeArchived: true })
-    .filter((j) => (Array.isArray(moveIds) || Boolean(j.restrict_mode_hash_table)) && (!through || j.id === through.journal_id));
+    .filter((j) => (Array.isArray(moveIds) || Boolean(j.restrict_mode_hash_table)) && (!through || j.id === moveJournalId(db, through)));
   const targetDate = hashDate || today();
   const moveIdSet = Array.isArray(moveIds) ? new Set(moveIds) : null;
-  const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : moveIdSet ? moveIdSet.has(m.id) : (m.invoice_date ?? m.date ?? '') <= targetDate);
+  const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : moveIdSet ? moveIdSet.has(m.id) : (moveDate(m)) <= targetDate);
   // A numbered draft before the entry (reset to draft keeps its number) would land unhashed inside the chain once re-posted.
   if (through && (db.records['account.move'] ?? []).some((m) => isSequenceConflictDraft(
     db, m, company, new Map([[moveJournalId(db, through), through.name ?? '']]),
@@ -424,7 +425,7 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   const lastNewlySecuredByJournal = new Map();
   for (const journal of restrictedJournals) {
     const journalMoves = (next.records['account.move'] ?? [])
-      .filter((m) => (m.company_id ?? 1) === company && m.journal_id === journal.id && m.state === 'posted')
+      .filter((m) => (m.company_id ?? 1) === company && moveJournalId(next, m) === journal.id && m.state === 'posted')
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
     const moves = journalMoves.filter(inScope);
     const securedMoves = journalMoves.filter((m) => m.inalterable_hash);
@@ -454,7 +455,7 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
       });
     
       previousHash = hash;
-      const date = move.invoice_date ?? move.date ?? '';
+      const date = moveDate(move);
       if (date > securedThrough) securedThrough = date;
     }
     if (unhashed.length || (securedMoves.length && !(journal.secure_chain_heads ?? []).some((h) => h.company_id === company))) {
@@ -470,7 +471,7 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
   if (through) return next;
   const lockDate = hashDate && securedThrough > hashDate ? hashDate : securedThrough;
   if (lockDate) {
-    const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (m.invoice_date ?? m.date ?? '') <= lockDate);
+    const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (moveDate(m)) <= lockDate);
     if (drafts.length) throw new Error('Cannot secure entries while draft entries exist on or before the secured date');
   }
   if (lastNewlySecuredByJournal.size && (db.records['account.move'] ?? []).some((m) => isSequenceConflictDraft(db, m, company, lastNewlySecuredByJournal))) {
@@ -493,7 +494,7 @@ export const SECURED_ORDER_ERROR = 'This entry would be numbered before the secu
 export function postedBeforeSecuredChain(db, after, before) {
   if (after.state !== 'posted' || before?.state === 'posted') return false;
   const company = after.company_id ?? 1;
-  return (db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.inalterable_hash && m.journal_id === after.journal_id
+  return (db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.inalterable_hash && moveJournalId(db, m) === moveJournalId(db, after)
     && (m.company_id ?? 1) === company && (m.name ?? '').localeCompare(after.name ?? '') >= 0);
 }
 
@@ -505,7 +506,7 @@ export function secureMoveInvariant(db, after, before) {
   const journal = (db.records['account.journal'] ?? []).find((j) => j.id === after.journal_id);
   if (!journal || after.state !== 'posted') return 'Only posted entries in secure journals can be hashed';
   const company = after.company_id ?? 1;
-  const all = (db.records['account.move'] ?? []).filter((m) => m.journal_id === journal.id && (m.company_id ?? 1) === company && m.state === 'posted')
+  const all = (db.records['account.move'] ?? []).filter((m) => moveJournalId(db, m) === journal.id && (m.company_id ?? 1) === company && m.state === 'posted')
     .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
   let previous = '';
   let sequence = 0;
@@ -526,7 +527,7 @@ export function journalHasSecuredEntries(db, journal) {
   if (!journal) return false;
   if ((journal.secure_chain_heads ?? []).length > 0) return true;
   // A hashed move always carries its journal: secureMoveInvariant hashes only against after.journal_id.
-  return (db?.records?.['account.move'] ?? []).some((m) => Boolean(m.inalterable_hash) && m.journal_id === journal.id);
+  return (db?.records?.['account.move'] ?? []).some((m) => Boolean(m.inalterable_hash) && moveJournalId(db, m) === journal.id);
 }
 
 /** A journal head must only advance to a valid chain; it cannot be removed or rewritten. */
@@ -547,7 +548,7 @@ export function secureHeadsGuard(db, before, after, ctx) {
     const old = oldHeads.find((h) => h.company_id === head.company_id);
     if (JSON.stringify(old) === JSON.stringify(head)) continue;
     if (ctx?.companies && !ctx.companies.has(head.company_id)) return 'No access to this company secure chain';
-    const moves = (db.records['account.move'] ?? []).filter((m) => m.journal_id === after.id && (m.company_id ?? 1) === head.company_id && m.inalterable_hash)
+    const moves = (db.records['account.move'] ?? []).filter((m) => moveJournalId(db, m) === after.id && (m.company_id ?? 1) === head.company_id && m.inalterable_hash)
       .sort((a, b) => a.secure_sequence_number - b.secure_sequence_number);
     if (!head.company_id || !Number.isInteger(head.count) || head.count < 1 || head.count !== head.last_sequence || moves.length !== head.count) return 'Invalid secure chain head';
     let previous = '';
@@ -574,7 +575,7 @@ export function checkInalterability(db, { journalId = null, companyId = null } =
   const journals = search(db, 'account.journal', { includeArchived: true }).filter((j) => targetJournalId === null || j.id === targetJournalId);
   const results = [];
   for (const j of journals) {
-    const secured = (db.records['account.move'] ?? []).filter((m) => m.journal_id === j.id && Boolean(m.inalterable_hash) && (!companyId || (m.company_id ?? 1) === companyId));
+    const secured = (db.records['account.move'] ?? []).filter((m) => moveJournalId(db, m) === j.id && Boolean(m.inalterable_hash) && (!companyId || (m.company_id ?? 1) === companyId));
     const heads = (j.secure_chain_heads ?? []).filter((h) => !companyId || h.company_id === companyId);
     const companies = [...new Set([...secured.map((m) => m.company_id ?? 1), ...heads.map((h) => h.company_id)])];
     if (!companies.length && j.restrict_mode_hash_table) companies.push(companyId);

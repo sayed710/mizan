@@ -214,7 +214,8 @@ test('2g. Duplicating an invoice in a locked period defaults accounting date (da
 
 test('3. A lock covering today moves the copy to the day after the lock, and its reversal keeps the same distance', () => {
   const lock = addDays(today(), 10);
-  let db = write(seed(), 'res.company', 1, { lock_date: lock });
+  let db = seed();
+  db = write({ ...db, records: { ...db.records, 'account.bank.statement.line': [] } }, 'res.company', 1, { lock_date: lock });
   const entry = create(db, 'account.move', {
     move_type: 'entry',
     date: addDays(today(), -20),

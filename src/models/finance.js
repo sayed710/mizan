@@ -129,7 +129,7 @@ function settlesAfterLock(db, before, after, lock) {
 /** Whether a move carries any tax line, tax identifier/rate, or tax-grid indicator. */
 export function hasTaxLines(move = {}) {
   return (move.line_ids ?? []).some((line) => Boolean(
-    (line.tax_name && (!line.tax_zero || line.tax_name !== '0%'))
+    line.tax_name
     || line.tax_id
     || (Array.isArray(line.tax_ids) && line.tax_ids.length > 0)
     || line.tax_grid_base
@@ -139,7 +139,7 @@ export function hasTaxLines(move = {}) {
   ))
   || (move.invoice_line_ids ?? []).some((line) => Boolean(
     line.tax_id
-    || (line.tax_name && (!line.tax_zero || line.tax_name !== '0%'))
+    || line.tax_name
     || (Array.isArray(line.tax_ids) && line.tax_ids.length > 0)
     || (Array.isArray(line.tax_breakdown) && line.tax_breakdown.length > 0)
     || Number(line.tax),
@@ -267,8 +267,8 @@ export function accountingDateForPost(db, move, { ctx = null, todayDate = today(
   const numberReset = deduceSequenceNumberReset(highestName);
   const sale = ['out_invoice', 'out_refund'].includes(move.move_type);
   if (sale) {
-    if (!highestName || numberReset === 'month') return minIsoDate(todayDate, endOfMonthIso(firstOpen));
-    if (numberReset === 'year') return minIsoDate(todayDate, endOfYearIso(firstOpen));
+    if (!highestName || numberReset === 'month') return maxIsoDate(firstOpen, minIsoDate(todayDate, endOfMonthIso(firstOpen)));
+    if (numberReset === 'year') return maxIsoDate(firstOpen, minIsoDate(todayDate, endOfYearIso(firstOpen)));
     return firstOpen;
   }
   if (!highestName || numberReset === 'month' || numberReset === 'year_range_month') {

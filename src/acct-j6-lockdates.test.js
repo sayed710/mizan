@@ -1384,7 +1384,7 @@ test('Odoo 20: posting invoices/bills in soft-locked period shifts accounting da
     journal_id: saleJournal.id,
     partner_id: 1,
     invoice_date: invDate,
-    invoice_line_ids: [{ name: 'Untaxed', qty: 1, price_unit: 100, tax: 0, account_id: incomeAcc.id }],
+    invoice_line_ids: [{ name: 'Untaxed', qty: 1, price_unit: 100, account_id: incomeAcc.id }],
   });
   const postedUntaxed = read(postMove(untaxedInv.db, untaxedInv.id), 'account.move', untaxedInv.id);
   assert.equal(postedUntaxed.state, 'posted');
@@ -1435,7 +1435,7 @@ test('Odoo 20: posting invoices/bills in soft-locked period shifts accounting da
   assert.throws(() => postMove(hardInv.db, hardInv.id), new RegExp(`The period up to ${softLock} is locked`));
 });
 
-test('Odoo 20: setting hard_lock_date validates draft entries and unreconciled bank lines (including child companies)', async () => {
+test('Odoo 20: setting hard_lock_date validates company draft entries and unreconciled bank lines', async () => {
   let db = seed();
   const pastDate = addDays(today(), -60);
   const lockDate = addDays(today(), -30);
@@ -1491,7 +1491,7 @@ test('Odoo 20: setting hard_lock_date validates draft entries and unreconciled b
     /There are still unreconciled bank transactions/,
   );
 
-  // Reconciling clears the blocker, and child company draft is also validated
+  // Reconciling clears the blocker; a branch draft is outside the parent lock scope
   db = reconcileWith(bankLine.db, read(bankLine.db, 'account.bank.statement.line', bankLine.id), draftInv.id);
   const branch = createCompany(db, { name: 'Branch Co', parent_id: 1 });
   db = branch.db;
@@ -1502,10 +1502,8 @@ test('Odoo 20: setting hard_lock_date validates draft entries and unreconciled b
     invoice_date: pastDate,
     invoice_line_ids: [{ name: 'Branch Draft', qty: 1, price_unit: 25, tax: 0 }],
   });
-  assert.throws(
-    () => write(branchDraft.db, 'res.company', 1, { hard_lock_date: lockDate }),
-    /There are still draft entries in the period you want to hard lock\./,
-  );
+  assert.doesNotThrow(() => write(branchDraft.db, 'res.company', 1, { hard_lock_date: lockDate }));
+  assert.throws(() => write(branchDraft.db, 'res.company', branch.id, { hard_lock_date: lockDate }), /There are still draft entries/);
 
   // Once branch draft is cancelled, parent hard_lock_date succeeds
   db = write(branchDraft.db, 'account.move', branchDraft.id, { state: 'cancel' });
@@ -1525,4 +1523,41 @@ test('Odoo 20: setting hard_lock_date validates draft entries and unreconciled b
   } finally {
     globalThis.localStorage = prevLS;
   }
+});
+
+test('future sales locks move posting into the first open period', () => {
+  let db = seed();
+  const lock = addDays(today(), 40);
+  const journal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  db = write(db, 'res.company', 1, { sale_lock_date: lock });
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, journal_id: journal.id, partner_id: 1, invoice_date: today(), invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100 }] });
+  assert.equal(read(postMove(inv.db, inv.id), 'account.move', inv.id).date, addDays(lock, 1));
+  assert.equal(accountingDateForPost(db, { move_type: 'out_invoice', company_id: 1, journal_id: journal.id, date: today(), highest_name: 'INV/2026/001' }, { todayDate: today() }), addDays(lock, 1));
+});
+
+test('unbooked imported bank transactions block company locks', () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.bank.statement.line': [] } };
+  const journal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, 'account.bank.statement.line', { journal_id: journal.id, company_id: 1, date: '2026-01-01', payment_ref: 'Imported', amount: 20, state: 'to_check' });
+  assert.ok(!read(line.db, 'account.bank.statement.line', line.id).bank_move_id);
+  for (const field of ['lock_date', 'hard_lock_date']) assert.throws(() => write(line.db, 'res.company', 1, { [field]: '2026-01-31' }), /unreconciled bank transactions/);
+});
+
+test('zero-rated tax-name-only lines receive the tax lock', () => {
+  const company = { tax_lock_date: '2026-12-31' };
+  assert.equal(lockDateFor(company, { line_ids: [{ tax_name: '0%', tax_zero: true }] }), '2026-12-31');
+  assert.equal(lockDateFor(company, { invoice_line_ids: [{ tax_name: '0%', tax_zero: true }] }), '2026-12-31');
+});
+
+test('shifted invoice numbering uses the accounting period for overrides', () => {
+  let db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', journal.id, { sequence_override_regex: String.raw`^(?P<prefix1>.*?)(?P<year>\d{4})/(?P<month>\d{2})/(?P<seq>\d+)$` });
+  db = write(db, 'res.company', 1, { sale_lock_date: '2027-12-31' });
+  db = { ...db, records: { ...db.records, 'account.move': [...db.records['account.move'], { id: 99999, company_id: 1, journal_id: journal.id, move_type: 'out_invoice', state: 'posted', date: '2027-12-01', invoice_date: '2027-12-01', name: 'INV/2027/12/0001' }] } };
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, journal_id: journal.id, partner_id: 1, invoice_date: '2027-12-15', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100 }] });
+  const posted = read(postMove(inv.db, inv.id), 'account.move', inv.id);
+  assert.equal(posted.date, '2028-01-01');
+  assert.match(posted.name, /2028\/01\//);
 });

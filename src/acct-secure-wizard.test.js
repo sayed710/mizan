@@ -654,3 +654,32 @@ test('later-dated numbered draft preceding newly secured entries blocks wizard a
   const afterUnrestricted = postMove(afterM4, draftUnrestricted.id);
   assert.equal(read(afterUnrestricted, 'account.move', draftUnrestricted.id).state, 'posted');
 });
+
+test('wizard secures a posted move resolved to an unrestricted default journal', () => {
+  let db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', journal.id, { restrict_mode_hash_table: false });
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.bank.statement.line': [] } };
+  const draft = create(db, 'account.move', { company_id: 1, journal_id: journal.id, partner_id: 1, move_type: 'out_invoice', invoice_date: '2026-01-10', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100 }] });
+  const posted = postMove(draft.db, draft.id);
+  const move = { db: { ...posted, records: { ...posted.records, 'account.move': posted.records['account.move'].map((m) => m.id === draft.id ? { ...m, journal_id: null } : m) } }, id: draft.id };
+  const analysis = analyzeJournalChains(move.db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(analysis.move_to_hash_ids.includes(move.id));
+  const result = secureEntries(move.db, { companyId: 1, hashDate: '2026-01-31', moveIds: analysis.move_to_hash_ids });
+  assert.ok(read(result, 'account.move', move.id).inalterable_hash);
+});
+
+test('securing a period scopes shifted invoices by accounting date', () => {
+  let db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', journal.id, { restrict_mode_hash_table: true });
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.bank.statement.line': [] } };
+  const move = { db: { ...db, records: { ...db.records, 'account.move': [{ id: 90001, company_id: 1, journal_id: journal.id, move_type: 'out_invoice', state: 'posted', name: 'INV/2026/00001', date: '2026-02-01', invoice_date: '2026-01-15', line_ids: [] }] } }, id: 90001 };
+  const analysis = analyzeJournalChains(move.db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(!analysis.move_to_hash_ids.includes(move.id));
+  assert.equal(analysis.max_hash_date, '2026-02-01');
+  const result = secureEntries(move.db, { companyId: 1, hashDate: '2026-01-31', moveIds: analysis.move_to_hash_ids });
+  assert.ok(!read(result, 'account.move', move.id).inalterable_hash);
+  const direct = secureEntries(move.db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(!read(direct, 'account.move', move.id).inalterable_hash);
+});

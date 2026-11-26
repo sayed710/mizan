@@ -196,9 +196,10 @@ export function journalInvoiceSequence(journal, move, db = null) {
   if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) {
     throw new Error(`Configure a positive next ${refund ? 'refund' : 'invoice'} sequence number on the selected journal`);
   }
-  const year = (move.date ?? move.invoice_date ?? today()).slice(0, 4);
+  const seqDate = move.date ?? move.invoice_date ?? today();
+  const year = seqDate.slice(0, 4);
   return {
-    name: db ? journalSequenceName(db, journal, move.invoice_date ?? move.date ?? today(), `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`, (candidate) => isInvoice(candidate) && (isRefund(candidate) && Boolean(journal.refund_sequence)) === refund) : `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
+    name: db ? journalSequenceName(db, journal, seqDate, `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`, (candidate) => isInvoice(candidate) && (isRefund(candidate) && Boolean(journal.refund_sequence)) === refund) : `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
     numberField,
     nextNumber,
   };
@@ -5116,7 +5117,7 @@ Object.assign(accountingModels, {
             if (analysis.not_hashable_unlocked_move_ids?.length) {
               const hasDateDraft = analysis.not_hashable_unlocked_move_ids.some((id) => {
                 const m = read(db, 'account.move', id);
-                return (m?.invoice_date ?? m?.date ?? '') <= r.hash_date;
+                return moveDate(m) <= r.hash_date;
               });
               throw new Error(
                 hasDateDraft
