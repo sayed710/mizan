@@ -24,10 +24,9 @@ import { automaticEntryDefaults, canChangePeriod, canMoveToAccount, canPostJourn
 /** Account roots use only the explicit account code. */
 export const accountCodeRoot = (account) => typeof account?.code === 'string' && account.code ? account.code.slice(0, 2) : null;
 
-/** Use explicit full IDs or the ledger's derived connected reconciliation group. */
+/** Only ledger-derived active reconciliation groups can be opened. */
 export function matchingGroupKey(line) {
-  if (line.full_reconcile_id) return `full:${line.full_reconcile_id}`;
-  return line.matching_number ? `matching:${line.matching_number}` : null;
+  return line.reconciliation_group ? `matching:${line.reconciliation_group}` : null;
 }
 
 export const matchesMatchingGroup = (line, key) => Boolean(key) && matchingGroupKey(line) === key;
@@ -311,17 +310,18 @@ export function JournalItems({ leaf = {} } = {}) {
   // Same company scope as accountBalance: the account's company, else the reconciled move's, else current one.
   const filterAccount = accountFilter ? read(db, 'account.account', accountFilter) : null;
   const filterMove = reconciledOf ? read(db, 'account.move', reconciledOf) : null;
-  const filterCompany = filterAccount
+  const reportCompany = filterAccount
     ? (filterAccount.company_id ?? scopedCompanyParam ?? db.settings?.current_company_id ?? 1)
     : filterMove
       ? (filterMove.company_id ?? scopedCompanyParam ?? db.settings?.current_company_id ?? 1)
       : (scopedCompanyParam ?? null);
+  const filterCompany = matchingGroup ? null : reportCompany;
   const matchesReconciliation = filterMove ? reconciledItemFilter(db, filterMove) : null;
   const multiCompany = companiesOf(db).length > 1;
   const multiCurrency = hasMultiCurrency(db);
   const stateField = models['account.move'].fields.state;
-  const enriched = journalItems(db, { from, to, reviewMode: moveFilter ? 'all_with_cancel' : 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
-    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!moveFilter || (line.move_id === moveFilter && !['line_section', 'line_subsection', 'line_note'].includes(line.display_type))) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line))))
+  const enriched = journalItems(db, { ...(matchingGroup ? {} : { from, to }), reviewMode: !matchingGroup && moveFilter ? 'all_with_cancel' : 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
+    .filter((line) => matchingGroup || ((!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!moveFilter || (line.move_id === moveFilter && !['line_section', 'line_subsection', 'line_note'].includes(line.display_type))) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line)))))
     .map((line) => {
       const move = read(db, 'account.move', line.move_id);
       const lineCompanyCurr = findCompanyCurrencyRecord(db, line.company_id);
@@ -359,15 +359,15 @@ export function JournalItems({ leaf = {} } = {}) {
     .map((g) => g.filter((f) => activeFilters.includes(f.id)))
     .filter((g) => g.length);
   const filteredRows = enriched
-    .filter((line) => activeGroups.every((g) => g.some((f) => mode === 'unreconciled' && f.id === 'unreconciled' ? isReconcilableAccount(line._account) && (line.amount_residual == null || Math.abs(line.amount_residual) > 1e-9) : f.fn(line))))
-    .filter((line) => matchesItemSearch(line, query))
+    .filter((line) => matchingGroup || activeGroups.every((g) => g.some((f) => mode === 'unreconciled' && f.id === 'unreconciled' ? isReconcilableAccount(line._account) && (line.amount_residual == null || Math.abs(line.amount_residual) > 1e-9) : f.fn(line))))
+    .filter((line) => matchingGroup || matchesItemSearch(line, query))
     .filter((line) => !matchingGroup || matchesMatchingGroup(line, matchingGroup));
   const rootCounts = new Map();
   for (const line of filteredRows) {
     const root = accountCodeRoot(line._account);
     if (root) rootCounts.set(root, (rootCounts.get(root) ?? 0) + 1);
   }
-  const rows = filteredRows.filter((line) => !accountRoot || accountCodeRoot(line._account) === accountRoot);
+  const rows = filteredRows.filter((line) => matchingGroup || !accountRoot || accountCodeRoot(line._account) === accountRoot);
 
   const groups = new Map();
   for (const line of rows) {
@@ -466,7 +466,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const renderCell = (line, col) => {
     switch (col.key) {
       case 'matching': return matchingGroupKey(line)
-        ? <a href="#" onClick={(event) => { event.preventDefault(); setMatchingGroup(matchingGroupKey(line)); setAccountRoot(null); setSelected([]); }}>{line.matchingText}</a>
+        ? <a href="#" onClick={(event) => { event.preventDefault(); setMatchingGroup(matchingGroupKey(line)); setSelected([]); }}>{line.matchingText}</a>
         : line.matchingText;
       case 'move_id': return line.move_id ? <a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a> : line.move_name;
       case 'status': return line.status ? <span className={`badge badge-${stateField.badge[line.move_state] ?? 'info'}`}>{t(line.status)}</span> : '';
@@ -549,11 +549,13 @@ export function JournalItems({ leaf = {} } = {}) {
   const controls = (
     <>
       <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
-        {accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
-        {journalFilter && <span className="facet">{t('Journal')}: {read(db, 'account.journal', journalFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
+        {!matchingGroup && accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
+        {!matchingGroup && journalFilter && <span className="facet">{t('Journal')}: {read(db, 'account.journal', journalFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
+        {!matchingGroup && <>
         <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
         <label>{t('To')} <input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
         <label>{t('Search')} <input aria-label={t('Search')} placeholder={t('Journal Item')} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
+        </>}
         <label>{t('Group By')} <select aria-label={t('Group By')} value={group} onChange={(e) => setGroup(e.target.value)}>
           <option value="">{t('None')}</option>{GROUP_OPTIONS.map((opt) => <option key={opt.key} value={opt.key}>{t(opt.label)}</option>)}
         </select></label>
@@ -562,12 +564,12 @@ export function JournalItems({ leaf = {} } = {}) {
         <button type="button" className="btn sm" onClick={exportCsv}>{t('Export CSV')}</button>
         <button type="button" className="btn sm" onClick={exportXlsx}>{t('Export XLSX')}</button>
       </div>
-      <div className="control-panel" role="group" aria-label={t('Filters')}>
+      {!matchingGroup && <div className="control-panel" role="group" aria-label={t('Filters')}>
         {ITEM_FILTER_GROUPS.map((grp, gi) => <Fragment key={gi}>
           {gi > 0 && <span className="filter-sep" aria-hidden="true">|</span>}
           {grp.map((f) => <button key={f.id} type="button" className={`btn sm${activeFilters.includes(f.id) ? ' active' : ''}`} aria-pressed={activeFilters.includes(f.id)} onClick={() => toggleFilter(f.id)}>{t(f.label)}</button>)}
         </Fragment>)}
-      </div>
+      </div>}
       <div className="control-panel">
         <span>{t('{n} selected', { n: selected.length })}</span>
         {mode !== 'draft' && <button type="button" className="btn" disabled={!selected.length || busy} onClick={handleMarkReviewed}>{t('Mark as reviewed')}</button>}
@@ -617,13 +619,13 @@ export function JournalItems({ leaf = {} } = {}) {
       company={printCompany}
       companies={printCompanies}
       title={t(title)}
-      subtitle={from || to ? `${from || '...'} → ${to || '...'}` : ''}
+      subtitle={!matchingGroup && (from || to) ? `${from || '...'} → ${to || '...'}` : ''}
       controls={controls}
       onBack={() => setIsPrinting(false)}
     >
       {matchingGroup && !isPrinting && <button type="button" className="btn sm" onClick={() => { setMatchingGroup(null); setSelected([]); }}>{t('Clear matching')}</button>}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: '1rem' }}>
-      {!isPrinting && <aside aria-label={t('Account Roots')} style={{ flex: '0 0 auto' }}>
+      {!isPrinting && !matchingGroup && <aside aria-label={t('Account Roots')} style={{ flex: '0 0 auto' }}>
         <strong>{t('Account Roots')}</strong>
         <div><button type="button" className="btn sm" aria-pressed={!accountRoot} onClick={() => { setAccountRoot(null); setSelected([]); }}>{t('All')}</button></div>
         {[...rootCounts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([root, count]) => <div key={root}><button type="button" className="btn sm" aria-pressed={accountRoot === root} onClick={() => { setAccountRoot(root); setSelected([]); }}>{root} ({count})</button></div>)}
