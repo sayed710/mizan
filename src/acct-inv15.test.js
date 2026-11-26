@@ -106,3 +106,21 @@ test('bank review flag makes a posted bill appear in To Review until marked revi
   assert.deepEqual(filtered(), []);
   assert.equal(fields.review_state.compute({ state: 'draft', to_check: true }), null);
 });
+test('posted tax column rounds with the company currency increment', () => {
+  const db = seed();
+  const company = db.records['res.company'].find((c) => c.id === 1);
+  const currencies = db.records['res.currency'].map((c) => c.id === company.currency_id ? { ...c, rounding: 0.001 } : c);
+  const threeDecimals = { ...db, records: { ...db.records, 'res.currency': currencies } };
+  assert.equal(fields.amount_tax_signed.compute({ move_type: 'out_invoice', company_id: 1, line_ids: [{ display_type: 'tax', debit: 0, credit: 1.235 }] }, threeDecimals), 1.235);
+});
+test('journal entries without tax lines report no tax and never convert currencies', () => {
+  const db = { ...seed(), records: { ...seed().records, 'res.company': [] }, settings: { ...seed().settings, base_currency_id: null } };
+  assert.equal(fields.amount_tax_signed.compute({ move_type: 'entry', company_id: 1, currency_id: 999, line_ids: [{ debit: 50, credit: 0 }] }, db), 0);
+});
+test('a stored anomaly review status stays in To Review', () => {
+  const filter = salesInvoiceView.filters.flat().find((f) => f.id === 'to_check');
+  const status = fields.review_state.compute({ state: 'posted', to_check: false, review_state: 'anomaly' });
+  assert.equal(status, 'anomaly');
+  assert.equal(filter.fn({ state: 'posted', review_state: status }), true);
+  assert.equal(fields.review_state.compute({ state: 'posted', to_check: false }), 'reviewed');
+});

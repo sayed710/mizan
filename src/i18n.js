@@ -2456,6 +2456,7 @@ const ar = {
   'Tax Returns': 'الإقرارات الضريبية',
   'Set start and end dates to view the tax report.': 'حدّد تاريخي البدء والانتهاء لعرض التقرير الضريبي.',
   'Review Status': 'حالة المراجعة',
+  'Anomaly': 'حالة شاذة',
   'Reviewed': 'تمت المراجعة',
   'Mark as reviewed': 'تحديد كمُراجَع',
   'Submission Date': 'تاريخ التقديم',

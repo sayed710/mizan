@@ -4191,8 +4191,13 @@ export const accountingModels = {
         type: 'monetary', label: 'Tax', currency: 'company',
         compute: (r, db) => {
           const lines = (r.line_ids ?? []).filter((line) => line.display_type === 'tax' || line.display_type === 'non_deductible_tax' || (line.display_type === 'rounding' && line.tax_repartition_line_id) || (line.tax_name && !line.tax_grid_base && !line.tax_zero));
-          if (lines.length) return -round2(lines.reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0)) || 0;
           const company = findCompanyCurrencyRecord(db, r.company_id ?? 1);
+          if (lines.length) {
+            const balance = -lines.reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0);
+            return (company ? roundCurrency(balance, company) : round2(balance)) || 0;
+          }
+          // Journal entries carry their tax only on lines; never convert a document amount for them.
+          if (!isInvoice(r)) return 0;
           if (!company) return null;
           const doc = documentCurrency(db, r);
           const rate = !doc || doc.id === company.id ? 1 : conversionRate(db, doc.id, company.id, r.invoice_date ?? r.date ?? today(), r.company_id ?? 1);
@@ -4288,7 +4293,7 @@ export const accountingModels = {
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       to_check: { type: 'boolean', label: 'To Check', copy: false },
-      review_state: { type: 'selection', label: 'Review Status', readonly: true, compute: (r) => r.state === 'posted' ? (r.to_check ? 'todo' : 'reviewed') : null, options: [['todo', 'To Review'], ['reviewed', 'Reviewed']] },
+      review_state: { type: 'selection', label: 'Review Status', readonly: true, compute: (r) => r.state !== 'posted' ? null : r.review_state === 'anomaly' ? 'anomaly' : r.to_check ? 'todo' : 'reviewed', options: [['todo', 'To Review'], ['anomaly', 'Anomaly'], ['reviewed', 'Reviewed']] },
       is_move_sent: { type: 'boolean', label: 'Is Move Sent', copy: false, readonly: true },
       auto_post: {
         type: 'selection',
