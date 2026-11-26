@@ -98,6 +98,9 @@ test('the multi-tax check uses the employee company when the expense has none', 
   let db = seed();
   const second = createCompany(db, { name: 'Expense branch' });
   db = second.db;
+  const expenseAccount = create(db, 'account.account', { name: 'Branch expenses', code: '699901', account_type: 'expense', company_id: second.id });
+  const journal = create(expenseAccount.db, 'account.journal', { name: 'Branch expenses', code: 'BEXP', type: 'purchase', company_id: second.id, default_account_id: expenseAccount.id });
+  db = write(journal.db, 'res.company', second.id, { default_purchase_journal_id: journal.id });
   const c1Taxes = [];
   for (const amount of [10, 4]) {
     const tax = create(db, 'account.tax', { name: `Main purchase ${amount}%`, amount, amount_type: 'percent', type_tax_use: 'purchase', company_id: 1 });
@@ -112,4 +115,16 @@ test('the multi-tax check uses the employee company when the expense has none', 
   const expense = { name: 'Branch approval', product_id: product.id, employee_id: emp.id, company_id: null, state: 'approved' };
   assert.ok(!models['hr.expense'].guard(db, null, expense));
   assert.match(models['hr.expense'].guard(db, null, { ...expense, employee_id: null }) ?? '', /multiple product taxes/);
+  const selected = models['hr.expense'].onchange({ ...expense, quantity: 1 }, 'product_id', db);
+  assert.equal(selected.tax_id, c2Tax.id);
+  const created = create(db, 'hr.expense', { ...expense, ...selected, state: 'draft' });
+  db = write(created.db, 'hr.expense', created.id, { state: 'submitted' });
+  db = write(db, 'hr.expense', created.id, { state: 'approved' });
+  db = run(db, created.id, 'Post Journal Entries');
+  const posted = read(db, 'hr.expense', created.id);
+  const move = read(db, 'account.move', posted.move_id);
+  assert.equal(posted.state, 'posted');
+  assert.equal(move.company_id, second.id);
+  assert.ok(isBalanced(move.line_ids));
+  assert.ok(move.line_ids.some((line) => line.tax_id === c2Tax.id));
 });

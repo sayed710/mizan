@@ -345,7 +345,7 @@ export const moreModels = {
       if (key === 'product_id' && r.product_id) {
         const p = read(db, 'product', r.product_id);
         const unit = Number(p?.cost) || 0;
-        const snapshot = productTax(db, p, 'purchase', null, r.company_id);
+        const snapshot = productTax(db, p, 'purchase', null, expenseCompanyId(db, r));
         const tax = snapshot?.tax_breakdown?.length ? snapshot.tax_breakdown.reduce((sum, item) => sum + (Number(item.tax) || 0), 0) : snapshot?.tax ?? p?.purchase_tax ?? r.tax;
         return { unit_amount: unit, tax, tax_id: hasMultipleExpenseTaxes(snapshot) ? null : snapshot?.tax_id ?? null, name: r.name || p?.name || '', total_amount: round2(computeLineTaxes({ qty: Number(r.quantity) || 1, price_unit: unit, ...(snapshot ?? { tax }) }).total) };
       }
