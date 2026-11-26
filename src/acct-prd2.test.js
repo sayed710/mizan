@@ -360,9 +360,15 @@ test('legacy scalar tax fallback is exported and drives list sorting', async () 
     URL.createObjectURL = (value) => { blob = value; return 'blob:regression'; };
     try {
       await React.act(async () => root.render(React.createElement(ActionView, { leaf: { key: 'fallback-export', model: 'product', view: 'list', list: ['name', 'taxes_id'], listFields, domain: (p) => p.id === first.id }, base: '#/test', params: new URLSearchParams('view=list') })));
-      const exportButton = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export') && !n.textContent.includes('XLSX'));
+      const exportButton = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export'));
       assert.ok(exportButton);
       await React.act(async () => props(exportButton).onClick());
+      const dialog = find(host, (n) => props(n)?.role === 'dialog');
+      assert.ok(dialog, 'Export dialog opens');
+      const formatSelect = find(dialog, (n) => props(n)?.['aria-label'] === 'Format');
+      await React.act(async () => props(formatSelect).onChange({ target: { value: 'csv' } }));
+      const confirmButton = find(dialog, (n) => n.tagName === 'BUTTON' && n.textContent === 'Export');
+      await React.act(async () => props(confirmButton).onClick());
       assert.ok(blob, 'CSV download created');
       const csv = await blob.text();
       assert.match(csv, /First fallback/);
