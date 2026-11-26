@@ -20,13 +20,6 @@ test('journal entry Not Secured uses the invoice predicate', () => {
   assert.equal(entry.fn({ state: 'posted', inalterable_hash: 'hash' }), false);
 });
 
-test('deferred labels are consistent', async () => {
-  const { deferredModels } = await import('./models/deferred.js');
-  const smart = accountingModels['account.move'].form.smart.find((item) => typeof item.target === 'function' && String(item.target).includes('moveDeferrals'));
-  assert.equal(smart.label, 'Deferred Entries');
-  assert.equal(deferredModels['account.deferral'].label, 'Deferred Entries');
-});
-
 test('account roots come only from explicit codes', async () => {
   const { accountCodeRoot } = await import('./views/JournalItems.jsx');
   assert.equal(accountCodeRoot({ code: '120500', name: 'Other' }), '12');

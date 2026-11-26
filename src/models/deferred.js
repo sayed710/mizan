@@ -1637,7 +1637,7 @@ export function deferralGuard(db, before, after) {
 
 export const deferredModels = {
   'account.deferral': {
-    label: 'Deferred Entries',
+    label: 'Deferrals',
     // Enforced on every write path, not only the Cancel button (Qodo 12).
     guard: deferralGuard,
     actions: {

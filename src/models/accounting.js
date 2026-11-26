@@ -4512,7 +4512,7 @@ export const accountingModels = {
           },
         },
         {
-          label: 'Deferred Entries',
+          label: (r) => (['in_invoice', 'in_refund'].includes(r?.move_type) ? 'Deferred Expenses' : 'Deferrals'),
           when: (r, db) => moveDeferrals(db, r).length > 0,
           value: (db, r) => moveDeferrals(db, r).length,
           target: (r, db) => {
