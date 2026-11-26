@@ -1,9 +1,9 @@
 import { read } from '../orm.js';
 
-/** Resolve an explicit account setting without interpreting its chart code. */
-export function configuredAccount(db, id, company, role, owner, { allowArchived = false } = {}) {
+/** Resolve an explicit account setting without interpreting its chart code. Deprecated accounts are rejected only with `rejectDeprecated` (a newly selected account); existing references stay usable. */
+export function configuredAccount(db, id, company, role, owner, { allowArchived = false, rejectDeprecated = false } = {}) {
   const account = Number.isInteger(id) && read(db, 'account.account', id);
-  if (!account || (!allowArchived && account.active === false)) throw new Error(`Configure the ${role} account on ${owner}`);
+  if (!account || (!allowArchived && account.active === false) || (rejectDeprecated && account.deprecated)) throw new Error(`Configure the ${role} account on ${owner}`);
   if (account.company_id && account.company_id !== (company ?? 1)) throw new Error(`The ${role} account on ${owner} belongs to another company`);
   return account.id;
 }
