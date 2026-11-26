@@ -615,7 +615,7 @@ test('invoices/bills keep their form untouched and Arabic i18n covers every new 
     'Reversal of',
     'Fiscal Position',
     'Terms and Conditions',
-    'Journal entry is not balanced: total debit must equal total credit.',
+    'The entry is not balanced.',
   ];
   const prevStorage = globalThis.localStorage;
   globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null) };

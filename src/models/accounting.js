@@ -383,7 +383,7 @@ export function paymentGuard(db, before, after, ctx) {
     if ((db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.correction_of_id === note.id && m.state !== 'cancel')) return 'This credit note already has a correction';
     if (after.state === 'posted' && docRound(total(after, db)) !== docRound(total(note, db))) return 'A correction must restore the full credit note amount';
   }
-  if (after.state === 'posted' && isInvoice(after) && !validInvoiceTotal(after, db)) return 'The total must be positive; use a credit note or refund instead';
+  if (after.state === 'posted' && isInvoice(after) && !validInvoiceTotal(after, db)) return invoiceTotalError(after, db);
   // Any sales invoice can overcommit an order with advances, not just an advance itself.
   if (after.state === 'posted' && before?.state !== 'posted' && after.move_type === 'out_invoice' && after.sale_id
     && [after, ...(db.records['account.move'] ?? []).filter((m) => m.sale_id === after.sale_id && m.state === 'posted')]
@@ -473,6 +473,7 @@ export function paymentGuard(db, before, after, ctx) {
 }
 
 const validInvoiceTotal = (r, db) => total(r, db) > 0 || (total(r, db) === 0 && r.move_type === 'out_invoice' && r.sale_id && (r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) < 0));
+const invoiceTotalError = (r, db) => total(r, db) < 0 ? 'You cannot validate an invoice with a negative total amount. You should create a credit note instead. Use the action menu to transform it into a credit note or refund.' : 'The total must be positive; use a credit note or refund instead';
 const RECURRENCE_MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
 const RECURRING_EXCLUDED_FIELDS = new Set([
   'id', 'name', 'ref', 'payment_reference', 'state', 'line_ids', 'payments', 'amount_paid', 'payment_date',
@@ -780,8 +781,8 @@ export function postMove(db, id, { autoPost = false } = {}) {
       return account?.company_id && account.company_id !== (r.company_id ?? 1);
     })) throw new Error('Journal account belongs to another company');
     if (badLineSign(r.line_ids) && !validStornoMove(db, r)) throw new Error('Debits and credits cannot be negative');
-    if (badCurrencyAmountSign(r.line_ids)) throw new Error('The currency amount sign must match the debit/credit balance');
-    if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error('Journal entry is not balanced: total debit must equal total credit');
+    if (badCurrencyAmountSign(r.line_ids)) throw new Error('The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited. If the currency is the same as the one from the company, this amount must strictly be equal to the balance.');
+    if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error((r.line_ids ?? []).length ? 'The entry is not balanced.' : "Even magicians can't post nothing!");
     const entryDate = r.invoice_date ?? r.date ?? today();
     if (r.auto_reverse) {
       const revDate = r.reverse_date;
@@ -829,9 +830,9 @@ export function postMove(db, id, { autoPost = false } = {}) {
     }
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
-  if (!r.partner_id) throw new Error('Partner is required');
-  if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
-  if (!validInvoiceTotal(r, db)) throw new Error('The total must be positive; use a credit note or refund instead');
+  if (!r.partner_id) throw new Error(isPurchase(r) ? "The field 'Vendor' is required, please complete it to validate the Vendor Bill." : "The 'Customer' field is required to validate the invoice.\nYou probably don't want to explain to your auditor that you invoiced an invisible man :)");
+  if (!(r.invoice_line_ids ?? []).length) throw new Error("Even magicians can't post nothing!");
+  if (!validInvoiceTotal(r, db)) throw new Error(invoiceTotalError(r, db));
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
   const expectedType = isPurchase(r) ? 'purchase' : 'sale';
@@ -2688,7 +2689,7 @@ function unbalancedEntryWarning(db, r) {
   const own = db ? companyCurrencyRecord(db, r.company_id ?? 1) : null;
   const hasAmounts = lines.some((l) => (Number(l.debit) || 0) !== 0 || (Number(l.credit) || 0) !== 0);
   if (!hasAmounts || ((!badLineSign(lines) || validStornoMove(db, r)) && isBalanced(lines, own))) return '';
-  return t('Journal entry is not balanced: total debit must equal total credit.');
+  return t('The entry is not balanced.');
 }
 
 /** Whether Quick Encoding applies to `r` under its company's `quick_edit_mode` (draft covered invoices/bills only). */
@@ -3941,7 +3942,7 @@ export const accountingModels = {
       if (baseErr) return baseErr;
       if (after.state === 'draft' && after.posting_order != null) return 'Draft move cannot have a posting order';
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
-      return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
+      return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited. If the currency is the same as the one from the company, this amount must strictly be equal to the balance.' : null);
     },
     invariant: (db, after, before, stored, ctx) => {
       const err = secureMoveInvariant(db, after, before, ctx?.secureOwnershipCache) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
@@ -4682,6 +4683,7 @@ export const accountingModels = {
           run: debitNote,
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
+        { label: 'Preview', when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=preview` }) },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: downloadMoves },
         {
           label: 'Reset to Draft',

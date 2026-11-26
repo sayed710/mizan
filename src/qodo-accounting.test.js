@@ -90,5 +90,5 @@ test('posting a negative invoice through a diff is refused even with positive ba
   const old = read(inv.db, 'account.move', inv.id);
   const draft = create(inv.db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ qty: 1, price_unit: -100, tax: 0 }] });
   const row = read(draft.db, 'account.move', draft.id);
-  assert.throws(() => applyDiff(draft.db, { upserts: { 'account.move': [{ ...row, state: 'posted', name: 'NEG/1', line_ids: old.line_ids }] } }), /total must be positive/);
+  assert.throws(() => applyDiff(draft.db, { upserts: { 'account.move': [{ ...row, state: 'posted', name: 'NEG/1', line_ids: old.line_ids }] } }), /You cannot validate an invoice with a negative total amount/);
 });

@@ -239,7 +239,7 @@ test('FX-10: Posting refuses a line whose amount_currency sign does not match it
   });
   assert.throws(
     () => postMove(draftBadDebit.db, draftBadDebit.id),
-    /The currency amount sign must match the debit\/credit balance/,
+    /The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited/,
   );
 
   // Positive amount_currency with credit balance: postMove throws
@@ -255,7 +255,7 @@ test('FX-10: Posting refuses a line whose amount_currency sign does not match it
   });
   assert.throws(
     () => postMove(draftBadCredit.db, draftBadCredit.id),
-    /The currency amount sign must match the debit\/credit balance/,
+    /The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited/,
   );
 
   // postEntry in ledger.js also refuses mismatched sign
@@ -271,7 +271,7 @@ test('FX-10: Posting refuses a line whose amount_currency sign does not match it
         { account_id: cashAccount, debit: 0, credit: 100 },
       ],
     }),
-    /The currency amount sign must match the debit\/credit balance/,
+    /The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited/,
   );
 });
 
@@ -296,7 +296,7 @@ test('FX-10: Posting sign mismatch is also refused when saved through diffDb + a
 
   assert.throws(
     () => applyDiff(db, forged, { isAdmin: false, author: 'Clerk' }),
-    /The currency amount sign must match the debit\/credit balance/,
+    /The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited/,
   );
 });
 

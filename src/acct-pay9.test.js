@@ -622,7 +622,7 @@ test('Regression 9: Rejected payment entry cannot be reset to draft or deleted w
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, deletedMoveDb), { isAdmin: true }),
-    /Posted entries cannot be deleted|records a payment/i,
+    /You cannot delete an entry which has been posted once|records a payment/i,
   );
 
   // 3. Aging credit remains backed by the posted entry and matches partner ledger
@@ -1348,7 +1348,7 @@ test('Regression 9: Rejected payment entry cannot be reset to draft or deleted w
   };
   assert.throws(
     () => applyDiff(db, diffDb(db, deletedMoveDb), { isAdmin: true }),
-    /Posted entries cannot be deleted|records a payment/i,
+    /You cannot delete an entry which has been posted once|records a payment/i,
   );
 
   // 3. Aging credit remains backed by the posted entry and matches partner ledger
