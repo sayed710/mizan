@@ -4095,6 +4095,7 @@ const ar = {
   'Percentage must be greater than 0 and at most 100': 'يجب أن تكون النسبة المئوية أكبر من 0 ولا تتجاوز 100',
   'Select an accrual account': 'اختر حساب استحقاق',
   'Select an active accrual account for this company': 'اختر حساب استحقاق نشطاً لهذه الشركة',
+  'Select a balance sheet account as the accrual account': 'اختر حساباً من حسابات الميزانية كحساب استحقاق',
   'Selected items have zero balance': 'البنود المحددة رصيدها صفر',
   'Automatic entries must be miscellaneous journal entries': 'يجب أن تكون القيود التلقائية قيود يومية متنوعة',
   'Journal and entry must belong to the same company': 'يجب أن ينتمي دفتر اليومية والقيد إلى نفس الشركة',
