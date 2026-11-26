@@ -297,7 +297,7 @@ test('header buttons per state, Lock hashing, Reset to Draft locks, Reverse Entr
     await openOtherInfo();
     assert.ok(fieldLabelsOf(otherPanel()).includes('Reversal of'));
     assert.equal(find(otherPanel(), (n) => props(n)?.id === 'f-reversed_entry_id'), null, 'Reversal of is readonly');
-    assert.ok(smartButtonsOf(ctx.host).some((b) => b.label === 'Reversed Entry' && b.href === `#/accounting/entries/${m1.id}`));
+    assert.ok(smartButtonsOf(ctx.host).some((b) => b.label === 'Journal Entry' && b.href === `#/accounting/entries/${m1.id}`));
 
     // On m2: test Post -> Reset to Draft -> Lock date hiding Reset to Draft -> Cancel Entry & Cancelled statusbar.
     await ctx.render(m2.id);
@@ -487,8 +487,8 @@ test('smart buttons cover Reversal Entries, Payments, Reconciled items, Adjustin
 
     await ctx.render(payRec.move_id);
     const paySmart = smartButtonsOf(ctx.host);
-    assert.ok(paySmart.some((b) => b.label === 'Payments' && b.val === '1' && b.href === `#/accounting/payments/${payRec.id}`));
-    assert.ok(paySmart.some((b) => b.label === 'Reconciled items' && b.href === `#/accounting/journal-items?reconciled_of=${payRec.move_id}`));
+    assert.ok(paySmart.some((b) => b.label === 'Payment' && b.val === '1' && b.href === `#/accounting/payments/${payRec.id}`));
+    assert.ok(paySmart.some((b) => b.label === 'Reconciled Items' && b.href === `#/accounting/journal-items?reconciled_of=${payRec.move_id}`));
 
     await ctx.render(taxClose.id);
     assert.ok(smartButtonsOf(ctx.host).some((b) => b.label === 'Tax Return' && b.href === `#/accounting/tax-returns/${taxRet.id}`));
