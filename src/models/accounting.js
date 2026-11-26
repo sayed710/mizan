@@ -4354,13 +4354,13 @@ export const accountingModels = {
       unlockedFields: ['to_check'],
       smart: [
         {
-          label: (r) => ({ out_invoice: 'Credit Notes', in_invoice: 'Refunds', entry: 'Reversal Entries' }[r.move_type] ?? ''),
+          label: (r) => ({ out_invoice: 'Credit Notes', in_invoice: 'Refunds', entry: 'Reversal Entries' }[r.move_type] ?? 'Reversal Entries'),
           when: (r, db) => moveReversalEntries(db, r).length > 0,
           value: (db, r) => moveReversalEntries(db, r).length,
           target: (r) => `accounting/entries?view=list&rel=reversed_entry_id:${r.id}`,
         },
         {
-          label: (r) => ({ out_refund: 'Invoice', in_refund: 'Vendor Bill', entry: 'Journal Entry' }[r.move_type] ?? ''),
+          label: (r) => ({ out_refund: 'Invoice', in_refund: 'Vendor Bill', entry: 'Journal Entry' }[r.move_type] ?? 'Journal Entry'),
           when: (r) => Boolean(r.reversed_entry_id),
           value: () => '',
           target: (r) => `accounting/entries/${r.reversed_entry_id}`,

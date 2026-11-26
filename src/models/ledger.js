@@ -1506,8 +1506,9 @@ export function reconciledJournalItems(db, move, { partialMatching = false } = {
 /** Filter the matching groups belonging to a move; retain legacy settlement support without group numbers. */
 export function reconciledItemFilter(db, move) {
   const numbers = new Set(reconciledJournalItems(db, move, { partialMatching: true }).map((line) => line.matching_number).filter(Boolean));
-  const legacyMoves = numbers.size ? null : matchedMoveIds(db, move.id);
-  return (line) => (numbers.size ? numbers.has(line.matching_number) : legacyMoves.has(line.move_id) && line.reconciled);
+  const legacyMoves = matchedMoveIds(db, move.id);
+  return (line) => numbers.has(line.matching_number)
+    || (!line.matching_number && legacyMoves.has(line.move_id) && line.reconciled);
 }
 
 /** Move IDs connected to `moveId` through active settlements, payments, and bank reconciliations. */

@@ -56,6 +56,39 @@ test('reversal and original buttons use Odoo labels and exact relationships for 
   assert.equal(dynamic('Invoice', move(db, 90002)).when({ move_type: 'out_refund' }), false);
 });
 
+test('linked receipts have labeled reversal buttons in both directions', () => {
+  const db = fixture();
+  for (const [id, type] of [[93001, 'out_receipt'], [93003, 'in_receipt']]) {
+    const source = { id, move_type: type, state: 'posted' };
+    const reversal = { id: id + 1, move_type: type, state: 'posted', reversed_entry_id: id };
+    db.records['account.move'].push(source, reversal);
+    const forward = dynamic('Reversal Entries', source);
+    const backward = dynamic('Journal Entry', reversal);
+    assert.equal(forward.when(source, db), true);
+    assert.equal(forward.value(db, source), 1);
+    assert.equal(backward.when(reversal, db), true);
+    assert.equal(backward.target(reversal, db), `accounting/entries/${id}`);
+  }
+});
+
+test('reconciled item filter includes numbered and legacy settlements together', () => {
+  const db = fixture();
+  const invoice = move(db, 90001);
+  invoice.payments = [{ move_id: 90010, amount: 100 }];
+  db.records['account.partial.reconcile'] = db.records['account.partial.reconcile'].filter((link) => link.id !== 92002);
+  const numbered = reconciledJournalItems(db, move(db, 90005), { partialMatching: true })[0];
+  const legacy = reconciledJournalItems(db, move(db, 90010), { partialMatching: true })[0];
+  assert.ok(numbered.matching_number);
+  assert.equal(legacy.matching_number, undefined);
+  assert.equal(legacy.reconciled, true);
+  const filter = reconciledItemFilter(db, invoice);
+  assert.equal(filter({ ...numbered, move_id: 90005 }), true);
+  assert.equal(filter({ ...legacy, move_id: 90010 }), true);
+  assert.equal(filter({ ...legacy, move_id: 90010, reconciled: false }), false);
+  assert.equal(filter({ ...legacy, move_id: 90010, matching_number: 'other' }), false);
+  assert.equal(filter({ ...legacy, move_id: 999999 }), false);
+});
+
 test('payments distinguish an originating payment from reconciled payments and select exact records', () => {
   const db = fixture(); const invoice = move(db, 90001); const entry = move(db, 90005);
   const origin = named('Payment'); const payments = named('Payments');
