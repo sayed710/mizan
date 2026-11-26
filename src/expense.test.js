@@ -63,3 +63,32 @@ test('quantity × unit price with tax included gives the total', () => {
   const vals = models['hr.expense'].onchange({ quantity: 3, unit_amount: 10, tax: 14 }, 'quantity', seed());
   assert.equal(vals.total_amount, 34.2);
 });
+
+test('editing an expense retains the selected tax price-inclusion configuration', () => {
+  let db = seed();
+  const tax = search(db, 'account.tax').find((t) => t.type_tax_use === 'purchase' && t.amount === 14);
+  db = write(db, 'account.tax', tax.id, { price_include_override: 'tax_included' });
+  const product = create(db, 'product', { name: 'Included expense', type: 'service', cost: 100, supplier_taxes_id: [tax.id] });
+  db = product.db;
+  const selected = models['hr.expense'].onchange({ product_id: product.id, quantity: 1 }, 'product_id', db);
+  assert.equal(selected.total_amount, 100);
+  const expense = { ...selected, product_id: product.id, quantity: 2 };
+  assert.equal(models['hr.expense'].onchange(expense, 'quantity', db).total_amount, 200);
+  assert.equal(models['hr.expense'].onchange({ ...expense, unit_amount: 150 }, 'unit_amount', db).total_amount, 300);
+});
+
+test('multiple product taxes are rejected at approval and posting', () => {
+  let db = seed();
+  const taxes = search(db, 'account.tax').filter((t) => t.type_tax_use === 'purchase' && t.active !== false && (!t.company_id || t.company_id === 1));
+  const product = create(db, 'product', { name: 'Multiple taxes', type: 'service', cost: 100, supplier_taxes_id: taxes.slice(0, 2).map((t) => t.id) });
+  db = product.db;
+  const error = /Expenses do not support multiple product taxes/;
+  assert.throws(() => create(db, 'hr.expense', { name: 'Direct approval', product_id: product.id, state: 'approved' }), error);
+  const submitted = create(db, 'hr.expense', { name: 'Changed product', state: 'submitted' });
+  assert.throws(() => write(submitted.db, 'hr.expense', submitted.id, { product_id: product.id, state: 'approved' }), error);
+  const approved = create(db, 'hr.expense', { name: 'Product changed later', state: 'approved', total_amount: 114, tax: 14 });
+  const modified = write(approved.db, 'product', product.id, { supplier_taxes_id: [] });
+  const expense = write(modified, 'hr.expense', approved.id, { product_id: product.id });
+  const changedTax = write(expense, 'product', product.id, { supplier_taxes_id: taxes.slice(0, 2).map((t) => t.id) });
+  assert.throws(() => run(changedTax, approved.id, 'Post Journal Entries'), error);
+});
