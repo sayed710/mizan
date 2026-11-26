@@ -781,7 +781,7 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
   assert.equal(isPaymentReconciled(db, read(db, 'account.payment', pUnrec.id)), false);
   assert.equal(customerPaymentView.listDecoration(read(db, 'account.payment', pUnrec.id), db), 'warning');
 
-  // 2. Paid & invoice-reconciled -> is_reconciled true, NO warning row; display_state & badge remain Paid (warning) until bank-matched
+  // 2. Invoice-reconciled but not bank-matched remains a warning until bank matching.
   const inv = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: partner.id,
@@ -793,7 +793,7 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
   const pInvRec = db.records['account.payment'].at(-1);
   assert.equal(isPaymentReconciled(db, pInvRec), true);
   assert.equal(read(db, 'account.payment', pInvRec.id).display_state, 'posted');
-  assert.equal(customerPaymentView.listDecoration(pInvRec, db), null);
+  assert.equal(customerPaymentView.listDecoration(pInvRec, db), 'warning');
 
   // 2b. Paid & bank-matched -> display_state 'reconciled' (Reconciled) + badge-success
   const pMatchedRes = create(db, 'account.payment', {
@@ -823,7 +823,7 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
   assert.deepEqual(byDisplayState.find((g) => g.key === 'posted')?.records.map((r) => r.id), [pInvRec.id]);
   assert.deepEqual(byDisplayState.find((g) => g.key === 'reconciled')?.records.map((r) => r.id), [pMatched.id]);
 
-  // 3. Rejected payment -> no warning row
+  // 3. Rejected payment -> muted row
   const pRej = create(db, 'account.payment', {
     partner_id: partner.id,
     partner_type: 'customer',
@@ -836,7 +836,7 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
   db = postPayment(pRej.db, read(pRej.db, 'account.payment', pRej.id));
   db = markAsSent(db, pRej.id);
   db = rejectPayment(db, pRej.id);
-  assert.equal(customerPaymentView.listDecoration(read(db, 'account.payment', pRej.id), db), null);
+  assert.equal(customerPaymentView.listDecoration(read(db, 'account.payment', pRej.id), db), 'muted');
 
   // Mount ActionView list and check rendered classes
   const prevStorage = globalThis.localStorage;
@@ -863,7 +863,7 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
     const rejRow = rowFor(read(db, 'account.payment', pRej.id).name);
     assert.ok(hasClass(unrecRow, 'warning'), 'paid unreconciled row has warning class');
     assert.ok(find(unrecRow, (n) => hasClass(n, 'badge-warning')), 'paid unreconciled badge has badge-warning');
-    assert.ok(!hasClass(invRecRow, 'warning'), 'paid invoice-reconciled row has no warning class');
+    assert.ok(hasClass(invRecRow, 'warning'), 'paid invoice-reconciled but unmatched row has warning class');
     const invRecBadge = find(invRecRow, (n) => hasClass(n, 'badge'));
     assert.ok(hasClass(invRecBadge, 'badge-warning'), 'invoice-settled unmatched payment badge matches display_state Paid');
     assert.equal(textOf(invRecBadge).trim(), 'Paid');
@@ -871,6 +871,7 @@ test('List decoration-warning renders on paid unreconciled payments and clears w
     assert.ok(hasClass(matchedBadge, 'badge-success'), 'bank-matched payment badge has badge-success');
     assert.equal(textOf(matchedBadge).trim(), 'Reconciled');
     assert.ok(!hasClass(rejRow, 'warning'), 'rejected row has no warning class');
+    assert.ok(hasClass(rejRow, 'muted'), 'rejected row has muted class');
     assert.ok(find(rejRow, (n) => hasClass(n, 'badge-muted')), 'rejected badge has badge-muted');
   } finally {
     await React.act(async () => root.unmount());

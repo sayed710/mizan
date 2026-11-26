@@ -191,14 +191,24 @@ export function validStornoMove(db, move) {
   return false;
 }
 
+export const CURRENCY_AMOUNT_SIGN_ERROR = 'The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited. If the currency is the same as the one from the company, this amount must strictly be equal to the balance.';
 /** Whether any line has a negative debit or credit. */
 export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);
-/** Whether any line's amount_currency sign contradicts its debit/credit balance. */
-export const badCurrencyAmountSign = (lines = []) => lines.some((l) => {
+/**
+ * Whether any line's amount_currency sign contradicts its debit/credit balance,
+ * or a company-currency line's amount_currency differs from its balance.
+ */
+export const badCurrencyAmountSign = (lines = [], companyCurrency = null) => lines.some((l) => {
+  if (l.amount_currency != null && !Number.isFinite(Number(l.amount_currency))) return true;
   const amount = Number(l.amount_currency) || 0;
-  if (!amount) return false;
   const debit = Number(l.debit) || 0;
   const credit = Number(l.credit) || 0;
+  const isCompanyCurrency = !l.currency_id || (companyCurrency?.id != null && l.currency_id === companyCurrency.id);
+  if (isCompanyCurrency && (l.currency_id != null || amount !== 0)) {
+    const balance = companyCurrency ? roundCurrency(debit - credit, companyCurrency) : (debit - credit);
+    return Math.abs(amount - balance) > 1e-9;
+  }
+  if (!amount) return false;
   return (amount > 0 && credit > debit) || (amount < 0 && debit > credit);
 });
 export const isBalanced = (lines = [], currency = null) =>
@@ -773,9 +783,13 @@ export function accountCurrencyFields(db, account, line, net, companyId, date) {
   if (account?.currency_id && !accountCurrency) throw new Error('Select an existing account currency');
   const applied = accountCurrency && accountCurrency.id !== companyCurrency.id ? accountCurrency : null;
   const currency = explicit ?? applied;
-  if (!currency) return {};
-  const amount = line.amount_currency == null && currency.id === applied?.id
-    ? net * rateAt(db, currency.id, date, companyId)
+  if (!currency) {
+    return line.amount_currency != null && Number(line.amount_currency) !== 0
+      ? { amount_currency: Number(line.amount_currency) }
+      : {};
+  }
+  const amount = line.amount_currency == null
+    ? (currency.id === companyCurrency.id ? net : currency.id === applied?.id ? net * rateAt(db, currency.id, date, companyId) : 0)
     : line.amount_currency;
   return { currency_id: currency.id, amount_currency: roundCurrency(amount ?? 0, currency) };
 }
@@ -1041,6 +1055,25 @@ export function isPaymentMatched(db, payment, excludeLineId = null) {
   const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
   const matches = [...(paymentLinesByMove.get(pMoveId) ?? []), ...(paymentLinesById.get(pId) ?? [])];
   return matches.some((lineId) => !excludeLineId || lineId !== excludeLineId);
+}
+
+const paymentStatementLinesCache = new WeakMap();
+
+/** Statement lines currently matched to a payment, using the same index as matching guards. */
+export function paymentStatementLines(db, payment) {
+  if (!db || !payment) return [];
+  let cached = paymentStatementLinesCache.get(db.records);
+  if (!cached) {
+    cached = new Map();
+    paymentStatementLinesCache.set(db.records, cached);
+  }
+  const key = JSON.stringify([payment.id ?? null, payment.move_id ?? null]);
+  if (cached.has(key)) return cached.get(key);
+  const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
+  const ids = new Set([...(paymentLinesById.get(payment.id) ?? []), ...(paymentLinesByMove.get(payment.move_id) ?? [])]);
+  const lines = (db.records['account.bank.statement.line'] ?? []).filter((line) => ids.has(line.id));
+  cached.set(key, lines);
+  return lines;
 }
 
 /** Settlement links per move, built once per immutable records object (journalItems runs on every report). */

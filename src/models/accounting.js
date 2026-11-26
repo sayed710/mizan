@@ -5,7 +5,7 @@ import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, CURRENCY_AMOUNT_SIGN_ERROR, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { accountingDateForPost, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
@@ -781,8 +781,9 @@ export function postMove(db, id, { autoPost = false } = {}) {
       return account?.company_id && account.company_id !== (r.company_id ?? 1);
     })) throw new Error('Journal account belongs to another company');
     if (badLineSign(r.line_ids) && !validStornoMove(db, r)) throw new Error('Debits and credits cannot be negative');
-    if (badCurrencyAmountSign(r.line_ids)) throw new Error('The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited. If the currency is the same as the one from the company, this amount must strictly be equal to the balance.');
-    if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error((r.line_ids ?? []).length ? 'The entry is not balanced.' : "Even magicians can't post nothing!");
+    const companyCurrency = companyCurrencyRecord(db, r.company_id);
+    if (badCurrencyAmountSign(r.line_ids, companyCurrency)) throw new Error(CURRENCY_AMOUNT_SIGN_ERROR);
+    if (!isBalanced(r.line_ids, companyCurrency)) throw new Error((r.line_ids ?? []).length ? 'The entry is not balanced.' : "Even magicians can't post nothing!");
     const entryDate = r.invoice_date ?? r.date ?? today();
     if (r.auto_reverse) {
       const revDate = r.reverse_date;
@@ -2102,6 +2103,8 @@ const invoiceLineField = {
     ...invoiceLineExtraBase,
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
     sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
+    combo_parent_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
+    combo_choice_id: { type: 'many2one', relation: 'product.combo', label: 'Combo Choices', readonly: true, hidden: true },
     purchase_line_id: { type: 'many2one', relation: 'purchase.order.line', label: 'Purchase Order Line', optional: 'hide', domain: (line, row, db) => { const po = db && read(db, 'purchase.order', line.purchase_id); return Boolean(po && (po.company_id ?? 1) === (row?.company_id ?? 1) && (!row?.parent_partner_id || sameCommercialPartner(db, po.partner_id, row.parent_partner_id))); } },
 
     down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true },
@@ -2447,8 +2450,14 @@ export function revalueForeignLine(db, line, entryDate, companyId) {
   const lineCurrencyId = line.currency_id ?? (account?.currency_id && account.currency_id !== companyCurr?.id ? account.currency_id : null);
   const isForeign = Boolean(lineCurrencyId && companyCurr && lineCurrencyId !== companyCurr.id);
   if (!isForeign) {
-    if (!line.currency_id || line.currency_id === companyCurr?.id) {
+    if (!line.currency_id) {
       return { ...line, amount_currency: 0 };
+    }
+    if (line.currency_id === companyCurr?.id) {
+      return {
+        ...line,
+        amount_currency: roundCurrency((Number(line.debit) || 0) - (Number(line.credit) || 0), companyCurr),
+      };
     }
     return line;
   }
@@ -2577,6 +2586,8 @@ const lineItem = {
     } else if (key === 'currency_id' && (!lineCurrencyId || lineCurrencyId === companyCurr?.id)) {
       updated.amount_currency = 0;
       if (updated.currency_id === companyCurr?.id) updated.currency_id = null;
+    } else if (updated.currency_id && updated.currency_id === companyCurr?.id && (key === 'debit' || key === 'credit')) {
+      updated.amount_currency = roundCurrency((Number(updated.debit) || 0) - (Number(updated.credit) || 0), companyCurr);
     }
     return updated;
   },
@@ -3961,7 +3972,8 @@ export const accountingModels = {
       if (baseErr) return baseErr;
       if (after.state === 'draft' && after.posting_order != null) return 'Draft move cannot have a posting order';
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
-      return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited. If the currency is the same as the one from the company, this amount must strictly be equal to the balance.' : null);
+      return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null)
+        ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids, findCompanyCurrencyRecord(db, after.company_id)) ? CURRENCY_AMOUNT_SIGN_ERROR : null);
     },
     invariant: (db, after, before, stored, ctx) => {
       const err = secureMoveInvariant(db, after, before, ctx?.secureOwnershipCache) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
