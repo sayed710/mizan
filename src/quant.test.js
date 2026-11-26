@@ -88,7 +88,7 @@ test('locked count, including zero-valued stock, is refused without mutation', (
   let db = transfer(base, product, 5, 'incoming', null, a);
   const q = quants(db, product).find((r) => r.location_id === a);
   db = write(db, 'stock.quant', q.id, { inventory_quantity: 8 });
-  db = write({ ...db, settings: { ...db.settings, lock_date: date } }, 'res.company', 1, { lock_date: date });
+  db = write({ ...db, records: { ...db.records, 'account.bank.statement.line': [] }, settings: { ...db.settings, lock_date: date } }, 'res.company', 1, { lock_date: date });
   const original = structuredClone(db);
   assert.throws(() => applyInventory(db, [q.id], { date }), /lock|closed/i);
   assert.deepEqual(db, original);
