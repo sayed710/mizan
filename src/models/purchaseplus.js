@@ -1,6 +1,7 @@
 import { create, read, search, write, postNote } from '../orm.js';
 import { today, pad, amounts } from './common.js';
 import { salesModels } from './sales.js';
+import { productTax } from './taxes.js';
 import { vendorPrice } from './routes.js';
 
 export { vendorPrice };
@@ -57,7 +58,8 @@ export function newQuotationFromRequisition(db, requisitionId, { partnerId } = {
   const lines = remainingQty(db, r.id).map((l) => {
     const qty = r.type === 'blanket' ? l.remaining : Number(l.product_qty);
     const price = vendorPrice(db, l.product_id, { partnerId: vendor, qty, date: today(), currencyId: r.currency_id, companyId: r.company_id });
-    return { product_id: l.product_id, qty, price_unit: r.type === 'blanket' ? Number(l.price_unit) : price?.price ?? read(db, 'product', l.product_id)?.cost ?? 0, tax: read(db, 'product', l.product_id)?.purchase_tax ?? 14 };
+    const prod = read(db, 'product', l.product_id);
+    return { product_id: l.product_id, qty, price_unit: r.type === 'blanket' ? Number(l.price_unit) : price?.price ?? prod?.cost ?? 0, ...(productTax(db, prod, 'purchase', null, r.company_id) ?? { tax: 0 }) };
   }).filter((l) => l.qty > 0);
   if (!lines.length) throw new Error('No quantity remains to order');
   const out = create(db, 'purchase.order', { partner_id: vendor, requisition_id: r.id, origin: r.name, order_line: lines, ...(r.currency_id ? { currency_id: r.currency_id } : {}), ...(r.company_id ? { company_id: r.company_id } : {}) });

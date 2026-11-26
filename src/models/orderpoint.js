@@ -2,6 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { addDays, pad, today } from './common.js';
 import { vendorPrice } from './routes.js';
+import { productTax } from './taxes.js';
 import { ensureMainWarehouse, mainWarehouse } from './warehouse.js';
 
 export function childLocationIds(db, rootLocationId) {
@@ -157,7 +158,7 @@ export function orderOrderpoints(db, ids) {
       if (!vendor) continue; // no valid vendor
 
       const priceUnit = best?.price ?? (Number(prod?.cost) || 0);
-      const tax = prod?.purchase_tax ?? 14;
+      const tax = productTax(next, prod, 'purchase', null, op.company_id ?? 1) ?? { tax: 0 };
 
       // Check for existing draft RFQ to extend/merge
       const existingRfq = search(next, 'purchase.order').find(
@@ -174,7 +175,7 @@ export function orderOrderpoints(db, ids) {
           lines[lineIdx] = { ...line, qty: newQty, price_unit: newPrice };
         } else {
           const existingPrice = vendorPrice(next, op.product_id, { partnerId: vendor, qty, currencyId: existingRfq.currency_id, companyId: existingRfq.company_id, date: existingRfq.date_order || today() })?.price ?? priceUnit;
-          lines.push({ product_id: op.product_id, orderpoint_id: op.id, qty, price_unit: existingPrice, tax });
+          lines.push({ product_id: op.product_id, orderpoint_id: op.id, qty, price_unit: existingPrice, ...tax });
         }
         const vals = {
           order_line: lines,
@@ -184,7 +185,7 @@ export function orderOrderpoints(db, ids) {
       } else {
         next = create(next, 'purchase.order', {
           partner_id: vendor,
-          order_line: [{ product_id: op.product_id, orderpoint_id: op.id, qty, price_unit: priceUnit, tax }],
+          order_line: [{ product_id: op.product_id, orderpoint_id: op.id, qty, price_unit: priceUnit, ...tax }],
           origin: 'Replenishment',
           company_id: op.company_id ?? 1,
         }).db;
