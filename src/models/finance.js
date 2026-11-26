@@ -3812,7 +3812,7 @@ export const financeModels = {
     },
     sort: (a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0) || a.id - b.id,
     kanban: { title: 'display_name', lines: ['send_email', 'send_sms', 'print_letter', 'create_activity'] },
-    list: ['display_delay', 'reminder_timing', 'send_email', 'send_sms', 'print_letter', 'join_invoices', 'activity_type_id', 'company_id'],
+    list: ['display_delay', 'reminder_timing', 'send_email', 'send_sms', 'activity_type_id', 'company_id'],
     listLabels: { activity_type_id: 'Activity' },
     searchFields: ['display_name', 'activity_summary', 'activity_note'],
     filters: [[
