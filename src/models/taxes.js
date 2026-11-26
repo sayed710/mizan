@@ -428,10 +428,13 @@ export function mapTaxIds(db, sourceIds, fpId, companyId = null) {
 /** Line tax values for a product (sales or purchase side) after the fiscal position. */
 export function productTax(db, product, side, fpId, companyId = null) {
   const own = product?.[side === 'purchase' ? 'supplier_tax_id' : 'tax_id'];
-  // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
+  if (own != null) return mapTaxIds(db, [own], fpId, companyId);
   const percent = product?.[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];
-  if (own == null) return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
-  return mapTaxIds(db, [own], fpId, companyId);
+  if (percent != null) return { ...taxSnapshot(null), tax: Number(percent) || 0 };
+  const ids = product?.[side === 'purchase' ? 'supplier_taxes_id' : 'taxes_id'];
+  if (ids?.length) return mapTaxIds(db, ids, fpId, companyId);
+  // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
+  return null;
 }
 
 /** Line tax values for an account's default taxes on `side`, mapped through `fpId`. */

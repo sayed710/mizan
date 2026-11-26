@@ -139,6 +139,9 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       </td>
       {cols.map((f) => {
         const field = fields[f];
+        if (field.widget === 'boolean_favorite') {
+          return <td key={f} onClick={(e) => e.stopPropagation()}><button type="button" className="link" aria-label={t('Favorite')} aria-pressed={!!r[f]} onClick={() => { try { commit(write(getDb(), model, r.id, { [f]: !r[f] })); } catch (e) { alert(t(e.message)); } }}>{r[f] ? '★' : '☆'}</button></td>;
+        }
         if (field.widget === 'handle') {
           return (
             <td key={f} className="handle-col" onClick={(e) => e.stopPropagation()}>
