@@ -4002,6 +4002,9 @@ const ar = {
   'There are still draft entries before the selected date and numbered draft entries in the sequence being secured.': 'لا تزال هناك قيود مسودة قبل التاريخ المحدد وقيود مسودة مرقّمة ضمن التسلسل الجاري تأمينه.',
   'Cannot secure entries while numbered draft entries precede entries to be secured': 'لا يمكن تأمين القيود ما دامت هناك قيود مسودة مرقّمة تسبق القيود المطلوب تأمينها',
   Empty: 'فارغ',
+  'Problem Description': 'وصف المشكلة',
+  'Initial balance ({amount}) does not match previous statement': 'الرصيد الافتتاحي ({amount}) لا يطابق كشف الحساب السابق',
+  'Incorrect ending balance, expected {amount}': 'الرصيد النهائي غير صحيح، المتوقع {amount}',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

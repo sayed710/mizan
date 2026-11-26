@@ -442,3 +442,52 @@ test('AST-4 Qodo Finding 2: switching to rate mode after posted periods derives 
   assert.equal(backUpdated.method_rate, 0.25);
   assert.equal(backUpdated.depreciation_ids.filter((l) => !l.posted).length, 4);
 });
+
+test('AST-4 Qodo: a rate derived by the wizard is rebuilt when the date posts another period, an entered rate is kept', () => {
+  let db = seed();
+  const accounts = assetAccounts(db);
+  const made = create(db, 'account.asset', {
+    ...accounts, name: 'Date Rate Press', acquisition_date: '2026-01-01', original_value: 1000, salvage_value: 0,
+    method: 'linear', method_mode: 'duration', method_number: 5, method_period: '12', prorata_computation_type: 'none', prorata_date: '2026-01-01',
+  });
+  db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
+  db = postDepreciation(db, read(db, 'account.asset', made.id), '2026-12-31');
+  const asset = read(db, 'account.asset', made.id);
+  const button = models['account.asset'].form.buttons.find((b) => b.label === 'Modify Depreciation');
+  const spec = button.wizard(db, asset);
+
+  // Derived at one date, then the date moves past another period: the rate is derived again from the periods left.
+  const derived = spec.onchange({ modify_action: 'modify', date: '2027-01-15', method_mode: 'rate', method_number: null, method_rate: null }, 'method_mode');
+  assert.deepEqual(derived, { method_rate: 0.25 });
+  assert.deepEqual(spec.onchange({ modify_action: 'modify', date: '2027-12-31', method_mode: 'rate', method_number: null, method_rate: 0.25 }, 'date'), { method_rate: 1 / 3 });
+  // An explicitly typed rate survives a date change.
+  assert.deepEqual(spec.onchange({ modify_action: 'modify', date: '2027-12-31', method_mode: 'rate', method_rate: 0.25, method_rate_explicit: true }, 'date'), {});
+  assert.deepEqual(spec.onchange({ modify_action: 'modify', method_mode: 'rate', method_rate: 0.5 }, 'method_rate'), { method_rate_explicit: true });
+
+  // Submitting the stale derived rate with a date that posts another period must not extend the schedule.
+  const next = button.run(db, asset, { modify_action: 'modify', date: '2027-12-31', method_mode: 'rate', method_rate: 0.25, method_rate_explicit: false }).db;
+  const updated = read(next, 'account.asset', made.id);
+  assert.equal(updated.depreciation_ids.filter((l) => l.posted).length, 2);
+  assert.equal(updated.depreciation_ids.filter((l) => !l.posted).length, 3);
+  assert.equal(updated.method_rate, 1 / 3);
+
+  // An entered rate is preserved as typed.
+  const kept = button.run(db, asset, { modify_action: 'modify', date: '2027-12-31', method_mode: 'rate', method_rate: 0.25, method_rate_explicit: true }).db;
+  assert.equal(read(kept, 'account.asset', made.id).method_rate, 0.25);
+});
+
+test('AST-4 Qodo: a confirmed payslip is paid and a category edited although its recorded account was deprecated since', () => {
+  let db = seed();
+  const slip = create(db, 'hr.payslip', { employee_id: 1, date_from: '2037-01-01', date_to: '2037-01-31' });
+  const run = (d, label) => models['hr.payslip'].form.buttons.find((b) => b.label === label).run(d, read(d, 'hr.payslip', slip.id)).db;
+  db = run(run(slip.db, 'Compute Sheet'), 'Confirm');
+  const payable = read(db, 'hr.payslip', slip.id).payable_account_id;
+  assert.ok(payable);
+  db = write(db, 'account.account', payable, { deprecated: true });
+  assert.equal(read(run(db, 'Mark as Paid'), 'hr.payslip', slip.id).state, 'paid');
+
+  const income = create(db, 'account.account', { code: '419001', name: 'Category Income', account_type: 'income', company_id: 1 });
+  const category = create(income.db, 'product.category', { name: 'Deprecated Ref', company_id: 1, property_account_income_categ_id: income.id });
+  const deprecated = write(category.db, 'account.account', income.id, { deprecated: true });
+  assert.equal(read(write(deprecated, 'product.category', category.id, { name: 'Renamed' }), 'product.category', category.id).name, 'Renamed');
+});

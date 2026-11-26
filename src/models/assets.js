@@ -1204,12 +1204,12 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
 
   const company = asset.company_id ?? 1;
   const journal = asset.journal_id ?? journalId(nextDb, 'MISC', company) ?? 'MISC';
-  const assetAcc = delta > 0 && increaseAccountId ? configuredAccount(nextDb, increaseAccountId, company, 'fixed asset', asset.name || 'the asset', { allowDeprecated: increaseAccountId === asset.account_asset_id }) : asset.account_asset_id;
+  const assetAcc = delta > 0 && increaseAccountId ? configuredAccount(nextDb, increaseAccountId, company, 'fixed asset', asset.name || 'the asset', { rejectDeprecated: increaseAccountId !== asset.account_asset_id }) : asset.account_asset_id;
   const childDepAcc = delta > 0 && asset.method !== 'no_depreciation'
-    ? (depreciationAccountId ? configuredAccount(nextDb, depreciationAccountId, company, 'depreciation', asset.name || 'the asset', { allowDeprecated: depreciationAccountId === asset.account_depreciation_id }) : asset.account_depreciation_id)
+    ? (depreciationAccountId ? configuredAccount(nextDb, depreciationAccountId, company, 'depreciation', asset.name || 'the asset', { rejectDeprecated: depreciationAccountId !== asset.account_depreciation_id }) : asset.account_depreciation_id)
     : asset.account_depreciation_id;
   const childExpAcc = delta > 0 && asset.method !== 'no_depreciation'
-    ? (expenseAccountId ? configuredAccount(nextDb, expenseAccountId, company, 'depreciation expense', asset.name || 'the asset', { allowDeprecated: expenseAccountId === asset.account_depreciation_expense_id }) : asset.account_depreciation_expense_id)
+    ? (expenseAccountId ? configuredAccount(nextDb, expenseAccountId, company, 'depreciation expense', asset.name || 'the asset', { rejectDeprecated: expenseAccountId !== asset.account_depreciation_expense_id }) : asset.account_depreciation_expense_id)
     : asset.account_depreciation_expense_id;
 
   let adjustmentMoveId = null;
@@ -1225,7 +1225,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
     }
     // A selected counterpart must be active and belong to the asset company, like the asset's own accounts (Qodo 39).
     counterpartAcc = configuredAccount(nextDb, counterpartAcc, company, 'counterpart', asset.name || 'the asset', {
-      allowDeprecated: delta < 0 && !accountId && (!expenseAccountId || expenseAccountId === asset.account_depreciation_expense_id),
+      rejectDeprecated: !(delta < 0 && !accountId && (!expenseAccountId || expenseAccountId === asset.account_depreciation_expense_id)),
     });
     const lines = delta > 0
       ? [
@@ -1326,7 +1326,7 @@ export function activateDepreciation(db, asset, { date = today(), newAccountAsse
   if ((asset.revaluation_ids ?? []).some((entry) => entry.date > date)) throw new Error('Activation date cannot precede an existing revaluation');
   const company = asset.company_id ?? 1;
   if (!isValidFixedAssetAccount(read(db, 'account.account', newAccountAssetId), company)) throw new Error('Select a valid fixed asset account');
-  const target = configuredAccount(db, newAccountAssetId, company, 'fixed asset', asset.name || 'the asset');
+  const target = configuredAccount(db, newAccountAssetId, company, 'fixed asset', asset.name || 'the asset', { rejectDeprecated: true });
   let next = postDepreciation(db, asset, date);
   asset = read(next, 'account.asset', asset.id);
   const value = cents(asset.original_value) - cents(asset.already_depreciated) - postedCents(asset);
@@ -1412,7 +1412,7 @@ function reduceRefundedAsset(db, asset, refundMove, refundAmount) {
       if (excess) {
         const company = asset.company_id ?? 1;
         const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
-        const expense = configuredAccount(db, asset.account_depreciation_expense_id, company, 'depreciation expense', asset.name || 'the asset', { allowDeprecated: true });
+        const expense = configuredAccount(db, asset.account_depreciation_expense_id, company, 'depreciation expense', asset.name || 'the asset');
         const date = refundMove.invoice_date ?? refundMove.date ?? today();
         if (postedLines.some((line) => line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
         const booked = postEntry(db, { journal, date, ref: `${asset.name} refund depreciation adjustment`, company, lines: [
@@ -1706,6 +1706,7 @@ export const assetModels = {
             { name: 'method_number', type: 'float', label: 'Remaining Duration', invisible: (v) => v.modify_action !== 'modify' || v.method_mode === 'rate' },
             { name: 'method_period', type: 'selection', label: 'Period', default: r?.method_period, options: [['1', 'Months'], ['12', 'Years']], invisible: (v) => v.modify_action !== 'modify' },
             { name: 'method_rate', type: 'float', label: 'Depreciation Rate', default: r?.method_mode === 'rate' ? r?.method_rate : null, invisible: (v) => v.modify_action !== 'modify' || v.method_mode !== 'rate' },
+            { name: 'method_rate_explicit', type: 'boolean', label: 'Rate Entered', default: false, invisible: () => true },
             { name: 'account_asset_id', type: 'many2one', relation: 'account.account', label: 'Gross Increase Account', default: r?.account_asset_id ?? null, invisible: (v) => v.modify_action !== 'modify', domain: (account) => isActiveCompanyAccount(account, r?.company_id ?? 1) && ['asset_fixed', 'asset_non_current'].includes(account.account_type) },
             { name: 'account_depreciation_id', type: 'many2one', relation: 'account.account', label: 'Accumulated Depreciation', default: r?.account_depreciation_id ?? null, invisible: (v) => v.modify_action !== 'modify', domain: (account) => isActiveCompanyAccount(account, r?.company_id ?? 1) },
             { name: 'account_depreciation_expense_id', type: 'many2one', relation: 'account.account', label: 'Depreciation Expense', default: r?.account_depreciation_expense_id ?? null, invisible: (v) => v.modify_action !== 'modify', domain: (account) => isActiveCompanyAccount(account, r?.company_id ?? 1) },
@@ -1718,7 +1719,9 @@ export const assetModels = {
             if (key === 'method_number') {
               return { method_rate: Number(values.method_number) > 0 ? 1 / Number(values.method_number) : null };
             }
-            if (key === 'method_mode' && values.method_mode === 'rate' && (values.method_rate == null || values.method_rate === '')) {
+            if (key === 'method_rate') return { method_rate_explicit: true };
+            const rederive = key === 'date' && values.method_mode === 'rate' && r?.method_mode !== 'rate' && values.method_rate_explicit !== true;
+            if (rederive || (key === 'method_mode' && values.method_mode === 'rate' && (values.method_rate == null || values.method_rate === ''))) {
               const remaining = remainingUnpostedCount(r, values.date);
               return { method_rate: Number(values.method_number) > 0 ? 1 / Number(values.method_number) : (remaining > 0 ? 1 / remaining : r?.method_rate ?? null) };
             }
@@ -1755,9 +1758,11 @@ export const assetModels = {
             const modeChanged = selectedMode !== assetMode;
             const unpostedCount = remainingUnpostedCount(currentAsset);
             const numberInput = values.method_number == null || values.method_number === '' ? null : Number(values.method_number);
-            const rawRate = values.method_rate == null
-              ? (selectedMode === 'rate' && modeChanged ? (numberInput > 0 ? 1 / numberInput : (unpostedCount > 0 ? 1 / unpostedCount : null)) : null)
-              : (values.method_rate === '' ? null : Number(values.method_rate));
+            // A rate derived by the wizard (not typed by the user) is rebuilt from the periods left after posting up to the new date.
+            const derivedRate = numberInput > 0 ? 1 / numberInput : (unpostedCount > 0 ? 1 / unpostedCount : null);
+            const rawRate = selectedMode === 'rate' && modeChanged && (values.method_rate_explicit === false || values.method_rate == null)
+              ? derivedRate
+              : (values.method_rate == null ? null : (values.method_rate === '' ? null : Number(values.method_rate)));
             const rateChanged = selectedMode === 'rate' && (modeChanged || (rawRate != null && rawRate !== Number(r.method_rate)));
             const rateDuration = rawRate ? 1 / rawRate : 0;
             const normalizedRateDuration = Math.abs(rateDuration - Math.round(rateDuration)) < 1e-12 ? Math.round(rateDuration) : rateDuration;
