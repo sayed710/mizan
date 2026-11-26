@@ -8,7 +8,111 @@ import { countryIdFor, countryReferenceError, stateIdFor } from './country.js';
 import { models } from '../registry.js';
 
 const ADDRESS_TYPE_LABELS = { invoice: 'Invoice', delivery: 'Delivery', other: 'Other' };
+const ADDRESS_TYPE_OPTIONS = [['contact', 'Contact'], ['invoice', 'Invoice'], ['delivery', 'Delivery'], ['other', 'Other']];
+const VALID_ADDRESS_TYPES = new Set(ADDRESS_TYPE_OPTIONS.map(([k]) => k));
+const ADDRESS_TYPE_ERROR = 'Address Type must be Contact, Invoice, Delivery, or Other';
 const CHILD_LINE_FIELDS = ['type', 'name', 'email', 'phone', 'function', 'street', 'city', 'state_id', 'zip', 'country_id', 'comment'];
+
+// Standard Odoo partner industries (odoo/addons/base/data/res_partner_data.xml)
+export const STANDARD_PARTNER_INDUSTRIES = [
+  ['Agriculture', 'A - AGRICULTURE, FORESTRY AND FISHING'],
+  ['Mining', 'B - MINING AND QUARRYING'],
+  ['Manufacturing', 'C - MANUFACTURING'],
+  ['Energy supply', 'D - ELECTRICITY, GAS, STEAM AND AIR CONDITIONING SUPPLY'],
+  ['Water supply', 'E - WATER SUPPLY; SEWERAGE, WASTE MANAGEMENT AND REMEDIATION ACTIVITIES'],
+  ['Construction', 'F - CONSTRUCTION'],
+  ['Wholesale/Retail', 'G - WHOLESALE AND RETAIL TRADE; REPAIR OF MOTOR VEHICLES AND MOTORCYCLES'],
+  ['Transportation/Logistics', 'H - TRANSPORTATION AND STORAGE'],
+  ['Food/Hospitality', 'I - ACCOMMODATION AND FOOD SERVICE ACTIVITIES'],
+  ['IT/Communication', 'J - INFORMATION AND COMMUNICATION'],
+  ['Finance/Insurance', 'K - FINANCIAL AND INSURANCE ACTIVITIES'],
+  ['Real Estate', 'L - REAL ESTATE ACTIVITIES'],
+  ['Scientific', 'M - PROFESSIONAL, SCIENTIFIC AND TECHNICAL ACTIVITIES'],
+  ['Administrative/Utilities', 'N - ADMINISTRATIVE AND SUPPORT SERVICE ACTIVITIES'],
+  ['Public Administration', 'O - PUBLIC ADMINISTRATION AND DEFENCE; COMPULSORY SOCIAL SECURITY'],
+  ['Education', 'P - EDUCATION'],
+  ['Health/Social', 'Q - HUMAN HEALTH AND SOCIAL WORK ACTIVITIES'],
+  ['Entertainment', 'R - ARTS, ENTERTAINMENT AND RECREATION'],
+  ['Other Services', 'S - OTHER SERVICE ACTIVITIES'],
+  ['Households', 'T - ACTIVITIES OF HOUSEHOLDS AS EMPLOYERS; UNDIFFERENTIATED GOODS- AND SERVICES-PRODUCING ACTIVITIES OF HOUSEHOLDS FOR OWN USE'],
+  ['Extraterritorial', 'U - ACTIVITIES OF EXTRATERRITORIAL ORGANISATIONS AND BODIES'],
+];
+
+/** Seed any missing standard `res.partner.industry` records (idempotent, matching by name). */
+export function ensurePartnerIndustries(db) {
+  if (!db) return db;
+  const existing = db.records?.['res.partner.industry'] ?? [];
+  const maxId = Math.max(db.seq?.['res.partner.industry'] ?? 0, 0, ...existing.map((r) => Number(r?.id) || 0));
+  let next = {
+    ...db,
+    records: db.records ?? {},
+    seq: maxId > (db.seq?.['res.partner.industry'] ?? 0) ? { ...(db.seq ?? {}), 'res.partner.industry': maxId } : (db.seq ?? {}),
+    messages: db.messages ?? [],
+  };
+  const existingNames = new Set(
+    existing.map((r) => String(r?.name ?? '').trim().toLowerCase()).filter(Boolean),
+  );
+  for (const [name, full_name] of STANDARD_PARTNER_INDUSTRIES) {
+    if (existingNames.has(name.toLowerCase())) continue;
+    next = create(next, 'res.partner.industry', { name, full_name }).db;
+    existingNames.add(name.toLowerCase());
+  }
+  return next;
+}
+
+const EMPTY_LIST = [];
+const EMPTY_SET = new Set();
+const EMPTY_MOVE_SUMMARY = { customerMoves: EMPTY_LIST, supplierMoves: EMPTY_LIST, postedCustomerMoves: EMPTY_LIST, totalInvoiced: 0 };
+
+const partnerIndexCache = new WeakMap();
+function partnerIndex(db) {
+  const records = db?.records;
+  if (!records || typeof records !== 'object') {
+    return { byId: new Map(), childrenByParent: new Map(), activeChildrenByParent: new Map(), descendantsById: new Map() };
+  }
+  let index = partnerIndexCache.get(records);
+  if (!index) {
+    const byId = new Map();
+    const childrenByParent = new Map();
+    const activeChildrenByParent = new Map();
+    for (const p of records['res.partner'] ?? []) {
+      if (!p) continue;
+      if (p.id != null) byId.set(p.id, p);
+      if (p.parent_id != null) {
+        const all = childrenByParent.get(p.parent_id);
+        if (all) all.push(p);
+        else childrenByParent.set(p.parent_id, [p]);
+        if (p.active !== false) {
+          const act = activeChildrenByParent.get(p.parent_id);
+          if (act) act.push(p);
+          else activeChildrenByParent.set(p.parent_id, [p]);
+        }
+      }
+    }
+    index = { byId, childrenByParent, activeChildrenByParent, descendantsById: new Map() };
+    partnerIndexCache.set(records, index);
+  }
+  return index;
+}
+
+const partnerBanksCache = new WeakMap();
+function banksByPartner(db) {
+  const records = db?.records;
+  if (!records || typeof records !== 'object') return new Map();
+  let index = partnerBanksCache.get(records);
+  if (!index) {
+    index = new Map();
+    for (const b of records['res.partner.bank'] ?? []) {
+      if (b && b.partner_id != null && b.active !== false) {
+        const arr = index.get(b.partner_id);
+        if (arr) arr.push(b);
+        else index.set(b.partner_id, [b]);
+      }
+    }
+    partnerBanksCache.set(records, index);
+  }
+  return index;
+}
 
 /** Display name including the parent company for non-company child contacts, matching Odoo's res.partner.complete_name. */
 export function partnerCompleteName(db, r) {
@@ -17,12 +121,12 @@ export function partnerCompleteName(db, r) {
   if (r.parent_id) {
     if (!name && ADDRESS_TYPE_LABELS[r.type]) name = ADDRESS_TYPE_LABELS[r.type];
     if (!r.is_company) {
-      const all = db?.records?.['res.partner'] ?? [];
-      let cur = all.find((p) => p.id === r.parent_id);
+      const { byId } = partnerIndex(db);
+      let cur = byId.get(r.parent_id);
       const seen = new Set();
       while (cur?.parent_id && !seen.has(cur.id)) {
         seen.add(cur.id);
-        const next = all.find((p) => p.id === cur.parent_id);
+        const next = byId.get(cur.parent_id);
         if (!next) break;
         cur = next;
       }
@@ -32,28 +136,29 @@ export function partnerCompleteName(db, r) {
   return name.trim();
 }
 
-/** All partner IDs in the subtree rooted at `partnerId` (including archived child contacts, cycle-safe). */
-export function partnerDescendantIds(db, partnerId) {
-  const ids = new Set();
-  if (!partnerId || !db?.records?.['res.partner']) return ids;
-  const childrenByParent = new Map();
-  for (const p of db.records['res.partner']) {
-    if (p?.parent_id != null) {
-      const list = childrenByParent.get(p.parent_id);
-      if (list) list.push(p.id);
-      else childrenByParent.set(p.parent_id, [p.id]);
+function getDescendantIds(db, partnerId) {
+  if (!partnerId || !db?.records?.['res.partner']) return EMPTY_SET;
+  const idx = partnerIndex(db);
+  let ids = idx.descendantsById.get(partnerId);
+  if (!ids) {
+    ids = new Set();
+    const queue = [partnerId];
+    while (queue.length) {
+      const cur = queue.shift();
+      if (ids.has(cur)) continue;
+      ids.add(cur);
+      for (const child of idx.childrenByParent.get(cur) ?? []) {
+        if (child?.id != null && !ids.has(child.id)) queue.push(child.id);
+      }
     }
-  }
-  const queue = [partnerId];
-  while (queue.length) {
-    const cur = queue.shift();
-    if (ids.has(cur)) continue;
-    ids.add(cur);
-    for (const childId of childrenByParent.get(cur) ?? []) {
-      if (!ids.has(childId)) queue.push(childId);
-    }
+    idx.descendantsById.set(partnerId, ids);
   }
   return ids;
+}
+
+/** All partner IDs in the subtree rooted at `partnerId` (including archived child contacts, cycle-safe). */
+export function partnerDescendantIds(db, partnerId) {
+  return new Set(getDescendantIds(db, partnerId));
 }
 
 const isVisibleMove = (db, move) => {
@@ -64,40 +169,127 @@ const isVisibleMove = (db, move) => {
   return !Array.isArray(allowed) || !allowed.length || allowed.includes(move.company_id ?? 1);
 };
 
+const partnerMovesCache = new WeakMap();
+function moveScopeKey(db) {
+  const activeCo = getActiveCompany() ?? '';
+  const allowed = db?.settings?.allowed_company_ids;
+  const allowedKey = Array.isArray(allowed) && allowed.length ? [...allowed].sort((a, b) => a - b).join(',') : '';
+  return `${activeCo}|${allowedKey}|${db?.settings?.currency ?? ''}`;
+}
+
+function partnerMovesIndex(db) {
+  const records = db?.records;
+  if (!records || typeof records !== 'object') {
+    return { customerByPartner: new Map(), vendorByPartner: new Map(), moveOrder: new Map(), summaryByPartner: new Map() };
+  }
+  let byScope = partnerMovesCache.get(records);
+  if (!byScope) {
+    byScope = new Map();
+    partnerMovesCache.set(records, byScope);
+  }
+  const key = moveScopeKey(db);
+  let index = byScope.get(key);
+  if (!index) {
+    const customerByPartner = new Map();
+    const vendorByPartner = new Map();
+    const moveOrder = new Map();
+    const moves = records['account.move'] ?? [];
+    for (let i = 0; i < moves.length; i++) {
+      const m = moves[i];
+      if (!isVisibleMove(db, m) || m.partner_id == null) continue;
+      if (m.move_type === 'out_invoice' || m.move_type === 'out_refund') {
+        moveOrder.set(m, i);
+        const list = customerByPartner.get(m.partner_id);
+        if (list) list.push(m);
+        else customerByPartner.set(m.partner_id, [m]);
+      } else if (m.move_type === 'in_invoice' || m.move_type === 'in_refund') {
+        moveOrder.set(m, i);
+        const list = vendorByPartner.get(m.partner_id);
+        if (list) list.push(m);
+        else vendorByPartner.set(m.partner_id, [m]);
+      }
+    }
+    index = { customerByPartner, vendorByPartner, moveOrder, summaryByPartner: new Map() };
+    byScope.set(key, index);
+  }
+  return index;
+}
+
+function collectPartnerMoves(byPartner, moveOrder, ids) {
+  const chunks = [];
+  for (const id of ids) {
+    const list = byPartner.get(id);
+    if (list?.length) chunks.push(list);
+  }
+  if (!chunks.length) return EMPTY_LIST;
+  if (chunks.length === 1) return chunks[0];
+  return chunks.flat().sort((a, b) => (moveOrder.get(a) ?? 0) - (moveOrder.get(b) ?? 0));
+}
+
+function partnerMoveSummary(db, partner) {
+  if (!db || !partner?.id) return EMPTY_MOVE_SUMMARY;
+  const index = partnerMovesIndex(db);
+  let summary = index.summaryByPartner.get(partner.id);
+  if (!summary) {
+    const { childrenByParent } = partnerIndex(db);
+    let customerMoves;
+    let supplierMoves;
+    if (!childrenByParent.has(partner.id)) {
+      customerMoves = index.customerByPartner.get(partner.id) ?? EMPTY_LIST;
+      supplierMoves = index.vendorByPartner.get(partner.id) ?? EMPTY_LIST;
+    } else {
+      const ids = getDescendantIds(db, partner.id);
+      customerMoves = collectPartnerMoves(index.customerByPartner, index.moveOrder, ids);
+      supplierMoves = collectPartnerMoves(index.vendorByPartner, index.moveOrder, ids);
+    }
+    summary = { customerMoves, supplierMoves, postedCustomerMoves: null, totalInvoiced: null };
+    index.summaryByPartner.set(partner.id, summary);
+  }
+  return summary;
+}
+
 /** Customer invoices and credit notes belonging to `partner` or any of its child contacts. */
 export function partnerCustomerInvoices(db, partner, { postedOnly = false } = {}) {
-  if (!db || !partner?.id) return [];
-  const ids = partnerDescendantIds(db, partner.id);
-  return (db.records?.['account.move'] ?? []).filter(
-    (m) => isVisibleMove(db, m)
-      && ids.has(m.partner_id)
-      && ['out_invoice', 'out_refund'].includes(m.move_type)
-      && (!postedOnly || m.state === 'posted'),
-  );
+  const summary = partnerMoveSummary(db, partner);
+  if (!postedOnly) return summary.customerMoves.slice();
+  if (!summary.postedCustomerMoves) {
+    summary.postedCustomerMoves = summary.customerMoves.filter((m) => m.state === 'posted');
+  }
+  return summary.postedCustomerMoves.slice();
 }
 
 /** Signed company-currency total of posted customer invoices and credit notes for `partner` and its child contacts. */
 export function partnerTotalInvoiced(db, partner) {
-  const computeSigned = models['account.move']?.fields?.amount_total_signed?.compute;
-  return partnerCustomerInvoices(db, partner, { postedOnly: true }).reduce((sum, m) => {
-    const val = computeSigned ? computeSigned(m, db) : m.amount_total_signed;
-    return sum + (Number.isFinite(val) ? val : 0);
-  }, 0);
+  const summary = partnerMoveSummary(db, partner);
+  if (summary.totalInvoiced == null) {
+    if (!summary.customerMoves.length) {
+      summary.totalInvoiced = 0;
+    } else {
+      const computeSigned = models['account.move']?.fields?.amount_total_signed?.compute;
+      let sum = 0;
+      for (const m of summary.customerMoves) {
+        if (m.state !== 'posted') continue;
+        const val = computeSigned ? computeSigned(m, db) : m.amount_total_signed;
+        sum += Number.isFinite(val) ? val : 0;
+      }
+      summary.totalInvoiced = sum;
+    }
+  }
+  return summary.totalInvoiced;
 }
 
 /** Vendor bills and vendor refunds belonging to `partner` or any of its child contacts. */
 export function partnerSupplierBills(db, partner) {
-  if (!db || !partner?.id) return [];
-  const ids = partnerDescendantIds(db, partner.id);
-  return (db.records?.['account.move'] ?? []).filter(
-    (m) => isVisibleMove(db, m)
-      && ids.has(m.partner_id)
-      && ['in_invoice', 'in_refund'].includes(m.move_type),
-  );
+  return partnerMoveSummary(db, partner).supplierMoves.slice();
 }
 
 function partnerMoveTarget(invoiceRoute, refundRoute, invoiceMoveType, moves, partner) {
-  const route = moves.length && !moves.some((m) => m.move_type === invoiceMoveType) ? refundRoute : invoiceRoute;
+  const hasInvoice = moves.some((m) => m.move_type === invoiceMoveType);
+  const hasRefund = moves.some((m) => m.move_type !== invoiceMoveType);
+  if (hasInvoice && hasRefund) {
+    return `accounting/entries?view=list&rel=id:${moves.map((m) => m.id).join(',')}`;
+  }
+  const route = moves.length && !hasInvoice ? refundRoute : invoiceRoute;
   const partnerIds = new Set(moves.map((m) => m.partner_id));
   if (!moves.length || (partnerIds.size === 1 && partnerIds.has(partner.id))) {
     return `${route}?view=list&rel=partner_id:${partner.id}`;
@@ -118,11 +310,18 @@ function normalizePartnerVals(db, vals, before = null) {
   }
 
   const effectiveCountryId = 'country_id' in next ? next.country_id : (before?.country_id ?? null);
-  if ('country_id' in next && !('state_id' in next) && before?.state_id) {
-    const st = read(db, 'res.country.state', before.state_id);
-    if (st && next.country_id != null && st.country_id !== next.country_id) {
-      next.state_id = null;
-      if (!('state' in next)) next.state = '';
+  if ('country_id' in next && !('state_id' in next)) {
+    if (!next.country_id) {
+      if (before?.state_id != null || before?.state) {
+        next.state_id = null;
+        if (!('state' in next)) next.state = '';
+      }
+    } else if (before?.state_id) {
+      const st = read(db, 'res.country.state', before.state_id);
+      if (st && st.country_id !== next.country_id) {
+        next.state_id = null;
+        if (!('state' in next)) next.state = '';
+      }
     }
   }
 
@@ -149,7 +348,7 @@ function normalizePartnerVals(db, vals, before = null) {
 /** Validate `child_ids` one2many lines submitted on a partner form or API write. */
 export function validatePartnerChildLines(db, partnerId, childLines = []) {
   if (!Array.isArray(childLines)) return null;
-  const allPartners = db?.records?.['res.partner'] ?? [];
+  const { byId } = partnerIndex(db);
   const seenIds = new Set();
   for (const line of childLines) {
     if (!line || (line.id != null && (!Number.isSafeInteger(line.id) || line.id < 1))) {
@@ -157,11 +356,15 @@ export function validatePartnerChildLines(db, partnerId, childLines = []) {
     }
     if (line.id) {
       if (line.id === partnerId || seenIds.has(line.id)) return 'The selected child contact is invalid';
-      const existing = allPartners.find((p) => p.id === line.id);
+      const existing = byId.get(line.id);
       if (!existing || existing.parent_id !== partnerId) return 'The selected child contact is invalid';
       seenIds.add(line.id);
     }
-    if ((line.type ?? 'contact') === 'contact' && !String(line.name ?? '').trim()) {
+    const addrType = line.type ?? 'contact';
+    if (!VALID_ADDRESS_TYPES.has(addrType)) {
+      return ADDRESS_TYPE_ERROR;
+    }
+    if (addrType === 'contact' && !String(line.name ?? '').trim()) {
       return 'Name is required for contact addresses';
     }
     const countryErr = countryReferenceError(db, line);
@@ -181,7 +384,7 @@ export function syncPartnerChildren(db, partnerId, childLines) {
   const err = validatePartnerChildLines(db, partnerId, childLines);
   if (err) throw new Error(err);
   const parent = read(db, 'res.partner', partnerId);
-  const existingChildren = (db.records?.['res.partner'] ?? []).filter((p) => p.parent_id === partnerId && p.active !== false);
+  const existingChildren = partnerIndex(db).activeChildrenByParent.get(partnerId) ?? [];
   const lineIds = new Set(childLines.map((l) => l.id).filter(Boolean));
   const valuesOf = (line) => Object.fromEntries(CHILD_LINE_FIELDS.filter((f) => Object.hasOwn(line, f) && line[f] !== undefined).map((f) => [f, line[f]]));
   let next = db;
@@ -206,6 +409,9 @@ export function syncPartnerChildren(db, partnerId, childLines) {
 }
 
 export function guardPartner(db, before, after) {
+  if (after?.type != null && !VALID_ADDRESS_TYPES.has(after.type)) {
+    return ADDRESS_TYPE_ERROR;
+  }
   if (after?.credit_limit != null && after?.credit_limit !== '') {
     const n = Number(after.credit_limit);
     if (!Number.isFinite(n) || n < 0) return 'Credit Limit must be non-negative';
@@ -223,12 +429,12 @@ export function guardPartner(db, before, after) {
   if (after?.parent_id != null) {
     const targetId = before?.id ?? after.id;
     const seen = new Set(targetId ? [targetId] : []);
-    const find = (key) => (db?.records?.['res.partner'] ?? []).find((p) => p.id === key);
+    const { byId } = partnerIndex(db);
     let cur = after.parent_id;
     while (cur) {
       if (seen.has(cur)) return 'Parent contact hierarchy cannot contain a cycle';
       seen.add(cur);
-      cur = find(cur)?.parent_id;
+      cur = byId.get(cur)?.parent_id;
     }
   }
   return validatePartnerBankLines(db, after?.id, after?.bank_ids)
@@ -503,7 +709,7 @@ export const crmModels = {
       customer_rank: { type: 'integer', label: 'Customer Rank', readonly: true },
       supplier_rank: { type: 'integer', label: 'Vendor Rank', readonly: true },
       is_company: { type: 'boolean', label: 'Company' },
-      type: { type: 'selection', label: 'Address Type', options: [['contact', 'Contact'], ['invoice', 'Invoice'], ['delivery', 'Delivery'], ['other', 'Other']], default: 'contact' },
+      type: { type: 'selection', label: 'Address Type', options: ADDRESS_TYPE_OPTIONS, default: 'contact' },
       parent_id: { type: 'many2one', relation: 'res.partner', label: 'Parent Contact', domain: (p, r) => p.id !== r?.id && !p.parent_id },
       email: { type: 'char', label: 'Email', optional: 'show' },
       phone: { type: 'char', label: 'Phone', optional: 'show' },
@@ -538,8 +744,8 @@ export const crmModels = {
       property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
       user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson', optional: 'hide' },
       total_invoiced: { type: 'monetary', label: 'Total Invoiced', currency: 'company', readonly: true, compute: (r, db) => partnerTotalInvoiced(db, r) },
-      account_move_count: { type: 'integer', label: 'Customer Invoices Count', readonly: true, compute: (r, db) => partnerCustomerInvoices(db, r).length },
-      supplier_invoice_count: { type: 'integer', label: 'Vendor Bills', readonly: true, compute: (r, db) => partnerSupplierBills(db, r).length },
+      account_move_count: { type: 'integer', label: 'Customer Invoices Count', readonly: true, compute: (r, db) => partnerMoveSummary(db, r).customerMoves.length },
+      supplier_invoice_count: { type: 'integer', label: 'Vendor Bills', readonly: true, compute: (r, db) => partnerMoveSummary(db, r).supplierMoves.length },
       followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible' },
       followup_reminder_type: { type: 'selection', label: 'Reminders', options: [['automatic', 'Automatic'], ['manual', 'Manual']], default: 'automatic' },
       followup_next_action_date: {
@@ -575,8 +781,7 @@ export const crmModels = {
         type: 'one2many',
         relation: 'res.partner',
         label: 'Contacts & Addresses',
-        compute: (r, db) => (r?.id ? (db?.records?.['res.partner'] ?? [])
-          .filter((c) => c.parent_id === r.id && c.active !== false)
+        compute: (r, db) => (r?.id ? (partnerIndex(db).activeChildrenByParent.get(r.id) ?? [])
           .map((c) => ({
             id: c.id,
             type: c.type ?? 'contact',
@@ -593,7 +798,7 @@ export const crmModels = {
           })) : []),
         fields: {
           id: { type: 'integer', label: 'ID', hidden: true, readonly: true },
-          type: { type: 'selection', label: 'Address Type', options: [['contact', 'Contact'], ['invoice', 'Invoice'], ['delivery', 'Delivery'], ['other', 'Other']] },
+          type: { type: 'selection', label: 'Address Type', options: ADDRESS_TYPE_OPTIONS },
           name: { type: 'char', label: 'Name' },
           email: { type: 'char', label: 'Email' },
           phone: { type: 'char', label: 'Phone' },
@@ -627,7 +832,7 @@ export const crmModels = {
         type: 'one2many',
         relation: 'res.partner.bank',
         label: 'Bank Accounts',
-        compute: (r, db) => (db?.records?.['res.partner.bank'] ?? []).filter((b) => b.partner_id === r?.id && b.active !== false).map((b) => read(db, 'res.partner.bank', b.id)),
+        compute: (r, db) => (r?.id ? (banksByPartner(db).get(r.id) ?? []).map((b) => read(db, 'res.partner.bank', b.id)) : []),
         fields: {
           account_number: { type: 'char', label: 'Account Number', required: true },
           bank_id: { type: 'many2one', relation: 'res.bank', label: 'Bank' },
@@ -674,7 +879,9 @@ export const crmModels = {
       if (key === 'country_id') {
         const countryRec = r.country_id && db ? read(db, 'res.country', r.country_id) : null;
         const curState = r.state_id && db ? read(db, 'res.country.state', r.state_id) : null;
-        const clearState = curState && r.country_id != null && curState.country_id !== r.country_id;
+        const clearState = !r.country_id
+          ? Boolean(r.state_id || r.state)
+          : Boolean(curState && curState.country_id !== r.country_id);
         return {
           country: countryRec?.name ?? '',
           ...(clearState ? { state_id: null, state: '' } : {}),
@@ -731,8 +938,8 @@ export const crmModels = {
       next = syncPartnerChildren(next, after.id, vals?.child_ids);
       if (before && (before.company_id ?? null) !== (after.company_id ?? null)) {
         const childUpdates = new Map(
-          (next.records?.['res.partner'] ?? [])
-            .filter((p) => p.parent_id === after.id && (p.company_id ?? null) !== (after.company_id ?? null))
+          (partnerIndex(next).childrenByParent.get(after.id) ?? [])
+            .filter((p) => (p.company_id ?? null) !== (after.company_id ?? null))
             .map((p) => [p.id, { company_id: after.company_id ?? null }]),
         );
         if (childUpdates.size) next = writeMany(next, 'res.partner', childUpdates);

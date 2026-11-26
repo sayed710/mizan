@@ -857,13 +857,13 @@ async function api(req, res, path) {
           ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
       delivered = Boolean(out.db);
-      if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
+      if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded', delivered: true });
       if (!out.db) return send(res, out.status, out.body);
       const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed), { document: body, reconcile: out.reconcile });
       commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {
-      return send(res, 502, { error: delivered ? `The email was sent, but its status could not be recorded: ${e.message}` : `Email could not be sent: ${e.message}` });
+      return send(res, 502, { error: delivered ? `The email was sent, but its status could not be recorded: ${e.message}` : `Email could not be sent: ${e.message}`, ...(delivered ? { delivered: true } : {}) });
     }
   }
   const sessionToken = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1] ?? '';

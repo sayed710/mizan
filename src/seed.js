@@ -10,6 +10,7 @@ import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, post
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
+import { ensurePartnerIndustries } from './models/crm.js';
 import { migrateCountries, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { countryIdFor, ensureCountries } from './models/country.js';
 import { ensureOnlinePaymentMethods, ensurePaymentMethods } from './models/paymentmethod.js';
@@ -554,29 +555,7 @@ export function seed() {
   set('res.partner', 3, { property_payment_term_id: t30 });
 
   // Standard Odoo partner industries (odoo/addons/base/data/res_partner_data.xml)
-  [
-    ['Agriculture', 'A - AGRICULTURE, FORESTRY AND FISHING'],
-    ['Mining', 'B - MINING AND QUARRYING'],
-    ['Manufacturing', 'C - MANUFACTURING'],
-    ['Energy supply', 'D - ELECTRICITY, GAS, STEAM AND AIR CONDITIONING SUPPLY'],
-    ['Water supply', 'E - WATER SUPPLY; SEWERAGE, WASTE MANAGEMENT AND REMEDIATION ACTIVITIES'],
-    ['Construction', 'F - CONSTRUCTION'],
-    ['Wholesale/Retail', 'G - WHOLESALE AND RETAIL TRADE; REPAIR OF MOTOR VEHICLES AND MOTORCYCLES'],
-    ['Transportation/Logistics', 'H - TRANSPORTATION AND STORAGE'],
-    ['Food/Hospitality', 'I - ACCOMMODATION AND FOOD SERVICE ACTIVITIES'],
-    ['IT/Communication', 'J - INFORMATION AND COMMUNICATION'],
-    ['Finance/Insurance', 'K - FINANCIAL AND INSURANCE ACTIVITIES'],
-    ['Real Estate', 'L - REAL ESTATE ACTIVITIES'],
-    ['Scientific', 'M - PROFESSIONAL, SCIENTIFIC AND TECHNICAL ACTIVITIES'],
-    ['Administrative/Utilities', 'N - ADMINISTRATIVE AND SUPPORT SERVICE ACTIVITIES'],
-    ['Public Administration', 'O - PUBLIC ADMINISTRATION AND DEFENCE; COMPULSORY SOCIAL SECURITY'],
-    ['Education', 'P - EDUCATION'],
-    ['Health/Social', 'Q - HUMAN HEALTH AND SOCIAL WORK ACTIVITIES'],
-    ['Entertainment', 'R - ARTS, ENTERTAINMENT AND RECREATION'],
-    ['Other Services', 'S - OTHER SERVICE ACTIVITIES'],
-    ['Households', 'T - ACTIVITIES OF HOUSEHOLDS AS EMPLOYERS; UNDIFFERENTIATED GOODS- AND SERVICES-PRODUCING ACTIVITIES OF HOUSEHOLDS FOR OWN USE'],
-    ['Extraterritorial', 'U - ACTIVITIES OF EXTRATERRITORIAL ORGANISATIONS AND BODIES'],
-  ].forEach(([name, full_name]) => add('res.partner.industry', { name, full_name }));
+  db = ensurePartnerIndustries(db);
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {
