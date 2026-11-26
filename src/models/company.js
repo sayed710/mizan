@@ -7,7 +7,7 @@ import { ensureReturnTypes } from './taxreturn.js';
 import { ensureStatementReports } from './statementReports.js';
 import { defaultPayrollRules } from './payroll.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
-import { returnCompanies, returnTaxLock } from './finance.js';
+import { moveDate, returnCompanies, returnTaxLock } from './finance.js';
 import { TAX_RETURN_TEMPLATE_OPTIONS } from './taxTemplates.js';
 import { LOCK_DATE_FIELDS } from './auditRules.js';
 import { refreshDraftEntryTaxes, taxUnitCompatibilityError } from './accounting.js';
@@ -306,6 +306,30 @@ function returnLockChange(db, companyId, from, to) {
   return (db.records['account.return'] ?? []).some((ret) => ret.date_to === from && !['submitted', 'paid'].includes(ret.state) && returnCompanies(db, ret).includes(companyId));
 }
 
+/** Validate Odoo 20 draft and unreconciled statement line lock preconditions. */
+function hardLockValidationError(db, companyId, hardLockDate, fiscalLockDate) {
+  const hasDraftEntries = hardLockDate && (db.records?.['account.move'] ?? []).some((m) => m.active !== false
+    && m.state === 'draft'
+    && (m.company_id ?? 1) === companyId
+    && moveDate(m) <= hardLockDate);
+  if (hasDraftEntries) {
+    return 'There are still draft entries in the period you want to hard lock. You should either post or delete them.';
+  }
+  const hasUnreconciledBank = (db.records?.['account.bank.statement.line'] ?? []).some((l) => {
+    if (l.active === false || l.state === 'reconciled' || l.is_reconciled === true) return false;
+    if ((l.company_id ?? 1) !== companyId) return false;
+    if (!fiscalLockDate || !l.date || l.date > fiscalLockDate) return false;
+    const moveId = l.bank_move_id || l.move_id;
+    if (!moveId) return l.state === 'to_check';
+    const move = read(db, 'account.move', moveId);
+    return move?.state === 'draft' || move?.state === 'posted';
+  });
+  if (hasUnreconciledBank) {
+    return 'There are still unreconciled bank transactions in the period you want to lock. You should either reconcile or delete them.';
+  }
+  return null;
+}
+
 function companyGuard(db, before, r, ctx) {
   if (r.account_check_printing_layout != null && r.account_check_printing_layout !== '' && !['none', 'top', 'middle', 'bottom'].includes(r.account_check_printing_layout)) return 'Select a valid check layout';
   for (const field of LOCK_DATE_FIELDS) {
@@ -353,6 +377,12 @@ function companyGuard(db, before, r, ctx) {
     && !(field === 'tax_lock_date' && returnLockChange(db, r.id, before?.tax_lock_date || null, r.tax_lock_date || null))
   ))) {
     return 'Only administrators can change lock dates or the audit trail or other company accounting settings';
+  }
+  const changedHardLock = (before?.hard_lock_date || null) !== (r.hard_lock_date || null) ? r.hard_lock_date : null;
+  const changedGlobalLock = (before?.lock_date || null) !== (r.lock_date || null) ? r.lock_date : null;
+  if (changedHardLock || changedGlobalLock) {
+    const err = hardLockValidationError(db, r.id, changedHardLock, [changedHardLock, changedGlobalLock].filter(Boolean).sort().at(-1));
+    if (err) return err;
   }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
@@ -781,7 +811,7 @@ export const companyModels = {
       resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Default Working Calendar' },
       parent_id: { type: 'many2one', relation: 'res.company', label: 'Parent Company' },
       email: { type: 'char', label: 'Email' }, phone: { type: 'char', label: 'Phone' },
-      lock_date: { type: 'date', label: 'Lock Date', tracking: true },
+      lock_date: { type: 'date', label: 'Global Lock Date', tracking: true },
       sale_lock_date: { type: 'date', label: 'Sales Lock Date', tracking: true },
       purchase_lock_date: { type: 'date', label: 'Purchase Lock Date', tracking: true },
       tax_lock_date: { type: 'date', label: 'Tax Return Lock Date', tracking: true },

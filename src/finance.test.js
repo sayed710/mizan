@@ -26,9 +26,11 @@ test('confirming a quotation over the credit limit warns without blocking', () =
   assert.equal(read(run(ok.db, 'sale.order', ok.id, 'Confirm'), 'sale.order', ok.id).state, 'sale');
 });
 
-test('posting into a locked period is refused', () => {
-  const db = write(seed(), 'res.company', 1, { lock_date: today() });
-  assert.throws(() => invoice(db, { invoice_date: addDays(today(), -1) }), /locked/);
+test('posting an invoice in a soft-locked period shifts its accounting date', () => {
+  const base = seed();
+  const db = write({ ...base, records: { ...base.records, 'account.bank.statement.line': [] } }, 'res.company', 1, { lock_date: today() });
+  const shifted = invoice(db, { invoice_date: addDays(today(), -1) });
+  assert.equal(read(shifted.db, 'account.move', shifted.id).date, addDays(today(), 1));
   assert.equal(read(invoice(db, { invoice_date: addDays(today(), 1) }).db, 'account.move', invoice(db, { invoice_date: addDays(today(), 1) }).id).state, 'posted');
 });
 
@@ -60,7 +62,7 @@ test('the lock date also guards synced changes and deletes; payments on locked i
   const { applyDiff, diffDb } = await import('./sync.js');
   const { payMove } = await import('./models/accounting.js');
   const { db: posted, id } = invoice(seed(), { invoice_date: addDays(today(), -10) });
-  const locked = write(posted, 'res.company', 1, { lock_date: addDays(today(), -1) });
+  const locked = write({ ...posted, records: { ...posted.records, 'account.bank.statement.line': [] } }, 'res.company', 1, { lock_date: addDays(today(), -1) });
   const edited = { ...locked, records: { ...locked.records, 'account.move': locked.records['account.move'].map((m) => (m.id === id ? { ...m, invoice_date: today() } : m)) } };
   assert.throws(() => applyDiff(locked, diffDb(locked, edited)), /locked/);
   assert.throws(() => applyDiff(locked, { upserts: {}, deletes: { 'account.move': [id] } }), /locked/);

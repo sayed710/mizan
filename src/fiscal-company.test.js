@@ -52,7 +52,7 @@ test('migration retains global closing locks without clearing them for closed fi
   const company = createCompany(seed(), { name: 'Other company' });
   const year = create(company.db, 'account.fiscal.year', { name: 'Legacy year', ...dates });
   const closed = closeFiscalYear(year.db, year.id);
-  const legacy = write(write({ ...closed, schema_version: 20, settings: { ...closed.settings, lock_date: dates.date_to } }, 'res.company', 1, { lock_date: dates.date_to }), 'res.company', company.id, { lock_date: dates.date_to });
+  const legacy = write(write({ ...closed, records: { ...closed.records, 'account.bank.statement.line': [] }, schema_version: 20, settings: { ...closed.settings, lock_date: dates.date_to } }, 'res.company', 1, { lock_date: dates.date_to }), 'res.company', company.id, { lock_date: dates.date_to });
   assert.throws(() => reopenFiscalYear(legacy, year.id), /locked/);
   const migrated = migrate(legacy);
   assert.ok(migrated.records['res.company'].every((c) => c.lock_date === dates.date_to));

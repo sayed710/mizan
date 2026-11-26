@@ -11,7 +11,7 @@ const EXCEPTION_FIELD_LABELS = Object.fromEntries(LOCK_EXCEPTION_FIELDS);
 export const LOCK_DATE_FIELDS = [
   { name: 'sale_lock_date', label: 'Sales Lock Date' },
   { name: 'purchase_lock_date', label: 'Purchase Lock Date' },
-  { name: 'lock_date', label: 'Lock Date' },
+  { name: 'lock_date', label: 'Global Lock Date' },
   { name: 'tax_lock_date', label: 'Tax Return Lock Date' },
   { name: 'hard_lock_date', label: 'Hard Lock Date', warning: 'A hard lock cannot be undone.' },
 ];
@@ -140,11 +140,11 @@ function LockDatesDialog({ db, company, readOnly, onClose, onSave }) {
       // Quiet: a refusal belongs in this dialog, next to the values the user can correct.
       result = await commit(nextDb, { quiet: true });
     } catch (e) {
-      setError(e.message);
+      setError(t(e.message));
       return;
     }
     if (result?.ok === false) {
-      setError(result.error);
+      setError(t(result.error));
       return;
     }
     onSave?.(nextDb);
