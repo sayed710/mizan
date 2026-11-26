@@ -2649,6 +2649,13 @@ function automaticEntryMoveError(db, before, after) {
   if (journal?.company_id && journal.company_id !== companyId) return 'Journal and entry must belong to the same company';
   // Sources are checked when linked; resetting a source later must not freeze the entries made from it.
   if (!linksChanged) return null;
+  if (!journal || journal.active === false || journal.type !== 'general') return 'Select an active miscellaneous journal for this company';
+  if (sourceIds.some((id) => !Number.isInteger(id) || id < 1 || id === after.id)) {
+    return 'Automatic entries can only reference posted journal entries';
+  }
+  if (new Set(sourceIds).size !== sourceIds.length) {
+    return 'Automatic entries cannot reference the same origin entry more than once';
+  }
   for (const srcId of sourceIds) {
     const src = read(db, 'account.move', srcId);
     if (!src || src.state !== 'posted') return 'Automatic entries can only reference posted journal entries';

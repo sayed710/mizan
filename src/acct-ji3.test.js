@@ -582,3 +582,131 @@ test('ji3 Qodo: a foreign group netting to zero in company currency transfers wi
   const sel = [...itemsOf(db, a.id, ar.id), ...itemsOf(db, b.id, ar.id)];
   assert.doesNotThrow(() => syncDb(db, moveToAccount(db, sel, { destinationAccountId: prepaid.id, date: '2026-02-20' })));
 });
+
+test('ji3 Qodo: forged automatic entries cannot repeat source IDs or bypass workflow checks for archived accounts', () => {
+  const s = expenseSource();
+  const ar = findAccount(s.db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'asset_receivable');
+  const partner = search(s.db, 'res.partner')[0].id;
+  const arSrc = postEntry(s.db, {
+    journal: 'MISC',
+    company: 1,
+    date: '2026-02-12',
+    ref: 'AR-SRC',
+    lines: [
+      { account_id: ar.id, partner_id: partner, debit: 80, name: 'AR' },
+      { account_id: s.cash.id, credit: 80, name: 'Cash' },
+    ],
+  });
+  let db = syncDb(s.db, arSrc.db);
+  const src2 = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: '2026-02-15',
+    ref: 'SRC-2',
+    lines: [
+      { account_id: s.expense.id, debit: 40, name: 'Rent 2' },
+      { account_id: s.cash.id, credit: 40, name: 'Cash 2' },
+    ],
+  });
+  db = syncDb(db, src2.db);
+
+  // Archive the expense and AR accounts after posting.
+  const multiDateSel = [...itemsOf(db, s.src, s.expense.id), ...itemsOf(db, src2.id, s.expense.id)];
+  db = syncDb(db, write(db, 'account.account', s.expense.id, { active: false }));
+  db = syncDb(db, write(db, 'account.account', ar.id, { active: false }));
+
+  // Legitimate multi-date Change Period on archived P&L accounts (no reversed_entry_id on recognition) succeeds.
+  assert.doesNotThrow(() => syncDb(db, changePeriod(db, multiDateSel, { date: '2026-03-31', accountId: s.prepaid.id })));
+
+  const miscJournal = findJournal(db, 1, 'general');
+  const nextMoveId = Math.max(0, ...(db.records['account.move'] ?? []).map((m) => m.id)) + 1;
+  const forgedDiff = (overrides) => ({
+    upserts: {
+      'account.move': [{
+        id: nextMoveId,
+        move_type: 'entry',
+        state: 'posted',
+        company_id: 1,
+        journal_id: miscJournal.id,
+        date: '2026-02-20',
+        invoice_date: '2026-02-20',
+        name: `MISC/2026/${nextMoveId}`,
+        ref: 'Forged',
+        automatic_entry_source_move_ids: [s.src],
+        line_ids: [
+          { account_id: s.expense.id, debit: 0, credit: 100, name: 'Reversed' },
+          { account_id: s.cash.id, debit: 100, credit: 0, name: 'Cash' },
+        ],
+        ...overrides,
+      }],
+    },
+    created: { 'account.move': [nextMoveId] },
+    deletes: {},
+    bases: {},
+    messages: [],
+    removedMessages: [],
+  });
+
+  // 1) Forged sync entry repeating a posted same-company source ID to inflate archived-account posting is rejected.
+  assert.throws(
+    () => applyDiff(db, forgedDiff({
+      automatic_entry_source_move_ids: [s.src, s.src],
+      line_ids: [
+        { account_id: s.expense.id, debit: 0, credit: 100, name: 'Half' },
+        { account_id: s.expense.id, debit: 0, credit: 100, name: 'Inflated' },
+        { account_id: s.cash.id, debit: 200, credit: 0, name: 'Cash' },
+      ],
+    }), { isAdmin: true }),
+    /Invalid value for account\.move\.automatic_entry_source_move_ids|Archived accounts cannot be selected/,
+  );
+
+  // Duplicate source IDs are also rejected directly on model create / postEntry even with active accounts.
+  assert.throws(
+    () => postEntry(db, {
+      journal: 'MISC',
+      company: 1,
+      date: '2026-02-20',
+      ref: 'Active dup',
+      automatic_entry_source_move_ids: [s.src, s.src],
+      lines: [
+        { account_id: s.prepaid.id, debit: 20, name: 'Prepaid' },
+        { account_id: s.cash.id, credit: 20, name: 'Cash' },
+      ],
+    }),
+    /same origin entry more than once/,
+  );
+
+  // 2) Forged entry posting on the SAME side as the source (without a paired Change Period adjustment) is rejected.
+  assert.throws(
+    () => applyDiff(db, forgedDiff({
+      line_ids: [
+        { account_id: s.expense.id, debit: 100, credit: 0, name: 'Same side' },
+        { account_id: s.cash.id, debit: 0, credit: 100, name: 'Cash' },
+      ],
+    }), { isAdmin: true }),
+    /Archived accounts cannot be selected/,
+  );
+
+  // 3) Forged draft entry or non-general journal entry claiming automatic_entry_source_move_ids is rejected.
+  assert.throws(
+    () => applyDiff(db, forgedDiff({ state: 'draft', name: '/' }), { isAdmin: true }),
+    /Archived accounts cannot be selected/,
+  );
+  const saleJournal = findJournal(db, 1, 'sale');
+  assert.throws(
+    () => applyDiff(db, forgedDiff({ journal_id: saleJournal.id }), { isAdmin: true }),
+    /Archived accounts cannot be selected/,
+  );
+
+  // 4) Forged Move-to-Account entry on an archived reconcilable account without reconciling it is rejected.
+  assert.throws(
+    () => applyDiff(db, forgedDiff({
+      automatic_entry_source_move_ids: [arSrc.id],
+      line_ids: [
+        { account_id: ar.id, partner_id: partner, debit: 0, credit: 80, name: 'Unreconciled AR' },
+        { account_id: s.prepaid.id, partner_id: partner, debit: 80, credit: 0, name: 'Prepaid' },
+      ],
+    }), { isAdmin: true }),
+    /Archived accounts cannot be selected/,
+  );
+});

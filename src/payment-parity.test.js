@@ -120,7 +120,7 @@ test('Customer Payments and Vendor Payments list columns, partner headers, and s
   );
 
   assert.deepEqual(models['account.payment'].list, [
-    'date', 'name', 'journal_id', 'company_id', 'partner_id',
+    'date', 'name', 'journal_id', 'company_id', 'payment_method_line_id', 'partner_id',
     'amount_signed', 'currency_id', 'activities', 'amount_company_currency_signed', 'display_state',
   ]);
   assert.ok(models['account.payment'].fields.memo);
@@ -210,7 +210,7 @@ test('Payment status labels, bank-matched Reconciled display_state, filters, and
   assert.equal(read(afterUnrec, 'account.payment', m.id).display_state, 'posted');
 
   // Group bys: Partner, Journal, Status, Payment Date, Currency, Company
-  assert.deepEqual(models['account.payment'].groupBys, ['partner_id', 'journal_id', 'display_state', 'date', 'currency_id', 'company_id']);
+  assert.deepEqual(models['account.payment'].groupBys, ['partner_id', 'journal_id', 'payment_method_line_id', 'display_state', 'date', 'currency_id', 'company_id']);
   const byStatus = groupRecords(db, 'account.payment', all, 'display_state');
   assert.equal(byStatus.find((g) => g.key === 'reconciled').records.length, 1);
   assert.equal(byStatus.find((g) => g.key === 'posted').records.length, 1);
@@ -263,7 +263,7 @@ test('Payment form renders Odoo 20 groups, radio Payment Type, direction-aware b
     // Draft payments also offer the invoice to settle (Qodo: new payments must be able to target one invoice).
     assert.equal(draftGroups.length, 3);
     assert.deepEqual(fieldLabelsOf(draftGroups[0]), ['Payment Type', 'Internal Transfer', 'Customer', 'Amount', 'Date', 'Memo']);
-    assert.deepEqual(fieldLabelsOf(draftGroups[1]), ['Journal', 'Customer Bank Account']);
+    assert.deepEqual(fieldLabelsOf(draftGroups[1]), ['Journal', 'Charge Bearer', 'Customer Bank Account']);
     assert.deepEqual(fieldLabelsOf(draftGroups[2]), ['Invoice']);
     const radioGroup = allFind(host, (n) => props(n)?.role === 'radiogroup')[0];
     assert.equal(props(radioGroup)['aria-label'], 'Payment Type');
@@ -282,7 +282,7 @@ test('Payment form renders Odoo 20 groups, radio Payment Type, direction-aware b
     const custGroups = allFind(host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
     assert.equal(custGroups.length, 3);
     assert.deepEqual(fieldLabelsOf(custGroups[0]), ['Payment Type', 'Customer', 'Amount', 'Date', 'Memo']);
-    assert.deepEqual(fieldLabelsOf(custGroups[1]), ['Journal', 'Company Bank Account']);
+    assert.deepEqual(fieldLabelsOf(custGroups[1]), ['Journal', 'Charge Bearer', 'Company Bank Account']);
     assert.deepEqual(fieldLabelsOf(custGroups[2]), ['Invoice']);
     // Only Memo renders an editable <input>; Amount and other group fields render readonly text
     const memoInput = allFind(host, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-memo');
@@ -305,7 +305,7 @@ test('Payment form renders Odoo 20 groups, radio Payment Type, direction-aware b
     await renderForm(vendLeaf, vendPostedId);
     const vendGroups = allFind(host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
     assert.deepEqual(fieldLabelsOf(vendGroups[0]), ['Payment Type', 'Vendor', 'Amount', 'Date', 'Memo']);
-    assert.deepEqual(fieldLabelsOf(vendGroups[1]), ['Journal', 'Vendor Bank Account']);
+    assert.deepEqual(fieldLabelsOf(vendGroups[1]), ['Journal', 'Charge Bearer', 'Vendor Bank Account']);
     const vendSmart = allFind(host, (n) => n.tagName === 'A' && hasClass(n, 'smart'));
     assert.equal(vendSmart.length, 2);
     const billsSmart = vendSmart.find((a) => a.textContent === '1Bills');

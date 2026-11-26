@@ -3523,6 +3523,15 @@ const ar = {
   'Key Performance Indicator': 'مؤشر الأداء الرئيسي',
   Metric: 'المؤشر',
   'Payment Method Lines': 'بنود طرق الدفع',
+  'Payment Method Line': 'بند طريقة الدفع',
+  'Transaction': 'المعاملة',
+  'Charge Bearer': 'متحمل الرسوم',
+  'Borne by Creditor': 'يتحملها المستفيد',
+  'Borne by Debtor': 'يتحملها الدافع',
+  'Following Service Level': 'حسب مستوى الخدمة',
+  'Only draft batches can be deleted.': 'يمكن حذف الدفعات المجمعة المسودة فقط.',
+  'The charge bearer of a posted payment cannot be changed.': 'لا يمكن تغيير متحمل الرسوم لدفعة مُرحّلة.',
+  'Please define a payment method line on your payment.': 'يرجى تحديد بند طريقة الدفع في الدفعة.',
   'Outstanding Receipts Account': 'حساب المقبوضات المعلقة',
   'Outstanding Payments Account': 'حساب المدفوعات المعلقة',
   'Select an active outstanding account': 'اختر حساب مبالغ معلقة نشطاً',
@@ -4100,6 +4109,7 @@ const ar = {
   'Automatic entries must be miscellaneous journal entries': 'يجب أن تكون القيود التلقائية قيود يومية متنوعة',
   'Journal and entry must belong to the same company': 'يجب أن ينتمي دفتر اليومية والقيد إلى نفس الشركة',
   'Automatic entries can only reference posted journal entries': 'لا يمكن للقيود التلقائية الإشارة إلا إلى قيود يومية مرحّلة',
+  'Automatic entries cannot reference the same origin entry more than once': 'لا يمكن للقيود التلقائية الإشارة إلى نفس القيد الأصلي أكثر من مرة',
   'Automatic entries cannot be created for items from different companies': 'لا يمكن إنشاء قيود تلقائية لبنود من شركات مختلفة',
 };
 
