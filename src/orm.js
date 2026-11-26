@@ -16,7 +16,7 @@ export const nextSequence = (db, model, step = 10) =>
 
 // ---- multi-company: records of company-scoped models carry company_id (missing = company 1) ----
 /** Master data shared by all companies (Odoo shares these by default). */
-export const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'res.partner.category', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
+export const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type',
   'account.tax', 'account.cash.rounding', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
   'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'payment.method', 'res.country.group']);
@@ -25,11 +25,26 @@ export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
 export const getActiveCompany = () => activeCompany;
 const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r.company_id ?? 1) === activeCompany;
 
+/**
+ * Computed fields are evaluated on read, except `lazy` ones (expensive, rarely shown): those are non-enumerable
+ * getters evaluated on first access, so ordinary lookups never pay for them and spreads/serialisation skip them.
+ */
 const withComputed = (fields, r, db) => {
   const computed = Object.entries(fields).filter(([, f]) => f.compute);
   if (!computed.length) return r;
   const out = { ...r };
-  for (const [k, f] of computed) out[k] = f.compute(out, db);
+  for (const [k, f] of computed) {
+    if (!f.lazy) { out[k] = f.compute(out, db); continue; }
+    Object.defineProperty(out, k, {
+      configurable: true,
+      enumerable: false,
+      get() {
+        const value = f.compute(out, db);
+        Object.defineProperty(out, k, { value, enumerable: false, writable: true, configurable: true });
+        return value;
+      },
+    });
+  }
   return out;
 };
 

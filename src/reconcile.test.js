@@ -82,6 +82,18 @@ test('autoReconcile applies the lowest-sequence auto-validated rule and skips th
   assert.equal(suggestRule(after, byRef('TRF SARA HASSAN INV')), null);
 });
 
+test('automatic reconciliation carries a saved review request to the bank move', () => {
+  let db = seed();
+  db = addRule(db, { sequence: 1, auto_reconcile: true, match_label: 'contains', match_label_param: 'review fee', line_ids: [{ account_id: accountId(db, '600000'), amount_type: 'percentage', amount: 100 }] });
+  const line = addLine(db, { payment_ref: 'review fee', amount: -12, review_requested: true });
+  const after = autoReconcile(line.db);
+  const booked = read(after, LINE, line.id);
+  assert.equal(booked.state, 'reconciled');
+  assert.equal(read(after, 'account.move', booked.bank_move_id).to_check, true);
+  const action = models[LINE].form.buttons.find((b) => b.label === 'Mark as reviewed');
+  assert.equal(action.when(booked, after), true);
+});
+
 test('the bank line button applies the matching reconciliation model', () => {
   const initial = seed();
   const base = create(initial, 'account.reconcile.model', { name: 'Fees', rule_type: 'writeoff_button', match_label: 'contains', match_label_param: 'fee', line_ids: [{ account_id: accountId(initial, '690000'), label: 'Fee', amount_type: 'percentage', amount: 100 }] });

@@ -24,10 +24,7 @@ export const countryGroupModels = {
   }, {
     form: {
       ...ecommerceModels['res.partner'].form,
-      groups: [
-        ecommerceModels['res.partner'].form.groups[0],
-        ['city', 'state', 'zip', 'country', 'pricelist_id', 'credit_limit', 'tag_ids'],
-      ],
+      groups: ecommerceModels['res.partner'].form.groups,
     },
   }),
 };

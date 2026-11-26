@@ -63,7 +63,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels, isFollowUpSmsDiff } from './finance.js';
+import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -79,6 +79,7 @@ import { ecommerceModels } from './ecommerce.js';
 import { blogModels } from './blog.js';
 import { appointmentModels } from './appointments.js';
 import { whatsappModels } from './whatsapp.js';
+import { appOpen } from '../access.js';
 import { today } from './common.js';
 import { companyModels, withCompany } from './company.js';
 import { withLocks } from './locks.js';
@@ -139,10 +140,34 @@ export const viewsOf = (model) => {
   return views.length ? views : ['list'];
 };
 
-const customers = { key: 'customers', label: 'Customers', model: 'res.partner', listActions: [{
-  label: 'Customer Statement', requiresSelection: true,
-  run: (db, ids) => ({ go: statementUrl(ids, { companyId: db.settings?.current_company_id ?? 1 }) }),
-}] };
+const customers = {
+  key: 'customers',
+  label: 'Customers',
+  model: 'res.partner',
+  optionalList: ['followup_status', 'followup_next_action_date', 'last_reminder', 'followup_line_id', 'followup_reminder_type'],
+  listActions: [
+    {
+      label: 'Customer Statement', requiresSelection: true,
+      run: (db, ids) => ({ go: statementUrl(ids, { companyId: db.settings?.current_company_id ?? 1 }) }),
+    },
+    {
+      label: 'Process follow-ups',
+      requiresSelection: true,
+      app: 'accounting',
+      when: (db, user) => appOpen(db, user, 'accounting'),
+      // Executed by ActionView through runBatchFollowUpsAction (server email delivery and commit); there is no `run`.
+      batchFollowUp: true,
+    },
+    {
+      label: 'Postpone',
+      requiresSelection: true,
+      app: 'accounting',
+      when: (db, user) => appOpen(db, user, 'accounting'),
+      wizard: () => postponeFollowUpWizardSpec(),
+      run: (db, ids, values) => ({ db: postponeFollowUp(db, ids, values.date, { companyId: db.settings?.current_company_id ?? 1 }) }),
+    },
+  ],
+};
 const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
 const products = { key: 'products', label: 'Products', model: 'product' };
 
@@ -456,6 +481,7 @@ const allApps = [
       { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
       { label: 'Configuration', children: [
         { key: 'tags', label: 'Tags', model: 'res.partner.category' },
+        { key: 'industries', label: 'Industries', model: 'res.partner.industry' },
         { key: 'banks', label: 'Banks', model: 'res.bank' },
       ] },
     ],
@@ -809,7 +835,7 @@ export const leavesOf = (app) => {
   return walk(app?.menus);
 };
 
-const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'product'];
+const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
   'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];
@@ -927,5 +953,8 @@ export function targetOf(model, uninstalled = []) {
   }
   return '#/';
 }
-export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
+// A record-set action may contain customer and vendor payments together.
+const allPaymentsAction = { key: 'all-payments', label: 'Payments', model: 'account.payment', ...customerPaymentView, listLabels: { ...customerPaymentView.listLabels, partner_id: 'Partner' } };
+export const findLeaf = (app, key) => (app?.id === 'accounting' && key === 'all-payments' ? allPaymentsAction : null)
+  ?? leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
 export const menusFor = (appId) => apps.find((a) => a.id === appId)?.menus ?? [];
