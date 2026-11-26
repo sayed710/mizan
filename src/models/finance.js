@@ -407,7 +407,12 @@ function isBankStatementMove(db, moveId) {
   return ids.has(moveId);
 }
 
+/** Review status (Odoo `checked`) stays writable on posted and locked entries. */
+const REVIEW_FIELDS = new Set(['to_check', 'review_state']);
+
 function bankStatementMoveRewriteError(db, before, after, ctx) {
+  const touched = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((field) => !REVIEW_FIELDS.has(field));
+  if (!changedFields(before, after, touched)) return null;
   const previousStatement = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
   const statement = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
   const partnerChanged = previousStatement && statement && (previousStatement.partner_id ?? null) !== (statement.partner_id ?? null)
