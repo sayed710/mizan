@@ -2766,7 +2766,16 @@ const ar = {
   'Journal entry is not balanced: total debit must equal total credit.': 'القيد المحاسبي غير متوازن: يجب أن يتساوى إجمالي المدين مع إجمالي الدائن.',
   'My Invoices': 'فواتيري',
   'Invoice Currency': 'عملة الفاتورة',
+  'Credit Note Currency': 'عملة الإشعار الدائن',
   'Bill Currency': 'عملة فاتورة المورد',
+  'Refund Currency': 'عملة المرتجع',
+  'Bill Date: This Month': 'تاريخ فاتورة المورد: هذا الشهر',
+  'Bill Date: This Year': 'تاريخ فاتورة المورد: هذه السنة',
+  "You can't generate invoices that are not posted.": 'لا يمكنك إنشاء فواتير غير مرحلة.',
+  'You can only generate sales documents or purchase documents for self-billing.': 'يمكنك إنشاء مستندات المبيعات أو مستندات المشتريات للفوترة الذاتية فقط.',
+  'Only invoices, credit notes, bills, and refunds can be downloaded': 'يمكن تنزيل الفواتير والإشعارات الدائنة وفواتير الموردين والمرتجعات فقط',
+  'Journal entry not found': 'القيد المحاسبي غير موجود',
+  'Some selected documents could not be found ({ids}).': 'تعذّر العثور على بعض المستندات المحددة ({ids}).',
   'Accounting Date: This Month': 'تاريخ القيد: هذا الشهر',
   'Accounting Date: This Year': 'تاريخ القيد: هذه السنة',
   'Due Date: This Month': 'تاريخ الاستحقاق: هذا الشهر',
@@ -4013,6 +4022,9 @@ const ar = {
   'There are still draft entries before the selected date and numbered draft entries in the sequence being secured.': 'لا تزال هناك قيود مسودة قبل التاريخ المحدد وقيود مسودة مرقّمة ضمن التسلسل الجاري تأمينه.',
   'Cannot secure entries while numbered draft entries precede entries to be secured': 'لا يمكن تأمين القيود ما دامت هناك قيود مسودة مرقّمة تسبق القيود المطلوب تأمينها',
   Empty: 'فارغ',
+  'Problem Description': 'وصف المشكلة',
+  'Initial balance ({amount}) does not match previous statement': 'الرصيد الافتتاحي ({amount}) لا يطابق كشف الحساب السابق',
+  'Incorrect ending balance, expected {amount}': 'الرصيد النهائي غير صحيح، المتوقع {amount}',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

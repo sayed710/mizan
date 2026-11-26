@@ -32,14 +32,14 @@ const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r
 const withComputed = (fields, r, db) => {
   const computed = Object.entries(fields).filter(([, f]) => f.compute);
   if (!computed.length) return r;
-  const eager = computed.filter(([, f]) => !f.lazy);
-  const out = { ...r, ...Object.fromEntries(eager.map(([k, f]) => [k, f.compute(r, db)])) };
-  for (const [k, f] of computed.filter(([, f]) => f.lazy)) {
+  const out = { ...r };
+  for (const [k, f] of computed) {
+    if (!f.lazy) { out[k] = f.compute(out, db); continue; }
     Object.defineProperty(out, k, {
       configurable: true,
       enumerable: false,
       get() {
-        const value = f.compute(r, db);
+        const value = f.compute(out, db);
         Object.defineProperty(out, k, { value, enumerable: false, writable: true, configurable: true });
         return value;
       },
