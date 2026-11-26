@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { monthFilters, shiftMonth, today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
+import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, partnerAccount, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { markAsReviewed, payMove, settleWriteoff } from './accounting.js';
 import { applyRule, counterpartTaxLines, mapStatementPartner, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -546,7 +546,12 @@ export function bookToAccount(db, line, opts = {}) {
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   const via = paymentJournal(db, line.journal_id, line.company_id ?? 1);
   const account = read(db, 'account.account', line.counterpart_account_id);
-  if (!eligibleCounterpart(account, line.company_id ?? 1)) throw new Error('Select a valid counterpart account for this company');
+  const partnerKind = account?.account_type === 'asset_receivable' ? 'receivable' : account?.account_type === 'liability_payable' ? 'payable' : null;
+  const savedLine = read(db, 'account.bank.statement.line', line.id);
+  const validPartnerAccount = partnerKind && savedLine?.state === 'to_check' && savedLine.partner_id && savedLine.partner_id === line.partner_id
+    && (savedLine.company_id ?? 1) === (line.company_id ?? 1)
+    && partnerAccount(db, savedLine.partner_id, savedLine.company_id ?? 1, partnerKind) === account.id;
+  if (!eligibleCounterpart(account, line.company_id ?? 1) && !validPartnerAccount) throw new Error('Select a valid counterpart account for this company');
   const open = round(line.open_amount ?? statementCompanyAmount(db, line));
   if (!(open > 0)) throw new Error('This bank transaction has no open amount');
   const requested = opts?.amount != null ? round(Number(opts.amount)) : open;
@@ -596,8 +601,9 @@ export function bookToAccount(db, line, opts = {}) {
     ? [liquidityLine, ...counterparts]
     : [...counterparts, liquidityLine];
   const { db: booked, id } = postEntry(current, { journal: via.code, journal_id: via.id, date: line.date, ref: entryRef, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
+  const reviewed = line.review_requested ? write(booked, 'account.move', bankMoveId ?? id, { to_check: true }) : booked;
   return {
-    db: write(booked, 'account.bank.statement.line', line.id, {
+    db: write(reviewed, 'account.bank.statement.line', line.id, {
       state: remaining > 0 ? 'to_check' : 'reconciled',
       move_id: id,
       bank_move_id: bankMoveId ?? id,
@@ -605,6 +611,33 @@ export function bookToAccount(db, line, opts = {}) {
       allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: requested }],
     }),
   };
+}
+
+/** Resolve a named counterpart using the same company and partner configuration as accounting. */
+export function statementCounterpartAccount(db, line, kind) {
+  const target = read(db, 'account.bank.statement.line', line.id);
+  if (!target) throw new Error('Bank transaction does not exist');
+  if (target.state !== 'to_check') throw new Error('This bank transaction is already reconciled');
+  const company = target.company_id ?? 1;
+  if (kind === 'receivable' || kind === 'payable') {
+    if (!target.partner_id) throw new Error('Select a partner first');
+    return partnerAccount(db, target.partner_id, company, kind);
+  }
+  if (kind !== 'transfer') throw new Error('Invalid counterpart choice');
+  const account = read(db, 'account.account', read(db, 'res.company', company)?.transfer_account_id);
+  if (!eligibleCounterpart(account, company)) throw new Error('Internal transfer account is not set for this company');
+  return account.id;
+}
+
+/** Mark a transaction for review independently of its reconciliation state. */
+export function setStatementLineReview(db, lineId, needsReview) {
+  const line = read(db, 'account.bank.statement.line', lineId);
+  if (!line) throw new Error('Bank transaction does not exist');
+  let next = write(db, 'account.bank.statement.line', lineId, { review_requested: Boolean(needsReview) });
+  if (line.bank_move_id) next = needsReview
+    ? write(next, 'account.move', line.bank_move_id, { to_check: true })
+    : markAsReviewed(next, line.bank_move_id);
+  return next;
 }
 
 /** Reject unreconciling when the statement line date, or any bank or counterpart entry, is on or before a lock date. */
@@ -749,7 +782,7 @@ export function setStatementLinePartner(db, line, partnerId) {
 }
 
 /** Validate the booked bank entry and payment allocations against the statement line amount and journal. */
-function bankEntryGuardError(db, after, { company, round, referenceAmount, via, bankAccount, allocations }) {
+function bankEntryGuardError(db, after, { before, company, round, referenceAmount, via, bankAccount, allocations }) {
   const bankEntry = read(db, 'account.move', after.bank_move_id);
   const bankLines = (bankEntry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
   const incoming = after.amount > 0;
@@ -826,6 +859,17 @@ function bankEntryGuardError(db, after, { company, round, referenceAmount, via, 
     || toCompany(db, bankCurrency.id, bankLine.amount_currency, after.date ?? today(), company) === referenceAmount;
   if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(incoming ? bankLine.debit : bankLine.credit) !== referenceAmount || !currencyAmountMatches) {
     return 'The bank entry must book the transaction amount once';
+  }
+  // A direct receivable/payable booking must use the saved partner and its configured account.
+  for (const item of before?.bank_move_id ? [] : (bankEntry.line_ids ?? [])) {
+    const type = read(db, 'account.account', item.account_id)?.account_type;
+    const kind = type === 'asset_receivable' ? 'receivable' : type === 'liability_payable' ? 'payable' : null;
+    if (!kind) continue;
+    try {
+      if (!after.partner_id || item.partner_id !== after.partner_id || partnerAccount(db, after.partner_id, company, kind) !== item.account_id) return 'Select a valid counterpart account for this company';
+    } catch {
+      return 'Select a valid counterpart account for this company';
+    }
   }
   const suspense = allocations.some((a) => a.payment_move_id !== after.bank_move_id) ? ensureBankSuspense(db, company, via.id).id : null;
   for (const allocation of allocations) {
@@ -1043,7 +1087,7 @@ function lineGuard(db, before, after, ctx = null) {
       if (err) return err;
     }
     const via = paymentJournal(db, after.journal_id, company);
-    const bankError = bankEntryGuardError(db, after, { company, round, referenceAmount, via, bankAccount: via.accountId, allocations });
+    const bankError = bankEntryGuardError(db, after, { before, company, round, referenceAmount, via, bankAccount: via.accountId, allocations });
     if (bankError) return bankError;
   }
   if (after.state === 'reconciled' && after.open_amount > 0) return 'A reconciled bank transaction cannot have an open amount';
@@ -1162,6 +1206,7 @@ export const bankModels = {
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },
       statement_id: { type: 'many2one', relation: 'account.bank.statement', label: 'Statement', readonly: lineStatementLocked },
       running_balance: { type: 'monetary', label: 'Running Balance', readonly: true, sum: false, compute: computeRunningBalance },
+      review_requested: { type: 'boolean', label: 'To Check', default: false },
       state: { type: 'selection', label: 'Status', tracking: true, optional: 'hide', badge: { to_check: 'info', reconciled: 'success' }, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true, domain: (j) => isLiquidityJournal(j), readonly: lineStatementLocked },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },

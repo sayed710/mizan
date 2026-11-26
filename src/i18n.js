@@ -87,6 +87,16 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Reset': 'إعادة تعيين',
+  'Show Reconciled': 'إظهار البنود المسوّاة',
+  'Print Statement': 'طباعة الكشف',
+  'Export Statement': 'تصدير الكشف',
+  'Set as Checked': 'تعيين كمُراجَع',
+  'Delete line': 'حذف السطر',
+  'Delete this bank transaction?': 'هل تريد حذف هذه المعاملة البنكية؟',
+  'Select a partner first': 'اختر الشريك أولاً',
+  'Invalid counterpart choice': 'اختيار الطرف المقابل غير صالح',
+
   'Hide lines at 0': 'إخفاء البنود الصفرية',
   'Percentages on the Payment Terms lines must be between 0 and 100.': 'يجب أن تكون النسب في بنود شروط الدفع بين 0 و100.',
   'The Payment Term must have at least one percent line and the sum of the percent must be 100%.': 'يجب أن يحتوي شرط الدفع على بند نسبة واحد على الأقل وأن يكون مجموع النسب 100%.',
