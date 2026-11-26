@@ -9,7 +9,7 @@ import { lineToStockQty } from './uom.js';
 import { freeQty, reservePicking } from './picking.js';
 import { round as round2 } from '../money.js';
 import { expenseDebits } from './expense-accounts.js';
-import { productTax } from './taxes.js';
+import { computeLineTaxes, productTax } from './taxes.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -338,8 +338,9 @@ export const moreModels = {
       if (key === 'product_id' && r.product_id) {
         const p = read(db, 'product', r.product_id);
         const unit = Number(p?.cost) || 0;
-        const tax = productTax(db, p, 'purchase', null, r.company_id)?.tax ?? p?.purchase_tax ?? r.tax;
-        return { unit_amount: unit, tax, name: r.name || p?.name || '', total_amount: round2((Number(r.quantity) || 1) * unit * (1 + (Number(tax) || 0) / 100)) };
+        const snapshot = productTax(db, p, 'purchase', null, r.company_id);
+        const tax = snapshot?.tax_breakdown?.length ? snapshot.tax_breakdown.reduce((sum, item) => sum + (Number(item.tax) || 0), 0) : snapshot?.tax ?? p?.purchase_tax ?? r.tax;
+        return { unit_amount: unit, tax, name: r.name || p?.name || '', total_amount: round2(computeLineTaxes({ qty: Number(r.quantity) || 1, price_unit: unit, ...(snapshot ?? { tax }) }).total) };
       }
       if (['quantity', 'unit_amount', 'tax'].includes(key) && Number(r.unit_amount) > 0) return { total_amount: round2((Number(r.quantity) || 0) * Number(r.unit_amount) * (1 + (Number(r.tax) || 0) / 100)) };
       return {};

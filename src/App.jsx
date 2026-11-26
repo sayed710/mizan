@@ -59,9 +59,27 @@ export function App() {
     const follow = (e) => {
       const { app: appId, menu, id, query } = parseHash();
       const model = appId === 'print' ? menu : apps.find((a) => a.id === appId) && findLeaf(apps.find((a) => a.id === appId), menu)?.model;
-      const moved = model && (e.detail[model]?.[Number(id)] ?? e.detail[model]?.[id]);
-      if (moved) {
-        const next = `#/${appId}/${menu}/${moved}${query ? `?${query}` : ''}`;
+      const map = model && e.detail?.[model];
+      if (!map || !id) return;
+      let nextId = null;
+      if (appId === 'print' && id.includes(',')) {
+        let changed = false;
+        const remappedIds = id.split(',').map((part) => {
+          const trimmed = part.trim();
+          const mapped = map[Number(trimmed)] ?? map[trimmed];
+          if (mapped != null && String(mapped) !== trimmed) {
+            changed = true;
+            return String(mapped);
+          }
+          return trimmed;
+        });
+        if (changed) nextId = remappedIds.join(',');
+      } else {
+        const moved = map[Number(id)] ?? map[id];
+        if (moved != null) nextId = String(moved);
+      }
+      if (nextId != null) {
+        const next = `#/${appId}/${menu}/${nextId}${query ? `?${query}` : ''}`;
         if (typeof location.replace === 'function') location.replace(next);
         else location.hash = next;
       }
@@ -72,7 +90,7 @@ export function App() {
 
   if (route.app === 'print' && route.menu === 'followup') return <Suspense fallback={<Loading />}><FollowUpLetter partnerId={route.id} companyId={route.params.get('company') || undefined} /></Suspense>;
   if (route.app === 'followup' && route.menu === 'send') return <Suspense fallback={<Loading />}><FollowUpWizard partnerId={route.id} companyId={route.params.get('company') || undefined} onClose={() => history.back()} /></Suspense>;
-  if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} proforma={route.params.get('report') === 'proforma'} /></Suspense>;
+  if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} proforma={route.params.get('report') === 'proforma'} report={route.params.get('report') || null} /></Suspense>;
   if (route.app === 'open') {
     // #/open/<model>/<id>: jump to the record inside whichever app shows that model.
     location.replace(`${targetOf(route.menu, db.settings?.uninstalled)}/${route.id}`);

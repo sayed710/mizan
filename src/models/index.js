@@ -4,7 +4,7 @@ import { statementUrl } from '../statementNavigation.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels, journalEntriesView, purchaseInvoiceView, salesInvoiceView } from './accounting.js';
+import { accountingModels, creditNoteView, journalEntriesView, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels, customerPaymentView, vendorPaymentView } from './pay.js';
@@ -216,7 +216,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'out_refund',
           defaults: { move_type: 'out_refund' },
-          ...salesInvoiceView,
+          ...creditNoteView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
         {
@@ -249,7 +249,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'in_refund',
           defaults: { move_type: 'in_refund' },
-          ...purchaseInvoiceView,
+          ...vendorRefundView,
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },

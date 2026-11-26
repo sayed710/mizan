@@ -13,10 +13,11 @@ function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
   const [f, dir] = sort;
   const field = fields[f];
-  const text = (r) => (field?.type === 'date' ? String(r[f] ?? '') : display(db, field, r[f]));
+  const value = (r) => field?.valueFallback && !r[f]?.length ? field.valueFallback(r) : r[f];
+  const text = (r) => (field?.type === 'date' ? String(value(r) ?? '') : display(db, field, value(r), r));
   return [...records].sort((a, b) => {
-    const x = a[f];
-    const y = b[f];
+    const x = value(a);
+    const y = value(b);
     const c = typeof x === 'number' && typeof y === 'number' ? x - y : text(a).localeCompare(text(b));
     return c * dir;
   });
@@ -157,9 +158,9 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         return (
           <td key={f} className={[isNumeric(field) ? 'num' : '', field.bold ? 'bold' : '', pastDue ? 'text-danger' : ''].filter(Boolean).join(' ')}
             onClick={editable ? (e) => e.stopPropagation() : undefined}>
-            {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
+            {hiddenByRule ? null : editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
-              : isTags ? (!hiddenByRule && <span className="many2many-tags">{(Array.isArray(cellVal) ? cellVal : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>)
+              : isTags ? (<span className="many2many-tags">{(Array.isArray(cellVal) ? cellVal : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>)
               : badge && text ? <span className={badge}>{text}</span> : text}
           </td>
         );

@@ -68,6 +68,7 @@
   .no-print { display: none !important; }
   .print-page { background: #fff; padding: 0; }
   .paper { box-shadow: none; padding: 0; max-width: none; min-height: 0; position: relative; }
+  .paper.paper-doc:not(:last-child) { break-after: page; }
   .paper-watermark { color: rgba(0, 0, 0, 0.08) !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   /* One check per Letter sheet: 11in minus the 0.25in top and bottom margins of the check page. */
   .paper.check { page: check; min-height: 10.5in; height: 10.5in; break-inside: avoid; }
@@ -284,6 +285,7 @@ html[dir='rtl'] body { font-family: 'Segoe UI', 'SF Arabic', 'Noto Sans Arabic',
 .fold-caret.open::before { content: '▾'; }
 html[dir="rtl"] .fold-caret:not(.open)::before { content: '◂'; }
 .list tr.danger td { color: var(--danger); }
+.list tr.warning td { color: var(--warn); }
 .list tr.info td { color: #1d6fa5; }
 .list tr.muted td { color: var(--muted); }
 .list td.danger { color: var(--danger); }

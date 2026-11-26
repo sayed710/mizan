@@ -2882,25 +2882,121 @@ const invoiceListDecoration = (r) => (r.state === 'draft' ? 'info' : r.state ===
 
 /** Build Odoo 20 search panel filter groups for sales or purchase invoice/refund lists. */
 const invoiceSearchFilters = ({ purchases = false } = {}) => [
-  [{ id: 'myinvoices', label: 'My Invoices', fn: (r, db) => Boolean(r.invoice_user_id && r.invoice_user_id === currentUserId(db)) }],
+  ...(!purchases ? [[
+    { id: 'myinvoices', label: 'My Invoices', fn: (r, db) => Boolean(r.invoice_user_id && r.invoice_user_id === currentUserId(db)) },
+  ]] : []),
   [
     { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
     { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' },
     { id: 'cancel', label: 'Cancelled', fn: (r) => r.state === 'cancel' },
   ],
   [
-    { id: 'unpaid', label: 'To Pay', fn: (r, db) => r.state !== 'cancel' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) },
-    { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
-    { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
+    { id: 'not_secured', label: 'Not Secured', fn: (r) => !r.inalterable_hash && r.state === 'posted' },
   ],
   ...(!purchases ? [[
     { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
     { id: 'is_not_sent', label: 'Not Sent', fn: (r) => !r.is_move_sent },
   ]] : []),
-  monthFilters('invoice_date', 'Invoice Date'),
+  purchases
+    ? [
+      { id: 'in_invoice', label: 'Bills', fn: (r) => r.move_type === 'in_invoice' },
+      { id: 'in_receipt', label: 'Receipt', fn: (r) => r.move_type === 'in_receipt' },
+      { id: 'in_refund', label: 'Refunds', fn: (r) => r.move_type === 'in_refund' },
+    ]
+    : [
+      { id: 'out_invoice', label: 'Invoices', fn: (r) => r.move_type === 'out_invoice' },
+      { id: 'out_receipt', label: 'Receipts', fn: (r) => r.move_type === 'out_receipt' },
+      { id: 'out_refund', label: 'Credit Notes', fn: (r) => r.move_type === 'out_refund' },
+    ],
+  [
+    {
+      id: 'to_check',
+      label: 'To Review',
+      fn: (r) => r.state === 'posted' && (r.to_check === true || ['todo', 'anomaly'].includes(r.review_state)),
+    },
+  ],
+  [
+    { id: 'unpaid', label: 'To Pay', fn: (r, db) => r.state !== 'cancel' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) },
+    { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
+    { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
+  ],
+  monthFilters('invoice_date', purchases ? 'Bill Date' : 'Invoice Date'),
   ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
   monthFilters('invoice_date_due', 'Due Date'),
 ];
+
+const isSalesDocument = (r) => Boolean(r && ['out_invoice', 'out_refund', 'out_receipt'].includes(r.move_type));
+
+function resolveMoveSelection(db, moveOrIds) {
+  if (Array.isArray(moveOrIds)) {
+    if (!moveOrIds.length) throw new Error('Select at least one record first');
+    return moveOrIds.map((id) => {
+      const move = read(db, 'account.move', id);
+      if (!move) throw new Error('Journal entry not found');
+      return move;
+    });
+  }
+  const move = moveOrIds?.id ? (read(db, 'account.move', moveOrIds.id) ?? moveOrIds) : moveOrIds;
+  if (!move) throw new Error('Journal entry not found');
+  return [move];
+}
+
+function resolveSendMoves(db, moveOrIds) {
+  const moves = resolveMoveSelection(db, moveOrIds);
+  if (moves.some((m) => m.state !== 'posted')) {
+    throw new Error("You can't generate invoices that are not posted.");
+  }
+  if (moves.some((m) => !isSalesDocument(m))) {
+    throw new Error('You can only generate sales documents or purchase documents for self-billing.');
+  }
+  return moves;
+}
+
+function sendMovesWizard(db, moveOrIds) {
+  const moves = resolveSendMoves(db, moveOrIds);
+  const allHaveEmail = moves.every((m) => Boolean(m.partner_id && read(db, 'res.partner', m.partner_id)?.email?.trim?.()));
+  return {
+    title: 'Send',
+    fields: [
+      { name: 'email', type: 'boolean', label: 'Email', default: allHaveEmail },
+      { name: 'download', type: 'boolean', label: 'Download', default: false },
+    ],
+  };
+}
+
+function runSendMoves(db, moveOrIds, values = {}) {
+  const moves = resolveSendMoves(db, moveOrIds);
+  if (!values?.email && !values?.download) {
+    throw new Error('Select at least one channel: Email or Download');
+  }
+  const markSent = !values.live && Boolean(values.download);
+  return {
+    db: markSent ? moves.reduce((acc, m) => write(acc, 'account.move', m.id, { is_move_sent: true }), db) : db,
+    ...(values.download ? { go: `#/print/account.move/${moves.map((m) => m.id).join(',')}` } : {}),
+  };
+}
+
+function downloadMoves(db, moveOrIds) {
+  const moves = resolveMoveSelection(db, moveOrIds);
+  if (moves.some((m) => !isInvoice(m))) {
+    throw new Error('Only invoices, credit notes, bills, and refunds can be downloaded');
+  }
+  return { db, go: `#/print/account.move/${moves.map((m) => m.id).join(',')}` };
+}
+
+const sendMovesListAction = {
+  label: 'Send',
+  email: 'document',
+  requiresSelection: true,
+  wizard: sendMovesWizard,
+  run: runSendMoves,
+};
+
+const downloadMovesListAction = {
+  label: 'Download',
+  requiresSelection: true,
+  run: downloadMoves,
+};
 
 const registerMethodField = (db, journalId, direction) => ({
   name: 'payment_method_line_id', type: 'many2one', relation: 'account.payment.method.line', label: 'Payment Method',
@@ -2980,10 +3076,15 @@ export const salesInvoiceView = {
   listLabels: { display_name: 'Number', partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
-  listActions: [registerPaymentsListAction],
+  listActions: [sendMovesListAction, registerPaymentsListAction, downloadMovesListAction],
   searchFields: INVOICE_SEARCH_FIELDS,
   filters: invoiceSearchFilters({ purchases: false }),
   groupBys: INVOICE_GROUP_BYS,
+};
+
+export const creditNoteView = {
+  ...salesInvoiceView,
+  listLabels: { ...salesInvoiceView.listLabels, currency_id: 'Credit Note Currency' },
 };
 
 export const purchaseInvoiceView = {
@@ -2997,10 +3098,15 @@ export const purchaseInvoiceView = {
   listLabels: { display_name: 'Number', partner_id: 'Vendor', invoice_date: 'Bill Date', currency_id: 'Bill Currency' },
   groupByLabels: INVOICE_GROUP_BY_LABELS,
   listDecoration: invoiceListDecoration,
-  listActions: [registerPaymentsListAction],
+  listActions: [registerPaymentsListAction, downloadMovesListAction],
   searchFields: INVOICE_SEARCH_FIELDS,
   filters: invoiceSearchFilters({ purchases: true }),
   groupBys: INVOICE_GROUP_BYS,
+};
+
+export const vendorRefundView = {
+  ...purchaseInvoiceView,
+  listLabels: { ...purchaseInvoiceView.listLabels, currency_id: 'Refund Currency' },
 };
 
 /** Create a statement line for cash moved into or out of a cash journal. */
@@ -4174,7 +4280,7 @@ export const accountingModels = {
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
     menuActions: [
-      { label: 'Print', when: (r) => isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+      { label: 'Print', when: (r) => isInvoice(r), run: downloadMoves },
       {
         label: 'Proforma Invoice',
         when: (r) => r.state === 'draft' && ['out_invoice', 'in_invoice'].includes(r.move_type),
@@ -4482,27 +4588,9 @@ export const accountingModels = {
           label: 'Send',
           email: 'document',
           primary: (r) => !r.is_move_sent,
-          when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type),
-          wizard: (db, r) => {
-            const partner = r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
-            return {
-              title: 'Send',
-              fields: [
-                { name: 'email', type: 'boolean', label: 'Email', default: Boolean(partner?.email?.trim?.()) },
-                { name: 'download', type: 'boolean', label: 'Download', default: false },
-              ],
-            };
-          },
-          run: (db, r, values = {}) => {
-            if (!values?.email && !values?.download) {
-              throw new Error('Select at least one channel: Email or Download');
-            }
-            const markSent = !values.live && Boolean(values.download);
-            return {
-              db: markSent ? write(db, 'account.move', r.id, { is_move_sent: true }) : db,
-              ...(values.download ? { go: `#/print/account.move/${r.id}` } : {}),
-            };
-          },
+          when: (r) => r.state === 'posted' && isSalesDocument(r),
+          wizard: sendMovesWizard,
+          run: runSendMoves,
         },
         {
           label: 'Credit Note',
@@ -4547,7 +4635,7 @@ export const accountingModels = {
           run: debitNote,
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
-        { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
+        { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: downloadMoves },
         {
           label: 'Reset to Draft',
           when: (r, db) => canResetMove(r, db),
@@ -4964,11 +5052,12 @@ Object.assign(accountingModels, {
     label: 'Secure Entries',
     fields: {
       company: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
-      hash_date: { type: 'date', label: 'Secure entries up to', required: true },
+      hash_date: { type: 'date', label: 'Hash All Entries', placeholder: 'Not hashed', required: true },
       max_hash_date: { type: 'date', label: 'Max Hash Date', readonly: true },
       warnings: { type: 'text', label: 'Warnings', readonly: true },
       entries_count: { type: 'integer', label: 'Number of Entries to Secure', readonly: true },
       move_to_hash_ids: { type: 'many2many', relation: 'account.move', label: 'Entries to Secure', readonly: true },
+      unreconciled_bank_statement_line_ids: { type: 'many2many', relation: 'account.bank.statement.line', label: 'Unreconciled Bank Transactions', readonly: true, openDirect: true },
       not_hashable_unlocked_move_ids: { type: 'many2many', relation: 'account.move', label: 'Draft Entries', readonly: true, openDirect: true },
       chains_to_hash_with_gaps: { type: 'char', label: 'Chains with Gaps', readonly: true },
     },
@@ -4979,6 +5068,7 @@ Object.assign(accountingModels, {
           warnings: analysis.warnings,
           entries_count: analysis.entries_count,
           move_to_hash_ids: analysis.move_to_hash_ids,
+          unreconciled_bank_statement_line_ids: analysis.unreconciled_bank_statement_line_ids,
           not_hashable_unlocked_move_ids: analysis.not_hashable_unlocked_move_ids,
           chains_to_hash_with_gaps: analysis.chains_to_hash_with_gaps,
           max_hash_date: analysis.max_hash_date,
@@ -4995,35 +5085,74 @@ Object.assign(accountingModels, {
         warnings: analysis.warnings,
         entries_count: analysis.entries_count,
         move_to_hash_ids: analysis.move_to_hash_ids,
+        unreconciled_bank_statement_line_ids: analysis.unreconciled_bank_statement_line_ids,
         not_hashable_unlocked_move_ids: analysis.not_hashable_unlocked_move_ids,
         chains_to_hash_with_gaps: analysis.chains_to_hash_with_gaps,
       };
     },
-    defaults: () => ({ move_to_hash_ids: [], not_hashable_unlocked_move_ids: [] }),
+    defaults: () => ({ move_to_hash_ids: [], unreconciled_bank_statement_line_ids: [], not_hashable_unlocked_move_ids: [] }),
     list: ['company', 'hash_date', 'max_hash_date', 'chains_to_hash_with_gaps'],
     form: {
       title: 'hash_date',
       hideTitle: true,
+      warnings: (r, db) => (r.hash_date ? analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date }).warning_items : []),
       buttons: [
         {
-          label: 'Confirm',
+          label: 'Secure Entries',
           primary: true,
-          when: (r, db) => !analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date }).not_hashable_unlocked_move_ids?.length,
+          when: (r, db) => !r.hash_date || !analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date }).not_hashable_unlocked_move_ids?.length,
           run: (db, r) => {
+            if (!r.hash_date) {
+              throw new Error('Set a date. The moves will be secured up to including this date.');
+            }
             const analysis = analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date });
             if (analysis.not_hashable_unlocked_move_ids?.length) {
-              throw new Error(t('Cannot secure entries while draft entries exist on or before the secured date'));
+              const hasDateDraft = analysis.not_hashable_unlocked_move_ids.some((id) => {
+                const m = read(db, 'account.move', id);
+                return (m?.invoice_date ?? m?.date ?? '') <= r.hash_date;
+              });
+              throw new Error(
+                hasDateDraft
+                  ? 'Cannot secure entries while draft entries exist on or before the secured date'
+                  : 'Cannot secure entries while numbered draft entries precede entries to be secured',
+              );
             }
             const count = analysis.entries_count;
-            return { db: secureEntries(db, { companyId: r.company, hashDate: r.hash_date }), ...(count ? { go: '#/accounting/entries' } : { message: t('No entries were secured; the hard lock date was not changed.') }) };
+            const unreconciledIds = analysis.unreconciled_bank_statement_line_ids ?? [];
+            const maxSecuredDate = analysis.move_to_hash_ids.reduce((max, id) => {
+              const m = read(db, 'account.move', id);
+              const d = m?.invoice_date ?? m?.date ?? '';
+              return d > max ? d : max;
+            }, '');
+            const lockCeiling = maxSecuredDate && r.hash_date && maxSecuredDate > r.hash_date ? r.hash_date : maxSecuredDate;
+            const blocksUnreconciled = unreconciledIds.some((id) => {
+              const line = read(db, 'account.bank.statement.line', id);
+              return line && lockCeiling && (line.date ?? '') <= lockCeiling;
+            });
+            const securedDb = secureEntries(db, {
+              companyId: r.company,
+              hashDate: r.hash_date,
+              moveIds: analysis.move_to_hash_ids,
+              skipHardLock: blocksUnreconciled,
+            });
+            return { db: securedDb, ...(count ? { go: '#/accounting/entries' } : { message: t('No entries were secured; the hard lock date was not changed.') }) };
           },
         },
         { label: 'Cancel', run: (db) => ({ db, go: '#/accounting/entries' }) },
       ],
-      groups: [['company', 'hash_date', 'max_hash_date', 'entries_count'], ['chains_to_hash_with_gaps', 'warnings']],
+      groups: [
+        [
+          'company',
+          { label: 'Secure entries up to', fields: ['hash_date'], suffix: 'inclusive, to make them immutable', inline: true },
+          'max_hash_date',
+          'entries_count',
+        ],
+        ['chains_to_hash_with_gaps', 'warnings'],
+      ],
       tabs: [
         { label: 'Entries to Secure', fields: ['move_to_hash_ids'] },
         { label: 'Draft Entries', fields: ['not_hashable_unlocked_move_ids'] },
+        { label: 'Unreconciled Bank Transactions', fields: ['unreconciled_bank_statement_line_ids'] },
       ],
     },
   },

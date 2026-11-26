@@ -199,16 +199,18 @@ test('PRD-2: No hardcoded 14% default tax rate; new products take company defaul
   assert.deepEqual(line.tax_ids, [sale15.id, eco2.id]);
   assert.equal(line.tax_id, sale15.id);
 
-  // Shared product across two companies carries both companies' default taxes and filters by invoice company.
+  // Shared products take only the active company default; explicitly assigned taxes are filtered by document company.
   const co2 = createCompanyWithDefaultInvoiceJournals(noTaxDb, { name: 'Branch Co', currency_id: read(noTaxDb, 'res.company', 1).currency_id });
   const co2Sale = create(co2.db, 'account.tax', { name: 'Branch VAT 20%', type_tax_use: 'sale', amount_type: 'percent', amount: 20, company_id: co2.id, ...defaultTaxRepartitionLines(vatPay, []) });
   let multiCoDb = write(co2Sale.db, 'res.company', 1, { account_sale_tax_id: sale15.id });
   multiCoDb = write(multiCoDb, 'res.company', co2.id, { account_sale_tax_id: co2Sale.id });
   const shared = create(multiCoDb, 'product', { name: 'Shared Multi-Co Item', list_price: 100 });
   const sharedProd = read(shared.db, 'product', shared.id);
-  assert.deepEqual(sharedProd.taxes_id, [sale15.id, co2Sale.id]);
+  assert.deepEqual(sharedProd.taxes_id, [sale15.id]);
   assert.equal(productTax(shared.db, sharedProd, 'sale', null, 1).tax, 15);
-  assert.equal(productTax(shared.db, sharedProd, 'sale', null, co2.id).tax, 20);
+  assert.equal(productTax(shared.db, sharedProd, 'sale', null, co2.id), null);
+  const both = { ...sharedProd, taxes_id: [sale15.id, co2Sale.id] };
+  assert.equal(productTax(shared.db, both, 'sale', null, co2.id).tax, 20);
 });
 
 test('PRD-2: Combo product type clears taxes and purchase_ok, enforces guards, hides non-combo fields, and posts on invoices', async () => {
@@ -324,4 +326,74 @@ test('PRD-2: Arabic translations exist for new product, combo, and Accounting fo
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('legacy scalar tax fallback is exported and drives list sorting', async () => {
+  let db = seed();
+  const z = create(db, 'account.tax', { name: 'Zulu tax', type_tax_use: 'sale', amount: 3, company_id: 1 });
+  const a = create(z.db, 'account.tax', { name: 'Alpha tax', type_tax_use: 'sale', amount: 4, company_id: 1 });
+  const first = create(a.db, 'product', { name: 'First fallback', taxes_id: [] });
+  const second = create(first.db, 'product', { name: 'Second fallback', taxes_id: [] });
+  db = { ...second.db, records: { ...second.db.records, product: second.db.records.product.map((p) => p.id === first.id ? { ...p, tax_id: z.id, taxes_id: [] } : p.id === second.id ? { ...p, tax_id: a.id, taxes_id: [] } : p) } };
+  const records = [read(db, 'product', first.id), read(db, 'product', second.id)];
+  await withUi(db, async ({ React, host, root, List, ActionView }) => {
+    const listFields = { name: { optional: null }, taxes_id: { optional: null } };
+    await React.act(async () => root.render(React.createElement(List, { db, model: 'product', records, open: () => {}, selected: new Set(), setSelected: () => {}, groupBy: [], page: { start: 0, end: 10 }, list: ['name', 'taxes_id'], listFields })));
+    assert.ok(host.textContent.includes('Zulu tax'));
+    assert.ok(host.textContent.includes('Alpha tax'));
+    const sortButton = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Sales Taxes'));
+    assert.ok(sortButton);
+    const body = find(host, (n) => n.tagName === 'TBODY');
+    const append = body.appendChild;
+    body.appendChild = (child) => { if (body.childNodes.includes(child)) body.removeChild(child); return append(child); };
+    await React.act(async () => props(sortButton).onClick());
+    const rows = body.childNodes.filter((n) => n.tagName === 'TR');
+    assert.ok(rows[0].textContent.includes('Second fallback'));
+    assert.ok(rows[1].textContent.includes('First fallback'));
+
+    const previous = URL.createObjectURL;
+    let blob;
+    URL.createObjectURL = (value) => { blob = value; return 'blob:regression'; };
+    try {
+      await React.act(async () => root.render(React.createElement(ActionView, { leaf: { key: 'fallback-export', model: 'product', view: 'list', list: ['name', 'taxes_id'], listFields, domain: (p) => p.id === first.id }, base: '#/test', params: new URLSearchParams('view=list') })));
+      const exportButton = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export') && !n.textContent.includes('XLSX'));
+      assert.ok(exportButton);
+      await React.act(async () => props(exportButton).onClick());
+      assert.ok(blob, 'CSV download created');
+      const csv = await blob.text();
+      assert.match(csv, /First fallback/);
+      assert.match(csv, /Zulu tax/);
+    } finally { URL.createObjectURL = previous; }
+  });
+});
+
+test('per-row hide rules suppress editable, badge and ordinary cells', async () => {
+  let db = seed();
+  const hidden = create(db, 'product', { name: 'Hidden row', type: 'service', default_code: 'EDIT-HIDDEN', barcode: 'PLAIN-HIDDEN' });
+  const visible = create(hidden.db, 'product', { name: 'Visible row', type: 'goods', default_code: 'EDIT-VISIBLE', barcode: 'PLAIN-VISIBLE' });
+  db = visible.db;
+  await withUi(db, async ({ React, host, root, List }) => {
+    const oldEditable = models.product.editableList;
+    models.product.editableList = ['default_code'];
+    try {
+      const hideWhen = (r) => r.type === 'service';
+      const listFields = {
+        name: { optional: null },
+        default_code: { optional: null, hideWhen },
+        type: { optional: null, hideWhen, badge: { goods: 'success', service: 'warning' } },
+        barcode: { optional: null, hideWhen },
+      };
+      await React.act(async () => root.render(React.createElement(List, { db, model: 'product', records: [read(db, 'product', hidden.id), read(db, 'product', visible.id)], open: () => {}, selected: new Set(), setSelected: () => {}, groupBy: [], page: { start: 0, end: 10 }, list: ['name', 'default_code', 'type', 'barcode'], listFields })));
+      const body = find(host, (n) => n.tagName === 'TBODY');
+      const rows = body.childNodes.filter((n) => n.tagName === 'TR');
+      const hiddenCells = rows[0].childNodes.filter((n) => n.tagName === 'TD');
+      const visibleCells = rows[1].childNodes.filter((n) => n.tagName === 'TD');
+      assert.equal(Boolean(find(hiddenCells[2], (n) => n.tagName === 'INPUT')), false);
+      assert.equal(hiddenCells[3].textContent, '');
+      assert.equal(hiddenCells[4].textContent, '');
+      assert.ok(find(visibleCells[2], (n) => n.tagName === 'INPUT'));
+      assert.ok(visibleCells[3].textContent.includes('Goods'));
+      assert.equal(visibleCells[4].textContent, 'PLAIN-VISIBLE');
+    } finally { models.product.editableList = oldEditable; }
+  });
 });

@@ -261,7 +261,7 @@ export function validatePosProducts(db, lines, configCompId, { allowAdjustments 
     if (line.is_tip && !line.product_id) continue;
     if (line.payment_rounding && !line.product_id) continue;
     const product = read(db, 'product', line.product_id);
-    if (!product || product.active === false || product.available_in_pos === false || product.sale_ok === false || (product.company_id != null && product.company_id !== configCompId)) {
+    if (!product || product.type === 'combo' || product.active === false || product.available_in_pos === false || product.sale_ok === false || (product.company_id != null && product.company_id !== configCompId)) {
       throw new Error('Product is not available in POS');
     }
   }

@@ -1,5 +1,5 @@
 // Taxes (percent/fixed, price-included, cash basis) and fiscal positions that remap taxes and accounts per partner.
-import { nextSequence, read, search } from '../orm.js';
+import { getActiveCompany, nextSequence, read, search } from '../orm.js';
 import { allocateCents, roundCurrency } from '../money.js';
 
 import { configuredAccount } from './configured-account.js';
@@ -434,14 +434,12 @@ export function productTax(db, product, side, fpId, companyId = null) {
     ? []
     : (product[listKey]?.length ? product[listKey] : (product[scalarKey] != null ? [product[scalarKey]] : []));
   if (rawIds.length) {
-    const matching = !product.company_id && companyId && db
-      ? rawIds.filter((id) => {
-          const tax = read(db, 'account.tax', id);
-          return tax && tax.active !== false && (!tax.company_id || tax.company_id === companyId);
-        })
-      : rawIds;
-    const ids = matching.length ? matching : rawIds;
-    return mapTaxIds(db, ids, fpId, companyId);
+    const activeId = companyId ?? db?.settings?.current_company_id ?? getActiveCompany() ?? 1;
+    const ids = rawIds.filter((id) => {
+      const tax = read(db, 'account.tax', id);
+      return tax && tax.active !== false && (!tax.company_id || tax.company_id === activeId);
+    });
+    if (ids.length) return mapTaxIds(db, ids, fpId, activeId);
   }
   // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
   const percent = product[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];

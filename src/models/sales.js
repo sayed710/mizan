@@ -339,6 +339,7 @@ export const parseAttributes = (text = '') => String(text).split(';')
 
 /** Create one product per combination of attribute values (skips combinations that already exist). */
 export function generateVariants(db, template) {
+  const templateTaxes = { taxes_id: [...(template.taxes_id?.length ? template.taxes_id : template.tax_id != null ? [template.tax_id] : [])], supplier_taxes_id: [...(template.supplier_taxes_id?.length ? template.supplier_taxes_id : template.supplier_tax_id != null ? [template.supplier_tax_id] : [])], sale_tax: template.sale_tax ?? null, purchase_tax: template.purchase_tax ?? null };
   const lines = template.attribute_line_ids ?? [];
   if (lines.length) {
     const groups = [...lines].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map((line) => {
@@ -359,8 +360,7 @@ export function generateVariants(db, template) {
         cost: template.cost, cost_method: template.cost_method, valuation: template.valuation,
         property_account_income_id: template.property_account_income_id, property_account_expense_id: template.property_account_expense_id,
         property_stock_valuation_account_id: template.property_stock_valuation_account_id, property_stock_journal: template.property_stock_journal,
-        taxes_id: [...(template.taxes_id ?? [])], tax_id: template.tax_id ?? null,
-        supplier_taxes_id: [...(template.supplier_taxes_id ?? [])], supplier_tax_id: template.supplier_tax_id ?? null,
+        ...templateTaxes,
         sale_ok: template.sale_ok, purchase_ok: template.purchase_ok, available_in_pos: template.available_in_pos, tag_ids: [...(template.tag_ids ?? [])],
         qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values.map((v) => v.name), variant_value_ids: ids,
       }).db;
@@ -372,7 +372,7 @@ export function generateVariants(db, template) {
     name: `${template.name} (${values.join(', ')})`,
     default_code: template.default_code ? `${template.default_code}-${String(i + 1).padStart(2, '0')}` : '',
     type: template.type, categ: template.categ, uom: template.uom, ...(template.uom_id ? { uom_id: template.uom_id } : {}), ...(template.uom_po_id ? { uom_po_id: template.uom_po_id } : {}), list_price: template.list_price, cost: template.cost,
-    qty_available: 0, variant_of: template.id, variant_values: values,
+    ...templateTaxes, qty_available: 0, variant_of: template.id, variant_values: values,
   }).db, db);
 }
 
@@ -405,6 +405,8 @@ const productTaxDomain = (use) => (tax, product) => (
 function normalizeProductTaxVals(vals) {
   if (!vals || typeof vals !== 'object') return vals;
   const next = { ...vals };
+  if (('taxes_id' in vals || 'tax_id' in vals) && !('sale_tax' in vals)) next.sale_tax = null;
+  if (('supplier_taxes_id' in vals || 'supplier_tax_id' in vals) && !('purchase_tax' in vals)) next.purchase_tax = null;
   if ('taxes_id' in next && !('tax_id' in next)) {
     next.tax_id = next.taxes_id?.[0] ?? null;
   } else if ('tax_id' in next && !('taxes_id' in next)) {
@@ -431,10 +433,7 @@ export function defaultProductTaxes(db, vals) {
   }
   if (!db) return { taxes_id: [], tax_id: null, supplier_taxes_id: [], supplier_tax_id: null };
   const activeId = db.settings?.current_company_id ?? getActiveCompany() ?? 1;
-  const allCompanies = search(db, 'res.company').filter((c) => c.active !== false);
-  const companies = vals?.company_id
-    ? [read(db, 'res.company', vals.company_id)].filter(Boolean)
-    : [...allCompanies].sort((a, b) => (a.id === activeId ? -1 : b.id === activeId ? 1 : a.id - b.id));
+  const companies = [read(db, 'res.company', vals?.company_id ?? activeId)].filter(Boolean);
   const collect = (key) => {
     const ids = [];
     for (const company of companies) {
@@ -858,6 +857,7 @@ export const salesModels = {
           when: (r) => ['draft', 'sent'].includes(r.state),
           // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
           run: (db, r) => {
+            if ((r.order_line ?? []).some((l) => read(db, 'product', l.product_id)?.type === 'combo')) throw new Error('Combo products cannot be fulfilled');
             const lines = (r.order_line ?? []).map((l) => {
               const product = read(db, 'product', l.product_id);
               return product?.type === 'goods' ? { ...l, procurement_route: routeAction(db, product, l) } : l;
@@ -915,7 +915,7 @@ export const salesModels = {
       origin: { type: 'char', label: 'Source Document', readonly: true },
       dropship_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Dropship Address', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
-      order_line: orderLines('Products', 'cost'),
+      order_line: { ...orderLines('Products', 'cost'), fields: { ...orderLines('Products', 'cost').fields, product_id: { ...orderLines('Products', 'cost').fields.product_id, domain: (p) => p.type !== 'combo' } } },
       ...amountFields('order_line'),
     },
     defaults: (id) => ({ name: 'P' + pad(id), date_order: today(), date_planned: addDays(today(), 7), state: 'draft', order_line: [], receipt_done: false }),
@@ -941,6 +941,7 @@ export const salesModels = {
           label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),
           // Dropship orders go vendor → customer directly: no receipt into our stock.
           run: (db, r) => {
+            if ((r.order_line ?? []).some((l) => read(db, 'product', l.product_id)?.type === 'combo')) throw new Error('Combo products cannot be purchased');
             const confirmed = write(incrementPartnerRank(db, r.partner_id, 'supplier_rank'), 'purchase.order', r.id, { state: 'purchase' });
             if (!r.dropship_partner_id) return { db: createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
             const moves = r.order_line.map((l, i) => ({ product_id: l.product_id, qty: toStock(confirmed, l, Number(l.qty)), so_line: l.so_line, po_line: i }));

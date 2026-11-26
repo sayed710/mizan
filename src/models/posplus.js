@@ -335,7 +335,7 @@ export function posProducts(db, { configId = null, selectedCatId = null, query =
   const categories = posCategories(db, configId);
   const activeCatIds = selectedCatId ? posCategoryDescendants(categories, selectedCatId) : null;
   const currentCat = selectedCatId ? read(db, 'pos.category', selectedCatId) : null;
-  const baseProducts = companyFilter(db, (db?.records?.product ?? []).filter((p) => p.active !== false && p.available_in_pos !== false && p.sale_ok !== false));
+  const baseProducts = companyFilter(db, (db?.records?.product ?? []).filter((p) => p.type !== 'combo' && p.active !== false && p.available_in_pos !== false && p.sale_ok !== false));
   const products = baseProducts.filter((p) => p.company_id == null || p.company_id === configCompId);
   return products.filter((p) => {
     if (query && !p.name?.toLowerCase().includes(query.toLowerCase())) return false;

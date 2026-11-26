@@ -55,7 +55,7 @@ export function createInvoice(db, task, { serviceProductId, hourlyRate = 50 } = 
   const service = serviceProductId ? read(db, 'product', serviceProductId) : null;
   const lines = [
     ...(task.material_ids ?? []).filter((l) => Number(l.qty)).map((l) => ({ ...l })),
-    ...(hours ? [{ product_id: service?.id ?? null, name: `${task.name} (${hours} h)`, qty: hours, price_unit: hourlyRate, discount: 0, tax: productTax(db, service, 'sale', null, task.company_id)?.tax ?? 0 }] : []),
+    ...(hours ? [{ product_id: service?.id ?? null, name: `${task.name} (${hours} h)`, qty: hours, price_unit: hourlyRate, discount: 0, ...(productTax(db, service, 'sale', null, task.company_id) ?? { tax: 0 }) }] : []),
   ];
   if (!lines.length) throw new Error('Nothing to invoice: no time spent and no products used');
   const date = today();

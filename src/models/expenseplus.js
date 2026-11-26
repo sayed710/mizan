@@ -141,8 +141,8 @@ export function reinvoiceExpenses(db, sheetId) {
     if (!Number.isFinite(qty) || qty <= 0) throw new Error('Expense quantity must be positive');
     const price = r.reinvoice === 'cost' ? Number(r.total_amount) / (1 + Number(r.tax ?? 0) / 100) / qty : Number(product.list_price);
     if (!Number.isFinite(price) || price < 0) throw new Error('Select a valid sales price');
-    const tax = productTax(next, product, 'sale', order.fiscal_position_id, order.company_id)?.tax ?? 0;
-    next = write(next, 'sale.order', order.id, { order_line: [...(order.order_line ?? []), { product_id: product.id, name: r.name, qty, price_unit: round(price), tax, expense_id: r.id }] });
+    const tax = productTax(next, product, 'sale', order.fiscal_position_id, order.company_id) ?? { tax: 0 };
+    next = write(next, 'sale.order', order.id, { order_line: [...(order.order_line ?? []), { product_id: product.id, name: r.name, qty, price_unit: round(price), ...tax, expense_id: r.id }] });
     next = write(next, 'hr.expense', r.id, { reinvoiced: true });
   }
   return next;
