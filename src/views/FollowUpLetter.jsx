@@ -33,6 +33,7 @@ const summarizeBatchResults = (results) => ({
   activities: results.filter((r) => r.actions.includes('activity')).length,
   letterPartnerIds: results.filter((r) => r.actions.includes('letter')).map((r) => r.partnerId),
   refreshPending: results.filter((r) => r.refreshError).length,
+  recordingFailures: results.filter((r) => r.delivered).length,
 });
 
 /** Execute batch follow-ups for `targets` (`[{ partnerId, companyId }]`), reusing server email and local commit paths. */
@@ -77,12 +78,12 @@ export async function runBatchFollowUpsAction(targets) {
         return { serverHandled: true, db: getDb(), ...(mailRes.refreshError ? { refreshError: mailRes.refreshError } : {}) };
       },
     });
-    if (!res.results.some((r) => r.refreshError) && res.db !== getDb()) {
+    if (!res.results.some((r) => r.refreshError || r.delivered) && res.db !== getDb()) {
       const saved = await commit(res.db, { quiet: true });
       if (saved && saved.ok === false) throw new Error(saved.error ?? 'Could not save changes');
     }
     results.push(...res.results);
-    if (res.results.some((r) => r.refreshError)) {
+    if (res.results.some((r) => r.refreshError || r.delivered)) {
       // Local follow-up state is stale: continuing would re-send to customers that were already reminded.
       for (const rest of targets.slice(targets.indexOf(item) + 1)) {
         const restId = Number(rest.partnerId);
@@ -104,6 +105,8 @@ export async function runBatchFollowUpsAction(targets) {
 export function FollowUpBatchResultModal({ report, onClose }) {
   const box = useRef(null);
   const [confirmed, setConfirmed] = useState(() => new Set());
+  const pendingRef = useRef(new Set());
+  const [pending, setPending] = useState(() => new Set());
   const [error, setError] = useState('');
   useEffect(() => {
     box.current?.querySelector('button')?.focus();
@@ -112,14 +115,21 @@ export function FollowUpBatchResultModal({ report, onClose }) {
   const { results, summary } = report;
   // Letters and calls advance the follow-up level only once the operator confirms them.
   const confirmManual = async (r, channel) => {
+    const key = `${r.companyId ?? 1}-${r.partnerId}-${channel}`;
+    if (pendingRef.current.has(key) || confirmed.has(key)) return;
+    pendingRef.current.add(key);
+    setPending(new Set(pendingRef.current));
     try {
       const next = logManualFollowUp(getDb(), r.partnerId, today(), { companyId: r.companyId ?? 1, channel, ignoreNextActionDate: true });
       const saved = await commit(next, { quiet: true });
       if (saved && saved.ok === false) throw new Error(saved.error ?? 'Could not save changes');
-      setConfirmed((prev) => new Set(prev).add(`${r.companyId ?? 1}-${r.partnerId}-${channel}`));
+      setConfirmed((prev) => new Set(prev).add(key));
       setError('');
     } catch (e) {
       setError(t(e.message));
+    } finally {
+      pendingRef.current.delete(key);
+      setPending(new Set(pendingRef.current));
     }
   };
   const lettersByCompany = new Map();
@@ -149,6 +159,7 @@ export function FollowUpBatchResultModal({ report, onClose }) {
             <button type="button" className="btn sm" onClick={() => location.reload()}>{t('Reload')}</button>
           </p>
         )}
+        {summary.recordingFailures > 0 && <p role="alert">{t('The email was delivered but could not be recorded. Do not send it again; resolve the recording failure before continuing.')}</p>}
         {error && <p role="alert">{error}</p>}
         <table className="list">
           <thead>
@@ -172,7 +183,7 @@ export function FollowUpBatchResultModal({ report, onClose }) {
                     const key = `${r.companyId ?? 1}-${r.partnerId}-${channel}`;
                     return confirmed.has(key)
                       ? <div key={channel}>{t(channel === 'letter' ? 'Letter printed' : 'Call done')}</div>
-                      : <div key={channel}><button type="button" className="btn sm" onClick={() => confirmManual(r, channel)}>{t(channel === 'letter' ? 'Mark letter as printed' : 'Mark call as done')}</button></div>;
+                      : <div key={channel}><button type="button" className="btn sm" disabled={pending.has(key)} onClick={() => confirmManual(r, channel)}>{t(channel === 'letter' ? 'Mark letter as printed' : 'Mark call as done')}</button></div>;
                   })}
                 </td>
                 <td>{r.nextActionDate ? `${t(r.reason)} (${r.nextActionDate})` : (r.reason ? t(r.reason) : '—')}</td>

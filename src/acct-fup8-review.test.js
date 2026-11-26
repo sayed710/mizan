@@ -7,7 +7,7 @@ import { seed } from './seed.js';
 import { addDays } from './models/common.js';
 import { postMove } from './models/accounting.js';
 import { apps, findLeaf } from './models/index.js';
-import { logManualFollowUp, partnerFollowUp, partnerFollowUpStatus, processFollowUps } from './models/finance.js';
+import { logManualFollowUp, partnerFollowUp, partnerFollowUpStatus, processFollowUps, runFollowUps } from './models/finance.js';
 
 const AT = '2026-03-31';
 
@@ -145,4 +145,28 @@ test('a sent email with a failed refresh is reported as sent and pending reload,
   assert.deepEqual(res.results[0].actions, ['email']);
   assert.equal(res.results[0].refreshError, 'Failed to fetch');
   assert.strictEqual(res.db, db, 'a stale client snapshot is not changed after delivery');
+});
+
+
+test('delivered but unrecorded email stops the batch without marking it unsent', async () => {
+  let db = withLevels([{ display_delay: 5, send_email: true, send_sms: true }]);
+  const a = create(db, 'res.partner', { name: 'A', email: 'a@example.test', mobile: '+201000000000', customer_rank: 1 });
+  const b = create(a.db, 'res.partner', { name: 'B', email: 'b@example.test', mobile: '+201000000001', customer_rank: 1 });
+  db = overdue(b.db, a.id, '2026-03-10');
+  db = overdue(db, b.id, '2026-03-10');
+  let calls = 0;
+  const result = await processFollowUps(db, [a.id, b.id], { at: AT, deliverEmail: () => { calls++; throw Object.assign(new Error('Recording failed'), { delivered: true }); } });
+  assert.equal(calls, 1);
+  assert.equal(result.results[0].delivered, true);
+  assert.equal(result.results.length, 1);
+  assert.notEqual(partnerFollowUp(read(result.db, 'res.partner', a.id), 1)?.followup_delivery_state, 'not_sent');
+});
+
+test('scheduled run recognizes SMS queued by a failed batch email', async () => {
+  let db = withLevels([{ display_delay: 5, send_email: true, send_sms: true, sms_message: 'Pay' }]);
+  const p = create(db, 'res.partner', { name: 'Cross path', email: 'x@example.test', mobile: '+201000000000', customer_rank: 1 });
+  db = overdue(p.db, p.id, '2026-03-10');
+  const batch = await processFollowUps(db, [p.id], { at: AT, deliverEmail: () => { throw new Error('failed'); } });
+  const scheduled = await runFollowUps(batch.db, AT, () => ({ status: 'sent' }));
+  assert.equal(search(scheduled, 'sms.campaign').filter(c => c.followup_sms).length, 1);
 });

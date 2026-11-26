@@ -269,3 +269,25 @@ test('future-dated invoices do not appear in partner balances or letters', () =>
   assert.equal(details.total_due, letter.due[0].amount);
   assert.equal(details.total_overdue, letter.overdue[0].amount);
 });
+
+test('manual confirmation ignores a second click while saving', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit, getDb } = await import('./store.js');
+  await initStore();
+  const { db, partner } = fixture();
+  await React.act(async () => commit(db));
+  const { FollowUpBatchResultModal } = await import('./views/FollowUpLetter.jsx');
+  const host = makeEl('div'); host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  const report = { summary: { processed: 1, skipped: 0, failed: 0 }, results: [{ partnerId: partner, companyId: 1, partnerName: 'Customer', status: 'processed', actions: ['letter'], pendingManual: ['letter'] }] };
+  try {
+    await React.act(async () => root.render(React.createElement(FollowUpBatchResultModal, { report, onClose: () => {} })));
+    const button = find(host, node => node.tagName === 'BUTTON' && textOf(node) === 'Mark letter as printed');
+    const before = getDb().messages.length;
+    const expected = finance.logManualFollowUp(getDb(), partner, (await import('./models/common.js')).today(), { companyId: 1, channel: 'letter', ignoreNextActionDate: true }).messages.length - before;
+    await React.act(async () => { const click = props(button).onClick; const first = click(); const second = click(); await Promise.all([first, second]); });
+    assert.equal(getDb().messages.length - before, expected);
+  } finally { await React.act(async () => root.unmount()); }
+});

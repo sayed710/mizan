@@ -1006,6 +1006,7 @@ const ar = {
   'Down payment exceeds the remaining order amount': 'الدفعة المقدمة تتجاوز المبلغ المتبقي من الطلب',
   'Choose a valid invoicing method': 'اختر طريقة فوترة صالحة',
   'Post or cancel the draft down payment before creating the final invoice': 'رحّل الدفعة المقدمة المسودة أو ألغها قبل إنشاء الفاتورة النهائية',
+  'The email was delivered but could not be recorded. Do not send it again; resolve the recording failure before continuing.': 'تم إرسال البريد الإلكتروني لكن تعذّر تسجيله. لا ترسله مرة أخرى؛ عالج خطأ التسجيل قبل المتابعة.',
   'Nothing left to invoice: everything ordered or delivered is already invoiced': 'لم يبقَ ما يُفوتَر: كل ما طُلب أو سُلّم تمت فوترته بالفعل',
   'Select values belonging to each attribute': 'اختر قيماً تخص كل خاصية',
   'The contact has no phone number': 'جهة الاتصال ليس لها رقم هاتف',

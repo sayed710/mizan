@@ -353,6 +353,11 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
   // Reads compute fields (balances, totals) over the companies this user can see only.
   const scopedDb = (d = db) => (companies ? { ...d, records: lazyRestrictedRecords(d, companies) } : d);
+  const apiRecord = (record) => {
+    if (!record) return record;
+    const lazyFields = Object.entries(models[model].fields).filter(([, field]) => field.compute && field.lazy);
+    return { ...record, ...Object.fromEntries(lazyFields.map(([name]) => [name, record[name]])) };
+  };
 
   try {
     if (id === null && method === 'GET') {
@@ -361,7 +366,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
       const terms = (query.get('q') ?? '').split(/\s+/).filter(Boolean);
       const seen = scopedDb();
       const all = search(seen, model).filter((r) => visible(r) && matches(seen, model, r, terms));
-      return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit) } };
+      return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit).map(apiRecord) } };
     }
     if (id === null && method === 'POST') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };
@@ -372,7 +377,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
     }
     const rec = read(db, model, id);
     if (!visible(rec)) return { status: 404, body: { error: `${model} #${id} not found` } };
-    if (method === 'GET') return { status: 200, body: read(scopedDb(), model, id) };
+    if (method === 'GET') return { status: 200, body: apiRecord(read(scopedDb(), model, id)) };
     if (method === 'PATCH') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };
       const { id: _ignored, ...changes } = vals;

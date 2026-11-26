@@ -3042,6 +3042,7 @@ export async function processFollowUps(db, partnerIds, {
     const pendingManual = [];
     let appliedLevel = false;
     let refreshError = null;
+    let delivered = false;
 
     // One partner's failure is recorded as that partner's result; actions already completed stay in `nextDb`.
     try {
@@ -3055,7 +3056,7 @@ export async function processFollowUps(db, partnerIds, {
       if (wantsSms && !smsAlreadyQueued) {
         try {
           if (wantsEmail) {
-            nextDb = queueFollowUpSms(nextDb, read(nextDb, 'res.partner', id), reminder, level, at, false);
+            nextDb = queueFollowUpSms(nextDb, read(nextDb, 'res.partner', id), reminder, level, at, true);
             smsQueued = true;
           } else {
             nextDb = logManualFollowUp(nextDb, id, at, { scope: nextDb, reminder, companyId: cId, channel: 'sms', ignoreNextActionDate: true });
@@ -3094,10 +3095,11 @@ export async function processFollowUps(db, partnerIds, {
               errors.push('Mail transport returned an invalid delivery result');
             }
           } catch (err) {
+            delivered = Boolean(err?.delivered);
             errors.push(err?.message ?? String(err));
           }
         }
-        if (!appliedLevel && smsQueued) {
+        if (!appliedLevel && smsQueued && !delivered) {
           // The SMS is done but the email is not: keep the level retryable and remember that the SMS must not be queued again.
           const current = read(nextDb, 'res.partner', id);
           nextDb = write(nextDb, 'res.partner', id, {
@@ -3115,9 +3117,9 @@ export async function processFollowUps(db, partnerIds, {
 
       // A successful server send with a failed refresh leaves this snapshot stale. Do not
       // perform further writes or actions until the caller has reloaded the database.
-      if (refreshError) {
+      if (refreshError || delivered) {
         results.push({ partnerId: id, partnerName: partner.name, companyId: cId, levelId: level.id, levelName,
-          status: errors.length ? 'failed' : 'processed', actions, refreshError,
+          status: errors.length ? 'failed' : 'processed', actions, refreshError, ...(delivered ? { delivered: true } : {}),
           ...(errors.length ? { reason: errors.join('; ') } : {}) });
         break;
       }
