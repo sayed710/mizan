@@ -106,7 +106,7 @@ function journalOwnershipIndex(db) {
 
 function moveJournalId(db, move, owners = null) {
   if (move?.journal_id != null) return move.journal_id;
-  if (move?.inalterable_hash) return (owners ?? journalOwnershipIndex(db)).get(move.id) ?? null;
+  if (move?.inalterable_hash) return (typeof owners === 'function' ? owners() : owners ?? journalOwnershipIndex(db)).get(move.id) ?? null;
   return resolveDocumentJournal(db, move)?.id ?? null;
 }
 
@@ -523,18 +523,28 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
  */
 /** A newly posted entry whose number sorts inside the journal's secured chain could never be hashed. */
 export const SECURED_ORDER_ERROR = 'This entry would be numbered before the secured entries of its journal';
-export function postedBeforeSecuredChain(db, after, before) {
-  const owners = journalOwnershipIndex(db);
+export function postedBeforeSecuredChain(db, after, before, owners = null) {
   if (after.state !== 'posted' || before?.state === 'posted') return false;
+  owners ??= ownershipResolver(db);
   const company = after.company_id ?? 1;
-  return (db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.inalterable_hash && moveJournalId(db, m, owners) === moveJournalId(db, after, owners)
-    && (m.company_id ?? 1) === company && (m.name ?? '').localeCompare(after.name ?? '') >= 0);
+  return (db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.inalterable_hash
+    && (m.company_id ?? 1) === company && (m.name ?? '').localeCompare(after.name ?? '') >= 0
+    && moveJournalId(db, m, owners) === moveJournalId(db, after, owners));
+}
+
+function ownershipResolver(db, cache = null) {
+  let owners;
+  return () => {
+    if (cache && cache.records !== db.records) { cache.records = db.records; cache.owners = null; }
+    if (cache) return cache.owners ??= journalOwnershipIndex(db);
+    return owners ??= journalOwnershipIndex(db);
+  };
 }
 
 /** Validate a newly secured move against the complete staged chain, including concurrent server diffs. */
-export function secureMoveInvariant(db, after, before) {
-  const owners = journalOwnershipIndex(db);
-  if (!after.inalterable_hash && !after.secure_sequence_number) return postedBeforeSecuredChain(db, after, before) ? SECURED_ORDER_ERROR : null;
+export function secureMoveInvariant(db, after, before, cache = null) {
+  const owners = ownershipResolver(db, cache);
+  if (!after.inalterable_hash && !after.secure_sequence_number) return postedBeforeSecuredChain(db, after, before, owners) ? SECURED_ORDER_ERROR : null;
   if (before?.inalterable_hash) return null;
   if (!after.inalterable_hash || !Number.isInteger(after.secure_sequence_number) || after.secure_sequence_number < 1) return 'Invalid secure entry hash chain';
   const journalId = moveJournalId(db, after, owners);

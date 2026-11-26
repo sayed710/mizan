@@ -3944,7 +3944,7 @@ export const accountingModels = {
       return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
     invariant: (db, after, before, stored, ctx) => {
-      const err = secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
+      const err = secureMoveInvariant(db, after, before, ctx?.secureOwnershipCache) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
       if (err) return err;
       if (before?.state === 'posted' && after.state !== 'posted'
         && (db.records['account.asset'] ?? []).some((a) => a.source_move_id === after.id && a.state !== 'cancel')) {
