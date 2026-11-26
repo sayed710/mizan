@@ -14,7 +14,8 @@ import { computeLineTaxes, productTax, taxSnapshot } from './taxes.js';
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
 const hasMultipleExpenseTaxes = (snapshot) => !!(snapshot?.tax_breakdown?.length || snapshot?.tax_ids?.length > 1);
-const expenseTaxError = (db, expense) => hasMultipleExpenseTaxes(productTax(db, read(db, 'product', expense.product_id), 'purchase', null, expense.company_id))
+const expenseCompanyId = (db, expense) => expense.company_id ?? read(db, 'hr.employee', expense.employee_id)?.company_id ?? 1;
+const expenseTaxError = (db, expense) => hasMultipleExpenseTaxes(productTax(db, read(db, 'product', expense.product_id), 'purchase', null, expenseCompanyId(db, expense)))
   ? 'Expenses do not support multiple product taxes' : undefined;
 const components = {
   type: 'one2many',
@@ -155,7 +156,7 @@ function postExpense(db, r) {
   const total = Number(r.total_amount) || 0;
   if (!(total > 0)) throw new Error('The expense total must be positive');
   const own = r.payment_mode !== 'company_account';
-  const companyId = r.company_id ?? read(db, 'hr.employee', r.employee_id)?.company_id ?? 1;
+  const companyId = expenseCompanyId(db, r);
   const via = own ? null : paymentJournal(db, null, companyId);
   const { db: booked, id } = postEntry(db, {
     journal: own ? 'MISC' : via.code, ...(via ? { journal_id: via.id } : {}), company: companyId, date: r.date ?? today(), ref: `Expense: ${r.name}`,
@@ -169,7 +170,7 @@ function postExpense(db, r) {
 
 /** Reimburse the employee for a posted expense they paid themselves. */
 function reimburse(db, r) {
-  const companyId = r.company_id ?? read(db, 'hr.employee', r.employee_id)?.company_id ?? 1;
+  const companyId = expenseCompanyId(db, r);
   const via = paymentJournal(db, null, companyId);
   const { db: paid } = postEntry(db, {
     journal: via.code, journal_id: via.id, company: companyId, date: today(), ref: `Reimbursement: ${r.name}`,

@@ -4,6 +4,7 @@ import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { seed } from './seed.js';
+import { createCompany } from './models/company.js';
 
 const run = (db, id, label) => models['hr.expense'].form.buttons.find((b) => b.label === label).run(db, read(db, 'hr.expense', id)).db;
 test('selecting a taxable product carries its tax through posting and rejects multiple taxes', () => {
@@ -91,4 +92,24 @@ test('multiple product taxes are rejected at approval and posting', () => {
   const expense = write(modified, 'hr.expense', approved.id, { product_id: product.id });
   const changedTax = write(expense, 'product', product.id, { supplier_taxes_id: taxes.slice(0, 2).map((t) => t.id) });
   assert.throws(() => run(changedTax, approved.id, 'Post Journal Entries'), error);
+});
+
+test('the multi-tax check uses the employee company when the expense has none', () => {
+  let db = seed();
+  const second = createCompany(db, { name: 'Expense branch' });
+  db = second.db;
+  const c1Taxes = [];
+  for (const amount of [10, 4]) {
+    const tax = create(db, 'account.tax', { name: `Main purchase ${amount}%`, amount, amount_type: 'percent', type_tax_use: 'purchase', company_id: 1 });
+    db = tax.db;
+    c1Taxes.push(read(db, 'account.tax', tax.id));
+  }
+  const c2Tax = create(db, 'account.tax', { name: 'Branch purchase 5%', amount: 5, amount_type: 'percent', type_tax_use: 'purchase', company_id: second.id });
+  db = c2Tax.db;
+  const product = create(db, 'product', { name: 'Branch expense', type: 'service', cost: 100, supplier_taxes_id: [...c1Taxes.map((t) => t.id), c2Tax.id] });
+  const emp = create(product.db, 'hr.employee', { name: 'Branch employee', company_id: second.id });
+  db = emp.db;
+  const expense = { name: 'Branch approval', product_id: product.id, employee_id: emp.id, company_id: null, state: 'approved' };
+  assert.ok(!models['hr.expense'].guard(db, null, expense));
+  assert.match(models['hr.expense'].guard(db, null, { ...expense, employee_id: null }) ?? '', /multiple product taxes/);
 });
