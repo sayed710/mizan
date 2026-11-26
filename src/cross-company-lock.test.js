@@ -24,7 +24,7 @@ function fixture(lockedCompany) {
     ] });
     db = entry.db; entries[companyId] = entry.id;
   }
-  db = write(db, 'res.company', lockedCompany === 1 ? 1 : company.id, { hard_lock_date: '2026-12-31' });
+  db = write(db, 'res.company', lockedCompany === 1 ? 1 : company.id, { hard_lock_date: '2026-06-30' });
   return { db, company: company.id, partner, entries };
 }
 

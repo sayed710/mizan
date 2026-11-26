@@ -9,9 +9,14 @@ import { lineToStockQty } from './uom.js';
 import { freeQty, reservePicking } from './picking.js';
 import { round as round2 } from '../money.js';
 import { expenseDebits } from './expense-accounts.js';
+import { computeLineTaxes, productTax, taxSnapshot } from './taxes.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
+const hasMultipleExpenseTaxes = (snapshot) => !!(snapshot?.tax_breakdown?.length || snapshot?.tax_ids?.length > 1);
+const expenseCompanyId = (db, expense) => expense.company_id ?? read(db, 'hr.employee', expense.employee_id)?.company_id ?? 1;
+const expenseTaxError = (db, expense) => hasMultipleExpenseTaxes(productTax(db, read(db, 'product', expense.product_id), 'purchase', null, expenseCompanyId(db, expense)))
+  ? 'Expenses do not support multiple product taxes' : undefined;
 const components = {
   type: 'one2many',
   label: 'Components',
@@ -146,10 +151,12 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
  * The product's expense account wins over the category default.
  */
 function postExpense(db, r) {
+  const taxError = expenseTaxError(db, r);
+  if (taxError) throw new Error(taxError);
   const total = Number(r.total_amount) || 0;
   if (!(total > 0)) throw new Error('The expense total must be positive');
   const own = r.payment_mode !== 'company_account';
-  const companyId = r.company_id ?? read(db, 'hr.employee', r.employee_id)?.company_id ?? 1;
+  const companyId = expenseCompanyId(db, r);
   const via = own ? null : paymentJournal(db, null, companyId);
   const { db: booked, id } = postEntry(db, {
     journal: own ? 'MISC' : via.code, ...(via ? { journal_id: via.id } : {}), company: companyId, date: r.date ?? today(), ref: `Expense: ${r.name}`,
@@ -163,7 +170,7 @@ function postExpense(db, r) {
 
 /** Reimburse the employee for a posted expense they paid themselves. */
 function reimburse(db, r) {
-  const companyId = r.company_id ?? read(db, 'hr.employee', r.employee_id)?.company_id ?? 1;
+  const companyId = expenseCompanyId(db, r);
   const via = paymentJournal(db, null, companyId);
   const { db: paid } = postEntry(db, {
     journal: via.code, journal_id: via.id, company: companyId, date: today(), ref: `Reimbursement: ${r.name}`,
@@ -333,13 +340,19 @@ export const moreModels = {
     },
     defaults: () => ({ date: today(), category: 'other', state: 'draft', employee_id: 1, quantity: 1, tax: 0, payment_mode: 'own_account' }),
     // A product fills the unit price and tax; quantity × unit price (tax included) gives the total.
+    guard: (db, before, after) => ['submitted', 'approved'].includes(after.state) ? expenseTaxError(db, after) : undefined,
     onchange: (r, key, db) => {
       if (key === 'product_id' && r.product_id) {
         const p = read(db, 'product', r.product_id);
         const unit = Number(p?.cost) || 0;
-        return { unit_amount: unit, tax: p?.purchase_tax ?? r.tax, name: r.name || p?.name || '', total_amount: round2((Number(r.quantity) || 1) * unit * (1 + (Number(p?.purchase_tax ?? r.tax) || 0) / 100)) };
+        const snapshot = productTax(db, p, 'purchase', null, expenseCompanyId(db, r));
+        const tax = snapshot?.tax_breakdown?.length ? snapshot.tax_breakdown.reduce((sum, item) => sum + (Number(item.tax) || 0), 0) : snapshot?.tax ?? p?.purchase_tax ?? r.tax;
+        return { unit_amount: unit, tax, tax_id: hasMultipleExpenseTaxes(snapshot) ? null : snapshot?.tax_id ?? null, name: r.name || p?.name || '', total_amount: round2(computeLineTaxes({ qty: Number(r.quantity) || 1, price_unit: unit, ...(snapshot ?? { tax }) }).total) };
       }
-      if (['quantity', 'unit_amount', 'tax'].includes(key) && Number(r.unit_amount) > 0) return { total_amount: round2((Number(r.quantity) || 0) * Number(r.unit_amount) * (1 + (Number(r.tax) || 0) / 100)) };
+      if (['quantity', 'unit_amount', 'tax'].includes(key) && Number(r.unit_amount) > 0) {
+        const selected = r.tax_id ? taxSnapshot(read(db, 'account.tax', r.tax_id), db, null, expenseCompanyId(db, r)) : {};
+        return { total_amount: round2(computeLineTaxes({ ...selected, tax: r.tax, qty: Number(r.quantity) || 0, price_unit: Number(r.unit_amount) }).total) };
+      }
       return {};
     },
     filters: [[{ id: 'to_approve', label: 'To Approve', fn: (r) => r.state === 'submitted' }, { id: 'to_post', label: 'To Post', fn: (r) => r.state === 'approved' }, { id: 'to_pay', label: 'To Reimburse', fn: (r) => r.state === 'posted' }]],

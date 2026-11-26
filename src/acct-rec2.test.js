@@ -177,8 +177,8 @@ test('locked booked statement lines skip partner mapping writes without crashing
   });
   db = openLineRes.db;
 
-  // Lock period through 2026-10-31
-  db = write(db, 'res.company', 1, { lock_date: '2026-10-31' });
+  // Model a historical lock that predates this unreconciled line; a new lock would be rejected.
+  db = { ...db, records: { ...db.records, 'res.company': db.records['res.company'].map((company) => company.id === 1 ? { ...company, lock_date: '2026-10-31' } : company) } };
 
   // 1. Existing lock is preserved for direct partner writes on the locked booked line
   assert.throws(

@@ -7,7 +7,7 @@ import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
-import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
+import { accountingDateForPost, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
@@ -196,9 +196,10 @@ export function journalInvoiceSequence(journal, move, db = null) {
   if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) {
     throw new Error(`Configure a positive next ${refund ? 'refund' : 'invoice'} sequence number on the selected journal`);
   }
-  const year = (move.invoice_date ?? move.date ?? today()).slice(0, 4);
+  const seqDate = move.date ?? move.invoice_date ?? today();
+  const year = seqDate.slice(0, 4);
   return {
-    name: db ? journalSequenceName(db, journal, move.invoice_date ?? move.date ?? today(), `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`, (candidate) => isInvoice(candidate) && (isRefund(candidate) && Boolean(journal.refund_sequence)) === refund) : `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
+    name: db ? journalSequenceName(db, journal, seqDate, `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`, (candidate) => isInvoice(candidate) && (isRefund(candidate) && Boolean(journal.refund_sequence)) === refund) : `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
     numberField,
     nextNumber,
   };
@@ -858,6 +859,13 @@ export function postMove(db, id, { autoPost = false } = {}) {
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   const matchWarnings = checkBillMatch(db, r);
+  const moveWithJournal = { ...r, journal_id: journal };
+  const currentAccountingDate = moveDate(moveWithJournal);
+  const hardLock = hardBlockingLockDate(db, moveWithJournal);
+  if (hardLock && currentAccountingDate <= hardLock) throw new Error(`The period up to ${hardLock} is locked`);
+  const effectiveAccountingDate = accountingDateForPost(db, moveWithJournal);
+  const dateUpdate = effectiveAccountingDate !== currentAccountingDate ? { date: effectiveAccountingDate } : {};
+  if (dateUpdate.date) r = { ...r, ...dateUpdate };
   const sequence = journalInvoiceSequence(journalRecord, r, db);
   const name = enteredName ?? sequence.name;
   if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
@@ -879,7 +887,7 @@ export function postMove(db, id, { autoPost = false } = {}) {
         ? { payment_reference: r.ref.trim() }
         : {});
   const postingOrderUpdate = r.move_type === 'in_invoice' && !r.posting_order ? { posting_order: nextPostingOrder(db) } : {};
-  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...dateUpdate, ...paymentReferenceUpdate, ...dueUpdate, ...postingOrderUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
   if (r.move_type === 'out_invoice' || r.move_type === 'in_invoice') posted = incrementPartnerRank(posted, r.partner_id, r.move_type === 'out_invoice' ? 'customer_rank' : 'supplier_rank');
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
@@ -3872,6 +3880,9 @@ export const accountingModels = {
       }
       const moveType = nextVals.move_type ?? before.move_type;
       const state = nextVals.state ?? before.state;
+      if (moveType !== 'entry' && state === 'draft' && 'invoice_date' in vals && vals.invoice_date !== before.invoice_date && !('date' in vals)) {
+        nextVals.date = vals.invoice_date;
+      }
       if (state === 'draft' && before.posting_order != null && vals.posting_order === undefined) {
         nextVals.posting_order = null;
       }
@@ -3959,7 +3970,7 @@ export const accountingModels = {
       return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
     },
     invariant: (db, after, before, stored, ctx) => {
-      const err = secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
+      const err = secureMoveInvariant(db, after, before, ctx?.secureOwnershipCache) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
       if (err) return err;
       if (before?.state === 'posted' && after.state !== 'posted'
         && (db.records['account.asset'] ?? []).some((a) => a.source_move_id === after.id && a.state !== 'cancel')) {
@@ -4074,11 +4085,12 @@ export const accountingModels = {
         if (key === 'line_ids' || key === 'currency_id') return { line_ids: computeEntryTaxLines(r.line_ids, r, db) };
       }
       if (key === 'invoice_date') {
-        if (r.invoice_payment_term_id) return termDue(db, r);
         const prev = context.previous ?? (r.id ? read(db, 'account.move', r.id) : null);
+        const accountingDate = r.move_type !== 'entry' && r.state === 'draft' && r.invoice_date !== prev?.invoice_date ? { date: r.invoice_date } : {};
+        if (r.invoice_payment_term_id) return { ...accountingDate, ...termDue(db, r) };
         const prevDate = prev?.invoice_date;
         const shouldFollow = !r.invoice_date_due || Boolean(prevDate && r.invoice_date_due === prevDate);
-        return shouldFollow && r.invoice_date ? { invoice_date_due: r.invoice_date } : {};
+        return { ...accountingDate, ...(shouldFollow && r.invoice_date ? { invoice_date_due: r.invoice_date } : {}) };
       }
       if (key === 'invoice_payment_term_id') return termDue(db, r);
       if (key === 'purchase_id') {
@@ -5189,7 +5201,7 @@ Object.assign(accountingModels, {
             if (analysis.not_hashable_unlocked_move_ids?.length) {
               const hasDateDraft = analysis.not_hashable_unlocked_move_ids.some((id) => {
                 const m = read(db, 'account.move', id);
-                return (m?.invoice_date ?? m?.date ?? '') <= r.hash_date;
+                return moveDate(m) <= r.hash_date;
               });
               throw new Error(
                 hasDateDraft
@@ -5198,22 +5210,10 @@ Object.assign(accountingModels, {
               );
             }
             const count = analysis.entries_count;
-            const unreconciledIds = analysis.unreconciled_bank_statement_line_ids ?? [];
-            const maxSecuredDate = analysis.move_to_hash_ids.reduce((max, id) => {
-              const m = read(db, 'account.move', id);
-              const d = m?.invoice_date ?? m?.date ?? '';
-              return d > max ? d : max;
-            }, '');
-            const lockCeiling = maxSecuredDate && r.hash_date && maxSecuredDate > r.hash_date ? r.hash_date : maxSecuredDate;
-            const blocksUnreconciled = unreconciledIds.some((id) => {
-              const line = read(db, 'account.bank.statement.line', id);
-              return line && lockCeiling && (line.date ?? '') <= lockCeiling;
-            });
             const securedDb = secureEntries(db, {
               companyId: r.company,
               hashDate: r.hash_date,
               moveIds: analysis.move_to_hash_ids,
-              skipHardLock: blocksUnreconciled,
             });
             return { db: securedDb, ...(count ? { go: '#/accounting/entries' } : { message: t('No entries were secured; the hard lock date was not changed.') }) };
           },

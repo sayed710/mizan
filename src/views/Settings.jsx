@@ -182,7 +182,7 @@ function ApiKeys() {
 }
 
 const ACCOUNTING_LOCK_FIELDS = [
-  ['lock_date', 'Lock Date', 'Prevent creating, editing or deleting accounting entries on or before this date.'],
+  ['lock_date', 'Global Lock Date', 'Prevent creating, editing or deleting accounting entries on or before this date.'],
   ['sale_lock_date', 'Sales Lock Date', 'Prevent creating or modifying customer invoices and credit notes on or before this date.'],
   ['purchase_lock_date', 'Purchase Lock Date', 'Prevent creating or modifying vendor bills and refunds on or before this date.'],
   ['tax_lock_date', 'Tax Return Lock Date', 'Lock tax-impacting entries up to the submitted tax return period.'],
@@ -806,7 +806,7 @@ export function Settings() {
       setStatus(null);
       commit(write(currentDb, 'res.company', company.id, vals));
     } catch (e) {
-      setStatus(e.message);
+      setStatus(t(e.message));
     }
   };
 

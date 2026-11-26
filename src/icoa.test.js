@@ -37,12 +37,14 @@ test('invoice rejects foreign taxes on selection and posting', () => {
   assert.throws(() => postMove(move.db, move.id), /tax.*another company/i);
 });
 
-test('product tax selection rejects a foreign tax', () => {
+test('shared product tax selection filters a foreign tax', () => {
   const company = setup();
   const tax = create(company.db, 'account.tax', { name: 'Foreign', amount: 10, company_id: company.id });
   const product = create(tax.db, 'product', { name: 'Taxed product', list_price: 100, tax_id: tax.id });
   const field = accountingModels['account.move'].fields.invoice_line_ids;
-  assert.throws(() => field.onchange({ product_id: product.id, qty: 1 }, 'product_id', product.db, { company_id: 1, move_type: 'out_invoice' }), /tax.*another company/i);
+  const line = field.onchange({ product_id: product.id, qty: 1 }, 'product_id', product.db, { company_id: 1, move_type: 'out_invoice' });
+  assert.equal(line.tax_id, null);
+  assert.equal(line.tax, 0);
 });
 
 test('mapped product tax retains its source for posting validation', () => {
