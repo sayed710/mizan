@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
-import { display, PagerButtons, readOptionalCols, SimulatedNote } from '../ui.jsx';
-import { downloadCsv } from '../csv.js';
-import { downloadXlsx } from '../xlsx.js';
+import { PagerButtons, readOptionalCols, SimulatedNote } from '../ui.jsx';
 import { commit, getDb, getUser, serverAction, useDb } from '../store.js';
 import { appOpen } from '../access.js';
 import { FollowUpBatchResultModal, runBatchFollowUpsAction } from './FollowUpLetter.jsx';
