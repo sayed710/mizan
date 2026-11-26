@@ -27,7 +27,10 @@ const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r
 
 const withComputed = (fields, r, db) => {
   const computed = Object.entries(fields).filter(([, f]) => f.compute);
-  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r, db)])) } : r;
+  if (!computed.length) return r;
+  const out = { ...r };
+  for (const [k, f] of computed) out[k] = f.compute(out, db);
+  return out;
 };
 
 /** Source records for a model, computing virtual report rows when declared by `models[model].records`. */
