@@ -1578,7 +1578,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
   const rows = search(db, 'account.move')
     .filter((m) => {
       const date = m.date ?? m.invoice_date;
-      const stateOk = reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
+      const stateOk = reviewMode === 'all_with_cancel' ? ['draft', 'posted', 'cancel'].includes(m.state) : reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
       return stateOk
       && includeClosingItem(m, includeClosing)
       && (!from || date >= from)
