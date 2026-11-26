@@ -244,7 +244,15 @@ const allApps = [
           ...creditNoteView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
-        { key: 'customer-products', label: 'Products', model: 'product', defaultFilters: ['sale_ok'], defaults: { sale_ok: true } },
+        {
+          key: 'customer-products',
+          label: 'Products',
+          model: 'product',
+          defaultFilters: ['sale_ok'],
+          defaults: { sale_ok: true },
+          list: ['name', 'default_code', 'tag_ids', 'barcode', 'company_id', 'list_price', 'taxes_id', 'cost', 'qty_available', 'categ_id', 'type', 'uom_id'],
+          listFields: { cost: { optional: 'hide' } },
+        },
         { ...customers, defaultFilters: ['customers'], defaults: { customer_rank: 1 } },
       ] },
       { label: 'Vendors', children: [
@@ -270,7 +278,15 @@ const allApps = [
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
-        { key: 'vendor-products', label: 'Products', model: 'product', defaultFilters: ['purchase_ok'], defaults: { purchase_ok: true } },
+        {
+          key: 'vendor-products',
+          label: 'Products',
+          model: 'product',
+          defaultFilters: ['purchase_ok'],
+          defaults: { purchase_ok: true },
+          list: ['name', 'default_code', 'tag_ids', 'barcode', 'company_id', 'list_price', 'cost', 'supplier_taxes_id', 'qty_available', 'categ_id', 'type', 'uom_id'],
+          listFields: { list_price: { optional: 'hide' } },
+        },
         { ...vendors, defaultFilters: ['vendors'], defaults: { supplier_rank: 1 } },
       ] },
       { label: 'Accounting', children: [

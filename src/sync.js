@@ -941,12 +941,13 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   }
   // Whole-record rules that look across models run once every change is in place.
   const final = { ...db, records };
+  const invariantCtx = { ...baseCtx, secureOwnershipCache: {} };
   for (const [model, recs] of Object.entries(d.upserts ?? {})) {
     const stored = byId(db.records[model]);
     const kept = byId(records[model]);
     for (const raw of recs) {
       const rec = kept.get(raw.id);
-      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db, baseCtx);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db, invariantCtx);
       if (err) throw new Error(err);
     }
   }

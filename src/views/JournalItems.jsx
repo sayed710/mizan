@@ -193,7 +193,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const [to, setTo] = useState('');
   const [query, setQuery] = useState('');
   const [group, setGroup] = useState(() => (leaf.groupBy?.[0] ? leaf.groupBy[0].replace('_id', '') : (mode === 'to_check' ? 'journal' : '')));
-  const [activeFilters, setActiveFilters] = useState(() => defaultFiltersForMode(mode));
+  const [activeFilters, setActiveFilters] = useState(() => new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '').has('move') ? [] : defaultFiltersForMode(mode));
   const [optionalState, isVisible, toggleCol] = useOptionalColumns(OPTIONAL_STORAGE_KEY);
   const [selected, setSelected] = useState([]);
   const [action, setAction] = useState('');
@@ -258,6 +258,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const hashParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
   const accountFilter = Number(hashParams.get('account')) || null;
   const journalFilter = Number(hashParams.get('journal')) || null;
+  const moveFilter = Number(hashParams.get('move')) || null;
   const reconciledOf = Number(hashParams.get('reconciled_of')) || null;
   const companyParam = Number(hashParams.get('company')) || null;
   const allowedCompanies = new Set(db.settings?.allowed_company_ids ?? [db.settings?.current_company_id ?? 1]);
@@ -274,8 +275,8 @@ export function JournalItems({ leaf = {} } = {}) {
   const multiCompany = companiesOf(db).length > 1;
   const multiCurrency = hasMultiCurrency(db);
   const stateField = models['account.move'].fields.state;
-  const enriched = journalItems(db, { from, to, reviewMode: 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
-    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line))))
+  const enriched = journalItems(db, { from, to, reviewMode: moveFilter ? 'all_with_cancel' : 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
+    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!moveFilter || (line.move_id === moveFilter && !['line_section', 'line_subsection', 'line_note'].includes(line.display_type))) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line))))
     .map((line) => {
       const move = read(db, 'account.move', line.move_id);
       const lineCompanyCurr = findCompanyCurrencyRecord(db, line.company_id);

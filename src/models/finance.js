@@ -4,7 +4,7 @@ import { installments } from './terms.js';
 import { normalizePhone, queueSms } from './sms.js';
 import { models } from '../registry.js';
 import { create, getActiveCompany, postNote, read, search, write } from '../orm.js';
-import { addDays, commercialPartnerId, sameCommercialPartner, today, total, validDate } from './common.js';
+import { addDays, commercialPartnerId, isoDate, sameCommercialPartner, today, total, validDate } from './common.js';
 import { ACTIVITY_TYPES } from './mail.js';
 import { currentActor, employeeFor } from './actor.js';
 import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, validStornoMove } from './ledger.js';
@@ -146,6 +146,9 @@ export function hasTaxLines(move = {}) {
   ));
 }
 
+const isSaleLockMove = (move, journal) => String(move?.move_type ?? '').startsWith('out_') || journal?.type === 'sale';
+const isPurchaseLockMove = (move, journal) => String(move?.move_type ?? '').startsWith('in_') || journal?.type === 'purchase';
+
 /**
  * The strictest lock date configured on the move's company: general and hard locks always apply, then
  * the sales or purchase lock by journal type, and tax lock for taxable moves. Empty when nothing is locked.
@@ -153,14 +156,128 @@ export function hasTaxLines(move = {}) {
 export function lockDateFor(company = {}, move = {}, journal = null) {
   const globalLock = company.lock_date ?? '';
   const hardLock = company.hard_lock_date ?? '';
-  const sales = String(move.move_type ?? '').startsWith('out_') || journal?.type === 'sale';
-  const purchases = String(move.move_type ?? '').startsWith('in_') || journal?.type === 'purchase';
-  const salesLock = sales ? (company.sale_lock_date ?? '') : '';
-  const purchasesLock = purchases ? (company.purchase_lock_date ?? '') : '';
+  const salesLock = isSaleLockMove(move, journal) ? (company.sale_lock_date ?? '') : '';
+  const purchasesLock = isPurchaseLockMove(move, journal) ? (company.purchase_lock_date ?? '') : '';
   const taxable = hasTaxLines(move);
   const taxLock = taxable ? (company.tax_lock_date ?? '') : '';
 
   return [globalLock, hardLock, salesLock, purchasesLock, taxLock].filter(Boolean).sort().at(-1) ?? '';
+}
+
+/** Strictest non-shiftable lock date on a move: hard lock, tax lock (when taxable), and closed fiscal year. */
+export function hardBlockingLockDate(db, move, ctx = null) {
+  if (!move) return '';
+  const compId = move.company_id ?? 1;
+  const comp = effectiveCompanyLockDates(read(db, 'res.company', compId) ?? {}, db, ctx);
+  return [comp.hard_lock_date ?? '', taxLockFor(db, move, ctx), closedYearLock(db, compId)]
+    .filter(Boolean).sort().at(-1) ?? '';
+}
+
+/** Applicable soft lock dates (global, sales, purchase) on or after `date`, sorted ascending. */
+export function violatedSoftLockDates(db, move, date, ctx = null) {
+  if (!move || !date) return [];
+  const compId = move.company_id ?? 1;
+  const comp = effectiveCompanyLockDates(read(db, 'res.company', compId) ?? {}, db, ctx);
+  const journal = move.journal_id ? read(db, 'account.journal', move.journal_id) : null;
+  const softLocks = [
+    comp.lock_date ?? '',
+    isSaleLockMove(move, journal) ? (comp.sale_lock_date ?? '') : '',
+    isPurchaseLockMove(move, journal) ? (comp.purchase_lock_date ?? '') : '',
+  ].filter((lock) => lock && date <= lock);
+  return [...new Set(softLocks)].sort();
+}
+
+const SEQUENCE_YEAR_LOOKBEHIND = '(?:(?<=\\D)|(?<=^))';
+const SEQUENCE_YEAR_PATTERN = `${SEQUENCE_YEAR_LOOKBEHIND}(?:(?:19|20|21)\\d{2}|\\d{2}(?=\\D))`;
+const SEQUENCE_RESET_RULES = [
+  [new RegExp(`^(?<prefix1>.*?)(?<year>${SEQUENCE_YEAR_PATTERN})(?<prefix2>\\D)(?<year_end>${SEQUENCE_YEAR_PATTERN})(?<prefix3>\\D)(?<month>0[1-9]|1[0-2])(?<prefix4>\\D+?)(?<seq>\\d*)(?<suffix>\\D*?)$`), 'year_range_month', ['seq', 'year', 'year_end', 'month']],
+  [new RegExp(`^(?<prefix1>.*?)(?<year>${SEQUENCE_YEAR_PATTERN})(?<prefix2>\\D*?)(?<month>0[1-9]|1[0-2])(?<prefix3>\\D+?)(?<seq>\\d*)(?<suffix>\\D*?)$`), 'month', ['seq', 'month', 'year']],
+  [new RegExp(`^(?:(?<prefix1>.*?)(?<year>${SEQUENCE_YEAR_PATTERN})(?<prefix2>\\D)(?<year_end>${SEQUENCE_YEAR_PATTERN})(?<prefix3>\\D+?))?(?<seq>\\d*)(?<suffix>\\D*?)$`), 'year_range', ['seq', 'year', 'year_end']],
+  [new RegExp(`^(?<prefix1>.*?)(?<year>${SEQUENCE_YEAR_LOOKBEHIND}(?:19|20|21)?\\d{2})(?<prefix2>\\D+?)(?<seq>\\d*)(?<suffix>\\D*?)$`), 'year', ['seq', 'year']],
+  [/^(?<prefix1>.*?)(?<seq>\d{0,9})(?<suffix>\D*?)$/, 'never', ['seq']],
+];
+
+/** Deduce Odoo sequence reset periodicity ('year_range_month', 'month', 'year_range', 'year', 'never'). */
+export function deduceSequenceNumberReset(name) {
+  const value = String(name ?? '');
+  for (const [regex, reset, requirements] of SEQUENCE_RESET_RULES) {
+    const match = value.match(regex);
+    if (!match?.groups) continue;
+    const g = match.groups;
+    if (g.year && g.year_end) {
+      const compatible = g.year.length >= g.year_end.length
+        && (Number(g.year) + 1) % (10 ** g.year.length) === Number(g.year_end);
+      if (!compatible) continue;
+    }
+    if (requirements.every((req) => g[req] != null)) return reset;
+  }
+  return 'never';
+}
+
+const endOfMonthIso = (iso) => {
+  const year = Number(iso.slice(0, 4));
+  const month = Number(iso.slice(5, 7));
+  return isoDate(new Date(year, month, 0));
+};
+const endOfYearIso = (iso) => `${iso.slice(0, 4)}-12-31`;
+const minIsoDate = (a, b) => (a <= b ? a : b);
+const maxIsoDate = (a, b) => (a >= b ? a : b);
+
+function splitSequenceName(name) {
+  const match = String(name ?? '').match(/^(.*?)(\d+)\D*$/);
+  return match ? { prefix: match[1], num: Number(match[2]) || 0 } : { prefix: String(name ?? ''), num: 0 };
+}
+
+function highestJournalSequenceName(db, move, journal, refDate) {
+  if (!move?.journal_id) return null;
+  const compId = move.company_id ?? 1;
+  const isMoveRefund = ['out_refund', 'in_refund'].includes(move.move_type);
+  const candidates = (db.records?.['account.move'] ?? []).filter((m) => m.active !== false
+    && m.id !== move.id
+    && m.state === 'posted'
+    && (m.company_id ?? 1) === compId
+    && m.journal_id === move.journal_id
+    && m.name && m.name !== '/'
+    && (!journal?.refund_sequence || ['out_refund', 'in_refund'].includes(m.move_type) === isMoveRefund));
+  if (!candidates.length) return null;
+  const sameYear = candidates.filter((m) => moveDate(m).slice(0, 4) === refDate.slice(0, 4));
+  const pool = sameYear.length ? sameYear : candidates;
+  const latest = pool.reduce((best, cur) => (cur.id > best.id ? cur : best));
+  const targetPrefix = splitSequenceName(latest.name).prefix;
+  return pool
+    .filter((m) => splitSequenceName(m.name).prefix === targetPrefix)
+    .reduce((best, cur) => {
+      const a = splitSequenceName(best.name).num;
+      const b = splitSequenceName(cur.name).num;
+      return b > a || (b === a && cur.id > best.id) ? cur : best;
+    }).name;
+}
+
+/**
+ * Odoo 20 AccountMove._get_accounting_date: when posting an invoice or vendor bill whose accounting date falls
+ * on or before a soft lock date, shift `date` forward to the first open period matching journal sequence periodicity.
+ */
+export function accountingDateForPost(db, move, { ctx = null, todayDate = today() } = {}) {
+  const sourceDate = moveDate(move);
+  const locks = violatedSoftLockDates(db, move, sourceDate, ctx);
+  if (!locks.length) return sourceDate;
+  const firstOpen = addDays(locks.at(-1), 1);
+  const journal = move.journal_id ? read(db, 'account.journal', move.journal_id) : null;
+  const highestName = move.highest_name ?? highestJournalSequenceName(db, move, journal, firstOpen);
+  const numberReset = deduceSequenceNumberReset(highestName);
+  const sale = ['out_invoice', 'out_refund'].includes(move.move_type);
+  if (sale) {
+    if (!highestName || numberReset === 'month') return maxIsoDate(firstOpen, minIsoDate(todayDate, endOfMonthIso(firstOpen)));
+    if (numberReset === 'year') return maxIsoDate(firstOpen, minIsoDate(todayDate, endOfYearIso(firstOpen)));
+    return firstOpen;
+  }
+  if (!highestName || numberReset === 'month' || numberReset === 'year_range_month') {
+    return todayDate.slice(0, 7) > firstOpen.slice(0, 7) ? endOfMonthIso(firstOpen) : maxIsoDate(firstOpen, todayDate);
+  }
+  if (numberReset === 'year') {
+    return todayDate.slice(0, 4) > firstOpen.slice(0, 4) ? endOfYearIso(firstOpen) : maxIsoDate(firstOpen, todayDate);
+  }
+  return firstOpen;
 }
 
 export const companyLockDate = (db, move, ctx = null) => {
@@ -278,7 +395,8 @@ const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'cu
 function postedMoveRule(db, before, after) {
   if (before && changedFields(before, after, ['tax_closing_lines'])) return 'Tax closing line links cannot be changed';
   if (before?.state === 'posted' && after.state === 'posted') {
-    if (changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    const pinningJournal = before.journal_id == null && !before.inalterable_hash && after.inalterable_hash && after.journal_id === resolveDocumentJournal(db, before)?.id;
+    if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
     if (before.reversed_entry_id && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
     if ((before.is_storno || after.is_storno) && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
   }

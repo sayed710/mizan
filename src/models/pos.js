@@ -46,7 +46,7 @@ export function startSession(db, openingCash = 0, configId = null) {
 export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1, journalId = openSession(db)?.journal_id ?? null } = {}) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
   const fp = fiscalPositionId || fiscalPositionFor(db, partnerId, companyId);
-  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: p?.sale_tax ?? 14 };
+  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: 0 };
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);
@@ -261,7 +261,7 @@ export function validatePosProducts(db, lines, configCompId, { allowAdjustments 
     if (line.is_tip && !line.product_id) continue;
     if (line.payment_rounding && !line.product_id) continue;
     const product = read(db, 'product', line.product_id);
-    if (!product || product.active === false || product.available_in_pos === false || product.sale_ok === false || (product.company_id != null && product.company_id !== configCompId)) {
+    if (!product || product.type === 'combo' || product.active === false || product.available_in_pos === false || product.sale_ok === false || (product.company_id != null && product.company_id !== configCompId)) {
       throw new Error('Product is not available in POS');
     }
   }
