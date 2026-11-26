@@ -372,7 +372,7 @@ export function invoiceLineAccountResult(db, move, line, journal = resolveDocume
   if (error) return { account: null, original: null, deferred: false, error };
   const originalAccount = read(db, 'account.account', original);
   const deferred = Boolean(line.deferred_start_date || line.deferred_end_date || originalAccount?.is_deferred);
-  if (deferred && (!line.deferred_start_date || !line.deferred_end_date || line.deferred_start_date > line.deferred_end_date)) {
+  if (deferred && (!validDate(line.deferred_start_date) || !validDate(line.deferred_end_date) || line.deferred_start_date > line.deferred_end_date)) {
     return { account: null, original, deferred, error: 'Set valid deferred start and end dates' };
   }
   const company = read(db, 'res.company', move.company_id ?? 1);
@@ -1043,6 +1043,25 @@ export function isPaymentMatched(db, payment, excludeLineId = null) {
   return matches.some((lineId) => !excludeLineId || lineId !== excludeLineId);
 }
 
+const paymentStatementLinesCache = new WeakMap();
+
+/** Statement lines currently matched to a payment, using the same index as matching guards. */
+export function paymentStatementLines(db, payment) {
+  if (!db || !payment) return [];
+  let cached = paymentStatementLinesCache.get(db.records);
+  if (!cached) {
+    cached = new Map();
+    paymentStatementLinesCache.set(db.records, cached);
+  }
+  const key = JSON.stringify([payment.id ?? null, payment.move_id ?? null]);
+  if (cached.has(key)) return cached.get(key);
+  const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
+  const ids = new Set([...(paymentLinesById.get(payment.id) ?? []), ...(paymentLinesByMove.get(payment.move_id) ?? [])]);
+  const lines = (db.records['account.bank.statement.line'] ?? []).filter((line) => ids.has(line.id));
+  cached.set(key, lines);
+  return lines;
+}
+
 /** Settlement links per move, built once per immutable records object (journalItems runs on every report). */
 const reconcileIndexes = new WeakMap();
 function reconcileIndex(db) {
@@ -1578,7 +1597,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
   const rows = search(db, 'account.move')
     .filter((m) => {
       const date = m.date ?? m.invoice_date;
-      const stateOk = reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
+      const stateOk = reviewMode === 'all_with_cancel' ? ['draft', 'posted', 'cancel'].includes(m.state) : reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
       return stateOk
       && includeClosingItem(m, includeClosing)
       && (!from || date >= from)

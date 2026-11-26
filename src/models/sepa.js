@@ -27,6 +27,8 @@ const escapeXml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '
 const normalizedIban = (value) => String(value ?? '').replace(/\s/g, '').toUpperCase();
 
 export const DEFAULT_SEPA_PAIN_VERSION = 'pain.001.001.09';
+export const CHARGE_BEARERS = [['CRED', 'Borne by Creditor'], ['DEBT', 'Borne by Debtor'], ['SHAR', 'Shared'], ['SLEV', 'Following Service Level']];
+export const DEFAULT_CHARGE_BEARER = 'SHAR';
 
 export const SEPA_PAIN_VERSIONS = [
   ['pain.001.001.03', 'Generic'],
