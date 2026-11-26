@@ -744,7 +744,7 @@ export const salesModels = {
     },
     prepareCreate: (db, vals) => ({ db, vals: normalizeProductTaxVals(vals) }),
     prepareWrite: (db, vals) => ({ db, vals: normalizeProductTaxVals(vals) }),
-    createDefaults: (db, vals) => vals?.type === 'combo' ? { purchase_ok: false } : defaultProductTaxes(db, vals),
+    createDefaults: (db, vals) => defaultProductTaxes(db, vals),
     onchange: (r, key) => {
       if (key === 'type' && r.type === 'combo') {
         return { purchase_ok: false, taxes_id: [], tax_id: null, supplier_taxes_id: [], supplier_tax_id: null, sale_tax: null, purchase_tax: null };
@@ -756,10 +756,6 @@ export const salesModels = {
       return {};
     },
     guard: (db, before, r) => {
-      if (r.type === 'combo' && (r.is_storable || (r.tracking && r.tracking !== 'none'))) return 'A combo product cannot be stockable or tracked';
-      if (r.type === 'combo' && !r.combo_ids?.length) return 'A combo product must contain at least 1 combo choice';
-      if (r.type === 'combo' && (r.combo_ids ?? []).some((id) => !read(db, 'product.combo', id))) return 'Select existing combo choices';
-      if (r.type === 'combo' && r.sale_ok !== false && r.combo_ids.some((id) => read(db, 'product.combo', id).combo_item_ids.some((item) => read(db, 'product', item.product_id)?.sale_ok === false))) return 'A sellable combo product can only contain sellable products';
       if (r.type === 'combo') {
         if (r.purchase_ok) return 'Combo products cannot be purchased';
         if (r.taxes_id?.length || r.tax_id != null || r.supplier_taxes_id?.length || r.supplier_tax_id != null || Number(r.sale_tax) || Number(r.purchase_tax)) {
@@ -769,6 +765,10 @@ export const salesModels = {
           return 'Combo products cannot have attributes';
         }
       }
+      if (r.type === 'combo' && (r.is_storable || (r.tracking && r.tracking !== 'none'))) return 'A combo product cannot be stockable or tracked';
+      if (r.type === 'combo' && !r.combo_ids?.length) return 'A combo product must contain at least 1 combo choice';
+      if (r.type === 'combo' && (r.combo_ids ?? []).some((id) => !read(db, 'product.combo', id))) return 'Select existing combo choices';
+      if (r.type === 'combo' && r.sale_ok !== false && r.combo_ids.some((id) => read(db, 'product.combo', id).combo_item_ids.some((item) => read(db, 'product', item.product_id)?.sale_ok === false))) return 'A sellable combo product can only contain sellable products';
       for (const id of [...(r.taxes_id ?? []), r.tax_id, ...(r.supplier_taxes_id ?? []), r.supplier_tax_id]) {
         if (id == null || id === '') continue;
         const tax = read(db, 'account.tax', id);
