@@ -21,6 +21,17 @@ import { currentCompany, documentCompany } from '../models/company.js';
 import { markAsReviewed } from '../models/accounting.js';
 import { automaticEntryDefaults, canChangePeriod, canMoveToAccount, canPostJournalItems, changePeriod, moveToAccount, postJournalItems } from '../models/automaticEntry.js';
 
+/** Account roots use only the explicit account code. */
+export const accountCodeRoot = (account) => typeof account?.code === 'string' && account.code ? account.code.slice(0, 2) : null;
+
+/** Use explicit full IDs or the ledger's derived connected reconciliation group. */
+export function matchingGroupKey(line) {
+  if (line.full_reconcile_id) return `full:${line.full_reconcile_id}`;
+  return line.matching_number ? `matching:${line.matching_number}` : null;
+}
+
+export const matchesMatchingGroup = (line, key) => Boolean(key) && matchingGroupKey(line) === key;
+
 const OPTIONAL_STORAGE_KEY = 'mizan-report-cols:journalItems';
 
 const ITEM_COLUMNS = [
@@ -193,6 +204,8 @@ export function JournalItems({ leaf = {} } = {}) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [query, setQuery] = useState('');
+  const [accountRoot, setAccountRoot] = useState(null);
+  const [matchingGroup, setMatchingGroup] = useState(null);
   const [group, setGroup] = useState(() => (leaf.groupBy?.[0] ? leaf.groupBy[0].replace('_id', '') : (mode === 'to_check' ? 'journal' : '')));
   const [activeFilters, setActiveFilters] = useState(() => new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '').has('move') ? [] : defaultFiltersForMode(mode));
   const [optionalState, isVisible, toggleCol] = useOptionalColumns(OPTIONAL_STORAGE_KEY);
@@ -315,7 +328,7 @@ export function JournalItems({ leaf = {} } = {}) {
       const isForeign = Boolean(line.currency_id && lineCompanyCurr && line.currency_id !== lineCompanyCurr.id);
       const { taxIds, taxes, originatorTax } = resolveLineTaxInfo(db, line, move);
       const gridIds = lineIds(line, 'tax_tag_ids', 'tag_ids');
-      const matchingText = line.matching_number ?? (line.reconciled ? t('Reconciled') : '');
+      const matchingText = line.matching_number ?? (line.full_reconcile_id ? String(line.full_reconcile_id) : line.reconciled ? t('Reconciled') : '');
       return {
         ...line,
         _account: read(db, 'account.account', line.account_id),
@@ -345,9 +358,16 @@ export function JournalItems({ leaf = {} } = {}) {
   const activeGroups = ITEM_FILTER_GROUPS
     .map((g) => g.filter((f) => activeFilters.includes(f.id)))
     .filter((g) => g.length);
-  const rows = enriched
+  const filteredRows = enriched
     .filter((line) => activeGroups.every((g) => g.some((f) => mode === 'unreconciled' && f.id === 'unreconciled' ? isReconcilableAccount(line._account) && (line.amount_residual == null || Math.abs(line.amount_residual) > 1e-9) : f.fn(line))))
-    .filter((line) => matchesItemSearch(line, query));
+    .filter((line) => matchesItemSearch(line, query))
+    .filter((line) => !matchingGroup || matchesMatchingGroup(line, matchingGroup));
+  const rootCounts = new Map();
+  for (const line of filteredRows) {
+    const root = accountCodeRoot(line._account);
+    if (root) rootCounts.set(root, (rootCounts.get(root) ?? 0) + 1);
+  }
+  const rows = filteredRows.filter((line) => !accountRoot || accountCodeRoot(line._account) === accountRoot);
 
   const groups = new Map();
   for (const line of rows) {
@@ -445,6 +465,9 @@ export function JournalItems({ leaf = {} } = {}) {
 
   const renderCell = (line, col) => {
     switch (col.key) {
+      case 'matching': return matchingGroupKey(line)
+        ? <a href="#" onClick={(event) => { event.preventDefault(); setMatchingGroup(matchingGroupKey(line)); setAccountRoot(null); setSelected([]); }}>{line.matchingText}</a>
+        : line.matchingText;
       case 'move_id': return line.move_id ? <a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a> : line.move_name;
       case 'status': return line.status ? <span className={`badge badge-${stateField.badge[line.move_state] ?? 'info'}`}>{t(line.status)}</span> : '';
       case 'amount_currency': return line._isForeign && line.amount_currency != null ? money(line.amount_currency, null, line._currency) : '';
@@ -598,7 +621,14 @@ export function JournalItems({ leaf = {} } = {}) {
       controls={controls}
       onBack={() => setIsPrinting(false)}
     >
-      <div className="list-wrap"><table className="list report" ref={tableRef}><thead><tr><th className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th no-print"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
+      {matchingGroup && !isPrinting && <button type="button" className="btn sm" onClick={() => { setMatchingGroup(null); setSelected([]); }}>{t('Clear matching')}</button>}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '1rem' }}>
+      {!isPrinting && <aside aria-label={t('Account Roots')} style={{ flex: '0 0 auto' }}>
+        <strong>{t('Account Roots')}</strong>
+        <div><button type="button" className="btn sm" aria-pressed={!accountRoot} onClick={() => { setAccountRoot(null); setSelected([]); }}>{t('All')}</button></div>
+        {[...rootCounts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([root, count]) => <div key={root}><button type="button" className="btn sm" aria-pressed={accountRoot === root} onClick={() => { setAccountRoot(root); setSelected([]); }}>{root} ({count})</button></div>)}
+      </aside>}
+      <div className="list-wrap" style={{ flex: '1 1 auto', minWidth: 0 }}><table className="list report" ref={tableRef}><thead><tr><th className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select all')} disabled={busy || !selectableRows.length} checked={allSelected} onChange={(e) => setSelected([...selected.filter((item) => !visibleKeys.has(keyOf(item))), ...(e.target.checked ? selectableRows.map((line) => ({ move_id: line.move_id, line_identity: line.line_identity })) : [])])} />{t('Select')}</th>{visibleCols.map((col) => <th key={col.key} className={col.numeric ? 'num' : undefined}>{t(col.label)}</th>)}<th className="o2m-cols-th no-print"><OptionalColsMenu items={optionalCols.map((c) => ({ key: c.key, label: c.label, defaultVisible: c.optional !== 'hide' }))} optionalState={optionalState} onToggle={toggleCol} /></th></tr></thead>
         <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
           {group && <tr className="group-row"><th className={isPrinting ? 'no-print' : undefined} /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th className="no-print" /></tr>}
           {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
@@ -620,6 +650,7 @@ export function JournalItems({ leaf = {} } = {}) {
           <td className="o2m-cols-td no-print" />
         </tr></tfoot>}
       </table></div>
+      </div>
     </ReportPrintView>
   );
 }
