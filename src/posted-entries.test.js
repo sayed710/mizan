@@ -28,7 +28,7 @@ test('a posted invoice cannot be marked paid, edited or deleted directly', () =>
   assert.throws(() => forged(db, 'account.move', { ...inv, payments: [...(inv.payments ?? []), { date: '2026-10-26', amount: 50, move_id: 424242 }], amount_paid: (inv.amount_paid ?? 0) + 50 }), /posted journal entry|cannot exceed the invoice total/);
   assert.throws(() => forged(db, 'account.move', { ...inv, line_ids: [] }), /reset them to draft/);
   assert.throws(() => forged(db, 'account.move', { ...inv, state: 'cancel' }), /draft/);
-  assert.throws(() => applyDiff(db, { upserts: {}, deletes: { 'account.move': [inv.id] } }, clerk), /cannot be deleted/);
+  assert.throws(() => applyDiff(db, { upserts: {}, deletes: { 'account.move': [inv.id] } }, clerk), /cannot delete an entry which has been posted once/);
   assert.equal(api(db, 'PATCH', `/api/v1/account.move/${inv.id}`, { invoice_line_ids: [{ name: 'x', qty: 1, price_unit: 1, tax: 0 }] }).status, 400);
 });
 
