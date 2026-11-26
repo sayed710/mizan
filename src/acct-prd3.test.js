@@ -226,3 +226,18 @@ test('a fixed pricelist price converts to a foreign order currency like the list
   assert.equal(Math.round(priced({ currency_id: foreign.id }) * 100), 2 * Math.round(priced({}) * 100));
   assert.equal(Math.round(priced({ currency_id: foreign.id, pricelist_id: pricelist.id }) * 100), Math.round(priced({ currency_id: foreign.id }) * 100));
 });
+
+test('fulfilled combo groups keep their line identities and configuration on confirmed orders', () => {
+  for (const activity of ['qty_delivered', 'qty_invoiced']) {
+    const setup = comboOrder();
+    let db = setup.button.run(setup.db, read(setup.db, 'sale.order', setup.orderId), setup.values).db;
+    db = models['sale.order'].form.buttons.find((button) => button.label === 'Confirm').run(db, read(db, 'sale.order', setup.orderId)).db;
+    let lines = read(db, 'sale.order', setup.orderId).order_line;
+    db = write(db, 'sale.order', setup.orderId, { order_line: lines.map((line, i) => i === 1 ? { ...line, [activity]: 1 } : line) });
+    lines = read(db, 'sale.order', setup.orderId).order_line;
+    assert.throws(() => write(db, 'sale.order', setup.orderId, { order_line: lines.map((line, i) => i === 1 ? { ...line, sale_line_key: 'replacement-key' } : line) }), /Configure each combo/);
+    assert.throws(() => write(db, 'sale.order', setup.orderId, { order_line: [] }), /Configure each combo/);
+    assert.throws(() => write(db, 'sale.order', setup.orderId, { order_line: lines.map((line, i) => i === 1 ? { ...line, qty: 1 } : line) }), /Configure each combo/);
+    assert.doesNotThrow(() => write(db, 'sale.order', setup.orderId, { order_line: lines.map((line, i) => i === 1 ? { ...line, [activity]: 2 } : line) }));
+  }
+});

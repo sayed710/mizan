@@ -316,12 +316,15 @@ export function configureComboLines(db, order, line, selections) {
 function comboOrderError(db, order, before = null) {
   const lines = order.order_line ?? [];
   const activeKeys = activeComboKeys(before);
+  for (const key of activeKeys) {
+    const related = (record) => comboLines(db, record)
+      .filter((line) => line.sale_line_key === key || line.combo_parent_key === key)
+      .map(stableValue).sort();
+    if (stableValue(related(before)) !== stableValue(related(order))) return 'Configure each combo before confirming the order';
+  }
   for (const parent of lines.filter((line) => read(db, 'product', line.product_id)?.type === 'combo')) {
     const children = lines.filter((line) => line.combo_parent_key && line.combo_parent_key === parent.sale_line_key);
-    if (activeKeys.has(parent.sale_line_key)) {
-      const related = (r) => (r.order_line ?? []).filter((line) => line.sale_line_key === parent.sale_line_key || line.combo_parent_key === parent.sale_line_key);
-      if (stableValue(related(before)) === stableValue(related(order))) continue;
-    }
+    if (activeKeys.has(parent.sale_line_key)) continue;
     const product = read(db, 'product', parent.product_id);
     if (!parent.sale_line_key || Number(parent.price_unit) !== 0 || children.length !== product.combo_ids.length) return 'Configure each combo before confirming the order';
     const selections = Object.fromEntries(children.map((line) => [line.combo_choice_id, line.product_id]));
