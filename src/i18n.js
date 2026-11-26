@@ -2759,6 +2759,8 @@ const ar = {
   'Cancel Entry': 'إلغاء القيد',
   'Reversal Entries': 'قيود العكس',
   'Reversed Entry': 'القيد المعكوس',
+  'Reconciled Items': 'البنود المطابقة',
+  'Cash Basis Entries': 'قيود الأساس النقدي',
   'Reconciled items': 'البنود المطابقة',
   'Adjusting Entries': 'قيود التسوية',
   'Bank transaction': 'معاملة بنكية',
