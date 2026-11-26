@@ -5,7 +5,7 @@ import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, defaultPaymentJournalId, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { accountingDateForPost, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
@@ -2926,7 +2926,8 @@ const INVOICE_LIST_FIELDS = {
   activities: { optional: 'hide' },
   company_id: { optional: 'hide', multiCompanyOnly: true },
   amount_untaxed_in_currency_signed: { optional: 'show', sum: 'Total' },
-  amount_tax_in_currency_signed: { optional: 'hide', sum: 'Total' },
+  amount_tax_signed: { optional: 'hide', sum: 'Total' },
+  move_sent_values: { optional: 'hide' },
   amount_total_in_currency_signed: { optional: 'show', bold: true, sum: 'Total' },
   amount_residual_in_currency_signed: { optional: 'show', sum: 'Total' },
   currency_id: { optional: 'hide' },
@@ -2967,7 +2968,7 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
     {
       id: 'to_check',
       label: 'To Review',
-      fn: (r) => r.state === 'posted' && (r.to_check === true || ['todo', 'anomaly'].includes(r.review_state)),
+      fn: (r) => r.state === 'posted' && ['todo', 'anomaly'].includes(r.review_state),
     },
   ],
   [
@@ -3124,8 +3125,8 @@ export const salesInvoiceView = {
   list: [
     'display_name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
     'ref', 'invoice_user_id', 'activities', 'company_id',
-    'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
-    'currency_id', 'status_in_payment',
+    'amount_untaxed_in_currency_signed', 'amount_tax_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
+    'currency_id', 'status_in_payment', 'move_sent_values',
   ],
   listFields: INVOICE_LIST_FIELDS,
   listLabels: { display_name: 'Number', partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
@@ -3146,7 +3147,7 @@ export const purchaseInvoiceView = {
   list: [
     'display_name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
     'payment_reference', 'ref', 'activities', 'company_id',
-    'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
+    'amount_untaxed_in_currency_signed', 'amount_tax_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
     'currency_id', 'status_in_payment', 'should_be_paid',
   ],
   listFields: INVOICE_LIST_FIELDS,
@@ -3958,6 +3959,24 @@ export const accountingModels = {
             }
           }
         }
+        const linesChanged = !before || JSON.stringify(before.invoice_line_ids ?? []) !== JSON.stringify(after.invoice_line_ids ?? []);
+        const postingTransition = after.state === 'posted' && (before?.state !== 'posted' || linesChanged);
+        const journal = postingTransition ? resolveDocumentJournal(db, after) : null;
+        for (const line of after.invoice_line_ids ?? []) {
+          if (isSectionOrNote(line)) {
+            if (line.deferred_start_date || line.deferred_end_date) return 'Set valid deferred start and end dates';
+            continue;
+          }
+          // Odoo _check_deferred_dates: a start date needs an end date on or after it on every save; an end date alone may wait for posting.
+          const { deferred_start_date: start, deferred_end_date: end } = line;
+          if ((start && (!validDate(start) || !end)) || (end && !validDate(end)) || (start && end && start > end)) {
+            return 'Set valid deferred start and end dates';
+          }
+          if (journal) {
+            const res = invoiceLineAccountResult(db, after, line, journal);
+            if (res.deferred && res.error) return res.error;
+          }
+        }
       }
       const counterpart = before?.intercompany_move_id ? read(db, 'account.move', before.intercompany_move_id) : null;
       const counterpartBlocked = counterpart && (counterpart.state === 'posted' || Number(counterpart.amount_paid) > 0 || paymentState(counterpart, db) === 'paid');
@@ -4225,6 +4244,24 @@ export const accountingModels = {
         label: 'Tax',
         compute: (r, db) => signedDocumentAmount(r, invoiceTaxAmount(r, db)),
       },
+      amount_tax_signed: {
+        type: 'monetary', label: 'Tax', currency: 'company',
+        compute: (r, db) => {
+          const lines = (r.line_ids ?? []).filter((line) => line.display_type === 'tax' || line.display_type === 'non_deductible_tax' || (line.display_type === 'rounding' && line.tax_repartition_line_id) || (line.tax_name && !line.tax_grid_base && !line.tax_zero));
+          const company = findCompanyCurrencyRecord(db, r.company_id ?? 1);
+          if (lines.length) {
+            const balance = -lines.reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0);
+            return (company ? roundCurrency(balance, company) : round2(balance)) || 0;
+          }
+          // Journal entries carry their tax only on lines; never convert a document amount for them.
+          if (!isInvoice(r)) return 0;
+          if (!company) return null;
+          const doc = documentCurrency(db, r);
+          const rate = !doc || doc.id === company.id ? 1 : conversionRate(db, doc.id, company.id, r.invoice_date ?? r.date ?? today(), r.company_id ?? 1);
+          return rate == null ? null : signedDocumentAmount(r, roundCurrency(invoiceTaxAmount(r, db) * rate, company));
+        },
+      },
+      move_sent_values: { type: 'selection', label: 'Sent', compute: (r) => r.is_move_sent ? 'sent' : 'not_sent', options: [['sent', 'Sent'], ['not_sent', 'Not Sent']], badge: { sent: 'success', not_sent: 'danger' } },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
       amount_total_in_currency_signed: {
         type: 'monetary',
@@ -4314,6 +4351,7 @@ export const accountingModels = {
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       to_check: { type: 'boolean', label: 'To Check', copy: false },
+      review_state: { type: 'selection', label: 'Review Status', readonly: true, compute: (r) => r.state !== 'posted' ? null : r.review_state === 'anomaly' ? 'anomaly' : r.to_check ? 'todo' : 'reviewed', options: [['todo', 'To Review'], ['anomaly', 'Anomaly'], ['reviewed', 'Reviewed']] },
       is_move_sent: { type: 'boolean', label: 'Is Move Sent', copy: false, readonly: true },
       auto_post: {
         type: 'selection',
@@ -4393,6 +4431,7 @@ export const accountingModels = {
       lockedWhen: (r) => r.state !== 'draft' || Boolean(r.inalterable_hash),
       unlockedFields: ['to_check'],
       smart: [
+        { label: 'Journal Items', when: (r) => r.move_type !== 'entry', value: () => '', target: (r) => `accounting/journal-items?move=${r.id}` },
         {
           label: (r) => ({ out_invoice: 'Credit Notes', in_invoice: 'Refunds', entry: 'Reversal Entries' }[r.move_type] ?? 'Reversal Entries'),
           when: (r, db) => moveReversalEntries(db, r).length > 0,
