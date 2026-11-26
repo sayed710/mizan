@@ -5,13 +5,13 @@ import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { display, formatDate } from '../ui.jsx';
 import { batchCurrency, checkAmountDisplay } from '../models/payments.js';
-import { paymentRemittanceLines } from '../models/pay.js';
+import { paymentReceiptData, paymentRemittanceLines } from '../models/pay.js';
 import { subtotal, today, validDate } from '../models/common.js';
 import { invoiceTaxTotals } from '../models/ledger.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
 import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
 import { invoiceTaxLegalNotes, taxInvoiceLabel } from '../models/taxes.js';
-import { documentCurrency, formatCurrency } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, formatCurrency } from '../money.js';
 import { dueTermLinesError, installments, invoiceInstallments, invoiceTermNote, termScheduleError } from '../models/terms.js';
 import { SafeHtml } from '../HtmlEditor.jsx';
 import { ReportPrintView } from './ReportPrintView.jsx';
@@ -288,8 +288,97 @@ function printCell(db, model, k, f, l, rec) {
   return display(db, f, value, { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id });
 }
 
+/** Odoo 20 Payment Receipt (`report_payment_receipt_document`): payment summary plus settled invoice partials. */
+function PaymentReceipt({ db, payment }) {
+  const company = documentCompany(db, payment);
+  if (!company) return <p role="alert">{t('Configure the document company before printing.')}</p>;
+  const data = paymentReceiptData(db, payment);
+  const partner = payment.partner_id ? read(db, 'res.partner', payment.partner_id) : null;
+  const payCurrency = documentCurrency(db, payment) ?? companyCurrencyRecord(db, payment.company_id);
+  const methodLine = payment.payment_method_line_id ? read(db, 'account.payment.method.line', payment.payment_method_line_id) : null;
+  const title = t(data.title);
+  const partnerLabel = payment.partner_type === 'supplier' ? t('Vendor:') : t('Customer:');
+  return (
+    <article className="paper">
+      <header className="paper-head">
+        <div>
+          <b className="paper-company">{company.name}</b>
+          {addressLines(company, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`} className="muted">{line}</div>)}
+        </div>
+        {partner && payment.partner_type && (
+          <address>
+            <div>{partnerLabel} <b>{partner.name}</b></div>
+            {addressLines(partner, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`}>{line}</div>)}
+          </address>
+        )}
+      </header>
+      <h1>{title}{payment.name && payment.name !== '/' ? `: ${payment.name}` : ''}</h1>
+      <dl className="paper-info">
+        {payment.date && <div><dt>{t('Payment Date')}</dt><dd>{formatDate(payment.date)}</dd></div>}
+        {payment.amount != null && (
+          <div>
+            <dt>{t('Payment Amount')}</dt>
+            <dd>{payCurrency ? formatCurrency(Number(payment.amount) || 0, payCurrency) : payment.amount}</dd>
+          </div>
+        )}
+        {methodLine?.name && <div><dt>{t('Payment Method')}</dt><dd>{methodLine.name}</dd></div>}
+        {payment.memo && <div><dt>{t('Memo')}</dt><dd>{payment.memo}</dd></div>}
+      </dl>
+      {data.invoices.length > 0 && (
+        <table className="paper-lines">
+          <thead>
+            <tr>
+              <th>{t('Invoice Date')}</th>
+              <th>{t('Invoice Number')}</th>
+              <th>{t('Reference')}</th>
+              {data.otherCurrency && <th className="num">{t('Amount In Currency')}</th>}
+              <th className="num">{t('Amount')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.invoices.map(({ invoice, currency, residual: invResidual, rows }) => (
+              <Fragment key={invoice.id}>
+                <tr>
+                  <td>{formatDate(invoice.invoice_date || invoice.date)}</td>
+                  <td>{invoice.name}</td>
+                  <td>{invoice.ref || ''}</td>
+                  {data.otherCurrency && <td />}
+                  <td className="num">{currency ? formatCurrency(Number(invoice.amount_total) || 0, currency) : invoice.amount_total}</td>
+                </tr>
+                {rows.map((row, idx) => (
+                  <tr key={`${invoice.id}-${idx}`}>
+                    <td>{row.date ? formatDate(row.date) : ''}</td>
+                    <td>{row.name === 'Early Payment Discount' ? t(row.name) : row.name}</td>
+                    <td>{row.ref || ''}</td>
+                    {data.otherCurrency && (
+                      <td className="num">
+                        {row.amountPayment != null && row.currencyPayment && currency && row.currencyPayment.id !== currency.id
+                          ? formatCurrency(row.amountPayment, row.currencyPayment)
+                          : ''}
+                      </td>
+                    )}
+                    <td className="num">{currency ? formatCurrency(row.amountInvoice, currency) : row.amountInvoice}</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td />
+                  <td><b>{t('Due Amount for {name}', { name: invoice.name })}</b></td>
+                  <td />
+                  {data.otherCurrency && <td />}
+                  <td className="num"><b>{currency ? formatCurrency(invResidual, currency) : invResidual}</b></td>
+                </tr>
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <footer className="paper-foot muted">{company.name} · {t('Generated by Mizan')}</footer>
+    </article>
+  );
+}
+
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */
-export function PrintDoc({ model, id, proforma = false }) {
+export function PrintDoc({ model, id, proforma = false, report = null }) {
   const db = useDb();
   const def = models[model];
   const layout = LAYOUTS[model];
@@ -298,14 +387,24 @@ export function PrintDoc({ model, id, proforma = false }) {
   const multiPayments = model === 'account.payment' && rawIds.length > 1
     ? rawIds.map((pid) => read(db, 'account.payment', pid)).filter((p) => p && p.state === 'posted' && p.payment_type === 'outbound' && p.check_number != null)
     : null;
+  const receiptIds = model === 'account.payment' ? (rawIds.length ? rawIds : [Number(id)].filter((n) => Number.isFinite(n) && n > 0)) : [];
+  const receiptPayments = receiptIds.map((pid) => read(db, 'account.payment', pid));
+  const isCheckPrint = model === 'account.payment' && report !== 'receipt' && (
+    Boolean(multiPayments?.length)
+    || Boolean(rec && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null)
+  );
+  const isBlockedPaymentReceipt = model === 'account.payment' && !isCheckPrint && (
+    !receiptPayments.length
+    || receiptPayments.some((p) => !p || p.state !== 'posted')
+  );
   const recId = multiPayments?.length ? multiPayments[0].id : rec?.id;
   const isProformaInvoice = model === 'account.move' && isProformaMove(rec, proforma);
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
-    if (!recId || isDraftInboundBatch) return undefined;
+    if (!recId || isDraftInboundBatch || isBlockedPaymentReceipt) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
-  }, [recId, isDraftInboundBatch]);
+  }, [recId, isDraftInboundBatch, isBlockedPaymentReceipt]);
   if (rec && model === 'account.batch.payment') {
     if (rec.batch_type === 'inbound') {
       if (rec.state !== 'posted') {
@@ -320,14 +419,34 @@ export function PrintDoc({ model, id, proforma = false }) {
     return <Checks db={db} batch={rec} />;
   }
   if (model === 'account.payment') {
-    if (multiPayments?.length) {
-      return multiPayments.map((p) => (
-        <Checks key={p.id} db={db} batch={{ company_id: p.company_id, date: p.date, lines: [{ move_id: p.invoice_id, payment_id: p.id, amount: p.amount }] }} />
-      ));
+    if (report !== 'receipt') {
+      if (multiPayments?.length) {
+        return multiPayments.map((p) => (
+          <Checks key={p.id} db={db} batch={{ company_id: p.company_id, date: p.date, lines: [{ move_id: p.invoice_id, payment_id: p.id, amount: p.amount }] }} />
+        ));
+      }
+      if (rec && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
+        const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
+        return <Checks db={db} batch={batch} />;
+      }
     }
-    if (rec && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
-      const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
-      return <Checks db={db} batch={batch} />;
+    if (receiptPayments.length && receiptPayments.every(Boolean)) {
+      if (receiptPayments.some((p) => p.state !== 'posted')) {
+        return (
+          <main className="action">
+            <p className="empty" role="alert">{t('Payment receipts can only be printed for posted payments.')}</p>
+          </main>
+        );
+      }
+      return (
+        <main className="print-page">
+          <div className="no-print print-toolbar">
+            <button type="button" className="btn primary" onClick={() => window.print()}>{t('Print')}</button>
+            <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
+          </div>
+          {receiptPayments.map((p) => <PaymentReceipt key={p.id} db={db} payment={p} />)}
+        </main>
+      );
     }
   }
   if (rec && model === 'audit.report') {

@@ -25,9 +25,27 @@ export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
 export const getActiveCompany = () => activeCompany;
 const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r.company_id ?? 1) === activeCompany;
 
+/**
+ * Computed fields are evaluated on read, except `lazy` ones (expensive, rarely shown): those are non-enumerable
+ * getters evaluated on first access, so ordinary lookups never pay for them and spreads/serialisation skip them.
+ */
 const withComputed = (fields, r, db) => {
   const computed = Object.entries(fields).filter(([, f]) => f.compute);
-  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r, db)])) } : r;
+  if (!computed.length) return r;
+  const eager = computed.filter(([, f]) => !f.lazy);
+  const out = { ...r, ...Object.fromEntries(eager.map(([k, f]) => [k, f.compute(r, db)])) };
+  for (const [k, f] of computed.filter(([, f]) => f.lazy)) {
+    Object.defineProperty(out, k, {
+      configurable: true,
+      enumerable: false,
+      get() {
+        const value = f.compute(r, db);
+        Object.defineProperty(out, k, { value, enumerable: false, writable: true, configurable: true });
+        return value;
+      },
+    });
+  }
+  return out;
 };
 
 /** Source records for a model, computing virtual report rows when declared by `models[model].records`. */

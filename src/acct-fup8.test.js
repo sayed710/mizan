@@ -224,10 +224,13 @@ test('processFollowUps handles email, letter, SMS, activity-only, skips, and fai
   assert.equal(byId.get(pNoEmail.id).status, 'failed');
   assert.match(byId.get(pNoEmail.id).reason, /email address/i);
 
-  // Re-running on same date skips already-processed customers
+  // Re-running on same date skips the emailed customer; the letter customer stays pending until the print is confirmed
+  // (deliberate spec change: a generated batch report no longer records letters as delivered).
   const second = await processFollowUps(res.db, [pEmail.id, pLetter.id], { companyId: 1, at: '2026-03-31', deliverEmail: () => ({ status: 'sent' }) });
-  assert.equal(second.summary.processed, 0);
-  assert.equal(second.summary.skipped, 2);
+  assert.equal(second.summary.processed, 1);
+  assert.equal(second.summary.skipped, 1);
+  assert.equal(second.results.find((r) => r.partnerId === pEmail.id).status, 'skipped');
+  assert.deepEqual(second.results.find((r) => r.partnerId === pLetter.id).pendingManual, ['letter']);
 });
 
 test('postponeFollowUp validates dates, persists per-company next reminder, and diff guard rejects invalid dates', () => {

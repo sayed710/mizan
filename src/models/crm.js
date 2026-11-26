@@ -297,6 +297,8 @@ export const crmModels = {
         ],
         badge: { in_need_of_action: 'warn', with_overdue_invoices: 'info', no_action_needed: 'ok' },
         hidden: true,
+        // Scans every move and payment: evaluated only when a view or filter reads it, not on every partner lookup.
+        lazy: true,
         compute: (r, db) => partnerFollowUpStatus(db, r, db?.settings?.current_company_id ?? 1),
       },
       followup_lines: {
@@ -308,6 +310,8 @@ export const crmModels = {
           followup_level_delay: { type: 'integer', label: 'Last Reminder Level (days)' },
           followup_date: { type: 'date', label: 'Last Reminder' },
           followup_oldest_date: { type: 'date', label: 'Oldest Overdue Date', hidden: true },
+          followup_sms_level_delay: { type: 'integer', label: 'SMS Queued for Level (days)', hidden: true },
+          followup_sms_oldest_date: { type: 'date', label: 'SMS Queued for Overdue Date', hidden: true },
           followup_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level' },
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },

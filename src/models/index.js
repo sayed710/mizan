@@ -63,7 +63,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec, processFollowUps } from './finance.js';
+import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -155,8 +155,8 @@ const customers = {
       requiresSelection: true,
       app: 'accounting',
       when: (db, user) => appOpen(db, user, 'accounting'),
+      // Executed by ActionView through runBatchFollowUpsAction (server email delivery and commit); there is no `run`.
       batchFollowUp: true,
-      run: (db, ids, options) => processFollowUps(db, ids, { companyId: db.settings?.current_company_id ?? 1, ...(options ?? {}) }),
     },
     {
       label: 'Postpone',

@@ -32,6 +32,7 @@ const summarizeBatchResults = (results) => ({
   phone: results.filter((r) => r.actions.includes('phone')).length,
   activities: results.filter((r) => r.actions.includes('activity')).length,
   letterPartnerIds: results.filter((r) => r.actions.includes('letter')).map((r) => r.partnerId),
+  refreshPending: results.filter((r) => r.refreshError).length,
 });
 
 /** Execute batch follow-ups for `targets` (`[{ partnerId, companyId }]`), reusing server email and local commit paths. */
@@ -72,26 +73,55 @@ export async function runBatchFollowUpsAction(targets) {
         }
         const mailRes = await serverAction('/api/mail/followup', { partnerId: ctx.partner.id, companyId: ctx.companyId });
         if (!mailRes.ok) throw new Error(mailRes.error ?? 'Action failed');
-        if (mailRes.refreshError) throw new Error(mailRes.refreshError);
-        return { serverHandled: true, db: getDb() };
+        // The email is already sent and recorded server-side: a failed refresh must not read as a failed send.
+        return { serverHandled: true, db: getDb(), ...(mailRes.refreshError ? { refreshError: mailRes.refreshError } : {}) };
       },
     });
-    if (res.db !== getDb()) {
+    if (!res.results.some((r) => r.refreshError) && res.db !== getDb()) {
       const saved = await commit(res.db, { quiet: true });
       if (saved && saved.ok === false) throw new Error(saved.error ?? 'Could not save changes');
     }
     results.push(...res.results);
+    if (res.results.some((r) => r.refreshError)) {
+      // Local follow-up state is stale: continuing would re-send to customers that were already reminded.
+      for (const rest of targets.slice(targets.indexOf(item) + 1)) {
+        const restId = Number(rest.partnerId);
+        results.push({
+          partnerId: restId,
+          partnerName: read(getDb(), 'res.partner', restId)?.name ?? `#${restId}`,
+          companyId: Number(rest.companyId ?? currentCompany(getDb())),
+          status: 'skipped',
+          reason: 'Reload the database before processing this customer',
+          actions: [],
+        });
+      }
+      break;
+    }
   }
   return { results, summary: summarizeBatchResults(results) };
 }
 
 export function FollowUpBatchResultModal({ report, onClose }) {
   const box = useRef(null);
+  const [confirmed, setConfirmed] = useState(() => new Set());
+  const [error, setError] = useState('');
   useEffect(() => {
     box.current?.querySelector('button')?.focus();
   }, []);
   if (!report) return null;
   const { results, summary } = report;
+  // Letters and calls advance the follow-up level only once the operator confirms them.
+  const confirmManual = async (r, channel) => {
+    try {
+      const next = logManualFollowUp(getDb(), r.partnerId, today(), { companyId: r.companyId ?? 1, channel, ignoreNextActionDate: true });
+      const saved = await commit(next, { quiet: true });
+      if (saved && saved.ok === false) throw new Error(saved.error ?? 'Could not save changes');
+      setConfirmed((prev) => new Set(prev).add(`${r.companyId ?? 1}-${r.partnerId}-${channel}`));
+      setError('');
+    } catch (e) {
+      setError(t(e.message));
+    }
+  };
   const lettersByCompany = new Map();
   for (const r of results) {
     if (!r.actions.includes('letter')) continue;
@@ -113,6 +143,13 @@ export function FollowUpBatchResultModal({ report, onClose }) {
         <p aria-live="polite">
           {t('Processed')}: <b>{summary.processed}</b> · {t('Skipped')}: <b>{summary.skipped}</b> · {t('Failed')}: <b>{summary.failed}</b>
         </p>
+        {summary.refreshPending > 0 && (
+          <p role="alert">
+            {t('The email was sent, but the database could not be refreshed. Reload the database to see the updated follow-up status; do not send it again.')}{' '}
+            <button type="button" className="btn sm" onClick={() => location.reload()}>{t('Reload')}</button>
+          </p>
+        )}
+        {error && <p role="alert">{error}</p>}
         <table className="list">
           <thead>
             <tr>
@@ -129,7 +166,15 @@ export function FollowUpBatchResultModal({ report, onClose }) {
                 <td>{r.partnerName}</td>
                 <td>{r.levelName ?? '—'}</td>
                 <td>{t(r.status === 'processed' ? 'Processed' : r.status === 'skipped' ? 'Skipped' : 'Failed')}</td>
-                <td>{r.actions.length ? r.actions.map((a) => t(ACTION_LABELS[a] ?? a)).join(', ') : '—'}</td>
+                <td>
+                  {r.actions.length ? r.actions.map((a) => t(ACTION_LABELS[a] ?? a)).join(', ') : '—'}
+                  {(r.pendingManual ?? []).map((channel) => {
+                    const key = `${r.companyId ?? 1}-${r.partnerId}-${channel}`;
+                    return confirmed.has(key)
+                      ? <div key={channel}>{t(channel === 'letter' ? 'Letter printed' : 'Call done')}</div>
+                      : <div key={channel}><button type="button" className="btn sm" onClick={() => confirmManual(r, channel)}>{t(channel === 'letter' ? 'Mark letter as printed' : 'Mark call as done')}</button></div>;
+                  })}
+                </td>
                 <td>{r.nextActionDate ? `${t(r.reason)} (${r.nextActionDate})` : (r.reason ? t(r.reason) : '—')}</td>
               </tr>
             ))}
