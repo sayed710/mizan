@@ -63,7 +63,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec } from './finance.js';
+import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec, unpostponeFollowUp } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -165,6 +165,13 @@ const customers = {
       when: (db, user) => appOpen(db, user, 'accounting'),
       wizard: () => postponeFollowUpWizardSpec(),
       run: (db, ids, values) => ({ db: postponeFollowUp(db, ids, values.date, { companyId: db.settings?.current_company_id ?? 1 }) }),
+    },
+    {
+      label: 'Unpostpone',
+      requiresSelection: true,
+      app: 'accounting',
+      when: (db, user) => appOpen(db, user, 'accounting'),
+      run: (db, ids) => ({ db: unpostponeFollowUp(db, ids, { companyId: db.settings?.current_company_id ?? 1 }) }),
     },
   ],
 };

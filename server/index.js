@@ -854,7 +854,7 @@ async function api(req, res, path) {
         : path.endsWith('statement')
           ? await sendCustomerStatement(SMTP, snapshot, body)
           : path.endsWith('followup')
-          ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId }, undefined, writeOptions(user, allowed))
+          ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId, ...(body.joinInvoices !== undefined ? { joinInvoices: Boolean(body.joinInvoices) } : {}), ...(body.at !== undefined ? { at: body.at } : {}) }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
       delivered = Boolean(out.db);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded', delivered: true });

@@ -172,7 +172,8 @@ export async function sendCustomerStatement(cfg, db, { partnerId, companyId, fro
 }
 
 /** Send a follow-up and persist its existing manual reminder transition after delivery. */
-export async function sendFollowUp(cfg, db, user, { partnerId, companyId, at = today() }, deliver = sendMail, writeOptions = { author: user.name, isAdmin: user.isAdmin }) {
+export async function sendFollowUp(cfg, db, user, { partnerId, companyId, at = today(), joinInvoices }, deliver = sendMail, writeOptions = { author: user.name, isAdmin: user.isAdmin }) {
+  if (!validDate(at)) throw new Error('Enter a valid As of Date');
   const partner = read(db, 'res.partner', Number(partnerId));
   if (!partner?.email?.trim()) throw new Error('A customer email address is required to send an email reminder');
   const company = Number(companyId);
@@ -182,11 +183,21 @@ export async function sendFollowUp(cfg, db, user, { partnerId, companyId, at = t
   const rows = letter.invoices.map((m) => [m.name, m.invoice_date ?? '', m.invoice_date_due ?? '', amount(m.amount_residual, m.followup_currency), m.overdue ? 'Overdue' : '']);
   const totals = (list) => list.map(({ amount: value, currency }) => amount(value, currency)).join(', ') || '0';
   const headers = ['Invoice', 'Invoice Date', 'Due Date', 'Residual', 'Overdue'];
-  const base = followUpEmail(db, letter.reminder, letter.level, partner);
+  const base = followUpEmail(db, letter.reminder, letter.level, partner, { joinInvoices });
   const text = `${base.text}\n\n${headers.join(' | ')}\n${rows.map((row) => row.join(' | ')).join('\n')}\nTotal Due: ${totals(letter.due)}\nTotal Overdue: ${totals(letter.overdue)}`;
   const html = `<p style="white-space:pre-line">${escapeHtml(base.text)}</p><table border="1"><thead><tr>${headers.map((v) => `<th>${escapeHtml(v)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`).join('')}</tbody></table><p>Total Due: ${escapeHtml(totals(letter.due))}<br>Total Overdue: ${escapeHtml(totals(letter.overdue))}</p>`;
+  const attachments = base.joinInvoices
+    ? (base.invoiceIds ?? [])
+      .map((invId) => read(db, 'account.move', invId))
+      .filter((inv) => inv && documentCompany(db, inv))
+      .map((inv) => ({
+        filename: `${String(inv.name || `invoice-${inv.id}`).replace(/[^A-Za-z0-9._-]+/g, '_')}.html`,
+        contentType: 'text/html; charset=utf-8',
+        content: documentHtml(db, 'account.move', inv),
+      }))
+    : [];
   const validated = applyDiff(db, diffDb(db, next), writeOptions);
-  await deliver(cfg, { ...base, text, html });
+  await deliver(cfg, { ...base, text, html, ...(attachments.length ? { attachments } : {}) });
   return {
     status: 200,
     body: { ok: true },

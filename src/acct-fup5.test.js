@@ -62,7 +62,7 @@ test('wizard defaults and printable page show the customer and invoice totals', 
     const inputs = [];
     const visit = (node) => { if (node.tagName === 'INPUT') inputs.push(node); for (const c of node.childNodes ?? []) visit(c); };
     visit(host);
-    assert.deepEqual(inputs.map((node) => props(node).checked), [true, false]);
+    assert.deepEqual(inputs.map((node) => props(node).checked), [true, false, false, true]);
     assert.ok(find(host, (node) => node.tagName === 'BUTTON' && textOf(node) === 'Send'));
     await React.act(async () => root.render(React.createElement(FollowUpLetter, { partnerId: partner, companyId: 1 })));
     const text = textOf(host);

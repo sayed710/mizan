@@ -4072,6 +4072,22 @@ const ar = {
   'Problem Description': 'وصف المشكلة',
   'Initial balance ({amount}) does not match previous statement': 'الرصيد الافتتاحي ({amount}) لا يطابق كشف الحساب السابق',
   'Incorrect ending balance, expected {amount}': 'الرصيد النهائي غير صحيح، المتوقع {amount}',
+  Unpostpone: 'إلغاء التأجيل',
+  'Follow-up unpostponed.': 'تم إلغاء تأجيل المتابعة.',
+  'Email Templates': 'قوالب البريد الإلكتروني',
+  'SMS Templates': 'قوالب الرسائل القصيرة',
+  'Content Template': 'قالب المحتوى',
+  'SMS Template': 'قالب الرسالة القصيرة',
+  'Print Letter': 'طباعة الخطاب',
+  'Attach Invoices': 'إرفاق الفواتير',
+  'Attach the open overdue invoices to the follow-up email.': 'إرفاق الفواتير المستحقة المفتوحة ببريد المتابعة الإلكتروني.',
+  'Content Template must apply to Contact': 'يجب أن ينطبق قالب المحتوى على جهة الاتصال',
+  'SMS Template must apply to Contact': 'يجب أن ينطبق قالب الرسالة القصيرة على جهة الاتصال',
+  'Select at least one follow-up action.': 'اختر إجراء متابعة واحداً على الأقل.',
+  'WhatsApp integration is not configured.': 'تكامل واتساب غير مضبوط.',
+  'Follow-up Status Summary': 'ملخص حالة المتابعة',
+  'Follow-up Level Summary': 'ملخص مستوى المتابعة',
+  'No Follow-up Level': 'بدون مستوى متابعة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

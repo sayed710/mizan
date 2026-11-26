@@ -6,6 +6,7 @@ import { models } from '../registry.js';
 import { create, getActiveCompany, postNote, read, search, write } from '../orm.js';
 import { addDays, commercialPartnerId, isoDate, sameCommercialPartner, today, total, validDate } from './common.js';
 import { ACTIVITY_TYPES } from './mail.js';
+import { renderTemplate } from './mailing.js';
 import { currentActor, employeeFor } from './actor.js';
 import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, validStornoMove } from './ledger.js';
 import { toCompany } from './currency.js';
@@ -2250,13 +2251,37 @@ export function levelChannels(level) {
   const channels = [];
   if (level.send_email) channels.push('email');
   if (level.send_sms) channels.push('sms');
-  if (!channels.length && level.channel && !['email', 'sms'].includes(level.channel)) channels.push(level.channel);
+  if (level.print_letter || (!level.send_email && !level.send_sms && level.channel === 'letter')) channels.push('letter');
+  if (!channels.length && level.channel && !['email', 'sms', 'letter'].includes(level.channel)) channels.push(level.channel);
   return channels;
 }
 
 export function levelChannel(level) { return levelChannels(level)[0] ?? null; }
 
-const followUpSmsText = (db, part, level) => String(level?.sms_message ?? '').trim() || followUpText(db, part);
+/** Resolve the reminder message body from a linked mail template (rendered for `partner`) or the level's message. */
+export function followUpLevelMessage(db, level, partner = null) {
+  if (!level) return '';
+  const tpl = level.mail_template_id ? read(db, 'mail.template', level.mail_template_id) : null;
+  if (tpl?.body != null && String(tpl.body).trim()) {
+    return renderTemplate(tpl.body, partner ?? {}).trim();
+  }
+  return String(level.message ?? '');
+}
+
+/** Resolve the reminder subject from a linked mail template (rendered for `partner`) or the level's display name. */
+export function followUpLevelSubject(db, level, partner = null) {
+  if (!level) return 'Payment reminder';
+  const tpl = level.mail_template_id ? read(db, 'mail.template', level.mail_template_id) : null;
+  const rendered = tpl?.subject ? renderTemplate(tpl.subject, partner ?? {}).trim() : '';
+  return rendered || followUpLevelName(level);
+}
+
+const followUpSmsText = (db, part, level) => {
+  const partner = read(db, 'res.partner', part.partner_id);
+  const tpl = level?.sms_template_id ? read(db, 'sms.template', level.sms_template_id) : null;
+  const tplBody = tpl?.body ? renderTemplate(tpl.body, partner ?? {}).trim() : '';
+  return tplBody || String(level?.sms_message ?? '').trim() || followUpText(db, part);
+};
 
 function queueFollowUpSms(db, partner, part, level, at, automatic = false) {
   if (automatic && search(db, 'sms.campaign').some((campaign) => campaign.followup_sms && campaign.followup_partner_id === partner.id && campaign.followup_company_id === part.company_id && campaign.followup_level_id === level?.id && campaign.followup_oldest === part.oldest)) return db;
@@ -2840,13 +2865,32 @@ export function followUpLetter(db, partnerId, companyId, at = today()) {
   if (!reminder) throw new Error('This customer has no overdue invoices');
   const level = followUpLevel(db, reminder, at);
   if (!level) throw new Error('No follow-up level applies to this customer');
+  const partner = read(db, 'res.partner', partnerId);
   const { invoices, due, overdue } = partnerReceivableLines(db, partnerId, companyId, at, { upcoming: reminder.upcoming });
-  return { reminder, level, invoices, due, overdue };
+  return {
+    reminder,
+    level,
+    invoices,
+    due,
+    overdue,
+    subject: followUpLevelSubject(db, level, partner),
+    message: followUpLevelMessage(db, level, partner),
+  };
 }
 
 /** The automatic and manual email share the same subject and introductory text. */
-export function followUpEmail(db, reminder, level, partner) {
-  return { to: partner.email.trim(), subject: followUpLevelName(level), text: `${level.message ?? ''}\n${followUpText(db, reminder)}`.trim() };
+export function followUpEmail(db, reminder, level, partner, { joinInvoices } = {}) {
+  const attachInvoices = joinInvoices !== undefined ? Boolean(joinInvoices) : level?.join_invoices !== false;
+  const invoiceIds = attachInvoices
+    ? [...new Set((reminder?.invoices ?? []).filter((m) => m.id && Number(m.amount_residual) > 0 && m.move_type === 'out_invoice').map((m) => m.id))]
+    : [];
+  return {
+    to: partner.email.trim(),
+    subject: followUpLevelSubject(db, level, partner),
+    text: `${followUpLevelMessage(db, level, partner)}\n${followUpText(db, reminder)}`.trim(),
+    joinInvoices: attachInvoices,
+    invoiceIds,
+  };
 }
 
 const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate = true } = {}) => {
@@ -2869,7 +2913,7 @@ export function openManualFollowUp(db, partnerId, at = today(), { scope = db, re
 
 /** Record a reminder confirmed sent by hand. */
 export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null, ignoreNextActionDate = true } = {}) {
-  if (!['email', 'sms', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
+  if (!['email', 'sms', 'phone', 'letter', 'whatsapp'].includes(channel)) throw new Error('Invalid reminder channel');
   if (channel === 'email' && !read(db, 'res.partner', partnerId)?.email?.trim()) {
     throw new Error('A customer email address is required to send an email reminder');
   }
@@ -3088,6 +3132,122 @@ export function postponeFollowUp(db, partnerIds, nextActionDate, { companyId = n
     }
   }
   return nextDb;
+}
+
+/** Clear the postponed next reminder date for one or more partners on `companyId`. */
+export function unpostponeFollowUp(db, partnerIds, { companyId = null } = {}) {
+  const ids = normalizePartnerIds(partnerIds);
+  if (!ids.length) throw new Error('Select at least one customer first');
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  let nextDb = db;
+  for (const id of ids) {
+    const partner = read(nextDb, 'res.partner', id);
+    if (!partner) throw new Error('Customer not found');
+    const prevDate = partnerFollowUp(partner, cId)?.followup_next_action_date ?? null;
+    if (prevDate == null) continue;
+    nextDb = write(nextDb, 'res.partner', id, {
+      followup_lines: updatePartnerFollowUp(partner, cId, { followup_next_action_date: null }).followup_lines,
+    });
+    nextDb = postNote(nextDb, 'res.partner', id, 'Follow-up unpostponed.');
+  }
+  return nextDb;
+}
+
+const FOLLOWUP_STATUS_LABELS = {
+  in_need_of_action: 'In need of action',
+  with_overdue_invoices: 'With overdue invoices',
+  no_action_needed: 'No action needed',
+  postponed: 'Postponed',
+};
+
+/** Compute structured follow-up report rows and level/status summary for `allowed` companies at `at`. */
+export function followUpReportData(db, allowed, statusFilter = 'all', at = today()) {
+  const reportDate = agedReportDate(at);
+  const allowedSet = new Set(allowed);
+  const allFollowUps = followUps(db, reportDate, { ignoreNextActionDate: true });
+  const companyBalances = new Map();
+  for (const cId of allowed) {
+    companyBalances.set(cId, companyReceivableLines(db, cId, reportDate));
+  }
+
+  const companyGroups = new Map();
+  const statusMap = new Map();
+  const levelMap = new Map();
+  const grandByCurrency = new Map();
+  let totalCount = 0;
+
+  const accumulateCurrency = (map, key, label, compCurr, due, overdue) => {
+    let entry = map.get(key);
+    if (!entry) {
+      entry = { key, label, count: 0, totalsByCurrency: new Map() };
+      map.set(key, entry);
+    }
+    entry.count += 1;
+    const currKey = compCurr?.id ?? 'default';
+    const prev = entry.totalsByCurrency.get(currKey) ?? { currency: compCurr, due: 0, overdue: 0 };
+    entry.totalsByCurrency.set(currKey, {
+      currency: compCurr,
+      due: roundCurrency(prev.due + due, compCurr),
+      overdue: roundCurrency(prev.overdue + overdue, compCurr),
+    });
+  };
+
+  for (const f of allFollowUps) {
+    for (const part of followUpCompanies(f)) {
+      const cId = part.company_id ?? part.invoices[0]?.company_id ?? 1;
+      if (!allowedSet.has(cId)) continue;
+      const partner = read(db, 'res.partner', part.partner_id);
+      const status = partnerFollowUpStatus(db, partner, cId, reportDate);
+      const postponed = isPartnerFollowUpPostponed(db, partner, cId, reportDate);
+      if (statusFilter === 'in_need_of_action' && status !== 'in_need_of_action') continue;
+      if (statusFilter === 'postponed' && !postponed) continue;
+
+      const compCurr = companyCurrencyRecord(db, cId);
+      const info = companyBalances.get(cId)?.get(part.partner_id) ?? partnerReceivableLines(db, part.partner_id, cId, reportDate);
+      const level = followUpLevel(db, part, reportDate);
+      const levelName = level ? followUpLevelName(level) : null;
+      const compLine = partnerFollowUp(partner, cId);
+      const displayStatusKey = postponed ? 'postponed' : status;
+      const displayStatusLabel = FOLLOWUP_STATUS_LABELS[displayStatusKey] ?? displayStatusKey;
+
+      const row = {
+        ...part,
+        companyId: cId,
+        partner,
+        compLine,
+        compCurr,
+        info,
+        level,
+        levelName,
+        status,
+        postponed,
+        displayStatusKey,
+        displayStatusLabel,
+      };
+      if (!companyGroups.has(cId)) companyGroups.set(cId, []);
+      companyGroups.get(cId).push(row);
+
+      totalCount += 1;
+      accumulateCurrency(statusMap, displayStatusKey, displayStatusLabel, compCurr, info.total_due, info.total_overdue);
+      accumulateCurrency(levelMap, level?.id ?? 'none', levelName ?? 'No Follow-up Level', compCurr, info.total_due, info.total_overdue);
+      const gKey = compCurr?.id ?? 'default';
+      const gPrev = grandByCurrency.get(gKey) ?? { currency: compCurr, due: 0, overdue: 0 };
+      grandByCurrency.set(gKey, {
+        currency: compCurr,
+        due: roundCurrency(gPrev.due + info.total_due, compCurr),
+        overdue: roundCurrency(gPrev.overdue + info.total_overdue, compCurr),
+      });
+    }
+  }
+
+  return {
+    at: reportDate,
+    companyGroups,
+    statusSummary: [...statusMap.values()].map((s) => ({ ...s, totals: [...s.totalsByCurrency.values()] })),
+    levelSummary: [...levelMap.values()].map((l) => ({ ...l, totals: [...l.totalsByCurrency.values()] })),
+    totalCount,
+    grandTotals: [...grandByCurrency.values()],
+  };
 }
 
 /**
@@ -3500,10 +3660,31 @@ export const financeModels = {
       delay: { type: 'integer', label: 'Days Overdue', hidden: true },
       send_email: { type: 'boolean', label: 'Email' },
       send_sms: { type: 'boolean', label: 'SMS' },
+      print_letter: { type: 'boolean', label: 'Print Letter' },
+      join_invoices: {
+        type: 'boolean',
+        label: 'Attach Invoices',
+        hideWhen: (r) => !r?.send_email && !r?.print_letter,
+        help: 'Attach the open overdue invoices to the follow-up email.',
+      },
       auto_execute: {
         type: 'boolean',
         label: 'Automatic',
         help: 'Automatically execute this follow-up level when due.',
+      },
+      mail_template_id: {
+        type: 'many2one',
+        relation: 'mail.template',
+        label: 'Content Template',
+        domain: (tpl) => !tpl?.model || tpl.model === 'res.partner',
+        hideWhen: (r) => !r?.send_email && !r?.print_letter,
+      },
+      sms_template_id: {
+        type: 'many2one',
+        relation: 'sms.template',
+        label: 'SMS Template',
+        domain: (tpl) => !tpl?.model || tpl.model === 'res.partner',
+        hideWhen: (r) => !r?.send_sms,
       },
       sms_message: { type: 'text', label: 'SMS Text', hideWhen: (r) => !r?.send_sms },
       create_activity: { type: 'boolean', label: 'Schedule Activity' },
@@ -3555,6 +3736,8 @@ export const financeModels = {
       delay: 15,
       send_email: true,
       send_sms: false,
+      print_letter: false,
+      join_invoices: true,
       auto_execute: true,
       create_activity: false,
       activity_default_responsible_type: 'followup',
@@ -3573,10 +3756,17 @@ export const financeModels = {
       if (next.send_sms === undefined && next.channel === 'sms') {
         next.send_sms = true;
       }
+      if (next.print_letter === undefined && next.channel === 'letter') {
+        next.print_letter = true;
+      }
+      if (next.join_invoices === undefined) {
+        next.join_invoices = true;
+      }
       const effectiveSendEmail = next.send_email !== undefined ? next.send_email : true;
       if (next.channel === undefined) {
         if (effectiveSendEmail) next.channel = 'email';
         else if (next.send_sms) next.channel = 'sms';
+        else if (next.print_letter) next.channel = 'letter';
       }
       const effDays = next.display_delay !== undefined ? next.display_delay : 15;
       const effTiming = next.reminder_timing ?? 'after';
@@ -3596,8 +3786,10 @@ export const financeModels = {
           reminder_timing: raw < 0 ? 'before' : 'after',
         };
       }
-      if (field === 'send_email' || field === 'send_sms') {
-        return { channel: rec.send_email ? 'email' : rec.send_sms ? 'sms' : (['email', 'sms'].includes(rec.channel) ? null : rec.channel) };
+      if (field === 'send_email' || field === 'send_sms' || field === 'print_letter') {
+        return {
+          channel: rec.send_email ? 'email' : rec.send_sms ? 'sms' : rec.print_letter ? 'letter' : (['email', 'sms', 'letter'].includes(rec.channel) ? null : rec.channel),
+        };
       }
       return null;
     },
@@ -3605,19 +3797,28 @@ export const financeModels = {
       if (record.display_delay == null || Number(record.display_delay) < 0 || !Number.isInteger(Number(record.display_delay))) {
         return 'Due Days must be a non-negative integer';
       }
+      if (record.mail_template_id != null) {
+        const tpl = read(db, 'mail.template', record.mail_template_id);
+        if (tpl && tpl.model && tpl.model !== 'res.partner') return 'Content Template must apply to Contact';
+      }
+      if (record.sms_template_id != null) {
+        const tpl = read(db, 'sms.template', record.sms_template_id);
+        if (tpl && tpl.model && tpl.model !== 'res.partner') return 'SMS Template must apply to Contact';
+      }
       if (record.create_activity && (!record.activity_type_id || !String(record.activity_summary ?? '').trim())) {
         return 'Activity Type and Summary are required when Schedule Activity is enabled';
       }
       return null;
     },
     sort: (a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0) || a.id - b.id,
-    kanban: { title: 'display_name', lines: ['send_email', 'send_sms', 'create_activity'] },
-    list: ['display_delay', 'reminder_timing', 'send_email', 'send_sms', 'activity_type_id', 'company_id'],
+    kanban: { title: 'display_name', lines: ['send_email', 'send_sms', 'print_letter', 'create_activity'] },
+    list: ['display_delay', 'reminder_timing', 'send_email', 'send_sms', 'print_letter', 'join_invoices', 'activity_type_id', 'company_id'],
     listLabels: { activity_type_id: 'Activity' },
     searchFields: ['display_name', 'activity_summary', 'activity_note'],
     filters: [[
       { id: 'email', label: 'Email', fn: (r) => Boolean(r.send_email) },
       { id: 'sms', label: 'SMS', fn: (r) => Boolean(r.send_sms) },
+      { id: 'print_letter', label: 'Print Letter', fn: (r) => Boolean(r.print_letter || (!r.send_email && !r.send_sms && r.channel === 'letter')) },
       { id: 'activity', label: 'Schedule Activity', fn: (r) => Boolean(r.create_activity) },
       { id: 'auto_execute', label: 'Automatic', fn: (r) => r.auto_execute !== false },
     ]],
@@ -3633,8 +3834,9 @@ export const financeModels = {
         {
           label: 'Notification',
           groups: [
-            { title: 'Actions', fields: ['send_email', 'send_sms'] },
-            { title: 'Options', fields: ['auto_execute'] },
+            { title: 'Actions', fields: ['send_email', 'send_sms', 'print_letter'] },
+            { title: 'Options', fields: ['auto_execute', 'join_invoices'] },
+            { title: 'Content', fields: ['mail_template_id', 'sms_template_id'] },
             { fullWidth: true, fields: ['message', 'sms_message'] },
           ],
         },

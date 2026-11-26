@@ -1,7 +1,7 @@
 import { create, getActiveCompany, read, write, writeMany } from '../orm.js';
 import { commercialPartnerId, today, validDate } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, postponeFollowUp, postponeFollowUpWizardSpec, unpostponeFollowUp, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 import { LANGUAGES } from '../i18n.js';
 import { countryIdFor, countryReferenceError, stateIdFor } from './country.js';
@@ -1008,6 +1008,19 @@ export const crmModels = {
         when: (_r, db, user) => appOpen(db, user, 'accounting'),
         visible: (_r, db, user) => appOpen(db, user, 'accounting'),
         run: (db, r) => ({ db, go: `#/followup/send/${r.id}?company=${db.settings?.current_company_id ?? 1}` }),
+      }, {
+        label: 'Postpone',
+        app: 'accounting',
+        when: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && !isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        visible: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && !isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        wizard: () => postponeFollowUpWizardSpec(),
+        run: (db, r, values) => ({ db: postponeFollowUp(db, [r.id], values.date, { companyId: db?.settings?.current_company_id ?? 1 }) }),
+      }, {
+        label: 'Unpostpone',
+        app: 'accounting',
+        when: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        visible: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        run: (db, r) => ({ db: unpostponeFollowUp(db, [r.id], { companyId: db?.settings?.current_company_id ?? 1 }) }),
       }, { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
       groups: [
         ['is_company', 'parent_id', 'email', 'phone', 'vat', 'function', 'website', 'lang'],
