@@ -4157,6 +4157,9 @@ const ar = {
   'Automatic entries can only reference posted journal entries': 'لا يمكن للقيود التلقائية الإشارة إلا إلى قيود يومية مرحّلة',
   'Automatic entries cannot reference the same origin entry more than once': 'لا يمكن للقيود التلقائية الإشارة إلى نفس القيد الأصلي أكثر من مرة',
   'Automatic entries cannot be created for items from different companies': 'لا يمكن إنشاء قيود تلقائية لبنود من شركات مختلفة',
+  'The bank journal is archived': 'دفتر اليومية البنكي مؤرشف',
+  'The historical currency rate is unavailable': 'سعر العملة التاريخي غير متاح',
+  'Upgrade: could not book bank statement line:': 'ترقية: تعذّر قيد بند كشف الحساب البنكي:',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

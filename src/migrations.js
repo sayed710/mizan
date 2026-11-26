@@ -2617,11 +2617,13 @@ function migrateStatementLinesBankSuspense(db) {
       }
       try {
         if (line.company_id == null) currentDb = write(currentDb, 'account.bank.statement.line', line.id, { company_id: company });
-        const openAmount = statementCompanyAmount(currentDb, normalizedLine);
+        if (journal.active === false) throw new Error('The bank journal is archived');
+        const openAmount = statementCompanyAmount(currentDb, normalizedLine, undefined, { allowUnavailable: true });
+        if (openAmount == null) throw new Error('The historical currency rate is unavailable');
         const booked = bookBankMovement(currentDb, normalizedLine, company, { date: line.date ?? today(), openAmount });
         currentDb = booked.db;
       } catch (error) {
-        throw new Error(`Cannot book bank statement line ${line.id}: ${error.message}`, { cause: error });
+        currentDb = postNote(currentDb, 'account.bank.statement.line', line.id, `Upgrade: could not book bank statement line: ${error.message}`);
       }
     }
   }

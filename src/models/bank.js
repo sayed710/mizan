@@ -1,7 +1,7 @@
 // Bank reconciliation: statement lines matched to open invoices/bills, or booked directly to an account.
 import { read, search, write } from '../orm.js';
 import { monthFilters, shiftMonth, today } from './common.js';
-import { bookedBankSuspenseAccountId, bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, partnerAccount, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
+import { bookedBankSuspenseAccountId, bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isBookedToSuspense, isLiquidityAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, partnerAccount, postEntry, resolveEntryAnalytics, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { appendDocumentSettlement, markAsReviewed, residual, settleWriteoff } from './accounting.js';
 import { settlementCompanyAmount } from './settlement.js';
@@ -13,7 +13,7 @@ import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { shouldBePaid } from './billcontrol.js';
 import { reverseEntry, reverseWriteoff, unreconcileInvoicePayment } from './pay.js';
-import { removeAnalytic } from './analyticplus.js';
+import { postAnalytic, removeAnalytic } from './analyticplus.js';
 
 /** The first active matching reconciliation model (by sequence), or null. */
 const modelFor = (db, line) => suggestRule(db, line);
@@ -631,8 +631,9 @@ export function bookToAccount(db, line, opts = {}) {
       ? { account_id: suspenseId, debit: 0, credit: totalSuspense, ...remFx(-1), name: line.payment_ref || '/' }
       : { account_id: suspenseId, debit: totalSuspense, credit: 0, ...remFx(1), name: line.payment_ref || '/' };
   }
-  const newLines = [...otherLines, ...counterparts, ...(remSuspenseLine ? [remSuspenseLine] : [])];
+  const newLines = resolveEntryAnalytics(current, bankMove, [...otherLines, ...counterparts, ...(remSuspenseLine ? [remSuspenseLine] : [])]);
   current = writeBankStatementMove(current, bankMoveId, newLines);
+  current = postAnalytic(removeAnalytic(current, bankMoveId), bankMoveId);
 
   const reviewed = line.review_requested ? write(current, 'account.move', bankMoveId, { to_check: true }) : current;
   return {
@@ -1222,7 +1223,7 @@ function bankEntryGuardError(db, after, { before, company, round, referenceAmoun
   return null;
 }
 
-function untouchedBankEntry(db, line) {
+export function untouchedBankEntry(db, line) {
   if (!line?.bank_move_id || line.state !== 'to_check' || (line.allocations ?? []).length || line.move_id) return false;
   const move = read(db, 'account.move', line.bank_move_id);
   const journal = read(db, 'account.journal', line.journal_id);
@@ -1488,7 +1489,9 @@ function lineGuard(db, before, after, ctx = null) {
       return 'The bank entry is already linked to another transaction';
     }
     const move = read(db, 'account.move', after.bank_move_id);
-    const suspenseId = bookedBankSuspenseAccountId(db, after, move)
+    const originalDb = ctx?.originalDb ?? db;
+    const originalMove = before?.bank_move_id && read(originalDb, 'account.move', before.bank_move_id);
+    const suspenseId = (originalMove && bookedBankSuspenseAccountId(originalDb, before, originalMove))
       ?? (journal.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
         ? journal.suspense_account_id
         : read(db, 'res.company', company)?.account_journal_suspense_account_id);
@@ -1497,7 +1500,7 @@ function lineGuard(db, before, after, ctx = null) {
     const suspense = lines.filter((item) => item.account_id === suspenseId);
     const sign = after.amount > 0 ? 1 : -1;
     const net = (item) => round(sign * (Number(item.debit || 0) - Number(item.credit || 0)));
-    if (move?.journal_id !== after.journal_id || !suspenseId || lines.length !== 2 || bank.length !== 1 || suspense.length !== 1
+    if (after.state === 'reconciled' || move?.journal_id !== after.journal_id || !suspenseId || lines.length !== 2 || bank.length !== 1 || suspense.length !== 1
       || net(bank[0]) !== referenceAmount || net(suspense[0]) !== -referenceAmount
       || round(Number(after.open_amount ?? referenceAmount)) !== referenceAmount) {
       return 'The bank entry must book the transaction amount in suspense';

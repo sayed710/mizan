@@ -58,6 +58,20 @@ test('an unallocated statement line cannot link an unrelated posted entry', () =
   assert.throws(() => applyDiff(first.db, diffDb(first.db, forged), { isAdmin: true }), /bank entry|already linked/i);
 });
 
+test('sync rejects unallocated bank entry substitutions with partner or state changes', () => {
+  const { db, bankJournal, suspenseAccount } = setupBankTestDb();
+  const account = create(db, 'account.account', { name: 'Other expense', code: '600999', account_type: 'expense', company_id: 1 });
+  const created = create(account.db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'Deposit', amount: 100 });
+  const line = read(created.db, LINE_MODEL, created.id);
+  const move = read(created.db, MOVE_MODEL, line.bank_move_id);
+  for (const changes of [{ partner_id: 3, state: 'reconciled', move_id: move.id, open_amount: null }, { state: 'reconciled', move_id: move.id, open_amount: null }]) {
+    const partner = changes.partner_id ?? null;
+    const forgedMove = { ...move, ...(changes.partner_id ? { partner_id: partner } : {}), line_ids: move.line_ids.map((item) => ({ ...item, ...(changes.partner_id ? { partner_id: partner } : {}), account_id: item.account_id === suspenseAccount.id ? account.id : item.account_id })) };
+    const forged = { ...created.db, records: { ...created.db.records, [LINE_MODEL]: created.db.records[LINE_MODEL].map((item) => item.id === line.id ? { ...item, ...changes } : item), [MOVE_MODEL]: created.db.records[MOVE_MODEL].map((item) => item.id === move.id ? forgedMove : item) } };
+    assert.throws(() => applyDiff(created.db, diffDb(created.db, forged), { isAdmin: true }));
+  }
+});
+
 test('untouched booked transactions can be corrected and deleted with reversal entries', () => {
   const { db, bankJournal } = setupBankTestDb();
   const created = create(db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'Mistyped', amount: 100 });
@@ -70,6 +84,17 @@ test('untouched booked transactions can be corrected and deleted with reversal e
   const deleted = unlink(corrected, LINE_MODEL, [created.id]);
   assert.ok(search(deleted, MOVE_MODEL).some((move) => move.reversed_entry_id === line.bank_move_id));
   assert.doesNotThrow(() => applyDiff(corrected, diffDb(corrected, deleted), { isAdmin: true }));
+});
+
+test('deleting a statement detaches its untouched booked transactions', () => {
+  const { db, bankJournal } = setupBankTestDb();
+  const statement = create(db, 'account.bank.statement', { name: 'Statement', journal_id: bankJournal.id, company_id: 1, date: '2026-05-01' });
+  const created = create(statement.db, LINE_MODEL, { statement_id: statement.id, journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'Deposit', amount: 100 });
+  const bankMoveId = read(created.db, LINE_MODEL, created.id).bank_move_id;
+  const result = unlink(created.db, 'account.bank.statement', [statement.id]);
+  assert.equal(read(result, 'account.bank.statement', statement.id), undefined);
+  assert.equal(read(result, LINE_MODEL, created.id).statement_id, null);
+  assert.equal(read(result, LINE_MODEL, created.id).bank_move_id, bankMoveId);
 });
 
 test('migration books a company-less legacy line using its journal company currency', () => {
@@ -89,6 +114,25 @@ test('migration books a company-less legacy line using its journal company curre
   const move = read(migrated, MOVE_MODEL, result.bank_move_id);
   assert.equal(move.company_id, company.id);
   assert.equal(move.line_ids.find((item) => item.account_id === journal.default_account_id).debit, 50);
+});
+
+test('migration records booking failures and continues with other statement lines', () => {
+  const { db, bankJournal, bankAccount } = setupBankTestDb();
+  const invalidJournal = { ...bankJournal, id: 90002, suspense_account_id: bankAccount.id };
+  const foreign = search(db, 'res.currency').find((currency) => currency.id !== read(db, 'res.company', 1).currency_id);
+  const noRate = { ...foreign, rate_ids: [] };
+  const lines = [
+    { id: 90003, journal_id: invalidJournal.id, company_id: 1, date: '1900-01-01', payment_ref: 'Invalid', amount: 10, state: 'to_check' },
+    { id: 90004, journal_id: bankJournal.id, company_id: 1, currency_id: foreign.id, date: '1900-01-01', payment_ref: 'Foreign', amount: 20, open_amount: 20, state: 'to_check' },
+    { id: 90005, journal_id: bankJournal.id, company_id: 1, date: '2026-05-01', payment_ref: 'Valid', amount: 30, state: 'to_check' },
+  ];
+  const legacy = { ...db, schema_version: 80, records: { ...db.records, 'account.journal': [...db.records['account.journal'], invalidJournal], 'res.currency': db.records['res.currency'].map((c) => c.id === noRate.id ? noRate : c), [LINE_MODEL]: [...db.records[LINE_MODEL], ...lines] } };
+  const migrated = migrate(legacy);
+  assert.ok(!read(migrated, LINE_MODEL, 90003).bank_move_id);
+  assert.ok(!read(migrated, LINE_MODEL, 90004).bank_move_id);
+  assert.ok(read(migrated, LINE_MODEL, 90005).bank_move_id);
+  assert.ok(migrated.messages.some((message) => message.res_id === 90003));
+  assert.ok(migrated.messages.some((message) => message.res_id === 90004));
 });
 
 test('BANK-2: importing statement lines immediately posts an entry in the bank journal (bank vs suspense) and GL bank balance equals statement', () => {
@@ -583,6 +627,26 @@ test('BANK-3: directBank shortcut for statement lines is refused in payMove', ()
   }, /direct bank/i);
 });
 
+test('legacy invoice match restores its payment move to bank suspense', () => {
+  const { db: base, bankJournal, suspenseAccount } = setupBankTestDb();
+  const journal = create(base, 'account.journal', { name: 'Legacy Direct', code: 'LDR', type: 'bank', company_id: 1, default_account_id: bankJournal.default_account_id, suspense_account_id: suspenseAccount.id, outstanding_receipts_account_id: null, outstanding_payments_account_id: null });
+  const invoice = create(journal.db, MOVE_MODEL, { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-06-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
+  let db = postMove(invoice.db, invoice.id);
+  db = payMove(db, invoice.id, 100, '2026-06-02', { journalId: journal.id });
+  const payment = search(db, 'account.payment').find((item) => item.invoice_id === invoice.id);
+  assert.ok(payment?.move_id);
+  const line = { id: 90006, journal_id: journal.id, company_id: 1, date: '2026-06-02', payment_ref: 'Legacy', amount: 100, state: 'reconciled', move_id: invoice.id, bank_move_id: payment.move_id, open_amount: 0, allocations: [{ invoice_id: invoice.id, payment_move_id: payment.move_id, amount: 100 }] };
+  db = { ...db, records: { ...db.records, [LINE_MODEL]: [...db.records[LINE_MODEL], line] } };
+  const released = unreconcile(db, line).db;
+  const result = read(released, LINE_MODEL, line.id);
+  assert.equal(result.state, 'to_check');
+  assert.equal(result.bank_move_id, payment.move_id);
+  assert.equal(result.open_amount, 100);
+  assert.ok(read(released, MOVE_MODEL, payment.move_id).line_ids.some((item) => item.account_id === suspenseAccount.id && item.credit === 100));
+  assert.ok(read(released, MOVE_MODEL, invoice.id).payments.every((row) => row.reversed));
+  assert.doesNotThrow(() => applyDiff(db, diffDb(db, released), { isAdmin: true }));
+});
+
 test('moveGuard: general statement entry rewrites are rejected via diffDb + applyDiff', () => {
   const { db: baseDb, bankJournal, bankAccount } = setupBankTestDb();
 
@@ -716,6 +780,22 @@ test('rule matching retains an account created while resolving suspense', () => 
   assert.equal(read(matched, LINE_MODEL, line.id).state, 'reconciled');
 });
 
+test('full coverage rule applies analytic defaults and requires mandatory plans', () => {
+  const { db: base, bankJournal } = setupBankTestDb();
+  const enabled = write(base, 'res.company', 1, { group_analytic_accounting: true });
+  const plan = create(enabled, 'account.analytic.plan', { name: 'Rule allocation', default_applicability: 'mandatory' });
+  const analytic = create(plan.db, 'account.analytic.account', { name: 'Rule cost', plan_id: plan.id });
+  const expense = search(analytic.db, 'account.account').find((account) => account.code === '600000');
+  const rule = create(analytic.db, 'account.reconcile.model', { name: 'Full expense', rule_type: 'writeoff_button', line_ids: [{ account_id: expense.id, amount_type: 'percentage', amount: 100 }] });
+  const line = create(rule.db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-06-01', payment_ref: 'Rule fee', amount: -100 });
+  assert.throws(() => applyRule(line.db, read(line.db, 'account.reconcile.model', rule.id), read(line.db, LINE_MODEL, line.id)), /mandatory.*Rule allocation/i);
+  const configured = create(line.db, 'account.analytic.distribution.model', { account_prefix: expense.code, company_id: 1, analytic_distribution: { [analytic.id]: 100 } }).db;
+  const booked = applyRule(configured, read(configured, 'account.reconcile.model', rule.id), read(configured, LINE_MODEL, line.id));
+  const moveId = read(booked, LINE_MODEL, line.id).bank_move_id;
+  assert.deepEqual(read(booked, MOVE_MODEL, moveId).line_ids.find((item) => item.account_id === expense.id).analytic_distribution, { [analytic.id]: 100 });
+  assert.ok(search(booked, 'account.analytic.line').some((item) => item.move_id === moveId && item.account_id === analytic.id));
+});
+
 test('BANK-3 & BANK-6: multi-invoice reconcileWith rewrites suspense line on existing bank entry', () => {
   const { db: baseDb, bankJournal, bankAccount } = setupBankTestDb();
 
@@ -817,6 +897,22 @@ test('BANK-3 & BANK-6: bookToAccount rewrites suspense line on existing bank ent
   assert.equal(sLine, undefined, 'Suspense line replaced by expense counterpart');
 
   assert.doesNotThrow(() => applyDiff(lineRes.db, diffDb(lineRes.db, db), { isAdmin: true }));
+});
+
+test('manual bank booking applies analytic defaults and enforces mandatory plans', () => {
+  const { db: base, bankJournal } = setupBankTestDb();
+  const expense = search(base, 'account.account').find((account) => account.code === '600000');
+  const enabled = write(base, 'res.company', 1, { group_analytic_accounting: true });
+  const plan = create(enabled, 'account.analytic.plan', { name: 'Bank allocation', default_applicability: 'mandatory' });
+  const analytic = create(plan.db, 'account.analytic.account', { name: 'Bank cost', plan_id: plan.id });
+  const line = create(analytic.db, LINE_MODEL, { journal_id: bankJournal.id, company_id: 1, date: '2026-06-02', payment_ref: 'Fee', amount: -30 });
+  const withAccount = write(line.db, LINE_MODEL, line.id, { counterpart_account_id: expense.id });
+  assert.throws(() => bookToAccount(withAccount, read(withAccount, LINE_MODEL, line.id)), /mandatory.*Bank allocation/i);
+  const configured = create(withAccount, 'account.analytic.distribution.model', { account_prefix: expense.code, company_id: 1, analytic_distribution: { [analytic.id]: 100 } }).db;
+  const booked = bookToAccount(configured, read(configured, LINE_MODEL, line.id)).db;
+  const moveId = read(booked, LINE_MODEL, line.id).bank_move_id;
+  assert.deepEqual(read(booked, MOVE_MODEL, moveId).line_ids.find((item) => item.account_id === expense.id).analytic_distribution, { [analytic.id]: 100 });
+  assert.ok(search(booked, 'account.analytic.line').some((item) => item.move_id === moveId && item.account_id === analytic.id));
 });
 
 test('Changing journal or company suspense account is allowed while open lines exist and does not strand already booked statement lines', () => {

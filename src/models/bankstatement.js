@@ -1,7 +1,7 @@
 // Bank statements (account.bank.statement) tracking opening, ending, and computed balances across statement lines.
 import { create, read, search, unlink, write } from '../orm.js';
 import { isLiquidityJournal, paymentJournal, statementCompanyAmount } from './ledger.js';
-import { bookToAccount } from './bank.js';
+import { bookToAccount, untouchedBankEntry } from './bank.js';
 import { monthFilters, today } from './common.js';
 import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
@@ -346,7 +346,7 @@ function statementProtectDelete(db, statement, staged = db) {
     return 'Cannot delete a statement with reconciled lines';
   }
   const hasBooked = (source) => (source?.records?.['account.bank.statement.line'] ?? []).some(
-    (l) => l.statement_id === statement.id && l.bank_move_id,
+    (l) => l.statement_id === statement.id && l.bank_move_id && !untouchedBankEntry(source, l),
   );
   if (hasBooked(db) || hasBooked(staged)) {
     return 'Cannot delete a statement with booked lines';

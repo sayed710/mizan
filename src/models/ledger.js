@@ -21,6 +21,19 @@ export { STOCK_CHART_ROLES } from './stock-accounts.js';
 /** Whether `account` belongs to the income or expense account type family. */
 export const isIncomeOrExpenseAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_depreciation', 'expense_other'].includes(account?.account_type);
 export const analyticEligibleAccount = isIncomeOrExpenseAccount;
+
+export function resolveEntryAnalytics(db, move, lines, { systemGenerated = false } = {}) {
+  const resolved = lines.map((line) => {
+    let distribution = line.analytic_distribution ?? (line.analytic_account_id != null ? { [line.analytic_account_id]: 100 } : null);
+    if (distribution == null && !systemGenerated && analyticEligibleAccount(read(db, 'account.account', line.account_id))) {
+      distribution = findAnalyticDistribution(db, { partner_id: line.partner_id ?? move.partner_id, product_id: line.product_id, account_id: line.account_id, company_id: move.company_id ?? 1 });
+    }
+    return distribution == null ? line : { ...line, analytic_distribution: normalizeDistribution(distribution, db) };
+  });
+  if (analyticPostingHooks?.checkMandatoryPlans) analyticPostingHooks.checkMandatoryPlans(db, { ...move, line_ids: resolved }, { systemGenerated });
+  else if (search(db, 'account.analytic.plan').length) throw new Error('Analytic posting support is not loaded');
+  return resolved;
+}
 /** Whether journal items on `account` participate in reconciliation (AR, AP, or `reconcile` flag). */
 export const isReconcilableAccount = (account) => Boolean(account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type));
 let analyticPostingHooks = null;
@@ -849,7 +862,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ref,
     ...(system_generated ? { system_generated: true } : {}),
   };
-  const line_ids = lines.map((l) => {
+  const line_ids = resolveEntryAnalytics(db, moveContext, lines.map((l) => {
     let accId = null;
     if (l.account_id) accId = l.account_id;
     else if (typeof l.account === 'number') accId = l.account;
@@ -872,27 +885,11 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
     const currencyFields = accountCurrencyFields(db, acc, l, net, company, date);
     // Callers pass an explicit allocation; business entries receive applicable defaults from distribution models.
-    let distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
-    if (distribution == null && !system_generated && analyticEligibleAccount(acc)) {
-      const defaultDist = findAnalyticDistribution(db, {
-        partner_id: l.partner_id ?? moveContext.partner_id,
-        product_id: l.product_id,
-        account_id: accId,
-        company_id: company ?? 1,
-      });
-      if (defaultDist && Object.keys(defaultDist).length) {
-        distribution = defaultDist;
-      }
-    }
+    const distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
     return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...currencyFields, ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_ids?.length ? { tax_ids: [...l.tax_ids] } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}), ...(l.use_in_tax_closing != null ? { use_in_tax_closing: Boolean(l.use_in_tax_closing) } : {}) };
-  });
+  }), { systemGenerated: system_generated });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
-  if (analyticPostingHooks?.checkMandatoryPlans) {
-    analyticPostingHooks.checkMandatoryPlans(db, { ...moveContext, line_ids }, { systemGenerated: system_generated });
-  } else if (search(db, 'account.analytic.plan').length) {
-    throw new Error('Analytic posting support is not loaded');
-  }
   const isDraft = state === 'draft';
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;

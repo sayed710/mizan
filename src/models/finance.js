@@ -415,14 +415,30 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
   if (!changedFields(before, after, touched)) return null;
   const previousStatement = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
   const statement = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const legacyLine = previousStatement ?? statement;
+  const legacyAllocations = legacyLine?.allocations ?? [];
+  const journalForLegacy = read(db, 'account.journal', before.journal_id);
+  const legacySuspense = journalForLegacy?.suspense_account_id || read(db, 'res.company', before.company_id ?? 1)?.account_journal_suspense_account_id;
+  const legacyAmount = legacyLine && statementCompanyAmount(db, legacyLine);
+  const legacySign = legacyLine?.amount > 0 ? 1 : -1;
+  const legacyNet = (line) => legacySign * (Number(line.debit || 0) - Number(line.credit || 0));
+  const legacyRelease = legacyLine && !legacyLine.payment_id && !(legacyLine.payment_ids ?? []).length
+    && legacyAllocations.length > 0 && legacyAllocations.every((allocation) => allocation.invoice_id && (allocation.payment_move_id ?? before.id) === before.id
+      && (read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((row) => row.move_id === before.id && row.reversed)
+      && !(read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((row) => row.move_id === before.id && !row.reversed))
+    && (db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id)
+    && (after.line_ids ?? []).length === 2 && legacySuspense && legacySuspense !== journalForLegacy?.default_account_id
+    && (after.line_ids ?? []).some((line) => line.account_id === journalForLegacy.default_account_id && legacyNet(line) === legacyAmount)
+    && (after.line_ids ?? []).some((line) => line.account_id === legacySuspense && legacyNet(line) === -legacyAmount);
   const partnerChanged = previousStatement && statement && (previousStatement.partner_id ?? null) !== (statement.partner_id ?? null)
     && (after.partner_id ?? null) === (statement.partner_id ?? null)
-    && (after.line_ids ?? []).every((line) => (line.partner_id ?? null) === (statement.partner_id ?? null));
+    && (after.line_ids ?? []).every((line) => (line.partner_id ?? null) === (statement.partner_id ?? null))
+    && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids);
   if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
     return 'Posted entries cannot be edited; reset them to draft first';
   }
   if (changedFields(before, after, ['line_ids'])) {
-    if ((db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id)) return 'Posted entries cannot be edited; reset them to draft first';
+    if ((db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id) && !legacyRelease) return 'Posted entries cannot be edited; reset them to draft first';
     if (ctx?.bankRewriteToken !== bankRewriteToken) {
       const previous = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
       const next = previous && (db.records['account.bank.statement.line'] ?? []).find((line) => line.id === previous.id);
@@ -949,8 +965,15 @@ export function paymentInvariant(db, after) {
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
-  if (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
-    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > companyStep + 1e-9)) return 'The journal entry must book this payment amount and direction';
+  const releasedLine = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === entry.id && line.state === 'to_check' && !line.move_id && !(line.allocations ?? []).length && !line.payment_id && !(line.payment_ids ?? []).length);
+  const suspense = read(db, 'account.journal', entry.journal_id)?.suspense_account_id || read(db, 'res.company', entry.company_id ?? 1)?.account_journal_suspense_account_id;
+  const releasedLegacy = releasedLine && invoice && (invoice.payments ?? []).some((row) => row.move_id === entry.id && row.reversed && row.unapplied)
+    && !(invoice.payments ?? []).some((row) => row.move_id === entry.id && !row.reversed)
+    && (entry.line_ids ?? []).length === 2 && suspense && suspense !== bank
+    && (entry.line_ids ?? []).some((line) => line.account_id === bank && (inbound ? 1 : -1) * (Number(line.debit || 0) - Number(line.credit || 0)) === expected)
+    && (entry.line_ids ?? []).some((line) => line.account_id === suspense && (inbound ? -1 : 1) * (Number(line.debit || 0) - Number(line.credit || 0)) === expected);
+  if (!releasedLegacy && (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
+    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > companyStep + 1e-9))) return 'The journal entry must book this payment amount and direction';
   }
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;

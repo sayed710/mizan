@@ -3,7 +3,7 @@ import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { currentCompany } from './company.js';
 import { distributionModelCompanyError, postAnalytic, removeAnalytic } from './analyticplus.js';
-import { bookedBankSuspenseAccountId, ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
+import { bookedBankSuspenseAccountId, ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry, resolveEntryAnalytics } from './ledger.js';
 import { recordLockDate, writeBankStatementMove } from './finance.js';
 import { bookBankMovement, candidates, reconcileWith, setStatementLinePartner, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { statementHasReconciledLines } from './bankstatement.js';
@@ -457,11 +457,9 @@ function writeOff(db, rule, line) {
     const suspLine = externalAllocated > 0 ? (incoming
       ? { account_id: suspenseId, debit: 0, credit: externalAllocated, ...(foreign ? { currency_id: lineCurrencyId, amount_currency: -roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }
       : { account_id: suspenseId, debit: externalAllocated, credit: 0, ...(foreign ? { currency_id: lineCurrencyId, amount_currency: roundCurrency(Math.abs(line.amount) * externalAllocated / bookedStatementAmount(current, line), currency) } : {}), name: line.payment_ref || '/' }) : null;
-    const newLines = [...bankLines, ...items, ...(suspLine ? [suspLine] : [])];
+    const newLines = resolveEntryAnalytics(current, bankMove, [...bankLines, ...items, ...(suspLine ? [suspLine] : [])]);
     current = writeBankStatementMove(current, bankMoveId, newLines);
-    if (items.some((l) => l.analytic_distribution)) {
-      current = postAnalytic(removeAnalytic(current, bankMoveId), bankMoveId);
-    }
+    current = postAnalytic(removeAnalytic(current, bankMoveId), bankMoveId);
     return write(current, 'account.bank.statement.line', line.id, {
       state: 'reconciled',
       move_id: bankMoveId,
