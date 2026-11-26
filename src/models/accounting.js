@@ -2622,6 +2622,32 @@ const moveCashBasisEntries = (db, r) => (db && r?.id ? search(db, 'account.move'
 /** Adjusting entries linked to `r` via `deferred_adjustment_of_id`. */
 const moveAdjustingEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.deferred_adjustment_of_id === r.id) : []);
 
+/** Automatic entries generated from `r` via Move to Account or Change Period. */
+const moveAutomaticEntries = (db, r) => (db && r?.id
+  ? search(db, 'account.move').filter((m) => m.state !== 'cancel' && (m.automatic_entry_source_move_ids ?? []).includes(r.id))
+  : []);
+
+/** Validate automatic entry origin links, company isolation, and journal company membership. */
+function automaticEntryMoveError(db, before, after) {
+  const hadSources = Array.isArray(before?.automatic_entry_source_move_ids) && before.automatic_entry_source_move_ids.length > 0;
+  if (before?.state === 'posted' && after?.state === 'posted' && hadSources
+    && JSON.stringify(before.automatic_entry_source_move_ids ?? []) !== JSON.stringify(after.automatic_entry_source_move_ids ?? [])) {
+    return 'Posted entries cannot be edited; reset them to draft first';
+  }
+  const sourceIds = after?.automatic_entry_source_move_ids;
+  if (!Array.isArray(sourceIds) || !sourceIds.length) return null;
+  if (after.move_type !== 'entry') return 'Automatic entries must be miscellaneous journal entries';
+  const companyId = after.company_id ?? 1;
+  const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
+  if (journal?.company_id && journal.company_id !== companyId) return 'Journal and entry must belong to the same company';
+  for (const srcId of sourceIds) {
+    const src = read(db, 'account.move', srcId);
+    if (!src || src.state !== 'posted') return 'Automatic entries can only reference posted journal entries';
+    if ((src.company_id ?? 1) !== companyId) return 'Automatic entries cannot be created for items from different companies';
+  }
+  return null;
+}
+
 /** Deferral schedules referencing journal entry or invoice/bill `r`. */
 const moveDeferrals = (db, r) => {
   if (!db || !r?.id) return [];
@@ -3926,7 +3952,7 @@ export const accountingModels = {
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
         return 'The inter-company bill is posted or paid; issue a credit note instead';
       }
-      const baseErr = archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx);
+      const baseErr = archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? automaticEntryMoveError(db, before, after) ?? paymentGuard(db, before, after, ctx);
       if (baseErr) return baseErr;
       if (after.state === 'draft' && after.posting_order != null) return 'Draft move cannot have a posting order';
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
@@ -4249,6 +4275,7 @@ export const accountingModels = {
       cash_basis_base_grid: { type: 'boolean', label: 'Cash Basis Base Grid', readonly: true, hidden: true },
       is_storno: { type: 'boolean', label: 'Storno accounting', readonly: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
+      automatic_entry_source_move_ids: { type: 'many2many', relation: 'account.move', label: 'Origin Entries', readonly: true, hidden: true },
       deferred_adjustment_of_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true, hidden: true },
       // Set by fiscal closing and exchange revaluation only.
       is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },
@@ -4401,6 +4428,24 @@ export const accountingModels = {
           when: (r, db) => moveAdjustingEntries(db, r).length > 0,
           value: (db, r) => moveAdjustingEntries(db, r).length,
           target: (r) => `accounting/entries?view=list&rel=deferred_adjustment_of_id:${r.id}`,
+        },
+        {
+          label: 'Automatic Entries',
+          when: (r, db) => moveAutomaticEntries(db, r).length > 0,
+          value: (db, r) => moveAutomaticEntries(db, r).length,
+          target: (r, db) => {
+            const list = moveAutomaticEntries(db, r);
+            return list.length === 1 ? `accounting/entries/${list[0].id}` : `accounting/entries?view=list&rel=id:${list.map((m) => m.id).join(',')}`;
+          },
+        },
+        {
+          label: 'Origin Entries',
+          when: (r) => Array.isArray(r?.automatic_entry_source_move_ids) && r.automatic_entry_source_move_ids.length > 0,
+          value: (db, r) => r.automatic_entry_source_move_ids.length,
+          target: (r) => {
+            const ids = r.automatic_entry_source_move_ids;
+            return ids.length === 1 ? `accounting/entries/${ids[0]}` : `accounting/entries?view=list&rel=id:${ids.join(',')}`;
+          },
         },
         {
           label: (r) => (['in_invoice', 'in_refund'].includes(r?.move_type) ? 'Deferred Expenses' : 'Deferrals'),

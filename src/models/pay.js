@@ -26,10 +26,13 @@ const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
 export const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund'] }, supplier: { inbound: ['in_refund'], outbound: ['in_invoice'] } };
 
 /** Resolve a selection against current records, never against list order or a caller's stale values. */
-export function selectedItems(db, selections, { allowMultipleEntryLines = false } = {}) {
+export function selectedItems(db, selections, { allowMultipleEntryLines = false, requireReconcilable = true, allowedStates = ['posted'] } = {}) {
   if (!selections?.length) throw new Error('Select journal items first');
   const seen = new Set();
   const reconciledByMove = new Map();
+  const missingMessage = allowedStates.length === 1 && allowedStates[0] === 'posted'
+    ? 'The selected journal item is missing, ambiguous or no longer posted; refresh the list'
+    : 'The selected journal item is missing or ambiguous; refresh the list';
   return selections.map(({ move_id, line_identity, line_index }) => {
     const key = JSON.stringify([move_id, line_index ?? line_identity]);
     if (seen.has(key)) throw new Error('Select each journal item only once');
@@ -38,23 +41,23 @@ export function selectedItems(db, selections, { allowMultipleEntryLines = false 
     let line;
     let lineIndex;
     if (line_index != null && Number.isInteger(line_index)) {
-      if (move?.state !== 'posted' || line_index < 0 || line_index >= (move?.line_ids ?? []).length) {
-        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      if (!move || !allowedStates.includes(move.state) || line_index < 0 || line_index >= (move?.line_ids ?? []).length) {
+        throw new Error(missingMessage);
       }
       line = move.line_ids[line_index];
       if (line_identity && journalItemIdentity(line) !== line_identity) {
-        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+        throw new Error(missingMessage);
       }
       lineIndex = line_index;
     } else {
       const matches = (move?.line_ids ?? []).filter((l) => journalItemIdentity(l) === line_identity);
-      if (move?.state !== 'posted' || matches.length !== 1) throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      if (!move || !allowedStates.includes(move.state) || matches.length !== 1) throw new Error(missingMessage);
       [line] = matches;
       lineIndex = (move.line_ids ?? []).indexOf(line);
     }
     const account = read(db, 'account.account', line.account_id);
     const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
-    if (!account || !(account.reconcile === true || counterpart)) throw new Error('Select items on a reconcilable account');
+    if (requireReconcilable && (!account || !(account.reconcile === true || counterpart))) throw new Error('Select items on a reconcilable account');
     // Multi-installment invoices and bills legitimately split one receivable/payable total across dated counterpart lines.
     const sameCounterpart = (move.line_ids ?? []).filter((item) => item.account_id === line.account_id && item.partner_id === line.partner_id);
     if (!allowMultipleEntryLines && sameCounterpart.length !== 1 && !(isInvoice(move) && counterpart)) throw new Error('This entry has multiple counterpart items; settle it from its document workflow');

@@ -19,6 +19,7 @@ import { downloadCsv } from '../csv.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { markAsReviewed } from '../models/accounting.js';
+import { automaticEntryDefaults, canChangePeriod, canMoveToAccount, canPostJournalItems, changePeriod, moveToAccount, postJournalItems } from '../models/automaticEntry.js';
 
 const OPTIONAL_STORAGE_KEY = 'mizan-report-cols:journalItems';
 
@@ -199,6 +200,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const [action, setAction] = useState('');
   const [date, setDate] = useState(today());
   const [amount, setAmount] = useState('');
+  const [percentage, setPercentage] = useState('100');
   const [journalId, setJournalId] = useState('');
   const [accountId, setAccountId] = useState('');
   const [label, setLabel] = useState('');
@@ -209,12 +211,24 @@ export function JournalItems({ leaf = {} } = {}) {
 
   const keyOf = (line) => JSON.stringify([line.move_id, line.line_identity]);
   const toggleFilter = (id) => setActiveFilters((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const handlePost = async () => {
+    setError('');
+    setBusy(true);
+    try {
+      const visible = new Set(journalItems(companyViewDb(getDb()), { reviewMode: 'all' }).map(keyOf));
+      if (selected.some((item) => !visible.has(keyOf(item)))) throw new Error('The selected items are no longer visible; refresh the selection');
+      const result = postJournalItems(getDb(), selected);
+      if ((await commit(result)).ok) { setSelected([]); setAction(''); }
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
   const run = async (event) => {
     event.preventDefault();
     setError('');
     setBusy(true);
     try {
-      const visible = new Set(journalItems(companyViewDb(getDb())).map(keyOf));
+      const visible = new Set(journalItems(companyViewDb(getDb()), { reviewMode: 'all' }).map(keyOf));
       if (selected.some((item) => !visible.has(keyOf(item)))) throw new Error('The selected items are no longer visible; refresh the selection');
       const execute = {
         Reconcile: (d, sel, opts) => reconcileLedgerItems(d, sel, { date: opts.date, amount: opts.amount }),
@@ -225,8 +239,26 @@ export function JournalItems({ leaf = {} } = {}) {
         Unreconcile: (d, sel, opts) => unreconcileLedgerItems(d, sel, { date: opts.date }),
         'Write Off': writeoffJournalItem,
         'Create Asset': createAssetsFromJournalItems,
+        'Move to Account': (d, sel, opts) => moveToAccount(d, sel, {
+          destinationAccountId: opts.accountId,
+          date: opts.date,
+          journalId: opts.journalId || null,
+        }),
+        'Change Period': (d, sel, opts) => changePeriod(d, sel, {
+          date: opts.date,
+          percentage: opts.percentage,
+          accountId: opts.accountId || null,
+          journalId: opts.journalId || null,
+        }),
       }[action];
-      const result = execute(getDb(), selected, { date, amount: amount === '' ? null : Number(amount), journalId: Number(journalId), accountId: Number(accountId), label });
+      const result = execute(getDb(), selected, {
+        date,
+        amount: amount === '' ? null : Number(amount),
+        percentage: percentage === '' ? 100 : Number(percentage),
+        journalId: journalId ? Number(journalId) : null,
+        accountId: accountId ? Number(accountId) : null,
+        label,
+      });
       if ((await commit(result)).ok) { setSelected([]); setAction(''); }
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -350,10 +382,29 @@ export function JournalItems({ leaf = {} } = {}) {
   const totalResidual = sumField(rows, 'amount_residual');
   const todayDate = today();
   const enrichedByKey = new Map(enriched.map((line) => [keyOf(line), line]));
-  const selectedHasIneligibleAsset = selected.some((item) => !enrichedByKey.get(keyOf(item))?.can_create_asset);
-  const selectableRows = mode === 'draft'
-    ? []
-    : rows.filter((line) => (mode === 'to_check' ? true : line.move_state !== 'draft') && (action !== 'Create Asset' || line.can_create_asset));
+  const selectedRows = selected.map((item) => enrichedByKey.get(keyOf(item))).filter(Boolean);
+  const canPostSelected = canPostJournalItems(selectedRows);
+  const canMoveAccountSelected = canMoveToAccount(selectedRows, db);
+  const canChangePeriodSelected = canChangePeriod(selectedRows, db);
+  const selectedHasDraft = selectedRows.some((line) => line.move_state === 'draft');
+  const selectedHasIneligibleAsset = selectedHasDraft || selectedRows.some((line) => !line.can_create_asset);
+  const selectableRows = rows.filter((line) => action !== 'Create Asset' || line.can_create_asset);
+  const wizardCompanyId = selectedRows.length === 1 || new Set(selectedRows.map((l) => l.company_id)).size === 1
+    ? (selectedRows[0]?.company_id ?? currentCompany(db))
+    : currentCompany(db);
+  const openAction = (btn) => {
+    if (btn === 'Move to Account' && !canMoveAccountSelected) return;
+    if (btn === 'Change Period' && !canChangePeriodSelected) return;
+    if (['Move to Account', 'Change Period'].includes(btn)) {
+      const defaults = automaticEntryDefaults(db, selectedRows, btn);
+      setDate(defaults.date);
+      setJournalId(defaults.journalId ? String(defaults.journalId) : '');
+      setAccountId(defaults.accountId ? String(defaults.accountId) : '');
+      setPercentage(defaults.percentage);
+    }
+    setAction(btn);
+    setError('');
+  };
   const visibleKeys = new Set(selectableRows.map(keyOf));
   const selectedKeys = new Set(selected.map(keyOf));
   const allSelected = selectableRows.length > 0 && selectableRows.every((line) => selectedKeys.has(keyOf(line)));
@@ -493,20 +544,37 @@ export function JournalItems({ leaf = {} } = {}) {
           {grp.map((f) => <button key={f.id} type="button" className={`btn sm${activeFilters.includes(f.id) ? ' active' : ''}`} aria-pressed={activeFilters.includes(f.id)} onClick={() => toggleFilter(f.id)}>{t(f.label)}</button>)}
         </Fragment>)}
       </div>
-      {mode !== 'draft' && <div className="control-panel">
+      <div className="control-panel">
         <span>{t('{n} selected', { n: selected.length })}</span>
-        <button type="button" className="btn" disabled={!selected.length || busy} onClick={handleMarkReviewed}>{t('Mark as reviewed')}</button>
-        {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off', 'Create Asset'].map((btn) => {
-          const disabled = !selected.length || busy || (btn === 'Create Asset' && selectedHasIneligibleAsset);
-          const btnTitle = btn === 'Create Asset' && selected.length && selectedHasIneligibleAsset ? t('Select only posted debit journal items without an existing asset') : undefined;
-          return <button type="button" className="btn" key={btn} disabled={disabled} title={btnTitle} onClick={() => { setAction(btn); setError(''); }}>{t(btn)}</button>;
+        {mode !== 'draft' && <button type="button" className="btn" disabled={!selected.length || busy} onClick={handleMarkReviewed}>{t('Mark as reviewed')}</button>}
+        <button type="button" className="btn" disabled={!selected.length || busy || !canPostSelected} title={selected.length && !canPostSelected ? t('Select only draft journal items') : undefined} onClick={handlePost}>{t('Post')}</button>
+        {['Reconcile', 'Reconcile with write-off', 'Unreconcile', 'Write Off', 'Create Asset', 'Move to Account', 'Change Period'].map((btn) => {
+          const wizardDisabled = btn === 'Move to Account'
+            ? !canMoveAccountSelected
+            : btn === 'Change Period'
+              ? !canChangePeriodSelected
+              : selectedHasDraft;
+          const disabled = !selected.length || busy || wizardDisabled || (btn === 'Create Asset' && selectedHasIneligibleAsset);
+          const btnTitle = btn === 'Create Asset' && selected.length && selectedHasIneligibleAsset
+            ? t('Select only posted debit journal items without an existing asset')
+            : btn === 'Move to Account' && selected.length && !canMoveAccountSelected
+              ? t('Select unreconciled posted journal items from a single company')
+              : btn === 'Change Period' && selected.length && !canChangePeriodSelected
+                ? t('Select posted income or expense journal items from a single company')
+                : undefined;
+          return <button type="button" className="btn" key={btn} disabled={disabled} title={btnTitle} onClick={() => openAction(btn)}>{t(btn)}</button>;
         })}
-      </div>}
+      </div>
       {action && <form onSubmit={run} className="control-panel" aria-label={t(action)}>
         <h2>{t(action)}</h2>
         {action === 'Unreconcile' && <p>{t('This removes the matching: payments stay posted with their credit available again, and GL entries (including write-offs created by Reconcile with write-off) stay posted with their open balance restored. Standalone Write Off entries and direct bank matches are reversed on the selected date.')}</p>}
         {action !== 'Create Asset' && <label>{t('Date')} <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>}
+        {action === 'Change Period' && <label>{t('Percentage')} <input required type="number" step="any" min="0.01" max="100" value={percentage} onChange={(e) => setPercentage(e.target.value)} /></label>}
         {(action === 'Reconcile' || action === 'Write Off') && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
+        {['Move to Account', 'Change Period'].includes(action) && <>
+          <label>{t(action === 'Move to Account' ? 'Destination Account' : 'Accrual Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => a.active !== false && !a.deprecated && (!a.company_id || a.company_id === wizardCompanyId) && (action === 'Move to Account' || !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type))).map((a) => <option key={a.id} value={a.id}>{a.code ? `${a.code} ${a.name}` : a.name}</option>)}</select></label>
+          <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => j.active !== false && j.type === 'general' && (j.company_id ?? 1) === wizardCompanyId).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
+        </>}
         {(action === 'Write Off' || action === 'Reconcile with write-off') && <>
           <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => action === 'Write Off' ? isLiquidityJournal(j) : (j.active !== false && ['general', 'bank', 'cash', 'credit'].includes(j.type))).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
           <label>{t('Write-off Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => a.active !== false && !a.deprecated && !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
@@ -515,6 +583,7 @@ export function JournalItems({ leaf = {} } = {}) {
         <button className="btn primary" disabled={busy}>{t('Confirm')}</button><button type="button" className="btn" disabled={busy} onClick={() => setAction('')}>{t('Cancel')}</button>
         {error && <p role="alert">{t(error)}</p>}
       </form>}
+      {!action && error && <p role="alert" className="control-panel">{t(error)}</p>}
     </>
   );
 
@@ -532,7 +601,7 @@ export function JournalItems({ leaf = {} } = {}) {
         <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={String(key ?? 'none')}>
           {group && <tr className="group-row"><th className={isPrinting ? 'no-print' : undefined} /><th colSpan={visibleCols.length}>{groupTitle(key, lines)} <span className="count">({lines.length})</span></th><th className="no-print" /></tr>}
           {lines.map((line) => <tr key={keyOf(line)} className={line.move_state === 'draft' ? 'info' : undefined}>
-            <td className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={(line.move_state === 'draft' && mode !== 'to_check') || busy || (action === 'Create Asset' && !line.can_create_asset)} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
+            <td className={isPrinting ? 'no-print' : undefined}><input type="checkbox" aria-label={t('Select journal item {entry}: {account} — {label}', { entry: line.move_name, account: line.account, label: line.name })} disabled={busy || (action === 'Create Asset' && !line.can_create_asset)} checked={selected.some((item) => keyOf(item) === keyOf(line))} onChange={(e) => setSelected(e.target.checked ? [...selected, { move_id: line.move_id, line_identity: line.line_identity }] : selected.filter((item) => keyOf(item) !== keyOf(line)))} /></td>
             {visibleCols.map((col) => <td key={col.key} className={cellClassName(col, line, todayDate)}>{renderCell(line, col)}</td>)}
             <td className="o2m-cols-td no-print" />
           </tr>)}
