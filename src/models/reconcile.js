@@ -559,6 +559,8 @@ function applyRuleInternal(db, rule, line) {
 
 export function applyRule(db, rule, line) {
   const result = applyRuleInternal(db, rule, line);
+  // A rule that changed nothing must stay a no-op so autoReconcile tries the next rule.
+  if (result === db) return result;
   const bankMoveId = read(result, 'account.bank.statement.line', line.id)?.bank_move_id;
   return line.review_requested && bankMoveId ? write(result, 'account.move', bankMoveId, { to_check: true }) : result;
 }

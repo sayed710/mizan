@@ -6,7 +6,7 @@ import { seed } from './seed.js';
 import { bookToAccount, matchPayment, reconcileWith, setStatementLineReview, statementCounterpartAccount, unreconcile } from './models/bank.js';
 import { postMove } from './models/accounting.js';
 import { models } from './models/index.js';
-import { applyRule } from './models/reconcile.js';
+import { applyRule, autoReconcile } from './models/reconcile.js';
 import { diffDb, applyDiff } from './sync.js';
 import { find, setupDom } from './test-support/dom.js';
 
@@ -246,4 +246,20 @@ test('empty statement print header uses its journal currency', async () => {
     assert.ok(header.textContent.includes(' · '));
     assert.ok(!header.textContent.includes('?'));
   } finally { await React.act(async () => root.unmount()); }
+});
+
+test('a skipped rule on a partially booked review line lets a later auto rule reconcile it', () => {
+  let { db, lineId } = fixture();
+  db = setStatementLineReview(db, lineId, true);
+  const account = read(db, 'res.company', 1).account_default_receivable_id;
+  const half = create(db, 'account.reconcile.model', { name: 'Half', trigger: 'manual', rule_type: 'writeoff_button', line_ids: [{ account_id: account, amount_type: 'percentage', amount: 50 }] });
+  db = applyRule(half.db, read(half.db, 'account.reconcile.model', half.id), read(half.db, 'account.bank.statement.line', lineId));
+  assert.equal(read(db, 'account.bank.statement.line', lineId).open_amount, 50);
+  const skip = create(db, 'account.reconcile.model', { name: 'Regex miss', sequence: 1, trigger: 'auto_reconcile', rule_type: 'writeoff_button', line_ids: [{ account_id: account, amount_type: 'regex', amount_string: 'NOMATCH ([0-9]+)' }] });
+  const rest = create(skip.db, 'account.reconcile.model', { name: 'Remainder', sequence: 2, trigger: 'auto_reconcile', rule_type: 'writeoff_button', line_ids: [{ account_id: account, amount_type: 'percentage', amount: 100 }] });
+  db = rest.db;
+  assert.equal(applyRule(db, read(db, 'account.reconcile.model', skip.id), read(db, 'account.bank.statement.line', lineId)), db);
+  const line = read(autoReconcile(db), 'account.bank.statement.line', lineId);
+  assert.equal(line.state, 'reconciled');
+  assert.ok(line.allocations.some((a) => a.reconcile_model_id === rest.id));
 });
