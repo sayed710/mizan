@@ -180,6 +180,8 @@ const ar = {
   'The AI is busy, try again in a moment.': 'الذكاء الاصطناعي مشغول، حاول مرة أخرى بعد لحظة.',
   'The AI returned no text.': 'لم يُرجع الذكاء الاصطناعي أي نص.',
   'Open a draft vendor bill to digitize a document': 'افتح فاتورة مورد مسودة لرقمنة مستند',
+  'No access to that company': '?? ????? ?????? ??? ??? ??????',
+  'Select an active partner belonging to the bill company': '???? ??? ????? ???? ????? ????? ????????',
   'Upload a PDF or an image (JPEG, PNG, GIF, WebP)': 'ارفع ملف PDF أو صورة (JPEG أو PNG أو GIF أو WebP)',
   'The document is too large (3 MB maximum)': 'المستند أكبر من المسموح (الحد الأقصى 3 ميجابايت)',
   'The document could not be read as a bill.': 'تعذّرت قراءة المستند كفاتورة.',

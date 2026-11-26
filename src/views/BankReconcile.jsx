@@ -1,7 +1,7 @@
 // Two-pane bank reconciliation widget: unreconciled statement lines on the left, matching/payment/manual tabs on the right.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
-import { create, read, search, unlink } from '../orm.js';
+import { read, search, unlink } from '../orm.js';
 import { downloadCsv } from '../csv.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { ReportPrintView } from './ReportPrintView.jsx';
@@ -410,21 +410,15 @@ export function BankReconcile() {
       try {
         const currentDb = getDb();
         const companyId = selectedLine?.company_id ?? currentCompany(currentDb)?.id ?? 1;
-        const created = create(currentDb, 'account.move', {
-          move_type: 'in_invoice',
+        const out = await serverAction('/api/integrations/digitize-new-bill', {
           company_id: companyId,
           ...(selectedLine?.partner_id ? { partner_id: selectedLine.partner_id } : {}),
-        });
-        const saved = await commit(created.db, { quiet: true });
-        if (!saved.ok) throw new Error(saved.error || 'Could not save changes');
-        const out = await serverAction('/api/integrations/digitize', {
-          model: 'account.move',
-          id: created.id,
           file: { name: f.name, type: f.type, data: String(reader.result).split(',')[1] },
         });
+        if (out?.ok === false) throw new Error(out.error || 'Could not save changes');
         setStatusMessage(out?.message || t('Vendor bill created and digitized'));
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(t(err instanceof Error ? err.message : String(err)));
       } finally {
         setBusy(false);
       }
@@ -633,7 +627,7 @@ export function BankReconcile() {
                       {model.name}
                     </button>
                   ))}
-                  <div className="nav-menu actions-menu" ref={modelsMenuRef}>
+                  <div className="nav-group actions-menu" ref={modelsMenuRef}>
                     <button
                       type="button"
                       className="btn sm"

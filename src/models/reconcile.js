@@ -636,20 +636,20 @@ function guardReconcileModel(db, before, rule) {
   }
   const priorJournals = new Set(before?.match_journal_ids ?? []);
   for (const journalId of rule.match_journal_ids ?? []) {
-    if (priorJournals.has(journalId)) continue;
+    const prior = priorJournals.has(journalId);
     const journal = read(db, 'account.journal', journalId);
-    if (!journal || (journal.company_id && journal.company_id !== rule.company_id)) {
+    if ((!journal && !prior) || (journal?.company_id && journal.company_id !== rule.company_id)) {
       return 'Journals in the reconciliation model must belong to the model company';
     }
-    if (journal.active === false || !isLiquidityJournal(journal)) {
+    if (!prior && (journal.active === false || !isLiquidityJournal(journal))) {
       return 'Journals in the reconciliation model must be bank, cash, or credit journals';
     }
   }
   const priorPartners = new Set(before?.match_partner_ids ?? []);
   for (const partnerId of rule.match_partner_ids ?? []) {
-    if (priorPartners.has(partnerId)) continue;
+    const prior = priorPartners.has(partnerId);
     const partner = read(db, 'res.partner', partnerId);
-    if (!partner || partner.active === false || (partner.company_id && partner.company_id !== rule.company_id)) {
+    if ((!partner && !prior) || (!prior && partner.active === false) || (partner?.company_id && partner.company_id !== rule.company_id)) {
       return 'Partners in the reconciliation model must belong to the model company';
     }
   }
