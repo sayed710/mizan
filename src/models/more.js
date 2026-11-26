@@ -350,7 +350,7 @@ export const moreModels = {
         return { unit_amount: unit, tax, tax_id: hasMultipleExpenseTaxes(snapshot) ? null : snapshot?.tax_id ?? null, name: r.name || p?.name || '', total_amount: round2(computeLineTaxes({ qty: Number(r.quantity) || 1, price_unit: unit, ...(snapshot ?? { tax }) }).total) };
       }
       if (['quantity', 'unit_amount', 'tax'].includes(key) && Number(r.unit_amount) > 0) {
-        const selected = r.tax_id ? taxSnapshot(read(db, 'account.tax', r.tax_id), db, null, r.company_id) : {};
+        const selected = r.tax_id ? taxSnapshot(read(db, 'account.tax', r.tax_id), db, null, expenseCompanyId(db, r)) : {};
         return { total_amount: round2(computeLineTaxes({ ...selected, tax: r.tax, qty: Number(r.quantity) || 0, price_unit: Number(r.unit_amount) }).total) };
       }
       return {};

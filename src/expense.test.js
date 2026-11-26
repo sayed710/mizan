@@ -128,3 +128,15 @@ test('the multi-tax check uses the employee company when the expense has none', 
   assert.ok(isBalanced(move.line_ids));
   assert.ok(move.line_ids.some((line) => line.tax_id === c2Tax.id));
 });
+
+test('quantity edits on a branch expense use the employee company price-inclusion setting', () => {
+  let db = seed();
+  const second = createCompany(db, { name: 'Inclusive branch' });
+  db = write(second.db, 'res.company', second.id, { account_price_include: 'tax_included' });
+  db = write(db, 'res.company', 1, { account_price_include: 'tax_excluded' });
+  const shared = create(db, 'account.tax', { name: 'Shared purchase 14%', amount: 14, amount_type: 'percent', type_tax_use: 'purchase' });
+  const emp = create(shared.db, 'hr.employee', { name: 'Inclusive employee', company_id: second.id });
+  db = emp.db;
+  const expense = { name: 'Branch edit', employee_id: emp.id, company_id: null, tax_id: shared.id, tax: 14, unit_amount: 114, quantity: 2 };
+  assert.equal(models['hr.expense'].onchange(expense, 'quantity', db).total_amount, 228);
+});
