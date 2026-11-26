@@ -372,7 +372,7 @@ export function invoiceLineAccountResult(db, move, line, journal = resolveDocume
   if (error) return { account: null, original: null, deferred: false, error };
   const originalAccount = read(db, 'account.account', original);
   const deferred = Boolean(line.deferred_start_date || line.deferred_end_date || originalAccount?.is_deferred);
-  if (deferred && (!line.deferred_start_date || !line.deferred_end_date || line.deferred_start_date > line.deferred_end_date)) {
+  if (deferred && (!validDate(line.deferred_start_date) || !validDate(line.deferred_end_date) || line.deferred_start_date > line.deferred_end_date)) {
     return { account: null, original, deferred, error: 'Set valid deferred start and end dates' };
   }
   const company = read(db, 'res.company', move.company_id ?? 1);
@@ -829,7 +829,7 @@ export function reversalLine(line) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, state = 'posted', auto_post = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, state = 'posted', auto_post = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, reversed_entry_id = null, automatic_entry_source_move_ids = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
   if (!['posted', 'draft'].includes(state)) throw new Error('Entry state must be posted or draft');
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
@@ -906,6 +906,8 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ...(tax_return_id ? { tax_return_id } : {}),
     ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
     ...(deferred_entry_type ? { deferred_entry_type } : {}),
+    ...(reversed_entry_id ? { reversed_entry_id } : {}),
+    ...(Array.isArray(automatic_entry_source_move_ids) && automatic_entry_source_move_ids.length ? { automatic_entry_source_move_ids } : {}),
     ...(system_generated ? { system_generated: true } : {}),
   }, { archivedOriginIds, includeCashBasisTargets });
   if (isDraft) return made;
@@ -1113,6 +1115,25 @@ export function isPaymentMatched(db, payment, excludeLineId = null) {
   const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
   const matches = [...(paymentLinesByMove.get(pMoveId) ?? []), ...(paymentLinesById.get(pId) ?? [])];
   return matches.some((lineId) => !excludeLineId || lineId !== excludeLineId);
+}
+
+const paymentStatementLinesCache = new WeakMap();
+
+/** Statement lines currently matched to a payment, using the same index as matching guards. */
+export function paymentStatementLines(db, payment) {
+  if (!db || !payment) return [];
+  let cached = paymentStatementLinesCache.get(db.records);
+  if (!cached) {
+    cached = new Map();
+    paymentStatementLinesCache.set(db.records, cached);
+  }
+  const key = JSON.stringify([payment.id ?? null, payment.move_id ?? null]);
+  if (cached.has(key)) return cached.get(key);
+  const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
+  const ids = new Set([...(paymentLinesById.get(payment.id) ?? []), ...(paymentLinesByMove.get(payment.move_id) ?? [])]);
+  const lines = (db.records['account.bank.statement.line'] ?? []).filter((line) => ids.has(line.id));
+  cached.set(key, lines);
+  return lines;
 }
 
 /** Settlement links per move, built once per immutable records object (journalItems runs on every report). */

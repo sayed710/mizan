@@ -273,7 +273,7 @@ test('REV-3: review actions update only linked move flags and survive diff valid
 
 test('REV-4: review leaves retain model lists, actions, and list exports', async () => {
   const { makeEl } = setupDom();
-  globalThis.document.createElementNS = (_ns, tag) => makeEl(tag);
+  const spy = setupDownloadSpy(makeEl);
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
   const store = await import('./store.js');
@@ -281,22 +281,48 @@ test('REV-4: review leaves retain model lists, actions, and list exports', async
   await store.commit(seed());
   const { ActionView } = await import('./views/ActionView.jsx');
   const app = apps.find((a) => a.id === 'accounting');
-  for (const [key, model] of [['draft-entries', 'account.move'], ['to-check', 'account.bank.statement.line']]) {
-    const leaf = findLeaf(app, key);
-    assert.equal(leaf.model, model);
-    assert.notEqual(leaf.type, 'report');
-    const host = makeEl('div');
-    host.ownerDocument = globalThis.document;
-    const root = createRoot(host);
-    await React.act(async () => root.render(React.createElement(ActionView, { leaf, base: `#/accounting/${key}`, params: new URLSearchParams() })));
-    const buttons = findAll(host, (n) => n.tagName === 'BUTTON').map((n) => n.textContent);
-    assert.ok(buttons.includes('Print'));
-    assert.ok(buttons.some((label) => label.includes('Export')));
-    assert.ok(buttons.some((label) => label.includes('Export XLSX')));
-    assert.ok(buttons.includes('Mark as reviewed'));
-    if (key === 'draft-entries') assert.ok(models[model].form.buttons.some((button) => button.label === 'Post')); 
-    assert.ok(find(host, (n) => n.tagName === 'TABLE'));
-    await React.act(async () => root.unmount());
+  try {
+    for (const [key, model] of [['draft-entries', 'account.move'], ['to-check', 'account.bank.statement.line']]) {
+      const leaf = findLeaf(app, key);
+      assert.equal(leaf.model, model);
+      assert.notEqual(leaf.type, 'report');
+      const host = makeEl('div');
+      host.ownerDocument = globalThis.document;
+      const root = createRoot(host);
+      try {
+        await React.act(async () => root.render(React.createElement(ActionView, { leaf, base: `#/accounting/${key}`, params: new URLSearchParams() })));
+        const buttons = findAll(host, (n) => n.tagName === 'BUTTON').map((n) => n.textContent);
+        assert.ok(buttons.includes('Print'));
+        assert.ok(buttons.some((label) => label.includes('Export')));
+        assert.ok(buttons.includes('Mark as reviewed'));
+        if (key === 'draft-entries') assert.ok(models[model].form.buttons.some((button) => button.label === 'Post'));
+        assert.ok(find(host, (n) => n.tagName === 'TABLE'));
+
+        for (const format of ['csv', 'xlsx']) {
+          const exportBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export'));
+          await React.act(async () => props(exportBtn).onClick());
+          const dialog = find(host, (n) => props(n)?.role === 'dialog');
+          assert.ok(dialog, `${key}: Export dialog opens`);
+          const formatSelect = find(dialog, (n) => props(n)?.['aria-label'] === 'Format');
+          const options = findAll(formatSelect, (n) => n.tagName === 'OPTION').map((n) => props(n)?.value);
+          assert.deepEqual(options, ['csv', 'xlsx']);
+          await React.act(async () => props(formatSelect).onChange({ target: { value: format } }));
+          const confirmBtn = find(dialog, (n) => n.tagName === 'BUTTON' && n.textContent === 'Export');
+          await React.act(async () => props(confirmBtn).onClick());
+          const dl = await spy.takeLast();
+          assert.ok(dl, `${key}: ${format.toUpperCase()} download triggered`);
+          assert.equal(dl.filename, `${model}.${format}`);
+          if (format === 'xlsx') {
+            assert.equal(dl.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            assert.ok(readXlsx(dl.bytes).rows.length >= 1);
+          }
+        }
+      } finally {
+        await React.act(async () => root.unmount());
+      }
+    }
+  } finally {
+    spy.restore();
   }
 });
 

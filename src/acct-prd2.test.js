@@ -215,11 +215,15 @@ test('PRD-2: No hardcoded 14% default tax rate; new products take company defaul
 
 test('PRD-2: Combo product type clears taxes and purchase_ok, enforces guards, hides non-combo fields, and posts on invoices', async () => {
   let db = seed();
+  // Odoo 20 requires at least one combo choice on a combo product.
+  const comboItem = create(db, 'product', { name: 'Bundle item', type: 'service', list_price: 10 });
+  const comboChoice = create(comboItem.db, 'product.combo', { name: 'Main', combo_item_ids: [{ product_id: comboItem.id, extra_price: 0 }] });
+  db = comboChoice.db;
   assert.ok(models.product.fields.type.options.some(([k, l]) => k === 'combo' && l === 'Combo'));
   assert.ok(models.product.filters.flat().some((f) => f.id === 'combo' && f.label === 'Combo'));
 
   // Creating a combo product omits company default taxes and sets purchase_ok = false.
-  const made = create(db, 'product', { name: 'Office Bundle', type: 'combo', list_price: 300 });
+  const made = create(db, 'product', { name: 'Office Bundle', type: 'combo', list_price: 300, combo_ids: [comboChoice.id] });
   db = made.db;
   const combo = read(db, 'product', made.id);
   assert.equal(combo.type, 'combo');
@@ -230,7 +234,7 @@ test('PRD-2: Combo product type clears taxes and purchase_ok, enforces guards, h
   assert.equal(combo.supplier_tax_id, null);
 
   // Switching an existing goods product to combo clears taxes and purchase_ok.
-  const switched = write(db, 'product', 1, { type: 'combo' });
+  const switched = write(db, 'product', 1, { type: 'combo', combo_ids: [comboChoice.id] });
   const switchedRec = read(switched, 'product', 1);
   assert.equal(switchedRec.purchase_ok, false);
   assert.deepEqual(switchedRec.taxes_id, []);
@@ -356,9 +360,15 @@ test('legacy scalar tax fallback is exported and drives list sorting', async () 
     URL.createObjectURL = (value) => { blob = value; return 'blob:regression'; };
     try {
       await React.act(async () => root.render(React.createElement(ActionView, { leaf: { key: 'fallback-export', model: 'product', view: 'list', list: ['name', 'taxes_id'], listFields, domain: (p) => p.id === first.id }, base: '#/test', params: new URLSearchParams('view=list') })));
-      const exportButton = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export') && !n.textContent.includes('XLSX'));
+      const exportButton = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export'));
       assert.ok(exportButton);
       await React.act(async () => props(exportButton).onClick());
+      const dialog = find(host, (n) => props(n)?.role === 'dialog');
+      assert.ok(dialog, 'Export dialog opens');
+      const formatSelect = find(dialog, (n) => props(n)?.['aria-label'] === 'Format');
+      await React.act(async () => props(formatSelect).onChange({ target: { value: 'csv' } }));
+      const confirmButton = find(dialog, (n) => n.tagName === 'BUTTON' && n.textContent === 'Export');
+      await React.act(async () => props(confirmButton).onClick());
       assert.ok(blob, 'CSV download created');
       const csv = await blob.text();
       assert.match(csv, /First fallback/);
