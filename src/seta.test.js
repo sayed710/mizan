@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 import { seed } from './seed.js';
+import { models } from './models/index.js';
+import { saveFormRecord } from './views/formSave.js';
 import { create, read, search, write } from './orm.js';
 import { newDefaults } from './views/formDefaults.js';
 import { createCompany } from './models/company.js';
 import { taxReport } from './models/finance.js';
 import { postPayment } from './models/pay.js';
+import { postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { reconcileWith } from './models/bank.js';
 import { generateReturns } from './models/taxreturn.js';
@@ -108,7 +111,7 @@ test('Finding 3: accounting lock dates are scoped to res.company and sister comp
     postMove(db, inv2.id);
   });
 
-  // Company 1 invoice dated 2026-03-15 fails
+  // Company 1 invoice dated 2026-03-15 shifts accounting date past soft lock; manual entry on 2026-03-15 fails
   const journal1 = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id === 1 || !j.company_id));
   const incomeAccount1 = search(db, 'account.account').find((a) => a.code === '400000' && (a.company_id === 1 || !a.company_id));
   const inv1 = create(db, 'account.move', {
@@ -120,8 +123,27 @@ test('Finding 3: accounting lock dates are scoped to res.company and sister comp
     invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, account_id: incomeAccount1.id }],
   });
   db = inv1.db;
+  const posted1 = postMove(db, inv1.id);
+  const inv1Posted = read(posted1, 'account.move', inv1.id);
+  assert.equal(inv1Posted.invoice_date, '2026-03-15');
+  assert.ok(inv1Posted.date > '2026-03-31', 'Company 1 invoice shifts accounting date out of soft-locked period');
+  const reset = models['account.move'].form.buttons.find((button) => button.label === 'Reset to Draft');
+  const draftDb = reset.run(posted1, inv1Posted).db;
+  const draft = read(draftDb, 'account.move', inv1.id);
+  const changes = models['account.move'].onchange(draft, 'invoice_date', draftDb, { previous: draft });
+  const saved = saveFormRecord(draftDb, 'account.move', inv1.id, { invoice_date: draft.invoice_date, ...changes });
+  assert.equal(read(saved.db, 'account.move', inv1.id).date, inv1Posted.date);
+
   assert.throws(() => {
-    postMove(db, inv1.id);
+    postEntry(db, {
+      journal: 'MISC',
+      company: 1,
+      date: '2026-03-15',
+      lines: [
+        { account: '101401', debit: 100, credit: 0 },
+        { account: '400000', debit: 0, credit: 100 },
+      ],
+    });
   }, /locked/i);
 });
 

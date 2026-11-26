@@ -209,7 +209,7 @@ test('audit trail captures lock-date, account, tax, payment and move changes wit
   db = write(inv.db, 'account.move', inv.id, { invoice_date_due: '2026-04-20' });
 
   const rows = collectAuditTrailRows(db, db, { from: '2000-01-01', to: '2099-12-31' });
-  const lockRow = rows.find((r) => r.model === 'res.company' && r.field === 'Lock Date' && r.newValue === '2026-02-28');
+  const lockRow = rows.find((r) => r.model === 'res.company' && r.field === 'Global Lock Date' && r.newValue === '2026-02-28');
   assert.ok(lockRow, 'Company lock-date change must appear in Audit Trail');
   assert.equal(lockRow.author, 'Nadia Auditor');
   assert.ok(lockRow.date);
@@ -260,7 +260,7 @@ test('audit trail covers create, edit and delete for all 4 financial models, all
 
   const rows = collectAuditTrailRows(db, db, { from: '2000-01-01', to: '2099-12-31' });
   for (const [label, val] of [
-    ['Lock Date', '2026-01-31'],
+    ['Global Lock Date', '2026-01-31'],
     ['Sales Lock Date', '2026-02-15'],
     ['Purchase Lock Date', '2026-02-20'],
     ['Tax Return Lock Date', '2026-02-28'],
@@ -336,7 +336,7 @@ test('res.company audit trail uses structural m.field (not body labels), protect
 
   db = { ...db, messages: [...db.messages, nonLockMsg, legacyCoMsg] };
   const rows = collectAuditTrailRows(db, db, { from: '2000-01-01', to: '2099-12-31' });
-  assert.ok(rows.some((r) => r.id === lockMsg.id && r.field === 'Lock Date' && r.oldValue === '—' && r.newValue === '2026-05-31'));
+  assert.ok(rows.some((r) => r.id === lockMsg.id && r.field === 'Global Lock Date' && r.oldValue === '—' && r.newValue === '2026-05-31'));
   assert.ok(!rows.some((r) => r.id === nonLockMsg.id), 'Non-lock res.company tracking message must not appear in audit rows');
   assert.ok(rows.some((r) => r.id === legacyCoMsg.id), 'Legacy res.company tracking message without field is retained conservatively');
 

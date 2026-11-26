@@ -183,7 +183,7 @@ test('wizard renders Odoo warning levels in order (danger before warning) and Re
   let db = seed();
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
   const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
-  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id && m.journal_id !== bankJournal.id) } };
+  db = { ...db, records: { ...db.records, 'account.move': [] } };
   db = write(db, 'account.journal', saleJournal.id, { restrict_mode_hash_table: true });
   db = write(db, 'account.journal', bankJournal.id, { restrict_mode_hash_table: true });
 
@@ -310,7 +310,7 @@ test('wizard detects non-hashable unlocked posted moves preceding last hashed mo
 test('wizard warns when securing an entry also secures earlier-numbered entries dated after hash_date', () => {
   let db = seed();
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
-  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
+  db = { ...db, records: { ...db.records, 'account.move': [] } };
   const accounts = search(db, 'account.account');
   const lines = [{ account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 }, { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 }];
 
@@ -391,7 +391,7 @@ test('Arabic translations exist for all new Secure Entries wizard strings', asyn
 test('confirming Secure Entries succeeds while the cannot-be-hashed warning is present and passes server sync', () => {
   let db = seed();
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
-  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].filter((m) => m.journal_id !== saleJournal.id) } };
+  db = { ...db, records: { ...db.records, 'account.move': [] } };
   const accounts = search(db, 'account.account');
   const lines = [
     { account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 },
@@ -428,7 +428,7 @@ test('confirming Secure Entries succeeds while the cannot-be-hashed warning is p
 
   assert.equal(read(res.db, 'account.move', m1.id).inalterable_hash ?? null, null, 'm1 remains unhashed');
   assert.equal(read(res.db, 'account.move', m3.id).secure_sequence_number, 2, 'm3 extends chain from m2');
-  assert.equal(read(res.db, 'res.company', 1).hard_lock_date, '2026-01-15', 'hard lock protects m1');
+  assert.equal(read(res.db, 'res.company', 1).hard_lock_date ?? null, null, 'wizard does not write hard_lock_date (Odoo account_secure_entries_wizard.py:241-250)');
 
   const synced = applyDiff(db, diffDb(db, res.db), { isAdmin: true });
   assert.equal(checkInalterability(synced, { journalId: saleJournal.id, companyId: 1 })[0].status, 'ok');
@@ -522,7 +522,7 @@ test('securing an entry dated after hash_date caps hard_lock_date and draft chec
 
   assert.ok(read(res.db, 'account.move', m1.id).inalterable_hash, 'm1 secured');
   assert.ok(read(res.db, 'account.move', m2.id).inalterable_hash, 'm2 secured');
-  assert.equal(read(res.db, 'res.company', 1).hard_lock_date, '2026-01-10', 'hard_lock_date capped at chosen hash_date');
+  assert.equal(read(res.db, 'res.company', 1).hard_lock_date ?? null, null, 'wizard does not write hard_lock_date');
 
   const afterPost = postEntry(res.db, {
     journal: generalJournal.code, date: '2026-01-15', company: 1, lines: [{ account: '600000', debit: 50 }, { account: '211000', credit: 50 }],
@@ -530,7 +530,7 @@ test('securing an entry dated after hash_date caps hard_lock_date and draft chec
   assert.equal(read(afterPost.db, 'account.move', afterPost.id).state, 'posted', 'entries after chosen hash_date remain unlocked');
 });
 
-test('unreconciled bank lines in unrestricted journals do not trigger danger warnings or skip hard_lock_date', () => {
+test('unreconciled bank lines in unrestricted journals warn and leave hard_lock_date unchanged', () => {
   let db = seed();
   const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale');
   const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
@@ -549,7 +549,9 @@ test('unreconciled bank lines in unrestricted journals do not trigger danger war
     { account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 },
     { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 },
   ];
-  const inv = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-10', name: 'INV/2026/0001', line_ids: lines });
+  const generalJournal = search(db, 'account.journal').find((j) => j.type === 'general' && !j.restrict_mode_hash_table);
+  const clean = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: generalJournal.id, invoice_date: '2026-01-10', name: 'MISC/2026/9001', line_ids: lines });
+  const inv = create(clean.db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: saleJournal.id, invoice_date: '2026-01-10', name: 'INV/2026/0001', line_ids: lines });
   const expAcc = accounts.find((a) => a.account_type === 'expense' && (a.company_id ?? 1) === 1);
   // Both an unbooked and a partially-booked unreconciled statement line on the UNRESTRICTED bank journal
   const stmtUnbooked = create(inv.db, 'account.bank.statement.line', {
@@ -561,8 +563,11 @@ test('unreconciled bank lines in unrestricted journals do not trigger danger war
   db = bookToAccount(stmtPartial.db, read(stmtPartial.db, 'account.bank.statement.line', stmtPartial.id), { amount: 40 }).db;
 
   const analysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-31' });
-  assert.deepEqual(analysis.unreconciled_bank_statement_line_ids, [], 'unrestricted bank lines ignored');
-  assert.equal(analysis.warning_items.some((w) => w.key === 'account_unreconciled_bank_statement_line_ids'), false, 'no danger warning emitted');
+  assert.ok(analysis.unreconciled_bank_statement_line_ids.includes(stmtPartial.id), 'unreconciled unrestricted bank chain is reported');
+  assert.ok(analysis.warning_items.some((w) => w.key === 'account_unreconciled_bank_statement_line_ids' && w.level === 'danger'), 'danger warning emitted');
+  const bankMove = read(db, 'account.bank.statement.line', stmtPartial.id).bank_move_id;
+  assert.ok(bankMove, 'partially booked line has a posted move');
+  assert.ok(!analysis.move_to_hash_ids.includes(bankMove), 'unreconciled chain is excluded');
 
   const wizModel = models['account.secure.entries.wizard'];
   const wiz = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-31' });
@@ -570,7 +575,13 @@ test('unreconciled bank lines in unrestricted journals do not trigger danger war
   const res = secureBtn.run(wiz.db, read(wiz.db, 'account.secure.entries.wizard', wiz.id));
 
   assert.ok(read(res.db, 'account.move', inv.id).inalterable_hash, 'sales entry secured');
-  assert.equal(read(res.db, 'res.company', 1).hard_lock_date, '2026-01-10', 'hard_lock_date updated despite unreconciled line in unrestricted journal');
+  assert.ok(read(res.db, 'account.move', clean.id).inalterable_hash, 'eligible unrestricted entry secured');
+  const synced = applyDiff(wiz.db, diffDb(wiz.db, res.db), { isAdmin: true });
+  assert.ok(read(synced, 'account.move', clean.id).inalterable_hash, 'unrestricted hash survives server validation');
+  // Odoo's action_secure_entries only hashes moves (account_secure_entries_wizard.py:241-250) and never writes hard_lock_date,
+  // so unreconciled lines cannot "skip" it. Setting the hard lock is a separate write guarded by company.py:634-640, 681-686.
+  assert.equal(read(res.db, 'res.company', 1).hard_lock_date ?? null, null, 'wizard leaves hard_lock_date unchanged');
+  assert.throws(() => write(res.db, 'res.company', 1, { hard_lock_date: '2026-01-10' }), /unreconciled bank transactions/, 'hard lock validation still refuses unreconciled lines');
 });
 
 test('later-dated numbered draft preceding newly secured entries blocks wizard and secureEntries until resolved, while keeping selected-date cap for unrelated drafts and hard lock', () => {
@@ -638,11 +649,40 @@ test('later-dated numbered draft preceding newly secured entries blocks wizard a
   assert.ok(read(securedRes.db, 'account.move', m1.id).inalterable_hash, 'm1 secured');
   assert.ok(read(securedRes.db, 'account.move', m2.id).inalterable_hash, 'm2 secured');
   assert.ok(read(securedRes.db, 'account.move', m3.id).inalterable_hash, 'm3 secured');
-  assert.equal(read(securedRes.db, 'res.company', 1).hard_lock_date, '2026-01-10', 'hard_lock_date remains capped at hash_date');
+  assert.equal(read(securedRes.db, 'res.company', 1).hard_lock_date ?? null, null, 'wizard does not write hard_lock_date');
 
   // Unrelated later-dated drafts (including m4 after INV/2026/0003) can still be posted normally
   const afterM4 = postMove(securedRes.db, m4.id);
   assert.equal(read(afterM4, 'account.move', m4.id).state, 'posted');
   const afterUnrestricted = postMove(afterM4, draftUnrestricted.id);
   assert.equal(read(afterUnrestricted, 'account.move', draftUnrestricted.id).state, 'posted');
+});
+
+test('wizard secures a posted move resolved to an unrestricted default journal', () => {
+  let db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', journal.id, { restrict_mode_hash_table: false });
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.bank.statement.line': [] } };
+  const draft = create(db, 'account.move', { company_id: 1, journal_id: journal.id, partner_id: 1, move_type: 'out_invoice', invoice_date: '2026-01-10', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100 }] });
+  const posted = postMove(draft.db, draft.id);
+  const move = { db: { ...posted, records: { ...posted.records, 'account.move': posted.records['account.move'].map((m) => m.id === draft.id ? { ...m, journal_id: null } : m) } }, id: draft.id };
+  const analysis = analyzeJournalChains(move.db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(analysis.move_to_hash_ids.includes(move.id));
+  const result = secureEntries(move.db, { companyId: 1, hashDate: '2026-01-31', moveIds: analysis.move_to_hash_ids });
+  assert.ok(read(result, 'account.move', move.id).inalterable_hash);
+});
+
+test('securing a period scopes shifted invoices by accounting date', () => {
+  let db = seed();
+  const journal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', journal.id, { restrict_mode_hash_table: true });
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.bank.statement.line': [] } };
+  const move = { db: { ...db, records: { ...db.records, 'account.move': [{ id: 90001, company_id: 1, journal_id: journal.id, move_type: 'out_invoice', state: 'posted', name: 'INV/2026/00001', date: '2026-02-01', invoice_date: '2026-01-15', line_ids: [] }] } }, id: 90001 };
+  const analysis = analyzeJournalChains(move.db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(!analysis.move_to_hash_ids.includes(move.id));
+  assert.equal(analysis.max_hash_date, '2026-02-01');
+  const result = secureEntries(move.db, { companyId: 1, hashDate: '2026-01-31', moveIds: analysis.move_to_hash_ids });
+  assert.ok(!read(result, 'account.move', move.id).inalterable_hash);
+  const direct = secureEntries(move.db, { companyId: 1, hashDate: '2026-01-31' });
+  assert.ok(!read(direct, 'account.move', move.id).inalterable_hash);
 });
