@@ -372,7 +372,7 @@ export function invoiceLineAccountResult(db, move, line, journal = resolveDocume
   if (error) return { account: null, original: null, deferred: false, error };
   const originalAccount = read(db, 'account.account', original);
   const deferred = Boolean(line.deferred_start_date || line.deferred_end_date || originalAccount?.is_deferred);
-  if (deferred && (!line.deferred_start_date || !line.deferred_end_date || line.deferred_start_date > line.deferred_end_date)) {
+  if (deferred && (!validDate(line.deferred_start_date) || !validDate(line.deferred_end_date) || line.deferred_start_date > line.deferred_end_date)) {
     return { account: null, original, deferred, error: 'Set valid deferred start and end dates' };
   }
   const company = read(db, 'res.company', move.company_id ?? 1);
