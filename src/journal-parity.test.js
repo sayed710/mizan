@@ -90,9 +90,9 @@ test('migration 40 backfills journal parity fields without changing existing num
     },
   };
 
-  assert.equal(SCHEMA_VERSION, 79);
+  assert.equal(SCHEMA_VERSION, 81);
   const upgraded = migrate(v39Db);
-  assert.equal(upgraded.schema_version, 79);
+  assert.equal(upgraded.schema_version, 81);
 
   const sd = read(upgraded, 'account.journal', 901);
   const ss = read(upgraded, 'account.journal', 902);
@@ -114,7 +114,7 @@ test('migration 40 backfills journal parity fields without changing existing num
 
   // Idempotent on second pass
   const again = migrate(upgraded);
-  assert.equal(again.schema_version, 79);
+  assert.equal(again.schema_version, 81);
   assert.equal(read(again, 'account.journal', 901).refund_sequence, true);
   assert.equal(read(again, 'account.journal', 902).refund_sequence, false);
 });
@@ -394,8 +394,8 @@ test('account.journal guards reject missing required accounts per type, archived
   assert.throws(() => create(db, 'account.journal', { name: 'NoDef Sale', code: 'NDS', type: 'sale', company_id: 1 }), /is required/);
   assert.throws(() => create(db, 'account.journal', { name: 'NoDef Buy', code: 'NDB', type: 'purchase', company_id: 1 }), /is required/);
 
-  // A liquidity journal can use the company suspense account; default account is required once saved.
-  assert.doesNotThrow(() => create(db, 'account.journal', { name: 'NoSusp Card', code: 'NSC', type: 'credit', company_id: 1 }));
+  // liquidity journals require suspense_account_id on create; default_account_id is allowed unset on create, required once saved
+  assert.throws(() => create(db, 'account.journal', { name: 'NoSusp Card', code: 'NSC', type: 'credit', company_id: 1 }), /Suspense Account is required/);
   const createdCard = create(db, 'account.journal', {
     name: 'Draft Card', code: 'DCRD', type: 'credit', company_id: 1,
     suspense_account_id: accs1.suspense,

@@ -1,8 +1,6 @@
 import '../src/models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +9,7 @@ import { createCompany } from '../src/models/company.js';
 import { seed } from '../src/seed.js';
 import { diffDb } from '../src/sync.js';
 import { openStorage } from './storage.js';
+import { startServer } from './test-server.js';
 
 test('legacy follow-up progress migrates and restricted API writes preserve other companies', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-followup-'));
@@ -27,16 +26,12 @@ test('legacy follow-up progress migrates and restricted API writes preserve othe
   const owned = { id: 989, name: 'Legacy branch customer', company_id: branch.id, followup_level_delay: 45, followup_date: '2025-03-01' };
   openStorage(sql).save(null, { ...branch.db, schema_version: 11, settings: { ...branch.db.settings, uninstalled: ['accounting'] }, records: { ...branch.db.records, 'res.partner': [...branch.db.records['res.partner'], partner, owned] } });
   sql.close();
-  const child = spawn(process.execPath, ['server/index.js'], {
-    env: { ...process.env, PORT: '0', MIZAN_DB: path, MIZAN_ADMIN_PASSWORD: 'followup-admin-password' },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
+  let server;
   try {
-    const url = await new Promise((resolve, reject) => {
-      let out = '';
-      child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
-      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
+    server = await startServer({
+      env: { ...process.env, PORT: '0', MIZAN_DB: path, MIZAN_ADMIN_PASSWORD: 'followup-admin-password' },
     });
+    const { url } = server;
     const client = () => {
       let cookie = '';
       return async (method, path, body) => {
@@ -81,7 +76,7 @@ test('legacy follow-up progress migrates and restricted API writes preserve othe
     const stale = await restricted('POST', '/api/diff', diff);
     assert.equal(stale.status, 409, 'same-company concurrent edits still conflict');
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+    await server?.stop();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

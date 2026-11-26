@@ -143,6 +143,27 @@ export function computeStatementLines(r, db) {
     }));
 }
 
+const formatStatementAmount = (db, r, amount) => {
+  const currency = statementCurrency(db, r);
+  return currency ? formatCurrency(amount, currency) : String(amount ?? 0);
+};
+
+/** Problem summary matching Odoo 20 `_compute_problem_description`, or null when valid and complete. */
+export function computeProblemDescription(r, db) {
+  if (!r || !db) return null;
+  if (!statementIsValid(r, db)) {
+    return t('Initial balance ({amount}) does not match previous statement', {
+      amount: formatStatementAmount(db, r, roundStatementAmount(db, r, r.balance_start)),
+    });
+  }
+  if (!statementIsComplete(r, db)) {
+    return t('Incorrect ending balance, expected {amount}', {
+      amount: formatStatementAmount(db, r, computeBalanceEnd(r, db)),
+    });
+  }
+  return null;
+}
+
 /** Form warning banner for invalid opening balance continuity or running balance mismatch against `balance_end_real`. */
 export function statementWarning(r, db) {
   if (!r || !db) return null;
@@ -153,11 +174,9 @@ export function statementWarning(r, db) {
   const balanceEnd = computeBalanceEnd(r, db);
   const balanceEndReal = roundStatementAmount(db, r, r.balance_end_real);
   if (balanceEnd !== balanceEndReal) {
-    const currency = statementCurrency(db, r);
-    const fmt = (n) => (currency ? formatCurrency(n, currency) : String(n));
     warnings.push(t('Running balance ({balanceEnd}) does not match the ending balance ({balanceEndReal}).', {
-      balanceEnd: fmt(balanceEnd),
-      balanceEndReal: fmt(balanceEndReal),
+      balanceEnd: formatStatementAmount(db, r, balanceEnd),
+      balanceEndReal: formatStatementAmount(db, r, balanceEndReal),
     }));
   }
   return warnings.length ? warnings.join(' ') : null;
@@ -505,7 +524,7 @@ export const bankStatementModels = {
         domain: (j) => isLiquidityJournal(j),
         readonly: (r, db) => r?.state === 'closed' || statementHasReconciledLines(db, r),
       },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true, multiCompanyOnly: true },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true, hidden: true, compute: (r, db) => statementCurrency(db, r)?.id ?? null },
       date: { type: 'date', label: 'Date', required: true },
       balance_start: { type: 'monetary', label: 'Starting Balance' },
@@ -533,6 +552,8 @@ export const bankStatementModels = {
       },
       is_complete: { type: 'boolean', label: 'Complete', readonly: true, compute: computeIsComplete },
       is_valid: { type: 'boolean', label: 'Valid', readonly: true, compute: computeIsValid },
+      // Declared after is_complete and is_valid so materialization reuses them without rescanning statements.
+      problem_description: { type: 'text', label: 'Problem Description', readonly: true, hidden: true, compute: computeProblemDescription },
       state: { type: 'selection', label: 'Status', options: [['open', 'Open'], ['closed', 'Closed']], default: 'open' },
     },
     defaults: () => ({ date: today(), balance_start: 0, balance_end_real: 0, state: 'open' }),
@@ -565,7 +586,7 @@ export const bankStatementModels = {
     ],
     groupBys: ['journal_id', 'date'],
     listDecoration: statementListDecoration,
-    list: ['name', 'date', 'journal_id', 'balance_start', 'balance_end', 'balance_end_real', 'state'],
+    list: ['name', 'date', 'journal_id', 'company_id', 'balance_start', 'balance_end_real'],
     form: {
       title: 'name',
       statusbar: 'state',

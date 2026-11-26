@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { setupDom, find } from './test-support/dom.js';
+import { setupDom, find, waitFor } from './test-support/dom.js';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
@@ -24,11 +24,7 @@ const collectAll = (node, pred, out = []) => {
   for (const child of node.childNodes ?? []) collectAll(child, pred, out);
   return out;
 };
-const rendered = async (React, container, text) => {
-  for (let i = 0; i < 200 && !container.textContent.includes(text); i++) {
-    await React.act(() => new Promise((resolve) => setTimeout(resolve, 20)));
-  }
-};
+const rendered = (React, container, text) => waitFor(React, () => container.textContent.includes(text));
 
 function cleanReportingFixture() {
   let db = seed();
@@ -635,7 +631,7 @@ test('Qodo 3: Legacy horizontal-group rule migration and normalization moves ids
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 79);
+  assert.equal(migrated.schema_version, 81);
   const upgradedGroup = migrated.records['account.report.horizontal.group'].find((g) => g.id === 991);
   assert.deepEqual(upgradedGroup.rule_ids[0].partner_ids, [1, 2]);
   assert.equal(upgradedGroup.rule_ids[0].ids, '');

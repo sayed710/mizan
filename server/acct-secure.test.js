@@ -403,11 +403,11 @@ test('account.secure.entries.wizard model exists in registry', () => {
   assert.ok(wizModel.fields.max_hash_date, 'max_hash_date field');
 });
 
-test('account.secure.entries.wizard form has Confirm button that calls secureEntries', () => {
+test('account.secure.entries.wizard form has Secure Entries button that calls secureEntries', () => {
   const wizModel = models['account.secure.entries.wizard'];
-  const confirmBtn = (wizModel.form?.buttons ?? []).find((b) => b.label === 'Confirm');
-  assert.ok(confirmBtn, 'Confirm button exists');
-  assert.ok(confirmBtn.run, 'Confirm button has run function');
+  const secureBtn = (wizModel.form?.buttons ?? []).find((b) => b.label === 'Secure Entries');
+  assert.ok(secureBtn, 'Secure Entries button exists');
+  assert.ok(secureBtn.run, 'Secure Entries button has run function');
 });
 
 test('account.secure.entries.wizard createDefaults populates analysis fields', () => {
@@ -811,12 +811,12 @@ test('account.asset.model has list and form views', () => {
   assert.ok(m.list.includes('method'), 'method in list');
 });
 
-test('account.secure.entries.wizard has list and form views with Confirm button', () => {
+test('account.secure.entries.wizard has list and form views with Secure Entries button', () => {
   const m = models['account.secure.entries.wizard'];
   assert.ok(m.list, 'list view spec');
   assert.ok(m.form, 'form view spec');
-  const confirmBtn = (m.form?.buttons ?? []).find((b) => b.label === 'Confirm');
-  assert.ok(confirmBtn, 'Confirm button in form');
+  const secureBtn = (m.form?.buttons ?? []).find((b) => b.label === 'Secure Entries');
+  assert.ok(secureBtn, 'Secure Entries button in form');
 });
 
 // â”€â”€â”€ 18. Inalterability: report view data (InalterabilityCheck in Reports.jsx) â”€â”€

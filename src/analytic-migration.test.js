@@ -48,7 +48,7 @@ test('migration restores historical analytic actuals without duplicating posted 
   } };
   assert.equal(analyticActuals(legacy).get(analytic.id), 0);
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 79);
+  assert.equal(migrated.schema_version, 81);
   assert.equal(analyticActuals(migrated).get(analytic.id), 100);
   assert.deepEqual(search(migrated, 'account.analytic.line').filter((line) => ids.includes(line.move_id)).map((line) => [line.move_id, line.amount]).sort(), originalLines.map((line) => [line.move_id, line.amount]).sort());
   assert.equal(read(migrated, 'account.move', ids[0]).state, 'posted');

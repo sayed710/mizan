@@ -4,7 +4,7 @@ import { statementUrl } from '../statementNavigation.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels, journalEntriesView, purchaseInvoiceView, salesInvoiceView } from './accounting.js';
+import { accountingModels, creditNoteView, journalEntriesView, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels, customerPaymentView, vendorPaymentView } from './pay.js';
@@ -216,7 +216,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'out_refund',
           defaults: { move_type: 'out_refund' },
-          ...salesInvoiceView,
+          ...creditNoteView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
         { key: 'customer-products', label: 'Products', model: 'product', defaultFilters: ['sale_ok'], defaults: { sale_ok: true } },
@@ -241,7 +241,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'in_refund',
           defaults: { move_type: 'in_refund' },
-          ...purchaseInvoiceView,
+          ...vendorRefundView,
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
@@ -456,6 +456,7 @@ const allApps = [
       { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
       { label: 'Configuration', children: [
         { key: 'tags', label: 'Tags', model: 'res.partner.category' },
+        { key: 'industries', label: 'Industries', model: 'res.partner.industry' },
         { key: 'banks', label: 'Banks', model: 'res.bank' },
       ] },
     ],
@@ -809,7 +810,7 @@ export const leavesOf = (app) => {
   return walk(app?.menus);
 };
 
-const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'product'];
+const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
   'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];
@@ -927,5 +928,8 @@ export function targetOf(model, uninstalled = []) {
   }
   return '#/';
 }
-export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
+// A record-set action may contain customer and vendor payments together.
+const allPaymentsAction = { key: 'all-payments', label: 'Payments', model: 'account.payment', ...customerPaymentView, listLabels: { ...customerPaymentView.listLabels, partner_id: 'Partner' } };
+export const findLeaf = (app, key) => (app?.id === 'accounting' && key === 'all-payments' ? allPaymentsAction : null)
+  ?? leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
 export const menusFor = (appId) => apps.find((a) => a.id === appId)?.menus ?? [];

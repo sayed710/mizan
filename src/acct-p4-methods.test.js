@@ -352,7 +352,7 @@ test('migration adds seeded payment methods and default lines to existing bank a
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 79);
+  assert.equal(migrated.schema_version, 81);
   assert.equal(search(migrated, 'account.payment.method').length, 5);
 
   const migratedBank = read(migrated, 'account.journal', bank.id);

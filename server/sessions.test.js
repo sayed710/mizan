@@ -1,34 +1,23 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startServer } from './test-server.js';
 
-let child;
+let server;
 let origin;
 let directory;
 
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'mizan-sessions-'));
-  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'admin-password-1', MIZAN_SECURE_COOKIE: '0' } });
-  origin = await new Promise((resolve, reject) => {
-    let output = '';
-    const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
-    child.stdout.on('data', (chunk) => {
-      output += chunk;
-      const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
-      if (match) { clearTimeout(timeout); resolve(match[1]); }
-    });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
-  });
+  server = await startServer({ env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'admin-password-1', MIZAN_SECURE_COOKIE: '0' } });
+  origin = server.origin;
 });
 
 after(async () => {
-  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
-  await rm(directory, { recursive: true, force: true });
+  await server?.stop();
+  if (directory) await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const call = (path, { cookie, bearer, body } = {}) => fetch(`${origin}${path}`, {

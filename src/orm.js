@@ -16,7 +16,7 @@ export const nextSequence = (db, model, step = 10) =>
 
 // ---- multi-company: records of company-scoped models carry company_id (missing = company 1) ----
 /** Master data shared by all companies (Odoo shares these by default). */
-export const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'res.partner.category', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
+export const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type',
   'account.tax', 'account.cash.rounding', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
   'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'payment.method', 'res.country.group']);
@@ -27,7 +27,10 @@ const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r
 
 const withComputed = (fields, r, db) => {
   const computed = Object.entries(fields).filter(([, f]) => f.compute);
-  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r, db)])) } : r;
+  if (!computed.length) return r;
+  const out = { ...r };
+  for (const [k, f] of computed) out[k] = f.compute(out, db);
+  return out;
 };
 
 /** Source records for a model, computing virtual report rows when declared by `models[model].records`. */

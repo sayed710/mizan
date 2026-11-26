@@ -24,7 +24,7 @@ test('migration output follows the latest registered schema version', () => {
 
 test('the shipped seed is current and every seeded record can be saved again unchanged', () => {
   const db = seed();
-  assert.equal(db.schema_version, 79);
+  assert.equal(db.schema_version, 81);
   assert.equal(migrate(db), db);
   for (const [model, recs] of Object.entries(db.records)) {
     for (const r of recs) {
@@ -54,7 +54,7 @@ function legacyDb() {
 test('older data is migrated once, then saves cleanly', () => {
   const old = legacyDb();
   const db = migrate(old);
-  assert.equal(db.schema_version, 79);
+  assert.equal(db.schema_version, 81);
   assert.equal(migrate(db), db, 'a migrated database is left alone');
 
   const doc = db.records['documents.document'][0];
@@ -117,7 +117,7 @@ test('the migrated data and its version are persisted', () => {
   const db = migrate(loaded);
   storage.save(loaded, db);
   const again = storage.load();
-  assert.equal(again.schema_version, 79);
+  assert.equal(again.schema_version, 81);
   assert.equal(migrate(again), again, 'nothing left to run after a restart');
   assert.deepEqual(again.records['documents.document'][0].tag_ids, db.records['documents.document'][0].tag_ids);
 });
