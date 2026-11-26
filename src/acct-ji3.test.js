@@ -710,3 +710,85 @@ test('ji3 Qodo: forged automatic entries cannot repeat source IDs or bypass work
     /Archived accounts cannot be selected/,
   );
 });
+
+function archivedArTransfer(lines) {
+  let db = seed();
+  const ar = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'asset_receivable');
+  const income = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'income');
+  const prepaid = findAccount(db, (a) => (a.company_id ?? 1) === 1 && ['asset_prepayments', 'asset_current'].includes(a.account_type) && a.id !== ar.id);
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const partner = search(db, 'res.partner')[0].id;
+  const ids = [];
+  for (const [i, spec] of lines.entries()) {
+    const posted = postEntry(db, { journal: 'MISC', company: 1, date: `2026-02-0${i + 1}`, ref: `AR-${i}`, lines: [
+      { account_id: ar.id, partner_id: partner, ...(spec.eur === undefined ? {} : { currency_id: eur.id, amount_currency: spec.eur }), ...spec.ar, name: 'ar' },
+      { account_id: income.id, ...(spec.ar.debit ? { credit: spec.ar.debit } : { debit: spec.ar.credit }), name: 'i' }] });
+    db = posted.db;
+    ids.push(posted.id);
+  }
+  db = syncDb(db, write(db, 'account.account', ar.id, { active: false }));
+  return { db, ar, prepaid, ids, sel: ids.flatMap((id) => itemsOf(db, id, ar.id)) };
+}
+
+test('ji3 Qodo: an archived reconcilable transfer line must be cleared by its source partials, not just touched by one', () => {
+  const s = archivedArTransfer([{ ar: { debit: 80 } }]);
+  const moved = moveToAccount(s.db, s.sel, { destinationAccountId: s.prepaid.id, date: '2026-02-20' });
+  const diff = diffDb(s.db, moved);
+  assert.doesNotThrow(() => applyDiff(s.db, diff, { isAdmin: true }), 'the genuine transfer clears the archived line in full');
+  const partials = diff.upserts['account.partial.reconcile'];
+  assert.equal(partials.length, 1);
+  assert.equal(partials[0].amount, 80);
+  const forged = { ...diff, upserts: { ...diff.upserts, 'account.partial.reconcile': [{ ...partials[0], amount: 1 }] } };
+  assert.throws(() => applyDiff(s.db, forged, { isAdmin: true }), /Archived accounts cannot be selected/);
+});
+
+test('ji3 Qodo: a foreign-currency transfer with exchange differences stays authorized', () => {
+  for (const spec of [
+    [{ ar: { debit: 100 }, eur: 90 }, { ar: { credit: 50 }, eur: -30 }],
+    // Counter-line itself carries the overvalued rate, so its own gap partial is needed to cover its company balance.
+    [{ ar: { debit: 100 }, eur: 90 }, { ar: { credit: 10 }, eur: -30 }],
+  ]) {
+    const s = archivedArTransfer(spec);
+    const moved = moveToAccount(s.db, s.sel, { destinationAccountId: s.prepaid.id, date: '2026-02-20' });
+    const diff = diffDb(s.db, moved);
+    assert.ok(diff.upserts['account.partial.reconcile'].some((p) => p.exchange_move_id != null), 'the rates differ, so an exchange difference is booked');
+    assert.doesNotThrow(() => applyDiff(s.db, diff, { isAdmin: true }));
+  }
+
+  // A forged partial that only reconciles 1 EUR of a 90 EUR archived transfer line is rejected.
+  const single = archivedArTransfer([{ ar: { debit: 100 }, eur: 90 }]);
+  const movedSingle = moveToAccount(single.db, single.sel, { destinationAccountId: single.prepaid.id, date: '2026-02-20' });
+  const singleDiff = diffDb(single.db, movedSingle);
+  const p0 = singleDiff.upserts['account.partial.reconcile'][0];
+  const shortForeign = {
+    ...singleDiff,
+    upserts: { ...singleDiff.upserts, 'account.partial.reconcile': [{ ...p0, amount: 100, debit_amount_currency: 1, credit_amount_currency: 1 }] },
+  };
+  assert.throws(() => applyDiff(single.db, shortForeign, { isAdmin: true }), /Archived accounts cannot be selected/);
+});
+
+test('ji3 Qodo: a paired Change Period must keep the foreign amounts of its archived source lines', () => {
+  let db = seed();
+  const expense = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'expense');
+  const cash = findAccount(db, (a) => (a.company_id ?? 1) === 1 && a.account_type === 'asset_cash');
+  const prepaid = findAccount(db, (a) => (a.company_id ?? 1) === 1 && ['asset_prepayments', 'asset_current'].includes(a.account_type));
+  const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  const src = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-10', ref: 'FX-SRC', lines: [
+    { account_id: expense.id, debit: 100, currency_id: eur.id, amount_currency: 90, name: 'Rent' }, { account_id: cash.id, credit: 100, name: 'Cash' }] });
+  db = syncDb(db, src.db);
+  db = syncDb(db, write(db, 'account.account', expense.id, { active: false }));
+  const sel = itemsOf(db, src.id, expense.id);
+  const diff = diffDb(db, changePeriod(db, sel, { date: '2026-03-31', accountId: prepaid.id }));
+  assert.doesNotThrow(() => applyDiff(db, diff, { isAdmin: true }), 'the genuine 100% pair is authorized');
+  const partialDiff = diffDb(db, changePeriod(db, sel, { date: '2026-03-31', accountId: prepaid.id, percentage: 50 }));
+  assert.doesNotThrow(() => applyDiff(db, partialDiff, { isAdmin: true }), 'a genuine partial-percentage pair is authorized');
+
+  const scaleForeign = (factor) => (move) => ({ ...move, line_ids: move.line_ids.map((l) => (l.currency_id ? { ...l, amount_currency: l.amount_currency * factor } : l)) });
+  const inflated = { ...diff, upserts: { ...diff.upserts, 'account.move': diff.upserts['account.move'].map(scaleForeign(10)) } };
+  assert.ok(inflated.upserts['account.move'].some((m) => m.line_ids.some((l) => Math.abs(l.amount_currency) === 900)));
+  assert.throws(() => applyDiff(db, inflated, { isAdmin: true }), /Archived accounts cannot be selected/);
+
+  const deflated = { ...diff, upserts: { ...diff.upserts, 'account.move': diff.upserts['account.move'].map(scaleForeign(0.1)) } };
+  assert.ok(deflated.upserts['account.move'].some((m) => m.line_ids.some((l) => Math.abs(l.amount_currency) === 9)));
+  assert.throws(() => applyDiff(db, deflated, { isAdmin: true }), /Archived accounts cannot be selected/);
+});

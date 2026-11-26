@@ -629,22 +629,41 @@ function isMoveToAccountEntry(seen, original, rec, changed) {
   const ownCurr = companyCurrencyRecord(seen, rec.company_id ?? 1);
   const sourceIdSet = new Set(sourceIds);
   const origPartialIds = new Set((original.records['account.partial.reconcile'] ?? []).map((p) => p.id));
+  const newPartials = changed.filter(([model, p]) => model === 'account.partial.reconcile' && !origPartialIds.has(p.id) && p.active !== false && !p.reversed).map(([, p]) => p);
   return (rec.line_ids ?? []).every((line, idx) => {
     const acc = line?.account_id ? read(seen, 'account.account', line.account_id) : null;
     if (!acc || acc.active !== false || !isReconcilableAccount(acc)) return true;
     const bal = (Number(line.debit) || 0) - (Number(line.credit) || 0);
     if (isCurrencyZero(bal, ownCurr)) return true;
-    const isDebit = bal > 0;
-    return changed.some(([model, p]) => (
-      model === 'account.partial.reconcile'
-      && !origPartialIds.has(p.id)
-      && p.active !== false
-      && !p.reversed
-      && (isDebit
-        ? p.debit_move_id === rec.id && p.debit_line_index === idx && sourceIdSet.has(p.credit_move_id)
-        : p.credit_move_id === rec.id && p.credit_line_index === idx && sourceIdSet.has(p.debit_move_id))
-    ));
+    return reconcilesLineWithSources(seen, ownCurr, rec, idx, line, bal > 0, sourceIdSet, newPartials);
   });
+}
+
+/**
+ * Whether the new partial reconciliations between line `idx` of the transfer `rec` and its source moves clear the whole line:
+ * their company-currency amounts (plus the exchange-difference gap partials settling them) cover its balance, and for a
+ * foreign-currency line their amounts in that currency cover its amount_currency too.
+ */
+function reconcilesLineWithSources(seen, ownCurr, rec, idx, line, isDebit, sourceIdSet, newPartials) {
+  const [side, other] = isDebit ? ['debit', 'credit'] : ['credit', 'debit'];
+  const onLine = newPartials.filter((p) => p[`${side}_move_id`] === rec.id && p[`${side}_line_index`] === idx && p.account_id === line.account_id);
+  const toSources = onLine.filter((p) => sourceIdSet.has(p[`${other}_move_id`]));
+  const exchangeIds = new Set(toSources.map((p) => p.exchange_move_id).filter(Boolean));
+  const gaps = onLine.filter((p) => p.exchange_move_id != null && p[`${other}_move_id`] === p.exchange_move_id && exchangeIds.has(p.exchange_move_id));
+  const covers = (applied, needed, currency) => {
+    const short = roundCurrency(needed - roundCurrency(applied, currency), currency);
+    return short <= 0 || isCurrencyZero(short, currency);
+  };
+  const sum = (partials, field) => partials.reduce((total, p) => total + (Number(p[field]) || 0), 0);
+  if (!covers(sum([...toSources, ...gaps], 'amount'), Math.abs((Number(line.debit) || 0) - (Number(line.credit) || 0)), ownCurr)) return false;
+  const foreignId = foreignCurrencyOf(line, ownCurr);
+  if (!foreignId) return true;
+  return covers(sum(toSources, `${side}_amount_currency`), Math.abs(Number(line.amount_currency) || 0), read(seen, 'res.currency', foreignId));
+}
+
+/** Foreign currency id of a journal item, or null when it is in the company currency. */
+function foreignCurrencyOf(line, ownCurr) {
+  return line?.currency_id && line.currency_id !== (ownCurr?.id ?? null) ? line.currency_id : null;
 }
 
 function isValidAccrualAccount(acc) {
@@ -655,11 +674,65 @@ function isValidAccrualAccount(acc) {
   );
 }
 
+/** Direction of a journal item: the sign of its company-currency balance, else of its amount_currency. */
+function lineDirection(line) {
+  return Math.sign((Number(line.debit) || 0) - (Number(line.credit) || 0)) || Math.sign(Number(line.amount_currency) || 0);
+}
+
+/**
+ * Whether every income/expense line of a Change Period adjustment reverses part of a distinct line of its source moves:
+ * same account, partner and currency, opposite direction, within the source amounts in both currencies, and with the
+ * company and foreign amounts at the same share of the source line (up to the rounding of each currency).
+ */
+function adjustmentLinesMatchSources(seen, adj) {
+  const ownCurr = companyCurrencyRecord(seen, adj.company_id ?? 1);
+  const isProfitLoss = (line) => isIncomeOrExpenseAccount(line?.account_id ? read(seen, 'account.account', line.account_id) : null);
+  const sources = adj.automatic_entry_source_move_ids.flatMap((id) => read(seen, 'account.move', id)?.line_ids ?? []).filter(isProfitLoss);
+  const adjusted = (adj.line_ids ?? []).filter(isProfitLoss);
+  if (!adjusted.length) return false;
+  const step = (currency) => Number(currency?.rounding ?? 0.01);
+  const amounts = (line) => ({
+    company: Math.abs((Number(line.debit) || 0) - (Number(line.credit) || 0)),
+    foreign: Math.abs(Number(line.amount_currency) || 0),
+  });
+  const fits = (a, s) => {
+    const foreignId = foreignCurrencyOf(s, ownCurr);
+    if (a.account_id !== s.account_id || (a.partner_id ?? null) !== (s.partner_id ?? null) || foreignCurrencyOf(a, ownCurr) !== foreignId) return false;
+    if (!lineDirection(s) || lineDirection(a) !== -lineDirection(s)) return false;
+    const [adjAmounts, srcAmounts] = [amounts(a), amounts(s)];
+    const companyStep = step(ownCurr);
+    if (adjAmounts.company > srcAmounts.company + companyStep / 2) return false;
+    if (isCurrencyZero(srcAmounts.company, ownCurr) && !isCurrencyZero(adjAmounts.company, ownCurr)) return false;
+    if (!foreignId) return !(Number(a.amount_currency) || 0);
+    const foreignCurr = read(seen, 'res.currency', foreignId);
+    const foreignStep = step(foreignCurr);
+    const srcCurrency = Number(s.amount_currency) || 0;
+    const amountCurrency = Number(a.amount_currency) || 0;
+    if (isCurrencyZero(srcCurrency, foreignCurr)) return isCurrencyZero(amountCurrency, foreignCurr);
+    if (adjAmounts.foreign > srcAmounts.foreign + foreignStep / 2) return false;
+    if (amountCurrency && Math.sign(amountCurrency) !== -Math.sign(srcCurrency)) return false;
+    // company = round(source * share) and foreign = round(source_foreign * share): the shares agree up to each rounding.
+    return Math.abs(adjAmounts.company * srcAmounts.foreign - adjAmounts.foreign * srcAmounts.company)
+      <= (companyStep * srcAmounts.foreign + foreignStep * srcAmounts.company) / 2 + 1e-9;
+  };
+  // Each adjustment line needs its own source line: bipartite matching, so the order of equal-looking lines is irrelevant.
+  const owner = new Array(sources.length).fill(-1);
+  const assign = (i, tried) => sources.some((s, j) => {
+    if (tried.has(j) || !fits(adjusted[i], s)) return false;
+    tried.add(j);
+    if (owner[j] !== -1 && !assign(owner[j], tried)) return false;
+    owner[j] = i;
+    return true;
+  });
+  return adjusted.every((_, i) => assign(i, new Set()));
+}
+
 function isChangePeriodAdjustment(seen, original, adj) {
   if (!isAutomaticEntryCandidate(seen, original, adj) || adj.reversed_entry_id) return false;
   const sourceIds = adj.automatic_entry_source_move_ids;
   if (!sourceIds.every((id) => moveDate(read(seen, 'account.move', id)) === adj.date)) return false;
   if (!mirrorsOriginsOnArchived(seen, adj, sourceIds, true)) return false;
+  if (!adjustmentLinesMatchSources(seen, adj)) return false;
   let hasAccrual = false;
   for (const line of adj.line_ids ?? []) {
     const acc = line?.account_id ? read(seen, 'account.account', line.account_id) : null;
