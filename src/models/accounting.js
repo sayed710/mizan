@@ -5,9 +5,10 @@ import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, commercialPartnerId, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, CURRENCY_AMOUNT_SIGN_ERROR, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, CURRENCY_AMOUNT_SIGN_ERROR, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, exchangeJournal, historicalOriginAccounts, installmentSettlementState, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItemIdentity, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
-import { accountCurrencyChangeError, accountDeleteGuard, accountingDateForPost, bankStatementRewriteAllowed, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, fxProvenanceError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
+import { accountCurrencyChangeError, accountDeleteGuard, accountingDateForPost, bankStatementRewriteAllowed, bookedByBank, creditNotePairError, creditWarning, deduceSequenceNumberReset, duplicateBillWarning, fxProvenanceError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, resequenceAllowed, taxUnitMemberTypeValidation } from './finance.js';
+import { unreconcileLedgerItems } from './glReconcile.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, postPayment, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
@@ -410,11 +411,15 @@ export function paymentGuard(db, before, after, ctx) {
       if (downPaymentOvercommitted(order, moves)) return 'Down payment exceeds the remaining order amount';
     }
   }
-  if (leavesPosted && (Number(before.amount_paid) > 0)) return 'Paid invoices cannot be reset or cancelled; reverse the payment with a credit note instead';
-  if (leavesPosted && settlingEntries(db).has(before.id)) return 'This entry settles an invoice payment and cannot be reset or cancelled';
+  if (leavesPosted && !isInvoice(before) && (Number(before.amount_paid) > 0)) return 'Paid invoices cannot be reset or cancelled; reverse the payment with a credit note instead';
+  if (leavesPosted && isInvoice(before) && (Number(after.amount_paid) > 0 || (after.payments ?? []).some((p) => !p?.reversed))) {
+    return 'Paid invoices cannot be reset or cancelled until their settlements are unreconciled';
+  }
+  if (leavesPosted && !isInvoice(before) && settlingEntries(db).has(before.id)) return 'This entry settles an invoice payment and cannot be reset or cancelled';
   // The books of a settlement entry are fixed once an invoice records it as a payment.
   if (before && ['fx_payment_move_id', 'fx_invoice_id'].some((k) => (before[k] ?? null) !== (after[k] ?? null))) return 'Exchange entry linkage cannot be changed';
   if (before?.state === 'posted' && settlingEntries(db).has(before.id)
+    && !(isInvoice(before) && leavesPosted && after.state === 'draft')
     && ['line_ids', 'journal_id', 'partner_id'].some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
     && !bankStatementRewriteAllowed(db, before, after, ctx)) {
     return 'This entry settles an invoice payment and cannot be changed';
@@ -2852,15 +2857,279 @@ function quickEditWarning(db, r) {
 
 /** Whether a move can be reset back to draft under Mizan's settlement, hash, bank, and lock rules. */
 function canResetMove(r, db, ctx = null) {
-  if (!r || r.state === 'draft' || r.inalterable_hash || Number(r.amount_paid) > 0) return false;
-  if (db && settlingEntries(db).has(r.id)) return false;
-  if (r.move_type === 'entry' && db) {
-    if (bookedByBank(db, r.id)) return false;
+  if (!r || r.state === 'draft' || r.inalterable_hash) return false;
+  if (!isInvoice(r) && Number(r.amount_paid) > 0) return false;
+  if (db && !isInvoice(r) && settlingEntries(db).has(r.id)) return false;
+  if (r.move_type === 'entry' && db && bookedByBank(db, r.id)) return false;
+  if (db) {
     const lock = recordLockDate(db, r, ctx);
     if (lock && moveDate(r) <= lock) return false;
   }
   return true;
 }
+
+/** Collect all reconciled counterpart item selections on a posted invoice/bill/refund before resetting it to draft. */
+function invoiceSettlementSelections(db, move) {
+  const activePartials = (db.records['account.partial.reconcile'] ?? []).filter((g) => g && g.active !== false && !g.reversed);
+  const activePartialIds = new Set(activePartials.map((g) => g.id));
+  const nonGlRows = (move.payments ?? []).filter((p) => !p.reversed && !(p.partial_reconcile_id != null && activePartialIds.has(p.partial_reconcile_id)));
+  const byIndex = new Map();
+  const addSelection = (lineIndex) => {
+    const line = (move.line_ids ?? [])[lineIndex];
+    if (!line || byIndex.has(lineIndex)) return;
+    byIndex.set(lineIndex, { move_id: move.id, line_index: lineIndex, line_identity: journalItemIdentity(line) });
+  };
+  for (const g of activePartials) {
+    if (g.debit_move_id === move.id && Number.isInteger(g.debit_line_index)) addSelection(g.debit_line_index);
+    if (g.credit_move_id === move.id && Number.isInteger(g.credit_line_index)) addSelection(g.credit_line_index);
+  }
+  if (nonGlRows.length) {
+    const counterpartIndices = (move.line_ids ?? []).flatMap((line, index) => {
+      const accountType = read(db, 'account.account', line.account_id)?.account_type;
+      return ['asset_receivable', 'liability_payable'].includes(accountType) ? [index] : [];
+    });
+    if (counterpartIndices.length === 1) {
+      addSelection(counterpartIndices[0]);
+    } else if (counterpartIndices.length > 1) {
+      const { untargetedTouched } = installmentSettlementState(db, { ...move, payments: nonGlRows });
+      for (const index of counterpartIndices) {
+        if (nonGlRows.some((p) => !p.discount && p.line_index === index) || untargetedTouched.has(index)) {
+          addSelection(index);
+        }
+      }
+    }
+  }
+  return [...byIndex.values()];
+}
+
+/** Reset a posted or cancelled move to draft, unreconciling any settlements on invoices/bills/refunds first. */
+export function resetMove(db, moveOrId, { date = null } = {}) {
+  const id = typeof moveOrId === 'object' && moveOrId !== null ? moveOrId.id : moveOrId;
+  const r = read(db, 'account.move', id);
+  if (!r || r.state === 'draft') throw new Error('Only posted or cancelled entries can be reset to draft');
+  if (r.inalterable_hash) throw new Error('Secured entries cannot be reset to draft or cancelled');
+  const lock = recordLockDate(db, r);
+  if (lock && moveDate(r) <= lock) throw new Error(`The period up to ${lock} is locked`);
+
+  let nextDb = db;
+  if (isInvoice(r) && r.state === 'posted') {
+    const selections = invoiceSettlementSelections(nextDb, r);
+    if (selections.length) {
+      const activePartials = (nextDb.records['account.partial.reconcile'] ?? []).filter(
+        (g) => g && g.active !== false && !g.reversed && (g.debit_move_id === r.id || g.credit_move_id === r.id),
+      );
+      const unrecDate = date ?? [
+        today(),
+        moveDate(r),
+        ...(r.payments ?? []).filter((p) => !p.reversed).map((p) => p.date),
+        ...activePartials.map((g) => g.max_date ?? g.date),
+      ].filter(Boolean).sort().at(-1);
+      nextDb = unreconcileLedgerItems(nextDb, selections, { date: unrecDate });
+    }
+  }
+
+  const fresh = read(nextDb, 'account.move', r.id);
+  const draftReversals = (nextDb.records['account.move'] ?? []).filter(
+    (m) => m.state === 'draft' && m.auto_post && m.auto_post !== 'no' && (m.reversed_entry_id === fresh.id || m.id === fresh.reversal_move_id),
+  );
+  const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), nextDb);
+  const draftedDb = write(cancelledDb, 'account.move', fresh.id, {
+    state: 'draft',
+    is_move_sent: false,
+    ...(draftReversals.some((m) => m.id === fresh.reversal_move_id) ? { reversal_move_id: null } : {}),
+    ...(isInvoice(fresh) ? { line_ids: [] } : {}),
+  });
+  return { db: removeAnalytic(draftedDb, fresh.id) };
+}
+
+function parseResequenceName(name) {
+  const value = String(name ?? '');
+  const match = value.match(/^(.*\D)?(\d+)(\D*)$/);
+  if (!match) return null;
+  return { prefix: match[1] ?? '', seq: match[2], suffix: match[3] ?? '', padding: match[2].length, start: Number(match[2]) };
+}
+
+function periodKeyForDate(dateStr, resetMode) {
+  if (!dateStr) return 'all';
+  if (resetMode === 'month' || resetMode === 'year_range_month') return dateStr.slice(0, 7);
+  if (resetMode === 'year' || resetMode === 'year_range') return dateStr.slice(0, 4);
+  return 'all';
+}
+
+function prefixForPeriod(basePrefix, firstDate, moveDateStr, resetMode) {
+  if (!firstDate || !moveDateStr || resetMode === 'never') return basePrefix;
+  let out = basePrefix;
+  const firstYear = firstDate.slice(0, 4);
+  const nextYear = moveDateStr.slice(0, 4);
+  if (firstYear !== nextYear) {
+    out = out.replace(firstYear, nextYear);
+  }
+  if ((resetMode === 'month' || resetMode === 'year_range_month') && firstDate.slice(5, 7) !== moveDateStr.slice(5, 7)) {
+    const firstMonth = firstDate.slice(5, 7);
+    const nextMonth = moveDateStr.slice(5, 7);
+    const idx = out.lastIndexOf(firstMonth);
+    if (idx >= 0) out = `${out.slice(0, idx)}${nextMonth}${out.slice(idx + firstMonth.length)}`;
+  }
+  return out;
+}
+
+function validateResequenceMoves(db, ids) {
+  const uniqueIds = [...new Set((ids ?? []).map(Number).filter(Boolean))];
+  if (!uniqueIds.length) throw new Error('Select at least one journal entry to resequence');
+  const selected = uniqueIds.map((id) => read(db, 'account.move', id)).filter(Boolean);
+  if (selected.length !== uniqueIds.length) throw new Error('Some selected entries were not found');
+  if (selected.some((m) => m.state !== 'posted')) throw new Error('Only posted entries can be resequenced');
+  if (new Set(selected.map((m) => `${m.company_id ?? 1}:${m.journal_id ?? ''}`)).size > 1) {
+    throw new Error('Only entries from the same journal can be resequenced together');
+  }
+  if (selected.some((m) => m.inalterable_hash)) throw new Error('Secured entries cannot be resequenced');
+  const companyId = selected[0].company_id ?? 1;
+  if (read(db, 'res.company', companyId)?.audit_trail) {
+    throw new Error('Posted entries keep their number while the audit trail is active');
+  }
+  for (const m of selected) {
+    const lock = recordLockDate(db, m);
+    if (lock && moveDate(m) <= lock) throw new Error(`The period up to ${lock} is locked`);
+  }
+  return selected;
+}
+
+/** Validate per-move and cross-move resequence constraints (used by both `resequenceMoves` and `applyDiff`). */
+export function resequenceError(db, after, before, stored = null) {
+  if (before?.state !== 'posted' || after?.state !== 'posted' || before.name === after.name) return null;
+  if (!resequenceAllowed(before, after)) return 'Posted entries cannot be edited; reset them to draft first';
+  const companyId = after.company_id ?? 1;
+  if ((db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.state === 'posted' && (m.company_id ?? 1) === companyId && m.name === after.name)) {
+    return 'Sequence numbers must be unique per posted entry';
+  }
+  if (stored) {
+    const storedById = new Map((stored.records?.['account.move'] ?? []).map((m) => [m.id, m]));
+    const resequenced = (db.records['account.move'] ?? []).filter((m) => {
+      const old = storedById.get(m.id);
+      return old?.state === 'posted' && m.state === 'posted' && old.name !== m.name;
+    });
+    if (resequenced.length > 1 && new Set(resequenced.map((m) => `${m.company_id ?? 1}:${m.journal_id ?? ''}`)).size > 1) {
+      return 'Only entries from the same journal can be resequenced together';
+    }
+  }
+  return null;
+}
+
+/** Preview old -> new names for a resequence selection without writing records. */
+export function resequencePreview(db, ids, values = {}) {
+  const selected = validateResequenceMoves(db, ids);
+  const ordering = values.ordering ?? 'keep';
+  if (!['keep', 'date'].includes(ordering)) throw new Error('Choose a valid sequence ordering');
+  const sorted = [...selected].sort((a, b) => (ordering === 'date'
+    ? ((moveDate(a) ?? '').localeCompare(moveDate(b) ?? '') || (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id)
+    : ((a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id)));
+  const firstName = values.first_name ?? sorted[0].name;
+  const parsed = parseResequenceName(firstName);
+  if (!parsed) throw new Error('Enter a valid starting sequence number');
+
+  const resetMode = deduceSequenceNumberReset(firstName);
+  const firstPeriodDate = moveDate(sorted[0]);
+  const periodOffsets = new Map();
+  let periodIndex = 0;
+  const preview = sorted.map((m) => {
+    const date = moveDate(m);
+    const periodKey = periodKeyForDate(date, resetMode);
+    if (!periodOffsets.has(periodKey)) {
+      periodOffsets.set(periodKey, { index: periodIndex++, count: 0 });
+    }
+    const info = periodOffsets.get(periodKey);
+    const num = (info.index === 0 ? parsed.start : 1) + info.count;
+    info.count += 1;
+    const prefix = info.index === 0 ? parsed.prefix : prefixForPeriod(parsed.prefix, firstPeriodDate, date, resetMode);
+    const newName = `${prefix}${String(num).padStart(parsed.padding, '0')}${parsed.suffix}`;
+    return { id: m.id, current_name: m.name, new_name: newName, date };
+  });
+
+  const companyId = selected[0].company_id ?? 1;
+  const journalId = selected[0].journal_id ?? null;
+  const selectedIds = new Set(selected.map((m) => m.id));
+  const assigned = new Set();
+  const existingPosted = new Set((db.records['account.move'] ?? [])
+    .filter((m) => m.state === 'posted' && (m.company_id ?? 1) === companyId && !selectedIds.has(m.id))
+    .map((m) => m.name));
+  const securedMoves = (db.records['account.move'] ?? [])
+    .filter((m) => m.state === 'posted' && (m.company_id ?? 1) === companyId && m.inalterable_hash && (m.journal_id ?? null) === journalId && !selectedIds.has(m.id));
+  for (const row of preview) {
+    if (assigned.has(row.new_name) || existingPosted.has(row.new_name)) {
+      throw new Error('Sequence numbers must be unique per posted entry');
+    }
+    assigned.add(row.new_name);
+    if (securedMoves.some((sm) => (sm.name ?? '').localeCompare(row.new_name) >= 0)) {
+      throw new Error(SECURED_ORDER_ERROR);
+    }
+  }
+  return preview;
+}
+
+/** Apply resequencing to selected posted entries from the same journal. */
+export function resequenceMoves(db, ids, values = {}) {
+  const preview = resequencePreview(db, ids, values);
+  let nextDb = db;
+  for (const row of preview) {
+    if (row.current_name === row.new_name) continue;
+    const move = read(nextDb, 'account.move', row.id);
+    const renamedLines = (move.line_ids ?? []).map((line) => (line?.name === row.current_name ? { ...line, name: row.new_name } : line));
+    nextDb = write(nextDb, 'account.move', move.id, { name: row.new_name, line_ids: renamedLines });
+    nextDb = postNote(nextDb, 'account.move', move.id, `Resequenced from ${row.current_name} to ${row.new_name}`);
+  }
+  return { db: nextDb };
+}
+
+/** Wizard specification for Resequence list action (Odoo `account.resequence.wizard` parity). */
+export function resequenceWizard(db, ids = []) {
+  const selected = validateResequenceMoves(db, ids);
+  const byName = [...selected].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id - b.id);
+  const dates = selected.map((m) => moveDate(m)).filter(Boolean).sort();
+  const defaultFirstName = byName[0].name;
+  const initialPreview = resequencePreview(db, ids, { first_name: defaultFirstName, ordering: 'keep' });
+  return {
+    title: 'Resequence',
+    fields: [
+      { name: 'first_date', type: 'date', label: 'First Date', readonly: true, default: dates[0] ?? null },
+      { name: 'end_date', type: 'date', label: 'End Date', readonly: true, default: dates.at(-1) ?? null },
+      { name: 'first_name', type: 'char', label: 'First New Sequence', required: true, default: defaultFirstName },
+      {
+        name: 'ordering',
+        type: 'selection',
+        label: 'Ordering',
+        required: true,
+        default: 'keep',
+        options: [
+          ['keep', 'Keep current order'],
+          ['date', 'Reorder by accounting date'],
+        ],
+      },
+      {
+        name: 'preview_moves',
+        type: 'one2many',
+        label: 'Preview Modifications',
+        readonly: true,
+        fields: {
+          current_name: { type: 'char', label: 'Current Number' },
+          new_name: { type: 'char', label: 'New Number' },
+          date: { type: 'date', label: 'Date' },
+        },
+        default: initialPreview,
+      },
+    ],
+    onchange: (vals, _key, currentDb) => {
+      if (!vals?.first_name) return { preview_moves: [] };
+      return { preview_moves: resequencePreview(currentDb ?? db, ids, vals) };
+    },
+  };
+}
+
+export const resequenceListAction = {
+  label: 'Resequence',
+  requiresSelection: true,
+  wizard: (db, ids) => resequenceWizard(db, ids),
+  run: (db, ids, values = {}) => resequenceMoves(db, ids, values),
+};
 
 /** Whether a posted manual entry is in an unhashed restricted journal and can be hash-locked. */
 function canLockEntry(r, db) {
@@ -2929,6 +3198,7 @@ export const journalEntriesView = {
       requiresSelection: true,
       run: (db, ids) => markAsReviewed(db, ids),
     },
+    resequenceListAction,
   ],
   filters: [
     [{ id: 'unposted', label: 'Unposted', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
@@ -4442,11 +4712,18 @@ export const accountingModels = {
         ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids, findCompanyCurrencyRecord(db, after.company_id)) ? CURRENCY_AMOUNT_SIGN_ERROR : null);
     },
     invariant: (db, after, before, stored, ctx) => {
-      const err = secureMoveInvariant(db, after, before, ctx?.secureOwnershipCache) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
+      const err = secureMoveInvariant(db, after, before, ctx?.secureOwnershipCache)
+        ?? lockedSettlementInvariant(db, after, before, ctx)
+        ?? moveInvariant(db, after, before, stored)
+        ?? resequenceError(db, after, before, stored);
       if (err) return err;
       if (before?.state === 'posted' && after.state !== 'posted'
         && (db.records['account.asset'] ?? []).some((a) => a.source_move_id === after.id && a.state !== 'cancel')) {
         return "Handle the entry's draft assets before resetting it";
+      }
+      if (before?.state === 'posted' && after.state !== 'posted' && isInvoice(before)
+        && (Number(after.amount_paid) > 0 || (after.payments ?? []).some((p) => !p?.reversed))) {
+        return 'Paid invoices cannot be reset or cancelled until their settlements are unreconciled';
       }
       return null;
     },
@@ -4829,6 +5106,7 @@ export const accountingModels = {
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0, is_move_sent: false }),
+    listActions: [resequenceListAction],
     // Gear-menu Print, like Odoo's report binding: prints in any state (drafts as Draft Invoice); the header Print stays posted-only.
     menuActions: [
       { label: 'Print', when: (r) => isInvoice(r), run: downloadMoves },
@@ -5237,19 +5515,7 @@ export const accountingModels = {
         {
           label: 'Reset to Draft',
           when: (r, db) => canResetMove(r, db),
-          run: (db, r) => {
-            const draftReversals = (db.records['account.move'] ?? []).filter(
-              (m) => m.state === 'draft' && m.auto_post && m.auto_post !== 'no' && (m.reversed_entry_id === r.id || m.id === r.reversal_move_id)
-            );
-            const cancelledDb = draftReversals.reduce((acc, m) => write(cancelMove(acc, m).db, 'account.move', m.id, { auto_post: 'no' }), db);
-            const nextDb = write(cancelledDb, 'account.move', r.id, {
-              state: 'draft',
-              is_move_sent: false,
-              ...(draftReversals.some((m) => m.id === r.reversal_move_id) ? { reversal_move_id: null } : {}),
-              ...(isInvoice(r) ? { line_ids: [] } : {})
-            });
-            return { db: removeAnalytic(nextDb, r.id) };
-          },
+          run: (db, r) => resetMove(db, r),
         },
         { label: 'Lock', when: canLockEntry, run: (db, r) => ({ db: secureEntries(db, { throughMoveId: r.id }) }) },
         { label: 'Mark as reviewed', when: (r) => Boolean(r?.to_check), run: (db, r) => ({ db: markAsReviewed(db, r.id) }) },

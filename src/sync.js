@@ -377,8 +377,10 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
     }
     const list = model === 'account.move' ? all.filter((record) => record.move_type === 'entry') : all;
     const was = new Map((stored[model] ?? []).map((r) => [r.id, r.name]));
-    // Only numbers this change set hands out can move; a record keeps the number it already had.
-    const genericUpserts = model === 'account.move' ? upserts[model].filter((record) => record.move_type === 'entry') : upserts[model];
+    // Only numbers this change set hands out can move; a record keeps the number it already had (unless explicitly resequenced).
+    const genericUpserts = model === 'account.move'
+      ? upserts[model].filter((record) => record.move_type === 'entry' && !(storedById.get(record.id)?.state === 'posted' && record.state === 'posted'))
+      : upserts[model];
     const incoming = new Set(genericUpserts.map((r) => r?.id).filter((id) => was.get(id) !== list.find((x) => x.id === id)?.name));
     const owner = new Map();
     // Records keeping their number claim it first.
@@ -873,9 +875,12 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
       const prior = current.get(raw.id);
       // Issued legal numbers belong to the server, even when an old client explicitly resubmits its provisional one.
+      // Explicit resequencing of already-posted account moves (with matching base name) is validated in invariant.
       const issued = SEQUENCED.includes(model) && sequencedName(model, prior?.name);
       const provisional = sequencedName(model, raw.name);
-      const submitted = issued && provisional?.[1] === issued[1] && raw.name !== prior.name ? {
+      const isExplicitResequence = model === 'account.move' && prior?.state === 'posted' && raw.state === 'posted'
+        && d.bases?.[model]?.[raw.id]?.name === prior.name && raw.name !== prior.name;
+      const submitted = issued && !isExplicitResequence && provisional?.[1] === issued[1] && raw.name !== prior.name ? {
         ...raw, name: prior.name,
         ...(Array.isArray(raw.line_ids) ? { line_ids: raw.line_ids.map((l) => l?.name === raw.name ? { ...l, name: prior.name } : l) } : {}),
       } : raw;

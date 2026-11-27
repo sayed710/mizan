@@ -524,7 +524,7 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
 /** A newly posted entry whose number sorts inside the journal's secured chain could never be hashed. */
 export const SECURED_ORDER_ERROR = 'This entry would be numbered before the secured entries of its journal';
 export function postedBeforeSecuredChain(db, after, before, owners = null) {
-  if (after.state !== 'posted' || before?.state === 'posted') return false;
+  if (after.state !== 'posted' || (before?.state === 'posted' && before.name === after.name)) return false;
   owners ??= ownershipResolver(db);
   const company = after.company_id ?? 1;
   return (db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.inalterable_hash

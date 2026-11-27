@@ -3,6 +3,7 @@
 // amounts that buttons set, which the form shows read-only or not at all) still can.
 import { isVerifiedReopenBoard } from './assets.js';
 import { isCompanylessBudget } from './analyticplus.js';
+import { resequenceAllowed } from './finance.js';
 
 const groupFields = (items = []) => items.flatMap((item) => {
   if (typeof item === 'string') return [item];
@@ -79,8 +80,14 @@ export function withLocks(models) {
           || (name === 'account.asset' && !isReopeningAsset)
           || (name === 'account.budget' && !isCompanylessBudgetRecord)
           ? [] : MAINTAINED[name] ?? [];
+        const isInvoiceReset = name === 'account.move'
+          && before.state === 'posted' && r.state === 'draft'
+          && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(before.move_type)
+          && (r.line_ids ?? []).length === 0;
+        const isResequence = name === 'account.move' && resequenceAllowed(before, r);
         const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f)
-          && !(name === 'account.move' && f === 'line_ids' && ctx?.verifiedBankRewrite));
+          && !(name === 'account.move' && f === 'line_ids' && (ctx?.verifiedBankRewrite || isInvoiceReset))
+          && !(isResequence && (f === 'line_ids' || f === 'name')));
         const changed = fields.filter((f) => !same(model.fields[f], before[f], r[f]));
         if (name === 'sign.request' && before.state !== 'sent') {
           for (const f of ['signature', 'sign_date', 'signer_ids', 'field_values']) {

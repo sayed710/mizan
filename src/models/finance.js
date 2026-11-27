@@ -411,9 +411,30 @@ function isBankStatementMove(db, moveId) {
 /** Review status (Odoo `checked`) stays writable on posted and locked entries. */
 const REVIEW_FIELDS = new Set(['to_check', 'review_state']);
 
+function resequenceLineMatch(before, after) {
+  const oldLines = before?.line_ids ?? [];
+  const newLines = after?.line_ids ?? [];
+  if (oldLines.length !== newLines.length) return false;
+  return oldLines.every((ol, i) => {
+    const nl = newLines[i];
+    if (!ol || !nl) return ol === nl;
+    const renamed = ol.name === before.name && nl.name === after.name;
+    return JSON.stringify(renamed ? { ...ol, name: nl.name } : ol) === JSON.stringify(nl);
+  });
+}
+
+/** Whether a posted move write is strictly a non-hashed sequence renumber (`name` and optional matching line names). */
+export function resequenceAllowed(before, after) {
+  if (before?.state !== 'posted' || after?.state !== 'posted') return false;
+  if (before.inalterable_hash || before.name === after.name || !after.name || after.name === '/' || !/\d/.test(after.name)) return false;
+  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'name' && field !== 'line_ids'))) return false;
+  return resequenceLineMatch(before, after);
+}
+
 function bankStatementMoveRewriteError(db, before, after, ctx) {
   const touched = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((field) => !REVIEW_FIELDS.has(field));
   if (!changedFields(before, after, touched)) return null;
+  const resequencing = resequenceAllowed(before, after);
   const previousStatement = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
   const statement = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
   const legacyLine = previousStatement ?? statement;
@@ -435,10 +456,10 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
     && (after.partner_id ?? null) === (statement.partner_id ?? null)
     && (after.line_ids ?? []).every((line) => (line.partner_id ?? null) === (statement.partner_id ?? null))
     && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids);
-  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
+  if (!resequencing && changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
     return 'Posted entries cannot be edited; reset them to draft first';
   }
-  if (changedFields(before, after, ['line_ids'])) {
+  if (!resequencing && changedFields(before, after, ['line_ids'])) {
     if ((db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id) && !legacyRelease) return 'Posted entries cannot be edited; reset them to draft first';
     if (ctx?.bankRewriteToken !== bankRewriteToken) {
       const previous = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
@@ -450,7 +471,7 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
       }
     }
   }
-  if (before.date !== after.date
+  if (!resequencing && (before.date !== after.date
     || (before.invoice_date ?? '') !== (after.invoice_date ?? '')
     || before.journal_id !== after.journal_id
     || (before.company_id ?? 1) !== (after.company_id ?? 1)
@@ -458,7 +479,7 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
     || before.state !== after.state
     || (before.currency_id ?? null) !== (after.currency_id ?? null)
     || (before.move_type ?? '') !== (after.move_type ?? '')
-    || (before.active !== false) !== (after.active !== false)) {
+    || (before.active !== false) !== (after.active !== false))) {
     return 'Posted entries cannot be edited; reset them to draft first';
   }
   const lock = recordLockDate(db, after, ctx);
@@ -469,6 +490,7 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
   if (before.inalterable_hash) {
     return 'Secured entries cannot be modified';
   }
+  if (resequencing) return null;
   const defaultAccountId = journal?.default_account_id;
   if (!defaultAccountId) {
     return 'The bank liquidity line cannot be changed';
@@ -525,7 +547,7 @@ function postedMoveRule(db, before, after, ctx = null) {
     if (isBankStatementMove(db, after.id)) {
       const bankErr = bankStatementMoveRewriteError(db, before, after, ctx);
       if (bankErr) return bankErr;
-    } else if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    } else if (!resequenceAllowed(before, after) && changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
     if (before.reversed_entry_id && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
     if ((before.is_storno || after.is_storno) && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
   }
@@ -535,7 +557,8 @@ function postedMoveRule(db, before, after, ctx = null) {
     const closingReset = after.state === 'cancel' && ret?.state === 'new' && (ret.closing_move_ids ?? []).includes(before.id)
       && !changedFields(before, after, [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((key) => key !== 'state'));
     if (after.state !== 'draft' && !closingReset) return 'Posted entries go back to draft before anything else';
-    if (Number(before.amount_paid) > 0 || Number(after.amount_paid) > 0) return 'Paid entries cannot be reset to draft';
+    const isDocument = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(before.move_type);
+    if (Number(after.amount_paid) > 0 || (!isDocument && Number(before.amount_paid) > 0)) return 'Paid entries cannot be reset to draft';
   }
   if (after.state === 'posted' && before?.state !== 'posted') {
     if (before && before.state !== 'draft') return 'Only draft entries can be posted';
@@ -621,7 +644,7 @@ function settlementCapacity(db, entry, inv) {
 function backsSettlement(db, id) {
   return (db.records['account.payment'] ?? []).some((p) => ['posted', 'rejected'].includes(p.state) && (p.move_id === id || p.destination_move_id === id))
     || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id || g.exchange_move_id === id))
-    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
+    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => !p?.reversed && (p?.move_id === id || p?.payment_fx_move_id === id)));
 }
 
 /** Whether a document `payments` row is backed by an existing `account.partial.reconcile` record whose moves and amount agree. */
@@ -681,7 +704,12 @@ function unapplicationError(db, stored, after, before) {
     && (reversal.company_id ?? 1) === (after.company_id ?? 1)
     && validDate(date) && reversal.invoice_date === date && date >= (source.invoice_date ?? source.date ?? '')
     && reversesJournalLines(source, reversal);
-  if (released.some(({ row, date }) => [row.payment_fx_move_id, row.cash_basis_move_id].some((id) => id && !moves.some((move) => mirrored(entries.get(id), move, date))))) {
+  if (released.some(({ row, date }) => {
+    const pairFxIds = moves.filter((m) => m.move_type === 'entry' && m.state === 'posted' && !m.reversed_entry_id
+      && ((m.fx_payment_move_id === row.move_id && m.fx_invoice_id === after.id)
+        || (m.fx_payment_move_id === after.id && m.fx_invoice_id === row.move_id))).map((m) => m.id);
+    return [row.payment_fx_move_id, row.cash_basis_move_id, ...pairFxIds].some((id) => id && !moves.some((move) => mirrored(entries.get(id), move, date)));
+  })) {
     return 'Unapplying a payment must reverse its exchange and cash-basis entries';
   }
   if (!stored) return null;
@@ -703,7 +731,14 @@ function unapplicationError(db, stored, after, before) {
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
     const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
-    if (glOnly || isBankStatementMove(db, moveId)) continue;
+    const counterpart = entries.get(moveId);
+    const creditNoteUnapplied = !payment && counterpart && counterpart.id !== after.id
+      && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(counterpart.move_type)
+      && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(after.move_type)
+      && released.filter(({ row }) => row.move_id === moveId).every(({ row, date }) => (counterpart.payments ?? []).some((cp) => (
+        cp.move_id === after.id && cp.reversed && cp.unapplied && Number(cp.amount) === Number(row.amount) && (!cp.reversal_date || !date || cp.reversal_date === date)
+      )));
+    if (glOnly || creditNoteUnapplied || isBankStatementMove(db, moveId)) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
     if (!payment || !prior || !Number.isFinite(change) || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
@@ -767,7 +802,12 @@ export function moveInvariant(db, after, before, stored = null) {
       const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
       const glEntry = hasMatchingPartialLink(db, after, current, { reversed: true });
       const bankEntry = isBankStatementMove(db, p.move_id);
-      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry && !bankEntry)
+      const counterpart = read(db, 'account.move', p.move_id);
+      const creditNoteUnapplied = counterpart && counterpart.id !== after.id
+        && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(counterpart.move_type)
+        && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(after.move_type)
+        && (counterpart.payments ?? []).some((cp) => cp.move_id === after.id && cp.reversed && cp.unapplied && Number(cp.amount) === Number(p.amount) && (!cp.reversal_date || !unappliedOn || cp.reversal_date === unappliedOn));
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry && !bankEntry && !creditNoteUnapplied)
         || !unappliedOn || (p.date && unappliedOn < p.date);
     }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
@@ -820,7 +860,9 @@ export function settlementFxError(db, invoice, p, allocated) {
   const moves = db.records['account.move'] ?? [];
   const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
   const cash = appliedValue(db, invoice, p);
-  const index = (invoice.payments ?? []).findIndex((row) => row === p || (row.move_id === p.move_id && row.payment_fx_move_id === p.payment_fx_move_id));
+  const index = (invoice.payments ?? []).findIndex((row) => row === p
+    || (p.id != null && row.id === p.id)
+    || (p.id == null && row.move_id === p.move_id && row.payment_fx_move_id === p.payment_fx_move_id));
   const earlier = index < 0 ? invoice.payments ?? [] : invoice.payments.slice(0, index);
   const prior = { ...invoice, ...read(db, 'account.move', invoice.id), payments: earlier.map((row) => {
     const reversalDate = read(db, 'account.move', row.reversal_move_id)?.invoice_date ?? row.reversal_date;
@@ -942,10 +984,11 @@ export function paymentInvariant(db, after) {
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
   const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
+  const postedInvoice = invoice?.state === 'posted' ? invoice : null;
   let account;
   try {
-    account = invoice
-      ? invoiceCounterpartAccount(db, invoice)
+    account = postedInvoice
+      ? invoiceCounterpartAccount(db, postedInvoice)
       : partnerAccount(db, after.partner_id, after.company_id, after.partner_type === 'supplier' ? 'payable' : 'receivable');
   } catch (error) {
     return error.message;

@@ -23,8 +23,11 @@ test('a paid invoice cannot be cancelled and a draft invoice cannot be paid', ()
   assert.throws(() => press(db, 'account.move', id, 'Register Payment'), /not available/);
   const paid = payMove(press(db, 'account.move', id, 'Confirm'), id, 100);
   assert.throws(() => press(paid, 'account.move', id, 'Cancel'), /not available/);
-  assert.throws(() => press(paid, 'account.move', id, 'Reset to Draft'), /not available/);
-  assert.equal(read(paid, 'account.move', id).state, 'posted');
+  const payEntryId = read(paid, 'account.move', id).payments[0].move_id;
+  assert.throws(() => press(paid, 'account.move', payEntryId, 'Reset to Draft'), /not available/);
+  const reset = press(paid, 'account.move', id, 'Reset to Draft');
+  assert.equal(read(reset, 'account.move', id).state, 'draft');
+  assert.equal(read(reset, 'account.move', id).amount_paid, 0);
 });
 
 test('a manufacturing order is confirmed once', () => {

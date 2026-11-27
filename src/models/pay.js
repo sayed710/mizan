@@ -206,7 +206,7 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
       && (invoice.payments ?? []).some((row) => !row.reversed && row.move_id === move.id));
     // An invoice item only releases bank lines reconciled directly against it; a bank match of a payment belongs to the payment's items.
     const banks = search(db, 'account.bank.statement.line').filter((b) => b.bank_move_id && (isInvoice(move)
-      ? (b.allocations ?? []).some((a) => a.invoice_id === move.id && (sourceIds.has(a.payment_move_id) || sourceIds.has(a.writeoff_move_id)))
+      ? (b.allocations ?? []).some((a) => a.invoice_id === move.id && (sourceIds.has(a.payment_move_id) || sourceIds.has(a.writeoff_move_id) || (!a.payment_move_id && sourceIds.has(b.bank_move_id))))
       : sourceIds.has(b.bank_move_id) || sourceIds.has(b.payment_move_id) || payments.some((p) => statementPaymentIds(db, b).includes(p.id))
         || (b.allocations ?? []).some((a) => sourceIds.has(a.payment_move_id) || sourceIds.has(a.writeoff_move_id))));
     if (!isInvoice(move) && !banks.length && !applications.length) throw new Error('The selected item has no active settlement');
@@ -220,19 +220,25 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
       for (const invoice of applications) {
         for (const row of (invoice.payments ?? []).filter((r) => !r.reversed && r.move_id === move.id)) {
           const targetIndex = Number.isInteger(row.line_index) ? row.line_index : null;
-          unapplications.set(`${invoice.id}:${move.id}:${targetIndex ?? ''}`, { invoiceId: invoice.id, moveId: move.id, lineIndex: targetIndex });
+          unapplications.set(row.id != null ? `${invoice.id}:${row.id}` : `${invoice.id}:${move.id}:${targetIndex ?? ''}`, { invoiceId: invoice.id, moveId: move.id, lineIndex: targetIndex, rowId: row.id ?? null });
         }
       }
     }
+    const creditNoteUnapplications = new Map();
     for (const row of rows) {
       if (row.discount && payments.some((p) => p.move_id === row.payment_move_id)) continue;
       if (bankMatched(row.move_id)) continue;
       const targetIndex = Number.isInteger(row.line_index) ? row.line_index : null;
       if (payments.some((p) => p.move_id === row.move_id)) {
-        unapplications.set(`${move.id}:${row.move_id}:${targetIndex ?? ''}`, { invoiceId: move.id, moveId: row.move_id, lineIndex: targetIndex });
+        unapplications.set(row.id != null ? `${move.id}:${row.id}` : `${move.id}:${row.move_id}:${targetIndex ?? ''}`, { invoiceId: move.id, moveId: row.move_id, lineIndex: targetIndex, rowId: row.id ?? null });
         continue;
       }
       const source = read(db, 'account.move', row.move_id);
+      if (isInvoice(source) && !row.discount) {
+        const pairKey = [Math.min(move.id, source.id), Math.max(move.id, source.id), Number(row.amount), row.date ?? ''].join(':');
+        creditNoteUnapplications.set(pairKey, { docId: move.id, otherId: source.id, rowId: row.id ?? null, lineIndex: targetIndex });
+        continue;
+      }
       if (source?.move_type !== 'entry' || row.discount) throw new Error('This settlement must be reversed from its originating document workflow');
       writeoffs.set(`${move.id}:${row.move_id}:${targetIndex ?? ''}`, { invoiceId: move.id, moveId: row.move_id, lineIndex: targetIndex });
     }
@@ -245,11 +251,16 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
       }
     }
     if (isInvoice(move) && !rows.length) throw new Error('The selected invoice has no active settlements');
+    items.creditNotePairs = items.creditNotePairs ?? creditNoteUnapplications;
+    if (items.creditNotePairs !== creditNoteUnapplications) {
+      for (const [k, v] of creditNoteUnapplications) items.creditNotePairs.set(k, v);
+    }
   }
   // These functions return immutable snapshots: publish nothing unless the whole operation succeeds.
   let next = db;
   for (const id of bankIds) next = unreconcile(next, read(next, 'account.bank.statement.line', id), date).db;
-  for (const { invoiceId, moveId, lineIndex } of unapplications.values()) next = unapplyPaymentCredit(next, invoiceId, moveId, date, { lineIndex });
+  for (const { invoiceId, moveId, lineIndex, rowId } of unapplications.values()) next = unapplyPaymentCredit(next, invoiceId, moveId, date, { lineIndex, rowId });
+  for (const { docId, otherId, rowId, lineIndex } of (items.creditNotePairs ?? new Map()).values()) next = unapplyCreditNoteSettlement(next, docId, otherId, date, { rowId, lineIndex });
   for (const { invoiceId, moveId, lineIndex } of writeoffs.values()) next = reverseWriteoff(next, invoiceId, moveId, date, { lineIndex });
   return next;
 }
@@ -734,6 +745,59 @@ export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today(
   });
   if (payment && unapplied != null) next = write(next, 'account.payment', payment.id, { unapplied });
   return write(next, 'account.move', invoice.id, { ...invoiceValues, payments: paymentsFinal });
+}
+
+/** Remove a credit-note / invoice settlement pair cleanly, reversing any exchange or cash-basis entries it created. */
+export function unapplyCreditNoteSettlement(db, docId, otherId, date = today(), { rowId = null, lineIndex = null, ctx = null } = {}) {
+  const doc = read(db, 'account.move', docId);
+  const other = read(db, 'account.move', otherId);
+  if (!isInvoice(doc) || doc?.state !== 'posted' || !isInvoice(other) || other?.state !== 'posted' || doc.id === other.id) {
+    throw new Error('Select a posted invoice and credit note settlement to unreconcile');
+  }
+  const rowA = (doc.payments ?? []).find((r) => !r.reversed
+    && (rowId != null ? r.id === rowId : true)
+    && r.move_id === otherId
+    && (!Number.isInteger(lineIndex) || r.line_index === lineIndex));
+  if (!rowA || rowA.discount) throw new Error('This settlement must be reversed from its originating document workflow');
+  const rowB = (other.payments ?? []).find((r) => !r.reversed && r.move_id === docId && Number(r.amount) === Number(rowA.amount) && (!r.date || !rowA.date || r.date === rowA.date))
+    ?? (other.payments ?? []).find((r) => !r.reversed && r.move_id === docId && Number(r.amount) === Number(rowA.amount));
+  if (!rowB || rowB.discount) throw new Error('This settlement must be reversed from its originating document workflow');
+  if (!validDate(date) || date < (rowA.date ?? '') || date < (rowB.date ?? '')) {
+    throw new Error('Enter an unapplication date on or after the application date');
+  }
+  for (const m of [doc, other]) {
+    const lock = recordLockDate(db, m, ctx);
+    if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
+  }
+  let next = db;
+  const fxMoves = search(next, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'entry' && !m.reversed_entry_id
+    && ((m.fx_payment_move_id === docId && m.fx_invoice_id === otherId)
+      || (m.fx_payment_move_id === otherId && m.fx_invoice_id === docId)
+      || m.id === rowA.payment_fx_move_id
+      || m.id === rowB.payment_fx_move_id));
+  for (const fx of fxMoves) {
+    next = reverseEntry(next, fx, date, { reconciliation_reversal: true }).db;
+  }
+  next = reverseCashBasis(next, rowA, doc, date);
+  next = reverseCashBasis(next, rowB, other, date);
+
+  const unapplyOnDoc = (m, targetRow) => {
+    const fresh = read(next, 'account.move', m.id);
+    const paymentsAfter = (fresh.payments ?? []).map((p) => (p.id != null ? p.id === targetRow.id : p === targetRow)
+      ? { ...p, reversed: true, unapplied: true, reversal_date: date }
+      : p);
+    const vals = {
+      amount_paid: Math.max(0, roundCurrency(Number(fresh.amount_paid) - Number(targetRow.amount), documentCurrency(next, fresh))),
+      payments: paymentsAfter,
+      payment_date: paymentsAfter.filter((p) => !p.reversed).at(-1)?.date ?? null,
+    };
+    const lockErr = lockedSettlementInvariant(next, { ...fresh, ...vals }, fresh, ctx);
+    if (lockErr) throw new Error(lockErr);
+    return write(next, 'account.move', fresh.id, vals);
+  };
+  next = unapplyOnDoc(doc, rowA);
+  next = unapplyOnDoc(other, rowB);
+  return next;
 }
 
 /**
