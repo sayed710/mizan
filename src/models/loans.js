@@ -185,10 +185,20 @@ function generatedLoanEntriesValid(db, loan) {
   const lines = loan.line_ids ?? [];
   if (!lines.length) return false;
   const lender = loan.lender_id ?? null;
+  const seenMoves = new Set(
+    (db.records['account.loan'] ?? [])
+      .filter((other) => other.id !== loan.id)
+      .flatMap(loanMoveIds),
+  );
   return lines.every((line, i) => {
+    if (line.posted) return false;
     const ids = line.generated_move_ids ?? [];
+    if (!Array.isArray(ids)) return false;
     if (loan.skip_until_date && line.date < loan.skip_until_date) return !ids.length && !line.move_id;
-    if (new Set(ids).size !== ids.length) return false;
+    for (const id of ids) {
+      if (!id || seenMoves.has(id)) return false;
+      seenMoves.add(id);
+    }
     const payment = read(db, 'account.move', line.move_id);
     if (!payment || !ids.includes(payment.id) || payment.state !== 'draft' || payment.date !== line.date || payment.journal_id !== loan.journal_id || (payment.company_id ?? 1) !== company) return false;
     const reclassAmount = cents(line.principal) + cents(line.short_term_theoretical_balance) - (i ? cents(lines[i - 1].short_term_theoretical_balance) : 0);

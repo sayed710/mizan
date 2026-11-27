@@ -416,3 +416,91 @@ test('Finding 9: confirming a legacy loan preserves its Compute wizard schedule'
   assert.equal(running.interest_difference, 0);
   assert.equal(loanModels['account.loan'].form.warning(running), '');
 });
+
+test('two same-date same-amount instalments confirm and post distinct payments, while guard rejects shared generated moves', () => {
+  const { db, id } = modernLoan();
+  const sameDateLines = [
+    { date: '2040-02-29', principal: 100, interest: 5, payment: 105, outstanding: 100, posted: false, move_id: null },
+    { date: '2040-02-29', principal: 100, interest: 5, payment: 105, outstanding: 0, posted: false, move_id: null },
+  ];
+  const draftDb = write(db, 'account.loan', id, { amount: 200, duration: 2, interest: 10, interest_rate: 0, line_ids: sameDateLines });
+  const confirmed = confirmLoan(draftDb, read(draftDb, 'account.loan', id));
+  const running = read(confirmed, 'account.loan', id);
+  assert.equal(running.state, 'running');
+  assert.notEqual(running.line_ids[0].move_id, running.line_ids[1].move_id);
+  const allMoveIds = running.line_ids.flatMap((line) => line.generated_move_ids);
+  assert.equal(new Set(allMoveIds).size, allMoveIds.length);
+  assert.doesNotThrow(() => applyDiff(draftDb, diffDb(draftDb, confirmed)));
+
+  const closedDb = postDueLines(confirmed, running, '2040-02-29');
+  const closedLoan = read(closedDb, 'account.loan', id);
+  assert.equal(closedLoan.state, 'closed');
+  assert.equal(closedLoan.outstanding_balance, 0);
+  assert.deepEqual(closedLoan.line_ids.map((line) => line.posted), [true, true]);
+  assert.ok(allMoveIds.every((moveId) => read(closedDb, 'account.move', moveId).state === 'posted'));
+  assert.doesNotThrow(() => applyDiff(confirmed, diffDb(confirmed, closedDb)));
+
+  // Guard boundary: sharing a payment move across two same-date/same-amount instalments is rejected.
+  const sharedMoveId = running.line_ids[0].move_id;
+  const prepDb = {
+    ...confirmed,
+    records: {
+      ...confirmed.records,
+      'account.loan': confirmed.records['account.loan'].map((loan) => (
+        loan.id === id ? { ...read(draftDb, 'account.loan', id), state: 'draft' } : loan
+      )),
+    },
+  };
+  assert.throws(() => write(prepDb, 'account.loan', id, {
+    state: 'running',
+    line_ids: [
+      running.line_ids[0],
+      { ...running.line_ids[1], move_id: sharedMoveId, generated_move_ids: [sharedMoveId] },
+    ],
+  }), /Generated loan entries do not match the schedule/);
+
+  // Guard boundary: confirming with an already-posted instalment flag while moves are draft is rejected.
+  assert.throws(() => write(prepDb, 'account.loan', id, {
+    state: 'running',
+    line_ids: [
+      { ...running.line_ids[0], posted: true },
+      running.line_ids[1],
+    ],
+  }), /Generated loan entries do not match the schedule/);
+
+  // Guard boundary: another loan cannot reuse the first loan's generated move.
+  const second = create(confirmed, 'account.loan', {
+    ...read(draftDb, 'account.loan', id),
+    name: 'Second modern loan',
+  });
+  assert.throws(() => write(second.db, 'account.loan', second.id, {
+    state: 'running',
+    line_ids: running.line_ids,
+  }), /Generated loan entries do not match the schedule/);
+
+  // Supported skip_until_date and legacy same-date/same-amount behaviour remain intact.
+  const skipLines = [
+    { date: '2040-01-31', principal: 100, interest: 5, payment: 105, outstanding: 200, posted: false, move_id: null },
+    { date: '2040-02-29', principal: 100, interest: 5, payment: 105, outstanding: 100, posted: false, move_id: null },
+    { date: '2040-02-29', principal: 100, interest: 5, payment: 105, outstanding: 0, posted: false, move_id: null },
+  ];
+  const skipDraft = write(db, 'account.loan', id, { amount: 300, duration: 3, interest: 15, interest_rate: 0, skip_until_date: '2040-02-01', line_ids: skipLines });
+  const skipConfirmed = confirmLoan(skipDraft, read(skipDraft, 'account.loan', id));
+  const skipRunning = read(skipConfirmed, 'account.loan', id);
+  assert.deepEqual(skipRunning.line_ids[0].generated_move_ids, []);
+  assert.equal(skipRunning.line_ids[0].move_id, null);
+  assert.notEqual(skipRunning.line_ids[1].move_id, skipRunning.line_ids[2].move_id);
+
+  const legacy = legacyLoan(db, {
+    amount: 200,
+    duration: 2,
+    interest: 10,
+    interest_rate: 0,
+    line_ids: sameDateLines,
+  });
+  const legacyRunning = confirmLoan(legacy.db, read(legacy.db, 'account.loan', legacy.id));
+  const legacyClosed = postDueLines(legacyRunning, read(legacyRunning, 'account.loan', legacy.id), '2040-02-29');
+  const legacyLoanRec = read(legacyClosed, 'account.loan', legacy.id);
+  assert.equal(legacyLoanRec.state, 'closed');
+  assert.notEqual(legacyLoanRec.line_ids[0].move_id, legacyLoanRec.line_ids[1].move_id);
+});
