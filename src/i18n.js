@@ -4137,6 +4137,8 @@ const ar = {
   'A group cannot be its own ancestor': 'لا يمكن أن تكون المجموعة سلفاً لنفسها',
   'Parent group must belong to the same company': 'يجب أن تتبع المجموعة الأم الشركة نفسها',
   'Code Prefix Start must not be greater than Code Prefix End': 'يجب ألا تكون بداية بادئة الرمز أكبر من نهايتها',
+  'Account group prefixes must have the same length': 'يجب أن يكون لبادئات مجموعة الحساب الطول نفسه',
+  'Account Groups with the same granularity cannot overlap': 'لا يمكن أن تتداخل مجموعات الحسابات ذات درجة التفصيل نفسها',
   'Select an existing account group': 'اختر مجموعة حساب موجودة',
   'Account group must belong to the account company': 'يجب أن تتبع مجموعة الحساب شركة الحساب',
   'Move to Account': 'نقل إلى حساب',

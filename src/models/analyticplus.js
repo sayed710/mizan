@@ -478,7 +478,7 @@ export function groupBudgetReportEntries(db, entries, groupBy) {
       const periodTotals = sharedCurrency
         ? Array.from({ length: periodCount }, (_, pIdx) => {
             const valid = group.items.map((item) => item.periodLines[pIdx]).filter((pl) => pl && !pl.error && pl.line);
-            if (!valid.length) return null;
+            if (valid.length !== group.items.length) return null;
             const planned = roundCurrency(valid.reduce((s, pl) => s + (pl.line.planned_amount ?? pl.line.planned ?? 0), 0), sharedCurrency);
             const achieved = roundCurrency(valid.reduce((s, pl) => s + (pl.line.achieved_amount ?? 0), 0), sharedCurrency);
             const committed = roundCurrency(valid.reduce((s, pl) => s + (pl.line.committed_amount ?? 0), 0), sharedCurrency);

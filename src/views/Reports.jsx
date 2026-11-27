@@ -818,19 +818,23 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
   };
 
   if (groupBy) {
-    const entries = budgets.flatMap(({ b, company, currency, periodReports, firstReportLines }) => (
+    const entries = budgets.flatMap(({ b, company, companyMissing, reportError, currency, periodReports, firstReportLines }) => (
       firstReportLines.map((line, i) => ({
         key: `${b.id}-${i}`,
         budget: b,
         company,
         currency,
         line,
-        periodLines: periodReports.map((pr) => ({ error: pr.error, line: pr.lines?.[i] ?? null })),
+        periodLines: targetPeriods.map((_, index) => ({ error: periodReports[index]?.error || (companyMissing || !periodReports[index] ? reportError || true : null), line: periodReports[index]?.lines?.[i] ?? null })),
       }))
     ));
     const grouped = groupBudgetReportEntries(db, entries, groupBy);
     return (
       <tbody>
+        {budgets.filter(({ companyMissing, reportError }) => companyMissing || reportError).map(({ b, companyMissing, reportError }) => <Fragment key={`diagnostic-${b.id}`}>
+          {companyMissing && <tr><td colSpan={colSpan} className="muted">{b.name}: {t('Select a company on the budget record to show this budget report.')} {t('Select a company to show this budget report.')}</td></tr>}
+          {reportError && <tr><td colSpan={colSpan} className="muted" role="alert">{b.name}: {t(reportError)}</td></tr>}
+        </Fragment>)}
         {grouped.map((group) => (
           <Fragment key={group.key}>
             <tr className="rep-section">
@@ -841,7 +845,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
                 <BudgetMoneyCell key={`${pIdx}-c`} value={pt.committed} currency={group.currency} money={fmtMoney} />,
                 <BudgetMoneyCell key={`${pIdx}-v`} value={pt.variance} currency={group.currency} money={fmtMoney} />,
                 <td key={`${pIdx}-a`} className="num">{pt.planned ? `${pt.achievement}%` : ''}</td>,
-              ] : [<td key={`${pIdx}-pl`} className="num">—</td>, <td key={`${pIdx}-pr`} className="num">—</td>, <td key={`${pIdx}-c`} className="num">—</td>, <td key={`${pIdx}-v`} className="num">—</td>, <td key={`${pIdx}-a`} className="num">—</td>])) : <td colSpan={targetPeriods.length * 5} />}
+              ] : [<td key={`${pIdx}-pl`} className="num">—</td>, <td key={`${pIdx}-pr`} className="num">—</td>, <td key={`${pIdx}-c`} className="num">—</td>, <td key={`${pIdx}-v`} className="num">—</td>, <td key={`${pIdx}-a`} className="num">—</td>])) : targetPeriods.map((_, pIdx) => <td key={pIdx} colSpan={5} className="num">{group.items.some((item) => !item.periodLines[pIdx] || item.periodLines[pIdx].error || !item.periodLines[pIdx].line) ? '—' : ''}</td>)}
             </tr>
             {group.items.map((item) => renderLineRows(item.key, `${item.budget.name} · ${lineLabel(item.line)}`, item.periodLines, item.currency))}
           </Fragment>
@@ -858,7 +862,7 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
           {company && <span className="muted"> · {company.name}</span>}
         </td></tr>,
         ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company on the budget record to show this budget report.')} {t('Select a company to show this budget report.')}</td></tr>] : []),
-        ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{reportError}</td></tr>] : []),
+        ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{t(reportError)}</td></tr>] : []),
         ...firstReportLines.map((l, i) => renderLineRows(
           `${b.id}-${i}`,
           lineLabel(l),

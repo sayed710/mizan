@@ -49,12 +49,13 @@ export function TrialBalance({ db, period, periods, companyId, analyticAccountId
   return (
     <tbody>
       {groupBy ? groups.map((group) => {
+        if (group.ancestors?.some((key) => closedGroups.has(key))) return null;
         const open = !closedGroups.has(group.key);
         return (
           <Fragment key={group.key}>
             <tr className="rep-section" onClick={() => toggleGroup(group.key)} aria-expanded={open} style={{ cursor: 'pointer' }}>
               <td style={group.depth ? { paddingInlineStart: `${group.depth * 1.5 + 0.75}rem` } : undefined}>
-                <span className="caret">{group.accounts.length ? (open ? '▾' : '▸') : ''}</span> {t(group.name)}
+                <span className="caret">{(group.accounts.length || group.hasChildren) ? (open ? '▾' : '▸') : ''}</span> {t(group.name)}
               </td>
               {group.periodTotals.flatMap((periodSum, index) => keys.map((key) => (
                 <td key={`${index}-${key}`} className="num">{fmtMoney(periodSum[key] ?? 0)}</td>

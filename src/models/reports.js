@@ -122,7 +122,7 @@ export function groupTrialBalanceRows(db, accounts, rowsByReport, keys, groupBy)
       return [...own, ...childAccs];
     };
     const out = [];
-    const walk = (parentId, depth, visited = new Set()) => {
+    const walk = (parentId, depth, visited = new Set(), ancestors = []) => {
       for (const group of childrenByParent.get(parentId) ?? []) {
         if (visited.has(group.id)) continue;
         visited.add(group.id);
@@ -132,10 +132,12 @@ export function groupTrialBalanceRows(db, accounts, rowsByReport, keys, groupBy)
           id: group.id,
           name: group.code_prefix_start ? `${group.code_prefix_start} ${group.name}` : group.name,
           depth,
+          ancestors,
+          hasChildren: (childrenByParent.get(group.id) ?? []).length > 0,
           accounts: directAccounts.get(group.id) ?? [],
           periodTotals: sumPeriodValues(subtreeAccounts),
         });
-        walk(group.id, depth + 1, visited);
+        walk(group.id, depth + 1, visited, [...ancestors, `group:${group.id}`]);
       }
     };
     walk(null, 0);

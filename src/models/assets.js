@@ -965,7 +965,7 @@ export function depreciationReport(db, period, companyId = 'all', options = {}) 
   const grouped = new Map();
   const groupModels = { asset_group_id: 'account.asset.group', model_id: 'account.asset.model', account_asset_id: 'account.account', company_id: 'res.company' };
   if (groupModels[groupBy]) for (const row of rows) {
-    const id = row.a[groupBy] ?? null;
+    const id = row.a[groupBy] ?? (groupBy === 'company_id' ? 1 : null);
     if (!grouped.has(id)) grouped.set(id, []);
     grouped.get(id).push(row);
   }

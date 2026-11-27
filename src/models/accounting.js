@@ -3237,21 +3237,32 @@ function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwri
 }
 
 // Stored account groups and their parents are derived from company and code ranges.
-export function recomputeAccountGroups(db) {
-  const groups = db.records['account.group'] ?? [];
-  const match = (code, company, excluded = null, maxLength = Infinity, endCode = code) => groups
+function matchAccountGroup(groups, code, company, excluded = null, maxLength = Infinity, endCode = code) {
+  return groups
     .filter((g) => {
       const start = String(g.code_prefix_start ?? '');
-      const end = String(g.code_prefix_end ?? start);
+      const end = String(g.code_prefix_end ?? start) || start;
       const prefix = String(code ?? '').slice(0, start.length);
       const endPrefix = String(endCode ?? '').slice(0, start.length);
       return g.id !== excluded && (g.company_id ?? 1) === (company ?? 1) && start && end
-        && start.length < maxLength && prefix.length === start.length && endPrefix.length === start.length
+        && start.length === end.length && start.length < maxLength && prefix.length === start.length && endPrefix.length === start.length
         && prefix >= start && endPrefix <= end;
     })
     .sort((a, b) => String(b.code_prefix_start).length - String(a.code_prefix_start).length || a.id - b.id)[0]?.id ?? null;
+}
+
+function recomputeAccountGroup(db, account, before) {
+  if (before && before.code === account.code && before.company_id === account.company_id) return db;
+  const groupId = matchAccountGroup(db.records['account.group'] ?? [], account.code, account.company_id);
+  if ((account.group_id ?? null) === groupId) return db;
+  return { ...db, records: { ...db.records, 'account.account': db.records['account.account'].map((a) => a.id === account.id ? { ...a, group_id: groupId } : a) } };
+}
+
+export function recomputeAccountGroups(db) {
+  const groups = db.records['account.group'] ?? [];
+  const match = (...args) => matchAccountGroup(groups, ...args);
   const updatedGroups = groups.map((g) => {
-    const parentId = match(g.code_prefix_start, g.company_id, g.id, String(g.code_prefix_start ?? '').length, g.code_prefix_end ?? g.code_prefix_start);
+    const parentId = match(g.code_prefix_start, g.company_id, g.id, String(g.code_prefix_start ?? '').length, g.code_prefix_end || g.code_prefix_start);
     return (g.parent_id ?? null) === parentId ? g : { ...g, parent_id: parentId };
   });
   const accounts = (db.records['account.account'] ?? []).map((a) => {
@@ -3401,8 +3412,8 @@ export const accountingModels = {
       }
       return null;
     },
-    onCreate: recomputeAccountGroups,
-    onWrite: recomputeAccountGroups,
+    onCreate: recomputeAccountGroup,
+    onWrite: recomputeAccountGroup,
     protectDelete: accountDeleteGuard,
     sort: (a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')),
     groupBys: ['account_type', 'group_id'],
@@ -3458,6 +3469,14 @@ export const accountingModels = {
     defaults: () => ({}),
     createDefaults: (db) => ({ company_id: currentCompany(db) }),
     guard: (db, before, after) => {
+      const start = String(after.code_prefix_start ?? '');
+      const end = String(after.code_prefix_end ?? start) || start;
+      if (start && end && start.length !== end.length) return 'Account group prefixes must have the same length';
+      if (start && end && (db.records['account.group'] ?? []).some((g) => {
+        const otherStart = String(g.code_prefix_start ?? '');
+        const otherEnd = String(g.code_prefix_end ?? otherStart) || otherStart;
+        return g.id !== (before?.id ?? after.id) && (g.company_id ?? 1) === (after.company_id ?? 1) && otherStart.length === start.length && otherEnd.length === start.length && start <= otherEnd && otherStart <= end;
+      })) return 'Account Groups with the same granularity cannot overlap';
       if (after.code_prefix_start && after.code_prefix_end && String(after.code_prefix_start) > String(after.code_prefix_end)) {
         return 'Code Prefix Start must not be greater than Code Prefix End';
       }
