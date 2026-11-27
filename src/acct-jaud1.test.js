@@ -6,7 +6,7 @@ import { journalAudit } from './models/journal_audit.js';
 import { journalAuditExportRows } from './models/journal_audit_export.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { postMove } from './models/accounting.js';
+import { applyCreditNote, postMove } from './models/accounting.js';
 import { taxesByGrid } from './models/finance.js';
 import { accountId, postEntry } from './models/ledger.js';
 import { applyPaymentCredit, postPayment, reversePayment } from './models/pay.js';
@@ -853,6 +853,267 @@ test('General Ledger under All Companies with a foreign-company journal filter k
     const rendered = textOf(host);
     assert.match(rendered, /\$250\.00/);
     assert.doesNotMatch(rendered, /€250\.00/);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Qodo Finding 1: explicit empty journalIds returns no groups in model, export, and empty ledger UI while undefined/nonempty filters still work', async () => {
+  let state = seed();
+  const invJournal = search(state, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  const miscJournal = search(state, 'account.journal').find((j) => j.code === 'MISC');
+  const emptyLedger = create(state, 'account.journal.group', { name: 'Empty Ledger', company_id: 1, journal_ids: [] });
+  state = emptyLedger.db;
+
+  const sale = create(state, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    journal_id: invJournal.id,
+    partner_id: 1,
+    invoice_date: '2031-12-03',
+    invoice_line_ids: [{ qty: 1, price_unit: 120, tax: 0 }],
+  });
+  state = postMove(sale.db, sale.id);
+  const misc = postEntry(state, {
+    journal: miscJournal.id,
+    company: 1,
+    date: '2031-12-04',
+    lines: [
+      { account: '121000', debit: 80 },
+      { account: '400000', credit: 80 },
+    ],
+  });
+  state = {
+    ...misc.db,
+    settings: { ...misc.db.settings, current_company_id: 1, allowed_company_ids: [1] },
+  };
+
+  // Ordinary results (undefined/null) return both journals; nonempty filter returns only the requested journal.
+  const allGroups = journalAudit(state, { from: '2031-12-01', to: '2031-12-31', companyId: 1 });
+  assert.deepEqual(allGroups.map((g) => g.journal.id), [invJournal.id, miscJournal.id]);
+  const onlyInvGroups = journalAudit(state, { from: '2031-12-01', to: '2031-12-31', companyId: 1, journalIds: [invJournal.id] });
+  assert.deepEqual(onlyInvGroups.map((g) => g.journal.id), [invJournal.id]);
+
+  // Explicit empty array (selected ledger with no journals) returns zero groups in model & CSV/XLSX export payload.
+  const emptyGroups = journalAudit(state, { from: '2031-12-01', to: '2031-12-31', companyId: 1, journalIds: [] });
+  assert.deepEqual(emptyGroups, []);
+  const { rows: emptyExportRows } = journalAuditExportRows(state, { period: { from: '2031-12-01', to: '2031-12-31', journalIds: [] }, companyId: 1 });
+  assert.equal(emptyExportRows.length, 2, 'only header and zero Total row exported when journalIds is []');
+  assert.equal(emptyExportRows[1][0], 'Total');
+  assert.equal(emptyExportRows[1][1], 0);
+  assert.equal(emptyExportRows[1][9], 0);
+
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/journal-audit' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+  await React.act(async () => commit(state));
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'journalAudit' } })));
+    const periodSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
+    await React.act(async () => props(periodSelect).onChange({ target: { value: 'custom' } }));
+    const fromInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date');
+    const toInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date' && n !== fromInput);
+    await React.act(async () => props(fromInput).onChange({ target: { value: '2031-12-01' } }));
+    await React.act(async () => props(toInput).onChange({ target: { value: '2031-12-31' } }));
+
+    // Ordinary UI view renders both $120.00 and $80.00.
+    assert.match(textOf(host), /\$120\.00/);
+    assert.match(textOf(host), /\$80\.00/);
+
+    // Selecting the empty ledger leaves no journal groups in the report UI.
+    const ledgerSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Ledger');
+    await React.act(async () => props(ledgerSelect).onChange({ target: { value: String(emptyLedger.id) } }));
+    const emptyRendered = textOf(host);
+    assert.doesNotMatch(emptyRendered, /\$120\.00|\$80\.00/);
+    assert.match(emptyRendered, /No entries for this period\./);
+
+    // Clearing back to All Ledgers restores ordinary results.
+    await React.act(async () => props(ledgerSelect).onChange({ target: { value: '' } }));
+    assert.match(textOf(host), /\$120\.00/);
+    assert.match(textOf(host), /\$80\.00/);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Qodo Finding 2: disabling Include Payments hides payment-linked cash basis release and its reversal while keeping independent cash-basis entries visible', () => {
+  let state = seed();
+  const cashTax = search(state, 'account.tax').find((t) => t.name === 'VAT 14% (Cash Basis)' && t.type_tax_use === 'sale');
+  assert.ok(cashTax, 'seeded cash-basis VAT tax exists');
+
+  // 1) Invoice settled by Payment 1 (later reversed, producing cash-basis release + its reversal), then settled by Payment 2.
+  const inv1 = create(state, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: 1,
+    invoice_date: '2031-12-05',
+    invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(cashTax) }],
+  });
+  state = postMove(inv1.db, inv1.id);
+  const p1 = create(state, 'account.payment', {
+    company_id: 1,
+    partner_id: 1,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 114,
+    date: '2031-12-06',
+  });
+  state = postPayment(p1.db, read(p1.db, 'account.payment', p1.id));
+  state = applyPaymentCredit(state, p1.id, inv1.id, '2031-12-06');
+  const pay1 = read(state, 'account.payment', p1.id);
+  const cbRelease1 = read(state, 'account.move', inv1.id).payments.at(-1).cash_basis_move_id;
+  assert.ok(cbRelease1, 'payment 1 creates cash-basis release');
+
+  state = reversePayment(state, pay1, '2031-12-07');
+  const pay1Reversal = state.records['account.move'].find((m) => m.reversed_entry_id === pay1.move_id);
+  const cbReversal1 = state.records['account.move'].find((m) => m.reversed_entry_id === cbRelease1);
+  assert.ok(pay1Reversal && cbReversal1, 'payment reversal also reverses linked cash-basis release');
+
+  const p2 = create(state, 'account.payment', {
+    company_id: 1,
+    partner_id: 1,
+    partner_type: 'customer',
+    payment_type: 'inbound',
+    amount: 114,
+    date: '2031-12-08',
+  });
+  state = postPayment(p2.db, read(p2.db, 'account.payment', p2.id));
+  state = applyPaymentCredit(state, p2.id, inv1.id, '2031-12-08');
+  const pay2 = read(state, 'account.payment', p2.id);
+  const cbRelease2 = read(state, 'account.move', inv1.id).payments.at(-1).cash_basis_move_id;
+  assert.ok(cbRelease2, 'payment 2 creates cash-basis release');
+
+  // 2) Independent cash-basis releases: credit note settlement (non-payment application move) + standalone manual cash-basis entry.
+  const inv2 = create(state, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    partner_id: 1,
+    invoice_date: '2031-12-05',
+    invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(cashTax) }],
+  });
+  state = postMove(inv2.db, inv2.id);
+  const note = create(state, 'account.move', {
+    move_type: 'out_refund',
+    company_id: 1,
+    partner_id: 1,
+    invoice_date: '2031-12-06',
+    invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(cashTax) }],
+  });
+  state = postMove(note.db, note.id);
+  state = applyCreditNote(state, note.id, inv2.id, '2031-12-09');
+  const cbFromNote = read(state, 'account.move', inv2.id).payments.at(-1).cash_basis_move_id;
+  assert.ok(cbFromNote, 'credit note settlement creates non-payment cash-basis release');
+
+  const manualCb = postEntry(state, {
+    journal: 'MISC',
+    company: 1,
+    date: '2031-12-10',
+    ref: 'Manual Cash Basis Adjustment',
+    lines: [
+      { account: '251000', debit: 14 },
+      { account: '251000', credit: 14 },
+    ],
+  });
+  state = manualCb.db;
+
+  const includedIds = new Set(journalAudit(state, { from: '2031-12-01', to: '2031-12-31', companyId: 1, includePayments: true })
+    .flatMap((g) => g.items.map((it) => it.move.id)));
+  for (const id of [inv1.id, inv2.id, note.id, pay1.move_id, pay1Reversal.id, cbRelease1, cbReversal1.id, pay2.move_id, cbRelease2, cbFromNote, manualCb.id]) {
+    assert.ok(includedIds.has(id), `move ${id} visible when includePayments=true`);
+  }
+
+  const excludedIds = new Set(journalAudit(state, { from: '2031-12-01', to: '2031-12-31', companyId: 1, includePayments: false })
+    .flatMap((g) => g.items.map((it) => it.move.id)));
+  assert.ok(excludedIds.has(inv1.id), 'invoice 1 stays visible');
+  assert.ok(excludedIds.has(inv2.id), 'invoice 2 stays visible');
+  assert.ok(excludedIds.has(note.id), 'credit note stays visible');
+  assert.ok(excludedIds.has(cbFromNote), 'credit-note cash-basis release stays visible');
+  assert.ok(excludedIds.has(manualCb.id), 'standalone manual cash-basis entry stays visible');
+  assert.ok(!excludedIds.has(pay1.move_id), 'reversed payment hidden');
+  assert.ok(!excludedIds.has(pay1Reversal.id), 'payment reversal hidden');
+  assert.ok(!excludedIds.has(cbRelease1), 'payment-linked cash-basis release 1 hidden');
+  assert.ok(!excludedIds.has(cbReversal1.id), 'reversal of payment-linked cash-basis release hidden');
+  assert.ok(!excludedIds.has(pay2.move_id), 'payment 2 hidden');
+  assert.ok(!excludedIds.has(cbRelease2), 'payment-linked cash-basis release 2 hidden');
+});
+
+test('Qodo Finding 3: posted invoice with dangling journal_id is skipped without crashing while preserving valid entries in model, export, and UI', async () => {
+  let state = seed();
+  const invJournal = search(state, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  const validInv = create(state, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    journal_id: invJournal.id,
+    partner_id: 1,
+    invoice_date: '2031-12-15',
+    invoice_line_ids: [{ qty: 1, price_unit: 320, tax: 0 }],
+  });
+  state = postMove(validInv.db, validInv.id);
+
+  // Add an already-posted invoice referencing a non-existent journal ID, plus a separate company lacking defaults so its draft stays safely scoped.
+  const danglingPostedInv = {
+    id: 998877,
+    name: 'DANGLING/2031/001',
+    move_type: 'out_invoice',
+    state: 'posted',
+    company_id: 1,
+    journal_id: 999999,
+    partner_id: 1,
+    date: '2031-12-16',
+    invoice_date: '2031-12-16',
+    line_ids: [
+      { account_id: accountId(state, '121000'), debit: 500, credit: 0 },
+      { account_id: accountId(state, '400000'), debit: 0, credit: 500 },
+    ],
+  };
+  state = {
+    ...state,
+    settings: { ...state.settings, current_company_id: 1, allowed_company_ids: [1] },
+    records: {
+      ...state.records,
+      'account.move': [...state.records['account.move'], danglingPostedInv],
+    },
+  };
+
+  const groups = journalAudit(state, { from: '2031-12-01', to: '2031-12-31', companyId: 1, includeDraft: true });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].journal.id, invJournal.id);
+  assert.equal(groups[0].debit, 320);
+
+  const { rows } = journalAuditExportRows(state, { period: { from: '2031-12-01', to: '2031-12-31' }, companyId: 1, includeDraft: true });
+  assert.ok(rows.some((r) => String(r[0]).startsWith('Customer Invoices (') && r[9] === 320));
+  assert.ok(!rows.some((r) => r[4] === 'DANGLING/2031/001'));
+  assert.equal(rows.at(-1)[9], 320);
+
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/journal-audit' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+  await React.act(async () => commit(state));
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'journalAudit' } })));
+    const periodSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
+    await React.act(async () => props(periodSelect).onChange({ target: { value: 'custom' } }));
+    const fromInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date');
+    const toInput = find(host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date' && n !== fromInput);
+    await React.act(async () => props(fromInput).onChange({ target: { value: '2031-12-01' } }));
+    await React.act(async () => props(toInput).onChange({ target: { value: '2031-12-31' } }));
+    const rendered = textOf(host);
+    assert.match(rendered, /\$320\.00/);
+    assert.doesNotMatch(rendered, /DANGLING\/2031\/001/);
   } finally {
     await React.act(async () => root.unmount());
   }

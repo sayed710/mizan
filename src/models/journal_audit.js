@@ -29,7 +29,7 @@ export function isIncompleteDraftPostingError(error) {
     && INCOMPLETE_DRAFT_POSTING_PATTERNS.some((pattern) => pattern.test(error.message));
 }
 
-/** Collect payment entry IDs and their explicitly linked transfer, reversal, discount, and FX moves. */
+/** Collect payment entry IDs and their explicitly linked transfer, reversal, discount, FX, and cash-basis moves. */
 function paymentRelatedMoveIds(db) {
   const ids = new Set();
   for (const payment of db.records['account.payment'] ?? []) {
@@ -56,6 +56,7 @@ function paymentRelatedMoveIds(db) {
           add(row.move_id);
           add(row.payment_fx_move_id);
           add(row.reversal_move_id);
+          add(row.cash_basis_move_id);
         }
       }
     }
@@ -80,21 +81,23 @@ function reportMoveLines(db, move) {
   }
 }
 
-/** Resolve a move's journal for Journal Audit, treating expected missing draft journal config explicitly. */
+/** Resolve a move's journal for Journal Audit, scoping dynamic fallback to eligible draft invoices. */
 function resolveAuditJournal(db, journals, move) {
   const direct = journals.get(move.journal_id);
   if (direct) return direct;
-  if (!isInvoice(move)) return null;
+  if (move.state !== 'draft' || !isInvoice(move)) return null;
   try {
     return resolveDocumentJournal(db, move);
   } catch (error) {
-    if (move.state === 'draft' && isIncompleteDraftPostingError(error)) return null;
+    if (isIncompleteDraftPostingError(error)) return null;
     throw error;
   }
 }
 
 /** Journal items and signed tax totals in the requested period and company, ordered by date or by entry number. */
 export function journalAudit(db, { from = '', to = '', companyId = null, ledgerCompanyId = null, journalIds = null, sort = 'date', includeDraft = false, includePayments = true } = {}) {
+  const targetJournals = Array.isArray(journalIds) ? new Set(journalIds.map(Number)) : null;
+  if (targetJournals && !targetJournals.size) return [];
   const groups = new Map();
   const journals = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -104,7 +107,6 @@ export function journalAudit(db, { from = '', to = '', companyId = null, ledgerC
   const byDate = (a, b) => a.date.localeCompare(b.date);
   const compareItems = (a, b) => (sort === 'number' ? byNumber(a, b) || byDate(a, b) : byDate(a, b) || (a.move.name ?? '').localeCompare(b.move.name ?? '')) || (a.move.id ?? 0) - (b.move.id ?? 0);
   const paymentMoves = includePayments ? null : paymentRelatedMoveIds(db);
-  const targetJournals = Array.isArray(journalIds) && journalIds.length ? new Set(journalIds.map(Number)) : null;
   const eligible = [];
   const journalCurrencies = new Map();
   for (const move of db.records['account.move'] ?? []) {
