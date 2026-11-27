@@ -49,7 +49,6 @@ export function parseRel(db, model, raw) {
 export function ActionView({ leaf, base, params }) {
   const db = useDb();
   const uploadType = base === '#/accounting/bills' ? 'in_invoice' : base === '#/accounting/invoices' ? 'out_invoice' : null;
-  const moveUpload = useMoveUpload({ moveType: uploadType, companyId: currentCompany(db) });
   const model = leaf.model;
   const def = models[model];
   const views = viewsOf(model);
@@ -70,6 +69,25 @@ export function ActionView({ leaf, base, params }) {
     const initial = emptySearch(model, parseRel(db, model, relRaw));
     const defaultFilters = leaf.defaultFilters ?? models[model].defaultFilters ?? [];
     return { ...initial, filters: urlFilters.length ? urlFilters : defaultFilters, groupBy: leaf.groupBy ?? [] };
+  });
+  const relField = uploadType ? search.rel?.field : null;
+  const journalRel = relField === 'journal_id' ? search.rel : null;
+  const companyRel = relField === 'company_id' ? search.rel : null;
+  const ambiguousJournalRel = Boolean(journalRel?.ids?.length > 1);
+  const ambiguousCompanyRel = Boolean(companyRel?.ids?.length > 1);
+  const uploadJournalId = journalRel ? (ambiguousJournalRel ? journalRel.ids : journalRel.id) : null;
+  const uploadJournal = !ambiguousJournalRel && Number.isSafeInteger(uploadJournalId) && uploadJournalId > 0
+    ? read(db, 'account.journal', uploadJournalId)
+    : null;
+  const uploadCompanyId = companyRel
+    ? (ambiguousCompanyRel ? companyRel.ids : companyRel.id)
+    : journalRel
+      ? (uploadJournal?.company_id ?? currentCompany(db))
+      : currentCompany(db);
+  const moveUpload = useMoveUpload({
+    moveType: uploadType,
+    companyId: uploadCompanyId,
+    ...(journalRel ? { journalId: uploadJournalId } : {}),
   });
   const [selected, setSelected] = useState(() => new Set());
   const [selectedImportJournalId, setSelectedImportJournalId] = useState('');

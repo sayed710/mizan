@@ -11,6 +11,14 @@ const readFile = (file) => new Promise((resolve, reject) => {
   reader.readAsDataURL(file);
 });
 
+const translateUploadError = (message) => {
+  const direct = t(message);
+  if (direct !== message) return direct;
+  const sep = message.indexOf(': ');
+  if (sep > 0) return `${message.slice(0, sep)}: ${t(message.slice(sep + 2))}`;
+  return message;
+};
+
 export function useMoveUpload(options) {
   const [busy, setBusy] = useState(false);
   const upload = async (input) => {
@@ -18,11 +26,16 @@ export function useMoveUpload(options) {
     if (!files.length || busy) return;
     setBusy(true);
     try {
-      const data = await Promise.all(files.map(readFile));
-      const result = await uploadMoves(data, options, { getDb, commit, ai: isServer() && !!getUser()?.integrations?.ai, digitize: (body) => serverAction('/api/integrations/digitize', body) });
-      if (result.errors.length) alert(result.errors.map((e) => t(e)).join('\n'));
-      location.hash = result.go;
-    } catch (error) { alert(t(error.message)); } finally { setBusy(false); }
+      const result = await uploadMoves(files, options, {
+        getDb,
+        commit,
+        readFile,
+        ai: isServer() && !!getUser()?.integrations?.ai,
+        digitize: (body) => serverAction('/api/integrations/digitize', body),
+      });
+      if (result.errors.length) alert(result.errors.map(translateUploadError).join('\n'));
+      if (result.go) location.hash = result.go;
+    } catch (error) { alert(translateUploadError(error.message)); } finally { setBusy(false); }
   };
   return { upload, busy };
 }
