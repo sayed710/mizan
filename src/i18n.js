@@ -4206,6 +4206,8 @@ const ar = {
   'Parent line must belong to the same report': 'يجب أن ينتمي البند الأصلي إلى نفس التقرير',
   'Select an existing report line': 'اختر بند تقرير موجوداً',
   'Expression company must match the report line': 'يجب أن تطابق شركة التعبير شركة بند التقرير',
+  'Account Roots': 'جذور الحسابات',
+  'Clear matching': 'مسح المطابقة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
