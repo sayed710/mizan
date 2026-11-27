@@ -233,6 +233,7 @@ const patterns = {
   "You can't delete a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): {1}": 'لا يمكنك حذف طريقة دفع مرتبطة بمزود في حالة مُفعّل أو اختبار.\nالمزودون المرتبطون: {1}',
   "You can't link a provider in the enabled or test state to an archived payment method.\nLinked provider(s): {1}": 'لا يمكنك ربط مزود في حالة مُفعّل أو اختبار بطريقة دفع مؤرشفة.\nالمزودون المرتبطون: {1}',
   "You can't enable a payment provider that is linked to an archived payment method.\nArchived method(s): {1}": 'لا يمكنك تفعيل مزود دفع مرتبط بطريقة دفع مؤرشفة.\nطرق الدفع المؤرشفة: {1}',
+  'Resequenced from {1} to {2}': 'تمت إعادة تسلسل القيد من {1} إلى {2}',
 };
 
 // Short English words and phrases that the code puts inside the messages above.

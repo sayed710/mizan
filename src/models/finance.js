@@ -21,6 +21,9 @@ import { effectiveCompanyLockDates } from './lockexception.js';
 
 export { applicationEffectiveDate };
 
+/** Which open documents a payment settles, by partner side and payment direction. */
+export const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund'] }, supplier: { inbound: ['in_refund'], outbound: ['in_invoice'] } };
+
 /** Whether Sales Credit Limit is enabled on the target (or current) company. */
 export const creditLimitEnabled = (db, companyId = null) => {
   if (!db) return false;
@@ -198,8 +201,8 @@ const SEQUENCE_RESET_RULES = [
   [/^(?<prefix1>.*?)(?<seq>\d{0,9})(?<suffix>\D*?)$/, 'never', ['seq']],
 ];
 
-/** Deduce Odoo sequence reset periodicity ('year_range_month', 'month', 'year_range', 'year', 'never'). */
-export function deduceSequenceNumberReset(name) {
+/** Parse an entry name with Odoo sequence reset rules, returning its reset mode, capture groups, and match. */
+export function parseSequenceNumberFormat(name) {
   const value = String(name ?? '');
   for (const [regex, reset, requirements] of SEQUENCE_RESET_RULES) {
     const match = value.match(regex);
@@ -207,12 +210,17 @@ export function deduceSequenceNumberReset(name) {
     const g = match.groups;
     if (g.year && g.year_end) {
       const compatible = g.year.length >= g.year_end.length
-        && (Number(g.year) + 1) % (10 ** g.year.length) === Number(g.year_end);
+        && (Number(g.year) + 1) % (10 ** g.year_end.length) === Number(g.year_end);
       if (!compatible) continue;
     }
-    if (requirements.every((req) => g[req] != null)) return reset;
+    if (requirements.every((req) => g[req] != null)) return { reset, groups: g, match };
   }
-  return 'never';
+  return { reset: 'never', groups: { prefix1: value, seq: '', suffix: '' }, match: null };
+}
+
+/** Deduce Odoo sequence reset periodicity ('year_range_month', 'month', 'year_range', 'year', 'never'). */
+export function deduceSequenceNumberReset(name) {
+  return parseSequenceNumberFormat(name).reset;
 }
 
 const endOfMonthIso = (iso) => {
@@ -411,9 +419,30 @@ function isBankStatementMove(db, moveId) {
 /** Review status (Odoo `checked`) stays writable on posted and locked entries. */
 const REVIEW_FIELDS = new Set(['to_check', 'review_state']);
 
+function resequenceLineMatch(before, after) {
+  const oldLines = before?.line_ids ?? [];
+  const newLines = after?.line_ids ?? [];
+  if (oldLines.length !== newLines.length) return false;
+  return oldLines.every((ol, i) => {
+    const nl = newLines[i];
+    if (!ol || !nl) return ol === nl;
+    const renamed = ol.name === before.name && nl.name === after.name;
+    return JSON.stringify(renamed ? { ...ol, name: nl.name } : ol) === JSON.stringify(nl);
+  });
+}
+
+/** Whether a posted move write is strictly a non-hashed sequence renumber (`name` and optional matching line names). */
+export function resequenceAllowed(before, after) {
+  if (before?.state !== 'posted' || after?.state !== 'posted') return false;
+  if (before.inalterable_hash || before.name === after.name || !after.name || after.name === '/' || !/\d/.test(after.name)) return false;
+  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'name' && field !== 'line_ids'))) return false;
+  return resequenceLineMatch(before, after);
+}
+
 function bankStatementMoveRewriteError(db, before, after, ctx) {
   const touched = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((field) => !REVIEW_FIELDS.has(field));
   if (!changedFields(before, after, touched)) return null;
+  const resequencing = resequenceAllowed(before, after);
   const previousStatement = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
   const statement = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
   const legacyLine = previousStatement ?? statement;
@@ -435,10 +464,10 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
     && (after.partner_id ?? null) === (statement.partner_id ?? null)
     && (after.line_ids ?? []).every((line) => (line.partner_id ?? null) === (statement.partner_id ?? null))
     && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids);
-  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
+  if (!resequencing && changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
     return 'Posted entries cannot be edited; reset them to draft first';
   }
-  if (changedFields(before, after, ['line_ids'])) {
+  if (!resequencing && changedFields(before, after, ['line_ids'])) {
     if ((db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id) && !legacyRelease) return 'Posted entries cannot be edited; reset them to draft first';
     if (ctx?.bankRewriteToken !== bankRewriteToken) {
       const previous = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
@@ -450,7 +479,7 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
       }
     }
   }
-  if (before.date !== after.date
+  if (!resequencing && (before.date !== after.date
     || (before.invoice_date ?? '') !== (after.invoice_date ?? '')
     || before.journal_id !== after.journal_id
     || (before.company_id ?? 1) !== (after.company_id ?? 1)
@@ -458,7 +487,7 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
     || before.state !== after.state
     || (before.currency_id ?? null) !== (after.currency_id ?? null)
     || (before.move_type ?? '') !== (after.move_type ?? '')
-    || (before.active !== false) !== (after.active !== false)) {
+    || (before.active !== false) !== (after.active !== false))) {
     return 'Posted entries cannot be edited; reset them to draft first';
   }
   const lock = recordLockDate(db, after, ctx);
@@ -469,6 +498,7 @@ function bankStatementMoveRewriteError(db, before, after, ctx) {
   if (before.inalterable_hash) {
     return 'Secured entries cannot be modified';
   }
+  if (resequencing) return null;
   const defaultAccountId = journal?.default_account_id;
   if (!defaultAccountId) {
     return 'The bank liquidity line cannot be changed';
@@ -525,7 +555,7 @@ function postedMoveRule(db, before, after, ctx = null) {
     if (isBankStatementMove(db, after.id)) {
       const bankErr = bankStatementMoveRewriteError(db, before, after, ctx);
       if (bankErr) return bankErr;
-    } else if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    } else if (!resequenceAllowed(before, after) && changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
     if (before.reversed_entry_id && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
     if ((before.is_storno || after.is_storno) && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
   }
@@ -535,7 +565,8 @@ function postedMoveRule(db, before, after, ctx = null) {
     const closingReset = after.state === 'cancel' && ret?.state === 'new' && (ret.closing_move_ids ?? []).includes(before.id)
       && !changedFields(before, after, [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((key) => key !== 'state'));
     if (after.state !== 'draft' && !closingReset) return 'Posted entries go back to draft before anything else';
-    if (Number(before.amount_paid) > 0 || Number(after.amount_paid) > 0) return 'Paid entries cannot be reset to draft';
+    const isDocument = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(before.move_type);
+    if (Number(after.amount_paid) > 0 || (!isDocument && Number(before.amount_paid) > 0)) return 'Paid entries cannot be reset to draft';
   }
   if (after.state === 'posted' && before?.state !== 'posted') {
     if (before && before.state !== 'draft') return 'Only draft entries can be posted';
@@ -621,7 +652,7 @@ function settlementCapacity(db, entry, inv) {
 function backsSettlement(db, id) {
   return (db.records['account.payment'] ?? []).some((p) => ['posted', 'rejected'].includes(p.state) && (p.move_id === id || p.destination_move_id === id))
     || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id || g.exchange_move_id === id))
-    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
+    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => !p?.reversed && (p?.move_id === id || p?.payment_fx_move_id === id)));
 }
 
 /** Whether a document `payments` row is backed by an existing `account.partial.reconcile` record whose moves and amount agree. */
@@ -671,6 +702,119 @@ function reversesJournalLines(source, reversal) {
       === JSON.stringify((reversal?.line_ids ?? []).map((l) => [l.account_id, l.partner_id ?? null, l.credit || 0, l.debit || 0]));
 }
 
+const DOCUMENT_MOVE_TYPES = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'];
+
+/** Resolve the reciprocal settlement row index on `note` for `row` on `doc`, rejecting conflicting explicit links and falling back to occurrence order for unlinked rows. */
+function resolveCreditNoteReciprocal(doc, row, rowIndex, note) {
+  const docPayments = doc?.payments ?? [];
+  const notePayments = note?.payments ?? [];
+  const matchesPair = (cp) => cp
+    && cp.move_id === doc.id
+    && !cp.discount
+    && Number(cp.amount) === Number(row.amount)
+    && (!cp.date || !row.date || cp.date === row.date)
+    && Boolean(cp.reversed) === Boolean(row.reversed);
+
+  if (row.reciprocal_row_id != null) {
+    const duplicateClaim = docPayments.some((r, i) => (
+      i !== rowIndex
+      && r
+      && r.move_id === note.id
+      && !r.discount
+      && r.reciprocal_row_id === row.reciprocal_row_id
+      && Boolean(r.reversed) === Boolean(row.reversed)
+    ));
+    if (duplicateClaim) return { index: -1, conflict: true };
+    const idx = notePayments.findIndex((cp) => cp && cp.id === row.reciprocal_row_id);
+    if (idx < 0) return { index: -1, conflict: true };
+    const cp = notePayments[idx];
+    if (!matchesPair(cp) || (cp.reciprocal_row_id != null && row.id != null && cp.reciprocal_row_id !== row.id)) {
+      return { index: -1, conflict: true };
+    }
+    return { index: idx, conflict: false };
+  }
+
+  const claimedNoteIds = new Set(
+    docPayments
+      .filter((r) => r && r.move_id === note.id && !r.discount && r.reciprocal_row_id != null && Boolean(r.reversed) === Boolean(row.reversed))
+      .map((r) => r.reciprocal_row_id),
+  );
+  const docMatches = docPayments
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r
+      && r.move_id === note.id
+      && !r.discount
+      && r.reciprocal_row_id == null
+      && Number(r.amount) === Number(row.amount)
+      && (!r.date || !row.date || r.date === row.date)
+      && Boolean(r.reversed) === Boolean(row.reversed));
+  const matchPos = rowIndex >= 0
+    ? docMatches.findIndex(({ i }) => i === rowIndex)
+    : docMatches.findIndex(({ r }) => r === row);
+  const occ = matchPos >= 0 ? matchPos : docMatches.length;
+  const noteMatches = notePayments
+    .map((cp, i) => ({ cp, i }))
+    .filter(({ cp }) => matchesPair(cp) && (cp.id == null || !claimedNoteIds.has(cp.id)));
+  return { index: noteMatches[occ]?.i ?? -1, conflict: false };
+}
+
+/** Resolve the exchange entry IDs owned by one settlement row (including reciprocal credit-note ownership and unlinked legacy rows). */
+export function settlementOwnedFxIds(db, doc, row, { counterpart = null, reciprocalRow = null, unappliedOn = null, releasedRows = null } = {}) {
+  if (!row) return [];
+  if (row.payment_fx_move_id) return [row.payment_fx_move_id];
+  const other = counterpart ?? (row.move_id != null ? read(db, 'account.move', row.move_id) : null);
+  const isDocPair = other && other.id !== doc?.id
+    && DOCUMENT_MOVE_TYPES.includes(doc?.move_type)
+    && DOCUMENT_MOVE_TYPES.includes(other.move_type);
+  if (!isDocPair) return [];
+
+  let matchedReciprocal = reciprocalRow;
+  if (!matchedReciprocal && row.reciprocal_row_id != null) {
+    matchedReciprocal = (other.payments ?? []).find((cp) => (
+      cp.id === row.reciprocal_row_id
+      && cp.move_id === doc.id
+      && !cp.discount
+      && Number(cp.amount) === Number(row.amount)
+      && (!cp.date || !row.date || cp.date === row.date)
+      && (unappliedOn
+        ? (cp.reversed && cp.unapplied && (!cp.reversal_date || cp.reversal_date === unappliedOn))
+        : !cp.reversed)
+    )) ?? null;
+  }
+  if (!matchedReciprocal) {
+    const sameOrderKey = (r) => `${r.move_id}:${Number(r.amount)}:${r.date ?? ''}`;
+    const targetKey = `${other.id}:${Number(row.amount)}:${row.date ?? ''}`;
+    const docMatches = (releasedRows ?? [])
+      .filter((entry) => entry.row && sameOrderKey(entry.row) === targetKey && (!unappliedOn || entry.date === unappliedOn))
+      .map((entry) => entry.row);
+    const occ = Math.max(0, docMatches.indexOf(row));
+    const reciprocalMatches = (other.payments ?? []).filter((cp) => (
+      cp.move_id === doc.id
+      && !cp.discount
+      && Number(cp.amount) === Number(row.amount)
+      && (!cp.date || !row.date || cp.date === row.date)
+      && (unappliedOn
+        ? (cp.reversed && cp.unapplied && (!cp.reversal_date || cp.reversal_date === unappliedOn))
+        : !cp.reversed)
+    ));
+    matchedReciprocal = reciprocalMatches[occ] ?? reciprocalMatches[0] ?? null;
+  }
+  if (matchedReciprocal?.payment_fx_move_id) return [matchedReciprocal.payment_fx_move_id];
+
+  // Legacy fallback: only pair FX moves not already claimed by any explicit payment_fx_move_id on either document.
+  const claimedFxIds = new Set(
+    [...(doc?.payments ?? []), ...(other.payments ?? [])].map((p) => p.payment_fx_move_id).filter(Boolean),
+  );
+  const moves = db.records['account.move'] ?? [];
+  return moves
+    .filter((m) => m.move_type === 'entry' && m.state === 'posted' && !m.reversed_entry_id
+      && !claimedFxIds.has(m.id)
+      && ((m.fx_payment_move_id === other.id && m.fx_invoice_id === doc.id)
+        || (m.fx_payment_move_id === doc.id && m.fx_invoice_id === other.id))
+      && !moves.some((rev) => rev.state !== 'cancel' && rev.reversed_entry_id === m.id))
+    .map((m) => m.id);
+}
+
 function unapplicationError(db, stored, after, before) {
   const moves = db.records['account.move'] ?? [];
   const entries = new Map(moves.map((m) => [m.id, m]));
@@ -681,7 +825,14 @@ function unapplicationError(db, stored, after, before) {
     && (reversal.company_id ?? 1) === (after.company_id ?? 1)
     && validDate(date) && reversal.invoice_date === date && date >= (source.invoice_date ?? source.date ?? '')
     && reversesJournalLines(source, reversal);
-  if (released.some(({ row, date }) => [row.payment_fx_move_id, row.cash_basis_move_id].some((id) => id && !moves.some((move) => mirrored(entries.get(id), move, date))))) {
+  if (released.some(({ row, date }) => {
+    const ownedFxIds = settlementOwnedFxIds(db, after, row, {
+      counterpart: entries.get(row.move_id),
+      unappliedOn: date,
+      releasedRows: released,
+    });
+    return [row.cash_basis_move_id, ...ownedFxIds].some((id) => id && !moves.some((move) => mirrored(entries.get(id), move, date)));
+  })) {
     return 'Unapplying a payment must reverse its exchange and cash-basis entries';
   }
   if (!stored) return null;
@@ -703,7 +854,14 @@ function unapplicationError(db, stored, after, before) {
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
     const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
-    if (glOnly || isBankStatementMove(db, moveId)) continue;
+    const counterpart = entries.get(moveId);
+    const creditNoteUnapplied = !payment && counterpart && counterpart.id !== after.id
+      && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(counterpart.move_type)
+      && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(after.move_type)
+      && released.filter(({ row }) => row.move_id === moveId).every(({ row, date }) => (counterpart.payments ?? []).some((cp) => (
+        cp.move_id === after.id && cp.reversed && cp.unapplied && Number(cp.amount) === Number(row.amount) && (!cp.reversal_date || !date || cp.reversal_date === date)
+      )));
+    if (glOnly || creditNoteUnapplied || isBankStatementMove(db, moveId)) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
     if (!payment || !prior || !Number.isFinite(change) || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
@@ -767,7 +925,12 @@ export function moveInvariant(db, after, before, stored = null) {
       const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
       const glEntry = hasMatchingPartialLink(db, after, current, { reversed: true });
       const bankEntry = isBankStatementMove(db, p.move_id);
-      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry && !bankEntry)
+      const counterpart = read(db, 'account.move', p.move_id);
+      const creditNoteUnapplied = counterpart && counterpart.id !== after.id
+        && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(counterpart.move_type)
+        && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(after.move_type)
+        && (counterpart.payments ?? []).some((cp) => cp.move_id === after.id && cp.reversed && cp.unapplied && Number(cp.amount) === Number(p.amount) && (!cp.reversal_date || !unappliedOn || cp.reversal_date === unappliedOn));
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry && !bankEntry && !creditNoteUnapplied)
         || !unappliedOn || (p.date && unappliedOn < p.date);
     }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
@@ -820,7 +983,9 @@ export function settlementFxError(db, invoice, p, allocated) {
   const moves = db.records['account.move'] ?? [];
   const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
   const cash = appliedValue(db, invoice, p);
-  const index = (invoice.payments ?? []).findIndex((row) => row === p || (row.move_id === p.move_id && row.payment_fx_move_id === p.payment_fx_move_id));
+  const index = (invoice.payments ?? []).findIndex((row) => row === p
+    || (p.id != null && row.id === p.id)
+    || (p.id == null && row.move_id === p.move_id && row.payment_fx_move_id === p.payment_fx_move_id));
   const earlier = index < 0 ? invoice.payments ?? [] : invoice.payments.slice(0, index);
   const prior = { ...invoice, ...read(db, 'account.move', invoice.id), payments: earlier.map((row) => {
     const reversalDate = read(db, 'account.move', row.reversal_move_id)?.invoice_date ?? row.reversal_date;
@@ -828,7 +993,24 @@ export function settlementFxError(db, invoice, p, allocated) {
   }) };
   const booked = allocated ?? settlementCompanyAmount(db, prior, Number(p.amount));
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, invoice.company_id));
-  const difference = payment && !payment.invoice_id ? companyRound((cash - booked) * (payment.payment_type === 'inbound' ? 1 : -1)) : 0;
+  const source = read(db, 'account.move', p.move_id);
+  const isCreditNote = !payment
+    && ['out_refund', 'in_refund'].includes(source?.move_type)
+    && ['out_invoice', 'in_invoice'].includes(invoice.move_type);
+  let difference = 0;
+  if (payment && !payment.invoice_id) {
+    difference = companyRound((cash - booked) * (payment.payment_type === 'inbound' ? 1 : -1));
+  } else if (isCreditNote) {
+    const notePayments = source.payments ?? [];
+    const { index: resolvedNoteIndex, conflict } = resolveCreditNoteReciprocal(invoice, p, index, source);
+    if (conflict) return 'Exchange entry is already used by another settlement';
+    const priorNote = { ...source, payments: notePayments.slice(0, resolvedNoteIndex < 0 ? notePayments.length : resolvedNoteIndex) };
+    const notePortion = settlementCompanyAmount(db, priorNote, Number(p.amount));
+    const gap = companyRound(booked - notePortion);
+    const sale = !['in_invoice', 'in_refund'].includes(invoice.move_type);
+    const clearsDebit = sale ? gap < 0 : gap > 0;
+    difference = gap ? (clearsDebit ? Math.abs(gap) : -Math.abs(gap)) : 0;
+  }
   if (!difference) return p.payment_fx_move_id ? 'An exchange entry is not required for this settlement' : null;
   const fx = read(db, 'account.move', p.payment_fx_move_id);
   const uses = moves.reduce((count, m) => count + (m.payments ?? []).filter((x) => x.payment_fx_move_id === p.payment_fx_move_id).length, 0);
@@ -852,13 +1034,25 @@ export function fxProvenanceError(db, entry) {
     if (source.state !== 'posted' || (source.reversed_entry_id && source.reversed_entry_id !== invoice?.id) || invoice?.state !== 'posted') {
       return 'Exchange provenance requires its settlement';
     }
-    const invIndex = (invoice.payments ?? []).findIndex((p) => p.move_id === source.id);
-    const noteIndex = (source.payments ?? []).findIndex((p) => p.move_id === invoice.id);
-    if (invIndex < 0 || noteIndex < 0) return 'Exchange provenance requires its settlement';
-    const invRow = invoice.payments[invIndex];
-    const noteRow = source.payments[noteIndex];
-    const priorInv = { ...invoice, payments: invoice.payments.slice(0, invIndex) };
-    const priorNote = { ...source, payments: source.payments.slice(0, noteIndex) };
+    const moves = db.records['account.move'] ?? [];
+    const live = (m) => m.state === 'posted' && !m.reversal_move_id && !moves.some((r) => r.state === 'posted' && r.reversed_entry_id === m.id);
+    const invPayments = invoice.payments ?? [];
+    let invIndex = invPayments.findIndex((p) => p.move_id === source.id && p.payment_fx_move_id === entry.id);
+    if (invIndex < 0) invIndex = invPayments.findIndex((p) => p.move_id === source.id && !p.payment_fx_move_id);
+    if (invIndex < 0) {
+      if (moves.some((m) => m.id !== entry.id && m.fx_payment_move_id === source.id && m.fx_invoice_id === invoice.id && live(m))) {
+        return 'Exchange entry is already used by another settlement';
+      }
+      return 'Exchange provenance requires its settlement';
+    }
+    const invRow = invPayments[invIndex];
+    const notePayments = source.payments ?? [];
+    const { index: noteIndex, conflict } = resolveCreditNoteReciprocal(invoice, invRow, invIndex, source);
+    if (conflict) return 'Exchange entry is already used by another settlement';
+    if (noteIndex < 0) return 'Exchange provenance requires its settlement';
+    const noteRow = notePayments[noteIndex];
+    const priorInv = { ...invoice, payments: invPayments.slice(0, invIndex) };
+    const priorNote = { ...source, payments: notePayments.slice(0, noteIndex) };
     const invoicePortion = settlementCompanyAmount(db, priorInv, invRow.amount);
     const notePortion = settlementCompanyAmount(db, priorNote, noteRow.amount);
     const companyCurrency = companyCurrencyRecord(db, invoice.company_id);
@@ -886,9 +1080,12 @@ export function fxProvenanceError(db, entry) {
       return 'A dedicated posted exchange entry must match the settlement';
     }
     // One settlement books its exchange difference once; a reversed earlier entry no longer counts.
-    const moves = db.records['account.move'] ?? [];
-    const live = (m) => m.state === 'posted' && !m.reversal_move_id && !moves.some((r) => r.state === 'posted' && r.reversed_entry_id === m.id);
-    if (moves.some((m) => m.id !== entry.id && m.fx_payment_move_id === source.id && m.fx_invoice_id === invoice.id && live(m))) {
+    if (invPayments.some((p, i) => i !== invIndex && p.payment_fx_move_id === entry.id)) {
+      return 'Exchange entry is already used by another settlement';
+    }
+    const hasDuplicateUnlinked = moves.some((m) => m.id !== entry.id && m.fx_payment_move_id === source.id && m.fx_invoice_id === invoice.id && live(m)
+      && (!invRow.payment_fx_move_id || !invPayments.some((p) => p.payment_fx_move_id === m.id)));
+    if (hasDuplicateUnlinked) {
       return 'Exchange entry is already used by another settlement';
     }
     return null;
@@ -898,8 +1095,40 @@ export function fxProvenanceError(db, entry) {
   return settlementFxError(db, invoice, row);
 }
 
+/** Validate that a posted payment's linked invoice (including a newly drafted invoice after reset) matches company, partner, type, and lifecycle. */
+export function paymentInvoiceError(db, after, before = null) {
+  if (after?.state !== 'posted' || after.is_internal_transfer || after.is_tax_payment || after.return_id || after.invoice_id == null) {
+    return null;
+  }
+  const invoice = read(db, 'account.move', after.invoice_id);
+  if (!invoice || !DOCUMENT_MOVE_TYPES.includes(invoice.move_type)) {
+    return 'A posted payment must reference a valid invoice or bill';
+  }
+  if ((invoice.company_id ?? 1) !== (after.company_id ?? 1)) {
+    return 'The payment and invoice must belong to the same company';
+  }
+  if (!sameCommercialPartner(db, invoice.partner_id, after.partner_id)) {
+    return 'The payment and invoice must belong to the same commercial partner';
+  }
+  if (!SETTLES[after.partner_type]?.[after.payment_type]?.includes(invoice.move_type)) {
+    return 'The payment cannot settle this document type';
+  }
+  if (before?.state === 'posted' && (before.invoice_id ?? null) !== after.invoice_id) {
+    return 'The invoice linked to a posted payment cannot be changed';
+  }
+  if (invoice.state !== 'posted') {
+    const settledBefore = ['draft', 'cancel'].includes(invoice.state)
+      && Boolean(after.move_id)
+      && (invoice.payments ?? []).some((row) => row.move_id === after.move_id && row.reversed && row.unapplied);
+    if (!settledBefore) {
+      return 'A posted payment can only reference a non-posted invoice that it previously settled';
+    }
+  }
+  return null;
+}
+
 /** A posted payment must have its own posted journal entry, booked for its partner. */
-export function paymentInvariant(db, after) {
+export function paymentInvariant(db, after, before = null) {
   if (after.check_number != null) {
     if (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound') {
       return 'Check number must be unique within its journal';
@@ -941,11 +1170,14 @@ export function paymentInvariant(db, after) {
   if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
+  const invError = paymentInvoiceError(db, after, before);
+  if (invError) return invError;
   const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
+  const postedInvoice = invoice?.state === 'posted' ? invoice : null;
   let account;
   try {
-    account = invoice
-      ? invoiceCounterpartAccount(db, invoice)
+    account = postedInvoice
+      ? invoiceCounterpartAccount(db, postedInvoice)
       : partnerAccount(db, after.partner_id, after.company_id, after.partner_type === 'supplier' ? 'payable' : 'receivable');
   } catch (error) {
     return error.message;

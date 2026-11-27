@@ -739,6 +739,21 @@ function unreconcileLockError(db, line, ctx = null) {
   return `The period up to ${lock} is locked`;
 }
 
+function allocationUnreconcileError(db, allocations, bankId) {
+  for (const a of allocations) {
+    if (a.partial_reconcile_id) {
+      const pr = read(db, 'account.partial.reconcile', a.partial_reconcile_id);
+      if (pr && (pr.active !== false || !pr.reversed)) return 'Unreconciliation must deactivate partial reconcile';
+    }
+    if (a.invoice_id) {
+      const invoice = read(db, 'account.move', a.invoice_id);
+      const rows = (invoice?.payments ?? []).filter((p) => p.move_id === bankId || p.move_id === a.payment_move_id || (a.writeoff_move_id && p.move_id === a.writeoff_move_id));
+      if (rows.some((r) => !r.reversed)) return 'Unreconciliation must restore the invoice settlement';
+    }
+  }
+  return null;
+}
+
 /** Validate a release against restored suspense entry and unlinked settlements rather than trusting a client flag. */
 function unreconcileError(db, before, after, ctx = null) {
   const lockError = unreconcileLockError(db, before, ctx);
@@ -756,12 +771,15 @@ function unreconcileError(db, before, after, ctx = null) {
   }
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);
   if (!bankId) return 'Cannot unreconcile a transaction without its bank entry link';
+  const allocations = before.allocations ?? [];
   const linkedPayments = statementPaymentIds(db, before).map((id) => read(db, 'account.payment', id));
   const isDirect = linkedPayments.length > 0 && linkedPayments.every((p) => p && !paymentOutstandingAccountId(db, p));
   if (isDirect && linkedPayments.some((payment) => payment?.move_id === bankId)) {
     if (after.bank_move_id || after.open_amount != null) {
       return 'Unreconciliation requires reversing entries and clearing the bank links';
     }
+    const allocErr = allocationUnreconcileError(db, allocations, bankId);
+    if (allocErr) return allocErr;
     for (const pid of before.payment_ids ?? (before.payment_id ? [before.payment_id] : [])) {
       if (read(db, 'account.payment', pid)?.state !== 'posted') return 'The matched payment must remain posted';
     }
@@ -787,18 +805,8 @@ function unreconcileError(db, before, after, ctx = null) {
   if (signed(bankLines[0]) !== expectedOpen || signed(suspLines[0]) !== -expectedOpen) {
     return 'Unreconciliation requires restoring the bank suspense entry';
   }
-  const allocations = before.allocations ?? [];
-  for (const a of allocations) {
-    if (a.partial_reconcile_id) {
-      const pr = read(db, 'account.partial.reconcile', a.partial_reconcile_id);
-      if (pr && (pr.active !== false || !pr.reversed)) return 'Unreconciliation must deactivate partial reconcile';
-    }
-    if (a.invoice_id) {
-      const invoice = read(db, 'account.move', a.invoice_id);
-      const rows = (invoice?.payments ?? []).filter((p) => p.move_id === bankId || p.move_id === a.payment_move_id || (a.writeoff_move_id && p.move_id === a.writeoff_move_id));
-      if (rows.some((r) => !r.reversed)) return 'Unreconciliation must restore the invoice settlement';
-    }
-  }
+  const allocErr = allocationUnreconcileError(db, allocations, bankId);
+  if (allocErr) return allocErr;
   if (before.payment_id && read(db, 'account.payment', before.payment_id)?.state !== 'posted') return 'The matched payment must remain posted';
   if (before.payment_ids?.length) {
     for (const pid of before.payment_ids) {
@@ -832,12 +840,28 @@ export function unreconcile(db, line, reversalDate = null, ctx = null) {
   const bankId = target.bank_move_id ?? (target.payment_id ? target.move_id : null);
   if (!bankId) throw new Error('Cannot unreconcile a transaction without its bank entry link');
   const allocations = target.allocations ?? [];
-  const date = reversalDate ?? [today(), target.date ?? '', read(db, 'account.move', bankId)?.invoice_date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
+  const date = reversalDate ?? [
+    today(),
+    target.date ?? '',
+    read(db, 'account.move', bankId)?.invoice_date ?? '',
+    ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? ''),
+    ...allocations.flatMap((a) => (a.invoice_id
+      ? (read(db, 'account.move', a.invoice_id)?.payments ?? [])
+          .filter((r) => !r.reversed && r.move_id === (a.payment_move_id ?? bankId))
+          .map((r) => r.date ?? '')
+      : [])),
+  ].sort().at(-1);
 
   let current = db;
   const linkedPayments = statementPaymentIds(db, target).map((id) => read(db, 'account.payment', id));
   const isDirect = linkedPayments.length > 0 && linkedPayments.every((p) => p && !paymentOutstandingAccountId(db, p));
   if (isDirect && linkedPayments.some((payment) => payment?.move_id === bankId)) {
+    for (const allocation of allocations) {
+      if (allocation.invoice_id) {
+        current = unreconcileInvoicePayment(current, allocation.invoice_id, allocation.payment_move_id ?? bankId, { date, ctx });
+        if (allocation.writeoff_move_id) current = reverseWriteoff(current, allocation.invoice_id, allocation.writeoff_move_id, date);
+      }
+    }
     current = write(current, 'account.bank.statement.line', target.id, {
       state: 'to_check',
       move_id: null,
