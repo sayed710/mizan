@@ -667,6 +667,8 @@ export function completePlanName(db, plan) {
   return names.join(' / ');
 }
 
+const sharedCompany = (id) => id == null || id === false || id === '';
+
 export const activeRootPlans = (db) => (db?.records?.['account.analytic.plan'] ?? [])
   .filter((p) => p.active !== false && !p.parent_id && (!p.company_id || p.company_id === currentCompany(db)));
 
@@ -680,11 +682,15 @@ export function analyticLineRootPlanId(r, db) {
 
 /**
  * Build root-plan filter descriptors for Analytic Items.
- * Active root plans are offered in the menu; any already-saved archived, inactive, or deleted
- * `analytic-plan-<id>` filters remain hidden predicates so they still restrict the list.
+ * Active root plans of allowed companies and shared plans are offered in the menu; any already-saved
+ * archived, inactive, disallowed, or deleted `analytic-plan-<id>` filters remain hidden predicates so
+ * they still restrict the list.
  */
 export function analyticPlanFilters(db, activeFilterIds = []) {
-  const active = activeRootPlans(db);
+  const allowed = new Set(db?.settings?.allowed_company_ids ?? [db ? currentCompany(db) : 1]);
+  const isAllowedPlan = (p) => sharedCompany(p.company_id) || allowed.has(p.company_id);
+  const active = (db?.records?.['account.analytic.plan'] ?? [])
+    .filter((p) => p.active !== false && !p.parent_id && isAllowedPlan(p));
   const seen = new Set(active.map((p) => p.id));
   const out = active.map((p) => ({
     id: `analytic-plan-${p.id}`,
@@ -699,7 +705,7 @@ export function analyticPlanFilters(db, activeFilterIds = []) {
     if (seen.has(planId)) continue;
     seen.add(planId);
     const plan = plans.get(planId);
-    out.push(plan
+    out.push(plan && isAllowedPlan(plan)
       ? { id, label: plan.name, hidden: true, fn: (r, data) => analyticLineRootPlanId(r, data) === planId }
       : { id, label: 'Deleted Analytic Plan', hidden: true, fn: () => false });
   }

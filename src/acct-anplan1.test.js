@@ -321,3 +321,96 @@ test('saved plan filters persist, stay effective on archived plans, and deleted 
     await deletedUrlCtx.done();
   }
 });
+
+test('multi-company analytic-items offers allowed and shared root plans while excluding disallowed companies', async () => {
+  let db = seed();
+  const compB = createCompany(db, { name: 'Company B' }); db = compB.db;
+  const compC = createCompany(db, { name: 'Company C' }); db = compC.db;
+
+  const planA = create(db, 'account.analytic.plan', { name: 'Plan A', company_id: 1 }); db = planA.db;
+  const planB = create(db, 'account.analytic.plan', { name: 'Plan B', company_id: compB.id }); db = planB.db;
+  const planC = create(db, 'account.analytic.plan', { name: 'Plan C', company_id: compC.id }); db = planC.db;
+  const planShared = create(db, 'account.analytic.plan', { name: 'Shared Plan', company_id: null }); db = planShared.db;
+
+  const accA = create(db, 'account.analytic.account', { name: 'Acc A', plan_id: planA.id, company_id: 1 }); db = accA.db;
+  const accB = create(db, 'account.analytic.account', { name: 'Acc B', plan_id: planB.id, company_id: compB.id }); db = accB.db;
+  const accC = create(db, 'account.analytic.account', { name: 'Acc C', plan_id: planC.id, company_id: compC.id }); db = accC.db;
+  const accShared = create(db, 'account.analytic.account', { name: 'Acc Shared', plan_id: planShared.id, company_id: null }); db = accShared.db;
+
+  const lineA = create(db, 'account.analytic.line', { name: 'Line A', date: '2026-01-01', account_id: accA.id, company_id: 1, amount: 10 }); db = lineA.db;
+  const lineB = create(db, 'account.analytic.line', { name: 'Line B', date: '2026-01-02', account_id: accB.id, company_id: compB.id, amount: 20 }); db = lineB.db;
+  const lineC = create(db, 'account.analytic.line', { name: 'Line C', date: '2026-01-03', account_id: accC.id, company_id: compC.id, amount: 30 }); db = lineC.db;
+  const lineShared = create(db, 'account.analytic.line', { name: 'Line Shared', date: '2026-01-04', account_id: accShared.id, company_id: 1, amount: 40 }); db = lineShared.db;
+
+  // Undefined allowed_company_ids falls back to current company (1) + shared plans only.
+  const undefAllowedDb = { ...db, settings: { ...db.settings, current_company_id: 1, allowed_company_ids: undefined } };
+  const undefIds = analyticPlanFilters(undefAllowedDb).map((f) => f.id);
+  assert.equal(undefIds.includes(`analytic-plan-${planA.id}`), true);
+  assert.equal(undefIds.includes(`analytic-plan-${planShared.id}`), true);
+  assert.equal(undefIds.includes(`analytic-plan-${planB.id}`), false);
+  assert.equal(undefIds.includes(`analytic-plan-${planC.id}`), false);
+
+  // Company A (1) is active, Company B is allowed, Company C is NOT allowed.
+  const multiDb = setCompanies(db, { current: 1, allowed: [1, compB.id] });
+
+  // activeRootPlans stays scoped to current company + shared.
+  const currentOnlyIds = activeRootPlans(multiDb).map((p) => p.id);
+  assert.equal(currentOnlyIds.includes(planA.id), true);
+  assert.equal(currentOnlyIds.includes(planShared.id), true);
+  assert.equal(currentOnlyIds.includes(planB.id), false);
+  assert.equal(currentOnlyIds.includes(planC.id), false);
+
+  // analyticPlanFilters offers A, B, and shared, while excluding C.
+  const multiPlanFilterIds = analyticPlanFilters(multiDb).map((f) => f.id);
+  assert.equal(multiPlanFilterIds.includes(`analytic-plan-${planA.id}`), true);
+  assert.equal(multiPlanFilterIds.includes(`analytic-plan-${planB.id}`), true);
+  assert.equal(multiPlanFilterIds.includes(`analytic-plan-${planShared.id}`), true);
+  assert.equal(multiPlanFilterIds.includes(`analytic-plan-${planC.id}`), false);
+
+  // Real ActionView list UI: Plan B is offered and filters visible lines to Company B; Plan C is not offered.
+  const ctx = await mountAnalyticList(multiDb);
+  try {
+    const toggleBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && hasClass(n, 'search-toggle'));
+    await ctx.React.act(async () => { props(toggleBtn).onClick(); });
+
+    const panel = find(ctx.host, (n) => hasClass(n, 'search-panel'));
+    const btnA = find(panel, (n) => n.tagName === 'BUTTON' && n.textContent === 'Plan A');
+    const btnB = find(panel, (n) => n.tagName === 'BUTTON' && n.textContent === 'Plan B');
+    const btnShared = find(panel, (n) => n.tagName === 'BUTTON' && n.textContent === 'Shared Plan');
+    const btnC = find(panel, (n) => n.tagName === 'BUTTON' && n.textContent === 'Plan C');
+
+    assert.ok(btnA, 'Plan A (active company) is offered');
+    assert.ok(btnB, 'Plan B (allowed company) is offered');
+    assert.ok(btnShared, 'Shared Plan is offered');
+    assert.equal(btnC, null, 'Plan C (disallowed company) is excluded');
+
+    await ctx.React.act(async () => { props(btnB).onClick(); });
+
+    const rowsText = () => allFind(ctx.host, (n) => n.tagName === 'TBODY').flatMap((tb) => allFind(tb, (n) => n.tagName === 'TR')).map((tr) => tr.textContent);
+    assert.equal(rowsText().some((t) => t.includes('Acc B')), true, 'Company B group is shown');
+    assert.equal(rowsText().some((t) => t.includes('Acc A')), false, 'Company A group is filtered out');
+    assert.equal(rowsText().some((t) => t.includes('Acc Shared')), false, 'Shared group is filtered out');
+    assert.equal(rowsText().some((t) => t.includes('Acc C')), false, 'Company C group is never shown');
+
+    const accBGroup = find(ctx.host, (n) => n.tagName === 'TR' && hasClass(n, 'group-row') && n.textContent.includes('Acc B'));
+    await ctx.React.act(async () => { props(accBGroup).onClick(); });
+    assert.equal(rowsText().some((t) => t.includes('Line B')), true);
+    assert.equal(rowsText().some((t) => t.includes('Line A')), false);
+    assert.equal(rowsText().some((t) => t.includes('Line Shared')), false);
+    assert.equal(rowsText().some((t) => t.includes('Line C')), false);
+  } finally {
+    await ctx.done();
+  }
+
+  // Disallowed company C filter via URL restricts to 0 rows, never broadens.
+  const disallowedUrlCtx = await mountAnalyticList(multiDb, new URLSearchParams(`view=list&filter=analytic-plan-${planC.id}`));
+  try {
+    const dataRows = allFind(disallowedUrlCtx.host, (n) => n.tagName === 'TBODY')
+      .flatMap((tb) => allFind(tb, (n) => n.tagName === 'TR'))
+      .filter((tr) => !find(tr, (n) => hasClass(n, 'empty')));
+    assert.equal(dataRows.length, 0, 'disallowed company plan filter must restrict to 0 rows');
+    assert.ok(find(disallowedUrlCtx.host, (n) => hasClass(n, 'empty')));
+  } finally {
+    await disallowedUrlCtx.done();
+  }
+});
