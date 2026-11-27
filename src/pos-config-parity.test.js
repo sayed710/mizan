@@ -904,7 +904,7 @@ test('migration 11 repairs schema 10 databases by resolving tenders within order
     seq: { ...base.seq, 'pos.payment.method': 102, 'pos.config': 2, 'pos.order': 1 },
   };
   const repaired = migrate(schema10Db);
-  assert.equal(repaired.schema_version, 83);
+  assert.equal(repaired.schema_version, 85);
   const order = read(repaired, 'pos.order', 1);
   assert.equal(order.payment_method_id, 102, 'Order tender repaired to match the configuration payment method');
   assert.equal(order.payment_ids[0].payment_method_id, 102);

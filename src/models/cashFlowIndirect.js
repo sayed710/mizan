@@ -61,10 +61,17 @@ export function indirectTagIdsByName(db) {
 
 /** Ensure all 32 Indirect Cash Flow account tags exist (applicability 'accounts'), preserving existing records. */
 export function ensureIndirectCashFlowTags(db) {
-  let next = db;
-  for (const name of INDIRECT_CASH_FLOW_TAGS) {
-    const exists = (next.records?.['account.account.tag'] ?? []).some((tag) => isStandardIndirectTag(tag, name));
-    if (exists) continue;
+  if (!db?.records) return db;
+  const existing = db.records['account.account.tag'] ?? [];
+  const missing = INDIRECT_CASH_FLOW_TAGS.filter((name) => !existing.some((tag) => isStandardIndirectTag(tag, name)));
+  if (!missing.length) return db;
+  const maxId = Math.max(db.seq?.['account.account.tag'] ?? 0, 0, ...existing.map((r) => Number(r?.id) || 0));
+  let next = {
+    ...db,
+    seq: maxId > (db.seq?.['account.account.tag'] ?? 0) ? { ...(db.seq ?? {}), 'account.account.tag': maxId } : (db.seq ?? {}),
+    messages: db.messages ?? [],
+  };
+  for (const name of missing) {
     next = create(next, 'account.account.tag', { name, applicability: 'accounts' }).db;
   }
   return next;

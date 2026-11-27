@@ -24,7 +24,7 @@ import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { normalizeReconcileRule } from './models/reconcile.js';
-import { ensureStatementReports } from './models/statementReports.js';
+import { ensureStatementReports, migrateStatementGrowthDirections } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
 import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
@@ -2634,7 +2634,15 @@ function migrateStatementLinesBankSuspense(db) {
 }
 MIGRATIONS.push({ version: 81, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 MIGRATIONS.push({ version: 82, name: 'stored-statement-report-lines', up: ensureStatementReports });
-MIGRATIONS.push({ version: 83, name: 'indirect-cash-flow-account-tags', up: ensureIndirectCashFlowTags });
+MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({ ...db, records: { ...db.records, 'account.report': (db.records['account.report'] ?? []).map((report) => ({
+  default_opening_date_filter: report.kind === 'balance' ? 'today' : 'this_year',
+  filter_date_range: report.date_scope !== 'cumulative', filter_unfold_all: true,
+  filter_hide_0_lines: 'optional', filter_period_comparison: true, filter_growth_comparison: true,
+  filter_line_comparison: true, filter_hierarchy: 'optional', ...report,
+})) } }) });
+
+MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
+MIGRATIONS.push({ version: 85, name: 'indirect-cash-flow-account-tags', up: ensureIndirectCashFlowTags });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

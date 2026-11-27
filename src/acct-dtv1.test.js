@@ -118,9 +118,11 @@ test('DTV-1: ConfigurableReportPage (P&L, Balance Sheet, custom report) shows in
 
     // 2. Balance Sheet with invalid custom range
     await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { key: 'bs', statementKind: 'balance', title: 'Balance Sheet' })));
-    const bsPeriod = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
+    const bsPeriod = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'today');
+    assert.ok(bsPeriod);
     await React.act(async () => props(bsPeriod).onChange({ target: { value: 'custom' } }));
-    const [, bsTo] = findDateInputs(host);
+    assert.equal(findDateInputs(host).length, 1);
+    const [bsTo] = findDateInputs(host);
     await React.act(async () => props(bsTo).onChange({ target: { value: '' } }));
     assert.equal(textOf(findAlert(host)), 'Enter a To date');
     assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
@@ -356,6 +358,18 @@ test('DTV-1 regression: clearing From with an active comparison shows inline err
     // 1. ConfigurableReportPage (P&L and Balance Sheet)
     for (const [statementKind, title] of [['pnl', 'Profit and Loss'], ['balance', 'Balance Sheet']]) {
       await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { key: `cmp-${statementKind}`, statementKind, title })));
+      if (statementKind === 'balance') {
+        const asOf = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'today');
+        assert.ok(asOf);
+        await React.act(async () => props(asOf).onChange({ target: { value: 'custom' } }));
+        const dates = findDateInputs(host);
+        assert.equal(dates.length, 1);
+        await React.act(async () => props(dates[0]).onChange({ target: { value: '' } }));
+        assert.equal(textOf(findAlert(host)), 'Enter a To date');
+        assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
+        assertActionsDisabled(true);
+        continue;
+      }
       const periodSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
       await React.act(async () => props(periodSelect).onChange({ target: { value: 'custom' } }));
       const [fromInput] = findDateInputs(host);
@@ -396,6 +410,18 @@ test('DTV-1 regression: clearing From with an active comparison shows inline err
     // 3. Reports.jsx comparable reports (P&L, Balance Sheet, Cash Flow, Executive, Trial, Tax, Fiscal)
     for (const report of ['pnl', 'balance', 'cashflow', 'executive', 'trial', 'tax', 'fiscal']) {
       await React.act(async () => root.render(React.createElement(Reports, { key: `rep-${report}`, leaf: { report, key: report } })));
+      if (report === 'balance') {
+        const asOf = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'today');
+        assert.ok(asOf);
+        await React.act(async () => props(asOf).onChange({ target: { value: 'custom' } }));
+        const dates = findDateInputs(host);
+        assert.equal(dates.length, 1);
+        await React.act(async () => props(dates[0]).onChange({ target: { value: '' } }));
+        assert.equal(textOf(findAlert(host)), 'Enter a To date');
+        assert.equal(find(host, (n) => n.tagName === 'TABLE'), null);
+        assertActionsDisabled(true);
+        continue;
+      }
       const periodSelect = find(host, (n) => n.tagName === 'SELECT' && props(n)?.value === 'year');
       await React.act(async () => props(periodSelect).onChange({ target: { value: 'custom' } }));
       const [rFrom] = findDateInputs(host);

@@ -219,7 +219,7 @@ test('PI-3: migration sets price_include_override from legacy price_include (tru
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 83);
+  assert.equal(migrated.schema_version, 85);
 
   const incl = migrated.records['account.tax'].find((t) => t.name === 'VAT 14% Included');
   const excl = migrated.records['account.tax'].find((t) => t.name === 'VAT 14%' && t.type_tax_use === 'sale');

@@ -72,7 +72,7 @@ test('migration seeds stored statement expressions idempotently and preserves se
   const seeded = seed();
   const withoutStored = { ...seeded, schema_version: 80, records: { ...seeded.records, 'account.report.line': [], 'account.report.expression': [] } };
   const migrated = migrate(withoutStored);
-  assert.equal(migrated.schema_version, 83);
+  assert.equal(migrated.schema_version, 85);
   assert.equal(migrate(migrated), migrated);
   for (const kind of ['pnl', 'balance']) {
     const report = migrated.records['account.report'].find((item) => item.kind === kind && item.company_id === 1);
