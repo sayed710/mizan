@@ -756,3 +756,48 @@ test('Journal Items analytic column availability follows scoped companies in tab
     await scopedOnCtx.done();
   }
 });
+
+test('matching navigation opens all permitted linked lines and returns to the restricted report', async () => {
+  const { postEntry } = await import('./models/ledger.js');
+  let db = seed();
+  const account = (db.records['account.account'] ?? []).find((a) => a.reconcile === true && (a.company_id ?? 1) === 1);
+  const other = (db.records['account.account'] ?? []).find((a) => a.id !== account.id && (a.company_id ?? 1) === 1);
+  const journal = (db.records['account.journal'] ?? []).find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  assert.ok(account && other && journal);
+  const old = postEntry(db, { journal_id: journal.id, journal: journal.code, company: 1, date: '2025-01-01', lines: [{ account_id: account.id, debit: 100, name: 'Older match' }, { account_id: other.id, credit: 100 }] });
+  const recent = postEntry(old.db, { journal_id: journal.id, journal: journal.code, company: 1, date: '2026-06-01', lines: [{ account_id: account.id, credit: 100, name: 'Recent match' }, { account_id: other.id, debit: 100 }] });
+  const hidden = { ...recent.db.records['account.move'].find((move) => move.id === recent.id), id: 987650, company_id: 987650, line_ids: [{ account_id: account.id, credit: 100, name: 'Hidden company match' }] };
+  db = { ...recent.db, settings: { ...recent.db.settings, allowed_company_ids: [1] }, records: { ...recent.db.records, 'account.move': [...recent.db.records['account.move'], hidden], 'account.partial.reconcile': [...(recent.db.records['account.partial.reconcile'] ?? []), { id: 987654, debit_move_id: old.id, debit_line_index: 0, credit_move_id: recent.id, credit_line_index: 0, amount: 100 }, { id: 987656, debit_move_id: old.id, debit_line_index: 0, credit_move_id: hidden.id, credit_line_index: 0, amount: 1 }] } };
+  const ui = await mountJournalItems(db, `#/accounting/journal-items?move=${recent.id}`);
+  try {
+    const search = find(ui.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Search');
+    const from = find(ui.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'From');
+    await ui.React.act(async () => { props(search).onChange({ target: { value: 'Recent match' } }); props(from).onChange({ target: { value: '2026-01-01' } }); });
+    const link = find(ui.host, (n) => n.tagName === 'A' && n.textContent === 'A987654');
+    assert.ok(link, 'current line has a matching link');
+    await click(ui.React, link);
+    assert.ok(ui.host.textContent.includes('Older match'), 'older counterpart is visible despite report scope and filters');
+    assert.ok(ui.host.textContent.includes('Recent match'));
+    assert.ok(!ui.host.textContent.includes('Hidden company match'));
+    const back = find(ui.host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Clear matching');
+    await click(ui.React, back);
+    assert.ok(ui.host.textContent.includes('Recent match'));
+    assert.ok(!ui.host.textContent.includes('Older match'));
+    assert.equal(props(find(ui.host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'Search')).value, 'Recent match');
+  } finally { await ui.done(); }
+});
+
+test('stale matching labels without active reconciliation do not link unrelated journal items', async () => {
+  const { postEntry } = await import('./models/ledger.js');
+  let db = seed();
+  const account = (db.records['account.account'] ?? []).find((a) => (a.company_id ?? 1) === 1);
+  const other = (db.records['account.account'] ?? []).find((a) => a.id !== account.id && (a.company_id ?? 1) === 1);
+  const journal = (db.records['account.journal'] ?? []).find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const posted = postEntry(db, { journal_id: journal.id, journal: journal.code, company: 1, date: '2026-06-01', lines: [{ account_id: account.id, debit: 25, name: 'Stale match', matching_number: 'P987' }, { account_id: other.id, credit: 25 }] });
+  db = { ...posted.db, records: { ...posted.db.records, 'account.move': posted.db.records['account.move'].map((m) => m.id === posted.id ? { ...m, line_ids: m.line_ids.map((line, i) => i === 0 ? { ...line, matching_number: 'P987' } : line) } : m) } };
+  const ui = await mountJournalItems(db, `#/accounting/journal-items?move=${posted.id}`);
+  try {
+    assert.ok(ui.host.textContent.includes('P987'));
+    assert.ok(!find(ui.host, (n) => n.tagName === 'A' && n.textContent === 'P987'));
+  } finally { await ui.done(); }
+});

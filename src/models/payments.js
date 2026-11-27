@@ -527,6 +527,7 @@ export function isBatchReconciled(db, batch) {
 export const paymentModels = {
   'account.batch.payment': {
     label: 'Batch Payments',
+    protectDelete: (_db, batch) => batch.state !== 'draft' ? 'Only draft batches can be deleted.' : null,
     guard: (db, before, after) => {
       const methodError = batchPaymentMethodGuard(db, before, after);
       if (methodError) return methodError;
