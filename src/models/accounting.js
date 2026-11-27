@@ -5,9 +5,9 @@ import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, commercialPartnerId, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, CURRENCY_AMOUNT_SIGN_ERROR, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, exchangeJournal, historicalOriginAccounts, installmentSettlementState, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItemIdentity, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, CURRENCY_AMOUNT_SIGN_ERROR, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, exchangeJournal, fiscalYearDates, historicalOriginAccounts, installmentSettlementState, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItemIdentity, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
-import { accountCurrencyChangeError, accountDeleteGuard, accountingDateForPost, bankStatementRewriteAllowed, bookedByBank, creditNotePairError, creditWarning, deduceSequenceNumberReset, duplicateBillWarning, fxProvenanceError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, resequenceAllowed, taxUnitMemberTypeValidation } from './finance.js';
+import { accountCurrencyChangeError, accountDeleteGuard, accountingDateForPost, bankStatementRewriteAllowed, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, fxProvenanceError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, moveGuard, moveInvariant, parseSequenceNumberFormat, recordLockDate, resequenceAllowed, taxUnitMemberTypeValidation } from './finance.js';
 import { unreconcileLedgerItems } from './glReconcile.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, postPayment, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
@@ -1016,23 +1016,26 @@ export function applyCreditNote(db, noteId, invoiceId, date = null, amount = nul
   if (!(value > 0)) return db;
   const invoicePortion = settlementCompanyAmount(db, invoice, value);
   const notePortion = settlementCompanyAmount(db, note, value);
-  let next = appendDocumentSettlement(db, invoice.id, { amount: value, moveId: note.id, date: appDate, lineIndex }).db;
-  next = appendDocumentSettlement(next, note.id, { amount: value, moveId: invoice.id, date: appDate }).db;
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
   const sale = !isPurchase(invoice);
   const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
+  let next = db;
+  let fxMoveId = null;
   if (gap) {
-    const account = invoiceCounterpartAccount(db, invoice);
+    const account = invoiceCounterpartAccount(next, invoice);
     const forced = valueOnlyCurrencyFields(next, account, invoice.company_id, invoice.currency_id);
     const fxAmount = Math.abs(gap);
     // The receivable/payable balance left by the two rates is cleared against the exchange gain or loss.
     const clearsDebit = sale ? gap < 0 : gap > 0;
     const open = clearsDebit ? { account, debit: fxAmount, partner_id: invoice.partner_id, ...forced } : { account, credit: fxAmount, partner_id: invoice.partner_id, ...forced };
-    const fxLines = exchangeLines(db, invoice.company_id, clearsDebit ? fxAmount : -fxAmount);
+    const fxLines = exchangeLines(next, invoice.company_id, clearsDebit ? fxAmount : -fxAmount);
     const fxJournalId = exchangeJournal(next, invoice.company_id).id;
     const fx = postEntry(next, { journal_id: fxJournalId, journal: fxJournalId, company: invoice.company_id ?? 1, date: appDate, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines], archivedOriginIds: [invoice.id, note.id] });
+    fxMoveId = fx.id;
     next = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: note.id, fx_invoice_id: invoice.id } : entry) } };
   }
+  next = appendDocumentSettlement(next, invoice.id, { amount: value, moveId: note.id, date: appDate, lineIndex, paymentFxMoveId: fxMoveId }).db;
+  next = appendDocumentSettlement(next, note.id, { amount: value, moveId: invoice.id, date: appDate }).db;
   return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
 }
 
@@ -2944,33 +2947,60 @@ export function resetMove(db, moveOrId, { date = null } = {}) {
 
 function parseResequenceName(name) {
   const value = String(name ?? '');
-  const match = value.match(/^(.*\D)?(\d+)(\D*)$/);
-  if (!match) return null;
-  return { prefix: match[1] ?? '', seq: match[2], suffix: match[3] ?? '', padding: match[2].length, start: Number(match[2]) };
+  const format = parseSequenceNumberFormat(value);
+  const g = format.groups;
+  let seq = g.seq ?? '';
+  let suffix = g.suffix ?? '';
+  if (format.reset === 'never' && !seq) {
+    const match = value.match(/^(.*\D)?(\d+)(\D*)$/);
+    if (!match) return null;
+    const prefix = match[1] ?? '';
+    seq = match[2];
+    suffix = match[3] ?? '';
+    return { prefix, seq, suffix, padding: seq.length, start: Number(seq), format: { reset: 'never', groups: { prefix1: prefix, seq, suffix } } };
+  }
+  if (!seq) return null;
+  const prefix = value.slice(0, value.length - seq.length - suffix.length);
+  return { prefix, seq, suffix, padding: seq.length, start: Number(seq), format };
 }
 
-function periodKeyForDate(dateStr, resetMode) {
-  if (!dateStr) return 'all';
-  if (resetMode === 'month' || resetMode === 'year_range_month') return dateStr.slice(0, 7);
-  if (resetMode === 'year' || resetMode === 'year_range') return dateStr.slice(0, 4);
-  return 'all';
+function periodKeyForDate(db, dateStr, resetMode, companyId) {
+  if (resetMode === 'never') return 'all';
+  if (!validDate(dateStr)) throw new Error('Enter a valid accounting date for every resequenced entry');
+  if (resetMode === 'month') return dateStr.slice(0, 7);
+  if (resetMode === 'year') return dateStr.slice(0, 4);
+  if (resetMode === 'year_range' || resetMode === 'year_range_month') {
+    const fy = fiscalYearDates(db, dateStr, companyId);
+    return resetMode === 'year_range' ? `${fy.from}:${fy.to}` : `${fy.from}:${fy.to}:${dateStr.slice(5, 7)}`;
+  }
+  throw new Error('Cannot derive sequence period for this format');
 }
 
-function prefixForPeriod(basePrefix, firstDate, moveDateStr, resetMode) {
-  if (!firstDate || !moveDateStr || resetMode === 'never') return basePrefix;
-  let out = basePrefix;
-  const firstYear = firstDate.slice(0, 4);
-  const nextYear = moveDateStr.slice(0, 4);
-  if (firstYear !== nextYear) {
-    out = out.replace(firstYear, nextYear);
+const formatSequenceYear = (yearNum, width) => String(yearNum).padStart(width, '0').slice(-width);
+
+function prefixForPeriod(db, format, dateStr, companyId) {
+  const { reset, groups: g } = format;
+  if (reset === 'never') return g.prefix1 ?? '';
+  if (!validDate(dateStr) || !g.year) throw new Error('Cannot derive sequence prefix for this period');
+  const calYear = Number(dateStr.slice(0, 4));
+  const month = dateStr.slice(5, 7);
+  if (reset === 'year') {
+    return `${g.prefix1 ?? ''}${formatSequenceYear(calYear, g.year.length)}${g.prefix2 ?? ''}`;
   }
-  if ((resetMode === 'month' || resetMode === 'year_range_month') && firstDate.slice(5, 7) !== moveDateStr.slice(5, 7)) {
-    const firstMonth = firstDate.slice(5, 7);
-    const nextMonth = moveDateStr.slice(5, 7);
-    const idx = out.lastIndexOf(firstMonth);
-    if (idx >= 0) out = `${out.slice(0, idx)}${nextMonth}${out.slice(idx + firstMonth.length)}`;
+  if (reset === 'month') {
+    return `${g.prefix1 ?? ''}${formatSequenceYear(calYear, g.year.length)}${g.prefix2 ?? ''}${month}${g.prefix3 ?? ''}`;
   }
-  return out;
+  if ((reset === 'year_range' || reset === 'year_range_month') && g.year_end) {
+    const fy = fiscalYearDates(db, dateStr, companyId);
+    const fyStartYear = Number(fy.from.slice(0, 4));
+    const startYear = formatSequenceYear(fyStartYear, g.year.length);
+    const endYear = formatSequenceYear(fyStartYear + 1, g.year_end.length);
+    if (reset === 'year_range') {
+      return `${g.prefix1 ?? ''}${startYear}${g.prefix2 ?? ''}${endYear}${g.prefix3 ?? ''}`;
+    }
+    return `${g.prefix1 ?? ''}${startYear}${g.prefix2 ?? ''}${endYear}${g.prefix3 ?? ''}${month}${g.prefix4 ?? ''}`;
+  }
+  throw new Error('Cannot derive sequence prefix for this period');
 }
 
 function validateResequenceMoves(db, ids) {
@@ -3027,26 +3057,28 @@ export function resequencePreview(db, ids, values = {}) {
   const parsed = parseResequenceName(firstName);
   if (!parsed) throw new Error('Enter a valid starting sequence number');
 
-  const resetMode = deduceSequenceNumberReset(firstName);
-  const firstPeriodDate = moveDate(sorted[0]);
+  const companyId = selected[0].company_id ?? 1;
+  const journalId = selected[0].journal_id ?? null;
+  const resetMode = parsed.format.reset;
   const periodOffsets = new Map();
   let periodIndex = 0;
   const preview = sorted.map((m) => {
     const date = moveDate(m);
-    const periodKey = periodKeyForDate(date, resetMode);
+    const periodKey = periodKeyForDate(db, date, resetMode, companyId);
     if (!periodOffsets.has(periodKey)) {
       periodOffsets.set(periodKey, { index: periodIndex++, count: 0 });
     }
     const info = periodOffsets.get(periodKey);
     const num = (info.index === 0 ? parsed.start : 1) + info.count;
     info.count += 1;
-    const prefix = info.index === 0 ? parsed.prefix : prefixForPeriod(parsed.prefix, firstPeriodDate, date, resetMode);
+    const prefix = info.index === 0 ? parsed.prefix : prefixForPeriod(db, parsed.format, date, companyId);
+    if (info.index > 0 && prefix === parsed.prefix) {
+      throw new Error('Cannot derive sequence prefix for this period');
+    }
     const newName = `${prefix}${String(num).padStart(parsed.padding, '0')}${parsed.suffix}`;
     return { id: m.id, current_name: m.name, new_name: newName, date };
   });
 
-  const companyId = selected[0].company_id ?? 1;
-  const journalId = selected[0].journal_id ?? null;
   const selectedIds = new Set(selected.map((m) => m.id));
   const assigned = new Set();
   const existingPosted = new Set((db.records['account.move'] ?? [])

@@ -87,6 +87,22 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Percentage of': 'النسبة من',
+  'Comparison in': 'المقارنة بوحدة',
+  'Rounding Unit': 'وحدة التقريب',
+  Decimals: 'المنازل العشرية',
+  Thousands: 'الآلاف',
+  Millions: 'الملايين',
+  'Default Opening Date Filter': 'مرشح تاريخ الافتتاح الافتراضي',
+  'Date Range': 'نطاق التاريخ',
+  'By Default': 'افتراضيًا',
+  'Period Comparison': 'مقارنة الفترات',
+  'Growth Comparison': 'مقارنة النمو',
+  'Line Comparison': 'مقارنة البنود',
+  'Account Parents': 'مجموعات الحسابات الرئيسية',
+  'Last Month': 'الشهر الماضي',
+  'Last Quarter': 'الربع الماضي',
+  'Last Year': 'السنة الماضية',
   'Reset': 'إعادة تعيين',
   'Show Reconciled': 'إظهار البنود المسوّاة',
   'Print Statement': 'طباعة الكشف',
@@ -4338,6 +4354,12 @@ const ar = {
   'Choose a valid sequence ordering': 'اختر طريقة ترتيب تسلسل صالحة',
   'Enter a valid starting sequence number': 'أدخل رقم تسلسل بداية صالحاً',
   'Posted entries keep their number while the audit trail is active': 'تحتفظ القيود المرحّلة برقمها أثناء تفعيل سجل التدقيق',
+  'Enter a valid accounting date for every resequenced entry': 'أدخل تاريخ قيد صالحاً لكل قيد مُعاد تسلسله',
+  'Cannot derive sequence period for this format': 'تعذّر استنتاج فترة التسلسل لهذا التنسيق',
+  'Cannot derive sequence prefix for this period': 'تعذّر استنتاج بادئة التسلسل لهذه الفترة',
+  'A posted payment must reference a valid invoice or bill': 'يجب أن يشير الدفع المرحّل إلى فاتورة صالحة',
+  'The invoice linked to a posted payment cannot be changed': 'لا يمكن تغيير الفاتورة المرتبطة بدفع مرحّل',
+  'A posted payment can only reference a non-posted invoice that it previously settled': 'لا يمكن أن يشير الدفع المرحّل إلا إلى فاتورة غير مرحّلة سبق أن سوّاها',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

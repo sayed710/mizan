@@ -335,7 +335,7 @@ test('migration skips secured moves so version-2 hash chains stay valid while mi
   };
 
   const migrated = migrate(db);
-  assert.equal(migrated.schema_version, 82);
+  assert.equal(migrated.schema_version, 84);
   assert.equal(migrate(migrated), migrated, 'migration is idempotent');
 
   // Unsecured invoice is migrated to 100% distribution.

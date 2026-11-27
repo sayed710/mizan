@@ -4,7 +4,7 @@ import { monthFilters, nextName, promptedAmount, sameCommercialPartner, today, v
 import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, paymentStatementLines, postEntry, reconciledJournalItems, statementPaymentIds, stornoLine, valueOnlyCurrencyFields } from './ledger.js';
 import { CHARGE_BEARERS, DEFAULT_CHARGE_BEARER } from './sepa.js';
 import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payWithDiscount, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
-import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
+import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, paymentInvariant, paymentInvoiceError, recordLockDate, returnCompanies, SETTLES, settlementFxError, settlementOwnedFxIds, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { checkPaymentCurrency, companyCurrencyRecord, documentCurrency, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
@@ -24,7 +24,7 @@ const shared = (id) => id == null || id === false || id === '';
 
 // Which open documents a payment settles, by direction and partner side.
 const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
-export const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund'] }, supplier: { inbound: ['in_refund'], outbound: ['in_invoice'] } };
+export { SETTLES };
 
 /** Resolve a selection against current records, never against list order or a caller's stale values. */
 export function selectedItems(db, selections, { allowMultipleEntryLines = false, requireReconcilable = true, allowedStates = ['posted'] } = {}) {
@@ -188,6 +188,17 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
     selectedIndicesByMove.set(item.move.id, set);
   }
   const unapplications = new Map();
+  const creditNotePairs = new Map();
+  const pairedRowKey = new Map();
+  const rowKey = (m, row) => {
+    if (row.id != null) return `${m.id}:id:${row.id}`;
+    let occ = 0;
+    for (const r of m.payments ?? []) {
+      if (r === row) break;
+      if (r.id == null && (r.line_index ?? null) === (row.line_index ?? null)) occ += 1;
+    }
+    return `${m.id}:line:${row.line_index ?? ''}:occ:${occ}`;
+  };
   const bankIds = new Set();
   const writeoffs = new Map();
   for (const { move, line, lineIndex, counterpart, multiInstallment } of items) {
@@ -224,7 +235,6 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
         }
       }
     }
-    const creditNoteUnapplications = new Map();
     for (const row of rows) {
       if (row.discount && payments.some((p) => p.move_id === row.payment_move_id)) continue;
       if (bankMatched(row.move_id)) continue;
@@ -235,8 +245,16 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
       }
       const source = read(db, 'account.move', row.move_id);
       if (isInvoice(source) && !row.discount) {
-        const pairKey = [Math.min(move.id, source.id), Math.max(move.id, source.id), Number(row.amount), row.date ?? ''].join(':');
-        creditNoteUnapplications.set(pairKey, { docId: move.id, otherId: source.id, rowId: row.id ?? null, lineIndex: targetIndex });
+        const myKey = rowKey(move, row);
+        if (pairedRowKey.has(myKey)) continue;
+        const reciprocalPool = (source.payments ?? []).filter((r) => !r.reversed && !r.discount && r.move_id === move.id && Number(r.amount) === Number(row.amount));
+        const reciprocal = reciprocalPool.find((r) => (!r.date || !row.date || r.date === row.date) && !pairedRowKey.has(rowKey(source, r)))
+          ?? reciprocalPool.find((r) => !pairedRowKey.has(rowKey(source, r)));
+        const otherKey = reciprocal ? rowKey(source, reciprocal) : `${source.id}:unmatched:${myKey}`;
+        pairedRowKey.set(myKey, otherKey);
+        if (reciprocal) pairedRowKey.set(otherKey, myKey);
+        const pairKey = [myKey, otherKey].sort().join('|');
+        creditNotePairs.set(pairKey, { docId: move.id, otherId: source.id, rowId: row.id ?? null, otherRowId: reciprocal?.id ?? null, lineIndex: targetIndex });
         continue;
       }
       if (source?.move_type !== 'entry' || row.discount) throw new Error('This settlement must be reversed from its originating document workflow');
@@ -251,16 +269,12 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
       }
     }
     if (isInvoice(move) && !rows.length) throw new Error('The selected invoice has no active settlements');
-    items.creditNotePairs = items.creditNotePairs ?? creditNoteUnapplications;
-    if (items.creditNotePairs !== creditNoteUnapplications) {
-      for (const [k, v] of creditNoteUnapplications) items.creditNotePairs.set(k, v);
-    }
   }
   // These functions return immutable snapshots: publish nothing unless the whole operation succeeds.
   let next = db;
   for (const id of bankIds) next = unreconcile(next, read(next, 'account.bank.statement.line', id), date).db;
   for (const { invoiceId, moveId, lineIndex, rowId } of unapplications.values()) next = unapplyPaymentCredit(next, invoiceId, moveId, date, { lineIndex, rowId });
-  for (const { docId, otherId, rowId, lineIndex } of (items.creditNotePairs ?? new Map()).values()) next = unapplyCreditNoteSettlement(next, docId, otherId, date, { rowId, lineIndex });
+  for (const { docId, otherId, rowId, otherRowId, lineIndex } of creditNotePairs.values()) next = unapplyCreditNoteSettlement(next, docId, otherId, date, { rowId, otherRowId, lineIndex });
   for (const { invoiceId, moveId, lineIndex } of writeoffs.values()) next = reverseWriteoff(next, invoiceId, moveId, date, { lineIndex });
   return next;
 }
@@ -748,7 +762,7 @@ export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today(
 }
 
 /** Remove a credit-note / invoice settlement pair cleanly, reversing any exchange or cash-basis entries it created. */
-export function unapplyCreditNoteSettlement(db, docId, otherId, date = today(), { rowId = null, lineIndex = null, ctx = null } = {}) {
+export function unapplyCreditNoteSettlement(db, docId, otherId, date = today(), { rowId = null, otherRowId = null, lineIndex = null, ctx = null } = {}) {
   const doc = read(db, 'account.move', docId);
   const other = read(db, 'account.move', otherId);
   if (!isInvoice(doc) || doc?.state !== 'posted' || !isInvoice(other) || other?.state !== 'posted' || doc.id === other.id) {
@@ -759,7 +773,10 @@ export function unapplyCreditNoteSettlement(db, docId, otherId, date = today(), 
     && r.move_id === otherId
     && (!Number.isInteger(lineIndex) || r.line_index === lineIndex));
   if (!rowA || rowA.discount) throw new Error('This settlement must be reversed from its originating document workflow');
-  const rowB = (other.payments ?? []).find((r) => !r.reversed && r.move_id === docId && Number(r.amount) === Number(rowA.amount) && (!r.date || !rowA.date || r.date === rowA.date))
+  const rowB = (otherRowId != null
+    ? (other.payments ?? []).find((r) => !r.reversed && r.id === otherRowId && r.move_id === docId && Number(r.amount) === Number(rowA.amount))
+    : null)
+    ?? (other.payments ?? []).find((r) => !r.reversed && r.move_id === docId && Number(r.amount) === Number(rowA.amount) && (!r.date || !rowA.date || r.date === rowA.date))
     ?? (other.payments ?? []).find((r) => !r.reversed && r.move_id === docId && Number(r.amount) === Number(rowA.amount));
   if (!rowB || rowB.discount) throw new Error('This settlement must be reversed from its originating document workflow');
   if (!validDate(date) || date < (rowA.date ?? '') || date < (rowB.date ?? '')) {
@@ -770,13 +787,12 @@ export function unapplyCreditNoteSettlement(db, docId, otherId, date = today(), 
     if (lock && date <= lock) throw new Error(`The period up to ${lock} is locked`);
   }
   let next = db;
-  const fxMoves = search(next, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'entry' && !m.reversed_entry_id
-    && ((m.fx_payment_move_id === docId && m.fx_invoice_id === otherId)
-      || (m.fx_payment_move_id === otherId && m.fx_invoice_id === docId)
-      || m.id === rowA.payment_fx_move_id
-      || m.id === rowB.payment_fx_move_id));
-  for (const fx of fxMoves) {
-    next = reverseEntry(next, fx, date, { reconciliation_reversal: true }).db;
+  const fxIds = settlementOwnedFxIds(next, doc, rowA, { counterpart: other, reciprocalRow: rowB });
+  for (const fxId of fxIds) {
+    const fx = read(next, 'account.move', fxId);
+    if (fx && fx.state === 'posted' && !fx.reversed_entry_id && !search(next, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === fx.id)) {
+      next = reverseEntry(next, fx, date, { reconciliation_reversal: true }).db;
+    }
   }
   next = reverseCashBasis(next, rowA, doc, date);
   next = reverseCashBasis(next, rowB, other, date);
@@ -2270,7 +2286,7 @@ export const payModels = {
         const curr = read(db, 'res.currency', after.currency_id);
         if (!curr || curr.active === false) return 'The payment currency must be active';
       }
-      return paymentMethodGuard(db, before, after);
+      return paymentInvoiceError(db, after, before) ?? paymentMethodGuard(db, before, after);
     },
     protectDelete: (db, payment, staged, ctx) => {
       const hasCheck = payment.check_number != null || (payment.voided_check_numbers ?? []).length > 0;

@@ -542,7 +542,7 @@ export function configurableReport(db, report, period, group = null, options = {
         .filter((entry) => entry && (options.includeZeroRows || reportAmountsVisible(entry.values, true)))
         .sort((a, b) => String(a.account.code ?? '').localeCompare(String(b.account.code ?? '')));
     }
-    return { ...line, parent_code: parent?.code ?? '', formula, sign: inverted ? -1 : 1, values, accountRows };
+    return { ...line, parent_code: parent?.code ?? '', formula, sign: inverted ? -1 : 1, green_on_positive: expression?.green_on_positive, values, accountRows };
   });
   const storedCodes = new Set(rawLines.map((stored) => stored.code).filter(Boolean));
   const inlineRows = !report.kind && report.line_ids?.length ? configurableReportLegacy(db, report, period, group, options).rows.filter((line) => !storedCodes.has(line.code)) : [];
@@ -658,6 +658,36 @@ export const isExpandableLine = (line) => Boolean(line.foldable && line.accountR
 /** Journal Items route scoped to one account: the only drill-down filter the Journal Items view reads from its URL. */
 export const accountJournalItemsHref = (accountId) => `#/accounting/journal-items?account=${accountId}`;
 
+export function reportAccountHierarchy(db, accounts) {
+  const groups = new Map((db.records['account.group'] ?? []).map((group) => [group.id, group]));
+  const nodes = new Map();
+  const roots = [];
+  const ensureGroup = (id, seen = new Set()) => {
+    const group = groups.get(id);
+    if (!group || seen.has(id)) return null;
+    if (nodes.has(id)) return nodes.get(id);
+    seen.add(id);
+    const node = { group, children: [], values: [] };
+    nodes.set(id, node);
+    const parent = ensureGroup(group.parent_id, seen);
+    (parent ? parent.children : roots).push(node);
+    return node;
+  };
+  for (const account of accounts) {
+    const parent = ensureGroup(account.account.group_id);
+    (parent ? parent.children : roots).push(account);
+  }
+  const sum = (node) => {
+    if (!node.group) return node.values;
+    for (const child of node.children) {
+      sum(child).forEach((value, index) => { node.values[index] = (node.values[index] ?? 0) + (value ?? 0); });
+    }
+    return node.values;
+  };
+  roots.forEach(sum);
+  return roots;
+}
+
 const company = { type: 'many2one', relation: 'res.company', label: 'Company', required: true };
 export const configurableReportModels = {
   ...reportRecordModels,
@@ -667,17 +697,25 @@ export const configurableReportModels = {
       name: { type: 'char', label: 'Name', required: true }, company_id: company,
       kind: { type: 'selection', label: 'Report Kind', options: [['', 'Custom'], ['pnl', 'Profit and Loss'], ['balance', 'Balance Sheet']] },
       date_scope: { type: 'selection', label: 'Date Scope', options: [['range', 'Period Range'], ['cumulative', 'As of Date']] },
+      default_opening_date_filter: { type: 'selection', label: 'Default Opening Date Filter', options: [['this_year', 'This Year'], ['this_quarter', 'This Quarter'], ['this_month', 'This Month'], ['today', 'Today'], ['previous_month', 'Last Month'], ['previous_quarter', 'Last Quarter'], ['previous_year', 'Last Year']] },
+      filter_date_range: { type: 'boolean', label: 'Date Range' },
+      filter_unfold_all: { type: 'boolean', label: 'Unfold All' },
+      filter_hide_0_lines: { type: 'selection', label: 'Hide lines at 0', options: [['by_default', 'By Default'], ['optional', 'Optional'], ['never', 'Never']] },
+      filter_period_comparison: { type: 'boolean', label: 'Period Comparison' },
+      filter_growth_comparison: { type: 'boolean', label: 'Growth Comparison' },
+      filter_line_comparison: { type: 'boolean', label: 'Line Comparison' },
+      filter_hierarchy: { type: 'selection', label: 'Account Parents', options: [['by_default', 'By Default'], ['optional', 'Optional'], ['never', 'Never']] },
       exclude_closing: { type: 'boolean', label: 'Exclude Closing Entries' },
       sequence: { type: 'integer', label: 'Sequence' }, active: { type: 'boolean', label: 'Active' },
       show_debit: { type: 'boolean', label: 'Debit' }, show_credit: { type: 'boolean', label: 'Credit' },
       stored_line_ids: { type: 'one2many', label: 'Accounting Report Lines', relation: 'account.report.line', openRelated: true, fields: { name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' } }, compute: (report, db) => (db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id) },
       line_ids: { type: 'one2many', label: 'Report Lines', fields: {
         name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' }, sequence: { type: 'integer', label: 'Sequence' },
-        parent_code: { type: 'char', label: 'Parent Code' }, formula: { type: 'char', label: 'Formula' },
+        green_on_positive: { type: 'boolean', label: 'Is Growth Good when Positive' }, parent_code: { type: 'char', label: 'Parent Code' }, formula: { type: 'char', label: 'Formula' },
         sign: { type: 'integer', label: 'Sign' }, foldable: { type: 'boolean', label: 'Foldable' }, strong: { type: 'boolean', label: 'Emphasized' },
       }, newLine: () => ({ name: '', code: '', sequence: 10, parent_code: '', formula: '', sign: 1, foldable: false, strong: false }) },
     },
-    defaults: () => ({ active: true, kind: '', date_scope: 'range', exclude_closing: false, sequence: 10, show_debit: false, show_credit: false, line_ids: [] }),
+    defaults: () => ({ active: true, kind: '', date_scope: 'range', default_opening_date_filter: 'this_year', filter_date_range: true, filter_unfold_all: true, filter_hide_0_lines: 'optional', filter_period_comparison: true, filter_growth_comparison: true, filter_line_comparison: true, filter_hierarchy: 'optional', exclude_closing: false, sequence: 10, show_debit: false, show_credit: false, line_ids: [] }),
     createDefaults: (db) => ({ company_id: currentCompanyId(db) }),
     guard: reportError,
     onWrite: (db, after, before) => syncInlineStatementLines(db, before, after),
@@ -692,7 +730,7 @@ export const configurableReportModels = {
       } };
     },
     list: ['name', 'sequence', 'company_id'],
-    form: { title: 'name', groups: [['sequence', 'company_id', 'active'], ['kind', 'date_scope', 'exclude_closing'], ['show_debit', 'show_credit']], tabs: [{ label: 'Report Lines', fields: ['line_ids'] }, { label: 'Accounting Report Lines', fields: ['stored_line_ids'] }], buttons: [{ label: 'Open Report', run: (db, report) => ({ db, go: `#/accounting/configurable-report-view/${report.id}` }) }] },
+    form: { title: 'name', groups: [['sequence', 'company_id', 'active'], ['kind', 'date_scope', 'exclude_closing'], ['show_debit', 'show_credit'], ['default_opening_date_filter', 'filter_date_range', 'filter_unfold_all', 'filter_hide_0_lines', 'filter_period_comparison', 'filter_growth_comparison', 'filter_line_comparison', 'filter_hierarchy']], tabs: [{ label: 'Report Lines', fields: ['line_ids'] }, { label: 'Accounting Report Lines', fields: ['stored_line_ids'] }], buttons: [{ label: 'Open Report', run: (db, report) => ({ db, go: `#/accounting/configurable-report-view/${report.id}` }) }] },
   },
   'account.report.horizontal.group': {
     label: 'Horizontal Groups', fields: {
