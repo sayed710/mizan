@@ -17,6 +17,7 @@ import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { normalizeHorizontalGroupVals } from './models/configurableReports.js';
 import { migrateProductCategories } from './models/productconfig.js';
+import { cents } from './money.js';
 import { today, validDate } from './models/common.js';
 import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
@@ -2641,6 +2642,25 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 })) } }) });
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
+
+/** Preserve legacy loan entries and account semantics while normalizing the cancelled state. */
+export function migrateLoans85(db) {
+  const loans = db.records['account.loan'];
+  if (!Array.isArray(loans)) return db;
+  return { ...db, records: { ...db.records, 'account.loan': loans.map((loan) => {
+    const line_ids = (loan.line_ids ?? []).map((line) => ({ ...line, generated_move_ids: line.generated_move_ids ?? (line.move_id ? [line.move_id] : []) }));
+    const interest = loan.interest == null && line_ids.length
+      ? line_ids.reduce((sum, line) => sum + cents(line.interest), 0) / 100
+      : loan.interest;
+    return {
+      ...loan,
+      ...(interest !== undefined ? { interest } : {}),
+      state: loan.state === 'cancel' ? 'cancelled' : loan.state,
+      line_ids,
+    };
+  }) } };
+}
+MIGRATIONS.push({ version: 85, name: 'loan-entry-history', up: migrateLoans85 });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
