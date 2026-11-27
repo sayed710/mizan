@@ -450,7 +450,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
         : cashBasis ? [] : taxBaseTags(null, side, l))].sort((a, b) => a - b);
       const taxIds = [...new Set(
         accrualTaxes
-          .filter((t) => t.tax_id != null && taxBaseTags(t, side, l).length > 0)
+          .filter((t) => t.tax_id != null)
           .map((t) => Number(t.tax_id))
       )].sort((a, b) => a - b);
       const key = JSON.stringify([account, zero, zeroTaxId, tags, taxIds, cashBasis, distributionKey]);
@@ -765,7 +765,7 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany, taxIds]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true, tax_side: sale ? 'sale' : 'purchase', ...(taxIds.length ? { tax_ids: taxIds } : {}) } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany, taxIds]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(taxIds.length ? { tax_ids: taxIds } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true, tax_side: sale ? 'sale' : 'purchase' } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, use_in_tax_closing: g.cash_basis ? false : (g.use_in_tax_closing === true), ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base)
@@ -1676,7 +1676,7 @@ export function journalItemIdentity({ reconciled: _reconciled, matching_number: 
 export const includeClosingItem = (item, includeClosing = false) => includeClosing || !item?.is_closing;
 
 /** Journal items with their move date, optionally limited by review status, date, company, and closing flag. */
-export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted', includeClosing = true } = {}) {
+export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted', includeClosing = true, includeDraftInvoices = false } = {}) {
   const targetCompany = company_id ?? company;
   const wantedState = reviewMode === 'draft' ? 'draft' : 'posted';
   const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
@@ -1694,7 +1694,12 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
-      return reconciledJournalItems(db, m, { partialMatching: true }).map((l) => ({
+      let reportMove = m;
+      if (includeDraftInvoices && m.state === 'draft' && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type) && !(m.line_ids ?? []).length) {
+        try { reportMove = { ...m, line_ids: invoiceLines(db, m) }; }
+        catch { /* An incomplete draft has no calculable journal items yet. */ }
+      }
+      return reconciledJournalItems(db, reportMove, { partialMatching: true }).map((l) => ({
         ...l,
         line_identity: journalItemIdentity(l),
         move_id: m.id,
