@@ -31,9 +31,11 @@ function setupTaxUnitEnv({ memberCountry = 'Egypt', mainCountry = 'Egypt', membe
   db = ensureReturnTypes(member.db);
   const mainType = search(db, 'account.return.type').find((t) => (t.company_id ?? 1) === 1 && t.name === 'VAT Return');
   const memberType = search(db, 'account.return.type').find((t) => t.company_id === member.id && t.name === 'VAT Return');
-  const memberPayable = create(db, 'account.account', { code: '251000', name: 'Member Tax Payable', account_type: 'liability_current', company_id: member.id });
+  const existingPayable = search(db, 'account.account').find((a) => a.code === '251000' && a.company_id === member.id);
+  const memberPayable = existingPayable ? { db, id: existingPayable.id } : create(db, 'account.account', { code: '251000', name: 'Member Tax Payable', account_type: 'liability_current', company_id: member.id });
   db = memberPayable.db;
-  const memberReceivable = create(db, 'account.account', { code: '131000', name: 'Member Tax Receivable', account_type: 'asset_current', company_id: member.id });
+  const existingReceivable = search(db, 'account.account').find((a) => a.code === '131000' && a.company_id === member.id);
+  const memberReceivable = existingReceivable ? { db, id: existingReceivable.id } : create(db, 'account.account', { code: '131000', name: 'Member Tax Receivable', account_type: 'asset_current', company_id: member.id });
   db = memberReceivable.db;
   db = write(db, 'account.return.type', memberType.id, {
     tax_payable_account_id: memberPayable.id,

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { withDefaultVat, createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { withDefaultVat } from './test-support/accounting-company.js';
 import { create, groupRecords, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
@@ -191,7 +191,7 @@ test('seed taxes and withDefaultVat set tax_group_id to real account.tax.group r
   const stamp = search(db, 'account.tax').find((t) => t.name === 'Stamp Duty');
   assert.equal(groups.get(stamp.tax_group_id), 'Stamp');
 
-  const co = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch Co' });
+  const co = create(db, 'res.company', { name: 'Branch Co', currency_id: read(db, 'res.company', 1).currency_id });
   const vatDb = withDefaultVat(co.db, co.id, 14);
   const companyTaxes = search(vatDb, 'account.tax').filter((t) => t.company_id === co.id);
   assert.equal(companyTaxes.length, 2);

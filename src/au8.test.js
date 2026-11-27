@@ -450,33 +450,29 @@ test('Regression: Two-company ownership for depreciation, disposal, deferral and
   db = c2Res.db;
   const c2Id = c2Res.id;
 
+  const ensureAcc = (code, name, account_type) => {
+    const existing = search(db, 'account.account').find((a) => a.code === code && a.company_id === c2Id);
+    if (existing) return existing;
+    const res = create(db, 'account.account', { code, name, account_type, company_id: c2Id });
+    db = res.db;
+    return read(db, 'account.account', res.id);
+  };
   const c2MiscJournal = create(db, 'account.journal', { name: 'C2 Misc', code: 'MISC2', type: 'general', company_id: c2Id });
   db = c2MiscJournal.db;
-  const c2Suspense = create(db, 'account.account', { code: '101404', name: 'C2 Suspense', account_type: 'asset_current', company_id: c2Id });
-  db = c2Suspense.db;
+  const c2Suspense = ensureAcc('101404', 'C2 Suspense', 'asset_current');
   const c2BankJournal = create(db, 'account.journal', { name: 'C2 Bank', code: 'BNK2', type: 'bank', company_id: c2Id, suspense_account_id: c2Suspense.id });
   db = c2BankJournal.db;
 
-  const c2AssetAcc = create(db, 'account.account', { code: '150000', name: 'C2 Asset', account_type: 'asset_fixed', company_id: c2Id });
-  db = c2AssetAcc.db;
-  const c2DeprAcc = create(db, 'account.account', { code: '159000', name: 'C2 Depr', account_type: 'asset_fixed', company_id: c2Id });
-  db = c2DeprAcc.db;
-  const c2ExpAcc = create(db, 'account.account', { code: '680000', name: 'C2 Depr Exp', account_type: 'expense', company_id: c2Id });
-  db = c2ExpAcc.db;
-  const c2GainAcc = create(db, 'account.account', { code: '750000', name: 'C2 Gain', account_type: 'income_other', company_id: c2Id });
-  db = c2GainAcc.db;
-  const c2LossAcc = create(db, 'account.account', { code: '650000', name: 'C2 Loss', account_type: 'expense_other', company_id: c2Id });
-  db = c2LossAcc.db;
-  const c2BankAcc = create(db, 'account.account', { code: '101000', name: 'C2 Bank', account_type: 'asset_cash', company_id: c2Id });
-  db = c2BankAcc.db;
-  const c2PrincipalAcc = create(db, 'account.account', { code: '260000', name: 'C2 Principal', account_type: 'liability_non_current', company_id: c2Id });
-  db = c2PrincipalAcc.db;
-  const c2InterestAcc = create(db, 'account.account', { code: '690000', name: 'C2 Interest', account_type: 'expense', company_id: c2Id });
-  db = c2InterestAcc.db;
-  const c2DefAcc = create(db, 'account.account', { code: '490000', name: 'C2 Deferred Rev', account_type: 'liability_current', company_id: c2Id });
-  db = c2DefAcc.db;
-  const c2RecAcc = create(db, 'account.account', { code: '700000', name: 'C2 Rev', account_type: 'income', company_id: c2Id });
-  db = c2RecAcc.db;
+  const c2AssetAcc = ensureAcc('150000', 'C2 Asset', 'asset_fixed');
+  const c2DeprAcc = ensureAcc('159000', 'C2 Depr', 'asset_fixed');
+  const c2ExpAcc = ensureAcc('680000', 'C2 Depr Exp', 'expense');
+  const c2GainAcc = ensureAcc('750000', 'C2 Gain', 'income_other');
+  const c2LossAcc = ensureAcc('650000', 'C2 Loss', 'expense_other');
+  const c2BankAcc = ensureAcc('101000', 'C2 Bank', 'asset_cash');
+  const c2PrincipalAcc = ensureAcc('260000', 'C2 Principal', 'liability_non_current');
+  const c2InterestAcc = ensureAcc('690000', 'C2 Interest', 'expense');
+  const c2DefAcc = ensureAcc('490000', 'C2 Deferred Rev', 'liability_current');
+  const c2RecAcc = ensureAcc('700000', 'C2 Rev', 'income');
 
   db = write(db, 'res.company', c2Id, {
     gain_account_id: c2GainAcc.id,

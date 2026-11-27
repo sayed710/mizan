@@ -37,8 +37,12 @@ function companyScopedAccountId(db, companyId, accountId) {
   return { db: created.db, id: created.id };
 }
 
-/** Give a fixture company its own default payment journal, copied from company 1's default bank journal. */
+/** Give a fixture company its own bank journal `BNK<id>`, preserving any existing default payment journal. */
 export function withDefaultBankJournal(db, companyId) {
+  if ((db.records['account.journal'] ?? []).some((j) => j.company_id === companyId && j.code === `BNK${companyId}`)) {
+    return db;
+  }
+  const hasDefault = (db.records['account.journal'] ?? []).some((j) => j.company_id === companyId && j.default_for_payments === true);
   const source = db.records['account.journal'].find((j) => j.company_id === 1 && j.default_for_payments === true);
   if (!source) throw new Error('Configure a default payment journal on company 1 before creating this fixture');
   let next = db;
@@ -64,12 +68,13 @@ export function withDefaultBankJournal(db, companyId) {
     bank_account_id: validBank ? vals.bank_account_id : null,
     code: `BNK${companyId}`,
     company_id: companyId,
+    default_for_payments: !hasDefault,
   }).db;
 }
 
-/** A fixture company with the explicitly configured sales and purchase journals copied from company 1 and its own bank journal. */
+/** A fixture company with default sales, purchase, general, and bank journals. */
 export function createCompanyWithDefaultInvoiceJournals(db, vals) {
-  const made = createCompany(db, { ...invoiceJournalDefaults(db), ...vals });
+  const made = createCompany(db, vals);
   return { ...made, db: withDefaultBankJournal(made.db, made.id) };
 }
 
@@ -89,6 +94,12 @@ export function accountingCompany(db) {
   let bankJournalId;
   let generalJournalId;
   for (const code of ['BNK1', 'MISC']) {
+    const existing = (next.records['account.journal'] ?? []).find((j) => j.code === code && j.company_id === branch.id);
+    if (existing) {
+      if (code === 'BNK1') bankJournalId = existing.id;
+      else generalJournalId = existing.id;
+      continue;
+    }
     const original = next.records['account.journal'].find((j) => j.code === code);
     const copied = create(next, 'account.journal', { ...original, company_id: branch.id,
       ...(code === 'BNK1' ? { default_account_id: accountIds['101401'] } : {}) });
@@ -96,13 +107,30 @@ export function accountingCompany(db) {
     if (code === 'BNK1') bankJournalId = copied.id;
     else generalJournalId = copied.id;
   }
-  const purchase = create(next, 'account.journal', { name: 'Branch expense journal', code: 'EXP2', type: 'purchase', company_id: branch.id, default_account_id: accountIds['600000'] });
-  const sourceTax = read(purchase.db, 'account.tax', read(purchase.db, 'res.company', 1).account_purchase_tax_id);
-  const sourceGroup = read(purchase.db, 'account.tax.group', sourceTax.tax_group_id);
-  const group = create(purchase.db, 'account.tax.group', { ...sourceGroup, id: undefined, company_id: branch.id });
-  const tax = create(group.db, 'account.tax', { ...sourceTax, company_id: branch.id, tax_group_id: group.id, ...Object.fromEntries(['invoice_repartition_line_ids', 'refund_repartition_line_ids'].map((key) => [key, (sourceTax[key] ?? []).map((l) => (l.repartition_type === 'tax' ? { ...l, account_id: accountIds['131000'] } : l))])) });
-  next = write(tax.db, 'res.company', branch.id, { account_default_receivable_id: accountIds['121000'], account_default_payable_id: accountIds['211000'], default_purchase_journal_id: purchase.id, default_general_journal_id: generalJournalId, account_purchase_tax_id: tax.id });
-  next = write(next, 'account.journal', bankJournalId, { default_for_payments: true });
+  const existingPurchase = (next.records['account.journal'] ?? []).find((j) => j.code === 'EXP2' && j.company_id === branch.id);
+  const purchaseId = existingPurchase ? existingPurchase.id : (() => {
+    const purchase = create(next, 'account.journal', { name: 'Branch expense journal', code: 'EXP2', type: 'purchase', company_id: branch.id, default_account_id: accountIds['600000'] });
+    next = purchase.db;
+    return purchase.id;
+  })();
+  const sourceTax = read(next, 'account.tax', read(next, 'res.company', 1).account_purchase_tax_id);
+  const sourceGroup = read(next, 'account.tax.group', sourceTax.tax_group_id);
+  const existingGroup = (next.records['account.tax.group'] ?? []).find((g) => g.company_id === branch.id && g.name === sourceGroup.name);
+  const groupId = existingGroup ? existingGroup.id : (() => {
+    const group = create(next, 'account.tax.group', { ...sourceGroup, id: undefined, company_id: branch.id });
+    next = group.db;
+    return group.id;
+  })();
+  const existingTax = (next.records['account.tax'] ?? []).find((t) => t.company_id === branch.id && t.name === sourceTax.name && t.type_tax_use === sourceTax.type_tax_use);
+  const taxId = existingTax ? existingTax.id : (() => {
+    const tax = create(next, 'account.tax', { ...sourceTax, company_id: branch.id, tax_group_id: groupId, ...Object.fromEntries(['invoice_repartition_line_ids', 'refund_repartition_line_ids'].map((key) => [key, (sourceTax[key] ?? []).map((l) => (l.repartition_type === 'tax' ? { ...l, account_id: accountIds['131000'] } : l))])) });
+    next = tax.db;
+    return tax.id;
+  })();
+  next = write(next, 'res.company', branch.id, { account_default_receivable_id: accountIds['121000'], account_default_payable_id: accountIds['211000'], default_purchase_journal_id: purchaseId, default_general_journal_id: generalJournalId, account_purchase_tax_id: taxId });
+  if (!(next.records['account.journal'] ?? []).some((j) => j.company_id === branch.id && j.default_for_payments === true)) {
+    next = write(next, 'account.journal', bankJournalId, { default_for_payments: true });
+  }
   return { db: next, id: branch.id };
 }
 

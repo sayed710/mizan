@@ -53,7 +53,11 @@ test('PKG-01: seeded liquidity journals (BNK1, CSH1) belong to company 1', () =>
 test('PKG-01: Company 2 payment requires its own default payment journal and never posts to Company 1 bank', () => {
   let db = seed();
   const branch = createCompany(db, { name: 'Company 2' });
-  db = addCompanyInvoiceJournals(branch.db, branch.id, 'C2');
+  db = branch.db;
+  for (const j of search(db, 'account.journal').filter((j) => j.company_id === branch.id && j.default_for_payments)) {
+    db = write(db, 'account.journal', j.id, { default_for_payments: false });
+  }
+  db = addCompanyInvoiceJournals(db, branch.id, 'C2');
   const partner = create(db, 'res.partner', { name: 'Co2 Customer', customer: true });
   db = partner.db;
   const product = search(db, 'product')[0];
@@ -140,7 +144,7 @@ test('PKG-01: migration 49 infers journal company_id only when provable and logs
 
   const migrated = migrate(synthetic);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 84);
+  assert.equal(SCHEMA_VERSION, 85);
 
   assert.equal(read(migrated, 'account.journal', 901).company_id, co2.id);
   assert.equal(read(migrated, 'account.journal', 902).company_id, co2.id);

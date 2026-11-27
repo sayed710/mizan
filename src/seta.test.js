@@ -32,11 +32,13 @@ test('Finding 2: unreleased cash-basis taxes resolve company transition accounts
   db = c2.db;
   const compId = c2.id;
   for (const code of ['101401', '251000', '251100', '400000']) {
+    if (search(db, 'account.account').some((a) => a.code === code && a.company_id === compId)) continue;
     const orig = db.records['account.account'].find((a) => a.code === code);
     db = create(db, 'account.account', { ...orig, company_id: compId }).db;
   }
+  const existingInv = search(db, 'account.journal').find((j) => j.code === 'INV' && j.company_id === compId);
   const origJournal = db.records['account.journal'].find((j) => j.code === 'INV');
-  const journalRes = create(db, 'account.journal', { ...origJournal, company_id: compId, invoice_sequence_prefix: 'C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'C2-RINV/', refund_sequence_next_number: 1 });
+  const journalRes = existingInv ? { db, id: existingInv.id } : create(db, 'account.journal', { ...origJournal, company_id: compId, invoice_sequence_prefix: 'C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'C2-RINV/', refund_sequence_next_number: 1 });
   db = journalRes.db;
 
   const taxAccount = search(db, 'account.account').find((a) => a.code === '251000' && a.company_id === compId);
@@ -84,11 +86,13 @@ test('Finding 3: accounting lock dates are scoped to res.company and sister comp
   db = c2.db;
   const comp2Id = c2.id;
   for (const code of ['101401', '400000']) {
+    if (search(db, 'account.account').some((a) => a.code === code && a.company_id === comp2Id)) continue;
     const orig = db.records['account.account'].find((a) => a.code === code);
     db = create(db, 'account.account', { ...orig, company_id: comp2Id }).db;
   }
+  const existingInv = search(db, 'account.journal').find((j) => j.code === 'INV' && j.company_id === comp2Id);
   const origJournal = db.records['account.journal'].find((j) => j.code === 'INV');
-  const journal2Res = create(db, 'account.journal', { ...origJournal, company_id: comp2Id, invoice_sequence_prefix: 'C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'C2-RINV/', refund_sequence_next_number: 1 });
+  const journal2Res = existingInv ? { db, id: existingInv.id } : create(db, 'account.journal', { ...origJournal, company_id: comp2Id, invoice_sequence_prefix: 'C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'C2-RINV/', refund_sequence_next_number: 1 });
   db = journal2Res.db;
 
   // Lock Company 1 via res.company
@@ -152,17 +156,7 @@ test('Finding 4: postPayment resolves company default payment journal and reject
   const c2 = createCompany(db, { name: 'Company Two' });
   db = c2.db;
   const comp2Id = c2.id;
-  const origAcc = db.records['account.account'].find((a) => a.code === '101401');
-  const bnkAccount = create(db, 'account.account', { ...origAcc, company_id: comp2Id });
-  db = bnkAccount.db;
-
-  const origJournal = db.records['account.journal'].find((j) => j.code === 'BNK1');
-  const bankJournal2 = create(db, 'account.journal', {
-    ...origJournal,
-    company_id: comp2Id,
-    default_account_id: bnkAccount.id,
-    default_for_payments: true,
-  });
+  const bankJournal2 = { db, id: search(db, 'account.journal').find((j) => j.code === 'BNK1' && j.company_id === comp2Id).id };
   db = bankJournal2.db;
 
   const partner = search(db, 'res.partner')[0];
@@ -335,8 +329,8 @@ test('Finding 3: migration 25 copies global locks to all companies and clears se
     },
   };
   const migrated = migrate(oldDb);
-  assert.equal(SCHEMA_VERSION, 84);
-  assert.equal(migrated.schema_version, 84);
+  assert.equal(SCHEMA_VERSION, 85);
+  assert.equal(migrated.schema_version, 85);
   assert.equal('lock_date' in migrated.settings, false);
   assert.equal('sale_lock_date' in migrated.settings, false);
   assert.equal('purchase_lock_date' in migrated.settings, false);

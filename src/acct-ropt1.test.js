@@ -267,7 +267,7 @@ test('upgrade restores seeded growth directions without changing user report lin
     }
   }
   for (const original of customExpressions) assert.deepEqual(upgraded.records['account.report.expression'].find((e) => e.id === original.id), original);
-  assert.equal(upgraded.schema_version, 84);
+  assert.equal(upgraded.schema_version, 85);
   assert.equal(migrate(upgraded), upgraded);
 });
 

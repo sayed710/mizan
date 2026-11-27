@@ -1,3 +1,4 @@
+import { installChartTemplate } from './chart-template.js';
 import { create, read, updateSettings, write } from '../orm.js';
 import { fiscalPositionFor, lineTaxOf, productTax, taxAmount, taxGroups, taxSnapshot } from './taxes.js';
 import { DEFERRED_COMPUTATION_OPTIONS, DEFERRED_EXPENSE_GENERATION_OPTIONS, DEFERRED_PERIODICITY_OPTIONS, DEFERRED_REVENUE_GENERATION_OPTIONS, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod, postCompanyDeferrals } from './deferred.js';
@@ -581,7 +582,7 @@ function onCompanyWrite(db, after, before, vals) {
 }
 
 /** Create a company and its shared contact, inheriting the parent's currency. */
-export function createCompany(db, vals) {
+export function createCompany(db, vals, legacyMain = false) {
   if (!vals.name?.trim()) throw new Error('Company name is required');
   let next = db;
   const parent = vals.parent_id && record(next, 'res.company', vals.parent_id);
@@ -605,6 +606,38 @@ export function createCompany(db, vals) {
   }
   const res = create(next, 'res.company', values);
   next = res.db;
+  if (!legacyMain) {
+    const chart = installChartTemplate(next, res.id);
+    next = chart.db;
+    const byCode = chart.installedByCode;
+    const ensureAccount = (code, vals) => {
+      const existing = (next.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === res.id);
+      if (existing) return existing.id;
+      const created = create(next, 'account.account', { code, ...vals, company_id: res.id });
+      next = created.db;
+      return created.id;
+    };
+    const earningsId = ensureAccount('302000', { name: 'Retained Earnings', account_type: 'equity' });
+    const transferId = ensureAccount('101405', { name: 'Internal Transfers', account_type: 'asset_current', reconcile: true });
+    const existingPayroll = (next.records['hr.payroll.structure'] ?? []).find((s) => s.name === 'Employees' && s.company_id === res.id);
+    const payrollId = values.default_payroll_structure_id ?? (existingPayroll ? existingPayroll.id : (() => {
+      const salJournal = (next.records['account.journal'] ?? []).find((j) => j.company_id === res.id && j.code === 'SAL');
+      const created = create(next, 'hr.payroll.structure', { name: 'Employees', company_id: res.id, journal_id: salJournal.id, salary_expense_account_id: byCode['620000'], salary_payable_account_id: byCode['230000'], rules: defaultPayrollRules({ insurance: byCode['240000'], tax: byCode['250100'] }) });
+      next = created.db;
+      return created.id;
+    })());
+    const defaults = {
+      current_year_earnings_account_id: earningsId, transfer_account_id: transferId, currency_exchange_journal_id: chart.companyJournals.general,
+      account_default_receivable_id: byCode['121000'], account_default_payable_id: byCode['211000'],
+      opening_equity_account_id: byCode['301000'], deferred_revenue_account_id: byCode['212000'], deferred_expense_account_id: byCode['132000'], down_payment_account_id: byCode['212000'],
+      gain_account_id: byCode['450300'], loss_account_id: byCode['690300'], income_currency_exchange_account_id: byCode['450100'], expense_currency_exchange_account_id: byCode['690100'], income_early_payment_discount_account_id: byCode['450200'], expense_early_payment_discount_account_id: byCode['690200'], rental_deposit_account_id: byCode['230100'], rental_withheld_deposit_account_id: byCode['450000'], account_journal_suspense_account_id: byCode['101404'],
+      default_sale_journal_id: chart.companyJournals.sales, default_purchase_journal_id: chart.companyJournals.purchases, default_general_journal_id: chart.companyJournals.general, deferred_revenue_journal_id: chart.companyJournals.general, deferred_expense_journal_id: chart.companyJournals.general,
+      account_sale_tax_id: chart.vatSale, account_purchase_tax_id: chart.vatPurchase, default_payroll_structure_id: payrollId,
+      ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, byCode[code]])),
+    };
+    const missing = Object.fromEntries(Object.entries(defaults).filter(([field]) => !values[field]));
+    return { ...res, db: ensureStatementReports(ensureReturnTypes(write(next, 'res.company', res.id, missing)), res.id) };
+  }
   const accounts = {};
   for (const [field, code, name, account_type] of [['current_year_earnings_account_id', '302000', 'Retained Earnings', 'equity'], ['account_default_receivable_id', '121000', 'Account Receivable', 'asset_receivable'], ['account_default_payable_id', '211000', 'Account Payable', 'liability_payable'], ['deferred_revenue_account_id', '212000', 'Deferred Revenue', 'liability_current'], ['deferred_expense_account_id', '132000', 'Prepaid Expenses', 'asset_current']]) {
     if (values[field]) continue;
@@ -668,7 +701,7 @@ export function ensureMainCompany(db, accounts = {}) {
   const currency = currencyId ? (db.records['res.currency'] ?? []).find((c) => c.id === currencyId) : null;
   if (!currency) throw new Error('Configure the base currency before initializing the company');
   const configured = updateSettings(db, { base_currency_id: currency.id });
-  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: currency.id, ...accounts }).db;
+  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: currency.id, ...accounts }, true).db;
   return ensureStatementReports(ensureReturnTypes(created), 1);
 }
 

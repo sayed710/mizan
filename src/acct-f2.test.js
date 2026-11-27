@@ -388,7 +388,7 @@ test('Switching company prunes analyticAccountIds that do not exist in the new c
     ],
   }).db;
 
-  const bank2 = create(db, 'account.account', { code: '101402', name: 'Co2 Bank', account_type: 'asset_cash', company_id: co2.id });
+  const bank2 = create(db, 'account.account', { code: '101492', name: 'Co2 Bank', account_type: 'asset_cash', company_id: co2.id });
   db = bank2.db;
   const cap2 = create(db, 'account.account', { code: '301002', name: 'Co2 Capital', account_type: 'equity', company_id: co2.id });
   db = cap2.db;

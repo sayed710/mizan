@@ -224,7 +224,7 @@ test('comparison, horizontal groups, analytic filter, depreciation, and multi-co
 
   const co2 = createCompany(db, { name: 'Subsidiary Co' });
   db = co2.db;
-  const cash2 = create(db, 'account.account', { code: '101402', name: 'Co2 Cash', account_type: 'asset_cash', company_id: co2.id });
+  const cash2 = create(db, 'account.account', { code: '101492', name: 'Co2 Cash', account_type: 'asset_cash', company_id: co2.id });
   db = cash2.db;
   const inc2 = create(db, 'account.account', { code: '400002', name: 'Co2 Income', account_type: 'income', company_id: co2.id });
   db = inc2.db;
@@ -289,7 +289,7 @@ test('migration 50 creates standard statement reports once and is idempotent', (
   };
   const upgraded = migrate(legacyDb);
   assert.equal(upgraded.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 84);
+  assert.equal(SCHEMA_VERSION, 85);
   for (const cId of [1, company2.id]) {
     assert.ok(findStatementReport(upgraded, 'balance', cId));
     assert.ok(findStatementReport(upgraded, 'pnl', cId));

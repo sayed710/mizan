@@ -481,12 +481,12 @@ test('Qodo 1: targetCompanyIds with explicit company rule and Company=all only s
   const co3Journal = search(db, 'account.journal').find((j) => j.company_id === co3.id && j.type === 'general')
     ?? search(db, 'account.journal').find((j) => j.company_id === co3.id);
 
-  const co2Cash = create(db, 'account.account', { code: '101402', name: 'Co2 Cash', account_type: 'asset_cash', company_id: co2.id });
+  const co2Cash = create(db, 'account.account', { code: '101492', name: 'Co2 Cash', account_type: 'asset_cash', company_id: co2.id });
   db = co2Cash.db;
   const co2Inc = create(db, 'account.account', { code: '400002', name: 'Co2 Income', account_type: 'income', company_id: co2.id });
   db = co2Inc.db;
 
-  const co3Cash = create(db, 'account.account', { code: '101403', name: 'Co3 Cash', account_type: 'asset_cash', company_id: co3.id });
+  const co3Cash = create(db, 'account.account', { code: '101493', name: 'Co3 Cash', account_type: 'asset_cash', company_id: co3.id });
   db = co3Cash.db;
   const co3Inc = create(db, 'account.account', { code: '400003', name: 'Co3 Income', account_type: 'income', company_id: co3.id });
   db = co3Inc.db;
@@ -631,7 +631,7 @@ test('Qodo 3: Legacy horizontal-group rule migration and normalization moves ids
     },
   };
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 84);
+  assert.equal(migrated.schema_version, 85);
   const upgradedGroup = migrated.records['account.report.horizontal.group'].find((g) => g.id === 991);
   assert.deepEqual(upgradedGroup.rule_ids[0].partner_ids, [1, 2]);
   assert.equal(upgradedGroup.rule_ids[0].ids, '');

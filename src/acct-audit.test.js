@@ -430,7 +430,7 @@ test('Two-company isolation: Working Files and Annual Report are strictly scoped
   const { create, read } = await import('./orm.js');
   const { seed } = await import('./seed.js');
   const { ensureAuditReturnType } = await import('./models/taxreturn.js');
-  const { postEntry } = await import('./models/ledger.js');
+  const { accountId, postEntry } = await import('./models/ledger.js');
   const { createCompany } = await import('./models/company.js');
   const { actionRecords } = await import('./companyView.js');
   const { menusFor } = await import('./models/index.js');
@@ -443,9 +443,8 @@ test('Two-company isolation: Working Files and Annual Report are strictly scoped
   db = comp2.db;
   const company2Id = comp2.id;
 
-  // Create company-specific accounts for Company 2
-  const c2Inc = create(db, 'account.account', { code: '400000', name: 'Sales C2', account_type: 'income', company_id: company2Id });
-  db = c2Inc.db;
+  // Reuse Company 2's income account installed by createCompany
+  assert.ok(accountId(db, '400000', company2Id));
 
   // Post entry in Company 1: 1,111.00
   const entryC1 = postEntry(db, {

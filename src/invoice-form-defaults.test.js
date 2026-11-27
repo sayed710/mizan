@@ -342,7 +342,7 @@ test('4d. Product account preview shows the original account for deferred lines 
   );
 
   // No journal resolves at all: the preview succeeds and leaves the line account untouched.
-  const branch = createCompany(db, { name: 'No Journal Co' });
+  const branch = create(db, 'res.company', { name: 'No Journal Co', currency_id: read(db, 'res.company', 1).currency_id });
   db = branch.db;
   const noJournal = lineField.onchange(
     { ...baseLine(emptyProduct.id), account_id: datedExpense.id },
@@ -736,7 +736,11 @@ test('6. Register Payment dialog: default payment journal and memo stored on pay
 
   // Invoice in a company with no default payment journal: wizard fields build, journal default is null, run without journal still throws 'Select a payment journal'
   const noDefaultCo = createCompany(db, { ...invoiceJournalDefaults(db), name: 'No Default Co' });
-  const { db: dbCo2, id: co2InvId } = create(noDefaultCo.db, 'account.move', {
+  let noDefaultDb = noDefaultCo.db;
+  for (const j of search(noDefaultDb, 'account.journal').filter((r) => r.company_id === noDefaultCo.id && r.default_for_payments)) {
+    noDefaultDb = write(noDefaultDb, 'account.journal', j.id, { default_for_payments: false });
+  }
+  const { db: dbCo2, id: co2InvId } = create(noDefaultDb, 'account.move', {
     move_type: 'out_invoice',
     company_id: noDefaultCo.id,
     partner_id: 1,

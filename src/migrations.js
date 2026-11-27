@@ -2641,6 +2641,7 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 })) } }) });
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
+MIGRATIONS.push({ version: 85, name: 'journal-dashboard-display', up: (db) => ({ ...db, records: { ...db.records, 'account.journal': (db.records['account.journal'] ?? []).map((journal) => ({ color: 0, show_on_dashboard: true, ...journal })) } }) });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
