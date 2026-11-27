@@ -1531,18 +1531,17 @@ export function reconciledJournalItems(db, move, { partialMatching = false } = {
   return computeReconciledItems(db, move, index).map((item, lineIdx) => {
     const key = lineKey(move.id, lineIdx);
     const groupCode = item.reconciled ? (index.matchingNumbers.get(key) ?? null) : null;
-    if (groupCode) return { ...item, matching_number: groupCode };
-    if (!partialMatching) return item;
     const partialCode = partialNumbers?.get(key);
-    return partialCode ? { ...item, matching_number: partialCode } : item;
+    const reconciliationGroup = groupCode ?? partialCode ?? null;
+    return { ...item, reconciliation_group: reconciliationGroup, ...(reconciliationGroup ? { matching_number: reconciliationGroup } : {}) };
   });
 }
 
 /** Filter the matching groups belonging to a move; retain legacy settlement support without group numbers. */
 export function reconciledItemFilter(db, move) {
-  const numbers = new Set(reconciledJournalItems(db, move, { partialMatching: true }).map((line) => line.matching_number).filter(Boolean));
+  const numbers = new Set(reconciledJournalItems(db, move, { partialMatching: true }).map((line) => line.reconciliation_group).filter(Boolean));
   const legacyMoves = matchedMoveIds(db, move.id);
-  return (line) => numbers.has(line.matching_number)
+  return (line) => numbers.has(line.reconciliation_group)
     || (!line.matching_number && legacyMoves.has(line.move_id) && line.reconciled);
 }
 
@@ -1597,7 +1596,7 @@ export function matchedMoveIds(db, moveId) {
 }
 
 /** Identity of an embedded journal line, independent of its position and derived matching or residual state. */
-export function journalItemIdentity({ reconciled: _reconciled, matching_number: _matchingNumber, amount_residual: _amountResidual, amount_residual_currency: _amountResidualCurrency, ...line }) {
+export function journalItemIdentity({ reconciled: _reconciled, matching_number: _matchingNumber, reconciliation_group: _reconciliationGroup, amount_residual: _amountResidual, amount_residual_currency: _amountResidualCurrency, ...line }) {
   return JSON.stringify(line);
 }
 

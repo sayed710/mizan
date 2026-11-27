@@ -4160,6 +4160,8 @@ const ar = {
   'Automatic entries can only reference posted journal entries': 'لا يمكن للقيود التلقائية الإشارة إلا إلى قيود يومية مرحّلة',
   'Automatic entries cannot reference the same origin entry more than once': 'لا يمكن للقيود التلقائية الإشارة إلى نفس القيد الأصلي أكثر من مرة',
   'Automatic entries cannot be created for items from different companies': 'لا يمكن إنشاء قيود تلقائية لبنود من شركات مختلفة',
+  'Account Roots': 'جذور الحسابات',
+  'Clear matching': 'مسح المطابقة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
