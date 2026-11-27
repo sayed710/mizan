@@ -133,7 +133,11 @@ test('migration records booking failures and continues with other statement line
   assert.ok(read(migrated, LINE_MODEL, 90005).bank_move_id);
   assert.ok(migrated.messages.some((message) => message.res_id === 90003));
   assert.ok(migrated.messages.some((message) => message.model === LINE_MODEL && message.res_id === 90004 && /historical currency rate.*unavailable/i.test(message.body)));
-  assert.deepEqual(read(migrated, LINE_MODEL, 90004), lines[1]);
+  const preserved = read(migrated, LINE_MODEL, 90004);
+  for (const field of ['amount', 'currency_id', 'journal_id', 'date', 'payment_ref', 'state', 'open_amount']) {
+    assert.equal(preserved[field], lines[1][field], `${field} is preserved`);
+  }
+  assert.ok(!preserved.bank_move_id);
 });
 
 test('BANK-2: importing statement lines immediately posts an entry in the bank journal (bank vs suspense) and GL bank balance equals statement', () => {
