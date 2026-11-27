@@ -185,7 +185,7 @@ export function migrateStatementGrowthDirections(db) {
     if (role) directions.set(line.id, role.green_on_positive ?? true);
   }
   return { ...db, records: { ...db.records, 'account.report.expression': (db.records['account.report.expression'] ?? []).map((expression) => (
-    expression.label === 'balance' && directions.has(expression.report_line_id)
+    expression.label === 'balance' && expression.green_on_positive === true && directions.has(expression.report_line_id)
       ? { ...expression, green_on_positive: directions.get(expression.report_line_id) }
       : expression
   )) } };
@@ -225,13 +225,13 @@ export function syncInlineStatementLines(db, before, after) {
   let nextExpressions = allExpressions.filter((item) => !removedIds.has(item.report_line_id));
   for (const line of inline) {
     const previous = oldInline.get(line.code);
-    if (previous && previous.formula === line.formula && previous.sign === line.sign && before.date_scope === after.date_scope) continue;
+    if (previous && previous.formula === line.formula && previous.sign === line.sign && previous.green_on_positive === line.green_on_positive && before.date_scope === after.date_scope) continue;
     const converted = storedExpression(line, after);
     if (!converted) throw new Error('Legacy report line cannot be converted to a stored expression');
     if (converted.engine === 'aggregation') converted.formula = converted.formula.replace(/\b([A-Za-z_][A-Za-z0-9_]*)\.balance\b/g, (match, code) => `${counterpart(code)?.code ?? code}.balance`);
     const id = ids.get(line.code);
     const old = nextExpressions.find((item) => item.report_line_id === id && item.label === 'balance');
-    const replacement = { ...old, ...converted, green_on_positive: old?.green_on_positive ?? converted.green_on_positive, id: old?.id ?? ++expressionId, report_line_id: id, company_id: after.company_id ?? 1 };
+    const replacement = { ...old, ...converted, green_on_positive: line.green_on_positive == null && previous?.green_on_positive == null ? (old?.green_on_positive ?? converted.green_on_positive) : converted.green_on_positive, id: old?.id ?? ++expressionId, report_line_id: id, company_id: after.company_id ?? 1 };
     nextExpressions = [...nextExpressions.filter((item) => item !== old), replacement];
   }
   const retained = oldLines

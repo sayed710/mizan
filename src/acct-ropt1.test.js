@@ -166,7 +166,7 @@ test('line percentages and growth export modes handle zero and account values', 
   assert.equal(configurableReportExportRows({ ...growth, growthDisplay: 'amount' })[1].at(-1), 50);
 });
 import { createCompany } from './models/company.js';
-import { updateSettings } from './orm.js';
+import { updateSettings, write } from './orm.js';
 import { reportPeriodRange } from './views/reportNavigation.js';
 import { periodsFor } from './views/reportCompare.js';
 import { today } from './models/common.js';
@@ -246,6 +246,9 @@ test('upgrade restores seeded growth directions without changing user report lin
   const customReport = { id: 999901, name: 'Custom', company_id: 1, kind: '' };
   const customLine = { id: 999902, report_id: customReport.id, code: 'EXP', inline_code: 'EXP', company_id: 1 };
   const extraLine = { id: 999903, report_id: pnl.id, code: 'CUSTOM', company_id: 1 };
+  const expense = seeded.records['account.report.line'].find((line) => line.report_id === pnl.id && line.inline_code === 'EXP');
+  const revenue = seeded.records['account.report.line'].find((line) => line.report_id === pnl.id && line.inline_code === 'REV');
+  const preservedIds = new Set([expense.id, revenue.id]);
   const customExpressions = [
     { id: 999904, report_line_id: customLine.id, label: 'balance', green_on_positive: true },
     { id: 999905, report_line_id: extraLine.id, label: 'balance', green_on_positive: true },
@@ -253,17 +256,33 @@ test('upgrade restores seeded growth directions without changing user report lin
   const old = { ...seeded, schema_version: 83, records: { ...seeded.records,
     'account.report': [...seeded.records['account.report'], customReport],
     'account.report.line': [...seeded.records['account.report.line'], customLine, extraLine],
-    'account.report.expression': [...seeded.records['account.report.expression'].map((e) => ({ ...e, green_on_positive: true })), ...customExpressions],
+    'account.report.expression': [...seeded.records['account.report.expression'].map((e) => ({ ...e, green_on_positive: !preservedIds.has(e.report_line_id) })), ...customExpressions],
   } };
   const upgraded = migrate(old);
   const unfavorable = { pnl: ['COR', 'EXP_GRP', 'EXP', 'DEP', 'EXO'], balance: ['LIAB', 'CUR_LIAB', 'CL', 'PAY', 'CC', 'NCL', 'LIAB_EQUITY'] };
   for (const report of seeded.records['account.report'].filter((r) => unfavorable[r.kind])) {
     for (const line of seeded.records['account.report.line'].filter((l) => l.report_id === report.id)) {
       const expression = upgraded.records['account.report.expression'].find((e) => e.report_line_id === line.id && e.label === 'balance');
-      assert.equal(expression.green_on_positive, !unfavorable[report.kind].includes(line.inline_code), line.inline_code);
+      assert.equal(expression.green_on_positive, !preservedIds.has(line.id) && !unfavorable[report.kind].includes(line.inline_code), line.inline_code);
     }
   }
   for (const original of customExpressions) assert.deepEqual(upgraded.records['account.report.expression'].find((e) => e.id === original.id), original);
   assert.equal(upgraded.schema_version, 84);
   assert.equal(migrate(upgraded), upgraded);
+});
+
+
+test('inline direction edits synchronize stored expressions with or without formula changes', () => {
+  let db = seed();
+  const report = db.records['account.report'].find((item) => item.kind === 'pnl');
+  const storedLine = db.records['account.report.line'].find((item) => item.report_id === report.id && item.inline_code === 'EXP');
+  const expression = () => db.records['account.report.expression'].find((item) => item.report_line_id === storedLine.id && item.label === 'balance');
+  assert.equal(expression().green_on_positive, false);
+  const lines = report.line_ids.map((line) => line.code === 'EXP' ? { ...line, green_on_positive: true } : line);
+  db = write(db, 'account.report', report.id, { line_ids: lines });
+  assert.equal(expression().green_on_positive, true);
+  const edited = lines.map((line) => line.code === 'EXP' ? { ...line, green_on_positive: false, formula: 'type:expense_depreciation' } : line);
+  db = write(db, 'account.report', report.id, { line_ids: edited });
+  assert.equal(expression().green_on_positive, false);
+  assert.ok(expression().formula.includes('expense_depreciation'));
 });
