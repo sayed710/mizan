@@ -14,6 +14,7 @@ import { budgetReport, filterReportBudgets, groupBudgetReportEntries, rootPlanMa
 import { addressLines, currentCompany, documentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
+import { journalAuditExportRows } from '../models/journal_audit_export.js';
 import { commit, companiesOf, getDb, isServer, listAuditAll, serverAction, useDb } from '../store.js';
 import { AUDIT_MODELS, auditTrailToCsv, collectAuditTrailRows } from '../models/auditTrail.js';
 import { PAGE_SIZE, pageWindow } from './paging.js';
@@ -1204,19 +1205,22 @@ function Depreciation({ db, period, companyId, groupBy = '', includeDraft = fals
   );
 }
 
-function JournalAudit({ db, period, companyId, sort = 'date', money: moneyProp }) {
+function JournalAudit({ db, period, companyId, sort = 'date', includeDraft = false, includePayments = true, isPrinting = false, money: moneyProp }) {
+  const [expanded, setExpanded] = useState({});
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const groups = journalAudit(db, { ...period, companyId: companyId === 'all' ? null : Number(companyId), sort });
-  if (!groups.length) return <tbody><tr><td colSpan={7} className="muted">{t('No posted entries for this period.')}</td></tr></tbody>;
-  return <tbody>{groups.map(({ journal, items, debit, credit, taxes }) => <Fragment key={journal.id}>
-    <tr className="rep-section"><td colSpan={5}><strong>{journal.name} ({journal.code})</strong></td><td className="num">{fmtMoney(debit)}</td><td className="num">{fmtMoney(credit)}</td></tr>
-    {items.map(({ move, line, date }, i) => {
-      const account = read(db, 'account.account', line.account_id);
-      return <tr key={`${move.id}-${i}`} className="rep-detail"><td>{date}</td><td><a href={`#/open/account.move/${move.id}`}>{move.name}</a></td><td>{read(db, 'res.partner', line.partner_id ?? move.partner_id)?.name ?? ''}</td><td>{account ? `${account.code} ${account.name}` : ''}</td><td>{line.name}</td><td className="num">{line.debit ? fmtMoney(line.debit) : ''}</td><td className="num">{line.credit ? fmtMoney(line.credit) : ''}</td></tr>;
-    })}
-    <tr className="rep-total strong"><td colSpan={5}>{t('Total')} - {journal.name}</td><td className="num">{fmtMoney(debit)}</td><td className="num">{fmtMoney(credit)}</td></tr>
-    {taxes.length > 0 && <><tr className="rep-section"><td colSpan={3}>{t('Tax Summary')} - {journal.name}</td><td>{t('Tax')}</td><td>{t('Base')}</td><td colSpan={2}>{t('Tax Amount')}</td></tr>{taxes.map((tax) => <tr key={tax.tax_id ?? 'unidentified-tax'}><td colSpan={3} /><td>{tax.name}</td><td className="num">{fmtMoney(tax.base)}</td><td colSpan={2} className="num">{fmtMoney(tax.tax)}</td></tr>)}</>}
-  </Fragment>)}</tbody>;
+  const groups = journalAudit(db, { ...period, companyId: companyId === 'all' ? null : Number(companyId), sort, includeDraft, includePayments });
+  const multiCurrency = groups.some((g) => g.items.some(({ move, line }) => line.currency_id && line.currency_id !== (read(db, 'res.company', move.company_id ?? 1)?.currency_id)));
+  const totals = groups.reduce((a, g) => ({ count: a.count + g.count, to_review: a.to_review + g.to_review, debit: a.debit + g.debit, credit: a.credit + g.credit, balance: a.balance + g.balance }), { count: 0, to_review: 0, debit: 0, credit: 0, balance: 0 });
+  const summary = (g) => <><td className="num">{g.count}</td><td className="num">{g.to_review}</td><td className="num">{fmtMoney(g.debit)}</td><td className="num">{fmtMoney(g.credit)}</td><td className="num">{fmtMoney(g.balance)}</td></>;
+  if (!groups.length) return <tbody><tr><td colSpan={6} className="muted">{t('No entries for this period.')}</td></tr></tbody>;
+  return <tbody>{groups.map((g) => <Fragment key={g.journal.id}>
+    <tr className="rep-section"><td><button type="button" aria-expanded={expanded[g.journal.id] !== false} onClick={() => setExpanded((old) => ({ ...old, [g.journal.id]: old[g.journal.id] === false }))}>{g.journal.name} ({g.journal.code})</button></td>{summary(g)}</tr>
+    {(isPrinting || expanded[g.journal.id] !== false) && <tr><td colSpan={6}><table><thead><tr>{['Date', 'Number', 'Partner', 'Account', 'Label', 'Debit', 'Credit', ...(multiCurrency ? ['Currency'] : [])].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead><tbody>
+      {g.items.map(({ move, line, date }, i) => { const account = read(db, 'account.account', line.account_id); const foreign = line.currency_id && line.currency_id !== read(db, 'res.company', move.company_id ?? 1)?.currency_id; return <tr key={`${move.id}-${i}`} className="rep-detail"><td>{date}</td><td><a href={`#/open/account.move/${move.id}`}>{move.name}</a></td><td>{read(db, 'res.partner', line.partner_id ?? move.partner_id)?.name ?? ''}</td><td>{account ? `${account.code} ${account.name}` : ''}</td><td>{line.name}</td><td className="num">{line.debit ? fmtMoney(line.debit) : ''}</td><td className="num">{line.credit ? fmtMoney(line.credit) : ''}</td>{multiCurrency && <td className="num">{foreign && line.amount_currency != null ? formatCurrency(line.amount_currency, read(db, 'res.currency', line.currency_id)) : ''}</td>}</tr>; })}
+      {g.taxes.length > 0 && <><tr className="rep-section"><td colSpan={3}>{t('Tax Summary')} - {g.journal.name}</td><td>{t('Tax')}</td><td>{t('Base')}</td><td colSpan={multiCurrency ? 3 : 2}>{t('Tax Amount')}</td></tr>{g.taxes.map((tax) => <tr key={tax.tax_id ?? 'unidentified-tax'}><td colSpan={3} /><td>{tax.name}</td><td className="num">{fmtMoney(tax.base)}</td><td colSpan={multiCurrency ? 3 : 2} className="num">{fmtMoney(tax.tax)}</td></tr>)}</>}
+      {g.grids.length > 0 && <><tr className="rep-section"><td colSpan={5}>{t('Tax Grids')} - {g.journal.name}</td><td colSpan={multiCurrency ? 3 : 2}>{t('Balance')}</td></tr>{g.grids.map((grid) => <tr key={grid.id}><td colSpan={5}>{grid.name}</td><td colSpan={multiCurrency ? 3 : 2} className="num">{fmtMoney(grid.amount)}</td></tr>)}</>}
+    </tbody></table></td></tr>}
+  </Fragment>)}<tr className="rep-total strong"><td>{t('Total')}</td>{summary(totals)}</tr></tbody>;
 }
 
 function InalterabilityCheck({ db, companyId, journalId }) {
@@ -1280,7 +1284,7 @@ export const REPORTS = {
   pnl: { title: 'Profit and Loss', cols: ['Balance'] },
   balance: { title: 'Balance Sheet', cols: ['Balance'] },
   ledger: { title: 'General Ledger', Body: Ledger, firstCol: 'Account', cols: ['Date', 'Entry', 'Ref', 'Label', 'Partner', 'Currency', 'Initial Balance', 'Debit', 'Credit', 'Balance'] },
-  journalAudit: { title: 'Journal Audit', Body: JournalAudit, firstCol: 'Date', cols: ['Number', 'Partner', 'Account', 'Label', 'Debit', 'Credit'] },
+  journalAudit: { title: 'Journal Audit', Body: JournalAudit, firstCol: 'Journal', cols: ['Documents', 'To Review', 'Debit', 'Credit', 'Balance'] },
   inalterability: { title: 'Data Inalterability Check', Body: InalterabilityCheck, firstCol: 'Journal', cols: ['First Secured Entry', 'Last Secured Entry', 'Status'] },
 };
 
@@ -1360,6 +1364,8 @@ function ReportPage({ leaf, params }) {
   const [showInitialBalance, setShowInitialBalance] = useState(true);
   const [showEndBalance, setShowEndBalance] = useState(true);
   const [auditSort, setAuditSort] = useState('date');
+  const [auditDraft, setAuditDraft] = useState(false);
+  const [auditPayments, setAuditPayments] = useState(true);
   const [depreciationGroupBy, setDepreciationGroupBy] = useState('');
   const [trialGroupBy, setTrialGroupBy] = useState('');
   const [budgetId, setBudgetId] = useState('');
@@ -1816,8 +1822,13 @@ function ReportPage({ leaf, params }) {
         ? partnerLedgerExportRows(db, { period: effectivePeriod, companyId: selectedCompany, analyticAccountIds, partnerIds: partnerFilterIds, unreconciledOnly, showJournalAccount, accountType, firstCol, money: fmtMoney })
         : null
   );
+  const auditExport = () => journalAuditExportRows(db, { period: effectivePeriod, companyId: selectedCompany, sort: auditSort, includeDraft: auditDraft, includePayments: auditPayments, translate: t });
   const exportCsv = () => {
     if (periodError) return;
+    if (leaf.report === 'journalAudit') {
+      downloadCsv('journalAudit.csv', auditExport().rows);
+      return;
+    }
     if (isAudit) {
       downloadCsv('audit.csv', auditTrailToCsv(auditAllRows));
       return;
@@ -1835,6 +1846,11 @@ function ReportPage({ leaf, params }) {
   };
   const exportXlsx = () => {
     if (periodError) return;
+    if (leaf.report === 'journalAudit') {
+      const { rows, columnTypes } = auditExport();
+      downloadXlsx('journalAudit.xlsx', rows, { sheetName: t(title), headerRowCount: 1, columnTypes });
+      return;
+    }
     if (isAudit) {
       downloadXlsx('audit.xlsx', auditTrailToCsv(auditAllRows), { sheetName: 'Audit Trail', columnTypes: Array(8).fill('text') });
       return;
@@ -2005,6 +2021,7 @@ function ReportPage({ leaf, params }) {
           </select>
         </label>
       )}
+      {leaf.report === 'journalAudit' && <><label><input type="checkbox" checked={auditDraft} onChange={(e) => setAuditDraft(e.target.checked)} /> {t('Draft Entries')}</label><label><input type="checkbox" checked={auditPayments} onChange={(e) => setAuditPayments(e.target.checked)} /> {t('Include Payments')}</label></>}
       {leaf.report === 'journalAudit' && <label className="inline-select">{t('Sort by')}
         <select aria-label={t('Sort by')} value={auditSort} onChange={(e) => setAuditSort(e.target.value)}>
           <option value="date">{t('Date')}</option>
@@ -2364,6 +2381,7 @@ function ReportPage({ leaf, params }) {
                 unreconciledOnly={unreconciledOnly}
                 variant={activeTaxVariant}
                 sort={auditSort}
+                includePayments={auditPayments}
                 kind={deferredKind}
                 groupBy={isTrial ? trialGroupBy : isBudget ? budgetGroupBy : depreciationGroupBy}
                 budgetId={isBudget ? activeBudgetId : undefined}
@@ -2374,7 +2392,7 @@ function ReportPage({ leaf, params }) {
                 hasUnassigned={hasUnassigned}
                 money={fmtMoney}
                 hideZeroLines={hideZeroLines}
-                includeDraft={leaf.report === 'depreciation' ? includeUnposted : isBudget ? includeDraftBudgets : false}
+                includeDraft={leaf.report === 'depreciation' ? includeUnposted : isBudget ? includeDraftBudgets : leaf.report === 'journalAudit' ? auditDraft : false}
                 accountType={accountType}
                 groupByPartner={groupByPartner}
                 showJournalAccount={showJournalAccount}
