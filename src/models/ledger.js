@@ -1675,6 +1675,17 @@ export function journalItemIdentity({ reconciled: _reconciled, matching_number: 
 /** Whether a move or journal item belongs in a report given `includeClosing` (shared by P&L, Trial Balance, and General Ledger). */
 export const includeClosingItem = (item, includeClosing = false) => includeClosing || !item?.is_closing;
 
+export const INVOICE_MOVE_TYPES = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'];
+
+/** Derive dynamic journal lines for an unposted invoice without mutating stored records. */
+export function draftInvoiceLines(db, move, { name = move?.name } = {}) {
+  if (!move || move.state !== 'draft' || !INVOICE_MOVE_TYPES.includes(move.move_type) || (move.line_ids ?? []).length) {
+    return move?.line_ids ?? [];
+  }
+  if (!(move.invoice_line_ids ?? []).length) return [];
+  return invoiceLines(db, name == null ? move : { ...move, name });
+}
+
 /** Journal items with their move date, optionally limited by review status, date, company, and closing flag. */
 export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted', includeClosing = true, includeDraftInvoices = false } = {}) {
   const targetCompany = company_id ?? company;
@@ -1695,8 +1706,8 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
       let reportMove = m;
-      if (includeDraftInvoices && m.state === 'draft' && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type) && !(m.line_ids ?? []).length) {
-        try { reportMove = { ...m, line_ids: invoiceLines(db, m) }; }
+      if (includeDraftInvoices && m.state === 'draft' && INVOICE_MOVE_TYPES.includes(m.move_type) && !(m.line_ids ?? []).length) {
+        try { reportMove = { ...m, line_ids: draftInvoiceLines(db, m) }; }
         catch { /* An incomplete draft has no calculable journal items yet. */ }
       }
       return reconciledJournalItems(db, reportMove, { partialMatching: true }).map((l) => ({

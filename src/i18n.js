@@ -2618,6 +2618,8 @@ const ar = {
   'Warnings': 'تحذيرات',
   'Number of Entries to Secure': 'عدد القيود المطلوب تأمينها',
   'Entries to Secure': 'قيود للتأمين',
+  'Include Payments': 'تضمين المدفوعات',
+  'No entries for this period.': 'لا توجد قيود لهذه الفترة.',
   'Draft Entries': 'قيود مسودة',
   'Chains with Gaps': 'سلاسل بها فجوات',
   'No posted entries for this period.': 'لا توجد قيود مرحلة لهذه الفترة.',

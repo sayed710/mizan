@@ -239,8 +239,8 @@ test('Journal Audit and Inalterability show only selected companies and their se
           const totals = { all: '300.00', '1': '100.00', '2': '200.00' };
           const total = find(host, (node) => node.tagName === 'TR' && props(node)?.className === 'rep-total strong');
           assert.ok(total, `${selection} total row`);
-          assert.equal(textOf(total.childNodes[1]), `$${totals[selection]}`, `${selection} debit total`);
-          assert.equal(textOf(total.childNodes[2]), '$0.00', `${selection} credit total`);
+          assert.equal(textOf(total.childNodes[3]), `$${totals[selection]}`, `${selection} debit total`);
+          assert.equal(textOf(total.childNodes[4]), '$0.00', `${selection} credit total`);
         } else {
           const body = find(host, (node) => node.tagName === 'TBODY');
           const rows = body.childNodes.filter((node) => node.tagName === 'TR');

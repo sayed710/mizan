@@ -1810,6 +1810,43 @@ function matchingBaseGridTagIds(db, moves, move, line, selectedTaxes) {
   }));
 }
 
+/** Tax-grid contributions for a journal item under `taxesByGrid`'s side-specific sign and eligibility rules. */
+export function taxGridLineContributions(db, moves, move, line, selectedTaxes = null) {
+  if (line.is_closing || line.is_tax_closing || line.is_tax_payment) return [];
+  if (selectedTaxes) {
+    if (line.tax_id != null) {
+      if (!selectedTaxes.has(Number(line.tax_id))) return [];
+    } else if (!line.tax_grid_base) {
+      return [];
+    }
+  }
+  const side = line.tax_side || (['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null);
+  if (!side) return [];
+  const allowedBaseTags = selectedTaxes && line.tax_grid_base && line.tax_id == null
+    ? matchingBaseGridTagIds(db, moves, move, line, selectedTaxes)
+    : null;
+  if (allowedBaseTags && !allowedBaseTags.size) return [];
+  const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
+  const value = side === 'sale' ? -balance : balance;
+  const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && isLegacyCashBasisRelease(move));
+  const entries = [];
+  for (const id of new Set(line.tax_tag_ids ?? [])) {
+    if (allowedBaseTags && !allowedBaseTags.has(id)) continue;
+    const tag = read(db, 'account.account.tag', id);
+    if (!tag) continue;
+    let base = 0;
+    let tax = 0;
+    if (line.tax_grid_base) {
+      base = line.tax_grid_release ? (Number(line.tax_base) || 0) : value;
+    } else if (line.tax_name && !line.tax_zero && line.tax_side) {
+      tax = value;
+      if (isLegacyRelease) base = Number(line.tax_base) || 0;
+    }
+    entries.push({ id, name: tag.name, base, tax });
+  }
+  return entries;
+}
+
 /** Tax grid amounts from tags on posted journal items. */
 export function taxesByGrid(db, period = {}) {
   const rows = new Map();
@@ -1820,34 +1857,11 @@ export function taxesByGrid(db, period = {}) {
     ? returnCompanies(db, period).flatMap((company_id) => journalItems(db, { ...taxPeriod, tax_unit_id: null, company_id }))
     : journalItems(db, taxPeriod);
   for (const line of items) {
-    if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
-    if (selectedTaxes) {
-      if (line.tax_id != null) {
-        if (!selectedTaxes.has(Number(line.tax_id))) continue;
-      } else if (!line.tax_grid_base) {
-        continue;
-      }
-    }
     const move = moves.get(line.move_id);
-    const side = line.tax_side || (['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null);
-    if (!side) continue;
-    const allowedBaseTags = selectedTaxes && line.tax_grid_base && line.tax_id == null
-      ? matchingBaseGridTagIds(db, moves, move, line, selectedTaxes)
-      : null;
-    if (allowedBaseTags && !allowedBaseTags.size) continue;
-    const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
-    const value = side === 'sale' ? -balance : balance;
-    const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && isLegacyCashBasisRelease(move));
-    for (const id of line.tax_tag_ids ?? []) {
-      if (allowedBaseTags && !allowedBaseTags.has(id)) continue;
-      const tag = read(db, 'account.account.tag', id);
-      if (!tag) continue;
-      const row = rows.get(id) ?? { id, name: tag.name, base: 0, tax: 0 };
-      if (line.tax_grid_base) row.base = round(row.base + (line.tax_grid_release ? (Number(line.tax_base) || 0) : value));
-      else if (line.tax_name && !line.tax_zero && line.tax_side) {
-        row.tax = round(row.tax + value);
-        if (isLegacyRelease) row.base = round(row.base + (Number(line.tax_base) || 0));
-      }
+    for (const { id, name, base, tax } of taxGridLineContributions(db, moves, move, line, selectedTaxes)) {
+      const row = rows.get(id) ?? { id, name, base: 0, tax: 0 };
+      if (base) row.base = round(row.base + base);
+      if (tax) row.tax = round(row.tax + tax);
       rows.set(id, row);
     }
   }
