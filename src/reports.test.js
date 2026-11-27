@@ -205,14 +205,14 @@ test('executive summary reports margins, liquidity and days sales outstanding', 
   const { db } = books();
   const s = executiveSummary(db, whole);
   assert.deepEqual([s.revenue, s.grossProfit, s.netProfit], [9400, 9400, 9400]); // purchases are stock, not expense
-  assert.deepEqual([s.cash, s.receivables, s.payables], [188333.5, 1780, 9234]);
+  assert.deepEqual([s.cash, s.receivables, s.payables], [188333.5, 1780, -9234]);
   assert.equal(s.grossMargin, 100);
   assert.equal(s.netMargin, 100);
-  assert.equal(s.dso, 138); // 1780 / 9400 × 731 days
+  assert.equal(s.dso, 138.42); // round(1780 / 9400 × 731 days, 2)
   assert.ok(s.currentRatio > 21.58 && s.currentRatio < 21.59); // (1780 + 188936 + 1134 + 35852 stock, opening stock included) / (9234 + 1316)
   const none = executiveSummary(db, { from: '2000-01-01', to: '2000-12-31' });
   assert.deepEqual([none.revenue, none.cash, none.receivables, none.payables], [0, 0, 0, 0]);
-  assert.deepEqual([none.currentRatio, none.grossMargin, none.netMargin, none.dso], [null, null, null, null]);
+  assert.deepEqual([none.currentRatio, none.grossMargin, none.netMargin, none.dso], [0, 0, 0, 0]);
 });
 
 test('customer statement runs one partner receivable with the payment reference', () => {

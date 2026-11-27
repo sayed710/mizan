@@ -203,11 +203,27 @@ export function ExecutiveSummary({ db, period, companyId, analyticAccountIds, mo
   const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
   const fmtMoney = moneyProp ?? reportMoney(db, currentCo);
   const s = executiveSummary(db, { ...period, ...(currentCo ? { company_id: currentCo } : {}), analyticAccountIds });
-  const rows = [
-    ['Revenue', fmtMoney(s.revenue)], ['Gross Profit', fmtMoney(s.grossProfit)], ['Net Profit', fmtMoney(s.netProfit)],
-    ['Cash', fmtMoney(s.cash)], ['Receivables', fmtMoney(s.receivables)], ['Payables', fmtMoney(s.payables)],
-    ['Current Ratio', s.currentRatio == null ? '—' : s.currentRatio.toFixed(2)], ['Gross Margin', pct(s.grossMargin)], ['Net Margin', pct(s.netMargin)],
-    ['Days Sales Outstanding', s.dso ?? '—'],
-  ];
-  return <tbody>{rows.map(([label, value]) => <tr key={label} className="rep-detail"><td>{t(label)}</td><td className="num">{value}</td></tr>)}</tbody>;
+  const formatCell = (row) => {
+    if (row.format === 'pct') return pct(row.value);
+    if (row.format === 'ratio') return row.value == null ? '—' : Number(row.value).toFixed(2);
+    return fmtMoney(row.value);
+  };
+  return (
+    <tbody>
+      {s.sections.map((section) => (
+        <Fragment key={section.key}>
+          <tr className="rep-section">
+            <td>{t(section.title)}</td>
+            <td />
+          </tr>
+          {section.rows.map((row) => (
+            <tr key={row.key} className={row.strong ? 'rep-detail rep-total' : 'rep-detail'}>
+              <td>{t(row.label)}</td>
+              <td className="num">{formatCell(row)}</td>
+            </tr>
+          ))}
+        </Fragment>
+      ))}
+    </tbody>
+  );
 }
