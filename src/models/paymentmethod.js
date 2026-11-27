@@ -1,6 +1,10 @@
 import { create, read, search, unlink, write } from '../orm.js';
+import { commercialPartnerId } from './common.js';
 import { defaultPaymentJournalId, isReconcilableAccount } from './ledger.js';
 import { currentCompany } from './company.js';
+import { isMethodLineJournal, preferredPaymentMethodLineError } from './paymentmethod-helpers.js';
+
+export { isMethodLineJournal, preferredPaymentMethodLineError };
 
 export const SEEDED_PAYMENT_METHODS = [
   { code: 'manual', payment_type: 'inbound', name: 'Manual' },
@@ -16,15 +20,10 @@ export const ONLINE_PAYMENT_METHOD_SEEDS = [
   { code: 'demo', name: 'Demo', providerCode: 'demo', sequence: 30 },
 ];
 
-const METHOD_LINE_JOURNAL_TYPES = ['bank', 'cash'];
 export const METHOD_LINE_FIELDS = [
   ['inbound_payment_method_line_ids', 'inbound'],
   ['outbound_payment_method_line_ids', 'outbound'],
 ];
-
-/** True when a journal (or journal type) supports payment method lines (bank or cash). */
-export const isMethodLineJournal = (journalOrType) =>
-  METHOD_LINE_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
 
 /** Find a payment method record by its `code` and `payment_type` (never by name or label). */
 export const findPaymentMethod = (db, code, paymentType) =>
@@ -90,6 +89,45 @@ export function journalMethodLines(db, journalId, paymentType = null) {
 /** ID of the first payment method line by sequence for `(journalId, paymentType)`, or null. */
 export function defaultPaymentMethodLineId(db, journalId, paymentType = 'inbound') {
   return journalMethodLines(db, journalId, paymentType)[0]?.id ?? null;
+}
+
+/** Resolve the active payment method line preferred by `partnerId` (or its commercial partner) for `paymentType` in `companyId`. */
+export function preferredPaymentMethodLine(db, partnerId, paymentType = 'inbound', companyId = 1) {
+  if (!db || !partnerId || !['inbound', 'outbound'].includes(paymentType)) return null;
+  const field = paymentType === 'inbound' ? 'property_inbound_payment_method_line_id' : 'property_outbound_payment_method_line_id';
+  const partner = read(db, 'res.partner', partnerId);
+  const commId = commercialPartnerId(db, partnerId);
+  const commercial = commId && commId !== partnerId ? read(db, 'res.partner', commId) : null;
+  const lineId = partner?.[field] ?? commercial?.[field] ?? null;
+  if (!lineId) return null;
+  const line = read(db, 'account.payment.method.line', lineId);
+  if (!line || line.active === false || line.payment_type !== paymentType) return null;
+  if (line.company_id && line.company_id !== companyId) return null;
+  const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
+  if (!journal || journal.active === false || !isMethodLineJournal(journal)) return null;
+  if (journal.company_id && journal.company_id !== companyId) return null;
+  return line;
+}
+
+/** Resolve `{ journal_id, payment_method_line_id }` for `(partnerId, paymentType, companyId)`, honoring any partner preference. */
+export function partnerPaymentMethodDefaults(db, partnerId, paymentType = 'inbound', companyId = 1, { journalId = null } = {}) {
+  const pref = partnerId ? preferredPaymentMethodLine(db, partnerId, paymentType, companyId) : null;
+  if (journalId) {
+    return {
+      journal_id: journalId,
+      payment_method_line_id: pref && pref.journal_id === journalId
+        ? pref.id
+        : defaultPaymentMethodLineId(db, journalId, paymentType),
+    };
+  }
+  if (pref) {
+    return { journal_id: pref.journal_id, payment_method_line_id: pref.id };
+  }
+  const fallbackJournalId = defaultPaymentJournalId(db, companyId);
+  return {
+    journal_id: fallbackJournalId,
+    payment_method_line_id: fallbackJournalId ? defaultPaymentMethodLineId(db, fallbackJournalId, paymentType) : null,
+  };
 }
 
 /** Validate an optional `payment_account_id` override against active status, company, and reconcilability. */
@@ -515,6 +553,15 @@ export const paymentMethodModels = {
     fields: {
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       name: { type: 'char', label: 'Name', required: true },
+      display_name: {
+        type: 'char',
+        label: 'Display Name',
+        hidden: true,
+        compute: (r, db) => {
+          const j = r?.journal_id && db ? read(db, 'account.journal', r.journal_id) : null;
+          return j ? `${r.name} (${j.name})` : (r?.name ?? '');
+        },
+      },
       payment_method_id: { type: 'many2one', relation: 'account.payment.method', label: 'Payment Method', required: true },
       journal_id: {
         type: 'many2one',

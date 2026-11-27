@@ -15,7 +15,7 @@ import { isPaymentMatched, unreconcile } from './bank.js';
 import { reconcileLedgerItems, unreconcilePartialReconcile } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, currentCompany, recipientBankCompanyError } from './company.js';
-import { defaultPaymentMethodLineId, isMethodLineJournal, paymentMethodLineError } from './paymentmethod.js';
+import { defaultPaymentMethodLineId, isMethodLineJournal, partnerPaymentMethodDefaults, paymentMethodLineError, preferredPaymentMethodLine } from './paymentmethod.js';
 import { openActivitiesText } from './mail.js';
 import { hasMultiCurrency } from './money.js';
 
@@ -2297,8 +2297,19 @@ export const payModels = {
     ],
     createDefaults: (db, vals = {}) => {
       const companyId = vals.company_id ?? getActiveCompany() ?? currentCompany(db);
-      const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
       const paymentType = vals.payment_type ?? 'inbound';
+      if (vals.partner_id && !vals.is_internal_transfer) {
+        const payDefaults = partnerPaymentMethodDefaults(db, vals.partner_id, paymentType, companyId, {
+          journalId: vals.journal_id ?? null,
+        });
+        return {
+          ...(vals.journal_id === undefined && payDefaults.journal_id ? { journal_id: payDefaults.journal_id } : {}),
+          ...(vals.payment_method_line_id === undefined && payDefaults.payment_method_line_id != null
+            ? { payment_method_line_id: payDefaults.payment_method_line_id }
+            : {}),
+        };
+      }
+      const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
       const lineId = vals.payment_method_line_id === undefined && journalId
         ? defaultPaymentMethodLineId(db, journalId, paymentType)
         : undefined;
@@ -2311,8 +2322,25 @@ export const payModels = {
       if (key === 'invoice_id' && r.invoice_id && db) {
         return { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null };
       }
-      if ((key === 'journal_id' || key === 'payment_type') && db) {
-        return { payment_method_line_id: defaultPaymentMethodLineId(db, r.journal_id, r.payment_type) };
+      if ((key === 'partner_id' || key === 'journal_id' || key === 'payment_type' || key === 'company_id') && db) {
+        const paymentType = r.payment_type ?? 'inbound';
+        const companyId = r.company_id ?? getActiveCompany() ?? currentCompany(db);
+        const pref = r.partner_id && !r.is_internal_transfer
+          ? preferredPaymentMethodLine(db, r.partner_id, paymentType, companyId)
+          : null;
+        if (pref) {
+          if (key === 'journal_id') {
+            return {
+              payment_method_line_id: pref.journal_id === r.journal_id
+                ? pref.id
+                : defaultPaymentMethodLineId(db, r.journal_id, paymentType),
+            };
+          }
+          return { journal_id: pref.journal_id, payment_method_line_id: pref.id };
+        }
+        if (key === 'journal_id' || key === 'payment_type') {
+          return { payment_method_line_id: defaultPaymentMethodLineId(db, r.journal_id, paymentType) };
+        }
       }
       return {};
     },

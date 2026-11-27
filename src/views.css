@@ -689,3 +689,4 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .user-menu-name { padding: 6px 10px; font-size: 12px; }
 .empty-state { padding: 16px; margin: 0; }
 .bank-reconcile-quick-actions { display: flex; flex-flow: row wrap; gap: 8px; margin-block: 10px; }
+.list-avatar-cell { display: inline-flex; align-items: center; gap: 8px; }
