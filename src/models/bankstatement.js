@@ -531,7 +531,7 @@ export const bankStatementModels = {
           partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
           amount: { type: 'monetary', label: 'Amount', required: true },
           ref: { type: 'char', label: 'Reference' },
-          state: { type: 'selection', label: 'Status', readonly: true, hidden: true, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
+          state: { type: 'selection', label: 'Status', readonly: true, hidden: true, options: [['to_check', 'Not Matched'], ['reconciled', 'Matched']] },
         },
         newLine: (r) => ({ date: r?.date || today(), payment_ref: '', partner_id: null, amount: 0, ref: '' }),
         compute: computeStatementLines,
