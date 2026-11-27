@@ -120,7 +120,7 @@ test('FIN-1: executiveSummary scopes figures to company_id without commingling',
   const summaryCo2 = executiveSummary(db, { ...period, company_id: company2Id });
   assert.equal(summaryCo2.revenue, 25000, 'Company 2 revenue should be strictly 25,000');
   assert.equal(summaryCo2.receivables, 15000, 'Company 2 receivables should be 15,000');
-  assert.equal(summaryCo2.payables, 8000, 'Company 2 payables should be 8,000');
+  assert.equal(summaryCo2.payables, -8000, 'Company 2 payables should be -8,000 (raw credit balance)');
   assert.equal(summaryCo2.cash, 10000, 'Company 2 cash should be 10,000');
   assert.equal(summaryCo2.grossProfit, 25000);
   assert.equal(summaryCo2.netProfit, 17000, 'Company 2 net profit should be 25,000 - 8,000 = 17,000');

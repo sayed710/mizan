@@ -4297,6 +4297,23 @@ const ar = {
   'Upgrade: could not book bank statement line:': 'ترقية: تعذّر قيد بند كشف الحساب البنكي:',
   'Account Roots': 'جذور الحسابات',
   'Clear matching': 'مسح المطابقة',
+  // Executive Summary (Odoo 20 parity)
+  'Cash received': 'النقد المستلم',
+  'Cash spent': 'النقد المنصرف',
+  'Cash surplus': 'الفائض النقدي',
+  'Closing bank balance': 'الرصيد البنكي الختامي',
+  Profitability: 'الربحية',
+  'Gross profit': 'مجمل الربح',
+  'Net assets': 'صافي الأصول',
+  Performance: 'الأداء',
+  'Gross profit margin (gross profit / operating income)': 'هامش مجمل الربح (مجمل الربح / الدخل التشغيلي)',
+  'Net profit margin (net profit / revenue)': 'هامش صافي الربح (صافي الربح / الإيرادات)',
+  'Return on investments (net profit / assets)': 'العائد على الاستثمارات (صافي الربح / الأصول)',
+  Position: 'المركز المالي',
+  'Average debtors days': 'متوسط أيام المدينين',
+  'Average creditors days': 'متوسط أيام الدائنين',
+  'Short term cash forecast': 'توقعات النقد قصيرة الأجل',
+  'Current assets to liabilities': 'نسبة الأصول المتداولة إلى الالتزامات',
   'Database is required': 'قاعدة البيانات مطلوبة',
 };
 

@@ -102,9 +102,26 @@ function Comparison({ data, report, money: fmtMoney = money }) {
   const showVariance = Boolean(data.variance);
   const [open, setOpen] = useState(() => new Set());
   const keys = isCashFlow ? data.sections.map((s) => s.title) : [];
-  const colSpan = 1 + (data.headers?.length ?? 0) + (showVariance ? 2 : 0);
+  const colCount = (data.headers?.length ?? 0) + (showVariance ? 2 : 0);
+  const colSpan = 1 + colCount;
   const section = (i) => {
     const s = data.sections[i];
+    if (!s.totals) {
+      return (
+        <Fragment key={s.key ?? s.title}>
+          <tr className="rep-section">
+            <td>{t(s.title)}</td>
+            {Array.from({ length: colCount }, (_, j) => <td key={j} />)}
+          </tr>
+          {s.rows.map((r) => (
+            <tr key={r.key ?? r.label} className={r.strong ? 'rep-detail rep-total' : 'rep-detail'}>
+              <td>{t(r.label)}</td>
+              <ComparisonCells values={r.values} variance={r.variance} showVariance={showVariance} format={r.format} money={fmtMoney} />
+            </tr>
+          ))}
+        </Fragment>
+      );
+    }
     return (
       <Section
         key={s.title}

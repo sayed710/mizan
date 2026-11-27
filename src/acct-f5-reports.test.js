@@ -63,24 +63,27 @@ test('FIN-9 (a) model: executiveColumns computes aligned KPI columns with varian
 
   const cols = executiveColumns(db, periods);
   assert.deepEqual(cols.headers, ['Jan', 'Feb']);
-  assert.ok(Array.isArray(cols.totals));
-  assert.ok(cols.totals.length >= 10, 'Executive summary comparison has at least 10 KPI lines');
+  assert.equal(cols.sections.length, 5, 'Executive summary comparison has 5 sections');
+  const allRows = cols.sections.flatMap((s) => s.rows);
+  assert.equal(allRows.length, 19, 'Executive summary comparison has all 19 KPI lines');
+  assert.equal(allRows.some((r) => r.label === 'Cash'), false, 'Legacy ambiguous Cash row replaced by Closing bank balance');
 
-  const revTotal = cols.totals.find((t) => t.label === 'Revenue');
-  const netTotal = cols.totals.find((t) => t.label === 'Net Profit');
-  const cashTotal = cols.totals.find((t) => t.label === 'Cash');
+  const revRow = allRows.find((t) => t.label === 'Revenue');
+  const netRow = allRows.find((t) => t.label === 'Net Profit');
+  const cashRow = allRows.find((t) => t.label === 'Closing bank balance');
 
-  assert.ok(revTotal, 'Revenue total line exists');
-  assert.ok(netTotal, 'Net Profit total line exists');
-  assert.ok(cashTotal, 'Cash total line exists');
+  assert.ok(revRow, 'Revenue line exists');
+  assert.ok(netRow, 'Net Profit line exists');
+  assert.ok(cashRow, 'Closing bank balance line exists');
 
-  assert.deepEqual(revTotal.values, [1000, 2000]);
-  assert.deepEqual(netTotal.values, [600, 1500]);
-  assert.deepEqual(cashTotal.values, [600, 2100]);
+  assert.deepEqual(revRow.values, [1000, 2000]);
+  assert.deepEqual(netRow.values, [600, 1500]);
+  assert.deepEqual(cashRow.values, [600, 2100]);
 
   // Variance verification for Revenue: Feb (2000) vs Jan (1000) -> +1000, +100%
-  const revIdx = cols.totals.findIndex((t) => t.label === 'Revenue');
-  assert.deepEqual(cols.variance[cols.sections.length + revIdx], { amount: 1000, pct: 100 });
+  const revIdx = allRows.findIndex((t) => t.label === 'Revenue');
+  assert.deepEqual(revRow.variance, { amount: 1000, pct: 100 });
+  assert.deepEqual(cols.variance[revIdx], { amount: 1000, pct: 100 });
 });
 
 test('FIN-9 (a) view: Reports.jsx renders Comparison select for Executive Summary and displays comparison columns', async () => {
@@ -127,10 +130,14 @@ test('FIN-9 (a) view: Reports.jsx renders Comparison select for Executive Summar
       props(compSelect).onChange({ target: { value: 'previous' } });
     });
 
-    // When comparison is active, table must show Variance and % header columns
+    // When comparison is active, table must show Variance and % header columns and all 5 sections + new figures
     assert.ok(host.textContent.includes('Variance'), 'Table header must include Variance');
     assert.ok(host.textContent.includes('%'), 'Table header must include %');
     assert.ok(host.textContent.includes('Revenue'), 'Executive Summary rows must be present');
+    assert.ok(host.textContent.includes('Cash surplus'), 'New Cash surplus row must be present in comparison');
+    assert.ok(host.textContent.includes('Closing bank balance'), 'Closing bank balance row must be present in comparison');
+    assert.ok(host.textContent.includes('Net assets'), 'Net assets row must be present in comparison');
+    assert.ok(host.textContent.includes('Average creditors days'), 'Average creditors days row must be present in comparison');
   } finally {
     await React.act(async () => root.unmount());
   }
