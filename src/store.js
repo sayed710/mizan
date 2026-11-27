@@ -9,6 +9,7 @@ import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
 import { t } from './i18n.js';
 import { companyCurrencyRecord } from './money.js';
+import { setReportDbProvider } from './views/reportNavigation.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
 const KEY = 'mizan-db-v32';
@@ -138,6 +139,7 @@ export async function initStore() {
 }
 
 export const getDb = () => db;
+setReportDbProvider(getDb);
 export const getUser = () => user;
 export const isServer = () => mode === 'server';
 

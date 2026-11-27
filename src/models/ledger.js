@@ -2,7 +2,7 @@
 import { roundingAccount } from './configured-account.js';
 import { journalSequenceName } from './journal-sequence.js';
 import { create, read, search, write } from '../orm.js';
-import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
+import { addDays, addUtcDays, amounts, appliedCashRounding, companyRoundingMethod, daysInMonth, invoiceTaxAmount, nextName, shiftMonth, today, total as moveTotal, validDate } from './common.js';
 import { companyCurrency, conversionRate, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
@@ -1834,36 +1834,54 @@ export function profitAndLoss(db, period, { includeClosing = false, weight, anal
 }
 
 /**
- * First day of the fiscal year containing a date. Configured fiscal years decide it; after the last configured
- * year the same start repeats yearly, and a company without any year uses the calendar year (the app default).
+ * Start and end dates ({ from, to }) of the fiscal year containing `date`, matching Odoo's
+ * compute_fiscalyear_dates / date_utils.get_fiscal_year (with explicit account.fiscal.year precedence).
  */
-export function fiscalYearStart(db, date, companyId) {
-  const years = search(db, 'account.fiscal.year').filter((y) => (y.company_id ?? 1) === companyId
-    && y.date_from <= date && date <= y.date_to);
+export function fiscalYearDates(db, date = today(), companyId = null) {
+  const refDate = date || today();
+  if (!validDate(refDate)) throw new Error('Enter a valid date');
+  const targetCompanyId = companyId ?? db?.settings?.current_company_id ?? 1;
+  const allYears = db ? search(db, 'account.fiscal.year').filter((y) => (y.company_id ?? 1) === targetCompanyId) : [];
+  const years = allYears.filter((y) => y.date_from <= refDate && refDate <= y.date_to);
   if (years.length > 1) {
-    const company = read(db, 'res.company', companyId)?.name ?? companyId;
-    throw new Error(`Fiscal years overlap for company ${company} on ${date}`);
+    const company = read(db, 'res.company', targetCompanyId)?.name ?? targetCompanyId;
+    throw new Error(`Fiscal years overlap for company ${company} on ${refDate}`);
   }
-  if (years.length === 1) return years[0].date_from;
-  const previous = search(db, 'account.fiscal.year')
-    .filter((y) => (y.company_id ?? 1) === companyId && y.date_to < date)
-    .sort((a, b) => a.date_from.localeCompare(b.date_from)).at(-1);
+  if (years.length === 1) return { from: years[0].date_from, to: years[0].date_to };
+  const previous = allYears
+    .filter((y) => y.date_to < refDate)
+    .sort((a, b) => a.date_from.localeCompare(b.date_from))
+    .at(-1);
   if (previous) {
-    let start = previous.date_from;
-    while (shiftMonth(start, 12) <= date) start = shiftMonth(start, 12);
-    return start;
+    let from = previous.date_from;
+    while (shiftMonth(from, 12) <= refDate) from = shiftMonth(from, 12);
+    return { from, to: addUtcDays(shiftMonth(from, 12), -1) };
   }
-  const company = read(db, 'res.company', companyId ?? db?.settings?.current_company_id ?? 1);
+  const company = db ? read(db, 'res.company', targetCompanyId) : null;
   const lastDay = Number(company?.fiscalyear_last_day) || 31;
   const lastMonth = Number(company?.fiscalyear_last_month) || 12;
-  const year = Number(date.slice(0, 4));
-  const monthStr = String(lastMonth).padStart(2, '0');
-  const dayStr = String(lastDay).padStart(2, '0');
-  const candidateEnd = `${year}-${monthStr}-${dayStr}`;
-  const yearEndOnOrBefore = date <= candidateEnd
-    ? `${year - 1}-${monthStr}-${dayStr}`
-    : candidateEnd;
-  return addDays(yearEndOnOrBefore, 1);
+  const fixDay = (year, month, day) => {
+    const maxDay = daysInMonth(year, month);
+    if (month === 2 && (day === 28 || day === maxDay)) return maxDay;
+    return Math.min(day, maxDay);
+  };
+  const isoYmd = (year, month, day) => `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  const year = Number(refDate.slice(0, 4));
+  const candidateEnd = isoYmd(year, lastMonth, fixDay(year, lastMonth, lastDay));
+  if (refDate <= candidateEnd) {
+    const prevEnd = isoYmd(year - 1, lastMonth, fixDay(year - 1, lastMonth, lastDay));
+    return { from: addUtcDays(prevEnd, 1), to: candidateEnd };
+  }
+  const nextEnd = isoYmd(year + 1, lastMonth, fixDay(year + 1, lastMonth, lastDay));
+  return { from: addUtcDays(candidateEnd, 1), to: nextEnd };
+}
+
+/**
+ * First day of the fiscal year containing a date. Configured fiscal years decide it; after the last configured
+ * year the same start repeats yearly, and a company without any year uses its fiscalyear_last_day/month (Dec 31 default).
+ */
+export function fiscalYearStart(db, date, companyId) {
+  return fiscalYearDates(db, date, companyId).from;
 }
 
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
