@@ -1,16 +1,18 @@
 // Two-pane bank reconciliation widget: unreconciled statement lines on the left, matching/payment/manual tabs on the right.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
 import { read, search, unlink } from '../orm.js';
 import { downloadCsv } from '../csv.js';
-import { documentCompany } from '../models/company.js';
+import { currentCompany, documentCompany } from '../models/company.js';
 import { ReportPrintView } from './ReportPrintView.jsx';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { companyFilter } from '../models/company.js';
 import { isLiquidityJournal } from '../models/ledger.js';
 import {
+  batchLineTotal,
   bookToAccount,
   candidates,
+  eligibleBatches,
   eligibleCounterpart,
   eligiblePayments,
   matchError,
@@ -22,11 +24,11 @@ import {
   unreconcile,
   statementCompanyAmount,
 } from '../models/bank.js';
-import { applyRule, isWriteoffButtonModel, mapStatementPartner, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
+import { applyRule, autoReconcile, isWriteoffButtonModel, mapStatementPartner, ruleMatches, sameCommercialPartner } from '../models/reconcile.js';
 import { statementCurrency, statementLineOrder } from '../models/bankstatement.js';
 import { t } from '../i18n.js';
 import { documentCurrency, findCompanyCurrencyRecord } from '../money.js';
-import { display, money } from '../ui.jsx';
+import { display, menuKeys, money, useDismiss } from '../ui.jsx';
 
 /** Format `amount` using `currency` (falling back to the active company currency when null). */
 const formatInCurrency = (amount, currency) => money(amount, currency?.name ?? null, currency ?? null);
@@ -35,6 +37,7 @@ const fmtDate = (value) => display(null, { type: 'date' }, value);
 const TABS = [
   { id: 'candidates', label: 'Counterpart Candidates' },
   { id: 'payments', label: 'Outstanding Payments' },
+  { id: 'batches', label: 'Batches' },
   { id: 'manual', label: 'Manual Operation' },
 ];
 
@@ -55,6 +58,7 @@ export function BankReconcile() {
   const [activeTab, setActiveTab] = useState('candidates');
   const [selectedCandidateIds, setSelectedCandidateIds] = useState(() => new Set());
   const [selectedPaymentIds, setSelectedPaymentIds] = useState([]);
+  const [selectedBatchId, setSelectedBatchId] = useState(null);
   const [manualAccountId, setManualAccountId] = useState('');
   const [manualTaxIds, setManualTaxIds] = useState([]);
   const [manualLabel, setManualLabel] = useState('');
@@ -63,9 +67,15 @@ export function BankReconcile() {
   const [writeoffLabel, setWriteoffLabel] = useState('');
   const [writeoffAmount, setWriteoffAmount] = useState('');
   const [error, setError] = useState('');
+  const [statusMessage, setStatusMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [showReconciled, setShowReconciled] = useState(false);
   const [isPrinting, setIsPrinting] = useState(false);
+  const [modelsMenuOpen, setModelsMenuOpen] = useState(false);
+  const modelsMenuRef = useRef(null);
+  const manualAccountRef = useRef(null);
+  const billUploadRef = useRef(null);
+  useDismiss(modelsMenuOpen, () => setModelsMenuOpen(false), modelsMenuRef);
 
   const journals = useMemo(
     () => companyFilter(db, search(db, 'account.journal').filter((j) => isLiquidityJournal(j)), 'account.journal'),
@@ -110,6 +120,7 @@ export function BankReconcile() {
     if (selectedLineKey == null) return;
     setSelectedCandidateIds(new Set());
     setSelectedPaymentIds([]);
+    setSelectedBatchId(null);
     setManualAccountId(selectedCounterpartId);
     setManualTaxIds([]);
     setManualLabel(selectedPaymentRef);
@@ -118,6 +129,7 @@ export function BankReconcile() {
     setWriteoffLabel('');
     setWriteoffAmount('');
     setError('');
+    setStatusMessage('');
   }, [selectedLineKey, selectedCounterpartId, selectedPaymentRef, selectedOpenAmount]);
 
   const statementRows = useMemo(() => selectedStatement ? companyFilter(db, search(db, 'account.bank.statement.line'), 'account.bank.statement.line')
@@ -139,6 +151,11 @@ export function BankReconcile() {
 
   const outstandingPayments = useMemo(
     () => (selectedLine ? eligiblePayments(db, selectedLine) : []),
+    [db, selectedLine],
+  );
+
+  const batchPayments = useMemo(
+    () => (selectedLine ? eligibleBatches(db, selectedLine) : []),
     [db, selectedLine],
   );
 
@@ -278,6 +295,13 @@ export function BankReconcile() {
           payment_ids: selectedPaymentIds,
         });
         nextDb = matchPayment(currentDb, prepared).db;
+      } else if (activeTab === 'batches') {
+        if (!selectedBatchId) throw new Error('Select a batch payment to match');
+        const prepared = lineWriteoffFields({
+          ...freshLine,
+          batch_payment_id: selectedBatchId,
+        });
+        nextDb = matchPayment(currentDb, prepared).db;
       } else {
         if (!manualAccountId) throw new Error('Select a counterpart account for the manual operation');
         const amountNum = manualAmount === '' ? null : Number(manualAmount);
@@ -318,6 +342,7 @@ export function BankReconcile() {
         setManualAmount(String(line.open_amount ?? statementCompanyAmount(current, line)));
         setSelectedCandidateIds(new Set());
         setSelectedPaymentIds([]);
+        setSelectedBatchId(null);
         setWriteoffAccountId('');
         setWriteoffLabel('');
         setWriteoffAmount('');
@@ -334,6 +359,71 @@ export function BankReconcile() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleAutoReconcile = async () => {
+    const visibleIds = openLines.filter((l) => l.state === 'to_check').map((l) => l.id);
+    if (!visibleIds.length) return;
+    setError('');
+    setStatusMessage('');
+    setBusy(true);
+    try {
+      const currentDb = getDb();
+      const nextDb = autoReconcile(currentDb, { lineIds: visibleIds });
+      const res = await commit(nextDb);
+      if (res.ok && selectedLine) {
+        const afterLine = read(nextDb, 'account.bank.statement.line', selectedLine.id);
+        if (!afterLine || afterLine.state === 'reconciled') setSelectedLineId(null);
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSetAccount = () => {
+    setActiveTab('manual');
+    setError('');
+    manualAccountRef.current?.focus?.();
+  };
+
+  const handleUploadBills = () => {
+    setError('');
+    setStatusMessage('');
+    if (!isServer() || !getUser()?.integrations?.ai) {
+      setError('This needs the server with AI enabled');
+      return;
+    }
+    billUploadRef.current?.click();
+  };
+
+  const handleBillFileChange = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      setError('');
+      setStatusMessage('');
+      setBusy(true);
+      try {
+        const currentDb = getDb();
+        const companyId = selectedLine?.company_id ?? currentCompany(currentDb)?.id ?? 1;
+        const out = await serverAction('/api/integrations/digitize-new-bill', {
+          company_id: companyId,
+          ...(selectedLine?.partner_id ? { partner_id: selectedLine.partner_id } : {}),
+          file: { name: f.name, type: f.type, data: String(reader.result).split(',')[1] },
+        });
+        if (out?.ok === false) throw new Error(out.error || 'Could not save changes');
+        setStatusMessage(out?.message || t('Vendor bill created and digitized'));
+      } catch (err) {
+        setError(t(err instanceof Error ? err.message : String(err)));
+      } finally {
+        setBusy(false);
+      }
+    };
+    reader.readAsDataURL(f);
   };
 
   const chooseCounterpart = (kind) => {
@@ -366,12 +456,31 @@ export function BankReconcile() {
     })
     : null;
 
+  const partnerQuery = selectedLine?.partner_id ? `&rel=partner_id:${selectedLine.partner_id}` : '';
+  const salesHref = `#/accounting/invoices?view=list&filter=unpaid${partnerQuery}`;
+  const purchasesHref = `#/accounting/bills?view=list&filter=unpaid${partnerQuery}`;
+  const hasOpenVisible = openLines.some((l) => l.state === 'to_check');
+
+  const writeoffFieldsBlock = (
+    <div className="bank-reconcile-writeoff-fields">
+      <label htmlFor={`writeoff-account-${activeTab}`}>{t('Write-off Account')}</label>
+      <select id={`writeoff-account-${activeTab}`} aria-label={t('Write-off Account')} value={writeoffAccountId} onChange={(e) => setWriteoffAccountId(e.target.value)}>
+        <option value="">{t('None')}</option>
+        {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
+      </select>
+      {writeoffAccountId && <>
+        <label>{t('Write-off Label')} <input aria-label={t('Write-off Label')} value={writeoffLabel} onChange={(e) => setWriteoffLabel(e.target.value)} /></label>
+        <label>{t('Write-off Amount')} <input aria-label={t('Write-off Amount')} type="number" step="any" min="0" value={writeoffAmount} onChange={(e) => setWriteoffAmount(e.target.value)} /></label>
+      </>}
+    </div>
+  );
+
   const statementExportRows = selectedStatement ? [
     [t('Statement'), selectedStatement.name],
     [t('Starting Balance'), selectedStatement.balance_start ?? 0],
     [t('Ending Balance'), selectedStatement.balance_end_real ?? 0],
     [t('Date'), t('Label'), t('Partner'), t('Reference'), t('Amount'), t('Status')],
-    ...statementRows.map((line) => [line.date, line.payment_ref, partnerName(line.partner_id), line.ref, Number(line.amount), t(line.state === 'reconciled' ? 'Reconciled' : 'To Reconcile')]),
+    ...statementRows.map((line) => [line.date, line.payment_ref, partnerName(line.partner_id), line.ref, Number(line.amount), t(line.state === 'reconciled' ? 'Matched' : 'Not Matched')]),
   ] : [];
   if (isPrinting && selectedStatement) return <ReportPrintView active company={documentCompany(db, selectedStatement)} title={t('Bank Statement')} subtitle={selectedStatement.name} onBack={() => setIsPrinting(false)} autoPrint={false}>
     <p>{t('Starting Balance')}: {formatInCurrency(selectedStatement.balance_start, statementCurrency(db, selectedStatement))} · {t('Ending Balance')}: {formatInCurrency(selectedStatement.balance_end_real, statementCurrency(db, selectedStatement))}</p>
@@ -380,6 +489,7 @@ export function BankReconcile() {
 
   return (
     <div className="page bank-reconcile-page">
+      <input ref={billUploadRef} type="file" accept="image/*,application/pdf" hidden onChange={handleBillFileChange} />
       <div className="control-panel">
         <h1>{t('Bank Reconciliation')}</h1>
         <label className="inline-select">
@@ -397,6 +507,7 @@ export function BankReconcile() {
           </select>
         </label>
         <label><input type="checkbox" checked={showReconciled} onChange={(e) => { setShowReconciled(e.target.checked); setSelectedLineId(null); }} /> {t('Show Reconciled')}</label>
+        <button type="button" className="btn sm" disabled={busy || !hasOpenVisible} onClick={handleAutoReconcile}>{t('Auto-Reconcile')}</button>
         <button type="button" className="btn sm" disabled={!selectedStatement} onClick={() => setIsPrinting(true)}>{t('Print Statement')}</button>
         <button type="button" className="btn sm" disabled={!selectedStatement} onClick={() => downloadCsv('bank-statement.csv', statementExportRows)}>{t('Export Statement')}</button>
         <a className="btn sm" href="#/accounting/bank">{t('Bank Transactions')}</a>
@@ -497,8 +608,13 @@ export function BankReconcile() {
                 <button type="button" className="btn sm" disabled={busy} onClick={() => chooseCounterpart('receivable')}>{t('Receivable')}</button>
                 <button type="button" className="btn sm" disabled={busy} onClick={() => chooseCounterpart('payable')}>{t('Payable')}</button>
                 <button type="button" className="btn sm" disabled={busy} onClick={() => chooseCounterpart('transfer')}>{t('Internal Transfer')}</button>
+                <button type="button" className="btn sm" disabled={busy} onClick={handleSetAccount}>{t('Set Account')}</button>
+                <a className="btn sm" href={salesHref}>{t('Sales')}</a>
+                <a className="btn sm" href={purchasesHref}>{t('Purchases')}</a>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => { setActiveTab('batches'); setError(''); }}>{t('Batches')}</button>
+                <button type="button" className="btn sm" disabled={busy} onClick={handleUploadBills}>{t('Upload bills')}</button>
               </div>}
-              {selectedLine.state !== 'reconciled' && quickActionModels.length > 0 && (
+              {selectedLine.state !== 'reconciled' && (
                 <div className="bank-reconcile-quick-actions" role="toolbar" aria-label={t('Quick Actions')}>
                   {quickActionModels.map((model) => (
                     <button
@@ -511,6 +627,25 @@ export function BankReconcile() {
                       {model.name}
                     </button>
                   ))}
+                  <div className="nav-group actions-menu" ref={modelsMenuRef}>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      aria-label={t('More')}
+                      aria-haspopup="menu"
+                      aria-expanded={modelsMenuOpen}
+                      onClick={() => setModelsMenuOpen((v) => !v)}
+                    >
+                      ⋯
+                    </button>
+                    {modelsMenuOpen && (
+                      <div className="nav-dropdown" role="menu" onKeyDown={menuKeys}>
+                        <a role="menuitem" href="#/accounting/reconcile-models" onClick={() => setModelsMenuOpen(false)}>
+                          {t('Manage Models')}
+                        </a>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -564,19 +699,7 @@ export function BankReconcile() {
                         })}
                       </div>
                     )}
-                    {candidateMoves.length > 0 && (
-                      <div className="bank-reconcile-writeoff-fields">
-                        <label htmlFor={`writeoff-account-${activeTab}`}>{t('Write-off Account')}</label>
-                        <select id={`writeoff-account-${activeTab}`} aria-label={t('Write-off Account')} value={writeoffAccountId} onChange={(e) => setWriteoffAccountId(e.target.value)}>
-                          <option value="">{t('None')}</option>
-                          {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
-                        </select>
-                        {writeoffAccountId && <>
-                          <label>{t('Write-off Label')} <input aria-label={t('Write-off Label')} value={writeoffLabel} onChange={(e) => setWriteoffLabel(e.target.value)} /></label>
-                          <label>{t('Write-off Amount')} <input aria-label={t('Write-off Amount')} type="number" step="any" min="0" value={writeoffAmount} onChange={(e) => setWriteoffAmount(e.target.value)} /></label>
-                        </>}
-                      </div>
-                    )}
+                    {candidateMoves.length > 0 && writeoffFieldsBlock}
                   </div>
                 )}
 
@@ -610,19 +733,49 @@ export function BankReconcile() {
                         })}
                       </div>
                     )}
-                    {outstandingPayments.length > 0 && (
-                      <div className="bank-reconcile-writeoff-fields">
-                        <label htmlFor={`writeoff-account-${activeTab}`}>{t('Write-off Account')}</label>
-                        <select id={`writeoff-account-${activeTab}`} aria-label={t('Write-off Account')} value={writeoffAccountId} onChange={(e) => setWriteoffAccountId(e.target.value)}>
-                          <option value="">{t('None')}</option>
-                          {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
-                        </select>
-                        {writeoffAccountId && <>
-                          <label>{t('Write-off Label')} <input aria-label={t('Write-off Label')} value={writeoffLabel} onChange={(e) => setWriteoffLabel(e.target.value)} /></label>
-                          <label>{t('Write-off Amount')} <input aria-label={t('Write-off Amount')} type="number" step="any" min="0" value={writeoffAmount} onChange={(e) => setWriteoffAmount(e.target.value)} /></label>
-                        </>}
+                    {outstandingPayments.length > 0 && writeoffFieldsBlock}
+                  </div>
+                )}
+
+                {activeTab === 'batches' && (
+                  <div className="bank-reconcile-batches">
+                    {batchPayments.length === 0 ? (
+                      <p className="muted">{t('No unmatched batch payments match this transaction.')}</p>
+                    ) : (
+                      <div className="bank-reconcile-lines">
+                        {batchPayments.map((batch) => {
+                          const isSelected = selectedBatchId === batch.id;
+                          const activeLines = (batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id);
+                          const total = batchLineTotal(db, batch);
+                          const firstPayment = activeLines[0]?.payment_id ? read(db, 'account.payment', activeLines[0].payment_id) : null;
+                          const batchCurr = documentCurrency(db, {
+                            ...batch,
+                            currency_id: batch.currency_id ?? read(db, 'account.journal', batch.journal_id)?.currency_id ?? firstPayment?.currency_id,
+                          });
+                          return (
+                            <button
+                              key={batch.id}
+                              type="button"
+                              className={`bank-reconcile-line-item${isSelected ? ' active' : ''}`}
+                              aria-pressed={isSelected}
+                              aria-label={lineAriaLabel(batch.name, journalName(batch.journal_id), formatInCurrency(total, batchCurr))}
+                              onClick={() => setSelectedBatchId((prev) => (prev === batch.id ? null : batch.id))}
+                            >
+                              <div className="bank-reconcile-line-top">
+                                <strong>{batch.name}</strong>
+                                <span>{formatInCurrency(total, batchCurr)}</span>
+                              </div>
+                              <div className="bank-reconcile-line-meta muted">
+                                <span>{fmtDate(batch.date)}</span>
+                                {batch.journal_id && <span>{journalName(batch.journal_id)}</span>}
+                                <span>{t('{n} payment(s)', { n: activeLines.length })}</span>
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
+                    {batchPayments.length > 0 && writeoffFieldsBlock}
                   </div>
                 )}
 
@@ -630,7 +783,7 @@ export function BankReconcile() {
                   <div className="bank-reconcile-manual">
                     <label>
                       {t('Counterpart Account')}
-                      <select aria-label={t('Counterpart Account')} value={manualAccountId} onChange={(e) => setManualAccountId(e.target.value)}>
+                      <select ref={manualAccountRef} aria-label={t('Counterpart Account')} value={manualAccountId} onChange={(e) => setManualAccountId(e.target.value)}>
                         <option value="">{t('Select an account')}</option>
                         {manualAccountId && !counterpartAccounts.some((a) => String(a.id) === manualAccountId) && <option value={manualAccountId}>{read(db, 'account.account', Number(manualAccountId))?.name}</option>}
                         {counterpartAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
@@ -669,6 +822,7 @@ export function BankReconcile() {
                 <button type="button" className="btn primary" disabled={busy} onClick={validate}>{t('Validate')}</button>
               </div>
               </>}
+              {statusMessage && <p role="status">{statusMessage}</p>}
               {error && <p role="alert">{t(error)}</p>}
             </>
           )}

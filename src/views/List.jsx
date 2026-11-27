@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { models } from '../models/index.js';
 import { groupRecords, read, write, writeMany } from '../orm.js';
 import { t } from '../i18n.js';
-import { display, FieldInput, isNumeric, money, OptionalColsMenu, Tag, useOptionalColumns } from '../ui.jsx';
+import { display, FieldInput, isNumeric, money, OptionalColsMenu, Tag, useOptionalColumns, Avatar } from '../ui.jsx';
 import { commit, companiesOf, getDb } from '../store.js';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
@@ -156,6 +156,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         const hiddenByRule = Boolean(field.hideWhen?.(r, db));
         const text = editable || isTags ? null : display(db, field, cellVal, r);
         const badge = editable || isTags ? null : badgeClass(field.badge, cellVal);
+        const showAvatar = !editable && !isTags && Boolean(field.avatar) && Boolean(text);
         // Odoo's relative-date widget shows a past date in red.
         const pastDue = field.widget === 'remaining_days' && text && r[f] && r[f] < today();
         return (
@@ -164,6 +165,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
             {hiddenByRule ? null : editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
               : isTags ? (<span className="many2many-tags">{(Array.isArray(cellVal) ? cellVal : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>)
+              : showAvatar ? <span className="list-avatar-cell"><Avatar name={r.name || text} size={24} /><span>{text}</span></span>
               : badge && text ? <span className={badge}>{text}</span> : text}
           </td>
         );
