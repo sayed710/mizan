@@ -48,7 +48,7 @@ test('oversized company transaction can match another document without another b
   assert.equal(read(db, LINE, line.id).state, 'reconciled');
   assert.equal(read(db, 'account.move', second.id).amount_residual, 0);
   const bank = read(db, 'account.journal', journal.id).default_account_id;
-  const entries = journalItems(db).filter((l) => !read(line.db, 'account.move', l.move_id) && l.account_id === bank);
+  const entries = journalItems(db).filter((l) => l.move_id === read(line.db, LINE, line.id).bank_move_id && l.account_id === bank);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].debit, 150);
   for (const m of search(db, 'account.move').filter((m) => !read(line.db, 'account.move', m.id))) {

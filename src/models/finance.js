@@ -7,7 +7,7 @@ import { create, getActiveCompany, postNote, read, search, write } from '../orm.
 import { addDays, commercialPartnerId, isoDate, sameCommercialPartner, today, total, validDate } from './common.js';
 import { ACTIVITY_TYPES } from './mail.js';
 import { currentActor, employeeFor } from './actor.js';
-import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, validStornoMove } from './ledger.js';
+import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, statementCompanyAmount, validStornoMove } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, isSectionOrNote, resolveLineTaxes, taxBaseTags, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
@@ -391,12 +391,140 @@ export function accountDeleteGuard(db, account, pending = db) {
 /** What a posted entry keeps until it is reset to draft. */
 const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active', 'is_storno'];
 
+const bankStatementMoveIds = new WeakMap();
+const bankRewriteToken = Symbol('bank reconciliation');
+export function writeBankStatementMove(db, id, lineIds, partnerId = undefined) {
+  return write(db, 'account.move', id, { line_ids: lineIds, ...(partnerId !== undefined ? { partner_id: partnerId } : {}) }, { bankRewriteToken });
+}
+function isBankStatementMove(db, moveId) {
+  const lines = db.records?.['account.bank.statement.line'];
+  if (!lines) return false;
+  let ids = bankStatementMoveIds.get(lines);
+  if (!ids) {
+    ids = new Set(lines.map((line) => line.bank_move_id).filter(Boolean));
+    bankStatementMoveIds.set(lines, ids);
+  }
+  return ids.has(moveId);
+}
+
+/** Review status (Odoo `checked`) stays writable on posted and locked entries. */
+const REVIEW_FIELDS = new Set(['to_check', 'review_state']);
+
+function bankStatementMoveRewriteError(db, before, after, ctx) {
+  const touched = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((field) => !REVIEW_FIELDS.has(field));
+  if (!changedFields(before, after, touched)) return null;
+  const previousStatement = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const statement = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const legacyLine = previousStatement ?? statement;
+  const legacyAllocations = legacyLine?.allocations ?? [];
+  const journalForLegacy = read(db, 'account.journal', before.journal_id);
+  const legacySuspense = journalForLegacy?.suspense_account_id || read(db, 'res.company', before.company_id ?? 1)?.account_journal_suspense_account_id;
+  const legacyAmount = legacyLine && statementCompanyAmount(db, legacyLine);
+  const legacySign = legacyLine?.amount > 0 ? 1 : -1;
+  const legacyNet = (line) => legacySign * (Number(line.debit || 0) - Number(line.credit || 0));
+  const legacyRelease = legacyLine && !legacyLine.payment_id && !(legacyLine.payment_ids ?? []).length
+    && legacyAllocations.length > 0 && legacyAllocations.every((allocation) => allocation.invoice_id && (allocation.payment_move_id ?? before.id) === before.id
+      && (read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((row) => row.move_id === before.id && row.reversed)
+      && !(read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((row) => row.move_id === before.id && !row.reversed))
+    && (db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id)
+    && (after.line_ids ?? []).length === 2 && legacySuspense && legacySuspense !== journalForLegacy?.default_account_id
+    && (after.line_ids ?? []).some((line) => line.account_id === journalForLegacy.default_account_id && legacyNet(line) === legacyAmount)
+    && (after.line_ids ?? []).some((line) => line.account_id === legacySuspense && legacyNet(line) === -legacyAmount);
+  const partnerChanged = previousStatement && statement && (previousStatement.partner_id ?? null) !== (statement.partner_id ?? null)
+    && (after.partner_id ?? null) === (statement.partner_id ?? null)
+    && (after.line_ids ?? []).every((line) => (line.partner_id ?? null) === (statement.partner_id ?? null))
+    && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids);
+  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
+    return 'Posted entries cannot be edited; reset them to draft first';
+  }
+  if (changedFields(before, after, ['line_ids'])) {
+    if ((db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id) && !legacyRelease) return 'Posted entries cannot be edited; reset them to draft first';
+    if (ctx?.bankRewriteToken !== bankRewriteToken) {
+      const previous = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+      const next = previous && (db.records['account.bank.statement.line'] ?? []).find((line) => line.id === previous.id);
+      if (!previous || !next || next.bank_move_id !== before.id
+        || (JSON.stringify(previous.allocations ?? []) === JSON.stringify(next.allocations ?? []) && previous.state === next.state
+          && !(partnerChanged && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids)))) {
+        return 'Posted entries cannot be edited; reset them to draft first';
+      }
+    }
+  }
+  if (before.date !== after.date
+    || (before.invoice_date ?? '') !== (after.invoice_date ?? '')
+    || before.journal_id !== after.journal_id
+    || (before.company_id ?? 1) !== (after.company_id ?? 1)
+    || before.name !== after.name
+    || before.state !== after.state
+    || (before.currency_id ?? null) !== (after.currency_id ?? null)
+    || (before.move_type ?? '') !== (after.move_type ?? '')
+    || (before.active !== false) !== (after.active !== false)) {
+    return 'Posted entries cannot be edited; reset them to draft first';
+  }
+  const lock = recordLockDate(db, after, ctx);
+  if (lock && (moveDate(after) <= lock || moveDate(before) <= lock)) {
+    return `The period up to ${lock} is locked`;
+  }
+  const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
+  if (before.inalterable_hash) {
+    return 'Secured entries cannot be modified';
+  }
+  const defaultAccountId = journal?.default_account_id;
+  if (!defaultAccountId) {
+    return 'The bank liquidity line cannot be changed';
+  }
+  const beforeLiq = (before.line_ids ?? []).filter((l) => l.account_id === defaultAccountId);
+  const afterLiq = (after.line_ids ?? []).filter((l) => l.account_id === defaultAccountId);
+  if (beforeLiq.length === 0) {
+    return 'The bank liquidity line cannot be changed';
+  }
+  const statementLine = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const sign = statementLine?.amount > 0 ? 1 : -1;
+  const originalLiquidity = beforeLiq.filter((line) => sign * (Number(line.debit || 0) - Number(line.credit || 0)) > 0);
+  if (originalLiquidity.length !== 1) return 'The bank liquidity line cannot be changed';
+  const previousLine = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const releasing = ctx?.bankRewriteToken === bankRewriteToken || (previousLine && statementLine?.state === 'to_check'
+    && !(statementLine.allocations ?? []).length && (previousLine.state === 'reconciled' || (previousLine.allocations ?? []).length));
+  const suspenseId = journal?.suspense_account_id || read(db, 'res.company', after.company_id ?? 1)?.account_journal_suspense_account_id;
+  const restoredAmount = statementLine && statementCompanyAmount(db, statementLine);
+  const restored = releasing && afterLiq.length === 1 && (after.line_ids ?? []).length === 2
+    && (after.line_ids ?? []).some((line) => line.account_id === suspenseId
+      && sign * (Number(line.debit || 0) - Number(line.credit || 0)) === -restoredAmount)
+    && sign * (Number(afterLiq[0].debit || 0) - Number(afterLiq[0].credit || 0)) === restoredAmount;
+  for (const b of originalLiquidity) {
+    const match = afterLiq.find((a) =>
+      Number(b.debit || 0) === Number(a.debit || 0)
+      && Number(b.credit || 0) === Number(a.credit || 0)
+      && (b.currency_id ?? null) === (a.currency_id ?? null)
+      && Number(b.amount_currency || 0) === Number(a.amount_currency || 0)
+    );
+    if (!match && !restored) {
+      return 'The bank liquidity line cannot be changed';
+    }
+  }
+  const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
+  if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) {
+    return 'Debits and credits cannot be negative';
+  }
+  if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) {
+    return 'A posted entry needs balanced journal items';
+  }
+  return null;
+}
+
+/** A posted statement entry whose only change is an allowed suspense rewrite (BANK-3/BANK-4). */
+export function bankStatementRewriteAllowed(db, before, after, ctx = null) {
+  return isBankStatementMove(db, after.id) && !bankStatementMoveRewriteError(db, before, after, ctx);
+}
+
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
-function postedMoveRule(db, before, after) {
+function postedMoveRule(db, before, after, ctx = null) {
   if (before && changedFields(before, after, ['tax_closing_lines'])) return 'Tax closing line links cannot be changed';
   if (before?.state === 'posted' && after.state === 'posted') {
     const pinningJournal = before.journal_id == null && !before.inalterable_hash && after.inalterable_hash && after.journal_id === resolveDocumentJournal(db, before)?.id;
-    if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    if (isBankStatementMove(db, after.id)) {
+      const bankErr = bankStatementMoveRewriteError(db, before, after, ctx);
+      if (bankErr) return bankErr;
+    } else if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
     if (before.reversed_entry_id && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
     if ((before.is_storno || after.is_storno) && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
   }
@@ -574,7 +702,7 @@ function unapplicationError(db, stored, after, before) {
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
     const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
-    if (glOnly) continue;
+    if (glOnly || isBankStatementMove(db, moveId)) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
     if (!payment || !prior || !Number.isFinite(change) || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
@@ -637,7 +765,8 @@ export function moveInvariant(db, after, before, stored = null) {
       const { reversed: flag, unapplied, reversal_date: unappliedOn, ...kept } = current;
       const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
       const glEntry = hasMatchingPartialLink(db, after, current, { reversed: true });
-      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry)
+      const bankEntry = isBankStatementMove(db, p.move_id);
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry && !bankEntry)
         || !unappliedOn || (p.date && unappliedOn < p.date);
     }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
@@ -836,8 +965,15 @@ export function paymentInvariant(db, after) {
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
-  if (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
-    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > companyStep + 1e-9)) return 'The journal entry must book this payment amount and direction';
+  const releasedLine = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === entry.id && line.state === 'to_check' && !line.move_id && !(line.allocations ?? []).length && !line.payment_id && !(line.payment_ids ?? []).length);
+  const suspense = read(db, 'account.journal', entry.journal_id)?.suspense_account_id || read(db, 'res.company', entry.company_id ?? 1)?.account_journal_suspense_account_id;
+  const releasedLegacy = releasedLine && invoice && (invoice.payments ?? []).some((row) => row.move_id === entry.id && row.reversed && row.unapplied)
+    && !(invoice.payments ?? []).some((row) => row.move_id === entry.id && !row.reversed)
+    && (entry.line_ids ?? []).length === 2 && suspense && suspense !== bank
+    && (entry.line_ids ?? []).some((line) => line.account_id === bank && (inbound ? 1 : -1) * (Number(line.debit || 0) - Number(line.credit || 0)) === expected)
+    && (entry.line_ids ?? []).some((line) => line.account_id === suspense && (inbound ? -1 : 1) * (Number(line.debit || 0) - Number(line.credit || 0)) === expected);
+  if (!releasedLegacy && (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
+    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > companyStep + 1e-9))) return 'The journal entry must book this payment amount and direction';
   }
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;
@@ -859,7 +995,7 @@ function securedMoveRule(before, after) {
 }
 
 export function moveGuard(db, before, after, ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after, ctx) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */

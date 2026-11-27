@@ -477,7 +477,7 @@ function companyGuard(db, before, r, ctx) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
   }
-  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
+  for (const field of ['account_journal_suspense_account_id', 'deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
     if (!r[field]) continue;
     const account = record(db, 'account.account', r[field]);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
@@ -763,6 +763,7 @@ export const companyModels = {
       account_opening_move_id: { type: 'many2one', relation: 'account.move', label: 'Opening Entry', readonly: true },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
+      account_journal_suspense_account_id: { type: 'many2one', relation: 'account.account', label: 'Bank Suspense Account' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
       use_invoice_terms: { type: 'boolean', label: 'Default Terms & Conditions' },
       invoice_terms: { type: 'text', label: 'Terms and Conditions' },

@@ -1,7 +1,7 @@
 // Bank statements (account.bank.statement) tracking opening, ending, and computed balances across statement lines.
 import { create, read, search, unlink, write } from '../orm.js';
 import { isLiquidityJournal, paymentJournal, statementCompanyAmount } from './ledger.js';
-import { bookToAccount } from './bank.js';
+import { bookToAccount, untouchedBankEntry } from './bank.js';
 import { monthFilters, today } from './common.js';
 import { currentCompany } from './company.js';
 import { t } from '../i18n.js';
@@ -13,8 +13,16 @@ const statementLinesCache = new WeakMap();
 export const statementLineOrder = (a, b) =>
   String(a.date ?? '').localeCompare(String(b.date ?? '')) || (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0);
 
-/** Whether a statement line is reconciled or booked to a bank/settlement entry. */
-export const isStatementLineLocked = (line) => Boolean(line && (line.state === 'reconciled' || line.bank_move_id));
+/** Whether a statement line is reconciled or matched/booked beyond its initial suspense entry. */
+export const isStatementLineLocked = (line) => Boolean(
+  line && (
+    line.state === 'reconciled'
+    || line.move_id
+    || (line.allocations ?? []).length > 0
+    || line.payment_move_id
+    || line.writeoff_move_id
+  ),
+);
 
 export function linesByStatement(db) {
   if (!db) return new Map();
@@ -336,6 +344,12 @@ function statementProtectDelete(db, statement, staged = db) {
   if (statement.state === 'closed') return 'A closed statement cannot be deleted';
   if (statementHasReconciledLines(db, statement.id) || statementHasReconciledLines(staged, statement.id)) {
     return 'Cannot delete a statement with reconciled lines';
+  }
+  const hasBooked = (source) => (source?.records?.['account.bank.statement.line'] ?? []).some(
+    (l) => l.statement_id === statement.id && l.bank_move_id && !untouchedBankEntry(source, l),
+  );
+  if (hasBooked(db) || hasBooked(staged)) {
+    return 'Cannot delete a statement with booked lines';
   }
   return null;
 }

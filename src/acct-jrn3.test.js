@@ -190,7 +190,8 @@ test('JRN-3: form smart button opens the journal items and list optional/group-g
   assert.equal(def.fields.company_id.multiCompanyOnly, true);
   assert.equal(def.fields.company_id.optional, 'hide');
   // jcf1 adds the optional journal currency column; JRN-1/JRN-2 declares journal_group_id on account.journal
-  assert.equal(Object.hasOwn(def.fields, 'currency_id'), true);
+  assert.equal(def.fields.currency_id.type, 'many2one');
+  assert.equal(def.fields.currency_id.relation, 'res.currency');
   assert.equal(def.fields.currency_id.optional, 'hide');
   assert.equal(Object.hasOwn(def.fields, 'journal_group_id'), true);
 

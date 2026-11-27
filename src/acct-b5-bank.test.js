@@ -105,7 +105,7 @@ test('BANK-7: a statement line on a cash journal can be created, matched to an i
 
   const afterLine = read(db, 'account.bank.statement.line', lineRes.id);
   assert.equal(afterLine.state, 'to_check');
-  assert.equal(afterLine.open_amount, null);
+  assert.equal(afterLine.open_amount, 150);
   assert.deepEqual(afterLine.allocations, []);
 
   // Invoice residual is restored

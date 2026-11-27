@@ -1,9 +1,9 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
 import { journalSequenceName } from './journal-sequence.js';
-import { create, read, search } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { amounts, appliedCashRounding, companyRoundingMethod, invoiceTaxAmount, nextName, shiftMonth, today, addDays, total as moveTotal, validDate } from './common.js';
-import { companyCurrency, rateAt, toCompany } from './currency.js';
+import { companyCurrency, conversionRate, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxGroups, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, isCurrencyZero, round, roundCurrency } from '../money.js';
 import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
@@ -21,6 +21,19 @@ export { STOCK_CHART_ROLES } from './stock-accounts.js';
 /** Whether `account` belongs to the income or expense account type family. */
 export const isIncomeOrExpenseAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_depreciation', 'expense_other'].includes(account?.account_type);
 export const analyticEligibleAccount = isIncomeOrExpenseAccount;
+
+export function resolveEntryAnalytics(db, move, lines, { systemGenerated = false } = {}) {
+  const resolved = lines.map((line) => {
+    let distribution = line.analytic_distribution ?? (line.analytic_account_id != null ? { [line.analytic_account_id]: 100 } : null);
+    if (distribution == null && !systemGenerated && analyticEligibleAccount(read(db, 'account.account', line.account_id))) {
+      distribution = findAnalyticDistribution(db, { partner_id: line.partner_id ?? move.partner_id, product_id: line.product_id, account_id: line.account_id, company_id: move.company_id ?? 1 });
+    }
+    return distribution == null ? line : { ...line, analytic_distribution: normalizeDistribution(distribution, db) };
+  });
+  if (analyticPostingHooks?.checkMandatoryPlans) analyticPostingHooks.checkMandatoryPlans(db, { ...move, line_ids: resolved }, { systemGenerated });
+  else if (search(db, 'account.analytic.plan').length) throw new Error('Analytic posting support is not loaded');
+  return resolved;
+}
 /** Whether journal items on `account` participate in reconciliation (AR, AP, or `reconcile` flag). */
 export const isReconcilableAccount = (account) => Boolean(account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type));
 let analyticPostingHooks = null;
@@ -849,7 +862,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ref,
     ...(system_generated ? { system_generated: true } : {}),
   };
-  const line_ids = lines.map((l) => {
+  const line_ids = resolveEntryAnalytics(db, moveContext, lines.map((l) => {
     let accId = null;
     if (l.account_id) accId = l.account_id;
     else if (typeof l.account === 'number') accId = l.account;
@@ -872,27 +885,11 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
     const currencyFields = accountCurrencyFields(db, acc, l, net, company, date);
     // Callers pass an explicit allocation; business entries receive applicable defaults from distribution models.
-    let distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
-    if (distribution == null && !system_generated && analyticEligibleAccount(acc)) {
-      const defaultDist = findAnalyticDistribution(db, {
-        partner_id: l.partner_id ?? moveContext.partner_id,
-        product_id: l.product_id,
-        account_id: accId,
-        company_id: company ?? 1,
-      });
-      if (defaultDist && Object.keys(defaultDist).length) {
-        distribution = defaultDist;
-      }
-    }
+    const distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
     return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...currencyFields, ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_ids?.length ? { tax_ids: [...l.tax_ids] } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}), ...(l.use_in_tax_closing != null ? { use_in_tax_closing: Boolean(l.use_in_tax_closing) } : {}) };
-  });
+  }), { systemGenerated: system_generated });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
-  if (analyticPostingHooks?.checkMandatoryPlans) {
-    analyticPostingHooks.checkMandatoryPlans(db, { ...moveContext, line_ids }, { systemGenerated: system_generated });
-  } else if (search(db, 'account.analytic.plan').length) {
-    throw new Error('Analytic posting support is not loaded');
-  }
   const isDraft = state === 'draft';
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;
@@ -958,14 +955,45 @@ export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
   return { id: journal.id, code: journal.code, accountId: id, account_id: id, account: account.code };
 }
 
-/** Resolve the suspense account configured on the statement's journal. */
+/** Resolve or create the bank suspense account for the company. */
 export function ensureBankSuspense(db, company, journalId) {
-  const journal = read(db, 'account.journal', journalId ?? paymentJournal(db, null, company).id);
-  const account = read(db, 'account.account', journal?.suspense_account_id);
-  if (!account) throw new Error(`Configure the suspense account on journal ${journal?.name ?? journalId ?? '(not selected)'}`);
-  if (journal?.company_id && journal.company_id !== company) throw new Error('Statement journal belongs to another company');
-  if (account.active === false || (account.company_id && account.company_id !== company)) throw new Error('The suspense account must be active and belong to the statement company');
-  return { db, id: account.id };
+  const compId = company ?? 1;
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  if (journal?.company_id && journal.company_id !== compId) throw new Error('The bank journal belongs to another company or does not exist');
+  if (journal?.suspense_account_id && journal.suspense_account_id === journal.default_account_id) {
+    throw new Error('Configure a bank suspense account on the journal or the company');
+  }
+
+  if (journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id) {
+    const account = read(db, 'account.account', journal.suspense_account_id);
+    if (!account || account.active === false || (account.company_id && account.company_id !== compId)) {
+      throw new Error('The suspense account must be active and belong to the statement company');
+    }
+    return { db, id: account.id };
+  }
+
+  const comp = read(db, 'res.company', compId);
+  const compSuspenseId = comp?.account_journal_suspense_account_id;
+  const compAccount = compSuspenseId ? read(db, 'account.account', compSuspenseId) : null;
+  const hasValidCompAccount = compAccount && compAccount.active !== false && (!compAccount.company_id || compAccount.company_id === compId) && compAccount.id !== journal?.default_account_id;
+
+  if (hasValidCompAccount) {
+    return { db, id: compAccount.id };
+  }
+
+  // Odoo always has a suspense account; create one with the first free code when none is configured.
+  const taken = new Set((db.records['account.account'] ?? []).filter((a) => !a.company_id || a.company_id === compId).map((a) => a.code));
+  let code = 101404;
+  while (taken.has(String(code))) code += 1;
+  const created = create(db, 'account.account', {
+    name: 'Bank Suspense Account',
+    code: String(code),
+    account_type: 'asset_current',
+    company_id: compId,
+    reconcile: true,
+  });
+  const nextDb = write(created.db, 'res.company', compId, { account_journal_suspense_account_id: created.id });
+  return { db: nextDb, id: created.id };
 }
 
 /** Resolve a payment method line's override account, else the optional journal/company outstanding account. */
@@ -980,8 +1008,17 @@ export function outstandingAccount(db, journal, company, inbound, methodLine = n
 }
 
 /** Statement amounts use the line's recorded currency or the journal currency; open allocations use company currency. */
-export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount)), { allowUnavailable = false } = {}) {
   const company = line.company_id ?? 1;
+  if (allowUnavailable) {
+    const own = findCompanyCurrencyRecord(db, company);
+    const currencyId = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? own?.id;
+    if (!own || !read(db, 'res.currency', currencyId)) return null;
+    if (currencyId !== own.id) {
+      const baseId = db?.settings?.base_currency_id;
+      if (!baseId || !read(db, 'res.currency', baseId) || conversionRate(db, own.id, currencyId, line.date ?? today(), company) == null) return null;
+    }
+  }
   const currency = line.currency_id ?? read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
@@ -1003,12 +1040,38 @@ export function statementPaymentIds(db, line) {
   return [...new Set([...allocated, ...current].filter(Boolean))];
 }
 
+/** Resolve the suspense account ID from an already booked bank entry, falling back to current journal/company configuration. */
+export function bookedBankSuspenseAccountId(db, line, move = null) {
+  if (!line?.bank_move_id) return null;
+  const bankEntry = move ?? read(db, 'account.move', line.bank_move_id);
+  const company = line.company_id ?? 1;
+  const journalId = line.journal_id ?? bankEntry?.journal_id ?? paymentJournal(db, null, company).id;
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  const liquidity = journal?.default_account_id ?? paymentJournal(db, journalId, company)?.accountId;
+  const lines = bankEntry?.line_ids ?? [];
+  const nonLiquidity = lines.filter((l) => l.account_id !== liquidity);
+  if (nonLiquidity.length === 1) {
+    const acc = read(db, 'account.account', nonLiquidity[0].account_id);
+    if (!acc || !['asset_receivable', 'liability_payable'].includes(acc.account_type)) {
+      return nonLiquidity[0].account_id;
+    }
+  }
+  const configured = journal?.suspense_account_id && journal.suspense_account_id !== liquidity
+    ? journal.suspense_account_id
+    : read(db, 'res.company', company)?.account_journal_suspense_account_id;
+  if (configured && lines.some((l) => l.account_id === configured)) return configured;
+  const candidate = nonLiquidity.find((l) => {
+    const acc = read(db, 'account.account', l.account_id);
+    return acc && !['asset_receivable', 'liability_payable'].includes(acc.account_type);
+  });
+  if (candidate) return candidate.account_id;
+  return configured ?? nonLiquidity[0]?.account_id ?? null;
+}
+
 /** Whether a statement line's bank_move_id was booked through its journal's suspense account (not a direct-payment bank entry). */
 export function isBookedToSuspense(db, line) {
   if (!line?.bank_move_id) return false;
-  const company = line.company_id ?? 1;
-  const journalId = line.journal_id ?? paymentJournal(db, null, company).id;
-  const suspenseId = read(db, 'account.journal', journalId)?.suspense_account_id;
+  const suspenseId = bookedBankSuspenseAccountId(db, line);
   if (!suspenseId) return false;
   const bankEntry = read(db, 'account.move', line.bank_move_id);
   return (bankEntry?.line_ids ?? []).some((l) => l.account_id === suspenseId);
@@ -1020,6 +1083,12 @@ export function bookedStatementAmount(db, line) {
   const company = line.company_id ?? 1;
   const account = paymentJournal(db, line.journal_id, company).accountId;
   const sign = line.amount > 0 ? 1 : -1;
+  const bankEntry = read(db, 'account.move', line.bank_move_id);
+  const liquidityLines = (bankEntry?.line_ids ?? []).filter((item) => item.account_id === account);
+  const signedLiquidity = liquidityLines.map((item) => sign * ((Number(item.debit) || 0) - (Number(item.credit) || 0)));
+  if (signedLiquidity.some((amount) => amount < 0)) {
+    return roundCurrency(signedLiquidity.filter((amount) => amount > 0).reduce((sum, amount) => sum + amount, 0), companyCurrencyRecord(db, company));
+  }
   const directMoves = !isBookedToSuspense(db, line) && line.state === 'reconciled' && (line.allocations ?? []).every((a) => !a.invoice_id && !a.reconcile_model_id)
     ? statementPaymentIds(db, line)
         .map((id) => read(db, 'account.payment', id))
@@ -1112,7 +1181,10 @@ function reconcileIndex(db) {
       }
     }
     if (statement.open_amount === 0) {
-      const suspense = read(db, 'account.journal', statement.journal_id)?.suspense_account_id;
+      const journal = read(db, 'account.journal', statement.journal_id);
+      const suspense = journal?.suspense_account_id && journal.suspense_account_id !== journal.default_account_id
+        ? journal.suspense_account_id
+        : read(db, 'res.company', statement.company_id ?? journal?.company_id ?? 1)?.account_journal_suspense_account_id;
       for (const moveId of new Set([statement.bank_move_id, ...(statement.allocations ?? []).map((a) => a.payment_move_id)].filter(Boolean))) push(settledSuspense, moveId, suspense);
     }
   }
