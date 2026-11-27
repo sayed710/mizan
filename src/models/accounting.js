@@ -2877,12 +2877,14 @@ export function markAsReviewed(db, moveIds) {
     ? write(next, 'account.move', id, { to_check: false }) : next, db);
 }
 
+const notSecuredFilter = { id: 'not_secured', label: 'Not Secured', fn: (r) => !r.inalterable_hash && r.state === 'posted' };
+
 export const journalEntriesView = {
   defaults: { move_type: 'entry' },
   list: ['accounting_date', 'display_name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
   optionalList: ['invoice_date', 'activities'],
   listLabels: { display_name: 'Number', accounting_date: 'Date', invoice_date: 'Invoice Date', amount_total_signed: 'Total', state: 'Status' },
-  searchFields: ['name', 'display_name', 'ref', 'partner_id', 'journal_id'],
+  searchFields: ['name', 'display_name', 'ref', 'partner_id', 'journal_id', 'amount_total'],
   listActions: [
     {
       label: 'Reverse Entries',
@@ -2903,6 +2905,7 @@ export const journalEntriesView = {
       { id: 'manual', label: 'Manual', fn: (r) => !((r.auto_post && r.auto_post !== 'no') || r.auto_post_origin_id) },
       { id: 'recurring', label: 'Recurring', fn: (r) => Boolean(RECURRENCE_MONTHS[r.auto_post] || r.auto_post_origin_id) },
     ],
+    [notSecuredFilter],
     [{ id: 'to_check', label: 'To Check', fn: (r) => r.to_check === true }],
     [
       { id: 'sales', label: 'Sales', fn: (r, db) => moveJournalType(db, r) === 'sale' },
@@ -2915,7 +2918,7 @@ export const journalEntriesView = {
     monthFilters('accounting_date', 'Date', (r) => r.date ?? r.invoice_date),
     monthFilters('invoice_date', 'Invoice Date'),
   ],
-  groupBys: ['partner_id', 'journal_id', 'state', 'accounting_date', 'invoice_date'],
+  groupBys: ['partner_id', 'journal_id', 'state', 'accounting_date', 'invoice_date', 'company_id'],
 };
 
 const INVOICE_LIST_FIELDS = {
@@ -2956,7 +2959,7 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
     { id: 'cancel', label: 'Cancelled', fn: (r) => r.state === 'cancel' },
   ],
   [
-    { id: 'not_secured', label: 'Not Secured', fn: (r) => !r.inalterable_hash && r.state === 'posted' },
+    notSecuredFilter,
   ],
   ...(!purchases ? [[
     { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
