@@ -35,9 +35,12 @@ export function loanYearFraction(start, end, method, maturity = end) {
     return result;
   }
   if (method === 'A/A AFB') {
+    const [endYear, endMonth, endDay] = dateParts(end);
     let cursor = end; let years = 0;
     while (true) {
-      const [y, m, d] = dateParts(cursor); const previous = `${y - 1}-${String(m).padStart(2, '0')}-${String(Math.min(d, Number(monthEnd(y - 1, m).slice(-2)))).padStart(2, '0')}`;
+      const y = endYear - (years + 1);
+      const last = Number(monthEnd(y, endMonth).slice(-2));
+      const previous = `${y}-${String(endMonth).padStart(2, '0')}-${String(Math.min(endDay, last)).padStart(2, '0')}`;
       if (previous < start) break;
       cursor = previous; years += 1;
     }
@@ -141,30 +144,75 @@ function postingConfig(db, loan) {
   if (modern(loan) && loan.long_term_account_id === loan.short_term_account_id) throw new Error('Loan liability accounts must be different');
 }
 
+function moveLinesMatch(move, expected) {
+  const actual = move?.line_ids ?? [];
+  if (actual.length !== expected.length) return false;
+  const remaining = [...actual];
+  return expected.every((exp) => {
+    const index = remaining.findIndex((item) => item.account_id === exp.account_id
+      && cents(item.debit) === exp.debit
+      && cents(item.credit) === exp.credit
+      && (item.partner_id ?? null) === (exp.partner_id ?? null));
+    if (index < 0) return false;
+    remaining.splice(index, 1);
+    return true;
+  });
+}
+
+function loanMoveIds(loan) {
+  return [...new Set([
+    ...(loan.receipt_move_id ? [loan.receipt_move_id] : []),
+    ...(loan.early_moves ?? []).map((m) => m.move_id).filter(Boolean),
+    ...(loan.line_ids ?? []).flatMap((line) => [
+      ...(line.generated_move_ids ?? []),
+      ...(line.move_id ? [line.move_id] : []),
+    ]),
+  ])];
+}
+
+function hasPostedAfterDate(db, loan, date) {
+  if ((loan.line_ids ?? []).some((line) => line.posted && line.date > date)) return true;
+  return loanMoveIds(loan).some((id) => {
+    const move = read(db, 'account.move', id);
+    return move?.state === 'posted' && (move.date || move.invoice_date) > date;
+  });
+}
+
 function generatedLoanEntriesValid(db, loan) {
   if (!loan.journal_id || !loan.bank_account_id || !loan.long_term_account_id || !loan.short_term_account_id || !loan.expense_account_id) return false;
   if (loan.long_term_account_id === loan.short_term_account_id) return false;
   const company = loan.company_id ?? 1;
   const lines = loan.line_ids ?? [];
   if (!lines.length) return false;
+  const lender = loan.lender_id ?? null;
   return lines.every((line, i) => {
     const ids = line.generated_move_ids ?? [];
     if (loan.skip_until_date && line.date < loan.skip_until_date) return !ids.length && !line.move_id;
+    if (new Set(ids).size !== ids.length) return false;
     const payment = read(db, 'account.move', line.move_id);
     if (!payment || !ids.includes(payment.id) || payment.state !== 'draft' || payment.date !== line.date || payment.journal_id !== loan.journal_id || (payment.company_id ?? 1) !== company) return false;
-    const net = (account) => (payment.line_ids ?? []).filter((item) => item.account_id === account).reduce((sum, item) => sum + cents(item.debit) - cents(item.credit), 0);
     const reclassAmount = cents(line.principal) + cents(line.short_term_theoretical_balance) - (i ? cents(lines[i - 1].short_term_theoretical_balance) : 0);
     const reclass = ids.filter((id) => id !== payment.id).map((id) => read(db, 'account.move', id));
     if (reclass.length !== (reclassAmount ? 1 : 0)) return false;
     if (reclassAmount) {
       const move = reclass[0];
-      const balance = (account) => (move?.line_ids ?? []).filter((item) => item.account_id === account).reduce((sum, item) => sum + cents(item.debit) - cents(item.credit), 0);
-      if (move?.date !== line.date || move.journal_id !== loan.journal_id || (move.company_id ?? 1) !== company || balance(loan.long_term_account_id) !== reclassAmount || balance(loan.short_term_account_id) !== -reclassAmount) return false;
+      const expectedReclass = reclassAmount > 0
+        ? [
+            { account_id: loan.long_term_account_id, debit: reclassAmount, credit: 0, partner_id: null },
+            { account_id: loan.short_term_account_id, debit: 0, credit: reclassAmount, partner_id: null },
+          ]
+        : [
+            { account_id: loan.short_term_account_id, debit: -reclassAmount, credit: 0, partner_id: null },
+            { account_id: loan.long_term_account_id, debit: 0, credit: -reclassAmount, partner_id: null },
+          ];
+      if (!move || move.state !== 'draft' || move.date !== line.date || move.journal_id !== loan.journal_id || (move.company_id ?? 1) !== company || !moveLinesMatch(move, expectedReclass)) return false;
     }
-    return ids.every((id) => read(db, 'account.move', id)?.state === 'draft')
-      && net(loan.short_term_account_id) === cents(line.principal)
-      && net(loan.expense_account_id) === cents(line.interest)
-      && net(loan.bank_account_id) === -cents(line.payment);
+    const expectedPayment = [
+      { account_id: loan.short_term_account_id, debit: cents(line.principal), credit: 0, partner_id: lender },
+      { account_id: loan.expense_account_id, debit: cents(line.interest), credit: 0, partner_id: lender },
+      { account_id: loan.bank_account_id, debit: 0, credit: cents(line.payment), partner_id: lender },
+    ];
+    return moveLinesMatch(payment, expectedPayment);
   });
 }
 
@@ -225,7 +273,8 @@ export function confirmLoan(db, loan) {
   if (loan.state !== 'draft') throw new Error('Only a draft loan can be confirmed');
   postingConfig(db, loan);
   if (modern(loan)) return confirmModernLoan(db, loan);
-  const lines = board(loan);
+  const generatedFromTerms = !loan.line_ids?.length;
+  const lines = loanBalances(generatedFromTerms ? board(loan) : loan.line_ids).map((l) => ({ ...l, posted: false, move_id: null }));
   const { db: booked, id: receiptId } = postEntry(db, {
     journal: loan.journal_id, company: loan.company_id, date: loan.start_date, ref: `Loan received ${loan.name}`,
     lines: [
@@ -310,7 +359,9 @@ export function postDueLines(db, loan, upTo = today()) {
 
 export function closeLoan(db, loan, date) {
   if (loan.state !== 'running') throw new Error('Only a running loan can be closed');
+  if (!modern(loan)) throw new Error('Close Loan is only available for loans with scheduled liability accounts');
   if (!date) throw new Error('Set a closing date');
+  if (hasPostedAfterDate(db, loan, date)) throw new Error('Cannot close a loan before a posted entry');
   let next = db;
   for (const line of loan.line_ids ?? []) {
     if (line.date <= date) continue;
@@ -359,7 +410,7 @@ export const loanModels = {
     label: 'Loans',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
-      lender_id: { type: 'many2one', relation: 'res.partner', label: 'Lender' },
+      lender_id: { type: 'many2one', relation: 'res.partner', label: 'Lender', readonly: (r) => r?.state && r.state !== 'draft' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal', readonly: (r) => r?.state && r.state !== 'draft' },
       bank_account_id: { type: 'many2one', relation: 'account.account', label: 'Bank Account', readonly: (r) => r?.state && r.state !== 'draft' },
       principal_account_id: { type: 'many2one', relation: 'account.account', label: 'Principal Liability Account', readonly: (r) => r?.state && r.state !== 'draft' },
@@ -395,7 +446,12 @@ export const loanModels = {
       },
       outstanding_balance: {
         type: 'monetary', label: 'Outstanding Balance',
-        compute: (r) => cents((Number(r.amount) || 0) - (Number(r.early_repaid) || 0) - (r.line_ids ?? []).filter((l) => l.posted).reduce((s, l) => s + (Number(l.principal) || 0), 0)) / 100 || 0,
+        compute: (r) => {
+          const repaid = (r.line_ids ?? [])
+            .filter((l) => l.posted || (modern(r) && r.skip_until_date && l.date < r.skip_until_date))
+            .reduce((s, l) => s + cents(l.principal), 0);
+          return (cents(r.amount) - cents(r.early_repaid) - repaid) / 100 || 0;
+        },
       },
       receipt_move_id: { type: 'many2one', relation: 'account.move', label: 'Receipt Entry', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
@@ -411,7 +467,10 @@ export const loanModels = {
     },
     defaults: () => ({ start_date: today(), duration: 12, interest_rate: 5, method: 'annuity', state: 'draft', line_ids: [], company_id: 1 }),
     guard: (db, before, r) => {
-      if (modern(r) && r.state === 'closed' && (!before || ['draft', 'cancelled', 'cancel'].includes(before.state))) return 'Only a running loan can be closed';
+      if (r.state === 'closed' && (!before || ['draft', 'cancelled', 'cancel'].includes(before.state))) return 'Only a running loan can be closed';
+      if (!modern(r) && r.state === 'closed' && (!before || before.state !== 'closed') && (r.line_ids ?? []).some((l) => !l.posted)) {
+        return 'Legacy loans cannot be closed with unpaid instalments';
+      }
       if (modern(r) && r.state === 'running' && before && ['cancelled', 'cancel'].includes(before.state)) return 'Only a draft loan can be confirmed';
       if (before?.state === 'closed' && modern(before) && (r.state !== 'closed' || r.close_date !== before.close_date)) {
         return 'A closed loan cannot be reopened';
@@ -421,8 +480,8 @@ export const loanModels = {
       }
       if (before && ['running', 'closed'].includes(before.state) && modern(before)) {
         if (before.state === 'running' && !['running', 'closed'].includes(r.state)) return 'Cannot change a running loan schedule or accounts';
-        for (const field of ['journal_id', 'bank_account_id', 'long_term_account_id', 'short_term_account_id', 'expense_account_id', 'amount', 'duration', 'start_date', 'skip_until_date']) {
-          if (r[field] !== before[field]) return 'Cannot change a running loan schedule or accounts';
+        for (const field of ['lender_id', 'journal_id', 'bank_account_id', 'long_term_account_id', 'short_term_account_id', 'expense_account_id', 'amount', 'duration', 'start_date', 'skip_until_date', 'interest_rate', 'method', 'interest']) {
+          if ((r[field] ?? null) !== (before[field] ?? null)) return 'Cannot change a running loan schedule or accounts';
         }
         const oldLines = before.line_ids ?? []; const newLines = r.line_ids ?? [];
         if (oldLines.length !== newLines.length || oldLines.some((line, i) => {
@@ -432,6 +491,7 @@ export const loanModels = {
             || (!oldPosted && newPosted && !(newRest.generated_move_ids ?? []).every((id) => read(db, 'account.move', id)?.state === 'posted'));
         })) return 'Cannot change a running loan schedule or accounts';
         if (before.state === 'running' && r.state === 'closed') {
+          if (r.close_date && hasPostedAfterDate(db, r, r.close_date)) return 'Cannot close a loan before a posted entry';
           const allPosted = newLines.every((line) => line.posted || (r.skip_until_date && line.date < r.skip_until_date));
           if (!allPosted) {
             if (!r.close_date) return 'Set a closing date';
@@ -464,7 +524,7 @@ export const loanModels = {
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmLoan(db, r) }) },
         { label: 'Compute Board', when: (r) => r.state === 'draft', run: (db, r) => ({ db: computeBoard(db, r) }) },
         { label: 'Compute', when: (r) => r.state === 'draft', wizard: (db, r) => computeWizard(r), run: (db, r, values) => ({ db: computeLoan(db, r, values) }) },
-        { label: 'Close Loan', when: (r) => r.state === 'running', wizard: () => ({ title: 'Close Loan', fields: [{ name: 'date', type: 'date', label: 'Closing Date', default: today(), required: true }] }), run: (db, r, values) => ({ db: closeLoan(db, r, values.date) }) },
+        { label: 'Close Loan', when: (r) => r.state === 'running' && modern(r), wizard: () => ({ title: 'Close Loan', fields: [{ name: 'date', type: 'date', label: 'Closing Date', default: today(), required: true }] }), run: (db, r, values) => ({ db: closeLoan(db, r, values.date) }) },
         { label: 'Post Due Lines', primary: true, when: (r) => r.state === 'running', run: (db, r) => ({ db: postDueLines(db, read(db, 'account.loan', r.id)) }) },
         {
           label: 'Early Repayment', when: (r) => r.state === 'running' && !modern(r), run: (db, r) => {

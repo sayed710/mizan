@@ -1,13 +1,18 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import { setupDom, find } from './test-support/dom.js';
+import { tableToRows } from './csv.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { accountId } from './models/ledger.js';
-import { confirmLoan, computeLoan, closeLoan, loanModels, loanSchedule, postDueLines } from './models/loans.js';
+import { accountId, postEntry } from './models/ledger.js';
+import { confirmLoan, computeLoan, closeLoan, earlyRepayment, loanModels, loanSchedule, loanYearFraction, postDueLines } from './models/loans.js';
 import { runScheduledJobs } from './models/scheduler.js';
 import { migrate } from './migrations.js';
 import { diffDb, applyDiff } from './sync.js';
+
+register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 const methods = {
   '30A/360': [11.6, 8.53, 4], '30U/360': [11.6, 8, 4], '30E/360': [11.6, 8.27, 4],
@@ -182,6 +187,9 @@ test('loan2 labels and messages have Arabic translations', async () => {
       'Cannot change a running loan schedule or accounts', 'A closed loan cannot be reopened',
       'Future draft loan entries must be cancelled when closing', 'Loan schedule differs from the loan totals',
       'Generated Entries', 'Loan liability accounts must be different', 'Generated loan entries do not match the schedule',
+      'Close Loan is only available for loans with scheduled liability accounts',
+      'Legacy loans cannot be closed with unpaid instalments',
+      'Cannot close a loan before a posted entry',
     ]) {
       assert.notEqual(tAr(label), label, `${label} must translate to Arabic`);
     }
@@ -189,4 +197,222 @@ test('loan2 labels and messages have Arabic translations', async () => {
     if (prevStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = prevStorage;
   }
+});
+
+function legacyLoan(db = seed(), overrides = {}) {
+  return create(db, 'account.loan', {
+    name: 'Legacy loan', amount: 1200, duration: 12, interest_rate: 6, method: 'linear', start_date: '2025-01-01',
+    journal_id: search(db, 'account.journal').find((j) => j.code === 'BNK1').id,
+    bank_account_id: accountId(db, '101401'),
+    principal_account_id: accountId(db, '260000'),
+    interest_account_id: accountId(db, '690400'),
+    ...overrides,
+  });
+}
+
+test('Finding 2: legacy loans cannot use Close Loan or close with unpaid instalments', () => {
+  const { db, id } = legacyLoan();
+  const confirmed = confirmLoan(db, read(db, 'account.loan', id));
+  const running = read(confirmed, 'account.loan', id);
+  const closeBtn = loanModels['account.loan'].form.buttons.find((b) => b.label === 'Close Loan');
+  assert.equal(closeBtn.when(running), false);
+  assert.throws(() => closeLoan(confirmed, running, '2025-03-01'), /scheduled liability accounts/);
+  assert.throws(() => write(confirmed, 'account.loan', id, { state: 'closed' }), /unpaid instalments/);
+  const settled = earlyRepayment(confirmed, running, { date: '2025-02-01', amount: running.outstanding_balance });
+  assert.equal(read(settled, 'account.loan', id).state, 'closed');
+});
+
+test('Finding 3: running and closed modern loans lock lender, interest rate, method and total interest', () => {
+  const { db, id } = modernLoan();
+  const withLender = write(db, 'account.loan', id, { lender_id: 1 });
+  const confirmed = confirmLoan(withLender, read(withLender, 'account.loan', id));
+  const running = read(confirmed, 'account.loan', id);
+  assert.equal(loanModels['account.loan'].fields.lender_id.readonly({ state: 'draft' }), false);
+  assert.equal(loanModels['account.loan'].fields.lender_id.readonly(running), true);
+  assert.throws(() => write(confirmed, 'account.loan', id, { lender_id: 2 }), /running loan/);
+  assert.throws(() => write(confirmed, 'account.loan', id, { interest_rate: 9 }), /running loan/);
+  assert.throws(() => write(confirmed, 'account.loan', id, { method: 'annuity' }), /running loan/);
+  assert.throws(() => write(confirmed, 'account.loan', id, { interest: 99 }), /running loan/);
+  const closed = closeLoan(confirmed, running, '2040-01-15');
+  assert.throws(() => write(closed, 'account.loan', id, { lender_id: 2 }), /running loan/);
+  assert.throws(() => write(closed, 'account.loan', id, { interest_rate: 9 }), /running loan/);
+  assert.throws(() => write(closed, 'account.loan', id, { method: 'annuity' }), /running loan/);
+  assert.throws(() => write(closed, 'account.loan', id, { interest: 99 }), /running loan/);
+});
+
+test('Finding 4: closeLoan and guard reject closing before a posted instalment or move', () => {
+  const { db, id } = modernLoan();
+  const confirmed = confirmLoan(db, read(db, 'account.loan', id));
+  const posted = postDueLines(confirmed, read(confirmed, 'account.loan', id), '2040-03-31');
+  const running = read(posted, 'account.loan', id);
+  assert.throws(() => closeLoan(posted, running, '2040-03-01'), /before a posted entry/);
+  // Direct write with future drafts manually cancelled also fails when a posted move exists after close_date.
+  let cancelledFuture = posted;
+  for (const line of running.line_ids.filter((l) => l.date > '2040-03-01')) {
+    for (const moveId of line.generated_move_ids) {
+      const m = read(cancelledFuture, 'account.move', moveId);
+      if (m?.state === 'draft') cancelledFuture = write(cancelledFuture, 'account.move', moveId, { state: 'cancel', auto_post: 'no' });
+    }
+  }
+  assert.throws(() => write(cancelledFuture, 'account.loan', id, { state: 'closed', close_date: '2040-03-01' }), /before a posted entry/);
+});
+
+test('Finding 5: skipped instalments reduce outstanding_balance and LoansAnalysis balance to zero at closure', async () => {
+  let db = seed();
+  const short = create(db, 'account.account', { code: '260102', name: 'Current loan liability 2', account_type: 'liability_current', company_id: 1 });
+  db = short.db;
+  const created = create(db, 'account.loan', {
+    name: 'Midlife loan', lender_id: 1, amount: 2400, duration: 24, interest_rate: 12, method: 'linear',
+    start_date: '2024-01-01', skip_until_date: '2024-04-01',
+    journal_id: search(db, 'account.journal').find((j) => j.code === 'BNK1').id,
+    bank_account_id: accountId(db, '101401'),
+    long_term_account_id: accountId(db, '260000'),
+    short_term_account_id: short.id,
+    expense_account_id: accountId(db, '690400'),
+  });
+  db = created.db;
+  const confirmed = confirmLoan(db, read(db, 'account.loan', created.id));
+  const atStart = read(confirmed, 'account.loan', created.id);
+  const skippedPrincipal = atStart.line_ids.slice(0, 2).reduce((s, l) => s + l.principal, 0);
+  assert.equal(atStart.outstanding_balance, 2400 - skippedPrincipal);
+
+  const closedDb = postDueLines(confirmed, atStart, '2026-12-31');
+  const closedLoan = read(closedDb, 'account.loan', created.id);
+  assert.equal(closedLoan.state, 'closed');
+  assert.equal(closedLoan.outstanding_balance, 0);
+
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+  await React.act(async () => store.commit(closedDb));
+  const { LoansAnalysis } = await import('./views/LoansAnalysis.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(LoansAnalysis)));
+    const rows = tableToRows(find(host, (n) => n.tagName === 'TABLE'));
+    const row = rows.find((r) => r[0] === 'Midlife loan');
+    assert.ok(row, 'Midlife loan appears in LoansAnalysis');
+    assert.equal(row[2], '$2,400.00');
+    assert.equal(row[3], '$2,400.00');
+    assert.equal(row[4], `$${closedLoan.total_interest.toFixed(2)}`);
+    assert.equal(row[5], '$0.00');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('Finding 6: loanYearFraction A/A AFB preserves Feb-29 anniversaries across multiple years', () => {
+  assert.equal(loanYearFraction('2020-02-29', '2024-02-29', 'A/A AFB'), 4);
+  assert.equal(loanYearFraction('2020-02-29', '2028-02-29', 'A/A AFB'), 8);
+  assert.equal(loanYearFraction('2020-02-29', '2021-02-28', 'A/A AFB'), 365 / 366);
+  assert.equal(loanYearFraction('2020-02-29', '2024-05-01', 'A/A AFB'), 4 + 62 / 366);
+});
+
+test('Finding 7: confirmation guard rejects generated moves with extra balanced accounting lines', () => {
+  const { db, id } = modernLoan();
+  const computed = computeLoan(db, read(db, 'account.loan', id), {
+    loan_amount: 200, loan_term: 2, interest_rate: 0, start_date: '2040-01-01',
+    first_payment_date: '2040-02-29', payment_end_of_month: 'end_of_month', compounding_method: '30A/360',
+  });
+  const confirmed = confirmLoan(computed, read(computed, 'account.loan', id));
+  const confirmedLoan = read(confirmed, 'account.loan', id);
+  const firstPaymentMoveId = confirmedLoan.line_ids[0].move_id;
+  const firstPaymentMove = read(confirmed, 'account.move', firstPaymentMoveId);
+  const extraDebitAcc = accountId(confirmed, '600000');
+  const extraCreditAcc = accountId(confirmed, '400000');
+  const tamperedPayment = postEntry(db, {
+    journal: confirmedLoan.journal_id, company: confirmedLoan.company_id, date: firstPaymentMove.date, state: 'draft',
+    lines: [
+      ...firstPaymentMove.line_ids.map((l) => ({ account_id: l.account_id, debit: l.debit, credit: l.credit })),
+      { account_id: extraDebitAcc, debit: 50 },
+      { account_id: extraCreditAcc, credit: 50 },
+    ],
+  });
+  const line0 = { ...confirmedLoan.line_ids[0], move_id: tamperedPayment.id, generated_move_ids: [
+    ...confirmedLoan.line_ids[0].generated_move_ids.filter((mId) => mId !== firstPaymentMoveId),
+    tamperedPayment.id,
+  ] };
+  const seededMoves = confirmed.records['account.move'].filter((m) => m.id !== firstPaymentMoveId);
+  const prepDb = { ...tamperedPayment.db, records: { ...tamperedPayment.db.records, 'account.move': [...seededMoves, read(tamperedPayment.db, 'account.move', tamperedPayment.id)] } };
+  assert.throws(() => write(prepDb, 'account.loan', id, {
+    state: 'running',
+    line_ids: [line0, confirmedLoan.line_ids[1]],
+  }), /Generated loan entries do not match the schedule/);
+
+  const reclassId = confirmedLoan.line_ids[0].generated_move_ids.find((mId) => mId !== firstPaymentMoveId);
+  const reclassMove = read(confirmed, 'account.move', reclassId);
+  const tamperedReclass = postEntry(db, {
+    journal: confirmedLoan.journal_id, company: confirmedLoan.company_id, date: reclassMove.date, state: 'draft',
+    lines: [
+      ...reclassMove.line_ids.map((l) => ({ account_id: l.account_id, debit: l.debit, credit: l.credit })),
+      { account_id: extraDebitAcc, debit: 50 },
+      { account_id: extraCreditAcc, credit: 50 },
+    ],
+  });
+  const line0Reclass = { ...confirmedLoan.line_ids[0], generated_move_ids: [tamperedReclass.id, firstPaymentMoveId] };
+  const prepReclassDb = { ...tamperedReclass.db, records: { ...tamperedReclass.db.records, 'account.move': [...confirmed.records['account.move'].filter((m) => m.id !== reclassId), read(tamperedReclass.db, 'account.move', tamperedReclass.id)] } };
+  assert.throws(() => write(prepReclassDb, 'account.loan', id, {
+    state: 'running',
+    line_ids: [line0Reclass, confirmedLoan.line_ids[1]],
+  }), /Generated loan entries do not match the schedule/);
+});
+
+test('Finding 8: migration 85 backfills missing interest totals without overwriting existing totals', () => {
+  const { db, id } = legacyLoan();
+  const legacy = {
+    ...db,
+    schema_version: 84,
+    records: {
+      ...db.records,
+      'account.loan': [
+        {
+          ...read(db, 'account.loan', id),
+          state: 'running',
+          line_ids: [
+            { date: '2025-02-28', principal: 600, interest: 6, payment: 606, outstanding: 600, posted: false, move_id: null },
+            { date: '2025-03-31', principal: 600, interest: 3, payment: 603, outstanding: 0, posted: false, move_id: null },
+          ],
+          duration: 2,
+        },
+        {
+          ...read(db, 'account.loan', id),
+          id: id + 1,
+          interest: 12,
+          state: 'running',
+          line_ids: [
+            { date: '2025-02-28', principal: 600, interest: 6, payment: 606, outstanding: 600, posted: false, move_id: null },
+            { date: '2025-03-31', principal: 600, interest: 3, payment: 603, outstanding: 0, posted: false, move_id: null },
+          ],
+          duration: 2,
+        },
+      ],
+    },
+  };
+  const migrated = migrate(legacy);
+  const backfilled = migrated.records['account.loan'][0];
+  assert.equal(backfilled.interest, 9);
+  assert.equal(backfilled.interest_difference, 0);
+  assert.equal(loanModels['account.loan'].form.warning(backfilled), '');
+  assert.equal(migrated.records['account.loan'][1].interest, 12);
+});
+
+test('Finding 9: confirming a legacy loan preserves its Compute wizard schedule', () => {
+  const { db, id } = legacyLoan();
+  const computed = computeLoan(db, read(db, 'account.loan', id), {
+    loan_amount: 1200, loan_term: 3, interest_rate: 12, start_date: '2025-01-15',
+    first_payment_date: '2025-02-15', payment_end_of_month: 'at_anniversary', compounding_method: 'A/365F',
+  });
+  const beforeConfirm = read(computed, 'account.loan', id);
+  const confirmed = confirmLoan(computed, beforeConfirm);
+  const running = read(confirmed, 'account.loan', id);
+  assert.equal(running.state, 'running');
+  assert.ok(running.receipt_move_id);
+  assert.deepEqual(running.line_ids.map((l) => l.date), beforeConfirm.line_ids.map((l) => l.date));
+  assert.deepEqual(running.line_ids.map((l) => l.interest), beforeConfirm.line_ids.map((l) => l.interest));
+  assert.equal(running.interest_difference, 0);
+  assert.equal(loanModels['account.loan'].form.warning(running), '');
 });

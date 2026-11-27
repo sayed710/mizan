@@ -8,7 +8,7 @@ import { useRef, useState } from 'react';
 import { read } from '../orm.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
-import { findCompanyCurrencyRecord } from '../money.js';
+import { cents, findCompanyCurrencyRecord } from '../money.js';
 import { today } from '../models/common.js';
 
 export function LoansAnalysis() {
@@ -30,11 +30,15 @@ export function LoansAnalysis() {
     if (['draft', 'cancel', 'cancelled'].includes(loan.state)) return [];
     if (isModern) {
       if ((loan.start_date ?? '') > date) return [];
-      const moves = (loan.line_ids ?? []).map((line) => posted(line.move_id, loan)).filter(Boolean);
+      const lines = loan.line_ids ?? [];
+      const moves = lines.map((line) => posted(line.move_id, loan)).filter(Boolean);
+      const skipped = lines.filter((line) => loan.skip_until_date && line.date < loan.skip_until_date && line.date <= date);
       const principal = Number(loan.amount) || 0;
-      const repaid = moves.reduce((sum, move) => sum + amount(move, loan.short_term_account_id), 0);
-      const interest = moves.reduce((sum, move) => sum + amount(move, loan.expense_account_id), 0);
-      return [{ loan, principal, repaid, interest, balance: principal - repaid }];
+      const repaid = (moves.reduce((sum, move) => sum + cents(amount(move, loan.short_term_account_id)), 0)
+        + skipped.reduce((sum, line) => sum + cents(line.principal), 0)) / 100;
+      const interest = (moves.reduce((sum, move) => sum + cents(amount(move, loan.expense_account_id)), 0)
+        + skipped.reduce((sum, line) => sum + cents(line.interest), 0)) / 100;
+      return [{ loan, principal, repaid, interest, balance: (cents(principal) - cents(repaid)) / 100 }];
     }
     const receipt = posted(loan.receipt_move_id, loan);
     if (!loan.receipt_move_id) return [{ loan, unavailable: true }];
