@@ -638,6 +638,9 @@ export function completePlanName(db, plan) {
   return names.join(' / ');
 }
 
+export const activeRootPlans = (db) => (db.records['account.analytic.plan'] ?? [])
+  .filter((p) => p.active !== false && !p.parent_id && (!p.company_id || p.company_id === currentCompany(db)));
+
 /** Return the id of the topmost ancestor plan in the hierarchy. */
 export function rootPlanId(db, plan) {
   if (!plan?.id) return null;
@@ -822,6 +825,11 @@ export const analyticPlusModels = {
       ...timesheetModel.fields,
       amount: { type: 'monetary', label: 'Amount' },
       account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic Account' },
+      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan', readonly: true, compute: (r, db) => {
+        const account = (db?.records?.['account.analytic.account'] ?? []).find((a) => a.id === r.account_id);
+        const plan = (db?.records?.['account.analytic.plan'] ?? []).find((p) => p.id === account?.plan_id);
+        return rootPlanId(db, plan);
+      } },
       general_account: { type: 'many2one', relation: 'account.account', label: 'General Account', readonly: (r) => !!r.move_id },
       legacy_general_account: { type: 'char', label: 'General Account Code', readonly: true, hideWhen: (r) => !r.legacy_general_account },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice / Bill' },

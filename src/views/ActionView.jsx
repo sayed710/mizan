@@ -19,6 +19,7 @@ import { Gantt } from './Gantt.jsx';
 import { Wizard } from './Wizard.jsx';
 import { actionRecords } from '../companyView.js';
 import { currentCompany, documentCompany } from '../models/company.js';
+import { activeRootPlans } from '../models/analyticplus.js';
 import { pageWindow } from './paging.js';
 import { statementImportJournalChoices, withSelectedStatementJournal } from '../models/statements.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
@@ -52,7 +53,9 @@ export function ActionView({ leaf, base, params }) {
   const views = viewsOf(model);
   const view = views.includes(params.get('view')) ? params.get('view') : views.includes(leaf.view) ? leaf.view : views[0];
   const relRaw = params.get('rel');
-  const filters = leaf.filters ?? def.filters;
+  const analyticPlanFilters = leaf.key === 'analytic-items' ? activeRootPlans(db)
+    .map((p) => ({ id: `analytic-plan-${p.id}`, label: p.name, fn: (r, data) => def.fields.plan_id.compute(r, data) === p.id })) : [];
+  const filters = analyticPlanFilters.length ? [...(leaf.filters ?? def.filters ?? []), analyticPlanFilters] : (leaf.filters ?? def.filters);
   const groupBys = leaf.groupBys ?? def.groupBys;
   const listCols = leaf.list ?? def.list;
   const optionalList = leaf.optionalList ?? def.optionalList ?? [];

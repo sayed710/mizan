@@ -87,6 +87,7 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Financial Account': 'الحساب المالي',
   'Percentage of': 'النسبة من',
   'Comparison in': 'المقارنة بوحدة',
   'Rounding Unit': 'وحدة التقريب',
