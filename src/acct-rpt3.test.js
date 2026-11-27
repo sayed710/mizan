@@ -504,3 +504,47 @@ test('scaled foldable aggregation account rows reconcile rounding remainder to t
   const halfBreakdown = [...raw.find((row) => row.code === 'HALF').accountExpressions.balance.values()];
   assert.equal(halfBreakdown.reduce((sum, amt) => sum + amt, 0), 0.01);
 });
+
+test('nested foldable aggregation preserves raw per-account contributions across intermediate reconciliation', () => {
+  let db = seed();
+  const yr = 2094;
+  const secondExp = create(db, 'account.account', { code: '601000', name: 'Other Expense', account_type: 'expense', company_id: 1 });
+  db = secondExp.db;
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: `${yr}-04-10`,
+    lines: [
+      { account: '600000', debit: 0.01 },
+      { account: '601000', debit: 0.01 },
+      { account: '101401', credit: 0.02 },
+    ],
+  }).db;
+  const report = create(db, 'account.report', { name: 'Nested Half Double Report', company_id: 1, show_debit: true, show_credit: true, line_ids: [] });
+  db = report.db;
+  const expLine = create(db, 'account.report.line', { report_id: report.id, name: 'Expenses', code: 'EXP', sequence: 10 });
+  db = expLine.db;
+  const halfLine = create(db, 'account.report.line', { report_id: report.id, name: 'Half Expenses', code: 'HALF', sequence: 20, foldable: true });
+  db = halfLine.db;
+  const doubleLine = create(db, 'account.report.line', { report_id: report.id, name: 'Double Half Expenses', code: 'DOUBLE', sequence: 30, foldable: true });
+  db = doubleLine.db;
+  db = create(db, 'account.report.expression', { report_line_id: expLine.id, label: 'balance', engine: 'domain', formula: '[["account_type","=","expense"]]', subformula: 'sum', date_scope: 'strict_range' }).db;
+  db = create(db, 'account.report.expression', { report_line_id: halfLine.id, label: 'balance', engine: 'aggregation', formula: 'EXP.balance / 2', date_scope: 'strict_range' }).db;
+  db = create(db, 'account.report.expression', { report_line_id: doubleLine.id, label: 'balance', engine: 'aggregation', formula: 'HALF.balance * 2', date_scope: 'strict_range' }).db;
+
+  const period = { from: `${yr}-01-01`, to: `${yr}-12-31` };
+  const rep = read(db, 'account.report', report.id);
+  const out = configurableReport(db, rep, period);
+  const doubleRow = out.rows.find((row) => row.code === 'DOUBLE');
+  assert.deepEqual(doubleRow.values, [0.02, 0.02, 0]);
+  assert.deepEqual(
+    doubleRow.accountRows.map((item) => [item.account.code, item.values]),
+    [['600000', [0.01, 0.01, 0]], ['601000', [0.01, 0.01, 0]]],
+  );
+
+  const raw = evaluateStoredReport(db, rep, period, { includeAccountBreakdown: true });
+  const exp1 = db.records['account.account'].find((a) => a.code === '600000' && (a.company_id ?? 1) === 1);
+  const doubleBreakdown = raw.find((row) => row.code === 'DOUBLE').accountExpressions.balance;
+  assert.equal(doubleBreakdown.get(exp1.id), 0.01);
+  assert.equal(doubleBreakdown.get(secondExp.id), 0.01);
+});

@@ -111,15 +111,16 @@ const combineLinear = (lhs, rhs, sign) => {
 
 /** Reconcile rounded per-account amounts to the rounded expression total via largest rounding residual. */
 function reconcileAccountBreakdown(accValues, total) {
-  if (!accValues.size) return;
-  const entries = [...accValues].map(([accId, raw]) => {
+  const reconciled = new Map(accValues);
+  if (!reconciled.size) return reconciled;
+  const entries = [...reconciled].map(([accId, raw]) => {
     const rounded = round(raw);
     return { accId, rawCents: raw * 100, roundedCents: cents(rounded), rounded };
   });
   const diff = cents(total) - entries.reduce((sum, entry) => sum + entry.roundedCents, 0);
   if (!diff) {
-    for (const entry of entries) accValues.set(entry.accId, entry.rounded);
-    return;
+    for (const entry of entries) reconciled.set(entry.accId, entry.rounded);
+    return reconciled;
   }
   const step = Math.sign(diff);
   const steps = Math.abs(diff);
@@ -127,7 +128,8 @@ function reconcileAccountBreakdown(accValues, total) {
     .map((entry) => ({ ...entry, priority: step * (entry.rawCents - entry.roundedCents) }))
     .sort((a, b) => (Math.abs(b.priority - a.priority) > 1e-9 ? b.priority - a.priority : a.accId - b.accId));
   for (let i = 0; i < steps; i++) ranked[i % ranked.length].roundedCents += step;
-  for (const entry of ranked) accValues.set(entry.accId, round(entry.roundedCents / 100));
+  for (const entry of ranked) reconciled.set(entry.accId, round(entry.roundedCents / 100));
+  return reconciled;
 }
 
 /** Evaluate an aggregation formula and, when purely linear in its references, its per-account attribution. */
@@ -270,6 +272,7 @@ export function evaluateStoredReport(db, report, period, options = {}) {
   const isNonBalanceCol = col !== 'balance';
   const memo = new Map();
   const accountMemo = new Map();
+  const rawAccountMemo = new Map();
   const evaluate = (expr) => {
     if (memo.has(expr.id)) return memo.get(expr.id);
     const needAccounts = breakdownExprIds.has(expr.id);
@@ -285,7 +288,7 @@ export function evaluateStoredReport(db, report, period, options = {}) {
           const refExpr = lookup.get(ref);
           if (!refExpr) throw new Error(`Unknown report expression: ${ref}`);
           const refValue = evaluate(refExpr);
-          const refLinear = needAccounts && accountMemo.has(refExpr.id)
+          const refLinear = needAccounts && rawAccountMemo.has(refExpr.id)
             ? { constVal: 0, terms: new Map([[refExpr.id, 1]]) }
             : null;
           return { value: refValue, linear: refLinear };
@@ -298,7 +301,7 @@ export function evaluateStoredReport(db, report, period, options = {}) {
           accValues = null;
         } else {
           for (const [refExprId, coeff] of linear.terms) {
-            const refMap = accountMemo.get(refExprId);
+            const refMap = rawAccountMemo.get(refExprId);
             if (!refMap) continue;
             for (const [accId, amt] of refMap) {
               accValues.set(accId, (accValues.get(accId) ?? 0) + coeff * amt);
@@ -369,8 +372,8 @@ export function evaluateStoredReport(db, report, period, options = {}) {
     value = round(value);
     memo.set(expr.id, value);
     if (needAccounts && accValues) {
-      reconcileAccountBreakdown(accValues, value);
-      accountMemo.set(expr.id, accValues);
+      rawAccountMemo.set(expr.id, accValues);
+      accountMemo.set(expr.id, reconcileAccountBreakdown(accValues, value));
     }
     return value;
   };
