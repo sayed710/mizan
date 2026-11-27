@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { cashFlowIndirect, INDIRECT_FOLDABLE_CODES } from '../models/cashFlowIndirect.js';
 import { t } from '../i18n.js';
 import { reportMoney } from './reportCompany.jsx';
@@ -9,9 +9,12 @@ export function CashFlowIndirect({ db, period, companyId, analyticAccountIds, mo
   const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
   const fmtMoney = moneyProp ?? reportMoney(db, currentCo);
   const [open, setOpen] = useState(() => new Set(INDIRECT_FOLDABLE_CODES));
-  const report = cashFlowIndirect(
-    db,
-    currentCo ? { ...period, company_id: currentCo, analyticAccountIds } : { ...period, analyticAccountIds },
+  const report = useMemo(
+    () => cashFlowIndirect(
+      db,
+      currentCo ? { ...period, company_id: currentCo, analyticAccountIds } : { ...period, analyticAccountIds },
+    ),
+    [db, period, currentCo, analyticAccountIds],
   );
   return (
     <tbody>

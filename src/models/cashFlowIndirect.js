@@ -2,7 +2,7 @@
 import { create, search } from '../orm.js';
 import { round } from '../money.js';
 import { assetMoveKinds } from './assets.js';
-import { filterByAnalytic, isLiquidityAccount, isLiquidityJournal, journalItems, profitAndLoss, weighted } from './ledger.js';
+import { analyticMoveItems, isLiquidityAccount, isLiquidityJournal, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { reportingBookedAmount } from './money.js';
 import { reportReviewMode } from './reports.js';
 import { taxRepartitionLines } from './taxes.js';
@@ -43,13 +43,27 @@ export const INDIRECT_CASH_FLOW_TAGS = [
   'not applicable', // 35
 ];
 
+/** Whether `tag` is the global standard Indirect Cash Flow tag for `name`. */
+export const isStandardIndirectTag = (tag, name) => (
+  tag.name === name && (!tag.applicability || tag.applicability === 'accounts') && !tag.country_id
+);
+
+/** Map each standard Indirect Cash Flow tag name to its IDs (including archived global tags). */
+export function indirectTagIdsByName(db) {
+  const candidateTags = search(db, 'account.account.tag', { includeArchived: true });
+  return new Map(
+    INDIRECT_CASH_FLOW_TAGS.map((name) => [
+      name,
+      candidateTags.filter((tag) => isStandardIndirectTag(tag, name)).map((tag) => tag.id),
+    ]),
+  );
+}
+
 /** Ensure all 32 Indirect Cash Flow account tags exist (applicability 'accounts'), preserving existing records. */
 export function ensureIndirectCashFlowTags(db) {
   let next = db;
   for (const name of INDIRECT_CASH_FLOW_TAGS) {
-    const exists = (next.records?.['account.account.tag'] ?? []).some(
-      (tag) => tag.name === name && (tag.applicability ?? 'accounts') === 'accounts' && !tag.country_id,
-    );
+    const exists = (next.records?.['account.account.tag'] ?? []).some((tag) => isStandardIndirectTag(tag, name));
     if (exists) continue;
     next = create(next, 'account.account.tag', { name, applicability: 'accounts' }).db;
   }
@@ -133,13 +147,10 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
   const accountsById = new Map((documentsDb.records?.['account.account'] ?? db.records?.['account.account'] ?? []).map((a) => [a.id, a]));
   const journalsById = new Map((documentsDb.records?.['account.journal'] ?? db.records?.['account.journal'] ?? []).map((j) => [j.id, j]));
 
-  // Map reference tag index (4..35) -> matching active account.account.tag IDs by exact name.
-  const activeTags = search(documentsDb, 'account.account.tag').filter((tag) => !tag.applicability || tag.applicability === 'accounts');
+  // Map reference tag index (4..35) -> matching standard global account.account.tag IDs (including archived).
+  const byName = indirectTagIdsByName(documentsDb);
   const tagIdsByRef = new Map(
-    INDIRECT_CASH_FLOW_TAGS.map((name, idx) => [
-      idx + 4,
-      new Set(activeTags.filter((tag) => tag.name === name).map((tag) => tag.id)),
-    ]),
+    INDIRECT_CASH_FLOW_TAGS.map((name, idx) => [idx + 4, new Set(byName.get(name) ?? [])]),
   );
   const hasTag = (account, refNum) => {
     const ids = tagIdsByRef.get(refNum);
@@ -159,18 +170,20 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
   const { saleMoveIds, disposalMoveIds, depreciationMoveIds } = assetMoveKinds(documentsDb);
 
   const periodItems = weighted(
-    filterByAnalytic(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds),
+    analyticMoveItems(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds),
     weight,
   );
   const bopItems = from
     ? weighted(
-        filterByAnalytic(journalItems(db, { company_id, reviewMode: mode, includeClosing: true }), analyticAccountIds)
-          .filter((l) => l.date < from),
+        analyticMoveItems(
+          journalItems(db, { company_id, reviewMode: mode, includeClosing: true }).filter((l) => l.date < from),
+          analyticAccountIds,
+        ),
         weight,
       )
     : [];
   const eopItems = weighted(
-    filterByAnalytic(journalItems(db, { to, company_id, reviewMode: mode, includeClosing: true }), analyticAccountIds),
+    analyticMoveItems(journalItems(db, { to, company_id, reviewMode: mode, includeClosing: true }), analyticAccountIds),
     weight,
   );
 

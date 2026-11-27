@@ -15,6 +15,7 @@ import { confirmAsset, disposeAsset, postDepreciation } from './models/assets.js
 import { bookBankMovement } from './models/bank.js';
 import { taxSnapshot } from './models/taxes.js';
 import { cashFlowIndirect, INDIRECT_CASH_FLOW_TAGS } from './models/cashFlowIndirect.js';
+import { accountCashFlowActivity } from './models/reports.js';
 import { setupDom, find } from './test-support/dom.js';
 import { tableToRows } from './csv.js';
 
@@ -385,4 +386,232 @@ test('CFI-1: all Indirect Cash Flow labels have formal Arabic translations', asy
     if (previousStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = previousStorage;
   }
+});
+
+test('CFI-1 regression (Finding 3): analytic filter keeps unallocated bank and working-capital counterparts', () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const plan = create(db, 'account.analytic.plan', { name: 'Projects', default_applicability: 'optional' });
+  db = plan.db;
+  const office = create(db, 'account.analytic.account', { name: 'Office Fitout', code: 'PRJ-1', plan_id: plan.id });
+  db = office.db;
+
+  // Unpaid vendor bill: analytic expense with unallocated trade payable counterpart
+  const billRes = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: search(db, 'res.partner')[0].id,
+    invoice_date: '2041-03-05',
+    invoice_line_ids: [
+      { name: 'Analytic Service', account_id: accountId(db, '600000'), qty: 1, price_unit: 1000, tax: 0, analytic_distribution: { [office.id]: 100 } },
+    ],
+  });
+  db = postMove(billRes.db, billRes.id);
+
+  // Analytic expense paid directly from unallocated bank line + bank/cash transfer with unallocated cash counterpart
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-03-10',
+    ref: 'Direct analytic expense',
+    lines: [
+      { account: '600000', debit: 400, analytic_distribution: { [office.id]: 100 } },
+      { account: '101401', credit: 400 },
+    ],
+  }).db;
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-03-12',
+    ref: 'Analytic cash deposit',
+    lines: [
+      { account: '101401', debit: 250, analytic_distribution: { [office.id]: 100 } },
+      { account: '101501', credit: 250 },
+    ],
+  }).db;
+
+  const report = cashFlowIndirect(db, { from: '2041-03-01', to: '2041-03-31', company_id: 1, analyticAccountIds: [office.id] });
+  const c = report.byCode;
+  assert.equal(c.CF_OP_EBIT, -1400);
+  assert.equal(c.CF_OP_WCAP_TRA_PAY, 1000, 'Unallocated payable counterpart of analytic bill is retained');
+  assert.equal(c.CF_OP, -400);
+  assert.equal(c.CF_CASH_VAR_NON_CASH, -400);
+  assert.equal(c.CF_CASH_VAR_CASH, 250, 'Unallocated cash counterpart of analytic bank line is retained');
+  assert.equal(c.CF_CASH_EOP, -150);
+  assert.equal(c.CF_CASH_BOP + c.CF_CASH, c.CF_CASH_EOP);
+});
+
+test('CFI-1 regression (Finding 9): archived matching tag satisfies migration and still classifies accounts', () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const archivedBorrowingId = 9901;
+  const legacy = {
+    ...db,
+    schema_version: 82,
+    records: {
+      ...db.records,
+      'account.account.tag': [
+        ...(db.records['account.account.tag'] ?? []).filter((tag) => tag.id <= 3),
+        { id: archivedBorrowingId, name: 'Financing - Borrowings Short Term', applicability: 'accounts', active: false },
+      ],
+    },
+    seq: { ...db.seq, 'account.account.tag': archivedBorrowingId },
+  };
+  let upgraded = migrate(legacy);
+  const matching = (upgraded.records['account.account.tag'] ?? []).filter(
+    (tag) => tag.name === 'Financing - Borrowings Short Term' && tag.applicability === 'accounts' && !tag.country_id,
+  );
+  assert.equal(matching.length, 1, 'Migration preserves existing archived matching tag without duplicating it');
+  assert.equal(matching[0].id, archivedBorrowingId);
+
+  upgraded = write(upgraded, 'account.account', accountId(upgraded, '260000'), { tag_ids: [archivedBorrowingId] });
+  upgraded = postEntry(upgraded, {
+    journal: 'BNK1',
+    date: '2041-04-05',
+    ref: 'Loan drawdown',
+    lines: [
+      { account: '101401', debit: 5000 },
+      { account: '260000', credit: 5000 },
+    ],
+  }).db;
+  upgraded = postEntry(upgraded, {
+    journal: 'BNK1',
+    date: '2041-04-15',
+    ref: 'Loan repayment',
+    lines: [
+      { account: '260000', debit: 1500 },
+      { account: '101401', credit: 1500 },
+    ],
+  }).db;
+
+  const { byCode } = cashFlowIndirect(upgraded, { from: '2041-04-01', to: '2041-04-30', company_id: 1 });
+  assert.equal(byCode.CF_FIN_PROC_BORR, 5000);
+  assert.equal(byCode.CF_FIN_REPAY_BORR, -1500);
+});
+
+test('CFI-1 regression (Finding 10): country-specific tag sharing a standard name is ignored by indirect cash flow', () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const saId = db.records['res.country'].find((c) => c.code === 'SA').id;
+  const countryTag = create(db, 'account.account.tag', {
+    name: 'Financing - Borrowings Short Term',
+    applicability: 'accounts',
+    country_id: saId,
+  });
+  db = countryTag.db;
+  const countryLoanAcc = create(db, 'account.account', {
+    code: '269900',
+    name: 'Local Borrowing',
+    account_type: 'liability_current',
+    tag_ids: [countryTag.id],
+  });
+  db = countryLoanAcc.db;
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-05-05',
+    ref: 'Local loan',
+    lines: [
+      { account: '101401', debit: 3000 },
+      { account: '269900', credit: 3000 },
+    ],
+  }).db;
+
+  const { byCode } = cashFlowIndirect(db, { from: '2041-05-01', to: '2041-05-31', company_id: 1 });
+  assert.equal(byCode.CF_FIN_PROC_BORR, 0, 'Country-specific tag must not match global indirect tag');
+  assert.equal(byCode.CF_NOT_RECON, 3000);
+});
+
+test('CFI-1 regression (Finding 12): fold toggles in CashFlowIndirect do not recompute the report', async () => {
+  const baseDb = buildIndirectFixture();
+  let moveReads = 0;
+  const trackedRecords = { ...baseDb.records };
+  const moves = baseDb.records['account.move'];
+  Object.defineProperty(trackedRecords, 'account.move', {
+    enumerable: true,
+    get() {
+      moveReads += 1;
+      return moves;
+    },
+  });
+  const trackedDb = { ...baseDb, records: trackedRecords };
+
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { CashFlowIndirect } = await import('./views/CashFlowIndirect.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  const period = { from: '2041-02-01', to: '2041-02-28', company_id: 1 };
+  try {
+    await React.act(async () => root.render(
+      React.createElement('table', null, React.createElement(CashFlowIndirect, { db: trackedDb, period, companyId: 1 })),
+    ));
+    const readsAfterMount = moveReads;
+    assert.ok(readsAfterMount > 0, 'Initial render should compute the indirect cash flow report');
+
+    const collapseBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Collapse All');
+    assert.ok(collapseBtn);
+    await React.act(async () => props(collapseBtn).onClick());
+    assert.equal(moveReads, readsAfterMount, 'Collapse All must not recompute cashFlowIndirect');
+
+    const sectionBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Cash Flows from operating activities'));
+    assert.ok(sectionBtn);
+    await React.act(async () => props(sectionBtn).onClick());
+    assert.equal(moveReads, readsAfterMount, 'Toggling a section fold must not recompute cashFlowIndirect');
+
+    await React.act(async () => root.render(
+      React.createElement('table', null, React.createElement(CashFlowIndirect, {
+        db: trackedDb,
+        period: { from: '2041-03-01', to: '2041-03-31', company_id: 1 },
+        companyId: 1,
+      })),
+    ));
+    assert.ok(moveReads > readsAfterMount, 'Changing the period must recompute cashFlowIndirect');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('CFI-1 regression (Finding 13): seeded database populates indirect cash flow detail without manual retagging', () => {
+  const db = seed();
+  const year = new Date().toISOString().slice(0, 4);
+  const { byCode } = cashFlowIndirect(db, { from: `${year}-01-01`, to: `${year}-12-31`, company_id: 1 });
+  assert.notEqual(byCode.CF_OP_WCAP_TRA_REC, 0, 'Seeded invoices and payments should populate Trade receivables');
+  assert.notEqual(byCode.CF_OP_WCAP_TRA_PAY, 0, 'Seeded vendor bill should populate Trade payables');
+  assert.notEqual(byCode.CF_OP_WCAP_INV, 0, 'Seeded stock valuation should populate Inventory');
+  assert.equal(byCode.CF_CASH_BOP + byCode.CF_CASH, byCode.CF_CASH_EOP);
+
+  // Direct cash-flow activity classification on seeded accounts remains intact
+  const loanAcc = read(db, 'account.account', accountId(db, '260000'));
+  const fixedAcc = read(db, 'account.account', accountId(db, '151000'));
+  assert.equal(accountCashFlowActivity(db, loanAcc), 'financing');
+  assert.equal(accountCashFlowActivity(db, fixedAcc), 'investing');
 });
