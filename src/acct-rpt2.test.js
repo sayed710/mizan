@@ -519,3 +519,73 @@ test('ConfigurableReport builds CSV and XLSX exports from report data with inden
     spy.restore();
   }
 });
+
+test('ConfigurableReport exports unfolded account rows of foldable stored lines without a code', async () => {
+  const { makeEl } = setupDom();
+  const spy = setupDownloadSpy(makeEl);
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.move': [], 'account.payment': [] } };
+  const yr = Number(today().slice(0, 4));
+  const cashAcc = search(db, 'account.account').find((a) => a.code === '101401');
+  const revAcc = search(db, 'account.account').find((a) => a.code === '400000');
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: `${yr}-03-15`,
+    lines: [{ account_id: cashAcc.id, debit: 500 }, { account_id: revAcc.id, credit: 500 }],
+  }).db;
+  const rep = create(db, 'account.report', { name: 'Codeless Export Report', company_id: 1, line_ids: [] });
+  db = rep.db;
+  const line = create(db, 'account.report.line', { report_id: rep.id, name: 'Codeless Revenue', foldable: true, sequence: 10 });
+  db = line.db;
+  db = create(db, 'account.report.expression', {
+    report_line_id: line.id,
+    label: 'balance',
+    engine: 'domain',
+    formula: '[["account_type","=","income"]]',
+    subformula: '-sum',
+    date_scope: 'strict_range',
+  }).db;
+  await React.act(async () => commit(db));
+
+  const { ConfigurableReportPage, configurableReportExportRows, reportLineKey } = await import('./views/ConfigurableReport.jsx');
+  const direct = configurableReportExportRows({
+    headers: ['Balance'],
+    showVariance: false,
+    rows: [{ id: line.id, name: 'Codeless Revenue', depth: 0, values: [500], foldable: true, accountRows: [{ account: revAcc, values: [500] }] }],
+  }, new Set([reportLineKey({ id: line.id })]));
+  assert.deepEqual(direct, [
+    ['Report Lines', 'Balance'],
+    ['Codeless Revenue', 500],
+    [`  ${revAcc.code} ${revAcc.name}`, 500],
+  ]);
+
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { id: rep.id })));
+    const row = findAll(host, (n) => n.tagName === 'TR').find((tr) => tr.textContent.includes('Codeless Revenue'));
+    assert.ok(row, 'Codeless foldable row rendered');
+    await React.act(async () => props(row).onClick());
+    assert.ok(host.textContent.includes(`${revAcc.code} ${revAcc.name}`), 'Unfolded account row visible in UI');
+
+    const csvBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Download CSV'));
+    const xlsxBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export XLSX'));
+    await React.act(async () => props(csvBtn).onClick());
+    const csvRows = fromCsv(await (await spy.takeLast()).text());
+    assert.ok(csvRows.some((r) => r[0] === `  ${revAcc.code} ${revAcc.name}` && r[1] === '500'), 'CSV includes unfolded account row for code-less line');
+
+    await React.act(async () => props(xlsxBtn).onClick());
+    const xlsxParsed = readXlsx((await spy.takeLast()).bytes);
+    assert.ok(xlsxParsed.rows.some((r) => r[0] === `  ${revAcc.code} ${revAcc.name}` && r[1] === 500), 'XLSX includes unfolded account row for code-less line');
+  } finally {
+    await React.act(async () => root.unmount());
+    spy.restore();
+  }
+});

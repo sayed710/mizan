@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react';
 import { search } from '../orm.js';
-import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, targetCompanyIds } from '../models/configurableReports.js';
+import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, reportLineKey, targetCompanyIds } from '../models/configurableReports.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { today } from '../models/common.js';
 import { useDb } from '../store.js';
@@ -47,6 +47,8 @@ function scopedJournals(db, companyIds, ledger) {
   );
 }
 
+export { reportLineKey };
+
 /** Build structured CSV/XLSX rows from computed report data (preserving hierarchy indentation and numeric values). */
 export function configurableReportExportRows(data, openCodes = new Set()) {
   if (!data) return [];
@@ -66,7 +68,7 @@ export function configurableReportExportRows(data, openCodes = new Set()) {
       ...line.values.map((v) => (v == null ? '' : Number(v))),
       ...formatVariance(line.variance),
     ]);
-    if (isExpandableLine(line) && openCodes?.has(line.code)) {
+    if (isExpandableLine(line) && openCodes?.has(reportLineKey(line))) {
       for (const acc of line.accountRows) {
         rows.push([
           indent(depth + 1, `${acc.account.code} ${acc.account.name}`),
@@ -197,7 +199,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   }
   const inlineError = periodError ?? groupSelectionError ?? computeError;
 
-  const expandableCodes = data ? data.rows.filter(isExpandableLine).map((line) => line.code || `line:${line.id}`) : [];
+  const expandableCodes = data ? data.rows.filter(isExpandableLine).map(reportLineKey) : [];
   const toggle = (code) => setOpenCodes((prev) => toggleReportFold(prev, code));
 
   const exportCsv = () => {
@@ -384,7 +386,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             </thead>
             <tbody>
               {data.rows.map((line) => {
-                const lineKey = line.code || `line:${line.id}`;
+                const lineKey = reportLineKey(line);
                 const canExpand = isExpandableLine(line);
                 const isOpen = canExpand && openCodes.has(lineKey);
                 const rowClass = [line.strong ? 'rep-total strong' : canExpand ? 'rep-section' : ''].filter(Boolean).join(' ');

@@ -177,6 +177,17 @@ export function syncInlineStatementLines(db, before, after) {
     return { ...(old ?? {}), id: ids.get(line.code), report_id: after.id, company_id: after.company_id ?? 1, name: line.name, code: old?.code ?? line.code, inline_code: line.code, sequence: line.sequence, parent_id: line.parent_code ? ids.get(line.parent_code) : null, foldable: !!line.foldable, strong: !!line.strong };
   });
   const removedIds = new Set(oldLines.filter((line) => oldInline.has(line.inline_code ?? line.code) && !ids.has(line.inline_code ?? line.code)).map((line) => line.id));
+  const oldById = new Map(oldLines.map((line) => [line.id, line]));
+  const survivingParentId = (parentId) => {
+    let current = parentId ?? null;
+    const seen = new Set();
+    while (current != null && removedIds.has(current)) {
+      if (seen.has(current)) return null;
+      seen.add(current);
+      current = oldById.get(current)?.parent_id ?? null;
+    }
+    return current;
+  };
   let nextExpressions = allExpressions.filter((item) => !removedIds.has(item.report_line_id));
   for (const line of inline) {
     const previous = oldInline.get(line.code);
@@ -189,6 +200,8 @@ export function syncInlineStatementLines(db, before, after) {
     const replacement = { ...old, ...converted, id: old?.id ?? ++expressionId, report_line_id: id, company_id: after.company_id ?? 1 };
     nextExpressions = [...nextExpressions.filter((item) => item !== old), replacement];
   }
-  const retained = oldLines.filter((line) => !oldInline.has(line.inline_code ?? line.code) && !ids.has(line.inline_code ?? line.code));
+  const retained = oldLines
+    .filter((line) => !oldInline.has(line.inline_code ?? line.code) && !ids.has(line.inline_code ?? line.code))
+    .map((line) => (removedIds.has(line.parent_id) ? { ...line, parent_id: survivingParentId(line.parent_id) } : line));
   return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': [...allLines.filter((line) => line.report_id !== after.id), ...retained, ...updated], 'account.report.expression': nextExpressions } };
 }

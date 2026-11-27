@@ -498,34 +498,82 @@ export function configurableReport(db, report, period, group = null, options = {
   const items = resolveReportItems(db, report, period, companies, { analyticAccountIds: options.analyticAccountIds, reviewMode });
   const columns = ['balance', ...(report.show_debit ? ['debit'] : []), ...(report.show_credit ? ['credit'] : [])];
   const buckets = group ? groupBuckets(db, group, items, { analyticAccountIds: options.analyticAccountIds }) : [{ key: 'all', label: '', weight: () => 1 }];
-  const evalOptions = { companyIds: companies, analyticAccountIds: options.analyticAccountIds, reviewMode, deferHideIfZero: true };
+  const evalOptions = { companyIds: companies, analyticAccountIds: options.analyticAccountIds, reviewMode, deferHideIfZero: true, includeAccountBreakdown: true };
   const caches = buckets.map(() => new Map());
-  const evaluated = buckets.map((bucket, index) => columns.map((column) => evaluateStoredReport(db, report, period, { ...evalOptions, column, itemCache: caches[index], weight: group ? bucket.weight : null })));
+  const evaluated = buckets.map((bucket, index) => columns.map((column, colIdx) => evaluateStoredReport(db, report, period, { ...evalOptions, column, itemCache: caches[index], weight: group ? bucket.weight : null, skipValidation: index > 0 || colIdx > 0 })));
   const rawLines = evaluated[0]?.[0] ?? evaluateStoredReport(db, report, period, evalOptions);
-  const ordered = [];
-  const append = (parentId, depth) => {
-    for (const line of rawLines.filter((item) => (item.parent_id ?? null) === parentId)) {
-      ordered.push({ ...line, depth });
-      append(line.id, depth + 1);
+  const lineIndex = evaluated.map((bucket) => bucket.map((result) => new Map(result.map((item) => [item.id, item]))));
+  const rawById = new Map(rawLines.map((candidate) => [candidate.id, candidate]));
+  const exprByLineId = new Map();
+  for (const expr of db.records['account.report.expression'] ?? []) {
+    if (expr.label === 'balance') exprByLineId.set(expr.report_line_id, expr);
+  }
+  const accountsById = new Map();
+  for (const cache of caches) {
+    for (const entry of cache.values()) {
+      for (const accEntry of entry.byAccount?.values() ?? []) {
+        if (accEntry.account) accountsById.set(accEntry.account.id, accEntry.account);
+      }
     }
-  };
-  append(null, 0);
-  const accounts = [...new Map(caches.flatMap((cache) => [...cache.values()].flatMap((entry) => entry.rows.map((row) => [row.account.id, row.account])))).values()];
-  const detailEvaluated = ordered.some((line) => line.foldable) ? accounts.map((account) => ({ account, values: buckets.map((bucket, index) => columns.map((column) => evaluateStoredReport(db, report, period, { ...evalOptions, accountId: account.id, column, itemCache: caches[index], weight: group ? bucket.weight : null }))) })) : [];
-  const rows = ordered.map((line) => {
-    const parent = rawLines.find((candidate) => candidate.id === line.parent_id);
-    const expression = (db.records['account.report.expression'] ?? []).find((item) => item.report_line_id === line.id && item.label === 'balance');
+  }
+  const rows = rawLines.map((line) => {
+    const parent = line.parent_id != null ? rawById.get(line.parent_id) : null;
+    const expression = exprByLineId.get(line.id);
     const aggregation = expression?.engine === 'aggregation' ? String(expression.formula) : '';
     const inverted = /^-\((.*)\)$/.exec(aggregation);
     const formula = (inverted ? inverted[1] : aggregation).replace(/\.balance\b/g, '');
-    const values = evaluated.flatMap((bucket) => bucket.map((result) => result.find((item) => item.id === line.id)?.expressions.balance ?? null));
-    const accountRows = !line.foldable ? [] : detailEvaluated.map(({ account, values: detail }) => ({ account, values: detail.flatMap((bucket) => bucket.map((result) => result.find((item) => item.id === line.id)?.expressions.balance ?? 0)) })).filter((entry) => options.includeZeroRows || reportAmountsVisible(entry.values, true)).sort((a, b) => String(a.account.code ?? '').localeCompare(String(b.account.code ?? '')));
+    const lineResults = lineIndex.map((bucket) => bucket.map((byLine) => byLine.get(line.id)));
+    const values = lineResults.flatMap((bucket) => bucket.map((item) => item?.expressions.balance ?? null));
+    let accountRows = [];
+    if (line.foldable) {
+      const accIds = new Set();
+      for (const bucket of lineResults) {
+        for (const item of bucket) {
+          const map = item?.accountExpressions?.balance;
+          if (map) for (const accId of map.keys()) accIds.add(accId);
+        }
+      }
+      accountRows = [...accIds]
+        .map((accId) => {
+          const account = accountsById.get(accId);
+          if (!account) return null;
+          return { account, values: lineResults.flatMap((bucket) => bucket.map((item) => item?.accountExpressions?.balance?.get(accId) ?? 0)) };
+        })
+        .filter((entry) => entry && (options.includeZeroRows || reportAmountsVisible(entry.values, true)))
+        .sort((a, b) => String(a.account.code ?? '').localeCompare(String(b.account.code ?? '')));
+    }
     return { ...line, parent_code: parent?.code ?? '', formula, sign: inverted ? -1 : 1, values, accountRows };
   });
-  const inlineRows = !report.kind && report.line_ids?.length ? configurableReportLegacy(db, report, period, group, options).rows.filter((line) => !rawLines.some((stored) => stored.code && stored.code === line.code)) : [];
-  const result = { columns, buckets, rows: [...inlineRows, ...rows].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)) };
+  const storedCodes = new Set(rawLines.map((stored) => stored.code).filter(Boolean));
+  const inlineRows = !report.kind && report.line_ids?.length ? configurableReportLegacy(db, report, period, group, options).rows.filter((line) => !storedCodes.has(line.code)) : [];
+  const allRows = [...rows, ...inlineRows];
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const byCode = new Map(allRows.filter((row) => row.code).map((row) => [row.code, row]));
+  const childMap = new Map(allRows.map((row) => [row, []]));
+  const roots = [];
+  for (const row of allRows) {
+    const parent = row.id != null
+      ? (row.parent_id != null ? byId.get(row.parent_id) : null)
+      : (row.parent_code ? byCode.get(row.parent_code) : null);
+    if (parent && childMap.has(parent)) childMap.get(parent).push(row);
+    else roots.push(row);
+  }
+  const bySeq = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.id != null && b.id != null ? a.id - b.id : 0);
+  const orderedRows = [];
+  const visitHierarchy = (list, depth, seen = new Set()) => {
+    for (const row of [...list].sort(bySeq)) {
+      if (seen.has(row)) continue;
+      seen.add(row);
+      orderedRows.push({ ...row, depth });
+      visitHierarchy(childMap.get(row) ?? [], depth + 1, seen);
+    }
+  };
+  visitHierarchy(roots, 0);
+  const result = { columns, buckets, rows: orderedRows };
   const hidden = new Set();
-  const children = (line) => line.id != null ? result.rows.filter((candidate) => candidate.parent_id === line.id) : line.code ? result.rows.filter((candidate) => candidate.parent_code === line.code) : [];
+  const children = (line) => result.rows.filter((candidate) => (
+    candidate.id != null ? line.id != null && candidate.parent_id === line.id : Boolean(line.code && candidate.parent_code === line.code)
+  ));
   const isZero = (line) => line.values.every((value) => !value) && children(line).every(isZero);
   const hide = (line) => { hidden.add(line); children(line).forEach(hide); };
   if (!options.deferHideIfZero) for (const line of result.rows) if (line.hide_if_zero && isZero(line)) hide(line);
@@ -536,17 +584,20 @@ export function configurableReport(db, report, period, group = null, options = {
 export function compareConfigurableReport(db, report, periods, baseFilter = {}, group = null, options = {}) {
   const filterRows = (rows) => {
     if (!options.hideZeroLines) return rows;
+    const rowById = new Map(rows.filter((r) => r.id != null).map((r) => [r.id, r]));
     const rowByCode = new Map(rows.filter((r) => r.code).map((r) => [r.code, r]));
     const visibleRows = new Set();
     for (const row of rows) {
       if (row.strong || reportAmountsVisible(row.values, true)) {
         visibleRows.add(row);
-        let parentCode = row.parent_code;
-        while (parentCode) {
-          const parentRow = rowByCode.get(parentCode);
+        let current = row;
+        while (current) {
+          const parentRow = current.id != null && current.parent_id != null
+            ? rowById.get(current.parent_id)
+            : (current.parent_code ? rowByCode.get(current.parent_code) : null);
           if (!parentRow || visibleRows.has(parentRow)) break;
           visibleRows.add(parentRow);
-          parentCode = parentRow.parent_code;
+          current = parentRow;
         }
       }
     }
@@ -589,12 +640,17 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
     return { ...baseRow, values, variance: varianceOf(values), accountRows };
   });
   const hidden = new Set();
-  const children = (line) => line.id != null ? rows.filter((candidate) => candidate.parent_id === line.id) : line.code ? rows.filter((candidate) => candidate.parent_code === line.code) : [];
+  const children = (line) => rows.filter((candidate) => (
+    candidate.id != null ? line.id != null && candidate.parent_id === line.id : Boolean(line.code && candidate.parent_code === line.code)
+  ));
   const isZero = (line) => line.values.every((value) => !value) && children(line).every(isZero);
   const hide = (line) => { hidden.add(line); children(line).forEach(hide); };
   for (const line of rows) if (line.hide_if_zero && isZero(line)) hide(line);
   return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows: filterRows(rows.filter((row) => !hidden.has(row))) };
 }
+
+/** Stable key identifying a report line even when a stored line has no code. */
+export const reportLineKey = (line) => line.code || `line:${line.id}`;
 
 /** Whether a computed report line can be unfolded into its contributing account rows. */
 export const isExpandableLine = (line) => Boolean(line.foldable && line.accountRows.length);

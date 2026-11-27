@@ -34,13 +34,26 @@ export function aggregationReferences(formula) {
 /** Validate references and cycles against the complete report, including a pending record change. */
 export function validateReportExpressions(lines, expressions) {
   const keys = new Map();
+  const seenCodes = new Set();
+  const lineExprLabels = new Set();
+  const exprsByLine = new Map();
+  for (const expr of expressions) {
+    const list = exprsByLine.get(expr.report_line_id);
+    if (list) list.push(expr);
+    else exprsByLine.set(expr.report_line_id, [expr]);
+  }
   for (const line of lines) {
+    const lineExprs = exprsByLine.get(line.id) ?? [];
+    for (const expr of lineExprs) {
+      const lineLabelKey = `${line.id}:${expr.label}`;
+      if (lineExprLabels.has(lineLabelKey)) return `Duplicate report expression: ${line.code || `line:${line.id}`}.${expr.label}`;
+      lineExprLabels.add(lineLabelKey);
+    }
     if (!line.code) continue;
-    if (lines.some((other) => other.id !== line.id && other.code === line.code)) return `Duplicate report line code: ${line.code}`;
-    for (const expr of expressions.filter((item) => item.report_line_id === line.id)) {
-      const key = `${line.code}.${expr.label}`;
-      if (keys.has(key)) return `Duplicate report expression: ${key}`;
-      keys.set(key, expr);
+    if (seenCodes.has(line.code)) return `Duplicate report line code: ${line.code}`;
+    seenCodes.add(line.code);
+    for (const expr of lineExprs) {
+      keys.set(`${line.code}.${expr.label}`, expr);
     }
   }
   for (const expr of expressions) {
@@ -138,17 +151,66 @@ export function evaluateStoredReport(db, report, period, options = {}) {
   const lines = (db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id);
   const lineIds = new Set(lines.map((line) => line.id));
   const expressions = (db.records['account.report.expression'] ?? []).filter((expr) => lineIds.has(expr.report_line_id));
-  const error = validateReportExpressions(lines, expressions);
-  if (error) throw new Error(error);
-  const lookup = new Map(expressions.map((expr) => [`${lines.find((line) => line.id === expr.report_line_id)?.code}.${expr.label}`, expr]));
+  if (!options.skipValidation) {
+    const error = validateReportExpressions(lines, expressions);
+    if (error) throw new Error(error);
+  }
+  const lineById = new Map(lines.map((line) => [line.id, line]));
+  const exprsByLine = new Map();
+  const lookup = new Map();
+  for (const expr of expressions) {
+    const list = exprsByLine.get(expr.report_line_id);
+    if (list) list.push(expr);
+    else exprsByLine.set(expr.report_line_id, [expr]);
+    const line = lineById.get(expr.report_line_id);
+    if (line) lookup.set(`${line.code}.${expr.label}`, expr);
+  }
+  const breakdownExprIds = new Set();
+  if (options.includeAccountBreakdown) {
+    const queue = [];
+    for (const line of lines) {
+      if (!line.foldable) continue;
+      for (const expr of exprsByLine.get(line.id) ?? []) queue.push(expr);
+    }
+    while (queue.length) {
+      const expr = queue.pop();
+      if (!expr || breakdownExprIds.has(expr.id)) continue;
+      breakdownExprIds.add(expr.id);
+      if (expr.engine === 'aggregation') {
+        for (const ref of aggregationReferences(expr.formula)) queue.push(lookup.get(ref));
+      }
+    }
+  }
+  const col = options.column && options.column !== 'balance' ? options.column : 'balance';
+  const isNonBalanceCol = col !== 'balance';
   const memo = new Map();
+  const accountMemo = new Map();
   const evaluate = (expr) => {
     if (memo.has(expr.id)) return memo.get(expr.id);
+    const needAccounts = breakdownExprIds.has(expr.id);
+    const accValues = needAccounts ? new Map() : null;
     let value = 0;
     if (expr.engine === 'aggregation') {
       const text = String(expr.formula);
-      const unwrapped = options.column && options.column !== 'balance' ? /^-\((.*)\)$/.exec(text) : null;
-      value = arithmetic((unwrapped ? unwrapped[1] : text).replace(referencePattern, (_all, code, label) => `(${evaluate(lookup.get(`${code}.${label}`))})`));
+      const unwrapped = isNonBalanceCol ? /^-\((.*)\)$/.exec(text) : null;
+      const exprText = unwrapped ? unwrapped[1] : text;
+      const refExprs = [];
+      const tokenized = exprText.replace(referencePattern, (_all, code, label) => {
+        const refExpr = lookup.get(`${code}.${label}`);
+        refExprs.push(refExpr);
+        return `(${evaluate(refExpr)})`;
+      });
+      value = arithmetic(tokenized);
+      if (needAccounts) {
+        const refMaps = refExprs.map((refExpr) => accountMemo.get(refExpr.id));
+        const accIds = new Set();
+        for (const map of refMaps) if (map) for (const accId of map.keys()) accIds.add(accId);
+        for (const accId of accIds) {
+          let refIdx = 0;
+          const accFormula = exprText.replace(referencePattern, () => `(${refMaps[refIdx++]?.get(accId) ?? 0})`);
+          accValues.set(accId, round(arithmetic(accFormula)));
+        }
+      }
     } else {
       if (!['domain', 'account_codes'].includes(expr.engine)) throw new Error(`Unsupported report engine: ${expr.engine}`);
       for (const companyId of options.companyIds ?? [report.company_id ?? 1]) {
@@ -165,45 +227,86 @@ export function evaluateStoredReport(db, report, period, options = {}) {
           const rows = balances(db, items);
           const predicate = expr.engine === 'account_codes' ? accountCodePredicate(expr.formula) : null;
           const factors = predicate ? new Map(rows.map((row) => [row.account.id, predicate(row.account, row.balance)])) : null;
-          cached = { items, rows, factors };
+          const byAccount = new Map();
+          for (const row of rows) {
+            const factor = factors ? (factors.get(row.account.id) ?? 0) : 1;
+            if (!factor) continue;
+            byAccount.set(row.account.id, { account: row.account, balance: row.balance * factor, debit: 0, credit: 0 });
+          }
+          for (const item of items) {
+            const factor = factors ? (factors.get(item.account_id) ?? 0) : 1;
+            if (!factor) continue;
+            let entry = byAccount.get(item.account_id);
+            if (!entry) {
+              entry = { account: read(db, 'account.account', item.account_id), balance: 0, debit: 0, credit: 0 };
+              byAccount.set(item.account_id, entry);
+            }
+            entry.debit += reportingBookedAmount(db, item, Number(item.debit) || 0) * factor;
+            entry.credit += reportingBookedAmount(db, item, Number(item.credit) || 0) * factor;
+          }
+          const totals = { balance: 0, debit: 0, credit: 0 };
+          for (const entry of byAccount.values()) {
+            totals.balance += entry.balance;
+            totals.debit += entry.debit;
+            totals.credit += entry.credit;
+          }
+          cached = { items, rows, factors, byAccount, totals };
           options.itemCache?.set(cacheKey, cached);
         }
-        let { items } = cached;
         if (expr.engine === 'domain') {
-          if (options.accountId != null) items = items.filter((item) => item.account_id === options.accountId);
-          const total = options.column && options.column !== 'balance'
-            ? items.reduce((sum, item) => sum + reportingBookedAmount(db, item, Number(item[options.column]) || 0), 0)
-            : balances(db, items).reduce((sum, row) => sum + row.balance, 0);
-          if (expr.subformula === '-sum') value += options.column && options.column !== 'balance' ? total : -total;
-          else if (expr.subformula === 'sum') value += total;
-          else throw new Error('Unsupported domain subformula');
-        } else {
-          const { rows, factors } = cached;
-          const total = options.column && options.column !== 'balance'
-            ? items.filter((item) => options.accountId == null || item.account_id === options.accountId).reduce((sum, item) => sum + reportingBookedAmount(db, item, Number(item[options.column]) || 0) * (factors.get(item.account_id) ?? 0), 0)
-            : rows.filter((row) => options.accountId == null || row.account.id === options.accountId).reduce((sum, row) => sum + row.balance * factors.get(row.account.id), 0);
-          if (expr.subformula === '-sum') value += options.column && options.column !== 'balance' ? total : -total;
-          else if (!expr.subformula || expr.subformula === 'sum') value += total;
-          else throw new Error('Unsupported account code subformula');
+          if (expr.subformula !== '-sum' && expr.subformula !== 'sum') throw new Error('Unsupported domain subformula');
+        } else if (expr.subformula && expr.subformula !== '-sum' && expr.subformula !== 'sum') {
+          throw new Error('Unsupported account code subformula');
         }
+        const sign = expr.subformula === '-sum' && !isNonBalanceCol ? -1 : 1;
+        const total = options.accountId != null
+          ? (cached.byAccount.get(options.accountId)?.[col] ?? 0)
+          : cached.totals[col];
+        value += sign * total;
+        if (needAccounts) {
+          for (const [accId, entry] of cached.byAccount) {
+            if (options.accountId != null && accId !== options.accountId) continue;
+            accValues.set(accId, (accValues.get(accId) ?? 0) + sign * entry[col]);
+          }
+        }
+      }
+      if (needAccounts) {
+        for (const [accId, amt] of accValues) accValues.set(accId, round(amt));
       }
     }
     value = round(value);
     memo.set(expr.id, value);
+    if (needAccounts) accountMemo.set(expr.id, accValues);
     return value;
   };
-  const result = lines.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id).map((line) => ({ ...line, expressions: Object.fromEntries(expressions.filter((expr) => expr.report_line_id === line.id).map((expr) => [expr.label, evaluate(expr)])) }));
-  const children = (parentId) => result.filter((line) => line.parent_id === parentId);
+  const result = lines
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)
+    .map((line) => {
+      const lineExprs = exprsByLine.get(line.id) ?? [];
+      const exprValues = Object.fromEntries(lineExprs.map((expr) => [expr.label, evaluate(expr)]));
+      if (!options.includeAccountBreakdown) return { ...line, expressions: exprValues };
+      const accountExpressions = Object.fromEntries(
+        lineExprs.map((expr) => [expr.label, accountMemo.get(expr.id) ?? new Map()]),
+      );
+      return { ...line, expressions: exprValues, accountExpressions };
+    });
+  const childrenByParent = new Map();
+  for (const line of result) {
+    const pid = line.parent_id ?? null;
+    const list = childrenByParent.get(pid);
+    if (list) list.push(line);
+    else childrenByParent.set(pid, [line]);
+  }
   const subtreeIsZero = (line, seen = new Set()) => {
     if (seen.has(line.id)) throw new Error('Report line parent cycle');
     const path = new Set(seen).add(line.id);
-    return Object.values(line.expressions).every((value) => value === 0) && children(line.id).every((child) => subtreeIsZero(child, path));
+    return Object.values(line.expressions).every((value) => value === 0) && (childrenByParent.get(line.id) ?? []).every((child) => subtreeIsZero(child, path));
   };
   const hidden = new Set();
   const hideTree = (line) => {
     if (hidden.has(line.id)) return;
     hidden.add(line.id);
-    for (const child of children(line.id)) hideTree(child);
+    for (const child of childrenByParent.get(line.id) ?? []) hideTree(child);
   };
   if (!options.deferHideIfZero) for (const line of result) if (line.hide_if_zero && subtreeIsZero(line)) hideTree(line);
   return result.filter((line) => !hidden.has(line.id));

@@ -32,7 +32,7 @@ test('stored domain and account code expressions use ledger balances and aggrega
   const staged = { ...db, records: { ...db.records, 'account.report.line': lines, 'account.report.expression': expressions } };
   const result = evaluateStoredReport(staged, report, { to: '2099-12-31' });
   assert.equal(result[2].expressions.balance, result[0].expressions.balance + result[1].expressions.balance);
-});import { create } from './orm.js';
+});import { create, read } from './orm.js';
 import { applyDiff, diffDb } from './sync.js';
 
 test('server diff rejects unknown engines and cyclic aggregation', () => {
@@ -280,4 +280,90 @@ test('inline synchronization preserves a stored counterpart whose code was edite
   assert.equal(matches[0].name, 'Edited name');
   assert.doesNotThrow(() => configurableReport(db, db.records['account.report'].find((item) => item.id === report.id), { from: '2026-01-01', to: '2026-12-31' }));
   assert.ok(db.records['account.report.expression'].some((item) => item.engine === 'aggregation' && item.formula.includes('CUSTOM_CODE.balance')));
+});
+
+test('stored and inline child lines stay beneath their parent even when child sequence is lower', () => {
+  let db = seed();
+  const report = create(db, 'account.report', {
+    name: 'Hierarchy Sequence Test',
+    company_id: 1,
+    line_ids: [
+      { code: 'PARENT', name: 'Parent Inline', formula: '400', sequence: 50 },
+      { code: 'INLINE_ROOT', name: 'Inline Root', formula: '400', sequence: 15 },
+      { code: 'INLINE_CHILD', name: 'Inline Child', parent_code: 'PARENT', formula: '400', sequence: 5 },
+    ],
+  });
+  db = report.db;
+  const parent = create(db, 'account.report.line', { report_id: report.id, name: 'Parent Stored', code: 'PARENT', sequence: 50 }); db = parent.db;
+  const earlier = create(db, 'account.report.line', { report_id: report.id, name: 'Earlier Root', code: 'EARLIER', sequence: 20 }); db = earlier.db;
+  const child = create(db, 'account.report.line', { report_id: report.id, parent_id: parent.id, name: 'Child Lower Seq', code: 'CHILD', sequence: 10 }); db = child.db;
+  const rows = configurableReport(db, read(db, 'account.report', report.id), { from: '2026-01-01', to: '2026-12-31' }).rows;
+  assert.deepEqual(
+    rows.map((row) => [row.code, row.depth]),
+    [['INLINE_ROOT', 0], ['EARLIER', 0], ['PARENT', 0], ['INLINE_CHILD', 1], ['CHILD', 1]],
+  );
+});
+
+test('validateReportExpressions rejects duplicate expression labels on a code-less line', () => {
+  const lines = [{ id: 1, name: 'Codeless' }];
+  const expr = (id) => ({ id, report_line_id: 1, label: 'balance', engine: 'domain', date_scope: 'strict_range', formula: '[]', subformula: 'sum' });
+  assert.match(validateReportExpressions(lines, [expr(1), expr(2)]), /Duplicate report expression/);
+});
+
+test('deleting an inline statement line reparents its stored-only children so they stay visible', () => {
+  let db = seed();
+  const report = db.records['account.report'].find((item) => item.kind === 'pnl' && item.company_id === 1);
+  const rev = db.records['account.report.line'].find((item) => item.report_id === report.id && item.code === 'REV');
+  const opinc = db.records['account.report.line'].find((item) => item.report_id === report.id && item.code === 'OPINC');
+  const customChild = create(db, 'account.report.line', { report_id: report.id, parent_id: opinc.id, name: 'Custom Child', code: 'CUSTOM_CHILD', sequence: 25 });
+  db = customChild.db;
+  const customGrand = create(db, 'account.report.line', { report_id: report.id, parent_id: customChild.id, name: 'Custom Grandchild', code: 'CUSTOM_GRAND', sequence: 26 });
+  db = customGrand.db;
+  const nextInline = report.line_ids
+    .filter((item) => item.code !== 'OPINC')
+    .map((item) => (item.code === 'REV' ? { ...item, formula: 'type:income', sign: -1 } : item.code === 'GROSS' ? { ...item, formula: 'REV - COR' } : item));
+  db = write(db, 'account.report', report.id, { line_ids: nextInline });
+  const updatedChild = read(db, 'account.report.line', customChild.id);
+  const updatedGrand = read(db, 'account.report.line', customGrand.id);
+  assert.equal(updatedChild.parent_id, rev.id);
+  assert.equal(updatedGrand.parent_id, customChild.id);
+  const rows = configurableReport(db, read(db, 'account.report', report.id), { from: '2026-01-01', to: '2026-12-31' }).rows;
+  assert.equal(rows.find((row) => row.id === customChild.id)?.depth, 1);
+  assert.equal(rows.find((row) => row.id === customGrand.id)?.depth, 2);
+});
+
+test('stored foldable breakdown matches legacy accountRows across columns, groups, and direct accountId lookups', () => {
+  let db = seed();
+  const yr = 2091;
+  db = postEntry(db, { journal: 'MISC', company: 1, date: `${yr}-02-10`, lines: [{ account: '101401', debit: 300, partner_id: 1 }, { account: '400000', credit: 300, partner_id: 1 }] }).db;
+  db = postEntry(db, { journal: 'MISC', company: 1, date: `${yr}-02-15`, lines: [{ account: '600000', debit: 120, partner_id: 2 }, { account: '101401', credit: 120, partner_id: 2 }] }).db;
+  const pnl = db.records['account.report'].find((item) => item.kind === 'pnl' && item.company_id === 1);
+  const report = { ...pnl, show_debit: true, show_credit: true };
+  const group = create(db, 'account.report.horizontal.group', { name: 'Partner Split', company_id: 1, report_ids: [pnl.id], rule_ids: [{ field: 'partner', partner_ids: [1] }] });
+  db = group.db;
+  const period = { from: `${yr}-01-01`, to: `${yr}-12-31` };
+  const stored = configurableReport(db, report, period, read(db, 'account.report.horizontal.group', group.id));
+  const legacy = configurableReportLegacy(db, report, period, read(db, 'account.report.horizontal.group', group.id));
+  for (const code of ['REV', 'OPINC', 'EXP_GRP', 'EXP']) {
+    const sRow = stored.rows.find((r) => r.code === code);
+    const lRow = legacy.rows.find((r) => r.code === code);
+    assert.deepEqual(sRow.values, lRow.values, `${code} values`);
+    assert.deepEqual(
+      sRow.accountRows.map((a) => [a.account.id, a.values]),
+      lRow.accountRows.map((a) => [a.account.id, a.values]),
+      `${code} accountRows`,
+    );
+  }
+  const incAcc = db.records['account.account'].find((a) => a.code === '400000' && (a.company_id ?? 1) === 1);
+  const cache = new Map();
+  const fullCached = evaluateStoredReport(db, report, period, { itemCache: cache });
+  const oneAccount = evaluateStoredReport(db, report, period, { itemCache: cache, accountId: incAcc.id, skipValidation: true });
+  const uncachedOne = evaluateStoredReport(db, report, period, { accountId: incAcc.id });
+  assert.equal(oneAccount.find((r) => r.code === 'REV').expressions.balance, uncachedOne.find((r) => r.code === 'REV').expressions.balance);
+  assert.equal(fullCached.find((r) => r.code === 'OPINC').expressions.balance, 300);
+  const zeroFiltered = configurableReport(db, report, period, null, { includeZeroRows: true });
+  assert.equal(zeroFiltered.rows.find((r) => r.code === 'OPINC').accountRows.some((a) => a.account.code === '600000'), false);
+  const breakdown = evaluateStoredReport(db, report, period, { includeAccountBreakdown: true });
+  assert.equal(breakdown.find((r) => r.code === 'REV').accountExpressions.balance.get(incAcc.id), 300);
+  assert.equal(breakdown.find((r) => r.code === 'GROSS').accountExpressions.balance.size, 0);
 });
