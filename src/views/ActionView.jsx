@@ -19,7 +19,7 @@ import { Gantt } from './Gantt.jsx';
 import { Wizard } from './Wizard.jsx';
 import { actionRecords } from '../companyView.js';
 import { currentCompany, documentCompany } from '../models/company.js';
-import { activeRootPlans } from '../models/analyticplus.js';
+import { analyticPlanFilters } from '../models/analyticplus.js';
 import { pageWindow } from './paging.js';
 import { statementImportJournalChoices, withSelectedStatementJournal } from '../models/statements.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
@@ -53,9 +53,8 @@ export function ActionView({ leaf, base, params }) {
   const views = viewsOf(model);
   const view = views.includes(params.get('view')) ? params.get('view') : views.includes(leaf.view) ? leaf.view : views[0];
   const relRaw = params.get('rel');
-  const analyticPlanFilters = leaf.key === 'analytic-items' ? activeRootPlans(db)
-    .map((p) => ({ id: `analytic-plan-${p.id}`, label: p.name, fn: (r, data) => def.fields.plan_id.compute(r, data) === p.id })) : [];
-  const filters = analyticPlanFilters.length ? [...(leaf.filters ?? def.filters ?? []), analyticPlanFilters] : (leaf.filters ?? def.filters);
+  const baseFilters = leaf.filters ?? def.filters;
+  const selectablePlanFilters = leaf.key === 'analytic-items' ? analyticPlanFilters(db) : [];
   const groupBys = leaf.groupBys ?? def.groupBys;
   const listCols = leaf.list ?? def.list;
   const optionalList = leaf.optionalList ?? def.optionalList ?? [];
@@ -65,12 +64,18 @@ export function ActionView({ leaf, base, params }) {
   const listDecoration = leaf.listDecoration ?? def.listDecoration ?? null;
   const groupByLabels = leaf.groupByLabels ?? def.groupByLabels ?? null;
   // ?filter=<id> (repeatable) preselects the model's named filters, e.g. links from dashboard tiles.
-  const urlFilters = params.getAll('filter').filter((id) => (filters ?? []).flat().some((f) => f.id === id));
+  const urlFilters = params.getAll('filter').filter(
+    (id) => (baseFilters ?? []).flat().some((f) => f.id === id)
+      || selectablePlanFilters.some((f) => f.id === id)
+      || (leaf.key === 'analytic-items' && /^analytic-plan-\d+$/.test(id)),
+  );
   const [search, setSearch] = useState(() => {
     const initial = emptySearch(model, parseRel(db, model, relRaw));
     const defaultFilters = leaf.defaultFilters ?? models[model].defaultFilters ?? [];
     return { ...initial, filters: urlFilters.length ? urlFilters : defaultFilters, groupBy: leaf.groupBy ?? [] };
   });
+  const activePlanFilters = leaf.key === 'analytic-items' ? analyticPlanFilters(db, search.filters) : [];
+  const filters = activePlanFilters.length ? [...(baseFilters ?? []), activePlanFilters] : baseFilters;
   const [selected, setSelected] = useState(() => new Set());
   const [selectedImportJournalId, setSelectedImportJournalId] = useState('');
   const [wizard, setWizard] = useState(null);

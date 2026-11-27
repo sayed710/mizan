@@ -81,7 +81,7 @@ const force = (db, id, vals) => ({ ...db, records: { ...db.records, [model]: db.
 test('ANI-1 accounting analytic views are distinct from the timesheet leaf', () => {
   const accounting = leaf('accounting', 'analytic-items');
   const timesheets = leaf('timesheets', 'timesheets');
-  assert.deepEqual(accounting.list, ['date', 'name', 'account_id', 'plan_id', 'ref', 'general_account', 'move_id', 'product_id', 'partner_id', 'unit_amount', 'amount']);
+  assert.deepEqual(accounting.list, ['date', 'name', 'account_id', 'plan_id', 'ref', 'general_account', 'move_id', 'product_id', 'partner_id', 'unit_amount', 'product_uom_id', 'company_id', 'amount']);
   assert.deepEqual(accounting.groupBy, ['account_id']);
   assert.ok(accounting.form.groups.flat().includes('general_account'));
   assert.equal(timesheets.form, undefined);

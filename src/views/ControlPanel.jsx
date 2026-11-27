@@ -72,15 +72,18 @@ function SearchPanel({ model, search, setSearch, onClose, filters = null, groupB
     <div className="search-panel" role="dialog" aria-label={t('Filters')}>
       <section>
         <h3><Icon name="filter" size={14} /> {t('Filters')}</h3>
-        {(filters ?? def.filters ?? []).map((group, i) => (
-          <ul key={i}>
-            {group.map((f) => (
-              <li key={f.id}>
-                <button type="button" aria-pressed={search.filters.includes(f.id)} onClick={() => toggle('filters', f.id)}>{t(f.label)}</button>
-              </li>
-            ))}
-          </ul>
-        ))}
+        {(filters ?? def.filters ?? []).map((group, i) => {
+          const visible = group.filter((f) => !f.hidden);
+          return visible.length > 0 && (
+            <ul key={i}>
+              {visible.map((f) => (
+                <li key={f.id}>
+                  <button type="button" aria-pressed={search.filters.includes(f.id)} onClick={() => toggle('filters', f.id)}>{t(f.label)}</button>
+                </li>
+              ))}
+            </ul>
+          );
+        })}
         {!hasArchivedFilter && (
           <ul>
             <li>
