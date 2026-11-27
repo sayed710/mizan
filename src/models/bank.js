@@ -12,7 +12,7 @@ import { datedLockDelete, datedLockGuard, moveDate, recordLockDate, writeBankSta
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { shouldBePaid } from './billcontrol.js';
-import { reverseEntry, reverseWriteoff, unreconcileInvoicePayment } from './pay.js';
+import { detachLegacyStatementPayment, reverseEntry, reverseWriteoff, unreconcileInvoicePayment } from './pay.js';
 import { postAnalytic, removeAnalytic } from './analyticplus.js';
 
 /** The first active matching reconciliation model (by sequence), or null. */
@@ -775,6 +775,18 @@ function unreconcileError(db, before, after, ctx = null) {
   return null;
 }
 
+/** Validate the complete legacy release before allowing its payment to be detached. */
+export function isLegacyPaymentRelease(db, payment, ctx) {
+  const original = ctx?.originalDb;
+  const line = (original?.records['account.bank.statement.line'] ?? []).find((item) => item.bank_move_id === payment.move_id
+    && !item.payment_id && !(item.payment_ids ?? []).length
+    && (item.allocations ?? []).some((a) => a.invoice_id === payment.invoice_id && (a.payment_move_id ?? item.bank_move_id) === payment.move_id));
+  const released = line && read(db, 'account.bank.statement.line', line.id);
+  return Boolean(line && released && !payment.is_internal_transfer && !payment.destination_move_id && !payment.check_number
+    && !unreconcileError(db, read(original, 'account.bank.statement.line', line.id), released, ctx)
+    && !(db.records['account.move'] ?? []).some((move) => (move.payments ?? []).some((row) => row.move_id === payment.move_id && !row.reversed)));
+}
+
 /** Release a match by restoring the suspense line on its entry and unlinking the matching; existing payments are not reversed. */
 export function unreconcile(db, line, reversalDate = null, ctx = null) {
   const target = read(db, 'account.bank.statement.line', line.id) ?? line;
@@ -868,6 +880,12 @@ export function unreconcile(db, line, reversalDate = null, ctx = null) {
     open_amount: restoredOpen,
     allocations: [],
   });
+  if (!target.payment_id && !(target.payment_ids ?? []).length) {
+    for (const payment of (db.records['account.payment'] ?? []).filter((p) => p.state === 'posted' && p.move_id === bankId
+      && allocations.some((a) => a.invoice_id === p.invoice_id && (a.payment_move_id ?? bankId) === bankId))) {
+      current = detachLegacyStatementPayment(current, payment, { ...ctx, originalDb: db });
+    }
+  }
   return { db: current };
 }
 

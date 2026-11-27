@@ -11,7 +11,7 @@ import { conversionRate, rateAt, toCompany } from './currency.js';
 import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
-import { isPaymentMatched, unreconcile } from './bank.js';
+import { isLegacyPaymentRelease, isPaymentMatched, unreconcile } from './bank.js';
 import { reconcileLedgerItems, unreconcilePartialReconcile } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, currentCompany, recipientBankCompanyError } from './company.js';
@@ -1221,6 +1221,8 @@ export function resetToDraftError(db, payment, ctx = null) {
   return reconciled ? 'Reconciled payments cannot be reset to draft' : null;
 }
 
+const detachedPaymentValues = (state) => ({ state, move_id: null, destination_move_id: null, unapplied: 0, is_sent: false });
+
 /** Undo posted entries of a payment (and paired transfer) and move the payment to `draft` or `cancel`. */
 function undoPaymentToState(db, paymentOrId, targetState, ctx = null) {
   const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
@@ -1260,21 +1262,9 @@ function undoPaymentToState(db, paymentOrId, targetState, ctx = null) {
     }
   }
 
-  next = write(next, 'account.payment', payment.id, {
-    state: targetState,
-    move_id: null,
-    destination_move_id: null,
-    unapplied: 0,
-    is_sent: false,
-  });
+  next = write(next, 'account.payment', payment.id, detachedPaymentValues(targetState));
   if (paired && paired.state !== targetState) {
-    next = write(next, 'account.payment', paired.id, {
-      state: targetState,
-      move_id: null,
-      destination_move_id: null,
-      unapplied: 0,
-      is_sent: false,
-    });
+    next = write(next, 'account.payment', paired.id, detachedPaymentValues(targetState));
   }
 
   for (const moveId of movesToUndo) {
@@ -1312,6 +1302,11 @@ export function cancelPayment(db, paymentOrId, ctx = null) {
     return undoPaymentToState(db, payment, 'cancel', ctx);
   }
   throw new Error('Only draft or sent paid payments can be cancelled');
+}
+
+/** Cancel the obsolete payment while preserving the statement's posted bank entry. */
+export function detachLegacyStatementPayment(db, payment, ctx) {
+  return write(db, 'account.payment', payment.id, detachedPaymentValues('cancel'), ctx);
 }
 
 /** True when `payment` is in Odoo's paid (not bank-matched) state. */
@@ -2135,7 +2130,11 @@ export const payModels = {
       }
       if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
       if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && ['cancel', 'rejected'].includes(after.state)))) {
-        const resetError = resetToDraftError(db, before, ctx);
+        const allowed = detachedPaymentValues('cancel');
+        const legacyRelease = Object.entries(allowed).every(([key, value]) => (after[key] ?? null) === value)
+          && [...new Set([...Object.keys(before), ...Object.keys(after)])].every((key) => key in allowed || JSON.stringify(before[key] ?? null) === JSON.stringify(after[key] ?? null))
+          && isLegacyPaymentRelease(db, before, ctx);
+        const resetError = legacyRelease ? null : resetToDraftError(db, before, ctx);
         if (resetError) return resetError;
       }
       if (!before && after.is_sent && after.state !== 'posted') {

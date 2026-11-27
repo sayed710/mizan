@@ -649,7 +649,28 @@ test('legacy invoice match restores its payment move to bank suspense', () => {
   assert.equal(result.open_amount, 100);
   assert.ok(read(released, MOVE_MODEL, payment.move_id).line_ids.some((item) => item.account_id === suspenseAccount.id && item.credit === 100));
   assert.ok(read(released, MOVE_MODEL, invoice.id).payments.every((row) => row.reversed));
-  assert.doesNotThrow(() => applyDiff(db, diffDb(db, released), { isAdmin: true }));
+  const forged = { ...released, records: { ...released.records, 'account.payment': released.records['account.payment'].map((item) => item.id === payment.id ? { ...item, amount: 1 } : item) } };
+  assert.throws(() => applyDiff(db, diffDb(db, forged), { isAdmin: true }));
+  const synced = applyDiff(db, diffDb(db, released), { isAdmin: true });
+  assert.equal(read(synced, 'account.payment', payment.id).state, 'cancel');
+  assert.equal(read(synced, 'account.payment', payment.id).move_id, null);
+  const assertBankEntry = (state) => {
+    const entry = read(state, MOVE_MODEL, payment.move_id);
+    assert.equal(entry.line_ids.reduce((sum, item) => sum + (item.debit || 0) - (item.credit || 0), 0), 0);
+    assert.equal(search(state, 'account.payment').some((item) => item.state === 'posted' && item.move_id === entry.id), false);
+  };
+  assertBankEntry(synced);
+  const rematched = reconcileWith(synced, read(synced, LINE_MODEL, line.id), invoice.id);
+  assertBankEntry(applyDiff(synced, diffDb(synced, rematched), { isAdmin: true }));
+  const account = create(synced, 'account.account', { name: 'Legacy income', code: '709998', account_type: 'income', company_id: 1 });
+  const ready = write(account.db, LINE_MODEL, line.id, { counterpart_account_id: account.id });
+  const booked = bookToAccount(ready, read(ready, LINE_MODEL, line.id)).db;
+  assert.equal(read(booked, LINE_MODEL, line.id).state, 'reconciled');
+  assertBankEntry(applyDiff(ready, diffDb(ready, booked), { isAdmin: true }));
+  const rule = create(account.db, 'account.reconcile.model', { name: 'Legacy rule', rule_type: 'writeoff_button', line_ids: [{ account_id: account.id, amount_type: 'percentage', amount: 100 }] });
+  const ruled = applyRule(rule.db, read(rule.db, 'account.reconcile.model', rule.id), read(rule.db, LINE_MODEL, line.id));
+  assert.equal(read(ruled, LINE_MODEL, line.id).state, 'reconciled');
+  assertBankEntry(applyDiff(rule.db, diffDb(rule.db, ruled), { isAdmin: true }));
 });
 
 test('moveGuard: general statement entry rewrites are rejected via diffDb + applyDiff', () => {
