@@ -261,7 +261,7 @@ test('migration skips secured moves so version-2 hash chains stay valid while mi
   const { read, write } = await import('./orm.js');
   const { postMove } = await import('./models/accounting.js');
   const { checkInalterability, computeMoveHash, secureEntries } = await import('./models/hash_chain.js');
-  const { migrate, SCHEMA_VERSION } = await import('./migrations.js');
+  const { migrate } = await import('./migrations.js');
   const { applyDiff, diffDb } = await import('./sync.js');
 
   let db = seed();
@@ -335,7 +335,7 @@ test('migration skips secured moves so version-2 hash chains stay valid while mi
   };
 
   const migrated = migrate(db);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 82);
   assert.equal(migrate(migrated), migrated, 'migration is idempotent');
 
   // Unsecured invoice is migrated to 100% distribution.

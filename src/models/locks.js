@@ -79,7 +79,8 @@ export function withLocks(models) {
           || (name === 'account.asset' && !isReopeningAsset)
           || (name === 'account.budget' && !isCompanylessBudgetRecord)
           ? [] : MAINTAINED[name] ?? [];
-        const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f));
+        const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f)
+          && !(name === 'account.move' && f === 'line_ids' && ctx?.verifiedBankRewrite));
         const changed = fields.filter((f) => !same(model.fields[f], before[f], r[f]));
         if (name === 'sign.request' && before.state !== 'sent') {
           for (const f of ['signature', 'sign_date', 'signer_ids', 'field_values']) {

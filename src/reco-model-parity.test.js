@@ -69,7 +69,7 @@ test('migration 41 converts legacy reconciliation models to Odoo 20 schema idemp
   };
 
   const migrated = migrate(legacyDb, SCHEMA_VERSION);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 82);
 
   const r1 = read(migrated, MODEL, 901);
   assert.equal(r1.rule_type, 'reco_model');

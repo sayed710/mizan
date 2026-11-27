@@ -4,7 +4,7 @@ import { statementUrl } from '../statementNavigation.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels, creditNoteView, journalEntriesView, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
+import { accountingModels, creditNoteView, journalEntriesView, partnerCreateBillAction, partnerCreateInvoiceAction, partnerMenuActions, partnerRegisterPaymentAction, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels, customerPaymentView, vendorPaymentView } from './pay.js';
@@ -63,7 +63,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec } from './finance.js';
+import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec, unpostponeFollowUp } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -133,6 +133,10 @@ for (const [name, model] of Object.entries(models)) {
 models['hr.leave'].guard = leaveGuard;
 declareWorkflowFields(models);
 
+const partnerListActions = [partnerCreateInvoiceAction, partnerCreateBillAction, partnerRegisterPaymentAction];
+models['res.partner'].listActions = partnerListActions;
+models['res.partner'].menuActions = partnerMenuActions;
+
 // Views that need their own spec are offered only when the model has one (a missing kanban spec used to crash the screen).
 const SPEC_VIEWS = ['kanban', 'calendar', 'gantt'];
 export const viewsOf = (model) => {
@@ -167,9 +171,24 @@ const customers = {
       wizard: () => postponeFollowUpWizardSpec(),
       run: (db, ids, values) => ({ db: postponeFollowUp(db, ids, values.date, { companyId: db.settings?.current_company_id ?? 1 }) }),
     },
+    {
+      label: 'Unpostpone',
+      requiresSelection: true,
+      app: 'accounting',
+      when: (db, user) => appOpen(db, user, 'accounting'),
+      run: (db, ids) => ({ db: unpostponeFollowUp(db, ids, { companyId: db.settings?.current_company_id ?? 1, at: today() }) }),
+    },
+    partnerCreateInvoiceAction,
+    partnerRegisterPaymentAction,
   ],
 };
-const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
+const vendors = {
+  key: 'vendors',
+  label: 'Vendors',
+  model: 'res.partner',
+  defaults: { supplier_rank: 1 },
+  listActions: [partnerCreateBillAction, partnerRegisterPaymentAction],
+};
 const products = { key: 'products', label: 'Products', model: 'product' };
 
 /**
@@ -419,6 +438,7 @@ const allApps = [
           { key: 'horizontal-groups', label: 'Horizontal Groups', model: 'account.report.horizontal.group' },
           { key: 'configurable-report-view', label: 'Accounting Report', type: 'report', report: 'configurable', hidden: true },
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
+          { key: 'account-groups', label: 'Account Groups', model: 'account.group' },
           { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list', defaultFilters: ['sale', 'purchase'], includeArchived: true },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
           { key: 'journals', label: 'Journals', model: 'account.journal', view: 'list' },
@@ -809,7 +829,14 @@ const allApps = [
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
   { id: 'spreadsheet', name: 'Spreadsheet', color: ['#16a34a', '#0f766e'], menus: [{ key: 'sheet', label: 'Spreadsheet', type: 'spreadsheet' }, { key: 'all', label: 'All Spreadsheets', model: 'spreadsheet.document' }] },
   { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', type: 'knowledge' }, { key: 'all', label: 'All Articles', model: 'knowledge.article' }] },
-  { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }, { key: 'companies', label: 'Companies', model: 'res.company' }] },
+  { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [
+    { key: 'general', label: 'General Settings', type: 'settings' },
+    { key: 'companies', label: 'Companies', model: 'res.company' },
+    { label: 'Technical', children: [
+      { label: 'Email', children: [{ key: 'mail-templates', label: 'Email Templates', model: 'mail.template' }] },
+      { key: 'sms-templates', label: 'SMS Templates', model: 'sms.template' },
+    ] },
+  ] },
 ];
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.

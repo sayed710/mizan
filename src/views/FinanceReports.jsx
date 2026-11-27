@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { read, search } from '../orm.js';
-import { cashFlow, customerStatement, executiveSummary, fiscalReport, partnerLedger, reportAmountsVisible, trialBalance } from '../models/reports.js';
+import { cashFlow, customerStatement, executiveSummary, fiscalReport, groupTrialBalanceRows, partnerLedger, reportAmountsVisible, trialBalance } from '../models/reports.js';
 import { currentCompany } from '../models/company.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -13,7 +13,7 @@ import { statementUrl } from '../statementNavigation.js';
 const num = (v, fmtMoney = money) => <td className="num">{fmtMoney(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
 
-export function TrialBalance({ db, period, periods, companyId, analyticAccountIds, showInitialBalance = true, showEndBalance = true, hideZeroLines = false, money: moneyProp }) {
+export function TrialBalance({ db, period, periods, companyId, analyticAccountIds, showInitialBalance = true, showEndBalance = true, hideZeroLines = false, groupBy = '', money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
   const reports = (periods ?? [period]).map((p) => trialBalance(db, { ...p, reviewMode: period.reviewMode, company_id, analyticAccountIds, includeZeroRows: true }));
@@ -27,11 +27,44 @@ export function TrialBalance({ db, period, periods, companyId, analyticAccountId
     ...(showEndBalance ? ['end'] : []),
   ];
   const visibleRows = rows.filter((account) => reportAmountsVisible(rowsByReport.flatMap((byAccount) => keys.map((key) => byAccount.get(account.id)?.[key] ?? 0)), hideZeroLines));
+  const [closedGroups, setClosedGroups] = useState(() => new Set());
+  const toggleGroup = (key) => setClosedGroups((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
+  const renderAccountRow = (r, indent = 0) => (
+    <tr key={r.id} className="rep-detail">
+      <td style={indent ? { paddingInlineStart: `${indent * 1.5 + 0.75}rem` } : undefined}>
+        <a href={`#/open/account.account/${r.id}`}>{r.code} {r.name}</a>
+      </td>
+      {rowsByReport.flatMap((byAccount, index) => {
+        const row = byAccount.get(r.id);
+        return keys.map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(row?.[key] ?? 0)}</td>);
+      })}
+    </tr>
+  );
+  const groups = groupBy ? groupTrialBalanceRows(db, visibleRows, rowsByReport, keys, groupBy) : [];
   return (
     <tbody>
-      {visibleRows.map((r) => (
-        <tr key={r.id} className="rep-detail"><td><a href={`#/open/account.account/${r.id}`}>{r.code} {r.name}</a></td>{rowsByReport.flatMap((byAccount, index) => { const row = byAccount.get(r.id); return keys.map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(row?.[key] ?? 0)}</td>); })}</tr>
-      ))}
+      {groupBy ? groups.map((group) => {
+        if (group.ancestors?.some((key) => closedGroups.has(key))) return null;
+        const open = !closedGroups.has(group.key);
+        return (
+          <Fragment key={group.key}>
+            <tr className="rep-section" onClick={() => toggleGroup(group.key)} aria-expanded={open} style={{ cursor: 'pointer' }}>
+              <td style={group.depth ? { paddingInlineStart: `${group.depth * 1.5 + 0.75}rem` } : undefined}>
+                <span className="caret">{(group.accounts.length || group.hasChildren) ? (open ? '▾' : '▸') : ''}</span> {t(group.name)}
+              </td>
+              {group.periodTotals.flatMap((periodSum, index) => keys.map((key) => (
+                <td key={`${index}-${key}`} className="num">{fmtMoney(periodSum[key] ?? 0)}</td>
+              )))}
+            </tr>
+            {open && group.accounts.map((r) => renderAccountRow(r, group.depth + 1))}
+          </Fragment>
+        );
+      }) : visibleRows.map((r) => renderAccountRow(r))}
       <tr className="rep-total strong"><td>{t('Total')}</td>{reports.flatMap((report, index) => keys.map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(report.totals[key])}</td>))}</tr>
     </tbody>
   );

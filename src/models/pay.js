@@ -11,11 +11,11 @@ import { conversionRate, rateAt, toCompany } from './currency.js';
 import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
-import { isPaymentMatched, unreconcile } from './bank.js';
+import { isLegacyPaymentRelease, isPaymentMatched, unreconcile } from './bank.js';
 import { reconcileLedgerItems, unreconcilePartialReconcile } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, currentCompany, recipientBankCompanyError } from './company.js';
-import { defaultPaymentMethodLineId, isMethodLineJournal, paymentMethodLineError } from './paymentmethod.js';
+import { defaultPaymentMethodLineId, isMethodLineJournal, partnerPaymentMethodDefaults, paymentMethodLineError, preferredPaymentMethodLine } from './paymentmethod.js';
 import { openActivitiesText } from './mail.js';
 import { hasMultiCurrency } from './money.js';
 
@@ -653,7 +653,8 @@ export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineI
     && (!Number.isInteger(lineIndex) || row.line_index === lineIndex));
   const targetMoveId = byPartial ? (paymentMoveId ?? matches[0]?.move_id) : paymentMoveId;
   const payments = targetMoveId != null ? search(db, 'account.payment').filter((p) => p.move_id === targetMoveId && p.state === 'posted') : [];
-  if (!isInvoice(invoice) || invoice?.state !== 'posted' || matches.length !== 1 || (byPartial ? payments.length > 1 : payments.length !== 1)) {
+  const isBankMove = (db.records['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === targetMoveId);
+  if (!isInvoice(invoice) || invoice?.state !== 'posted' || matches.length !== 1 || (byPartial ? payments.length > 1 : (!isBankMove && payments.length !== 1))) {
     throw new Error(byPartial ? 'Select one active partial reconciliation settlement' : 'Select one active application of a posted payment');
   }
   const [row] = matches;
@@ -674,7 +675,7 @@ export function paymentUnapplication(db, invoiceId, paymentMoveId, date, { lineI
   if (payment && (!byPartial || row.payment_company_amount != null) && !(bookedPayment > 0)) {
     throw new Error('The application payment company amount cannot be determined from its booked entry; repair the settlement link first');
   }
-  if (source?.state !== 'posted' || (!byPartial && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === targetMoveId))) {
+  if (source?.state !== 'posted' || (!byPartial && !isBankMove && search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === targetMoveId))) {
     throw new Error(byPartial ? 'The reconciled counterpart entry must remain posted' : 'The payment entry must remain posted and unreversed');
   }
   const fxError = settlementFxError(db, invoice, row);
@@ -1040,7 +1041,7 @@ export function reverseWriteoff(db, invoiceId, moveId, date, { lineIndex = null 
  * again, cash-basis taxes included. Payments made by a bank reconciliation stay, since the bank line still matches them.
  */
 export function reversePayment(db, p, date = today(), options = {}) {
-  if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
+  if (!p || p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   if (p.return_id || p.is_tax_payment) throw new Error('Tax return payments cannot be reversed independently');
 
   if (p.is_internal_transfer) {
@@ -1220,6 +1221,8 @@ export function resetToDraftError(db, payment, ctx = null) {
   return reconciled ? 'Reconciled payments cannot be reset to draft' : null;
 }
 
+const detachedPaymentValues = (state) => ({ state, move_id: null, destination_move_id: null, unapplied: 0, is_sent: false });
+
 /** Undo posted entries of a payment (and paired transfer) and move the payment to `draft` or `cancel`. */
 function undoPaymentToState(db, paymentOrId, targetState, ctx = null) {
   const payment = typeof paymentOrId === 'object' && paymentOrId !== null ? paymentOrId : read(db, 'account.payment', paymentOrId);
@@ -1259,21 +1262,9 @@ function undoPaymentToState(db, paymentOrId, targetState, ctx = null) {
     }
   }
 
-  next = write(next, 'account.payment', payment.id, {
-    state: targetState,
-    move_id: null,
-    destination_move_id: null,
-    unapplied: 0,
-    is_sent: false,
-  });
+  next = write(next, 'account.payment', payment.id, detachedPaymentValues(targetState));
   if (paired && paired.state !== targetState) {
-    next = write(next, 'account.payment', paired.id, {
-      state: targetState,
-      move_id: null,
-      destination_move_id: null,
-      unapplied: 0,
-      is_sent: false,
-    });
+    next = write(next, 'account.payment', paired.id, detachedPaymentValues(targetState));
   }
 
   for (const moveId of movesToUndo) {
@@ -1311,6 +1302,11 @@ export function cancelPayment(db, paymentOrId, ctx = null) {
     return undoPaymentToState(db, payment, 'cancel', ctx);
   }
   throw new Error('Only draft or sent paid payments can be cancelled');
+}
+
+/** Cancel the obsolete payment while preserving the statement's posted bank entry. */
+export function detachLegacyStatementPayment(db, payment, ctx) {
+  return write(db, 'account.payment', payment.id, detachedPaymentValues('cancel'), ctx);
 }
 
 /** True when `payment` is in Odoo's paid (not bank-matched) state. */
@@ -2134,7 +2130,11 @@ export const payModels = {
       }
       if (!validCheckWrite(db, before, after)) return 'Issued check numbers cannot be changed';
       if (before && before.state !== 'draft' && (after.state === 'draft' || (before.state === 'posted' && ['cancel', 'rejected'].includes(after.state)))) {
-        const resetError = resetToDraftError(db, before, ctx);
+        const allowed = detachedPaymentValues('cancel');
+        const legacyRelease = Object.entries(allowed).every(([key, value]) => (after[key] ?? null) === value)
+          && [...new Set([...Object.keys(before), ...Object.keys(after)])].every((key) => key in allowed || JSON.stringify(before[key] ?? null) === JSON.stringify(after[key] ?? null))
+          && isLegacyPaymentRelease(db, before, ctx);
+        const resetError = legacyRelease ? null : resetToDraftError(db, before, ctx);
         if (resetError) return resetError;
       }
       if (!before && after.is_sent && after.state !== 'posted') {
@@ -2297,8 +2297,19 @@ export const payModels = {
     ],
     createDefaults: (db, vals = {}) => {
       const companyId = vals.company_id ?? getActiveCompany() ?? currentCompany(db);
-      const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
       const paymentType = vals.payment_type ?? 'inbound';
+      if (vals.partner_id && !vals.is_internal_transfer) {
+        const payDefaults = partnerPaymentMethodDefaults(db, vals.partner_id, paymentType, companyId, {
+          journalId: vals.journal_id ?? null,
+        });
+        return {
+          ...(vals.journal_id === undefined && payDefaults.journal_id ? { journal_id: payDefaults.journal_id } : {}),
+          ...(vals.payment_method_line_id === undefined && payDefaults.payment_method_line_id != null
+            ? { payment_method_line_id: payDefaults.payment_method_line_id }
+            : {}),
+        };
+      }
+      const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
       const lineId = vals.payment_method_line_id === undefined && journalId
         ? defaultPaymentMethodLineId(db, journalId, paymentType)
         : undefined;
@@ -2311,8 +2322,25 @@ export const payModels = {
       if (key === 'invoice_id' && r.invoice_id && db) {
         return { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null };
       }
-      if ((key === 'journal_id' || key === 'payment_type') && db) {
-        return { payment_method_line_id: defaultPaymentMethodLineId(db, r.journal_id, r.payment_type) };
+      if ((key === 'partner_id' || key === 'journal_id' || key === 'payment_type' || key === 'company_id') && db) {
+        const paymentType = r.payment_type ?? 'inbound';
+        const companyId = r.company_id ?? getActiveCompany() ?? currentCompany(db);
+        const pref = r.partner_id && !r.is_internal_transfer
+          ? preferredPaymentMethodLine(db, r.partner_id, paymentType, companyId)
+          : null;
+        if (pref) {
+          if (key === 'journal_id') {
+            return {
+              payment_method_line_id: pref.journal_id === r.journal_id
+                ? pref.id
+                : defaultPaymentMethodLineId(db, r.journal_id, paymentType),
+            };
+          }
+          return { journal_id: pref.journal_id, payment_method_line_id: pref.id };
+        }
+        if (key === 'journal_id' || key === 'payment_type') {
+          return { payment_method_line_id: defaultPaymentMethodLineId(db, r.journal_id, paymentType) };
+        }
       }
       return {};
     },

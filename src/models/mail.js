@@ -83,4 +83,26 @@ export const mailModels = {
     list: ['name', 'description'],
     form: { title: 'name', groups: [['description'], []], chatter: true },
   },
+
+  'mail.template': {
+    label: 'Email Templates',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      model: {
+        type: 'selection',
+        label: 'Applies to',
+        required: true,
+        options: [['res.partner', 'Contact'], ['account.move', 'Invoice'], ['sale.order', 'Sales Order']],
+      },
+      subject: { type: 'char', label: 'Subject' },
+      body: { type: 'text', label: 'Body' },
+    },
+    defaults: () => ({ model: 'res.partner' }),
+    list: ['name', 'model', 'subject'],
+    form: {
+      title: 'name',
+      groups: [['model', 'subject']],
+      tabs: [{ label: 'Content', fields: ['body'] }],
+    },
+  },
 };

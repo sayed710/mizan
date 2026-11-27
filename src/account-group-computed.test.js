@@ -1,0 +1,35 @@
+﻿import test from 'node:test';
+import assert from 'node:assert/strict';
+import { seed } from './seed.js';
+import { create, read, unlink, write } from './orm.js';
+import { applyDiff, diffDb } from './sync.js';
+
+const save = (db, next) => applyDiff(db, diffDb(db, next), { isAdmin: true });
+test('account groups and parents follow prefixes through sync', () => {
+  let db = seed();
+  const account = create(db, 'account.account', { name: 'Prefix test', code: '101000', account_type: 'asset_current', company_id: 1 });
+  db = save(db, account.db);
+  const root = create(db, 'account.group', { name: 'Root', code_prefix_start: '10', code_prefix_end: '10', company_id: 1 });
+  db = save(db, root.db);
+  assert.equal(read(db, 'account.account', account.id).group_id, root.id);
+  const child = create(db, 'account.group', { name: 'Child', code_prefix_start: '101', code_prefix_end: '101', company_id: 1 });
+  db = save(db, child.db);
+  assert.equal(read(db, 'account.account', account.id).group_id, child.id);
+  assert.equal(read(db, 'account.group', child.id).parent_id, root.id);
+  db = save(db, write(db, 'account.group', child.id, { code_prefix_start: '103', code_prefix_end: '103' }));
+  assert.equal(read(db, 'account.account', account.id).group_id, root.id);
+  db = save(db, write(db, 'account.group', child.id, { code_prefix_start: '101', code_prefix_end: '101' }));
+  const forged = structuredClone(db);
+  forged.records['account.account'].find((a) => a.id === account.id).group_id = root.id;
+  forged.records['account.group'].find((g) => g.id === child.id).parent_id = null;
+  db = save(db, forged);
+  assert.equal(read(db, 'account.account', account.id).group_id, child.id);
+  assert.equal(read(db, 'account.group', child.id).parent_id, root.id);
+  db = save(db, write(db, 'account.account', account.id, { code: '102000' }));
+  assert.equal(read(db, 'account.account', account.id).group_id, root.id);
+  db = save(db, write(db, 'account.account', account.id, { code: '101000' }));
+  db = save(db, unlink(db, 'account.group', [child.id]));
+  assert.equal(read(db, 'account.account', account.id).group_id, root.id);
+  db = save(db, unlink(db, 'account.group', [root.id]));
+  assert.equal(read(db, 'account.account', account.id).group_id, null);
+});

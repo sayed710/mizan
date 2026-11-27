@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from 'react';
+import { Fragment, useState } from 'react';
 import { search } from '../orm.js';
 import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, targetCompanyIds } from '../models/configurableReports.js';
 import { currentCompany, documentCompany } from '../models/company.js';
@@ -6,7 +6,7 @@ import { today } from '../models/common.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
-import { downloadCsv, tableToRows } from '../csv.js';
+import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { periodsFor, selectedOptionIds } from './reportCompare.js';
@@ -47,10 +47,41 @@ function scopedJournals(db, companyIds, ledger) {
   );
 }
 
+/** Build structured CSV/XLSX rows from computed report data (preserving hierarchy indentation and numeric values). */
+export function configurableReportExportRows(data, openCodes = new Set()) {
+  if (!data) return [];
+  const headerLabels = [...data.headers, ...(data.showVariance ? ['Variance', '%'] : [])]
+    .map((header) => header.split(' ').map((part) => t(part)).join(' '));
+  const rows = [[t('Report Lines'), ...headerLabels]];
+  const formatVariance = (variance) => (
+    data.showVariance
+      ? [variance?.amount == null ? '' : Number(variance.amount), variance?.pct == null ? t('n/a') : `${variance.pct}${t('%')}`]
+      : []
+  );
+  const indent = (depth, label) => `${'  '.repeat(Math.max(0, Number(depth) || 0))}${label}`;
+  for (const line of data.rows) {
+    const depth = Number(line.depth) || 0;
+    rows.push([
+      indent(depth, t(line.name)),
+      ...line.values.map((v) => (v == null ? '' : Number(v))),
+      ...formatVariance(line.variance),
+    ]);
+    if (isExpandableLine(line) && openCodes?.has(line.code)) {
+      for (const acc of line.accountRows) {
+        rows.push([
+          indent(depth + 1, `${acc.account.code} ${acc.account.name}`),
+          ...acc.values.map((v) => (v == null ? '' : Number(v))),
+          ...formatVariance(acc.variance),
+        ]);
+      }
+    }
+  }
+  return rows;
+}
+
 /** Render an editable account.report either by record ID or by standard statement kind ('pnl' / 'balance'). */
 export function ConfigurableReportPage({ id, statementKind = null, title = null }) {
   const sourceDb = useDb();
-  const tableRef = useRef(null);
   const [companyId, setCompanyId] = useState('all');
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [comparison, setComparison] = useState('none');
@@ -172,7 +203,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   const exportCsv = () => {
     if (!data) return;
     const baseName = statementKind || report.code || report.name || 'report';
-    downloadCsv(`${String(baseName).toLowerCase().replace(/\s+/g, '_')}.csv`, tableToRows(tableRef.current));
+    downloadCsv(`${String(baseName).toLowerCase().replace(/\s+/g, '_')}.csv`, configurableReportExportRows(data, openCodes));
   };
 
   const exportXlsx = () => {
@@ -186,7 +217,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     ];
     downloadXlsx(
       `${String(baseName).toLowerCase().replace(/\s+/g, '_')}.xlsx`,
-      tableRef.current,
+      configurableReportExportRows(data, openCodes),
       { sheetName, columnTypes },
     );
   };
@@ -342,7 +373,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     >
       {data && (
         <div className="list-wrap">
-          <table className="list report" ref={tableRef}>
+          <table className="list report">
             <thead>
               <tr>
                 <th>{t('Report Lines')}</th>

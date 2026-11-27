@@ -311,7 +311,7 @@ test('2. Brand-new connection default state is not_synchronized, reflects provid
   const migrated = migrate(legacyDb);
   assert.equal(migrated.records['account.online.link'].find((r) => r.id === 101).state, 'not_synchronized');
   assert.equal(migrated.records['account.online.link'].find((r) => r.id === 102).state, 'connected');
-  assert.equal(SCHEMA_VERSION, 81);
+  assert.equal(SCHEMA_VERSION, 82);
 });
 
 test('3. Tax returns: name defaults canonically, write/onchange enforces name rules, duplicate preserves copy name, and empty dates tab is clean', async () => {

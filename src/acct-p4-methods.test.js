@@ -7,7 +7,7 @@ import { postMove } from './models/accounting.js';
 import { postPayment } from './models/pay.js';
 import { accountId } from './models/ledger.js';
 import { applyDiff, diffDb } from './sync.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 
 const sync = (db, next, opts) => applyDiff(db, diffDb(db, next), opts);
 
@@ -352,7 +352,7 @@ test('migration adds seeded payment methods and default lines to existing bank a
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 82);
   assert.equal(search(migrated, 'account.payment.method').length, 5);
 
   const migratedBank = read(migrated, 'account.journal', bank.id);

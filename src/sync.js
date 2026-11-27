@@ -9,7 +9,7 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
-import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines } from './models/accounting.js';
+import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines, recomputeAccountGroups } from './models/accounting.js';
 import { moveDate } from './models/finance.js';
 import { isIncomeOrExpenseAccount, isReconcilableAccount } from './models/ledger.js';
 import { checkMandatoryPlans } from './models/analyticplus.js';
@@ -17,6 +17,7 @@ import { companyCurrencyRecord, isCurrencyZero, roundCurrency } from './money.js
 import { isRevaluationMovePair } from './models/closing.js';
 import { isProtectedAuditMessage } from './models/auditRules.js';
 import { syncJournalMethodLines, unlinkJournalMethodLines } from './models/paymentmethod.js';
+import { bankStatementRewriteAllowed } from './models/finance.js';
 import { authorizeSyncCashDifferenceLines, syncStatementLines } from './models/bankstatement.js';
 import { syncLinkedPartnerBanks } from './models/resbank.js';
 
@@ -1049,7 +1050,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     }
   }
   const seen = { ...db, records };
-  const baseCtx = { isAdmin, login, name: author, companies, allowed };
+  const baseCtx = { isAdmin, login, name: author, companies, allowed, originalDb: db };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
     // An origin link only unlocks archived accounts for verified workflows: generated moves, server-rebuilt exchange
@@ -1070,8 +1071,16 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     ].filter(Number.isInteger) : [];
     const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
     // Keep specific authorization failures ahead of the generic locked-form error.
+    let verifiedBankRewrite = false;
+    if (model === 'account.move' && before && bankStatementRewriteAllowed(seen, before, rec, baseCtx)) {
+      const oldLine = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === rec.id);
+      const newLine = oldLine && read(seen, 'account.bank.statement.line', oldLine.id);
+      const checkedLine = newLine && { ...newLine, running_balance: oldLine.running_balance };
+      verifiedBankRewrite = Boolean(checkedLine && !validate('account.bank.statement.line', checkedLine, seen, false, oldLine)
+        && !models['account.bank.statement.line'].guard?.(seen, oldLine, checkedLine, { ...baseCtx, ...cashDiffSync.ctx }));
+    }
     const err = validate(model, rec, seen, !before, before) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { ...baseCtx, ...cashDiffSync.ctx, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets }, submittedByRecord.get(`${model}:${rec.id}`));
+      ?? models[model].guard?.(seen, before, rec, { ...baseCtx, ...cashDiffSync.ctx, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets, verifiedBankRewrite }, submittedByRecord.get(`${model}:${rec.id}`));
     if (err) throw new Error(err);
     if (model === 'account.journal') {
       const submitted = submittedByRecord.get(`${model}:${rec.id}`);
@@ -1152,6 +1161,9 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       }
     }
     if (model in records) records = { ...records, [model]: records[model].filter((r) => !drop.has(r.id)) };
+  }
+  if (d.upserts?.['account.account'] || d.upserts?.['account.group'] || d.deletes?.['account.group']) {
+    records = recomputeAccountGroups({ ...db, records }).records;
   }
   // Whole-record rules that look across models run once every change is in place.
   const final = { ...db, records };

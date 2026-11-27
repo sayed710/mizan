@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { create, read } from './orm.js';
 import { conversionRate, rateAt, toCompany } from './models/currency.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 
 test('company rates take precedence over shared rates as of the conversion date', () => {
   let db = seed();
@@ -37,7 +37,7 @@ test('legacy currency rate migration marks rows shared and preserves company rat
     { date: '2020-01-01', rate: 1 }, { date: '2021-01-01', rate: 2, company_id: 1 },
   ] }] } };
   const migrated = migrate(old);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 82);
   assert.deepEqual(read(migrated, 'res.currency', currency.id).rate_ids.map((r) => r.company_id), [null, 1]);
   assert.equal(migrate(migrated), migrated);
   assert.equal(old.records['res.currency'][0].rate_ids[0].company_id, undefined);
