@@ -27,6 +27,6 @@ export function useMoveUpload(options) {
   return { upload, busy };
 }
 
-export function UploadButton({ upload, busy }) {
-  return <label className="btn"><span>{t('Upload')}</span><input type="file" multiple hidden disabled={busy} onChange={(e) => { upload(e.target.files); e.target.value = ''; }} /></label>;
+export function UploadButton({ upload, busy, className = 'btn' }) {
+  return <label className={className}><span>{t('Upload')}</span><input type="file" multiple hidden disabled={busy} onChange={(e) => { upload(e.target.files); e.target.value = ''; }} /></label>;
 }

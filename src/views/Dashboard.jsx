@@ -114,8 +114,14 @@ function JournalCard({ card, companyId }) {
           </dl>
         )}
         <RateNote count={card.unratedCount} />
-        <a className="btn primary sm" href={actionHref}>{t(actionLabel)}</a>
-        <UploadButton {...moveUpload} />
+        {empty && !sale ? (
+          <UploadButton {...moveUpload} className="btn primary sm" />
+        ) : (
+          <>
+            <a className="btn primary sm" href={actionHref}>{t(actionLabel)}</a>
+            {!empty && <UploadButton {...moveUpload} />}
+          </>
+        )}
         {empty && (
           sale ? (
             <div className="journal-onboarding">

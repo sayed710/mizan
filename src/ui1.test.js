@@ -292,15 +292,16 @@ test('rendered dashboard shows empty states for journals with no posted entries 
   assert.match(saleCard, />and<\/span>/);
   assert.match(saleCard, /href="#\/accounting\/taxes">[\s\S]*Configure taxes<\/span><\/a>/);
   assert.doesNotMatch(saleCard, /Create your first invoice\./);
+  assert.doesNotMatch(saleCard, /Upload/);
 
   const purchaseCard = journalCardHtml(html, 'Empty Purchase');
   assert.match(purchaseCard, /Record your vendor bills and pay them easily\./);
-  assert.match(purchaseCard, /class="btn primary sm" href="#\/accounting\/bills\/new">New Bill<\/a>/);
+  assert.match(purchaseCard, /<label class="btn primary sm"><span>Upload<\/span><input type="file"/);
   assert.equal((purchaseCard.match(/class="btn primary/g) ?? []).length, 1);
   assert.match(purchaseCard, />or<\/span>/);
   assert.match(purchaseCard, /href="#\/accounting\/bills\/new">[\s\S]*Create a vendor bill manually<\/span><\/a>/);
   assert.doesNotMatch(purchaseCard, /Create your first bill\./);
-  assert.doesNotMatch(purchaseCard, /Upload/);
+  assert.doesNotMatch(purchaseCard, /New Bill/);
 
   const bankCard = journalCardHtml(html, 'Empty Bank');
   assert.match(bankCard, /Import your bank statements to reconcile them\./);
