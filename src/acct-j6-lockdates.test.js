@@ -1210,7 +1210,7 @@ test('Qodo #8: server-side deletes via applyDiff pass ctx so personal exceptions
   // Move delete guard receives ctx via applyDiff: user3 gets locked error, clerk bypasses lock check
   const moveDel = { upserts: {}, deletes: { 'account.move': [postedMove.id] } };
   assert.throws(() => applyDiff(db, moveDel, user3Ctx), /period up to 2026-03-31 is locked/i);
-  assert.throws(() => applyDiff(db, moveDel, clerkCtx), /Posted entries cannot be deleted/i);
+  assert.throws(() => applyDiff(db, moveDel, clerkCtx), /You cannot delete an entry which has been posted once/i);
 });
 
 test('Qodo #9: non-accounting managers cannot create, edit, revoke, or delete lock exceptions through applyDiff', async () => {

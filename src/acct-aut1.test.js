@@ -103,7 +103,7 @@ test('AP-3 commits digitization before posting, surfaces failure, and honors ven
       assert.equal(bill.ref, 'INV-7');
       assert.equal(bill.state, scenario === 'always' ? 'posted' : 'draft');
       assert.equal(bill.digitized_unedited, true);
-      if (scenario === 'failure') assert.match(out.message, /automatic posting failed:.*invoice line/i);
+      if (scenario === 'failure') assert.match(out.message, /automatic posting failed:.*Even magicians can't post nothing!/i);
       else assert.doesNotMatch(out.message, /failed/i);
       assert.equal(snapshots.length, scenario === 'always' ? 2 : 1);
     }

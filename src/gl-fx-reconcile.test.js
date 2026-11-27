@@ -1029,13 +1029,13 @@ test('Guard test: resetting, deleting or independently reversing exchange entry 
   // 2. Deleting FX entry via applyDiff is rejected
   assert.throws(
     () => applyDiff(settled, { deletes: { 'account.move': [fxId] } }),
-    /cannot be deleted/i,
+    /cannot delete an entry which has been posted once/i,
   );
 
   // Also via direct unlink
   assert.throws(
     () => unlink(settled, 'account.move', [fxId]),
-    /cannot be deleted/i,
+    /cannot delete an entry which has been posted once/i,
   );
 
   // 3. Independently reversing FX entry via applyDiff is rejected

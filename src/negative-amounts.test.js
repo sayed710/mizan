@@ -24,7 +24,7 @@ test('a negative bucket on an invoice moves to the other side instead of a negat
 test('an invoice or bill with a total of zero or less cannot be confirmed', () => {
   for (const move_type of ['out_invoice', 'in_invoice']) {
     const { db, id } = create(seed(), 'account.move', { move_type, partner_id: 3, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: -114, tax: 0 }] });
-    assert.throws(() => confirm(db, id), /total must be positive/);
+    assert.throws(() => confirm(db, id), /You cannot validate an invoice with a negative total amount/);
     assert.equal(read(db, 'account.move', id).payment_state, 'not_paid');
   }
 });
