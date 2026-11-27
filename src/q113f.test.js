@@ -73,7 +73,8 @@ for (const [key, section, moveType, dateField] of [['invoices', 'Customers', 'ou
 test('importing a statement through an empty bank card of a company 2 journal creates company 2 lines (CSV and OFX)', async () => {
   const c2 = createCompany(seed(), { name: 'Branch Co', currency_id: read(seed(), 'res.company', 1).currency_id });
   const acc = create(c2.db, 'account.account', { code: '101477', name: 'Branch Bank', account_type: 'asset_cash', company_id: c2.id });
-  const journal = create(acc.db, 'account.journal', { name: 'Branch Bank J', code: 'BBJ', type: 'bank', company_id: c2.id, default_account_id: acc.id, suspense_account_id: acc.id });
+  const suspense = create(acc.db, 'account.account', { code: '101478', name: 'Branch Suspense', account_type: 'asset_current', company_id: c2.id });
+  const journal = create(suspense.db, 'account.journal', { name: 'Branch Bank J', code: 'BBJ', type: 'bank', company_id: c2.id, default_account_id: acc.id, suspense_account_id: suspense.id });
   const { initStore, commit, getDb } = await import('./store.js');
   const { importModelFile } = await import('./views/importModelFile.js');
   await initStore();

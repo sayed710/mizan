@@ -353,28 +353,30 @@ test('Finding 1: bank-linked journal items can be reconciled and actioned withou
   });
   db = postMove(inv.db, inv.id);
 
-  // Bank entry
-  const bankEntry = postEntry(db, {
-    journal: 'BNK1',
+  const { postPayment } = await import('./models/pay.js');
+  const { matchPayment } = await import('./models/bank.js');
+  // Customer payment on bank journal, then matched to a bank statement line (bank-linked move)
+  const pay = create(db, 'account.payment', {
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: partner.id,
+    amount: 100,
+    journal_id: bankJournal.id,
     date: today(),
-    lines: [
-      { account: bankJournal.default_account_id, debit: 100, credit: 0 },
-      { account: receivableId, partner_id: partner.id, debit: 0, credit: 100 },
-    ],
   });
-  db = bankEntry.db;
-  const bankMove = read(db, 'account.move', bankEntry.id);
+  db = postPayment(pay.db, read(pay.db, 'account.payment', pay.id));
+  const bankMove = read(db, 'account.move', read(db, 'account.payment', pay.id).move_id);
 
-  // Bank statement line linked to bankEntry
+  // Bank statement line matched to the payment (auto-books bank entry into suspense, then matches payment)
   const stLine = create(db, 'account.bank.statement.line', {
     journal_id: bankJournal.id,
     date: today(),
     payment_ref: 'Payment F1',
     partner_id: partner.id,
     amount: 100,
-    bank_move_id: bankEntry.id,
+    payment_id: pay.id,
   });
-  db = stLine.db;
+  db = matchPayment(stLine.db, read(stLine.db, 'account.bank.statement.line', stLine.id)).db;
   await store.commit(db);
 
   const { JournalItems } = await import('./views/JournalItems.jsx');
@@ -475,9 +477,6 @@ test('Finding 2: bank statement lines cannot change journal via kanban drag-and-
 
 test('Finding 3: Mark as reviewed throws when selected bank lines have no journal entry to review', () => {
   let db = seed();
-  const partner = search(db, 'res.partner')[0];
-  const receivableId = accountId(db, '121000');
-  const revenueId = accountId(db, '400000');
   const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
   const lineWithoutMove = create(db, 'account.bank.statement.line', {
     journal_id: bankJournal.id,
@@ -495,26 +494,17 @@ test('Finding 3: Mark as reviewed throws when selected bank lines have no journa
     /The selected transactions have no journal entry to review/
   );
 
-  const move = postEntry(db, {
-    journal: 'MISC',
-    date: today(),
-    lines: [
-      { account: receivableId, partner_id: partner.id, debit: 200, credit: 0 },
-      { account: revenueId, debit: 0, credit: 200 },
-    ],
-  });
-  db = write(move.db, 'account.move', move.id, { to_check: true });
   const lineWithMove = create(db, 'account.bank.statement.line', {
     journal_id: bankJournal.id,
     date: today(),
     payment_ref: 'With move',
     amount: 200,
-    bank_move_id: move.id,
   });
-  db = lineWithMove.db;
+  const lineMoveId = read(lineWithMove.db, 'account.bank.statement.line', lineWithMove.id).bank_move_id;
+  db = write(lineWithMove.db, 'account.move', lineMoveId, { to_check: true });
 
   const reviewed = action.run(db, [lineWithMove.id]);
-  assert.equal(read(reviewed, 'account.move', move.id).to_check, false, 'Linked move to_check flag is cleared');
+  assert.equal(read(reviewed, 'account.move', lineMoveId).to_check, false, 'Linked move to_check flag is cleared');
 });
 
 test('Finding 4: unpriced open items with null residual stay in unreconciled review report', () => {

@@ -63,7 +63,7 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
-import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec } from './finance.js';
+import { financeModels, isFollowUpSmsDiff, postponeFollowUp, postponeFollowUpWizardSpec, unpostponeFollowUp } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
@@ -170,6 +170,13 @@ const customers = {
       when: (db, user) => appOpen(db, user, 'accounting'),
       wizard: () => postponeFollowUpWizardSpec(),
       run: (db, ids, values) => ({ db: postponeFollowUp(db, ids, values.date, { companyId: db.settings?.current_company_id ?? 1 }) }),
+    },
+    {
+      label: 'Unpostpone',
+      requiresSelection: true,
+      app: 'accounting',
+      when: (db, user) => appOpen(db, user, 'accounting'),
+      run: (db, ids) => ({ db: unpostponeFollowUp(db, ids, { companyId: db.settings?.current_company_id ?? 1, at: today() }) }),
     },
     partnerCreateInvoiceAction,
     partnerRegisterPaymentAction,
@@ -819,7 +826,14 @@ const allApps = [
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
   { id: 'spreadsheet', name: 'Spreadsheet', color: ['#16a34a', '#0f766e'], menus: [{ key: 'sheet', label: 'Spreadsheet', type: 'spreadsheet' }, { key: 'all', label: 'All Spreadsheets', model: 'spreadsheet.document' }] },
   { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', type: 'knowledge' }, { key: 'all', label: 'All Articles', model: 'knowledge.article' }] },
-  { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }, { key: 'companies', label: 'Companies', model: 'res.company' }] },
+  { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [
+    { key: 'general', label: 'General Settings', type: 'settings' },
+    { key: 'companies', label: 'Companies', model: 'res.company' },
+    { label: 'Technical', children: [
+      { label: 'Email', children: [{ key: 'mail-templates', label: 'Email Templates', model: 'mail.template' }] },
+      { key: 'sms-templates', label: 'SMS Templates', model: 'sms.template' },
+    ] },
+  ] },
 ];
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.

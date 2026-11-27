@@ -10,7 +10,7 @@ const { postEntry } = await import('./models/ledger.js');
 const { createCompany } = await import('./models/company.js');
 const { rateAt, toCompany } = await import('./models/currency.js');
 const { applyDiff, diffDb } = await import('./sync.js');
-const { migrate, SCHEMA_VERSION } = await import('./migrations.js');
+  const { migrate } = await import('./migrations.js');
 const { validateCompanySettingWrite } = await import('./views/Settings.jsx');
 await import('./models/index.js');
 
@@ -225,7 +225,7 @@ test('the migration moves old global locks to company 1', () => {
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 81);
 
   // Company 1 received the legacy global locks.
   const comp1 = read(migrated, 'res.company', 1);

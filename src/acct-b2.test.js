@@ -73,13 +73,13 @@ test('matchPayment matches an outstanding payment to the remaining open balance 
   assert.equal(finalLine.allocations[0].amount, 40);
   assert.equal(finalLine.allocations[1].amount, 60);
 
-  // 5. Unreconciliation cleanly reverses all allocations and bank movement
+  // 5. Unreconciliation releases allocations and restores the bank suspense entry
   const unrec = unreconcile(synced, finalLine);
   const unrecSynced = applyDiff(synced, diffDb(synced, unrec.db), { isAdmin: true });
   const unrecLine = read(unrecSynced, LINE, line.id);
   assert.equal(unrecLine.state, 'to_check');
-  assert.equal(unrecLine.open_amount, null);
-  assert.equal(unrecLine.bank_move_id, null);
+  assert.equal(unrecLine.open_amount, 100);
+  assert.equal(unrecLine.bank_move_id, partialLine.bank_move_id);
   assert.equal((unrecLine.allocations ?? []).length, 0);
 });
 
@@ -144,13 +144,13 @@ test('partial match leaves the rest open with the right open_amount, second paym
   assert.equal(step2Line.allocations[0].amount, 60);
   assert.equal(step2Line.allocations[1].amount, 40);
 
-  // 6. Unreconciliation cleanly reverses both allocations and the bank entry
+  // 6. Unreconciliation releases both allocations and restores suspense
   const unrec = unreconcile(db, step2Line);
   const unrecSynced = applyDiff(db, diffDb(db, unrec.db), { isAdmin: true });
   const unrecLine = read(unrecSynced, LINE, line.id);
   assert.equal(unrecLine.state, 'to_check');
-  assert.equal(unrecLine.open_amount, null);
-  assert.equal(unrecLine.bank_move_id, null);
+  assert.equal(unrecLine.open_amount, 100);
+  assert.equal(unrecLine.bank_move_id, step1Line.bank_move_id);
   assert.equal((unrecLine.allocations ?? []).length, 0);
 });
 
@@ -364,6 +364,7 @@ test('BUG-2: direct payment finishes an open partial line booked to suspense and
     amount: 100,
   });
   let db = lineRes.db;
+  const originalMoveId = read(db, LINE, lineRes.id).bank_move_id;
 
   // Payment 1 via outstanding receipts (60)
   const outPayRes = create(db, 'account.payment', {
@@ -404,6 +405,7 @@ test('BUG-2: direct payment finishes an open partial line booked to suspense and
   const synced = applyDiff(staged2, diffDb(staged2, completed.db), { isAdmin: true });
   const finalLine = read(synced, LINE, lineRes.id);
   assert.equal(finalLine.state, 'reconciled');
+  assert.equal(finalLine.bank_move_id, originalMoveId);
   assert.equal(finalLine.open_amount, 0);
   assert.equal(finalLine.allocations.length, 2);
   assert.equal(bookedStatementAmount(synced, finalLine), 100);
@@ -416,6 +418,69 @@ test('BUG-2: direct payment finishes an open partial line booked to suspense and
     .filter((l) => moveIds.has(l.move_id) && l.account_id === suspenseId)
     .reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   assert.equal(suspenseNet, 0);
+  const released = unreconcile(synced, finalLine).db;
+  const restored = read(released, LINE, lineRes.id);
+  assert.equal(restored.bank_move_id, originalMoveId);
+  const restoredMove = read(released, 'account.move', originalMoveId);
+  assert.equal(restoredMove.line_ids.length, 2);
+  assert.equal(restoredMove.line_ids.reduce((sum, item) => sum + (item.debit || 0) - (item.credit || 0), 0), 0);
+  assert.doesNotThrow(() => applyDiff(synced, diffDb(synced, released), { isAdmin: true }));
+
+  // Legacy mixed matches stored only net liquidity. Restoring must rebuild the full bank amount.
+  const bankMove = read(synced, 'account.move', originalMoveId);
+  const liquidityId = read(synced, 'account.journal', bankJournal.id).default_account_id;
+  const liquidity = bankMove.line_ids.filter((item) => item.account_id === liquidityId);
+  const net = liquidity.reduce((sum, item) => sum + Number(item.debit || 0) - Number(item.credit || 0), 0);
+  const legacyMove = { ...bankMove, line_ids: [{ ...liquidity[0], debit: net, credit: 0 }, ...bankMove.line_ids.filter((item) => item.account_id !== liquidityId)] };
+  const legacy = { ...synced, records: { ...synced.records, 'account.move': synced.records['account.move'].map((move) => move.id === originalMoveId ? legacyMove : move) } };
+  const repaired = unreconcile(legacy, read(legacy, LINE, lineRes.id)).db;
+  const repairedMove = read(repaired, 'account.move', originalMoveId);
+  assert.equal(repairedMove.line_ids.find((item) => item.account_id === liquidityId).debit, 100);
+  assert.equal(repairedMove.line_ids.reduce((sum, item) => sum + Number(item.debit || 0) - Number(item.credit || 0), 0), 0);
+  assert.doesNotThrow(() => applyDiff(legacy, diffDb(legacy, repaired), { isAdmin: true }));
+});
+
+test('a direct payment keeps and restores the posted statement entry', () => {
+  const { db: base, bankJournal } = setupCompanyWithOutstanding();
+  const configured = write(base, 'res.company', 1, { outstanding_receipts_account_id: null });
+  const payment = create(configured, 'account.payment', { journal_id: bankJournal.id, partner_id: 3, payment_type: 'inbound', partner_type: 'customer', amount: 100, date: '2026-01-10' });
+  const posted = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
+  const created = create(posted, LINE, { journal_id: bankJournal.id, date: '2026-01-10', payment_ref: 'Direct payment', amount: 100 });
+  const bankMoveId = read(created.db, LINE, created.id).bank_move_id;
+  const staged = write(created.db, LINE, created.id, { payment_id: payment.id });
+  const matched = matchPayment(staged, read(staged, LINE, created.id)).db;
+  assert.equal(read(matched, LINE, created.id).bank_move_id, bankMoveId);
+  assert.equal(read(matched, 'account.move', bankMoveId).state, 'posted');
+  const other = search(matched, 'account.account').find((account) => account.account_type === 'expense' && (account.company_id ?? 1) === 1);
+  const forged = { ...matched, records: { ...matched.records, 'account.move': matched.records['account.move'].map((move) => move.id === bankMoveId
+    ? { ...move, line_ids: [...move.line_ids, { account_id: other.id, debit: 1, credit: 0 }, { account_id: other.id, debit: 0, credit: 1 }] } : move) } };
+  assert.throws(() => applyDiff(staged, diffDb(staged, forged), { isAdmin: true }), /counterpart|match|reconcil/i);
+  const synced = applyDiff(staged, diffDb(staged, matched), { isAdmin: true });
+  const released = unreconcile(synced, read(synced, LINE, created.id)).db;
+  assert.equal(read(released, LINE, created.id).bank_move_id, bankMoveId);
+  assert.equal(read(released, 'account.move', bankMoveId).line_ids.length, 2);
+  assert.doesNotThrow(() => applyDiff(synced, diffDb(synced, released), { isAdmin: true }));
+});
+
+test('a partial direct payment can be followed by an outstanding payment', () => {
+  const { db: base, bankJournal, outstanding } = setupCompanyWithOutstanding();
+  const directDb = write(base, 'res.company', 1, { outstanding_receipts_account_id: null });
+  const direct = create(directDb, 'account.payment', { journal_id: bankJournal.id, partner_id: 3, payment_type: 'inbound', partner_type: 'customer', amount: 40, date: '2026-01-10' });
+  let db = postPayment(direct.db, read(direct.db, 'account.payment', direct.id));
+  db = write(db, 'res.company', 1, { outstanding_receipts_account_id: outstanding.id });
+  const pending = create(db, 'account.payment', { journal_id: bankJournal.id, partner_id: 3, payment_type: 'inbound', partner_type: 'customer', amount: 60, date: '2026-01-10' });
+  db = postPayment(pending.db, read(pending.db, 'account.payment', pending.id));
+  const created = create(db, LINE, { journal_id: bankJournal.id, date: '2026-01-10', payment_ref: 'Direct then outstanding', amount: 100 });
+  const bankMoveId = read(created.db, LINE, created.id).bank_move_id;
+  const first = write(created.db, LINE, created.id, { payment_id: direct.id });
+  const partial = matchPayment(first, read(first, LINE, created.id)).db;
+  db = applyDiff(first, diffDb(first, partial), { isAdmin: true });
+  assert.equal(read(db, LINE, created.id).open_amount, 60);
+  const second = write(db, LINE, created.id, { payment_id: pending.id });
+  const matched = matchPayment(second, read(second, LINE, created.id)).db;
+  const synced = applyDiff(second, diffDb(second, matched), { isAdmin: true });
+  assert.equal(read(synced, LINE, created.id).bank_move_id, bankMoveId);
+  assert.equal(read(synced, LINE, created.id).state, 'reconciled');
 });
 
 test('BUG-3: foreign partial match decides partial vs complete in statement currency, validates both amounts, and settles payments at different rates', () => {

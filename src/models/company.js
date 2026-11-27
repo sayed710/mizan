@@ -85,7 +85,7 @@ export function setCompanies(db, { current, allowed }) {
 // Accounting configuration belongs to its company; other configuration is readable across companies.
 const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position', 'account.cash.rounding', 'account.analytic.account']);
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
-  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'payment.method', 'res.country.group', 'res.partner.category', 'res.partner.industry']);
+  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account', 'account.payment.method', 'payment.method', 'res.country.group', 'res.partner.category', 'res.partner.industry', 'mail.template', 'sms.template']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.bank', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
@@ -477,7 +477,7 @@ function companyGuard(db, before, r, ctx) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
   }
-  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
+  for (const field of ['account_journal_suspense_account_id', 'deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
     if (!r[field]) continue;
     const account = record(db, 'account.account', r[field]);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
@@ -763,6 +763,7 @@ export const companyModels = {
       account_opening_move_id: { type: 'many2one', relation: 'account.move', label: 'Opening Entry', readonly: true },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
+      account_journal_suspense_account_id: { type: 'many2one', relation: 'account.account', label: 'Bank Suspense Account' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
       use_invoice_terms: { type: 'boolean', label: 'Default Terms & Conditions' },
       invoice_terms: { type: 'text', label: 'Terms and Conditions' },

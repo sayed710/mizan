@@ -977,11 +977,11 @@ test('Qodo #5: bank statement guard honors user-specific lock exception for matc
     date: '2026-02-15',
     payment_ref: 'Bank Wire',
     amount: 100,
-    state: 'reconciled',
-    move_id: bankMove.id,
-    bank_move_id: bankMove.id,
+    counterpart_account_id: search(db, 'account.account').find((a) => a.code === '450000').id,
   });
-  db = write(line.db, 'res.company', 1, { lock_date: '2026-03-31' });
+  const { bookToAccount } = await import('./models/bank.js');
+  const booked = bookToAccount(line.db, read(line.db, 'account.bank.statement.line', line.id)).db;
+  db = write(booked, 'res.company', 1, { lock_date: '2026-03-31' });
   db = createLockException(db, {
     company_id: 1,
     user_id: 2,
@@ -1540,7 +1540,8 @@ test('unbooked imported bank transactions block company locks', () => {
   db = { ...db, records: { ...db.records, 'account.move': [], 'account.bank.statement.line': [] } };
   const journal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
   const line = create(db, 'account.bank.statement.line', { journal_id: journal.id, company_id: 1, date: '2026-01-01', payment_ref: 'Imported', amount: 20, state: 'to_check' });
-  assert.ok(!read(line.db, 'account.bank.statement.line', line.id).bank_move_id);
+  // Odoo 20 books every statement line on its own bank entry; what blocks the lock is that it is not reconciled.
+  assert.ok(!read(line.db, 'account.bank.statement.line', line.id).is_reconciled);
   for (const field of ['lock_date', 'hard_lock_date']) assert.throws(() => write(line.db, 'res.company', 1, { [field]: '2026-01-31' }), /unreconciled bank transactions/);
 });
 

@@ -973,7 +973,7 @@ test('PKG-08(H): bookToAccount supports full, partial + second close, foreign-cu
   assert.equal(fxAfter2.state, 'reconciled');
   assert.equal(fxAfter2.open_amount, 0);
   const fxMove2 = read(fxDb, 'account.move', fxAfter2.move_id);
-  assert.equal(Math.abs(fxMove2.line_ids.find((l) => l.account_id === rev).amount_currency), 60);
+  assert.equal(Math.abs(fxMove2.line_ids.findLast((l) => l.account_id === rev).amount_currency), 60);
 });
 
 test('PKG-08(J): unreconciling Reconcile with write-off keeps the write-off entry posted with open balance restored', async () => {

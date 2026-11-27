@@ -492,6 +492,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
       company_id: defaults.company_id ?? finalJournal?.company_id ?? companyId,
     };
 
+    const dbBeforeBlock = currentDb;
     const { db: linesDb, count, line_ids } = importStatementLines(currentDb, lines, blockDefaults, { camt: isCamt });
     if (!count || !line_ids.length) {
       continue;
@@ -520,7 +521,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
 
     const prevEnd = prevStatement
       ? Number(prevStatement.balance_end_real) || 0
-      : bookedAccountBalance(currentDb, targetJournal, statementDate);
+      : bookedAccountBalance(dbBeforeBlock, targetJournal, statementDate);
 
     // Overlapping imports / duplicate lines handling (Bug 11):
     let balance_start;

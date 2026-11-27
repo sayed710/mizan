@@ -88,7 +88,7 @@ export function App() {
     return () => window.removeEventListener('mizan:remapped', follow);
   }, []);
 
-  if (route.app === 'print' && route.menu === 'followup') return <Suspense fallback={<Loading />}><FollowUpLetter partnerId={route.id} companyId={route.params.get('company') || undefined} /></Suspense>;
+  if (route.app === 'print' && route.menu === 'followup') return <Suspense fallback={<Loading />}><FollowUpLetter partnerId={route.id} companyId={route.params.get('company') || undefined} at={route.params.get('at') || undefined} /></Suspense>;
   if (route.app === 'followup' && route.menu === 'send') return <Suspense fallback={<Loading />}><FollowUpWizard partnerId={route.id} companyId={route.params.get('company') || undefined} onClose={() => history.back()} /></Suspense>;
   if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} proforma={route.params.get('report') === 'proforma'} report={route.params.get('report') || null} /></Suspense>;
   if (route.app === 'open') {

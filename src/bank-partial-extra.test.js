@@ -24,7 +24,7 @@ for (const mode of ['Book to Account', 'rule']) test(`outbound oversized bill le
   assert.equal(read(db, LINE, line.id).open_amount, 0);
   const bank = search(db, 'account.account').find((a) => a.code === '101401').id;
   const suspense = search(db, 'account.account').find((a) => a.code === '101404').id;
-  const items = journalItems(db).filter((l) => !read(line.db, 'account.move', l.move_id));
+  const items = journalItems(db).filter((l) => !read(inv.db, 'account.move', l.move_id));
   assert.equal(items.filter((l) => l.account_id === bank).length, 1);
   assert.equal(items.filter((l) => l.account_id === bank)[0].credit, 130);
   assert.equal(items.filter((l) => l.account_id === suspense).reduce((sum, l) => sum + l.debit - l.credit, 0), 0);

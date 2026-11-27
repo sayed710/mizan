@@ -63,13 +63,13 @@ for (const [amountType, amount] of [['fixed', 5], ['percentage', 5]]) test(`B4: 
   const line = read(after, LINE, x.line);
   assert.equal(line.state, 'to_check');
   assert.equal(line.move_id, null);
-  assert.equal(line.bank_move_id, null);
-  assert.equal(line.open_amount, null);
+  assert.ok(line.bank_move_id);
+  assert.equal(line.open_amount, 100);
   assert.deepEqual(line.allocations, []);
   assert.ok(search(after, 'account.move').some((m) => m.reversed_entry_id === writeoffMoveId), 'the write-off entry is reversed');
   assert.equal(read(after, 'account.move', x.invoice).amount_residual, 95);
   balanced(after, `B4 ${amountType} unreconciled`);
-  assert.equal(round(ledgerBalance(after, bankId(after)) - base.bank), 0);
+  assert.equal(round(ledgerBalance(after, bankId(after)) - base.bank), 100);
   assert.equal(round(ledgerBalance(after, feeId(after)) - base.fee), 0);
 });
 
@@ -159,7 +159,7 @@ test('Qodo 11.2: a fixed taxed counterpart above the balance is rejected instead
   const after = read(db, LINE, line.id);
   assert.equal(after.state, 'to_check', 'the rejected rule books nothing');
   assert.ok(after.move_id == null, 'no write-off entry is linked');
-  assert.ok(after.open_amount == null, 'no open amount was recorded');
+  assert.equal(after.open_amount, 100, 'open amount remains on statement line');
   assert.deepEqual(after.allocations ?? [], [], 'nothing was allocated');
   assert.equal(search(db, 'account.move').length, moves, 'no entry is posted');
   balanced(db, '11.2 rejected');
@@ -220,7 +220,7 @@ test('Qodo 11.3: a 50% foreign share that rounds to the whole booked company amo
   assert.equal(round(items.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)), 0, 'the entry also balances in journal currency');
   assert.equal(round(items.find((l) => l.account_id === s.bank).amount_currency), 2, 'the bank item books both journal units');
   assert.equal(round(items.find((l) => l.account_id === s.fee).amount_currency), -2, 'the counterpart absorbs the unit the increment cannot represent');
-  assert.equal(search(after, 'account.move').length, search(line.db, 'account.move').length + 1, 'one entry books the whole line');
+  assert.equal(search(after, 'account.move').length, search(line.db, 'account.move').length, 'one entry books the whole line');
   // Nothing is left to_check for a later run to fail on.
   const rerun = autoReconcile(after);
   assert.equal(read(rerun, LINE, line.id).state, 'reconciled');
