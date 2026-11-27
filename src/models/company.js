@@ -27,6 +27,21 @@ const companyField = { type: 'many2one', relation: 'res.company', label: 'Compan
 const record = (db, model, id) => (db.records[model] ?? []).find((r) => r.id === id);
 const shared = (id) => id == null || id === false || id === '';
 
+/** Whether `journal` is a valid company journal of `type` (optionally requiring active). */
+export const isValidCompanyJournal = (journal, companyId, type = 'general', { requireActive = true } = {}) => Boolean(
+  journal
+  && (!requireActive || journal.active !== false)
+  && journal.type === type
+  && (shared(journal.company_id) || journal.company_id === companyId),
+);
+
+/** Whether `account` is a valid account for `companyId` (optionally requiring active). */
+export const isValidCompanyAccount = (account, companyId, { requireActive = true } = {}) => Boolean(
+  account
+  && (!requireActive || account.active !== false)
+  && (shared(account.company_id) || account.company_id === companyId),
+);
+
 /** Current company ID, defaulting to the main company before initialization. */
 export const currentCompany = (db) => db.settings?.current_company_id ?? 1;
 
@@ -285,6 +300,9 @@ const CONTROL_FIELDS = [
   'currency_provider', 'currency_interval_unit', 'currency_next_execution_date',
   'account_sale_tax_id', 'account_purchase_tax_id', 'account_price_include', 'tax_calculation_rounding_method', 'tax_cash_basis_journal_id',
   'currency_exchange_journal_id',
+  'account_revaluation_journal_id',
+  'account_revaluation_expense_provision_account_id',
+  'account_revaluation_income_provision_account_id',
   'deferred_revenue_journal_id', 'deferred_expense_journal_id',
   'deferred_revenue_account_id', 'deferred_expense_account_id',
   'generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method',
@@ -428,9 +446,9 @@ function companyGuard(db, before, r, ctx) {
   ]) {
     if (!r[field]) continue;
     const journal = record(db, 'account.journal', r[field]);
-    const requiresActive = field.startsWith('deferred_') || field === 'tax_cash_basis_journal_id' || field === 'currency_exchange_journal_id' || field === 'account_revaluation_journal_id';
-    if (!journal || (requiresActive && journal.active === false) || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
-      return `${label} must be ${requiresActive ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
+    const requireActive = field.startsWith('deferred_') || field === 'tax_cash_basis_journal_id' || field === 'currency_exchange_journal_id' || field === 'account_revaluation_journal_id';
+    if (!isValidCompanyJournal(journal, r.id, type, { requireActive })) {
+      return `${label} must be ${requireActive ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
     }
   }
   for (const field of ['generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method']) {
@@ -481,7 +499,7 @@ function companyGuard(db, before, r, ctx) {
   for (const field of ['account_revaluation_expense_provision_account_id', 'account_revaluation_income_provision_account_id', 'account_journal_suspense_account_id', 'deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
     if (!r[field]) continue;
     const account = record(db, 'account.account', r[field]);
-    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
+    if (!isValidCompanyAccount(account, r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
   }
   if (r.current_year_earnings_account_id) {
     const account = record(db, 'account.account', r.current_year_earnings_account_id);
@@ -642,9 +660,20 @@ export function createCompany(db, vals) {
     accounts[field] = installed.get(key);
   }
   if (!values.opening_equity_account_id) accounts.opening_equity_account_id = accounts.current_year_earnings_account_id ?? values.current_year_earnings_account_id;
-  if (!values.account_revaluation_income_provision_account_id) accounts.account_revaluation_income_provision_account_id = accounts.income_currency_exchange_account_id ?? values.income_currency_exchange_account_id;
-  if (!values.account_revaluation_expense_provision_account_id) accounts.account_revaluation_expense_provision_account_id = accounts.expense_currency_exchange_account_id ?? values.expense_currency_exchange_account_id;
-  if (!values.account_revaluation_journal_id && values.default_general_journal_id) accounts.account_revaluation_journal_id = values.default_general_journal_id;
+  const incomeExchangeId = accounts.income_currency_exchange_account_id ?? values.income_currency_exchange_account_id;
+  if (!values.account_revaluation_income_provision_account_id && incomeExchangeId) {
+    const account = record(next, 'account.account', incomeExchangeId);
+    if (isValidCompanyAccount(account, res.id)) accounts.account_revaluation_income_provision_account_id = account.id;
+  }
+  const expenseExchangeId = accounts.expense_currency_exchange_account_id ?? values.expense_currency_exchange_account_id;
+  if (!values.account_revaluation_expense_provision_account_id && expenseExchangeId) {
+    const account = record(next, 'account.account', expenseExchangeId);
+    if (isValidCompanyAccount(account, res.id)) accounts.account_revaluation_expense_provision_account_id = account.id;
+  }
+  if (!values.account_revaluation_journal_id && values.default_general_journal_id) {
+    const journal = record(next, 'account.journal', values.default_general_journal_id);
+    if (isValidCompanyJournal(journal, res.id, 'general')) accounts.account_revaluation_journal_id = journal.id;
+  }
   if (!values.default_payroll_structure_id) {
     const payroll = {};
     for (const [role, code, name, account_type] of [['expense', '620000', 'Salaries & Wages', 'expense'], ['payable', '230000', 'Salaries Payable', 'liability_current'], ['insurance', '240000', 'Social Insurance Payable', 'liability_current'], ['tax', '250100', 'Payroll Tax Payable', 'liability_current']]) {

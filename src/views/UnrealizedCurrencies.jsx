@@ -27,9 +27,14 @@ export function UnrealizedCurrencies() {
   const [posting, setPosting] = useState(false);
   let rows = [];
   let error = '';
-  try { rows = foreignBalanceReport(db, date, selectedCompany === 'all' ? {} : { companyId: Number(selectedCompany) }).filter((row) => !excluded.includes(row.account_id)); } catch (e) { error = e.message; }
+  const singleCompanyId = selectedCompany !== 'all'
+    ? Number(selectedCompany)
+    : (companies.length === 1 ? companies[0].id : null);
+  const requiresSingleCompany = singleCompanyId == null;
+  try { rows = foreignBalanceReport(db, date, singleCompanyId ? { companyId: singleCompanyId } : {}).filter((row) => !excluded.includes(row.account_id)); } catch (e) { error = e.message; }
   const openWizard = () => {
-    const company = read(db, 'res.company', selectedCompany === 'all' ? currentCompany(db) : Number(selectedCompany));
+    if (!singleCompanyId) return;
+    const company = read(db, 'res.company', singleCompanyId);
     if (!company) return;
     setWizard({ companyId: company.id, date, journalId: company.account_revaluation_journal_id ?? '', expenseAccountId: company.account_revaluation_expense_provision_account_id ?? '', incomeAccountId: company.account_revaluation_income_provision_account_id ?? '' });
   };
@@ -43,6 +48,7 @@ export function UnrealizedCurrencies() {
       preview = (result.records['account.move'] ?? []).filter((m) => !ids.has(m.id) && m.revaluation_date === wizard.date);
     } catch (e) { previewError = e.message; }
   }
+  const wizardCompany = wizard ? read(db, 'res.company', wizard.companyId) : null;
   const wizardCurrency = wizard ? companyCurrencyRecord(db, wizard.companyId) : null;
   const post = async () => {
     if (posting) return;
@@ -75,9 +81,15 @@ export function UnrealizedCurrencies() {
     <div className="control-panel">
       <h1 className="cp-title">{t('Unrealized Currencies')}</h1>
       <label>{t('Date')} <input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
-      <button type="button" className="btn sm" disabled={!!error} onClick={openWizard}>{t('Adjustment Entry')}</button>
+      <button
+        type="button"
+        className="btn sm"
+        disabled={!!error || requiresSingleCompany}
+        title={requiresSingleCompany ? t('Select a single company to create an adjustment entry') : undefined}
+        onClick={openWizard}
+      >{t('Adjustment Entry')}</button>
       {excluded.length > 0 && <button type="button" className="btn sm" onClick={() => setExcluded([])}>{t('Restore Accounts')}</button>}
-      {availableCompanies.length > 1 && <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} />}
+      {availableCompanies.length > 1 && <CompanySelect companies={companies} value={selectedCompany} onChange={(v) => { setCompanyId(v); setWizard(null); }} />}
       <span className="spacer" />
       <button type="button" className="btn sm" disabled={!!error} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
       <button type="button" className="btn sm" disabled={!!error} onClick={() => downloadCsv('unrealized-currencies.csv', tableToRows(tableRef.current))}>{t('Download CSV')}</button>
@@ -103,6 +115,7 @@ export function UnrealizedCurrencies() {
       {error && <p role="alert">{error}</p>}
       {wizard && <div className="modal-overlay"><div className="modal" role="dialog" aria-label={t('Adjustment Entry')}>
         <h2>{t('Adjustment Entry')}</h2>
+        {wizardCompany && <p className="muted"><strong>{t('Company')}:</strong> {wizardCompany.name}</p>}
         <label>{t('Date')} <input type="date" value={wizard.date} onChange={(e) => setWizard({ ...wizard, date: e.target.value })} /></label>
         {[['journalId', 'Revaluation Journal', 'account.journal'], ['expenseAccountId', 'Expense Provision Account', 'account.account'], ['incomeAccountId', 'Income Provision Account', 'account.account']].map(([field, label, model]) => <label key={field}>{t(label)} <select value={wizard[field]} onChange={(e) => setWizard({ ...wizard, [field]: Number(e.target.value) || '' })}>
           <option value="">{t('None')}</option>{(db.records[model] ?? []).filter((r) => r.active !== false && (!r.company_id || r.company_id === wizard.companyId) && (model !== 'account.journal' || r.type === 'general')).map((r) => <option key={r.id} value={r.id}>{r.code ? `${r.code} ${r.name}` : r.name}</option>)}

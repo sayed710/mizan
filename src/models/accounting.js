@@ -3911,6 +3911,7 @@ export const accountingModels = {
         for (const [field, label] of [
           ['tax_cash_basis_journal_id', 'Cash Basis Journal'],
           ['currency_exchange_journal_id', 'Exchange Difference Journal'],
+          ['account_revaluation_journal_id', 'Revaluation Journal'],
         ]) {
           const blockedOwner = companies.find((c) => c[field] === before.id && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id)));
           if (blockedOwner) {

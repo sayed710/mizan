@@ -29,6 +29,7 @@ import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeD
 import { formatTaxReturnName } from './models/taxreturn.js';
 import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
+import { isValidCompanyAccount, isValidCompanyJournal } from './models/company.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -2641,7 +2642,27 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 })) } }) });
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
-MIGRATIONS.push({ version: 85, name: 'revaluation-defaults', up: (db) => ({ ...db, records: { ...db.records, 'res.company': (db.records['res.company'] ?? []).map((c) => ({ ...c, account_revaluation_journal_id: c.account_revaluation_journal_id ?? c.default_general_journal_id ?? null, account_revaluation_expense_provision_account_id: c.account_revaluation_expense_provision_account_id ?? c.expense_currency_exchange_account_id ?? null, account_revaluation_income_provision_account_id: c.account_revaluation_income_provision_account_id ?? c.income_currency_exchange_account_id ?? null })) } }) });
+MIGRATIONS.push({ version: 85, name: 'revaluation-defaults', up: (db) => {
+  const journalsById = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
+  const accountsById = new Map((db.records['account.account'] ?? []).map((a) => [a.id, a]));
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': (db.records['res.company'] ?? []).map((c) => {
+        const defaultJournal = c.default_general_journal_id ? journalsById.get(c.default_general_journal_id) : null;
+        const expenseExchange = c.expense_currency_exchange_account_id ? accountsById.get(c.expense_currency_exchange_account_id) : null;
+        const incomeExchange = c.income_currency_exchange_account_id ? accountsById.get(c.income_currency_exchange_account_id) : null;
+        return {
+          ...c,
+          account_revaluation_journal_id: c.account_revaluation_journal_id ?? (isValidCompanyJournal(defaultJournal, c.id, 'general') ? defaultJournal.id : null),
+          account_revaluation_expense_provision_account_id: c.account_revaluation_expense_provision_account_id ?? (isValidCompanyAccount(expenseExchange, c.id) ? expenseExchange.id : null),
+          account_revaluation_income_provision_account_id: c.account_revaluation_income_provision_account_id ?? (isValidCompanyAccount(incomeExchange, c.id) ? incomeExchange.id : null),
+        };
+      }),
+    },
+  };
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

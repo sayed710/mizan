@@ -122,6 +122,7 @@ const ar = {
   'Revaluation Journal must be an active general journal shared with or belonging to this company': 'يجب أن يكون دفتر يومية إعادة التقييم دفتراً عاماً نشطاً مشتركاً أو تابعاً لهذه الشركة',
   'Select an active Expense Provision Account belonging to this company': 'اختر حساب مخصص المصروفات نشطاً يتبع هذه الشركة',
   'Select an active Income Provision Account belonging to this company': 'اختر حساب مخصص الإيرادات نشطاً يتبع هذه الشركة',
+  'Select a single company to create an adjustment entry': 'اختر شركة واحدة لإنشاء قيد تسوية',
   'Reset': 'إعادة تعيين',
   'Show Reconciled': 'إظهار البنود المسوّاة',
   'Print Statement': 'طباعة الكشف',

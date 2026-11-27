@@ -360,8 +360,10 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       return { account_id: r.account_id, partner_id: r.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
     }).filter((line) => line.debit || line.credit);
     const expected = [...lines];
-    if (gain) expected.push({ account_id: provision(incomeAccountId, settings.account_revaluation_income_provision_account_id, 1), credit: gain });
-    if (loss) expected.push({ account_id: provision(expenseAccountId, settings.account_revaluation_expense_provision_account_id, -1), debit: loss });
+    const effectiveIncomeAccountId = gain ? provision(incomeAccountId, settings.account_revaluation_income_provision_account_id, 1) : null;
+    const effectiveExpenseAccountId = loss ? provision(expenseAccountId, settings.account_revaluation_expense_provision_account_id, -1) : null;
+    if (gain) expected.push({ account_id: effectiveIncomeAccountId, credit: gain });
+    if (loss) expected.push({ account_id: effectiveExpenseAccountId, debit: loss });
     const booked = visible.filter((m) => (m.company_id ?? 1) === company)
       .reduce((totals, m) => revaluationTotals(m.line_ids ?? [], companyRound, totals), new Map());
     const wanted = revaluationTotals(expected, companyRound);
@@ -370,12 +372,25 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       const amount = companyRound((wanted.get(key)?.amount ?? 0) - (booked.get(key)?.amount ?? 0));
       return { account_id: row.account_id, partner_id: row.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount), ...valueOnlyCurrencyFields(db, row.account_id, company) };
     }).filter((line) => line.debit || line.credit);
-    if (delta.length) plans.push({ company, journalId: hasJournal ? selectedJournal : revaluationJournalId(db, company), expected: delta });
+    const effectiveJournalId = hasJournal ? selectedJournal : revaluationJournalId(db, company);
+    if (delta.length) {
+      plans.push({
+        company,
+        journalId: effectiveJournalId,
+        expected: delta,
+        revaluationOptions: {
+          journalId: effectiveJournalId,
+          expenseAccountId: effectiveExpenseAccountId,
+          incomeAccountId: effectiveIncomeAccountId,
+          excludedAccountIds: excluded,
+        },
+      });
+    }
   }
 
   let next = db;
   for (const plan of plans) {
-    const { company, journalId, expected } = plan;
+    const { company, journalId, expected, revaluationOptions } = plan;
     const entry = postEntry(next, { journal: journalId, journal_id: journalId, date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company, system_generated: true });
     const posted = read(entry.db, 'account.move', entry.id);
     const reversal = postEntry(entry.db, {
@@ -384,18 +399,18 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       system_generated: true,
       archivedOriginIds: [entry.id],
     });
-    next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id, revaluation_options: { journalId, expenseAccountId, incomeAccountId, excludedAccountIds } }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
+    next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id, revaluation_options: revaluationOptions }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
   }
   return next;
 }
 
 const revaluationIgnoredFields = new Set(['id', 'name', 'ref', 'system_generated', 'reversal_move_id', 'reversed_entry_id']);
-function revaluationMoveContents(move) {
+function revaluationMoveContents(move, { ignoreOptions = false } = {}) {
   const lineContents = (move.line_ids ?? []).map((line) => JSON.stringify(Object.fromEntries(
     Object.entries(line).filter(([field]) => field !== 'name').sort(([a], [b]) => a.localeCompare(b)),
   ))).sort();
   return JSON.stringify(Object.fromEntries(Object.entries(move)
-    .filter(([field]) => !revaluationIgnoredFields.has(field))
+    .filter(([field]) => !revaluationIgnoredFields.has(field) && !(ignoreOptions && field === 'revaluation_options'))
     .map(([field, value]) => [field, field === 'line_ids' ? lineContents : value])
     .sort(([a], [b]) => a.localeCompare(b))));
 }
@@ -419,7 +434,8 @@ export function isRevaluationMovePair(db, adjustment, reversal) {
     seq: { ...db.seq, 'account.move': maxMoveId },
   };
   const opts = adjustment.revaluation_options;
-  if (opts != null) {
+  const ignoreOptions = opts == null;
+  if (!ignoreOptions) {
     if (typeof opts !== 'object' || Array.isArray(opts)) return false;
     const allowedKeys = new Set(['journalId', 'expenseAccountId', 'incomeAccountId', 'excludedAccountIds']);
     if (Object.keys(opts).some((k) => !allowedKeys.has(k))) return false;
@@ -445,7 +461,7 @@ export function isRevaluationMovePair(db, adjustment, reversal) {
   if (expectedReversals.length !== 1) return false;
   const expectedReversal = expectedReversals[0];
   return Boolean(expectedReversal
-    && revaluationMoveContents(adjustment) === revaluationMoveContents(expectedAdjustment)
+    && revaluationMoveContents(adjustment, { ignoreOptions }) === revaluationMoveContents(expectedAdjustment, { ignoreOptions })
     && revaluationMoveContents(reversal) === revaluationMoveContents(expectedReversal));
 }
 

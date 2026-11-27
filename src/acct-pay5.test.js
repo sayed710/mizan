@@ -1126,7 +1126,7 @@ test('direct ORM writes converting journal type normalize sepa_pain_version in t
   const db = await addJournalMethods(seed());
   const seededBank = db.records['account.journal'].find((j) => j.type === 'bank');
   const seededCash = db.records['account.journal'].find((j) => j.type === 'cash');
-  const seededMisc = db.records['account.journal'].find((j) => j.type === 'general');
+  const seededMisc = db.records['account.journal'].find((j) => j.type === 'general' && !db.records['res.company'].some((c) => c.account_revaluation_journal_id === j.id));
 
   // prepareWrite hook normalizes values directly
   const prepBank = journalModel.prepareWrite(db, { type: 'bank' }, seededCash);
