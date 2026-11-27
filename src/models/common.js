@@ -72,6 +72,14 @@ export const addDays = (date, n) => {
   d.setDate(d.getDate() + n);
   return isoDate(d);
 };
+/** Number of calendar days in the given 1-based month of `year`. */
+export const daysInMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+/** Shift a YYYY-MM-DD date by `days` using UTC calendar math. */
+export const addUtcDays = (date, days) => {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
 export const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
   && Number.isFinite(Date.parse(`${date}T00:00:00Z`)) && new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date;
 /** Shift a YYYY-MM-DD date by `months`, preserving month-end dates and clamping shorter target months. */

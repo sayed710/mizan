@@ -3,8 +3,10 @@ import { genericTaxRows, taxReturnBoxes } from '../models/taxExport.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
 import { cashFlow, executiveSummary, fiscalReport, reportReviewMode } from '../models/reports.js';
 import { round } from '../money.js';
+import { fiscalYearDates } from '../models/ledger.js';
 import { groupBuckets, targetCompanyIds } from '../models/configurableReports.js';
 import { shiftMonth, validDate } from '../models/common.js';
+import { reportPeriodRange } from './reportNavigation.js';
 
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const iso = (date) => date.toISOString().slice(0, 10);
@@ -54,8 +56,8 @@ function customRangePeriods(from, to, mode) {
   return (mode === 'previous' ? [1, 0] : [2, 1, 0]).map(shiftBack);
 }
 
-/** Full calendar or custom periods, oldest first; modes are none, previous, lastYear and last3. */
-export function periodsFor(periodKey, mode, anchor) {
+/** Full calendar, fiscal or custom periods, oldest first; modes are none, previous, lastYear and last3. */
+export function periodsFor(periodKey, mode, anchor, { db = null, companyId = null } = {}) {
   if (periodKey === 'all') return [{ from: '', to: '9999-12-31', label: 'All Dates' }];
   if (periodKey === 'custom') {
     const from = typeof anchor === 'object' && anchor !== null ? anchor.from : anchor;
@@ -67,6 +69,33 @@ export function periodsFor(periodKey, mode, anchor) {
   const date = new Date(`${anchorIso}T00:00:00Z`);
   if (!unit || !Number.isFinite(date.getTime()) || iso(date) !== anchorIso) throw new Error('Choose a valid period and date');
   if (!['none', 'previous', 'lastYear', 'last3'].includes(mode)) throw new Error('Choose a valid comparison');
+  if (db) {
+    const stepOffsets = {
+      none: [0],
+      previous: [-1, 0],
+      lastYear: [periodKey === 'month' ? -12 : periodKey === 'quarter' ? -4 : -1, 0],
+      last3: [-2, -1, 0],
+    }[mode];
+    const resolvedCompanyId = companyId ?? db?.settings?.current_company_id ?? 1;
+    return stepOffsets.map((step) => {
+      const range = reportPeriodRange(db, periodKey, { companyId: resolvedCompanyId, date: anchorIso, offset: step });
+      const y = range.from.slice(0, 4);
+      const m = Number(range.from.slice(5, 7)) - 1;
+      let label;
+      if (periodKey === 'month') {
+        label = `${months[m]} ${y}`;
+      } else if (periodKey === 'year') {
+        label = range.from.endsWith('-01-01') && range.to.endsWith('-12-31') && y === range.to.slice(0, 4)
+          ? y
+          : `${range.from} → ${range.to}`;
+      } else {
+        const fy = fiscalYearDates(db, range.from, resolvedCompanyId);
+        const isCalendarFy = fy.from.endsWith('-01-01') && fy.to.endsWith('-12-31') && fy.from.slice(0, 4) === fy.to.slice(0, 4);
+        label = isCalendarFy ? `Q${Math.floor(m / 3) + 1} ${y}` : `${range.from} → ${range.to}`;
+      }
+      return { ...range, label };
+    });
+  }
   const year = date.getUTCFullYear();
   const month = Math.floor(date.getUTCMonth() / unit) * unit;
   const offsets = { none: [0], previous: [-unit, 0], lastYear: [-12, 0], last3: [-2 * unit, -unit, 0] }[mode];

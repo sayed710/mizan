@@ -29,7 +29,7 @@ import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 import { GENERIC_TAX_TOTALS, TAX_RETURN_TEMPLATES, resolveTaxReturnTemplate, genericTaxRows, taxBoxItems, taxReturnBoxes, taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowAnalyticColumns, cashflowColumns, detailReportColumns, executiveColumns, periodsFor, selectedOptionIds } from './reportCompare.js';
-import { customPeriodError, DEFAULT_REPORT_PERIOD, PERIODS, reportPage, updateReportParam } from './reportNavigation.js';
+import { customPeriodError, DEFAULT_REPORT_PERIOD, PERIODS, reportPage, reportPeriodRange, updateReportParam } from './reportNavigation.js';
 import { statementUrl } from '../statementNavigation.js';
 export { PERIODS };
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -1257,6 +1257,7 @@ function ReportPage({ leaf, params }) {
     [sourceDb, companyId, allowAllCompanies],
   );
   const [periodKey, setPeriodKey] = useState(params?.has('from') && params?.get('to') ? 'custom' : DEFAULT_REPORT_PERIOD);
+  const [periodOffset, setPeriodOffset] = useState(0);
   const asOfErrorId = useId();
   const [asOfState, setAsOfState] = useState(() => {
     const paramTo = params?.get('to');
@@ -1404,8 +1405,12 @@ function ReportPage({ leaf, params }) {
   const isTaxBoxes = leaf.report === 'tax' && activeTaxVariant !== 'generic';
   const xmlCompanyId = selectedCompanyId ?? (companies.length === 1 ? companies[0].id : null);
   const period = useMemo(
-    () => (isAged || isValuation || isFollowUps ? { from: '', to: agedReportDate(asOfState.date) } : periodKey === 'custom' ? customPeriod : PERIODS[periodKey]()),
-    [isAged, isValuation, isFollowUps, asOfState.date, periodKey, customPeriod],
+    () => (isAged || isValuation || isFollowUps
+      ? { from: '', to: agedReportDate(asOfState.date) }
+      : periodKey === 'custom'
+        ? customPeriod
+        : reportPeriodRange(scopedCompanyDb, periodKey, { companyId: selectedCompanyId, offset: periodOffset })),
+    [isAged, isValuation, isFollowUps, asOfState.date, periodKey, customPeriod, scopedCompanyDb, selectedCompanyId, periodOffset],
   );
   const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all';
   const periodError = !isAged && !['inalterability', 'valuation', 'followups'].includes(leaf.report)
@@ -1481,7 +1486,9 @@ function ReportPage({ leaf, params }) {
   };
   const periodName = periodKey === 'month'
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
-    : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
+    : periodKey === 'year' && period.from.endsWith('-01-01') && period.to.endsWith('-12-31') && period.from.slice(0, 4) === period.to.slice(0, 4)
+      ? period.to.slice(0, 4)
+      : `${period.from} - ${period.to}`;
   const isTrial = leaf.report === 'trial';
   const isBudget = leaf.report === 'budget';
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
@@ -1538,7 +1545,9 @@ function ReportPage({ leaf, params }) {
     ? search(companyDb, 'account.report.horizontal.group').filter((g) => (g.company_id ?? 1) === primaryCompanyId && !(g.report_ids ?? []).length)
     : [];
   const canComputePeriods = !periodError;
-  const periods = comparable && comparison !== 'none' && canComputePeriods ? periodsFor(periodKey, comparison, period) : null;
+  const periods = comparable && comparison !== 'none' && canComputePeriods
+    ? periodsFor(periodKey, comparison, period, { db: scopedCompanyDb, companyId: selectedCompanyId })
+    : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
   const agedKind = leaf.report === 'agedPayable' ? 'payable' : 'receivable';
   const agedData = useMemo(
@@ -1824,16 +1833,28 @@ function ReportPage({ leaf, params }) {
         <label>{t('As of')}<input aria-label={t('As of')} aria-invalid={Boolean(asOfState.error)} aria-describedby={asOfState.error ? asOfErrorId : undefined} type="date" value={asOfState.input} onChange={(e) => setAsOfState((prev) => resolveAgedAsOfDate(e.target.value, prev.date))} /></label>
         {asOfState.error && <span id={asOfErrorId} className="alert" role="alert">{t(asOfState.error)}</span>}
       </>}
-      {leaf.report !== 'inalterability' && !isAged && !isValuation && !isFollowUps && <label className="inline-select">
-        {t('Period')}
-        <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
-          <option value="month">{t('This Month')}</option>
-          <option value="quarter">{t('This Quarter')}</option>
-          <option value="year">{t('This Year')}</option>
-          {!isDeferred && <option value="all">{t('All Dates')}</option>}
-          {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense', 'audit'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
-        </select>
-      </label>}
+      {leaf.report !== 'inalterability' && !isAged && !isValuation && !isFollowUps && (
+        <>
+          <label className="inline-select">
+            {t('Period')}
+            <select value={periodKey} onChange={(e) => { setPeriodKey(e.target.value); setPeriodOffset(0); }}>
+              <option value="month">{t('This Month')}</option>
+              <option value="quarter">{t('This Quarter')}</option>
+              <option value="year">{t('This Year')}</option>
+              {!isDeferred && <option value="all">{t('All Dates')}</option>}
+              {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget', 'deferredRevenue', 'deferredExpense', 'audit'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+            </select>
+          </label>
+          {['month', 'quarter', 'year'].includes(periodKey) && (
+            <PagerButtons
+              prevLabel={t('Previous Period')}
+              nextLabel={t('Next Period')}
+              onPrev={() => setPeriodOffset((o) => o - 1)}
+              onNext={() => setPeriodOffset((o) => o + 1)}
+            />
+          )}
+        </>
+      )}
       {!isAged && !isValuation && !isFollowUps && periodKey === 'custom' && <><label>{t('From')}<input aria-label={t('From')} type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input aria-label={t('To')} type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
       {isAudit && (
         <>
