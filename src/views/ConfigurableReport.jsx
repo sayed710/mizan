@@ -10,7 +10,7 @@ import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { periodsFor, selectedOptionIds } from './reportCompare.js';
-import { customPeriodError, DEFAULT_REPORT_PERIOD, PERIODS } from './reportNavigation.js';
+import { customPeriodError, DEFAULT_REPORT_PERIOD, reportPeriodRange } from './reportNavigation.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
 import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 
@@ -154,7 +154,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
       }
     : companyDb;
 
-  const period = statementKind ? (periodKey === 'custom' ? { from, to } : PERIODS[periodKey]()) : { from, to };
+  const period = statementKind
+    ? (periodKey === 'custom' ? { from, to } : reportPeriodRange(companyDb, periodKey, { companyId: primaryCompanyId }))
+    : { from, to };
   const comparable = !statementKind || periodKey !== 'all';
   const activePeriodKey = statementKind ? periodKey : 'custom';
   const periodError = customPeriodError(activePeriodKey, period, { requireFrom: comparable && comparison !== 'none' });
@@ -177,7 +179,9 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   if (!periodError && !groupSelectionError) {
     try {
       const periods = comparable && comparison !== 'none' && canComputePeriods
-        ? periodsFor(activePeriodKey, comparison, period)
+        ? (statementKind && activePeriodKey !== 'custom'
+          ? periodsFor(activePeriodKey, comparison, period, { db: companyDb, companyId: primaryCompanyId })
+          : periodsFor(activePeriodKey, comparison, period))
         : [{ ...period, label: '' }];
       data = compareConfigurableReport(
         db,

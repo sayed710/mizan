@@ -3,7 +3,7 @@ import { read } from '../orm.js';
 import { appAnalyses, recordAnalyses } from '../models/analysis.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
-import { PERIODS } from './Reports.jsx';
+import { reportPeriodRange } from './reportNavigation.js';
 import { companyViewDb } from '../companyView.js';
 
 // Ids in analysis results are shown by name when the key says which model they point at.
@@ -110,7 +110,7 @@ export function AnalysisPage({ leaf }) {
           </label>
         )}
       </div>
-      <AnalysisResult db={db} run={(view) => entry.run(view, PERIODS[periodKey]())} />
+      <AnalysisResult db={db} run={(view) => entry.run(view, reportPeriodRange(view, periodKey))} />
     </main>
   );
 }
