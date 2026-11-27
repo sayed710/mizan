@@ -179,7 +179,8 @@ function journalSequenceGuard(db, before, after) {
   }
   if (new Set(prefixes).size !== prefixes.length) return 'Invoice and refund sequence prefixes must be different';
   const configured = new Set(prefixes);
-  const duplicates = (db.records['account.journal'] ?? []).some((journal) => journal.id !== after.id && (journal.company_id ?? 1) === (after.company_id ?? 1)
+  const duplicates = (db.records['account.journal'] ?? []).some((journal) => journal.id !== after.id
+    && (!journal.company_id || !after.company_id || journal.company_id === after.company_id)
     && [journal.invoice_sequence_prefix, ...(journal.refund_sequence ? [journal.refund_sequence_prefix] : [])].some((prefix) => configured.has(prefix)));
   return duplicates ? 'Each journal sequence prefix must be unique' : null;
 }
@@ -4133,7 +4134,7 @@ export const accountingModels = {
       } },
     },
     defaults: () => ({
-      type: 'general', active: true, sequence: 10,
+      type: 'general', active: true, sequence: 10, color: 0, show_on_dashboard: true,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
       check_manual_sequencing: false, check_printing_layout: 'top',
     }),
@@ -4179,7 +4180,6 @@ export const accountingModels = {
       return { db, vals: nextVals };
     },
     createDefaults: (db, vals = {}) => ({
-      ...(db.records['res.company']?.length ? { color: 0, show_on_dashboard: true } : {}),
       ...(isLiquidityJournal(vals) && vals.company_id === undefined ? { company_id: currentCompany(db) } : {}),
       ...(vals.payment_sequence === undefined ? { payment_sequence: isLiquidityJournal(vals) } : {}),
       ...(vals.refund_sequence === undefined ? derivedRefundSequence(vals) : {}),

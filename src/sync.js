@@ -370,7 +370,8 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
       const newInvoices = upserts[model].filter((move) => move?.move_type !== 'entry' && move?.state === 'posted'
         && storedById.get(move.id)?.state !== 'posted');
       for (const move of newInvoices) {
-        if (all.some((other) => other.id !== move.id && other.move_type !== 'entry' && other.state === 'posted' && other.name === move.name)) {
+        if (all.some((other) => other.id !== move.id && other.move_type !== 'entry' && other.state === 'posted'
+          && (other.company_id ?? 1) === (move.company_id ?? 1) && other.name === move.name)) {
           throw new ConflictError('This invoice number is already assigned; reload and post again to use the journal sequence');
         }
       }

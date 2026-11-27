@@ -13,6 +13,7 @@ import { trialBalance } from './models/reports.js';
 import { companyViewDb } from './companyView.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { diffDb, applyDiff } from './sync.js';
+import { newDefaults } from './views/formDefaults.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -20,7 +21,17 @@ test('company 1 accounting seed retains the original records byte for byte', () 
   const expected = readFileSync(new URL('./acct-co1-seed-fixture.json', import.meta.url), 'utf8').replace(/^\uFEFF/, '').trim();
   const db = seed();
   const keys = Object.keys(JSON.parse(expected));
-  assert.equal(JSON.stringify(Object.fromEntries(keys.map((key) => [key, db.records[key]]))), expected);
+  for (const journal of db.records['account.journal']) {
+    assert.equal(journal.color, 0);
+    assert.equal(journal.show_on_dashboard, true);
+  }
+  const actual = Object.fromEntries(keys.map((key) => [
+    key,
+    key === 'account.journal'
+      ? db.records[key].map(({ color: _c, show_on_dashboard: _s, ...journal }) => journal)
+      : db.records[key],
+  ]));
+  assert.equal(JSON.stringify(actual), expected);
 });
 
 test('new company chart installs company-scoped chart, journals, taxes, terms, and defaults with repeated codes', () => {
@@ -156,4 +167,102 @@ test('migration 85 backfills color and show_on_dashboard on existing journals', 
     assert.equal(j.color, 0);
     assert.equal(j.show_on_dashboard, true);
   }
+});
+
+test('sync allows matching posted invoice numbers across different companies while rejecting duplicates in the same company', () => {
+  const base = seed();
+  let server = base;
+  const c1FirstName = server.records['account.move'].find((m) => m.move_type === 'out_invoice' && m.state === 'posted')?.name;
+  assert.ok(c1FirstName, 'seed has a posted company 1 invoice');
+  // Scope company 1 invoice journals to company 1 so a second company also gets the INV/ prefix at counter 1.
+  for (const code of ['INV', 'BILL']) {
+    const j = server.records['account.journal'].find((row) => row.code === code);
+    server = write(server, 'account.journal', j.id, { company_id: 1 });
+  }
+  const company2 = createCompany(server, { name: 'Second Company' });
+  server = applyDiff(server, diffDb(server, company2.db), { isAdmin: true });
+  const c2InvJournal = read(server, 'account.journal', journalId(server, 'INV', company2.id));
+  assert.equal(c2InvJournal.invoice_sequence_prefix, 'INV/');
+  assert.equal(c2InvJournal.invoice_sequence_next_number, 1);
+
+  const c2Sale = create(server, 'account.move', {
+    company_id: company2.id,
+    move_type: 'out_invoice',
+    partner_id: 3,
+    invoice_date: `${c1FirstName.split('/')[1]}-11-27`,
+    invoice_line_ids: [{ name: 'C2 Sale', qty: 1, price_unit: 150, tax: 0 }],
+  });
+  const c2Posted = postMove(c2Sale.db, c2Sale.id);
+  assert.equal(read(c2Posted, 'account.move', c2Sale.id).name, c1FirstName);
+  server = applyDiff(server, diffDb(server, c2Posted), { isAdmin: true });
+  assert.equal(read(server, 'account.move', c2Sale.id).state, 'posted');
+  assert.equal(read(server, 'account.move', c2Sale.id).name, c1FirstName);
+
+  // Same-company duplicate posted invoice number is still rejected on sync (in both company 1 and company 2).
+  for (const cid of [1, company2.id]) {
+    const dup = create(server, 'account.move', {
+      company_id: cid,
+      move_type: 'out_invoice',
+      partner_id: 3,
+      name: c1FirstName,
+      invoice_date: `${c1FirstName.split('/')[1]}-11-27`,
+      invoice_line_ids: [{ name: 'Dup', qty: 1, price_unit: 50, tax: 0 }],
+    });
+    assert.throws(
+      () => applyDiff(server, diffDb(server, postMove(dup.db, dup.id)), { isAdmin: true }),
+      /already assigned/,
+    );
+  }
+});
+
+test('journal sequence guard rejects collisions with shared journals and chart template disambiguates prefixes', () => {
+  const base = seed();
+  const sharedInv = base.records['account.journal'].find((j) => j.code === 'INV');
+  assert.equal(sharedInv.company_id, undefined);
+
+  const company2 = createCompany(base, { name: 'Second Company' });
+  const c2Inv = read(company2.db, 'account.journal', journalId(company2.db, 'INV', company2.id));
+  const c2Bill = read(company2.db, 'account.journal', journalId(company2.db, 'BILL', company2.id));
+  const c2Pos = read(company2.db, 'account.journal', journalId(company2.db, 'POSS', company2.id));
+  assert.notEqual(c2Inv.invoice_sequence_prefix, sharedInv.invoice_sequence_prefix);
+  assert.notEqual(c2Inv.refund_sequence_prefix, sharedInv.refund_sequence_prefix);
+  assert.equal(c2Inv.invoice_sequence_prefix, `INV-${company2.id}/`);
+  assert.equal(c2Bill.invoice_sequence_prefix, `BILL-${company2.id}/`);
+  assert.equal(c2Pos.invoice_sequence_prefix, `POS-${company2.id}/`);
+
+  assert.throws(
+    () => create(company2.db, 'account.journal', {
+      name: 'Colliding Company 2 Journal',
+      code: 'C2DUP',
+      type: 'sale',
+      company_id: company2.id,
+      default_account_id: accountId(company2.db, '400000', company2.id),
+      invoice_sequence_prefix: 'INV/',
+      invoice_sequence_next_number: 1,
+    }),
+    /Each journal sequence prefix must be unique/,
+  );
+  assert.throws(
+    () => create(company2.db, 'account.journal', {
+      name: 'Colliding Shared Journal',
+      code: 'SHDUP',
+      type: 'sale',
+      default_account_id: accountId(company2.db, '400000', 1),
+      invoice_sequence_prefix: c2Inv.invoice_sequence_prefix,
+      invoice_sequence_next_number: 1,
+    }),
+    /Each journal sequence prefix must be unique/,
+  );
+});
+
+test('seeded journals and new journal defaults set color and show_on_dashboard explicitly', () => {
+  const db = seed();
+  for (const journal of db.records['account.journal']) {
+    assert.equal(journal.color, 0);
+    assert.equal(journal.show_on_dashboard, true);
+  }
+  const noCompanyDb = { ...db, records: { ...db.records, 'res.company': [] } };
+  const defaults = newDefaults(noCompanyDb, 'account.journal', {}, new URLSearchParams(), null);
+  assert.equal(defaults.color, 0);
+  assert.equal(defaults.show_on_dashboard, true);
 });

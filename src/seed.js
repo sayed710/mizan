@@ -11,7 +11,7 @@ import { installChartTemplate } from './models/chart-template.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { ensurePartnerIndustries } from './models/crm.js';
-import { migrateCountries, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
+import { migrateCountries, migrateJournalDashboardDisplay, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { ensureCountries } from './models/country.js';
 import { ensureOnlinePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
@@ -516,5 +516,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(ensureOnlinePaymentMethods(opened)))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...migrateCountries(ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready)))))))), schema_version: SCHEMA_VERSION };
+  return { ...migrateJournalDashboardDisplay(migrateCountries(ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))))))), schema_version: SCHEMA_VERSION };
 }

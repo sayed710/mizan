@@ -54,10 +54,32 @@ export function installChartTemplate(db, companyId = 1, { legacy = false, includ
     demoBankJournal = !legacy
       ? ((db.records['account.journal'] ?? []).find((j) => j.company_id === companyId && j.default_for_payments === true)?.id ?? null)
       : null;
+    const usedPrefixes = !legacy
+      ? new Set((db.records['account.journal'] ?? [])
+          .filter((j) => !j.company_id || !companyId || j.company_id === companyId)
+          .flatMap((j) => [j.invoice_sequence_prefix, ...(j.refund_sequence ? [j.refund_sequence_prefix] : [])])
+          .filter(Boolean))
+      : new Set();
+    const uniquePrefix = (base) => {
+      if (!base || legacy || !usedPrefixes.has(base)) return base;
+      const stem = base.endsWith('/') ? base.slice(0, -1) : base;
+      const slash = base.endsWith('/') ? '/' : '';
+      let candidate = `${stem}-${companyId}${slash}`;
+      let n = 2;
+      while (usedPrefixes.has(candidate)) {
+        candidate = `${stem}-${companyId}-${n}${slash}`;
+        n += 1;
+      }
+      return candidate;
+    };
     JOURNALS.forEach((journal, idx) => {
       const existing = !legacy && (db.records['account.journal'] ?? []).find((j) => j.code === journal.code && j.company_id === companyId);
       const wantsDefaultPayment = journal.default_for_payments === true;
       const isDefaultPayment = wantsDefaultPayment && (legacy || !demoBankJournal);
+      const invoicePrefix = existing ? null : uniquePrefix(journal.invoice_sequence_prefix);
+      if (invoicePrefix) usedPrefixes.add(invoicePrefix);
+      const refundPrefix = existing ? null : uniquePrefix(journal.refund_sequence_prefix);
+      if (!existing && journal.refund_sequence && refundPrefix) usedPrefixes.add(refundPrefix);
       const id = existing ? existing.id : add('account.journal', {
         code: journal.code, name: journal.name, type: journal.type,
         sequence: (idx + 1) * 10, active: true,
@@ -72,9 +94,9 @@ export function installChartTemplate(db, companyId = 1, { legacy = false, includ
         ...(journal.sepa_pain_version ? { sepa_pain_version: journal.sepa_pain_version } : {}),
         ...(journal.invoice_reference_type ? { invoice_reference_type: journal.invoice_reference_type } : {}),
         ...(journal.invoice_reference_model ? { invoice_reference_model: journal.invoice_reference_model } : {}),
-        ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
+        ...(invoicePrefix ? { invoice_sequence_prefix: invoicePrefix } : {}),
         ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
-        ...(journal.refund_sequence_prefix ? { refund_sequence_prefix: journal.refund_sequence_prefix } : {}),
+        ...(refundPrefix ? { refund_sequence_prefix: refundPrefix } : {}),
         ...(journal.refund_sequence_next_number != null ? { refund_sequence_next_number: journal.refund_sequence_next_number } : {}),
       });
       if (journal.company_default) companyJournals[journal.company_default] = id;
