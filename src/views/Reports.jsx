@@ -18,7 +18,7 @@ import { commit, companiesOf, getDb, isServer, listAuditAll, serverAction, useDb
 import { AUDIT_MODELS, auditTrailToCsv, collectAuditTrailRows } from '../models/auditTrail.js';
 import { PAGE_SIZE, pageWindow } from './paging.js';
 import { valuationReport } from '../models/valuation.js';
-import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
+import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, partnerLedgerExportRows, TrialBalance } from './FinanceReports.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { money, PagerButtons } from '../ui.jsx';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency } from '../money.js';
@@ -152,7 +152,48 @@ function Comparison({ data, report, money: fmtMoney = money }) {
   );
 }
 
-function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = false, hideZeroLines = false, money: moneyProp }) {
+/** Build full unpaged, unfolded export rows and column types for General Ledger CSV/XLSX export. */
+export function generalLedgerExportRows(db, { period, companyId, analyticAccountIds, groupByPartner = false, hideZeroLines = false, money: moneyProp } = {}) {
+  const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
+  const fmtMoney = moneyProp ?? reportMoney(db, targetCompanyId ?? period?.company_id);
+  const report = generalLedger(db, {
+    ...period,
+    company_id: targetCompanyId,
+    analyticAccountIds,
+    reviewMode: period?.reviewMode,
+    groupByPartner,
+    hideZeroLines,
+  });
+  const headers = ['Account', 'Date', 'Entry', 'Ref', 'Label', 'Partner', 'Currency', 'Initial Balance', 'Debit', 'Credit', 'Balance'].map((c) => t(c));
+  const columnTypes = ['text', 'text', 'text', 'text', 'text', 'text', 'text', 'number', 'number', 'number', 'number'];
+  const rows = [headers];
+  const initialRow = (amount) => [t('Initial Balance'), '', '', '', '', '', '', fmtMoney(amount), '', '', fmtMoney(amount)];
+  const lineRow = (l) => {
+    const linePartner = l.partner_id ? (read(db, 'res.partner', l.partner_id)?.name ?? '') : '';
+    const lineCurrency = l.currency_id && l.amount_currency != null
+      ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id))
+      : '';
+    return ['', l.date, l.move_name, l.ref || '', l.name || '', linePartner, lineCurrency, '', l.debit ? fmtMoney(l.debit) : '', l.credit ? fmtMoney(l.credit) : '', fmtMoney(l.balance)];
+  };
+  for (const r of report.rows) {
+    rows.push([`${r.account.code} ${r.account.name}`, '', '', '', '', '', '', fmtMoney(r.initial), fmtMoney(r.debit), fmtMoney(r.credit), fmtMoney(r.end)]);
+    if (groupByPartner) {
+      if (r.initial) rows.push(initialRow(r.initial));
+      for (const p of r.partners) {
+        rows.push([p.partner_id ? p.name : t('No Partner'), '', '', '', '', '', '', fmtMoney(p.initial), fmtMoney(p.debit), fmtMoney(p.credit), fmtMoney(p.end)]);
+        if (p.initial) rows.push(initialRow(p.initial));
+        for (const l of p.lines) rows.push(lineRow(l));
+      }
+    } else {
+      rows.push(initialRow(r.initial));
+      for (const l of r.lines) rows.push(lineRow(l));
+    }
+  }
+  rows.push([t('Total'), '', '', '', '', '', '', fmtMoney(report.totals.initial), fmtMoney(report.totals.debit), fmtMoney(report.totals.credit), fmtMoney(report.totals.end)]);
+  return { rows, columnTypes };
+}
+
+function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = false, hideZeroLines = false, isPrinting = false, money: moneyProp }) {
   const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
   const fmtMoney = moneyProp ?? reportMoney(db, targetCompanyId ?? period?.company_id);
   const report = generalLedger(db, {
@@ -171,8 +212,8 @@ function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = fa
   const toggle = (id) => setOpen((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const togglePartner = (id) => setOpenPartners((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
-  const renderInitialRow = (key, amount, indent = 0, hidden = false) => (
-    <tr key={key} className={`rep-detail${hidden ? ' report-folded-row' : ''}`}>
+  const renderInitialRow = (key, amount, indent = 0) => (
+    <tr key={key} className="rep-detail">
       <td style={indent ? { paddingInlineStart: indent } : undefined}>{t('Initial Balance')}</td>
       <td /><td /><td /><td /><td /><td />
       <td className="num">{fmtMoney(amount)}</td>
@@ -181,13 +222,13 @@ function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = fa
     </tr>
   );
 
-  const renderLineRow = (l, key, indent = 0, hidden = false) => {
+  const renderLineRow = (l, key, indent = 0) => {
     const linePartner = l.partner_id ? (read(db, 'res.partner', l.partner_id)?.name ?? '') : '';
     const lineCurrency = l.currency_id && l.amount_currency != null
       ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id))
       : '';
     return (
-      <tr key={key} className={`rep-detail${hidden ? ' report-folded-row' : ''}`}>
+      <tr key={key} className="rep-detail">
         <td style={indent ? { paddingInlineStart: indent } : undefined} />
         <td>{l.date}</td>
         <td><a href={`#/open/account.move/${l.move_id}`}>{l.move_name}</a></td>
@@ -207,35 +248,40 @@ function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = fa
     <tbody>
       {report.rows.map((r) => {
         const a = r.account;
+        const accountExpanded = isPrinting || open.has(a.id);
         return [
           <tr key={a.id} className="rep-section" onClick={() => toggle(a.id)} aria-expanded={open.has(a.id)}>
             <td><span className="caret">{open.has(a.id) ? '▾' : '▸'}</span> {a.code} {a.name}</td>
             <td /><td /><td /><td /><td /><td />
-            {['initial', 'debit', 'credit', 'end'].map((column) => <td key={column} className="num"><a onClick={(e) => e.stopPropagation()} href={reportJournalItemsHref({ accountId: a.id, period, companyId, column })}>{fmtMoney(r[column])}</a></td>)}
+            {['initial', 'debit', 'credit', 'end'].map((column) => <td key={column} className="num"><a onClick={(e) => e.stopPropagation()} href={reportJournalItemsHref({ accountId: a.id, period: { ...period, analyticAccountIds }, companyId, column, trialOpening: column === 'initial' || column === 'end' })}>{fmtMoney(r[column])}</a></td>)}
           </tr>,
-          ...(
+          ...(accountExpanded ? (
             groupByPartner ? [
-              ...(r.initial ? [renderInitialRow(`${a.id}-open`, r.initial, 28, !open.has(a.id))] : []),
+              ...(r.initial ? [renderInitialRow(`${a.id}-open`, r.initial, 28)] : []),
               ...r.partners.flatMap((p) => {
                 const pKey = `${a.id}-${p.partner_id ?? 'none'}`;
                 const pName = p.partner_id ? p.name : t('No Partner');
+                const partnerExpanded = isPrinting || openPartners.has(pKey);
+                const visibleLines = isPrinting ? p.lines : p.lines.slice(0, limitOf(pKey));
                 return [
-                  <tr key={pKey} className={`rep-partner rep-section-sub${!open.has(a.id) ? ' report-folded-row' : ''}`} onClick={() => togglePartner(pKey)} aria-expanded={openPartners.has(pKey)} style={{ cursor: 'pointer' }}>
+                  <tr key={pKey} className="rep-partner rep-section-sub" onClick={() => togglePartner(pKey)} aria-expanded={openPartners.has(pKey)} style={{ cursor: 'pointer' }}>
                     <td style={{ paddingInlineStart: 28 }}><span className="caret">{openPartners.has(pKey) ? '▾' : '▸'}</span> {pName}</td>
                     <td /><td /><td /><td /><td /><td />
-                    {['initial', 'debit', 'credit', 'end'].map((column) => <td key={column} className="num"><a onClick={(e) => e.stopPropagation()} href={reportJournalItemsHref({ accountId: a.id, partnerId: p.partner_id, period, companyId, column })}>{fmtMoney(p[column])}</a></td>)}
+                    {['initial', 'debit', 'credit', 'end'].map((column) => <td key={column} className="num"><a onClick={(e) => e.stopPropagation()} href={reportJournalItemsHref({ accountId: a.id, partnerId: p.partner_id, period: { ...period, analyticAccountIds }, companyId, column, trialOpening: column === 'initial' || column === 'end' })}>{fmtMoney(p[column])}</a></td>)}
                   </tr>,
-                  ...(p.initial ? [renderInitialRow(`${pKey}-open`, p.initial, 44, !open.has(a.id) || !openPartners.has(pKey))] : []),
-                  ...p.lines.map((l, i) => renderLineRow(l, `${pKey}-${i}`, 44, !open.has(a.id) || !openPartners.has(pKey) || i >= limitOf(pKey))),
-                  ...(open.has(a.id) && openPartners.has(pKey) && p.lines.length > limitOf(pKey) ? [<tr key={`${pKey}-more`} className="no-export"><td colSpan={11}><button type="button" className="btn sm" onClick={() => more(pKey)}>{t('Load more...')}</button></td></tr>] : []),
+                  ...(partnerExpanded ? [
+                    ...(p.initial ? [renderInitialRow(`${pKey}-open`, p.initial, 44)] : []),
+                    ...visibleLines.map((l, i) => renderLineRow(l, `${pKey}-${i}`, 44)),
+                    ...(!isPrinting && p.lines.length > limitOf(pKey) ? [<tr key={`${pKey}-more`} className="no-export"><td colSpan={11}><button type="button" className="btn sm" onClick={() => more(pKey)}>{t('Load more...')}</button></td></tr>] : []),
+                  ] : []),
                 ];
               }),
             ] : [
-              renderInitialRow(`${a.id}-open`, r.initial, 0, !open.has(a.id)),
-              ...r.lines.map((l, i) => renderLineRow(l, `${a.id}-${i}`, 0, !open.has(a.id) || i >= limitOf(a.id))),
-              ...(open.has(a.id) && r.lines.length > limitOf(a.id) ? [<tr key={`${a.id}-more`} className="no-export"><td colSpan={11}><button type="button" className="btn sm" onClick={() => more(a.id)}>{t('Load more...')}</button></td></tr>] : []),
+              renderInitialRow(`${a.id}-open`, r.initial, 0),
+              ...(isPrinting ? r.lines : r.lines.slice(0, limitOf(a.id))).map((l, i) => renderLineRow(l, `${a.id}-${i}`, 0)),
+              ...(!isPrinting && r.lines.length > limitOf(a.id) ? [<tr key={`${a.id}-more`} className="no-export"><td colSpan={11}><button type="button" className="btn sm" onClick={() => more(a.id)}>{t('Load more...')}</button></td></tr>] : []),
             ]
-          ),
+          ) : []),
         ];
       })}
       <tr className="rep-total strong">
@@ -386,7 +432,7 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
     const gridsByReport = gridReports.map((rows) => new Map(rows.map((row) => [row.id, row])));
     const grids = new Map(gridReports.flatMap((rows) => rows.map((row) => [row.id, row])));
     const totals = specs.map((spec) => taxReport(db, spec));
-    const renderRows = (rows) => rows.map((row) => <tr key={rowKey(row)} className="rep-detail">{activeVariant !== 'generic' && <td>{row.code}</td>}<td>{t(row.label ?? row.name)}</td>{rowsByReport.flatMap((byKey, index) => { const value = byKey.get(rowKey(row)); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{activeVariant === 'generic' && row.tax_id ? <a href={reportJournalItemsHref({ period: specs[index], companyId: effectiveCompanyId, taxId: row.tax_id, taxKind: key })}>{fmtMoney(value?.[key] ?? 0)}</a> : fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>);
+    const renderRows = (rows) => rows.map((row) => <tr key={rowKey(row)} className="rep-detail">{activeVariant !== 'generic' && <td>{row.code}</td>}<td>{t(row.label ?? row.name)}</td>{rowsByReport.flatMap((byKey, index) => { const value = byKey.get(rowKey(row)); return ['base', 'tax'].map((key) => <td key={`${index}-${key}`} className="num">{activeVariant === 'generic' && row.tax_id ? <a href={reportJournalItemsHref({ period: specs[index], companyId: effectiveCompanyId, taxId: row.tax_id, taxKind: key, taxSide: row.side })}>{fmtMoney(value?.[key] ?? 0)}</a> : fmtMoney(value?.[key] ?? 0)}</td>); })}</tr>);
     const section = (title) => <tr className="rep-section"><td>{t(title)}</td>{periods.flatMap((_, index) => [<td key={`${index}-base`} />, <td key={`${index}-tax`} />])}</tr>;
     const mergedRows = [...keys.values()];
     return <tbody>
@@ -440,10 +486,10 @@ export function Tax({ db, period, periods, companyId = 'all', variant = null, mo
           <tr className="rep-detail">
             <td>{x.name}</td>
             <td className="num">
-              {x.tax_id ? <><a href={reportJournalItemsHref({ period: effectivePeriod, companyId: effectiveCompanyId, taxId: x.tax_id, taxKind: 'base' })}>{fmtMoney(x.base)}</a>{' '}<button type="button" className="tax-drill-toggle no-export" aria-label={t('Details')} aria-expanded={openBoxes.has(x.code)} onClick={() => toggleBox(x.code)}>{openBoxes.has(x.code) ? '▾' : '▸'}</button></> : <TaxAmountToggle value={x.base} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} money={fmtMoney} />}
+              {x.tax_id ? <><a href={reportJournalItemsHref({ period: effectivePeriod, companyId: effectiveCompanyId, taxId: x.tax_id, taxKind: 'base', taxSide: x.side })}>{fmtMoney(x.base)}</a>{' '}<button type="button" className="tax-drill-toggle no-export" aria-label={t('Details')} aria-expanded={openBoxes.has(x.code)} onClick={() => toggleBox(x.code)}>{openBoxes.has(x.code) ? '▾' : '▸'}</button></> : <TaxAmountToggle value={x.base} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} money={fmtMoney} />}
             </td>
             <td className="num">
-              {x.tax_id ? <a href={reportJournalItemsHref({ period: effectivePeriod, companyId: effectiveCompanyId, taxId: x.tax_id, taxKind: 'tax' })}>{fmtMoney(x.tax)}</a> : <TaxAmountToggle value={x.tax} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} money={fmtMoney} />}
+              {x.tax_id ? <a href={reportJournalItemsHref({ period: effectivePeriod, companyId: effectiveCompanyId, taxId: x.tax_id, taxKind: 'tax', taxSide: x.side })}>{fmtMoney(x.tax)}</a> : <TaxAmountToggle value={x.tax} open={openBoxes.has(x.code)} onToggle={() => toggleBox(x.code)} money={fmtMoney} />}
             </td>
           </tr>
           {openBoxes.has(x.code) && (
@@ -510,7 +556,8 @@ function DetailComparison({ db, data, report, companyId, variant, taxIds, money:
 const Aged = (kind) => function AgedBody({ db, period, companyId, agingOptions, partnerIds, agedData = null, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company = companyId && companyId !== 'all' ? Number(companyId) : null;
-  const result = agedData ?? agedBalance(db, kind, agedReportDate(period.to), company, { ...agingOptions, reviewMode: period.reviewMode });
+  const cutoff = agedReportDate(period.to);
+  const result = agedData ?? agedBalance(db, kind, cutoff, company, { ...agingOptions, reviewMode: period.reviewMode });
   const { buckets } = result;
   const allRows = result.rows;
   const rows = partnerIds?.length ? allRows.filter((row) => partnerIds.includes(row.partner_id)) : allRows;
@@ -531,7 +578,7 @@ const Aged = (kind) => function AgedBody({ db, period, companyId, agingOptions, 
           </td>
           <td />
           <td /><td /><td /><td />
-          {buckets.map(([k]) => <td key={k} className="num">{r[k] ? <a href={reportJournalItemsHref({ partnerId: r.partner_id, companyId: company, period: { ...period, from: null }, agedKind: kind, agedBucket: k, agingInterval: agingOptions?.aging_interval ?? 30, agingBasedOn: agingOptions?.aging_based_on ?? 'base_on_maturity_date' })}>{fmtMoney(r[k])}</a> : ''}</td>)}
+          {buckets.map(([k]) => <td key={k} className="num">{r[k] ? <a href={reportJournalItemsHref({ partnerId: r.partner_id, companyId: company, period: { ...period, from: null, to: cutoff }, agedKind: kind, agedBucket: k, agingInterval: agingOptions?.aging_interval ?? 30, agingBasedOn: agingOptions?.aging_based_on ?? 'base_on_maturity_date' })}>{fmtMoney(r[k])}</a> : ''}</td>)}
           <td className="num">{fmtMoney(r.total)}</td>
         </tr>
         {open.has(r.partner_id) && r.invoices.map((detail) => (
@@ -1762,6 +1809,13 @@ function ReportPage({ leaf, params }) {
   const auditOffset = auditPage.key === auditPageKey ? auditPage.offset : 0;
   const auditWin = pageWindow(auditAllRows.length, auditOffset, PAGE_SIZE);
   const auditPagedRows = auditAllRows.slice(auditWin.start, auditWin.end);
+  const ledgerExport = () => (
+    leaf.report === 'ledger'
+      ? generalLedgerExportRows(db, { period: effectivePeriod, companyId: selectedCompany, analyticAccountIds, groupByPartner, hideZeroLines, money: fmtMoney })
+      : isPartnerLedger
+        ? partnerLedgerExportRows(db, { period: effectivePeriod, companyId: selectedCompany, analyticAccountIds, partnerIds: partnerFilterIds, unreconciledOnly, showJournalAccount, accountType, firstCol, money: fmtMoney })
+        : null
+  );
   const exportCsv = () => {
     if (periodError) return;
     if (isAudit) {
@@ -1770,6 +1824,11 @@ function ReportPage({ leaf, params }) {
     }
     if (isFollowUps) {
       downloadCsv('followups.csv', followUpReportExportRows(db, sourceDb, { allowed: followupAllowed, statusFilter: followupStatusFilter, at: period.to }).rows);
+      return;
+    }
+    const fullExport = ledgerExport();
+    if (fullExport) {
+      downloadCsv(`${leaf.report || 'report'}.csv`, fullExport.rows);
       return;
     }
     downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
@@ -1787,6 +1846,11 @@ function ReportPage({ leaf, params }) {
     }
     const name = leaf.report || 'report';
     const sheetName = title || name;
+    const fullExport = ledgerExport();
+    if (fullExport) {
+      downloadXlsx(`${name}.xlsx`, fullExport.rows, { sheetName, headerRowCount: 1, columnTypes: fullExport.columnTypes });
+      return;
+    }
     downloadXlsx(`${name}.xlsx`, tableRef.current, { sheetName });
   };
   const activeCompanyId = selectedCompany === 'all' ? currentCompany(companyDb) : Number(selectedCompany);

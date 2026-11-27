@@ -1,7 +1,7 @@
 import { accountJournalItemsHref } from '../models/configurableReports.js';
 
 /** Build a journal-item link using the period and review mode displayed by a report. */
-export function reportJournalItemsHref({ accountId, partnerId, period = {}, companyId, column = 'balance', accountType, unreconciledOnly, taxId, taxKind, trialOpening, cashFlowAccount, agedKind, agedBucket, agingInterval, agingBasedOn }) {
+export function reportJournalItemsHref({ accountId, partnerId, period = {}, companyId, column = 'balance', accountType, unreconciledOnly, taxId, taxKind, taxSide, trialOpening, cashFlowAccount, agedKind, agedBucket, agingInterval, agingBasedOn }) {
   const before = period.from ? new Date(`${period.from}T00:00:00Z`) : null;
   if (before) before.setUTCDate(before.getUTCDate() - 1);
   return accountJournalItemsHref(accountId, {
@@ -9,7 +9,7 @@ export function reportJournalItemsHref({ accountId, partnerId, period = {}, comp
     ...(companyId && companyId !== 'all' ? { company: companyId } : {}),
     ...(accountType ? { accountType } : {}),
     ...(unreconciledOnly ? { unreconciled: '1' } : {}),
-    ...(taxId != null ? { tax: taxId, taxKind } : {}),
+    ...(taxId != null ? { tax: taxId, taxKind, ...(taxSide ? { taxSide } : {}) } : {}),
     ...(trialOpening && period.from ? { trialOpening: period.from } : {}),
     ...(cashFlowAccount ? { cashFlowAccount } : {}),
     ...(agedKind ? { agedKind, agedBucket, agingInterval, agingBasedOn } : {}),

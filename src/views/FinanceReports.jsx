@@ -42,7 +42,7 @@ export function TrialBalance({ db, period, periods, companyId, analyticAccountId
       </td>
       {rowsByReport.flatMap((byAccount, index) => {
         const row = byAccount.get(r.id);
-        return keys.map((key) => <td key={`${index}-${key}`} className="num"><a href={reportJournalItemsHref({ accountId: r.id, period: { ...(periods ?? [period])[index], reviewMode: period.reviewMode, journalIds: period.journalIds }, companyId, column: key, trialOpening: key === 'initial' || key === 'end' })}>{fmtMoney(row?.[key] ?? 0)}</a></td>);
+        return keys.map((key) => <td key={`${index}-${key}`} className="num"><a href={reportJournalItemsHref({ accountId: r.id, period: { ...(periods ?? [period])[index], reviewMode: period.reviewMode, journalIds: period.journalIds, analyticAccountIds }, companyId, column: key, trialOpening: key === 'initial' || key === 'end' })}>{fmtMoney(row?.[key] ?? 0)}</a></td>);
       })}
     </tr>
   );
@@ -91,28 +91,99 @@ export function FiscalReport({ db, period, periods, companyId, analyticAccountId
   const rowsByReport = reports.map((report) => new Map(report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   const groups = new Map(reports.flatMap((report) => report.rows.map((row) => [row.category?.id ?? 'uncategorized', row])));
   return <tbody>
-    {[...groups.keys()].map((id) => <FiscalCategoryRows key={id} rows={rowsByReport.map((byCategory) => byCategory.get(id))} periods={(periods ?? [period]).map((p) => ({ ...p, reviewMode: period.reviewMode }))} companyId={effectiveCompanyId} money={fmtMoney} />)}
+    {[...groups.keys()].map((id) => <FiscalCategoryRows key={id} rows={rowsByReport.map((byCategory) => byCategory.get(id))} periods={(periods ?? [period]).map((p) => ({ ...p, reviewMode: period.reviewMode, journalIds: period.journalIds, analyticAccountIds }))} companyId={effectiveCompanyId} money={fmtMoney} />)}
     <tr className="rep-total strong"><td>{t('Total')}</td>{reports.flatMap((report, index) => ['debit', 'credit', 'balance'].map((key) => <td key={`${index}-${key}`} className="num">{fmtMoney(report.totals[key])}</td>))}</tr>
   </tbody>;
 }
 
+/** Build full unpaged, unfolded export rows and column types for Partner Ledger CSV/XLSX export. */
+export function partnerLedgerExportRows(db, { period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, showJournalAccount = false, accountType, firstCol = 'Partner', money: moneyProp } = {}) {
+  const fmtMoney = moneyProp ?? reportMoney(db, companyId);
+  const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
+  const rowsData = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, accountType);
+  const headers = [
+    t(firstCol),
+    ...(showJournalAccount ? [t('Journal'), t('Account')] : []),
+    t('Due Date'),
+    t('Matching'),
+    t('Label'),
+    t('Initial Balance'),
+    t('Debit'),
+    t('Credit'),
+    t('End Balance'),
+    t('Amount Currency'),
+  ];
+  const columnTypes = [
+    'text',
+    ...(showJournalAccount ? ['text', 'text'] : []),
+    'text',
+    'text',
+    'text',
+    'number',
+    'number',
+    'number',
+    'number',
+    'number',
+  ];
+  const rows = [headers];
+  for (const p of rowsData) {
+    const partnerName = p.partner_id ? (read(db, 'res.partner', p.partner_id)?.name ?? '') : t('Unknown');
+    rows.push([
+      partnerName,
+      ...(showJournalAccount ? ['', ''] : []),
+      '', '', '',
+      fmtMoney(p.initial),
+      fmtMoney(p.debit),
+      fmtMoney(p.credit),
+      fmtMoney(p.end),
+      '',
+    ]);
+    for (const l of p.lines) {
+      const journal = l.journal_id ? read(db, 'account.journal', l.journal_id) : null;
+      const account = l.account_id ? read(db, 'account.account', l.account_id) : null;
+      rows.push([
+        `${l.date} · ${l.move_name}`,
+        ...(showJournalAccount ? [journal?.code ?? '', account ? `${account.code} ${account.name}` : ''] : []),
+        l.dueDate ?? '',
+        l.matchingNumber ?? '',
+        `${l.label}${l.ref ? ` · ${l.ref}` : ''}`,
+        '',
+        fmtMoney(l.debit),
+        fmtMoney(l.credit),
+        fmtMoney(l.balance),
+        l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : '',
+      ]);
+    }
+  }
+  rows.push([
+    t('Total'),
+    ...(showJournalAccount ? ['', ''] : []),
+    '', '', '',
+    ...['initial', 'debit', 'credit', 'end'].map((k) => fmtMoney(rowsData.reduce((s, r) => s + r[k], 0))),
+    '',
+  ]);
+  return { rows, columnTypes };
+}
+
 /** One partner: a clickable summary row that unfolds its entries with the running balance. */
-function PartnerRows({ db, p, period, companyId, kind, unreconciledOnly, showJournalAccount = false, money: fmtMoney = money }) {
+function PartnerRows({ db, p, period, companyId, analyticAccountIds, kind, unreconciledOnly, showJournalAccount = false, isPrinting = false, money: fmtMoney = money }) {
   const [open, setOpen] = useState(false);
   const [limit, setLimit] = useState(80);
+  const expanded = isPrinting || open;
+  const visibleLines = isPrinting ? p.lines : p.lines.slice(0, limit);
   return (
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
         <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')} {kind !== 'payable' && p.partner_id && companyId && <a href={statementUrl([p.partner_id], { companyId, ...period })} onClick={(e) => e.stopPropagation()}>{t('Customer Statement')}</a>}</td>
         {showJournalAccount && <><td /><td /></>}
         <td /><td /><td />
-        {['initial', 'debit', 'credit', 'end'].map((column) => <td key={column} className="num"><a onClick={(e) => e.stopPropagation()} href={reportJournalItemsHref({ partnerId: p.partner_id, period, companyId, column, accountType: kind ?? 'receivable', unreconciledOnly })}>{fmtMoney(p[column])}</a></td>)}<td />
+        {['initial', 'debit', 'credit', 'end'].map((column) => <td key={column} className="num"><a onClick={(e) => e.stopPropagation()} href={reportJournalItemsHref({ partnerId: p.partner_id, period: { ...period, analyticAccountIds }, companyId, column, accountType: kind ?? 'receivable', unreconciledOnly })}>{fmtMoney(p[column])}</a></td>)}<td />
       </tr>
-      {p.lines.map((l, i) => {
+      {expanded && visibleLines.map((l, i) => {
         const journal = l.journal_id ? read(db, 'account.journal', l.journal_id) : null;
         const account = l.account_id ? read(db, 'account.account', l.account_id) : null;
         return (
-          <tr key={i} className={`rep-detail${!open || i >= limit ? ' report-folded-row' : ''}`}>
+          <tr key={i} className="rep-detail">
             <td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a></td>
             {showJournalAccount && (
               <>
@@ -129,7 +200,7 @@ function PartnerRows({ db, p, period, companyId, kind, unreconciledOnly, showJou
           </tr>
         );
       })}
-      {open && p.lines.length > limit && <tr className="no-export"><td colSpan={showJournalAccount ? 11 : 9}><button type="button" className="btn sm" onClick={() => setLimit((n) => n + 80)}>{t('Load more...')}</button></td></tr>}
+      {!isPrinting && open && p.lines.length > limit && <tr className="no-export"><td colSpan={showJournalAccount ? 11 : 9}><button type="button" className="btn sm" onClick={() => setLimit((n) => n + 80)}>{t('Load more...')}</button></td></tr>}
     </>
   );
 }
@@ -141,13 +212,13 @@ export function PartnerLedger(props) {
       return <PartnerLedger {...innerProps} accountType={innerProps.accountType ?? kind} />;
     };
   }
-  const { db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, showJournalAccount = false, accountType, money: moneyProp } = props;
+  const { db, period, companyId, analyticAccountIds, partnerIds, unreconciledOnly, showJournalAccount = false, isPrinting = false, accountType, money: moneyProp } = props;
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
   const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds, partnerIds, unreconciledOnly }, accountType);
   return (
     <tbody>
-      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} period={period} companyId={company_id} kind={accountType} unreconciledOnly={unreconciledOnly} showJournalAccount={showJournalAccount} money={fmtMoney} />)}
+      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} period={period} companyId={company_id} analyticAccountIds={analyticAccountIds} kind={accountType} unreconciledOnly={unreconciledOnly} showJournalAccount={showJournalAccount} isPrinting={isPrinting} money={fmtMoney} />)}
       <tr className="rep-total strong"><td>{t('Total')}</td>{showJournalAccount && <><td /><td /></>}<td /><td /><td />{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{fmtMoney(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
