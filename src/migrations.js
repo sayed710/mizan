@@ -2641,6 +2641,19 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 })) } }) });
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
+export const migrateJournalDashboardDisplay = (db) => ({
+  ...db,
+  records: {
+    ...db.records,
+    'account.journal': (db.records['account.journal'] ?? []).map((journal) => ({
+      ...journal,
+      color: journal.color ?? 0,
+      show_on_dashboard: journal.show_on_dashboard ?? true,
+    })),
+  },
+});
+
+MIGRATIONS.push({ version: 85, name: 'journal-dashboard-display', up: migrateJournalDashboardDisplay });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

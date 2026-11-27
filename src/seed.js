@@ -6,14 +6,14 @@ import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, postEntry } from './models/ledger.js';
-import { defaultCashFlowActivity } from './models/reports.js';
+import { STOCK_CHART_ROLES, accountId, postEntry } from './models/ledger.js';
+import { installChartTemplate } from './models/chart-template.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { ensurePartnerIndustries } from './models/crm.js';
-import { migrateCountries, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
-import { countryIdFor, ensureCountries } from './models/country.js';
-import { ensureOnlinePaymentMethods, ensurePaymentMethods } from './models/paymentmethod.js';
+import { migrateCountries, migrateJournalDashboardDisplay, migratePartnerRanks, migratePartnerTags, migratePosMethods, SCHEMA_VERSION } from './migrations.js';
+import { ensureCountries } from './models/country.js';
+import { ensureOnlinePaymentMethods } from './models/paymentmethod.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
@@ -111,89 +111,9 @@ export function seed() {
   const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }));
   const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '131000')) }));
 
-  const cashFlowTags = {
-    operating: add('account.account.tag', { name: 'Operating Activities', cash_flow_activity: 'operating' }),
-    investing: add('account.account.tag', { name: 'Investing Activities', cash_flow_activity: 'investing' }),
-    financing: add('account.account.tag', { name: 'Financing Activities', cash_flow_activity: 'financing' }),
-  };
-  // The demo chart tags loans payable as financing explicitly; every other account follows its type.
-  const chartActivity = { '260000': 'financing' };
-  const installedAccountIds = {};
-  const installedByCode = {};
-  CHART.forEach(([code, name, account_type, key]) => {
-    const id = add('account.account', {
-      code, name, account_type,
-      ...(account_type === 'asset_fixed' ? { create_asset: 'draft' } : {}),
-      reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
-      tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
-    });
-    installedByCode[code] = id;
-    if (key) installedAccountIds[key] = id;
-  });
-  db = ensurePaymentMethods(db);
-  const companyJournals = {};
-  let demoBankJournal = null;
-  JOURNALS.forEach((journal, idx) => {
-    const id = add('account.journal', {
-      code: journal.code, name: journal.name, type: journal.type,
-      sequence: (idx + 1) * 10, active: true,
-      default_account_id: journal.account ? installedByCode[journal.account] : null,
-      ...(isLiquidityJournal(journal) ? { company_id: 1 } : {}),
-      ...(['bank', 'cash', 'credit'].includes(journal.type) ? { suspense_account_id: installedByCode['101404'] } : {}),
-      ...(journal.type === 'cash' ? { profit_account_id: installedByCode['450000'], loss_account_id: installedByCode['690000'] } : {}),
-      default_for_payments: journal.default_for_payments === true,
-      ...(journal.refund_sequence != null ? { refund_sequence: journal.refund_sequence } : {}),
-      ...(journal.payment_sequence != null ? { payment_sequence: journal.payment_sequence } : {}),
-      ...(journal.bank_statements_source ? { bank_statements_source: journal.bank_statements_source } : {}),
-      ...(journal.sepa_pain_version ? { sepa_pain_version: journal.sepa_pain_version } : {}),
-      ...(journal.invoice_reference_type ? { invoice_reference_type: journal.invoice_reference_type } : {}),
-      ...(journal.invoice_reference_model ? { invoice_reference_model: journal.invoice_reference_model } : {}),
-      ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
-      ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
-      ...(journal.refund_sequence_prefix ? { refund_sequence_prefix: journal.refund_sequence_prefix } : {}),
-      ...(journal.refund_sequence_next_number != null ? { refund_sequence_next_number: journal.refund_sequence_next_number } : {}),
-    });
-    if (journal.company_default) companyJournals[journal.company_default] = id;
-    if (journal.default_for_payments === true) {
-      if (demoBankJournal) throw new Error('Demo setup needs exactly one default payment journal');
-      demoBankJournal = id;
-    }
-  });
-  if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
-  const vatGroupId = add('account.tax.group', { name: 'VAT', sequence: 10, company_id: 1 });
-  const stampGroupId = add('account.tax.group', { name: 'Stamp', sequence: 20, company_id: 1 });
-  const tax = (name, type_tax_use, amount, account, vals = {}) => {
-    const accId = account ? accountId(db, account) : null;
-    return add('account.tax', {
-      name,
-      type_tax_use,
-      amount,
-      amount_type: 'percent',
-      tax_exigibility: 'on_invoice',
-      active: true,
-      tax_group_id: vatGroupId,
-      invoice_repartition_line_ids: [
-        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
-        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
-      ],
-      refund_repartition_line_ids: [
-        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
-        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
-      ],
-      ...vals,
-    });
-  };
-  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country_id: countryIdFor(db, 'EG'), account_ids: [] });
-  const exportFp = add('account.fiscal.position', {
-    name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.', account_ids: [],
-  });
-  const vatSale = tax('VAT 14%', 'sale', 14, '251000');
-  const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
-  tax('0% Exports', 'sale', 0, null, { fiscal_position_ids: [exportFp], original_tax_ids: [vatSale] });
-  tax('0% Imports', 'purchase', 0, null, { fiscal_position_ids: [exportFp], original_tax_ids: [vatPurchase] });
-  tax('VAT 14% Included', 'sale', 14, '251000', { price_include: true });
-  tax('VAT 14% (Cash Basis)', 'sale', 14, '251000', { tax_exigibility: 'on_payment', cash_basis_transition_account_id: installedByCode['251100'] });
-  tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group_id: stampGroupId });
+  const chart = installChartTemplate(db, 1, { legacy: true, includeTerms: false });
+  ({ db } = chart);
+  const { installedAccountIds, installedByCode, companyJournals, demoBankJournal, vatSale, vatPurchase } = chart;
   db = postEntry(db, {
     // Start of the year, but never after the seeded history (invoices go back 45 days).
     journal: 'MISC', date: [`${today().slice(0, 4)}-01-01`, addDays(today(), -60)].sort()[0], ref: 'Opening balance',
@@ -541,17 +461,9 @@ export function seed() {
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });
   add('helpdesk.sla', { name: 'Urgent: same day', team_id: support, priority: '3', days: 0 });
   (db.records['helpdesk.ticket'] ?? []).forEach((t) => set('helpdesk.ticket', t.id, { team_id: support }));
-  const line = (value, nb_days, value_type = 'percent', delay_type = 'days_after', extra = {}) => ({ value, value_type, nb_days, delay_type, ...extra });
-  add('account.payment.term', { name: 'Immediate Payment', sequence: 1, line_ids: [line(100, 0)] });
-  const t30 = add('account.payment.term', { name: '30 Days', sequence: 4, line_ids: [line(100, 30)] });
-  add('account.payment.term', { name: '30% Now, Balance 60 Days', sequence: 8, line_ids: [line(30, 0), line(70, 60)] });
-  add('account.payment.term', { name: '2/7 Net 30', sequence: 9, early_discount: true, discount_percent: 2, discount_days: 7, discount_tax_computation: 'included', line_ids: [line(100, 30)] });
-  add('account.payment.term', { name: '15 Days', sequence: 2, line_ids: [line(100, 15)] });
-  add('account.payment.term', { name: '21 Days', sequence: 3, line_ids: [line(100, 21)] });
-  add('account.payment.term', { name: '45 Days', sequence: 5, line_ids: [line(100, 45)] });
-  add('account.payment.term', { name: 'End of Following Month', sequence: 6, line_ids: [line(100, 0, 'percent', 'days_after_end_of_next_month')] });
-  add('account.payment.term', { name: '10 Days after End of Next Month', sequence: 7, line_ids: [line(100, 10, 'percent', 'days_after_end_of_next_month')] });
-  add('account.payment.term', { name: '90 days, on the 10th', sequence: 10, line_ids: [line(100, 90, 'percent', 'days_end_of_month_on_the', { days_next_month: 10 })] });
+  const terms = installChartTemplate(db, 1, { legacy: true, includeChart: false });
+  ({ db } = terms);
+  const { t30 } = terms;
   set('res.partner', 3, { property_payment_term_id: t30 });
 
   // Standard Odoo partner industries (odoo/addons/base/data/res_partner_data.xml)
@@ -604,5 +516,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(ensureOnlinePaymentMethods(opened)))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...migrateCountries(ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready)))))))), schema_version: SCHEMA_VERSION };
+  return { ...migrateJournalDashboardDisplay(migrateCountries(ensureCalendars(migratePartnerTags(migratePartnerRanks(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))))))), schema_version: SCHEMA_VERSION };
 }

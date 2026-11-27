@@ -226,10 +226,10 @@ test('manually & grouped deferred generation posts grouped entries, next-day rev
   // Company isolation: create Company 2 with its own accounts and deferred invoice
   const { db: withCo2, id: co2 } = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch Co2', deferred_revenue_account_id: accountId(db, '212000') });
   db = withCo2;
-  const co2Inc = create(db, 'account.account', { code: '410000', name: 'Income Co2', account_type: 'income', company_id: co2 });
-  const co2Def = create(co2Inc.db, 'account.account', { code: '212000', name: 'Def Rev Co2', account_type: 'liability_current', company_id: co2 });
-  const co2InvJnl = create(co2Def.db, 'account.journal', { code: 'INV', name: 'Invoices Co2', type: 'sale', company_id: co2, default_account_id: co2Inc.id, invoice_sequence_prefix: 'DEFG-CO2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'DEFG-CO2-RINV/', refund_sequence_next_number: 1 });
-  const co2MiscJnl = create(co2InvJnl.db, 'account.journal', { code: 'MISC', name: 'Misc Co2', type: 'general', company_id: co2 });
+  const co2Inc = { db, id: accountId(db, '410000', co2) };
+  const co2Def = { db: co2Inc.db, id: accountId(co2Inc.db, '212000', co2) };
+  const co2InvJnl = { db: co2Def.db, id: journalId(co2Def.db, 'INV', co2) };
+  const co2MiscJnl = { db: co2InvJnl.db, id: journalId(co2InvJnl.db, 'MISC', co2) };
   db = write(co2MiscJnl.db, 'res.company', co2, {
     default_sale_journal_id: co2InvJnl.id,
     deferred_generation_method: 'manual_grouped',

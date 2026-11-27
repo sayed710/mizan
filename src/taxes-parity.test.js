@@ -259,7 +259,7 @@ test('taxes search fields, filter groups, and group-by options match Odoo 20', a
   assert.deepEqual(applyFilters('account.tax', allTaxes, ['sale', 'goods'], db), []);
 
   // Multi-company unlocks Company search and Group by Company in SearchPanel
-  const branch = createCompany(db, { name: 'Delta Branch' });
+  const branch = create(db, 'res.company', { name: 'Delta Branch', currency_id: read(db, 'res.company', 1).currency_id });
   db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
   const branchTax = create(db, 'account.tax', { name: 'Branch VAT', type_tax_use: 'sale', amount: 15, company_id: branch.id });
   db = branchTax.db;
@@ -331,7 +331,7 @@ test('fiscal positions opens in list view with Odoo 20 columns, search, Archived
   const fpArchived = create(db, 'account.fiscal.position', { name: 'Old Regime', country_id: egypt.id, active: false });
   db = fpArchived.db;
 
-  const branch = createCompany(db, { name: 'UAE Branch', country: 'United Arab Emirates' });
+  const branch = create(db, 'res.company', { name: 'UAE Branch', country: 'United Arab Emirates', currency_id: read(db, 'res.company', 1).currency_id });
   db = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
   const fpBranchDomestic = create(db, 'account.fiscal.position', { name: 'UAE Domestic', country_id: uae.id, company_id: branch.id });
   db = fpBranchDomestic.db;

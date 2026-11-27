@@ -64,7 +64,12 @@ test('a new company keeps its configured counterpart account identities and paym
   const accounts = search(branch.db, 'account.account').filter((account) => account.company_id === branch.id);
   assert.equal(created.account_default_receivable_id, accounts.find((account) => account.account_type === 'asset_receivable').id);
   assert.equal(created.account_default_payable_id, accounts.find((account) => account.account_type === 'liability_payable').id);
-  assert.throws(() => paymentJournal(branch.db, null, branch.id), /Select a payment journal or configure one default bank or cash journal/);
+  assert.notEqual(paymentJournal(branch.db, null, branch.id).id, paymentJournal(branch.db, null, 1).id);
+  let noDefaultDb = branch.db;
+  for (const j of search(noDefaultDb, 'account.journal').filter((r) => r.company_id === branch.id && r.default_for_payments)) {
+    noDefaultDb = write(noDefaultDb, 'account.journal', j.id, { default_for_payments: false });
+  }
+  assert.throws(() => paymentJournal(noDefaultDb, null, branch.id), /Select a payment journal or configure one default bank or cash journal/);
 });
 
 test('POS posts the configured company receivable account', () => {

@@ -783,12 +783,13 @@ test('automatically valued goods sold in a second company scope stock valuation 
   }
   const journals = {};
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
+    const existing = search(db, 'account.journal').find((j) => j.code === code && j.company_id === company.id);
+    if (existing) { journals[code] = existing.id; continue; }
     const created = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: accounts[acc], ...(type === 'cash' ? { suspense_account_id: accounts[acc] } : {}) });
     db = created.db;
     journals[code] = created.id;
   }
   db = write(db, 'res.company', company.id, { account_default_receivable_id: accounts['121000'] });
-  db = write(db, 'account.journal', journals.CSH1, { default_for_payments: true });
   const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id, journal_id: journals.POSS }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'C2 Cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
 
@@ -813,11 +814,13 @@ test('shared product POS valuation opens and consumes only the session company s
   let db = seed();
   const company = createCompany(db, { name: 'Independent stock company' }); db = company.db;
   for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['301000', 'equity']]) {
-    db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
+    if (!accountId(db, code, company.id)) db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
   const c2account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === company.id);
   let c2PosJournalId;
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
+    const existing = (db.records['account.journal'] ?? []).find((j) => j.code === code && j.company_id === company.id);
+    if (existing) { if (code === 'POSS') c2PosJournalId = existing.id; continue; }
     const journal = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: c2account(acc).id, ...(type === 'cash' ? { suspense_account_id: c2account(acc).id } : {}) });
     db = journal.db;
     if (code === 'POSS') c2PosJournalId = journal.id;
@@ -904,7 +907,7 @@ test('migration 11 repairs schema 10 databases by resolving tenders within order
     seq: { ...base.seq, 'pos.payment.method': 102, 'pos.config': 2, 'pos.order': 1 },
   };
   const repaired = migrate(schema10Db);
-  assert.equal(repaired.schema_version, 84);
+  assert.equal(repaired.schema_version, 85);
   const order = read(repaired, 'pos.order', 1);
   assert.equal(order.payment_method_id, 102, 'Order tender repaired to match the configuration payment method');
   assert.equal(order.payment_ids[0].payment_method_id, 102);

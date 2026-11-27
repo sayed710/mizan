@@ -80,7 +80,7 @@ function JournalCard({ card, companyId }) {
   // A journal whose card cannot be computed keeps its title and shows why, so the rest of the dashboard still renders.
   if (card.kind === 'error') {
     return (
-      <section className="panel journal-card journal-card-error">
+      <section className={`panel journal-card journal-card-error${card.journal.color ? ` journal-color-${card.journal.color}` : ''}`}>
         <h2>{card.journal.name}</h2>
         <p className="journal-error" role="alert">{t(card.error)}</p>
       </section>
@@ -97,7 +97,7 @@ function JournalCard({ card, companyId }) {
       ['Late', card.late, card.lateAmount, `${list}&filter=overdue`],
     ];
     return (
-      <section className="panel journal-card">
+      <section className={`panel journal-card${card.journal.color ? ` journal-color-${card.journal.color}` : ''}`}>
         <h2><a href={list}>{card.journal.name}</a></h2>
         {empty ? (
           <p className="journal-empty muted">{t(sale ? 'Get paid online and send your invoices.' : 'Record your vendor bills and pay them easily.')}</p>
@@ -141,7 +141,7 @@ function JournalCard({ card, companyId }) {
     const empty = !card.hasPosted && !card.toReconcile;
     const isStatement = isStatementJournal(card.kind);
     return (
-      <section className="panel journal-card">
+      <section className={`panel journal-card${card.journal.color ? ` journal-color-${card.journal.color}` : ''}`}>
         <h2><a href={list}>{card.journal.name}</a></h2>
         {empty ? (
           isOnlineFeedJournal(card.kind) && card.onlineSync ? (
@@ -206,7 +206,7 @@ function JournalCard({ card, companyId }) {
     );
   }
   return (
-    <section className="panel journal-card">
+    <section className={`panel journal-card${card.journal.color ? ` journal-color-${card.journal.color}` : ''}`}>
       <h2><a href={list}>{card.journal.name}</a></h2>
       <dl>
         <div><dt>{t('Posted Entries')}</dt><dd>{card.entries}</dd></div>

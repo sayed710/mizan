@@ -234,7 +234,14 @@ test('tax return locks and resets are isolated by company through synced actions
 test('invoice confirmation only uses journals and accounts available to its company', () => {
   let db = seed();
   const company = createCompany(db, { name: 'Company without journals' });
-  db = company.db;
+  db = {
+    ...company.db,
+    records: {
+      ...company.db.records,
+      'account.journal': company.db.records['account.journal'].filter((r) => !(r.company_id === company.id && ['INV', 'BILL'].includes(r.code))),
+    },
+  };
+  db = write(db, 'res.company', company.id, { default_sale_journal_id: null, default_purchase_journal_id: null });
   for (const code of ['INV', 'BILL']) {
     const journal = search(db, 'account.journal').find((record) => record.code === code);
     db = write(db, 'account.journal', journal.id, { company_id: 1 });
@@ -329,16 +336,12 @@ test('tax return actions post closing and payment to the company chart when acco
   let db = seed();
   const company = createCompany(db, { name: 'Separate chart company' });
   db = company.db;
-  const accounts = {};
-  for (const code of ['251000', '131000', '101401']) {
-    const account_type = code === '101401' ? 'asset_cash' : code === '251000' ? 'liability_current' : 'asset_current';
-    const created = create(db, 'account.account', { code, name: `Company chart ${code}`, account_type, company_id: company.id });
-    db = created.db;
-    accounts[code] = created.id;
-  }
-  const bankJournal = create(db, 'account.journal', {
-    name: 'Company tax bank', code: 'COMPANY-BANK', type: 'bank', company_id: company.id, default_account_id: accounts['101401'], suspense_account_id: accounts['101401'], default_for_payments: true,
-  });
+  const accounts = {
+    '251000': accountId(db, '251000', company.id),
+    '131000': accountId(db, '131000', company.id),
+    '101401': accountId(db, '101401', company.id),
+  };
+  const bankJournal = { db, id: journalId(db, 'BNK1', company.id) };
   db = bankJournal.db;
   const type = search(db, 'account.return.type').find((t) => t.company_id === company.id);
   db = create(db, 'res.partner.bank', { partner_id: 1, account_number: 'COMPANY TAX BANK' }).db;
@@ -1203,7 +1206,7 @@ test('migration v15: sequence advance, preserved formatting, and uniqueness of a
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 84);
+  assert.equal(migrated.schema_version, 85);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');

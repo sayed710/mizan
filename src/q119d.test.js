@@ -174,7 +174,11 @@ test('1a: createInvoiceCheckout resolves payment journal with same helper and re
 
   // Company 2 with no default payment journal and provider with journal_id=null cannot settle.
   const co2 = createCompany(db, { name: 'Company 2', currency: 'USD', coa: 'us' });
-  const co2Sale = makeSaleJournal(co2.db, co2.id);
+  let co2Db = co2.db;
+  for (const j of search(co2Db, 'account.journal').filter((r) => r.company_id === co2.id && r.default_for_payments)) {
+    co2Db = write(co2Db, 'account.journal', j.id, { default_for_payments: false });
+  }
+  const co2Sale = makeSaleJournal(co2Db, co2.id);
   db = co2Sale.db;
   const pCo2 = create(db, 'res.partner', { name: 'Co2 Customer', company_id: co2.id, customer_rank: 1 });
   db = pCo2.db;
@@ -220,7 +224,11 @@ test('1a: createInvoiceCheckout resolves payment journal with same helper and re
 test('1b: portal hides providers that cannot settle and rejects direct POST for an unsettleable provider without creating a transaction', async (tCtx) => {
   let db = seed();
   const co2 = createCompany(db, { name: 'Company 2', currency: 'USD', coa: 'us' });
-  const co2Sale = makeSaleJournal(co2.db, co2.id);
+  let co2Db = co2.db;
+  for (const j of search(co2Db, 'account.journal').filter((r) => r.company_id === co2.id && r.default_for_payments)) {
+    co2Db = write(co2Db, 'account.journal', j.id, { default_for_payments: false });
+  }
+  const co2Sale = makeSaleJournal(co2Db, co2.id);
   db = co2Sale.db;
   const pCo2 = create(db, 'res.partner', { name: 'Portal Co2 Customer', company_id: co2.id, customer_rank: 1 });
   db = pCo2.db;

@@ -179,7 +179,8 @@ function journalSequenceGuard(db, before, after) {
   }
   if (new Set(prefixes).size !== prefixes.length) return 'Invoice and refund sequence prefixes must be different';
   const configured = new Set(prefixes);
-  const duplicates = (db.records['account.journal'] ?? []).some((journal) => journal.id !== before?.id
+  const duplicates = (db.records['account.journal'] ?? []).some((journal) => journal.id !== after.id
+    && (!journal.company_id || !after.company_id || journal.company_id === after.company_id)
     && [journal.invoice_sequence_prefix, ...(journal.refund_sequence ? [journal.refund_sequence_prefix] : [])].some((prefix) => configured.has(prefix)));
   return duplicates ? 'Each journal sequence prefix must be unique' : null;
 }
@@ -3978,6 +3979,8 @@ export const accountingModels = {
         options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['cash', 'Cash'], ['bank', 'Bank'], ['credit', 'Credit Card'], ['general', 'Miscellaneous']],
         help: 'Select "Sales" for customer invoices journals; "Purchase" for vendor bills journals; "Cash", "Bank" or "Credit Card" for customer or vendor payments; "Miscellaneous" for everything else.',
       },
+      color: { type: 'integer', label: 'Color' },
+      show_on_dashboard: { type: 'boolean', label: 'Show on Dashboard' },
       active: { type: 'boolean', label: 'Active', optional: 'hide' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, optional: 'hide' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', optional: 'hide', domain: (currency) => currency.active !== false },
@@ -4131,7 +4134,7 @@ export const accountingModels = {
       } },
     },
     defaults: () => ({
-      type: 'general', active: true, sequence: 10,
+      type: 'general', active: true, sequence: 10, color: 0, show_on_dashboard: true,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
       check_manual_sequencing: false, check_printing_layout: 'top',
     }),

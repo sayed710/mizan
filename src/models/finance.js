@@ -2148,7 +2148,7 @@ export function journalCards(db, at = today()) {
     return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };
   };
   // One misconfigured journal must not hide the others: its card carries the configuration error to show.
-  return journals.map((j) => {
+  return journals.filter((j) => j.show_on_dashboard !== false).map((j) => {
     try {
       return cardOf(j);
     } catch (error) {

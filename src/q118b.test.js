@@ -93,7 +93,7 @@ test('Finding 2: ConfigurableReportPage limits ledgers and journals to selected 
   db = co2.db;
   db = updateSettings(db, { current_company_id: 1, allowed_company_ids: [1, co2.id] });
 
-  const cash2 = create(db, 'account.account', { code: '101402', name: 'Co2 Cash', account_type: 'asset_cash', company_id: co2.id });
+  const cash2 = create(db, 'account.account', { code: '101492', name: 'Co2 Cash', account_type: 'asset_cash', company_id: co2.id });
   db = cash2.db;
   const inc2 = create(db, 'account.account', { code: '400002', name: 'Co2 Income', account_type: 'income', company_id: co2.id });
   db = inc2.db;

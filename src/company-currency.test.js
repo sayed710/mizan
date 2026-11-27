@@ -47,7 +47,7 @@ test('a USD invoice in a EUR company is converted at the cross rate and keeps it
   // Paid today at 0.90 EUR per USD: 90 EUR reach the bank, 2 EUR are an exchange loss.
   const paid = payMove(db, id, 100, today());
   const entry = read(paid, 'account.move', read(paid, 'account.move', id).payments[0].move_id);
-  assert.equal(entry.line_ids.find((l) => l.account_id === accountId(paid, '101401')).debit, 90);
+  assert.equal(entry.line_ids.find((l) => l.account_id === accountId(paid, '101401', company)).debit, 90);
   assert.equal(entry.line_ids.find((l) => l.account_id === accountId(paid, '690100')).debit, 2);
 });
 

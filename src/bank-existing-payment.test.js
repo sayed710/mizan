@@ -39,8 +39,8 @@ test('match a registered invoice payment through outstanding receipts without an
 test('outgoing payment uses company and journal outstanding defaults and unmatches in its own company', () => {
   const base = seed();
   const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
-  const bank = create(branch.db, 'account.account', { company_id: branch.id, code: '101401', name: 'Branch Bank', account_type: 'asset_cash' });
-  const outstandingAccount = create(bank.db, 'account.account', { company_id: branch.id, code: '101403', name: 'Branch Outstanding', account_type: 'asset_current' });
+  const bank = { db: branch.db, id: search(branch.db, 'account.account').find((a) => a.company_id === branch.id && a.code === '101401').id };
+  const outstandingAccount = { db: bank.db, id: search(bank.db, 'account.account').find((a) => a.company_id === branch.id && a.code === '101403').id };
   const suspense = create(outstandingAccount.db, 'account.account', { company_id: branch.id, code: '101499', name: 'Branch Suspense', account_type: 'asset_current' });
   const journal = create(suspense.db, 'account.journal', { company_id: branch.id, name: 'Branch Bank', code: 'BRB', type: 'bank', default_account_id: bank.id, suspense_account_id: suspense.id, outstanding_payments_account_id: outstandingAccount.id });
   const inv = create(journal.db, 'account.move', { company_id: branch.id, move_type: 'in_invoice', partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });

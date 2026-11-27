@@ -120,7 +120,7 @@ test('Qodo 23: transfers track untracked edits for either audited company and at
     (db, id, values) => writeManyAtomic(db, 'account.move', new Map([[id, values]])),
   ];
   for (const update of methods) for (const [from, to] of [[branch.id, 1], [1, branch.id]]) {
-    const entry = create(branch.db, 'account.move', { move_type: 'entry', company_id: from, ref: 'before' });
+    const entry = create(branch.db, 'account.move', { move_type: 'entry', company_id: from, journal_id: null, ref: 'before' });
     const local = update(entry.db, entry.id, { company_id: to, ref: 'after' });
     const messages = local.messages.slice(entry.db.messages.length).filter((m) => m.model === 'account.move' && m.res_id === entry.id);
     const note = messages.find((m) => m.body.includes('Reference: before → after'));

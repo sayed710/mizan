@@ -690,3 +690,15 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .empty-state { padding: 16px; margin: 0; }
 .bank-reconcile-quick-actions { display: flex; flex-flow: row wrap; gap: 8px; margin-block: 10px; }
 .list-avatar-cell { display: inline-flex; align-items: center; gap: 8px; }
+
+.journal-card.journal-color-1 { border-inline-start: 4px solid #f06050; }
+.journal-card.journal-color-2 { border-inline-start: 4px solid #f4a460; }
+.journal-card.journal-color-3 { border-inline-start: 4px solid #f7cd1f; }
+.journal-card.journal-color-4 { border-inline-start: 4px solid #6cc1ed; }
+.journal-card.journal-color-5 { border-inline-start: 4px solid #814968; }
+.journal-card.journal-color-6 { border-inline-start: 4px solid #eb7e7f; }
+.journal-card.journal-color-7 { border-inline-start: 4px solid #2c8397; }
+.journal-card.journal-color-8 { border-inline-start: 4px solid #475577; }
+.journal-card.journal-color-9 { border-inline-start: 4px solid #d6145f; }
+.journal-card.journal-color-10 { border-inline-start: 4px solid #30c381; }
+.journal-card.journal-color-11 { border-inline-start: 4px solid #9365b8; }

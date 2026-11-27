@@ -87,6 +87,9 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Show on Dashboard': 'إظهار في لوحة المعلومات',
+  'Demo setup needs exactly one default payment journal': 'يتطلب الإعداد التجريبي دفتر يومية دفع افتراضياً واحداً بالضبط',
+  'Demo setup needs a default payment journal': 'يتطلب الإعداد التجريبي دفتر يومية دفع افتراضياً',
   'Percentage of': 'النسبة من',
   'Comparison in': 'المقارنة بوحدة',
   'Rounding Unit': 'وحدة التقريب',
