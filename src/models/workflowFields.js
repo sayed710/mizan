@@ -17,6 +17,7 @@ const FIELDS = {
     closing_fiscal_year_id: m2o('account.fiscal.year', 'Fiscal Year'),
     force_post: hidden('boolean', 'Post Despite Quantity Mismatch'), // billcontrol.js
     revaluation_date: hidden('date', 'Revaluation Date'), // closing.js: one revaluation per date
+    revaluation_options: hidden('json', 'Revaluation Options'),
     reversal_move_id: m2o('account.move', 'Reversal Entry'),
     repair_id: m2o('repair.order', 'Repair Order'),
     system_generated: hidden('boolean', 'System Generated'),

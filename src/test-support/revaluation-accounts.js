@@ -7,5 +7,5 @@ export function configureRevaluationLoss(db) {
     db = made.db;
     account = { id: made.id };
   }
-  return write(db, 'res.company', 1, { expense_currency_exchange_account_id: account.id });
+  return write(db, 'res.company', 1, { expense_currency_exchange_account_id: account.id, account_revaluation_expense_provision_account_id: null });
 }

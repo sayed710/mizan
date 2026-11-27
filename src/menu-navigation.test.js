@@ -178,9 +178,12 @@ test('Unrealized Currencies report date and revaluation button operate through t
     assert.ok(input);
     await React.act(async () => props(input).onChange({ target: { value: '2026-02-28' } }));
     assert.ok(container.textContent.includes('MENUFX'));
-    const button = find(container, (n) => n.tagName === 'BUTTON' && n.textContent === 'Revalue Foreign Currency');
+    const button = find(container, (n) => n.tagName === 'BUTTON' && n.textContent === 'Adjustment Entry');
     assert.ok(button);
     await React.act(async () => props(button).onClick());
+    const post = find(container, (n) => n.tagName === 'BUTTON' && n.textContent === 'Post');
+    assert.ok(post);
+    await React.act(async () => { await props(post).onClick(); });
     assert.ok(search(getDb(), 'account.move').some((m) => m.revaluation_date === '2026-02-28'));
   } finally {
     await React.act(async () => root.unmount());
@@ -578,7 +581,7 @@ test('Accounting menu follows the Odoo top-level, Closing and Review group order
   assert.equal(review.children.find((menu) => menu.label === 'Control').children[0].label, 'Journal Items');
   assert.ok(allLabels(menus).includes('Customer Statement'));
   assert.ok(allLabels(menus).includes('Unrealized Currencies'));
-  const regularization = review.children.find((menu) => menu.label === 'Regularization Entries').children;
+  const regularization = menus.find((menu) => menu.label === 'Configuration').children;
   assert.equal(regularization.find((menu) => menu.key === 'deferred-revenues').domain({ kind: 'revenue' }), true);
   assert.equal(regularization.find((menu) => menu.key === 'deferred-revenues').domain({ kind: 'expense' }), false);
   assert.equal(regularization.find((menu) => menu.key === 'deferred-expenses').domain({ kind: 'expense' }), true);

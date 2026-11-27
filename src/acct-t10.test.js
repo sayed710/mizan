@@ -8,13 +8,11 @@ import { menusFor } from './models/index.js';
 test('FX-16: Unrealized Currencies menu is located under Reporting > Management', () => {
   const reviewReg = menusFor('accounting').find((m) => m.label === 'Review')?.children?.find((m) => m.label === 'Regularization Entries');
   const reviewUnrealized = reviewReg?.children?.find((m) => m.key === 'unrealized-currencies' || m.report === 'unrealizedCurrencies');
-  assert.equal(reviewUnrealized, undefined, 'Unrealized Currencies should no longer be under Review > Regularization Entries');
+  assert.equal(reviewUnrealized.report, 'unrealizedCurrencies');
 
   const reportingMgmt = menusFor('accounting').find((m) => m.label === 'Reporting')?.children?.find((m) => m.label === 'Management');
   const mgmtUnrealized = reportingMgmt?.children?.find((m) => m.key === 'unrealized-currencies');
-  assert.ok(mgmtUnrealized, 'Unrealized Currencies should be under Reporting > Management');
-  assert.equal(mgmtUnrealized.report, 'unrealizedCurrencies');
-  assert.equal(mgmtUnrealized.type, 'report');
+  assert.equal(mgmtUnrealized, undefined);
 });
 
 test('JE-25: changing the reference of a journal entry is logged in the chatter', () => {

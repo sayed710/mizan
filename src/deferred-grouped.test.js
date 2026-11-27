@@ -57,8 +57,7 @@ test('manually & grouped deferred generation posts grouped entries, next-day rev
 
   // Verify menu action exists on Deferred Revenues and Deferred Expenses
   const menus = menusFor('accounting');
-  const review = menus.find((m) => m.label === 'Review');
-  const regEntries = review.children.find((m) => m.label === 'Regularization Entries');
+  const regEntries = menus.find((m) => m.label === 'Configuration');
   const revMenu = regEntries.children.find((m) => m.key === 'deferred-revenues');
   const expMenu = regEntries.children.find((m) => m.key === 'deferred-expenses');
   assert.ok(revMenu, 'Deferred Revenues menu exists');
@@ -284,8 +283,7 @@ test('public model and menu paths invoke grouped deferral generation consistentl
   db = button('account.move', 'Confirm', invoice.db, invoice.id);
 
   const menus = menusFor('accounting');
-  const review = menus.find((m) => m.label === 'Review');
-  const regEntries = review.children.find((m) => m.label === 'Regularization Entries');
+  const regEntries = menus.find((m) => m.label === 'Configuration');
   const revMenu = regEntries.children.find((m) => m.key === 'deferred-revenues');
   assert.equal(revMenu.model, 'account.deferral');
   assert.equal(revMenu.actions, undefined);

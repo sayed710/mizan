@@ -381,9 +381,9 @@ const allApps = [
           { key: 'inventory-valuation', label: 'Inventory Valuation', type: 'report', report: 'valuation' },
         ] },
                 { label: 'Regularization Entries', children: [
-          { key: 'deferred-revenues', label: 'Deferred Revenues', model: 'account.deferral', domain: (r) => r.kind === 'revenue', defaults: { kind: 'revenue' } },
-          { key: 'deferred-expenses', label: 'Deferred Expenses', model: 'account.deferral', domain: (r) => r.kind === 'expense', defaults: { kind: 'expense' } },
-          { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
+          { key: 'unrealized-currencies', label: 'Unrealized Currencies', type: 'report', report: 'unrealizedCurrencies' },
+          { key: 'deferred-revenue-report', label: 'Deferred Revenues', type: 'report', report: 'deferredRevenue' },
+          { key: 'deferred-expense-report', label: 'Deferred Expenses', type: 'report', report: 'deferredExpense' },
         ] },
                 { label: 'Sales', children: [
           { key: 'invoices-to-be-issued', label: 'Invoices To Be Issued', type: 'report', report: 'invoicesToBeIssued' },
@@ -413,10 +413,7 @@ const allApps = [
           { key: 'fiscal-report', label: 'Fiscal Report', type: 'report', report: 'fiscal' },
         ] },
                 { label: 'Management', children: [
-          { key: 'deferred-revenue-report', label: 'Deferred Revenue', type: 'report', report: 'deferredRevenue' },
-          { key: 'deferred-expense-report', label: 'Deferred Expense', type: 'report', report: 'deferredExpense' },
           { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.invoice.report', view: 'pivot' },
-          { key: 'unrealized-currencies', label: 'Unrealized Currencies', type: 'report', report: 'unrealizedCurrencies' },
           { key: 'loans-analysis', label: 'Loans Analysis', type: 'report', report: 'loansAnalysis' },
           { key: 'cashflow-analysis', label: 'Cashflow Analysis', type: 'report', report: 'cashflowAnalysis' },
           { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
@@ -425,6 +422,9 @@ const allApps = [
         ] },
       ] },
       { label: 'Configuration', children: [
+        { key: 'deferred-revenues', label: 'Deferred Revenues', model: 'account.deferral', domain: (r) => r.kind === 'revenue', defaults: { kind: 'revenue' }, hidden: true },
+        { key: 'deferred-expenses', label: 'Deferred Expenses', model: 'account.deferral', domain: (r) => r.kind === 'expense', defaults: { kind: 'expense' }, hidden: true },
+        { key: 'deferrals', label: 'Deferrals', model: 'account.deferral', hidden: true },
         { key: 'settings', label: 'Settings', type: 'settings' },
                 { label: 'Invoicing', children: [
           { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },

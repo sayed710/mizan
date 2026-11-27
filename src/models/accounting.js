@@ -481,7 +481,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'id', 'name', 'ref', 'payment_reference', 'state', 'line_ids', 'payments', 'amount_paid', 'payment_date',
   'fx_payment_move_id', 'fx_invoice_id', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'debit_origin_id',
   'inalterable_hash', 'inalterable_hash_version', 'secure_sequence_number', 'auto_post_origin_id',
-  'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
+  'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date', 'revaluation_options',
   'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
   'to_check', // a review flag belongs to the reviewed entry only
@@ -3911,6 +3911,7 @@ export const accountingModels = {
         for (const [field, label] of [
           ['tax_cash_basis_journal_id', 'Cash Basis Journal'],
           ['currency_exchange_journal_id', 'Exchange Difference Journal'],
+          ['account_revaluation_journal_id', 'Revaluation Journal'],
         ]) {
           const blockedOwner = companies.find((c) => c[field] === before.id && (after.active === false || after.type !== 'general' || (after.company_id && after.company_id !== c.id)));
           if (blockedOwner) {

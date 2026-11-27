@@ -164,8 +164,7 @@ test('Finding 13: each kind-filtered deferral menu generates only its own kind',
   db = expSchedule.db;
 
   const menus = menusFor('accounting');
-  const review = menus.find((m) => m.label === 'Review');
-  const regEntries = review.children.find((m) => m.label === 'Regularization Entries');
+  const regEntries = menus.find((m) => m.label === 'Configuration');
   const revMenu = regEntries.children.find((m) => m.key === 'deferred-revenues');
   const expMenu = regEntries.children.find((m) => m.key === 'deferred-expenses');
 

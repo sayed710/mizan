@@ -31,7 +31,7 @@ test('Qodo 2: migration 34 sets default_general_journal_id for legacy companies 
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 84);
+  assert.equal(migrated.schema_version, 85);
   const updatedCompany = read(migrated, 'res.company', company.id);
   assert.equal(updatedCompany.default_general_journal_id, journal.id);
   // A company with one general journal gets no upgrade note
@@ -72,7 +72,7 @@ test('Qodo 2: migration 34 leaves companies with zero or several general journal
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 84);
+  assert.equal(migrated.schema_version, 85);
 
   // Both should remain unset
   assert.equal(read(migrated, 'res.company', compA.id).default_general_journal_id ?? null, null);
@@ -105,7 +105,7 @@ test('Qodo 2: revalueForeignBalances runtime error informs user to set default g
     invoice_line_ids: [{ name: 'Receivable line', qty: 1, price_unit: 100, tax: 0 }],
   });
   const posted = postMove(invoice.db, invoice.id);
-  const unconfigured = write(posted, 'res.company', 1, { default_general_journal_id: null });
+  const unconfigured = write(posted, 'res.company', 1, { default_general_journal_id: null, account_revaluation_journal_id: null });
 
   // Company has foreign exposure needing adjustment, but no default general journal
   assert.throws(
