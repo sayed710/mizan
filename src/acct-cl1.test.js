@@ -262,10 +262,12 @@ test('FX-6: General Ledger report excludes is_closing lines in the period', asyn
     const sectionRows = findAll(host, (n) => n.tagName === 'TR' && n.className?.includes('rep-section'));
     const revSection = sectionRows.find((tr) => tr.textContent.includes('400000'));
     assert.ok(revSection, 'Revenue account row exists in General Ledger');
+    const headers = findAll(host, (n) => n.tagName === 'TH').map((th) => th.textContent);
     const cells = findAll(revSection, (n) => n.tagName === 'TD').map((td) => td.textContent);
-    assert.equal(cells[1], money(0), 'GL revenue debit excludes closing entry');
-    assert.equal(cells[2], money(750), 'GL revenue credit shows actual 750');
-    assert.equal(cells[3], money(-750), 'GL revenue end balance shows -750');
+    assert.equal(cells[headers.indexOf('Initial Balance')], money(0), 'GL revenue initial balance is 0');
+    assert.equal(cells[headers.indexOf('Debit')], money(0), 'GL revenue debit excludes closing entry');
+    assert.equal(cells[headers.indexOf('Credit')], money(750), 'GL revenue credit shows actual 750');
+    assert.equal(cells[headers.indexOf('Balance')], money(-750), 'GL revenue end balance shows -750');
     assert.ok(!sectionRows.some((tr) => tr.textContent.includes('302000')), 'GL excludes year-end closing entry row on 302000');
 
     // Expanding the revenue row shows only the real entry, not the closing entry
