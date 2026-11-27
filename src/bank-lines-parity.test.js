@@ -317,7 +317,12 @@ test('bank transactions reorder only within the same date and journal, and older
   };
   assert.equal(read(migrate(legacy), 'account.bank.statement.line', 9001).currency_id, eur.id);
   const missingRate = { ...legacy, records: { ...legacy.records, 'res.currency': base.records['res.currency'] } };
-  assert.throws(() => migrate(missingRate), /line 9001.*rate/i);
+  const migratedMissingRate = migrate(missingRate);
+  const unbooked = read(migratedMissingRate, 'account.bank.statement.line', 9001);
+  assert.equal(unbooked.bank_move_id, undefined);
+  assert.equal(unbooked.amount, 5);
+  assert.equal(unbooked.currency_id, eur.id);
+  assert.ok(migratedMissingRate.messages.some((message) => message.model === 'account.bank.statement.line' && message.res_id === 9001 && /historical currency rate.*unavailable/i.test(message.body)));
 });
 
 test('a CAMT batch entry keeps only entry-level details on its single imported line', () => {

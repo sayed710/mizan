@@ -132,7 +132,8 @@ test('migration records booking failures and continues with other statement line
   assert.ok(!read(migrated, LINE_MODEL, 90004).bank_move_id);
   assert.ok(read(migrated, LINE_MODEL, 90005).bank_move_id);
   assert.ok(migrated.messages.some((message) => message.res_id === 90003));
-  assert.ok(migrated.messages.some((message) => message.res_id === 90004));
+  assert.ok(migrated.messages.some((message) => message.model === LINE_MODEL && message.res_id === 90004 && /historical currency rate.*unavailable/i.test(message.body)));
+  assert.deepEqual(read(migrated, LINE_MODEL, 90004), lines[1]);
 });
 
 test('BANK-2: importing statement lines immediately posts an entry in the bank journal (bank vs suspense) and GL bank balance equals statement', () => {
@@ -1119,6 +1120,9 @@ test('Migration: foreign-currency unconfigured statement line without a rate is 
   assert.equal(migratedWithOpen.bank_move_id, null);
   assert.equal(migratedWithOpen.company_id, company.id);
   assert.equal(migratedWithOpen.open_amount, 42);
+  for (const id of [996, 997]) {
+    assert.ok(migratedDb.messages.some((message) => message.model === LINE_MODEL && message.res_id === id && /historical currency rate.*unavailable/i.test(message.body)));
+  }
 
   const migratedWithRate = read(migratedDb, LINE_MODEL, 998);
   assert.equal(migratedWithRate.bank_move_id, null);
