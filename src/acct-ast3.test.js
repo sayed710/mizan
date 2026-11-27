@@ -363,7 +363,7 @@ test('Finding 4 & 10: source-linked asset lifecycle across reset/cancel/repost a
 
   // Resetting/deleting a move with a running asset is blocked
   assert.throws(() => write(resetDb, 'account.move', entry.id, { state: 'draft' }), /running or depreciated assets/i);
-  assert.throws(() => unlink(resetDb, 'account.move', [entry.id]), /Posted entries cannot be deleted/i);
+  assert.throws(() => unlink(resetDb, 'account.move', [entry.id]), /You cannot delete an entry which has been posted once/i);
 });
 
 test('Finding 5 UI: JournalItems blocks Create Asset on credit/already-linked items', async () => {

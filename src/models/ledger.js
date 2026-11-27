@@ -204,14 +204,24 @@ export function validStornoMove(db, move) {
   return false;
 }
 
+export const CURRENCY_AMOUNT_SIGN_ERROR = 'The amount expressed in the secondary currency must be positive when account is debited and negative when account is credited. If the currency is the same as the one from the company, this amount must strictly be equal to the balance.';
 /** Whether any line has a negative debit or credit. */
 export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);
-/** Whether any line's amount_currency sign contradicts its debit/credit balance. */
-export const badCurrencyAmountSign = (lines = []) => lines.some((l) => {
+/**
+ * Whether any line's amount_currency sign contradicts its debit/credit balance,
+ * or a company-currency line's amount_currency differs from its balance.
+ */
+export const badCurrencyAmountSign = (lines = [], companyCurrency = null) => lines.some((l) => {
+  if (l.amount_currency != null && !Number.isFinite(Number(l.amount_currency))) return true;
   const amount = Number(l.amount_currency) || 0;
-  if (!amount) return false;
   const debit = Number(l.debit) || 0;
   const credit = Number(l.credit) || 0;
+  const isCompanyCurrency = !l.currency_id || (companyCurrency?.id != null && l.currency_id === companyCurrency.id);
+  if (isCompanyCurrency && (l.currency_id != null || amount !== 0)) {
+    const balance = companyCurrency ? roundCurrency(debit - credit, companyCurrency) : (debit - credit);
+    return Math.abs(amount - balance) > 1e-9;
+  }
+  if (!amount) return false;
   return (amount > 0 && credit > debit) || (amount < 0 && debit > credit);
 });
 export const isBalanced = (lines = [], currency = null) =>
@@ -786,9 +796,13 @@ export function accountCurrencyFields(db, account, line, net, companyId, date) {
   if (account?.currency_id && !accountCurrency) throw new Error('Select an existing account currency');
   const applied = accountCurrency && accountCurrency.id !== companyCurrency.id ? accountCurrency : null;
   const currency = explicit ?? applied;
-  if (!currency) return {};
-  const amount = line.amount_currency == null && currency.id === applied?.id
-    ? net * rateAt(db, currency.id, date, companyId)
+  if (!currency) {
+    return line.amount_currency != null && Number(line.amount_currency) !== 0
+      ? { amount_currency: Number(line.amount_currency) }
+      : {};
+  }
+  const amount = line.amount_currency == null
+    ? (currency.id === companyCurrency.id ? net : currency.id === applied?.id ? net * rateAt(db, currency.id, date, companyId) : 0)
     : line.amount_currency;
   return { currency_id: currency.id, amount_currency: roundCurrency(amount ?? 0, currency) };
 }
@@ -889,7 +903,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
     return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...currencyFields, ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_ids?.length ? { tax_ids: [...l.tax_ids] } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}), ...(l.use_in_tax_closing != null ? { use_in_tax_closing: Boolean(l.use_in_tax_closing) } : {}) };
   }), { systemGenerated: system_generated });
-  if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
+  if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error(line_ids.length ? 'The entry is not balanced.' : "Even magicians can't post nothing!");
   const isDraft = state === 'draft';
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;

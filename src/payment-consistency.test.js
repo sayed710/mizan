@@ -22,7 +22,7 @@ test('the entry that pays an invoice cannot be reset to draft or deleted', () =>
   const entry = read(paid, 'account.move', read(paid, 'account.move', id).payments[0].move_id);
   assert.equal(button('Reset to Draft').when(entry, paid), false);
   assert.throws(() => write(paid, 'account.move', entry.id, { state: 'draft' }), /settles an invoice payment/);
-  assert.throws(() => unlink(paid, 'account.move', [entry.id]), /tied to a payment|Posted entries cannot be deleted/);
+  assert.throws(() => unlink(paid, 'account.move', [entry.id]), /tied to a payment|You cannot delete an entry which has been posted once/);
   assert.throws(() => write(paid, 'account.move', id, { state: 'cancel' }), /Paid invoices|Posted entries go back to draft/);
 });
 

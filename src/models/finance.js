@@ -549,7 +549,7 @@ function postedMoveRule(db, before, after, ctx = null) {
     }
     const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
     if ((lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0) || after.is_storno) && !validStornoMove(db, after)) return 'Debits and credits cannot be negative';
-    if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) return 'A posted entry needs balanced journal items';
+    if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) return lines.length ? 'The entry is not balanced.' : "Even magicians can't post nothing!";
     if (!after.name || after.name === '/') return 'A posted entry needs a number';
   }
   return null;
@@ -1098,7 +1098,7 @@ export function moveDeleteGuard(db, move, staged = db, ctx = null) {
   // The trail counts if it is on before or after the change set (enabling it alongside a deletion still protects).
   const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
   if (audited && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
-  if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
+  if (move.state === 'posted') return 'You cannot delete an entry which has been posted once.';
   if ((db.records['account.asset'] ?? []).some((a) => a.source_move_id === move.id && a.state !== 'cancel')) return "Handle the entry's linked assets before deleting it";
   if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
