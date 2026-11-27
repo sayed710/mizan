@@ -2632,6 +2632,7 @@ function migrateStatementLinesBankSuspense(db) {
   return currentDb;
 }
 MIGRATIONS.push({ version: 81, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
+MIGRATIONS.push({ version: 82, name: 'stored-statement-report-lines', up: ensureStatementReports });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

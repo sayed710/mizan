@@ -471,7 +471,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
                       {f.hideWhen?.(cellRec, db)
                         ? null
                         : readonly
-                          ? (rateText ?? display(db, f, cellVal, cellRec))
+                          ? (field.openRelated && field.relation && l.id != null && k === cols[0]?.[0] ? <a href={`#/open/${field.relation}/${l.id}`}>{rateText ?? display(db, f, cellVal, cellRec)}</a> : (rateText ?? display(db, f, cellVal, cellRec)))
                           : <><FieldInput db={db} field={f} value={cellVal} record={cellRec} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${rowIdx + 1}`} placeholder={cellPlaceholder} />{rateText && <span className="readonly rate-only">{rateText}</span>}</>}
                     </td>
                   );

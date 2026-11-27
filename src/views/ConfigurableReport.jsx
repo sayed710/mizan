@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react';
 import { search } from '../orm.js';
-import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, targetCompanyIds } from '../models/configurableReports.js';
+import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, reportLineKey, targetCompanyIds } from '../models/configurableReports.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { today } from '../models/common.js';
 import { useDb } from '../store.js';
@@ -17,11 +17,11 @@ import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 function RowCells({ values, variance, showVariance }) {
   return (
     <>
-      {values.map((value, index) => <td className="num" key={index}>{money(value)}</td>)}
+      {values.map((value, index) => <td className="num" key={index}>{value == null ? '' : money(value)}</td>)}
       {showVariance && (
         <>
           <td className="num">{variance?.amount == null ? '' : money(variance.amount)}</td>
-          <td className="num">{variance?.pct == null ? t('n/a') : `${variance.pct}${t('%')}`}</td>
+          <td className="num">{values.every((value) => value == null) ? '' : variance?.pct == null ? t('n/a') : `${variance.pct}${t('%')}`}</td>
         </>
       )}
     </>
@@ -47,6 +47,8 @@ function scopedJournals(db, companyIds, ledger) {
   );
 }
 
+export { reportLineKey };
+
 /** Build structured CSV/XLSX rows from computed report data (preserving hierarchy indentation and numeric values). */
 export function configurableReportExportRows(data, openCodes = new Set()) {
   if (!data) return [];
@@ -66,7 +68,7 @@ export function configurableReportExportRows(data, openCodes = new Set()) {
       ...line.values.map((v) => (v == null ? '' : Number(v))),
       ...formatVariance(line.variance),
     ]);
-    if (isExpandableLine(line) && openCodes?.has(line.code)) {
+    if (isExpandableLine(line) && openCodes?.has(reportLineKey(line))) {
       for (const acc of line.accountRows) {
         rows.push([
           indent(depth + 1, `${acc.account.code} ${acc.account.name}`),
@@ -201,7 +203,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   }
   const inlineError = periodError ?? groupSelectionError ?? computeError;
 
-  const expandableCodes = data ? data.rows.filter(isExpandableLine).map((line) => line.code) : [];
+  const expandableCodes = data ? data.rows.filter(isExpandableLine).map(reportLineKey) : [];
   const toggle = (code) => setOpenCodes((prev) => toggleReportFold(prev, code));
 
   const exportCsv = () => {
@@ -388,14 +390,15 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             </thead>
             <tbody>
               {data.rows.map((line) => {
+                const lineKey = reportLineKey(line);
                 const canExpand = isExpandableLine(line);
-                const isOpen = canExpand && openCodes.has(line.code);
+                const isOpen = canExpand && openCodes.has(lineKey);
                 const rowClass = [line.strong ? 'rep-total strong' : canExpand ? 'rep-section' : ''].filter(Boolean).join(' ');
                 return (
-                  <Fragment key={line.code}>
+                  <Fragment key={lineKey}>
                     <tr
                       className={rowClass || undefined}
-                      onClick={canExpand && !isPrinting ? () => toggle(line.code) : undefined}
+                      onClick={canExpand && !isPrinting ? () => toggle(lineKey) : undefined}
                       aria-expanded={canExpand && !isPrinting ? isOpen : undefined}
                     >
                       <td style={{ paddingInlineStart: `${line.depth * 1.5 + 0.75}rem` }}>
@@ -406,7 +409,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                     </tr>
                     {isOpen && line.accountRows.map((acc) => (
                       <tr
-                        key={`${line.code}:${acc.account.id}`}
+                        key={`${lineKey}:${acc.account.id}`}
                         className="rep-detail"
                         onClick={isPrinting ? undefined : () => { globalThis.location.hash = accountJournalItemsHref(acc.account.id); }}
                       >

@@ -225,7 +225,7 @@ test('the migration moves old global locks to company 1', () => {
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 81);
+  assert.equal(migrated.schema_version, 82);
 
   // Company 1 received the legacy global locks.
   const comp1 = read(migrated, 'res.company', 1);

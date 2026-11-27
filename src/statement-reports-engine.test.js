@@ -119,7 +119,7 @@ test('seeded Balance Sheet and Profit and Loss exist per company using Odoo acco
   }
 
   const pnlNames = pnl1.line_ids.map((l) => l.name);
-  for (const required of ['Revenue', 'Operating Income', 'Cost of Revenue', 'Gross Profit', 'Other Income', 'Expenses', 'Depreciation', 'Net Profit']) {
+  for (const required of ['Revenue', 'Operating Income', 'Less Costs of Revenue', 'Gross Profit', 'Plus Other Income', 'Less Operating Expenses', 'Expenses', 'Depreciation', 'Less Other Expenses', 'Net Profit']) {
     assert.ok(pnlNames.includes(required), `P&L missing Odoo line: ${required}`);
   }
 
@@ -289,7 +289,7 @@ test('migration 50 creates standard statement reports once and is idempotent', (
   };
   const upgraded = migrate(legacyDb);
   assert.equal(upgraded.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 81);
+  assert.equal(SCHEMA_VERSION, 82);
   for (const cId of [1, company2.id]) {
     assert.ok(findStatementReport(upgraded, 'balance', cId));
     assert.ok(findStatementReport(upgraded, 'pnl', cId));
