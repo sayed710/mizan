@@ -2632,6 +2632,40 @@ const moveCashBasisEntries = (db, r) => (db && r?.id ? search(db, 'account.move'
 /** Adjusting entries linked to `r` via `deferred_adjustment_of_id`. */
 const moveAdjustingEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.deferred_adjustment_of_id === r.id) : []);
 
+/** Automatic entries generated from `r` via Move to Account or Change Period. */
+const moveAutomaticEntries = (db, r) => (db && r?.id
+  ? search(db, 'account.move').filter((m) => m.state !== 'cancel' && (m.automatic_entry_source_move_ids ?? []).includes(r.id))
+  : []);
+
+/** Validate automatic entry origin links, company isolation, and journal company membership. */
+function automaticEntryMoveError(db, before, after) {
+  const links = (m) => JSON.stringify(m?.automatic_entry_source_move_ids ?? []);
+  const linksChanged = !before || links(before) !== links(after);
+  // Origin links are set when the wizard creates the entry; a posted entry never gains or loses one.
+  if (before?.state === 'posted' && linksChanged) return 'Posted entries cannot be edited; reset them to draft first';
+  const sourceIds = after?.automatic_entry_source_move_ids;
+  if (!Array.isArray(sourceIds) || !sourceIds.length) return null;
+  if (after.move_type !== 'entry') return 'Automatic entries must be miscellaneous journal entries';
+  const companyId = after.company_id ?? 1;
+  const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
+  if (journal?.company_id && journal.company_id !== companyId) return 'Journal and entry must belong to the same company';
+  // Sources are checked when linked; resetting a source later must not freeze the entries made from it.
+  if (!linksChanged) return null;
+  if (!journal || journal.active === false || journal.type !== 'general') return 'Select an active miscellaneous journal for this company';
+  if (sourceIds.some((id) => !Number.isInteger(id) || id < 1 || id === after.id)) {
+    return 'Automatic entries can only reference posted journal entries';
+  }
+  if (new Set(sourceIds).size !== sourceIds.length) {
+    return 'Automatic entries cannot reference the same origin entry more than once';
+  }
+  for (const srcId of sourceIds) {
+    const src = read(db, 'account.move', srcId);
+    if (!src || src.state !== 'posted') return 'Automatic entries can only reference posted journal entries';
+    if ((src.company_id ?? 1) !== companyId) return 'Automatic entries cannot be created for items from different companies';
+  }
+  return null;
+}
+
 /** Deferral schedules referencing journal entry or invoice/bill `r`. */
 const moveDeferrals = (db, r) => {
   if (!db || !r?.id) return [];
@@ -2843,12 +2877,14 @@ export function markAsReviewed(db, moveIds) {
     ? write(next, 'account.move', id, { to_check: false }) : next, db);
 }
 
+const notSecuredFilter = { id: 'not_secured', label: 'Not Secured', fn: (r) => !r.inalterable_hash && r.state === 'posted' };
+
 export const journalEntriesView = {
   defaults: { move_type: 'entry' },
   list: ['accounting_date', 'display_name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
   optionalList: ['invoice_date', 'activities'],
   listLabels: { display_name: 'Number', accounting_date: 'Date', invoice_date: 'Invoice Date', amount_total_signed: 'Total', state: 'Status' },
-  searchFields: ['name', 'display_name', 'ref', 'partner_id', 'journal_id'],
+  searchFields: ['name', 'display_name', 'ref', 'partner_id', 'journal_id', 'amount_total'],
   listActions: [
     {
       label: 'Reverse Entries',
@@ -2869,6 +2905,7 @@ export const journalEntriesView = {
       { id: 'manual', label: 'Manual', fn: (r) => !((r.auto_post && r.auto_post !== 'no') || r.auto_post_origin_id) },
       { id: 'recurring', label: 'Recurring', fn: (r) => Boolean(RECURRENCE_MONTHS[r.auto_post] || r.auto_post_origin_id) },
     ],
+    [notSecuredFilter],
     [{ id: 'to_check', label: 'To Check', fn: (r) => r.to_check === true }],
     [
       { id: 'sales', label: 'Sales', fn: (r, db) => moveJournalType(db, r) === 'sale' },
@@ -2881,7 +2918,7 @@ export const journalEntriesView = {
     monthFilters('accounting_date', 'Date', (r) => r.date ?? r.invoice_date),
     monthFilters('invoice_date', 'Invoice Date'),
   ],
-  groupBys: ['partner_id', 'journal_id', 'state', 'accounting_date', 'invoice_date'],
+  groupBys: ['partner_id', 'journal_id', 'state', 'accounting_date', 'invoice_date', 'company_id'],
 };
 
 const INVOICE_LIST_FIELDS = {
@@ -2922,7 +2959,7 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
     { id: 'cancel', label: 'Cancelled', fn: (r) => r.state === 'cancel' },
   ],
   [
-    { id: 'not_secured', label: 'Not Secured', fn: (r) => !r.inalterable_hash && r.state === 'posted' },
+    notSecuredFilter,
   ],
   ...(!purchases ? [[
     { id: 'sent', label: 'Sent', fn: (r) => Boolean(r.is_move_sent) },
@@ -3958,7 +3995,7 @@ export const accountingModels = {
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
         return 'The inter-company bill is posted or paid; issue a credit note instead';
       }
-      const baseErr = archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx);
+      const baseErr = archivedLineAccountGuard(db, before, after, ctx) ?? moveGuard(db, before, after, ctx) ?? automaticEntryMoveError(db, before, after) ?? paymentGuard(db, before, after, ctx);
       if (baseErr) return baseErr;
       if (after.state === 'draft' && after.posting_order != null) return 'Draft move cannot have a posting order';
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
@@ -4300,6 +4337,7 @@ export const accountingModels = {
       cash_basis_base_grid: { type: 'boolean', label: 'Cash Basis Base Grid', readonly: true, hidden: true },
       is_storno: { type: 'boolean', label: 'Storno accounting', readonly: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
+      automatic_entry_source_move_ids: { type: 'many2many', relation: 'account.move', label: 'Origin Entries', readonly: true, hidden: true },
       deferred_adjustment_of_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true, hidden: true },
       // Set by fiscal closing and exchange revaluation only.
       is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },
@@ -4454,6 +4492,24 @@ export const accountingModels = {
           when: (r, db) => moveAdjustingEntries(db, r).length > 0,
           value: (db, r) => moveAdjustingEntries(db, r).length,
           target: (r) => `accounting/entries?view=list&rel=deferred_adjustment_of_id:${r.id}`,
+        },
+        {
+          label: 'Automatic Entries',
+          when: (r, db) => moveAutomaticEntries(db, r).length > 0,
+          value: (db, r) => moveAutomaticEntries(db, r).length,
+          target: (r, db) => {
+            const list = moveAutomaticEntries(db, r);
+            return list.length === 1 ? `accounting/entries/${list[0].id}` : `accounting/entries?view=list&rel=id:${list.map((m) => m.id).join(',')}`;
+          },
+        },
+        {
+          label: 'Origin Entries',
+          when: (r) => Array.isArray(r?.automatic_entry_source_move_ids) && r.automatic_entry_source_move_ids.length > 0,
+          value: (db, r) => r.automatic_entry_source_move_ids.length,
+          target: (r) => {
+            const ids = r.automatic_entry_source_move_ids;
+            return ids.length === 1 ? `accounting/entries/${ids[0]}` : `accounting/entries?view=list&rel=id:${ids.join(',')}`;
+          },
         },
         {
           label: (r) => (['in_invoice', 'in_refund'].includes(r?.move_type) ? 'Deferred Expenses' : 'Deferrals'),

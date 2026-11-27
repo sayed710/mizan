@@ -281,18 +281,27 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
       }));
     });
 
-    const csvBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export') && !n.textContent.includes('XLSX'));
-    const xlsxBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export XLSX'));
-    assert.ok(csvBtn, 'List view renders CSV Export button');
-    assert.ok(xlsxBtn, 'List view renders Export XLSX button');
+    const openExport = async (format) => {
+      const exportBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export'));
+      assert.ok(exportBtn, 'List view renders Export button');
+      await React.act(async () => props(exportBtn).onClick());
+      const dialog = find(host, (n) => props(n)?.role === 'dialog');
+      assert.ok(dialog, 'Export dialog opens');
+      const formatSelect = find(dialog, (n) => props(n)?.['aria-label'] === 'Format');
+      assert.ok(formatSelect, 'Export dialog provides format selector');
+      await React.act(async () => props(formatSelect).onChange({ target: { value: format } }));
+      const confirmBtn = find(dialog, (n) => n.tagName === 'BUTTON' && n.textContent === 'Export');
+      assert.ok(confirmBtn, 'Export dialog renders Export confirm button');
+      await React.act(async () => props(confirmBtn).onClick());
+      return spy.takeLast();
+    };
 
     const expectedHeaders = ['Number', 'Partner', 'Date', 'Due Date', 'Tax Excluded', 'Total', 'Amount Due', 'Status'];
-    const expectedInv1 = ['INV-EXP2-001', 1, 'Jun 1, 2026', '', 500, 500, 500, 'Draft'];
-    const expectedInv2 = ['INV-EXP2-002', 1, 'Jun 2, 2026', '', 400, 400, 400, 'Draft'];
+    const expectedInv1 = ['INV-EXP2-001', 'Nile Furniture Co.', 'Jun 1, 2026', '', 500, 500, 500, 'Draft'];
+    const expectedInv2 = ['INV-EXP2-002', 'Nile Furniture Co.', 'Jun 2, 2026', '', 400, 400, 400, 'Draft'];
     const expectedMoveCount = search(db, 'account.move').filter((m) => (m.company_id ?? 1) === 1).length;
 
-    await React.act(async () => props(csvBtn).onClick());
-    const csvAll = await spy.takeLast();
+    const csvAll = await openExport('csv');
     assert.ok(csvAll, 'Unselected CSV download captured');
     assert.equal(csvAll.filename, 'account.move.csv');
     const csvAllRows = fromCsv(await csvAll.text());
@@ -301,8 +310,7 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
     assert.deepEqual(csvAllRows.find((r) => r[0] === 'INV-EXP2-001')?.map(normCell), expectedInv1);
     assert.deepEqual(csvAllRows.find((r) => r[0] === 'INV-EXP2-002')?.map(normCell), expectedInv2);
 
-    await React.act(async () => props(xlsxBtn).onClick());
-    const xlsxAll = await spy.takeLast();
+    const xlsxAll = await openExport('xlsx');
     assert.ok(xlsxAll, 'Unselected XLSX download captured');
     assert.equal(xlsxAll.filename, 'account.move.xlsx');
     assert.equal(xlsxAll.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -320,8 +328,7 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
     assert.ok(cb2, 'Selection checkbox exists for INV-EXP2-002');
     await React.act(async () => props(cb2).onChange({ target: { checked: true } }));
 
-    await React.act(async () => props(csvBtn).onClick());
-    const csvSel = await spy.takeLast();
+    const csvSel = await openExport('csv');
     assert.ok(csvSel, 'Selected CSV download captured');
     assert.equal(csvSel.filename, 'account.move.csv');
     const csvSelRows = fromCsv(await csvSel.text());
@@ -330,8 +337,7 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
     assert.deepEqual(csvSelRows[1].map(normCell), expectedInv2);
     assert.equal(csvSelRows.some((r) => r[0] === 'INV-EXP2-001'), false, 'Selected CSV excludes unselected invoice');
 
-    await React.act(async () => props(xlsxBtn).onClick());
-    const xlsxSel = await spy.takeLast();
+    const xlsxSel = await openExport('xlsx');
     assert.ok(xlsxSel, 'Selected XLSX download captured');
     assert.equal(xlsxSel.filename, 'account.move.xlsx');
     assert.equal(xlsxSel.type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -350,7 +356,7 @@ test('EXP-2: ActionView list exports CSV and XLSX via shared writer, respecting 
         params: new URLSearchParams('view=kanban'),
       }));
     });
-    assert.equal(find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export XLSX')), null);
+    assert.equal(find(host, (n) => n.tagName === 'BUTTON' && n.textContent.includes('Export')), null);
   } finally {
     await React.act(async () => root.unmount());
     spy.restore();

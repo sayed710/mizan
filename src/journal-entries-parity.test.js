@@ -288,7 +288,7 @@ test('Journal Entries filters, group-bys and search fields cover all Odoo 20 opt
     const filterLabels = allFind(filterSection, (n) => n.tagName === 'BUTTON').map((b) => b.textContent.trim());
     assert.deepEqual(filterLabels, [
       'Unposted', 'Posted',
-      'Reversed', 'Manual', 'Recurring',
+      'Reversed', 'Manual', 'Recurring', 'Not Secured',
       'To Check',
       'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous',
       'Date: This Month', 'Date: This Year',
@@ -296,7 +296,7 @@ test('Journal Entries filters, group-bys and search fields cover all Odoo 20 opt
       'Archived',
     ]);
     const groupLabels = allFind(groupSection, (n) => n.tagName === 'BUTTON').map((b) => b.textContent.trim());
-    assert.deepEqual(groupLabels, ['Partner', 'Journal', 'Status', 'Date', 'Invoice Date']);
+    assert.deepEqual(groupLabels, ['Partner', 'Journal', 'Status', 'Date', 'Invoice Date', 'Company']);
 
     const bodyRows = () => allFind(find(ctx.host, (n) => n.tagName === 'TBODY'), (n) => n.tagName === 'TR' && !find(n, (c) => hasClass(c, 'empty')) && !hasClass(n, 'group-row'));
     const toggleFilter = async (labelText) => {
