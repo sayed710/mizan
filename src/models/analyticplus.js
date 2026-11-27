@@ -502,23 +502,16 @@ const transition = (label, from, state) => ({
 });
 
 const rawPlans = (db) => db?.records?.['account.analytic.plan'] ?? [];
+const planHierarchyCache = new WeakMap();
+const accountPlanCache = new WeakMap();
 const planIndexCache = new WeakMap();
 
-function getPlanIndex(db) {
-  if (!db?.records) {
-    return {
-      rawPlans: new Map(),
-      childrenMap: new Map(),
-      counts: new Map(),
-      roots: new Map(),
-    };
-  }
-  let cached = planIndexCache.get(db.records);
-  if (cached) return cached;
+function getPlanHierarchy(plans) {
+  let cached = planHierarchyCache.get(plans);
+  if (cached && cached.len === plans.length) return cached;
 
   const rawPlans = new Map();
   const childrenMap = new Map();
-  const plans = db.records['account.analytic.plan'] ?? [];
   for (const p of plans) {
     rawPlans.set(p.id, p);
     if (p.parent_id != null) {
@@ -529,31 +522,6 @@ function getPlanIndex(db) {
       }
       list.push(p.id);
     }
-  }
-
-  const directCounts = new Map();
-  for (const a of db.records['account.analytic.account'] ?? []) {
-    if (a.active !== false && a.plan_id != null) {
-      directCounts.set(a.plan_id, (directCounts.get(a.plan_id) ?? 0) + 1);
-    }
-  }
-
-  const counts = new Map();
-  const visiting = new Set();
-  function getCount(planId) {
-    if (counts.has(planId)) return counts.get(planId);
-    if (visiting.has(planId)) return 0;
-    visiting.add(planId);
-    let total = directCounts.get(planId) ?? 0;
-    const children = childrenMap.get(planId);
-    if (children) {
-      for (const childId of children) {
-        total += getCount(childId);
-      }
-    }
-    visiting.delete(planId);
-    counts.set(planId, total);
-    return total;
   }
 
   const roots = new Map();
@@ -579,12 +547,73 @@ function getPlanIndex(db) {
     return rootId;
   }
 
-  for (const p of plans) {
-    getCount(p.id);
-    getRoot(p.id);
+  for (const p of plans) getRoot(p.id);
+  cached = { len: plans.length, rawPlans, childrenMap, roots };
+  planHierarchyCache.set(plans, cached);
+  return cached;
+}
+
+function accountPlanMap(db) {
+  const accounts = db?.records?.['account.analytic.account'];
+  if (!accounts?.length) return null;
+  let cached = accountPlanCache.get(accounts);
+  if (!cached || cached.len !== accounts.length) {
+    const map = new Map();
+    for (const a of accounts) {
+      if (a?.id != null) map.set(a.id, a.plan_id ?? null);
+    }
+    cached = { len: accounts.length, map };
+    accountPlanCache.set(accounts, cached);
+  }
+  return cached.map;
+}
+
+function getPlanIndex(db) {
+  if (!db?.records) {
+    return {
+      rawPlans: new Map(),
+      childrenMap: new Map(),
+      counts: new Map(),
+      roots: new Map(),
+    };
+  }
+  const plans = db.records['account.analytic.plan'] ?? [];
+  const accounts = db.records['account.analytic.account'] ?? [];
+  let cached = planIndexCache.get(db.records);
+  if (cached && cached.plans === plans && cached.accounts === accounts && cached.planLen === plans.length && cached.accountLen === accounts.length) {
+    return cached;
   }
 
-  const index = { rawPlans, childrenMap, counts, roots };
+  const { rawPlans, childrenMap, roots } = getPlanHierarchy(plans);
+
+  const directCounts = new Map();
+  for (const a of accounts) {
+    if (a.active !== false && a.plan_id != null) {
+      directCounts.set(a.plan_id, (directCounts.get(a.plan_id) ?? 0) + 1);
+    }
+  }
+
+  const counts = new Map();
+  const visiting = new Set();
+  function getCount(planId) {
+    if (counts.has(planId)) return counts.get(planId);
+    if (visiting.has(planId)) return 0;
+    visiting.add(planId);
+    let total = directCounts.get(planId) ?? 0;
+    const children = childrenMap.get(planId);
+    if (children) {
+      for (const childId of children) {
+        total += getCount(childId);
+      }
+    }
+    visiting.delete(planId);
+    counts.set(planId, total);
+    return total;
+  }
+
+  for (const p of plans) getCount(p.id);
+
+  const index = { plans, accounts, planLen: plans.length, accountLen: accounts.length, rawPlans, childrenMap, counts, roots };
   planIndexCache.set(db.records, index);
   return index;
 }
@@ -636,6 +665,51 @@ export function completePlanName(db, plan) {
     curId = parent.parent_id;
   }
   return names.join(' / ');
+}
+
+const sharedCompany = (id) => id == null || id === false || id === '';
+
+export const activeRootPlans = (db) => (db?.records?.['account.analytic.plan'] ?? [])
+  .filter((p) => p.active !== false && !p.parent_id && (!p.company_id || p.company_id === currentCompany(db)));
+
+/** Resolve the root analytic plan id for an analytic line via indexed account and plan maps. */
+export function analyticLineRootPlanId(r, db) {
+  if (!r?.account_id || !db?.records) return null;
+  const planId = accountPlanMap(db)?.get(r.account_id);
+  if (planId == null) return null;
+  return getPlanHierarchy(db.records['account.analytic.plan'] ?? []).roots.get(planId) ?? null;
+}
+
+/**
+ * Build root-plan filter descriptors for Analytic Items.
+ * Active root plans of allowed companies and shared plans are offered in the menu; any already-saved
+ * archived, inactive, disallowed, or deleted `analytic-plan-<id>` filters remain hidden predicates so
+ * they still restrict the list.
+ */
+export function analyticPlanFilters(db, activeFilterIds = []) {
+  const allowed = new Set(db?.settings?.allowed_company_ids ?? [db ? currentCompany(db) : 1]);
+  const isAllowedPlan = (p) => sharedCompany(p.company_id) || allowed.has(p.company_id);
+  const active = (db?.records?.['account.analytic.plan'] ?? [])
+    .filter((p) => p.active !== false && !p.parent_id && isAllowedPlan(p));
+  const seen = new Set(active.map((p) => p.id));
+  const out = active.map((p) => ({
+    id: `analytic-plan-${p.id}`,
+    label: p.name,
+    fn: (r, data) => analyticLineRootPlanId(r, data) === p.id,
+  }));
+  const plans = getPlanHierarchy(db?.records?.['account.analytic.plan'] ?? []).rawPlans;
+  for (const id of activeFilterIds) {
+    const match = /^analytic-plan-(\d+)$/.exec(id);
+    if (!match) continue;
+    const planId = Number(match[1]);
+    if (seen.has(planId)) continue;
+    seen.add(planId);
+    const plan = plans.get(planId);
+    out.push(plan && isAllowedPlan(plan)
+      ? { id, label: plan.name, hidden: true, fn: (r, data) => analyticLineRootPlanId(r, data) === planId }
+      : { id, label: 'Deleted Analytic Plan', hidden: true, fn: () => false });
+  }
+  return out;
 }
 
 /** Return the id of the topmost ancestor plan in the hierarchy. */
@@ -822,6 +896,7 @@ export const analyticPlusModels = {
       ...timesheetModel.fields,
       amount: { type: 'monetary', label: 'Amount' },
       account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic Account' },
+      plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan', readonly: true, compute: (r, db) => analyticLineRootPlanId(r, db) },
       general_account: { type: 'many2one', relation: 'account.account', label: 'General Account', readonly: (r) => !!r.move_id },
       legacy_general_account: { type: 'char', label: 'General Account Code', readonly: true, hideWhen: (r) => !r.legacy_general_account },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice / Bill' },

@@ -313,9 +313,10 @@ const allApps = [
                 { label: 'Transactions', children: [
           { key: 'entries', label: 'Journal Entries', model: 'account.move', ...journalEntriesView },
           { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line',
-            list: ['date', 'name', 'account_id', 'company_id', 'amount'],
-            optionalList: ['ref', 'general_account', 'move_id', 'product_id', 'unit_amount', 'product_uom_id', 'partner_id'], listLabels: { unit_amount: 'Quantity' },
-            groupBy: ['account_id'], groupBys: ['date', 'account_id', 'general_account', 'category', 'product_id', 'partner_id'],
+            list: ['date', 'name', 'account_id', 'plan_id', 'ref', 'general_account', 'move_id', 'product_id', 'partner_id', 'unit_amount', 'product_uom_id', 'company_id', 'amount'],
+            listFields: { account_id: { optional: 'show' }, plan_id: { optional: 'show' }, ref: { optional: 'hide' }, general_account: { optional: 'hide' }, move_id: { optional: 'show' }, product_id: { optional: 'hide' }, partner_id: { optional: 'hide' }, unit_amount: { optional: 'hide' }, product_uom_id: { optional: 'hide' }, company_id: { optional: 'show' }, amount: { optional: 'show' } },
+            listLabels: { unit_amount: 'Quantity', general_account: 'Financial Account', move_id: 'Journal Entry' },
+            groupBy: ['account_id'], groupBys: ['date', 'account_id', 'plan_id', 'general_account', 'category', 'product_id', 'partner_id'],
             defaults: { category: 'other', employee_id: null, unit_amount: 0 },
             form: {
               title: 'name',
