@@ -1850,12 +1850,20 @@ export function fiscalYearDates(db, date = today(), companyId = null) {
   if (years.length === 1) return { from: years[0].date_from, to: years[0].date_to };
   const previous = allYears
     .filter((y) => y.date_to < refDate)
-    .sort((a, b) => a.date_from.localeCompare(b.date_from))
+    .sort((a, b) => a.date_to.localeCompare(b.date_to))
     .at(-1);
+  const next = allYears
+    .filter((y) => y.date_from > refDate)
+    .sort((a, b) => a.date_from.localeCompare(b.date_from))
+    .at(0);
+  const clampRange = (from, to) => ({
+    from: previous && from <= previous.date_to ? addUtcDays(previous.date_to, 1) : from,
+    to: next && to >= next.date_from ? addUtcDays(next.date_from, -1) : to,
+  });
   if (previous) {
     let from = previous.date_from;
     while (shiftMonth(from, 12) <= refDate) from = shiftMonth(from, 12);
-    return { from, to: addUtcDays(shiftMonth(from, 12), -1) };
+    return clampRange(from, addUtcDays(shiftMonth(from, 12), -1));
   }
   const company = db ? read(db, 'res.company', targetCompanyId) : null;
   const lastDay = Number(company?.fiscalyear_last_day) || 31;
@@ -1870,10 +1878,10 @@ export function fiscalYearDates(db, date = today(), companyId = null) {
   const candidateEnd = isoYmd(year, lastMonth, fixDay(year, lastMonth, lastDay));
   if (refDate <= candidateEnd) {
     const prevEnd = isoYmd(year - 1, lastMonth, fixDay(year - 1, lastMonth, lastDay));
-    return { from: addUtcDays(prevEnd, 1), to: candidateEnd };
+    return clampRange(addUtcDays(prevEnd, 1), candidateEnd);
   }
   const nextEnd = isoYmd(year + 1, lastMonth, fixDay(year + 1, lastMonth, lastDay));
-  return { from: addUtcDays(candidateEnd, 1), to: nextEnd };
+  return clampRange(addUtcDays(candidateEnd, 1), nextEnd);
 }
 
 /**

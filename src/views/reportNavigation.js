@@ -4,13 +4,6 @@ import { fiscalYearDates } from '../models/ledger.js';
 
 export const DEFAULT_REPORT_PERIOD = 'year';
 
-let reportDbProvider = () => null;
-
-/** Register the active database reader so zero-arg PERIODS callers pick up company fiscal settings. */
-export function setReportDbProvider(provider) {
-  reportDbProvider = typeof provider === 'function' ? provider : () => null;
-}
-
 /** Validate a custom report period range (From/To); returns an English error message or null when valid. */
 export function customPeriodError(periodKey, period, { requireFrom = false } = {}) {
   if (periodKey !== 'custom') return null;
@@ -81,12 +74,17 @@ export function reportPeriodRange(db, periodKey, { companyId = null, date = toda
   throw new Error('Choose a valid period');
 }
 
-/** Standard accounting period presets shared across statement and analysis views. */
+const requirePeriodDb = (db) => {
+  if (!db) throw new Error('Database is required');
+  return db;
+};
+
+/** Standard accounting period presets shared across statement and analysis views (requires explicit db). */
 export const PERIODS = {
-  month: (db = reportDbProvider(), companyId = null, opts = {}) => reportPeriodRange(db, 'month', { companyId, ...opts }),
-  quarter: (db = reportDbProvider(), companyId = null, opts = {}) => reportPeriodRange(db, 'quarter', { companyId, ...opts }),
-  year: (db = reportDbProvider(), companyId = null, opts = {}) => reportPeriodRange(db, 'year', { companyId, ...opts }),
-  all: (db = reportDbProvider(), companyId = null, opts = {}) => reportPeriodRange(db, 'all', { companyId, ...opts }),
+  month: (db, companyId = null, opts = {}) => reportPeriodRange(requirePeriodDb(db), 'month', { companyId, ...opts }),
+  quarter: (db, companyId = null, opts = {}) => reportPeriodRange(requirePeriodDb(db), 'quarter', { companyId, ...opts }),
+  year: (db, companyId = null, opts = {}) => reportPeriodRange(requirePeriodDb(db), 'year', { companyId, ...opts }),
+  all: (db, companyId = null, opts = {}) => reportPeriodRange(requirePeriodDb(db), 'all', { companyId, ...opts }),
 };
 
 /** Reports remount when the selected report changes, resetting its filters. */

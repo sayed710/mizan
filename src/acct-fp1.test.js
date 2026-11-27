@@ -178,18 +178,20 @@ test('FP1: quarter presets follow non-calendar fiscal year and step cleanly acro
   );
 });
 
-test('FP1: zero-arg PERIODS picks up active company fiscal year from store for ConfigurableReport compatibility', async () => {
-  const { initStore, commit } = await import('./store.js');
-  await initStore();
+test('FP1: PERIODS requires explicit db without global provider and uses passed company fiscal year', async () => {
   let db = seed();
   db = write(db, 'res.company', 1, { fiscalyear_last_day: 31, fiscalyear_last_month: 3 });
-  await commit(db);
+
+  assert.throws(() => PERIODS.year(), /Database is required/);
+  assert.throws(() => PERIODS.quarter(), /Database is required/);
+  assert.throws(() => PERIODS.month(), /Database is required/);
+  assert.throws(() => PERIODS.all(), /Database is required/);
 
   const ref = today();
-  assert.deepEqual(PERIODS.year(), reportPeriodRange(db, 'year', { companyId: 1, date: ref }));
-  assert.deepEqual(PERIODS.quarter(), reportPeriodRange(db, 'quarter', { companyId: 1, date: ref }));
-  assert.deepEqual(PERIODS.month(), reportPeriodRange(db, 'month', { companyId: 1, date: ref }));
-  assert.deepEqual(PERIODS.all(), { from: '', to: '9999-12-31' });
+  assert.deepEqual(PERIODS.year(db, 1), reportPeriodRange(db, 'year', { companyId: 1, date: ref }));
+  assert.deepEqual(PERIODS.quarter(db, 1), reportPeriodRange(db, 'quarter', { companyId: 1, date: ref }));
+  assert.deepEqual(PERIODS.month(db, 1), reportPeriodRange(db, 'month', { companyId: 1, date: ref }));
+  assert.deepEqual(PERIODS.all(db, 1), { from: '', to: '9999-12-31' });
 });
 
 test('FP1: Reports.jsx period select and previous/next navigation update rendered range and report data', async () => {
@@ -303,5 +305,209 @@ test('FP1: Arabic translations for period navigation labels exist in i18n.js', a
     assert.equal(t('Choose a valid period'), 'اختر فترة صالحة');
   } finally {
     globalThis.localStorage = prevStorage;
+  }
+});
+
+test('FP1: explicit fiscal years separated by a gap never overlap during navigation or comparison', async () => {
+  let db = seed();
+  const comp = createCompany(db, {
+    name: 'Gap Co',
+    fiscalyear_last_day: 31,
+    fiscalyear_last_month: 3,
+  });
+  db = comp.db;
+  const cId = comp.id;
+  db = create(db, 'account.fiscal.year', {
+    name: 'FY 2024',
+    company_id: cId,
+    date_from: '2024-01-01',
+    date_to: '2024-12-31',
+  }).db;
+  db = create(db, 'account.fiscal.year', {
+    name: 'FY 2025-26',
+    company_id: cId,
+    date_from: '2025-04-01',
+    date_to: '2026-03-31',
+  }).db;
+
+  // Gap between 2024-12-31 and 2025-04-01 is clamped before 2025-04-01
+  assert.deepEqual(fiscalYearDates(db, '2025-03-31', cId), { from: '2025-01-01', to: '2025-03-31' });
+  // Pre-FY1 fallback (Mar 31 year-end) is clamped before 2024-01-01
+  assert.deepEqual(fiscalYearDates(db, '2023-12-31', cId), { from: '2023-04-01', to: '2023-12-31' });
+
+  // Stepping back from FY 2025-26 lands on the 3-month gap, then FY 2024
+  assert.deepEqual(
+    reportPeriodRange(db, 'year', { companyId: cId, date: '2025-05-01', offset: -1 }),
+    { from: '2025-01-01', to: '2025-03-31' },
+  );
+  assert.deepEqual(
+    reportPeriodRange(db, 'year', { companyId: cId, date: '2025-05-01', offset: -2 }),
+    { from: '2024-01-01', to: '2024-12-31' },
+  );
+  // Stepping forward from FY 2024 lands on the gap, then FY 2025-26
+  assert.deepEqual(
+    reportPeriodRange(db, 'year', { companyId: cId, date: '2024-06-15', offset: 1 }),
+    { from: '2025-01-01', to: '2025-03-31' },
+  );
+  assert.deepEqual(
+    reportPeriodRange(db, 'year', { companyId: cId, date: '2024-06-15', offset: 2 }),
+    { from: '2025-04-01', to: '2026-03-31' },
+  );
+
+  // Comparison columns do not overlap across the gap
+  assert.deepEqual(
+    periodsFor('year', 'last3', '2025-05-01', { db, companyId: cId }),
+    [
+      { from: '2024-01-01', to: '2024-12-31', label: '2024' },
+      { from: '2025-01-01', to: '2025-03-31', label: '2025-01-01 → 2025-03-31' },
+      { from: '2025-04-01', to: '2026-03-31', label: '2025-04-01 → 2026-03-31' },
+    ],
+  );
+
+  // UI pager navigation in Reports.jsx steps cleanly back into the gap and forward back into current FY
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/trial-balance' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  const ref = today();
+  const refYear = Number(ref.slice(0, 4));
+  const refMonth = Number(ref.slice(5, 7));
+  const fyStartYear = refMonth >= 4 ? refYear : refYear - 1;
+  const curFrom = `${fyStartYear}-04-01`;
+  const curTo = `${fyStartYear + 1}-03-31`;
+  const gapFrom = `${fyStartYear}-01-01`;
+  const gapTo = `${fyStartYear}-03-31`;
+  const prevFrom = `${fyStartYear - 1}-01-01`;
+  const prevTo = `${fyStartYear - 1}-12-31`;
+
+  let uiDb = seed();
+  const uiCo = createCompany(uiDb, { name: 'UI Gap Co', fiscalyear_last_day: 31, fiscalyear_last_month: 3 });
+  uiDb = uiCo.db;
+  uiDb = create(uiDb, 'account.fiscal.year', { name: 'Prev Cal FY', company_id: uiCo.id, date_from: prevFrom, date_to: prevTo }).db;
+  uiDb = create(uiDb, 'account.fiscal.year', { name: 'Cur Apr FY', company_id: uiCo.id, date_from: curFrom, date_to: curTo }).db;
+  uiDb = setCompanies(uiDb, { current: uiCo.id, allowed: [uiCo.id] });
+
+  await React.act(async () => commit(uiDb));
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'trial' } })));
+    const prevBtn = () => find(host, (n) => n.tagName === 'BUTTON' && props(n)?.['aria-label'] === 'Previous Period');
+    const nextBtn = () => find(host, (n) => n.tagName === 'BUTTON' && props(n)?.['aria-label'] === 'Next Period');
+
+    assert.ok(textOf(host).includes(`${curFrom} → ${curTo}`));
+    await React.act(async () => props(prevBtn()).onClick());
+    assert.ok(textOf(host).includes(`${gapFrom} → ${gapTo}`), 'Stepping back lands on non-overlapping gap');
+    await React.act(async () => props(prevBtn()).onClick());
+    assert.ok(textOf(host).includes(`${prevFrom} → ${prevTo}`), 'Stepping back again lands on earlier explicit FY');
+    await React.act(async () => props(nextBtn()).onClick());
+    assert.ok(textOf(host).includes(`${gapFrom} → ${gapTo}`), 'Stepping forward lands back on gap');
+    await React.act(async () => props(nextBtn()).onClick());
+    assert.ok(textOf(host).includes(`${curFrom} → ${curTo}`), 'Stepping forward again lands on current explicit FY');
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('FP1: ConfigurableReport uses selected company fiscal year and fiscal comparison columns', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/profit-and-loss' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+
+  let db = seed();
+  // Company 1 stays Dec 31 calendar year; Company 2 uses Mar 31 fiscal year-end
+  const marCo = createCompany(db, {
+    name: 'Secondary Mar Co',
+    fiscalyear_last_day: 31,
+    fiscalyear_last_month: 3,
+  });
+  db = marCo.db;
+  const c2 = marCo.id;
+  db = setCompanies(db, { current: 1, allowed: [1, c2] });
+
+  const ref = today();
+  const c1Fy = reportPeriodRange(db, 'year', { companyId: 1, date: ref });
+  const c2CurFy = reportPeriodRange(db, 'year', { companyId: c2, date: ref });
+  const c2PrevFy = reportPeriodRange(db, 'year', { companyId: c2, date: ref, offset: -1 });
+
+  const revAcc = search(db, 'account.account').find((a) => a.code === '400000' && (a.company_id ?? 1) === c2)
+    ?? search(db, 'account.account').find((a) => a.code === '400000');
+  const cashAcc = search(db, 'account.account').find((a) => a.code === '101401' && (a.company_id ?? 1) === c2)
+    ?? search(db, 'account.account').find((a) => a.code === '101401');
+  const genJournal = search(db, 'account.journal').find((j) => j.type === 'general' && j.company_id === c2)
+    ?? search(db, 'account.journal').find((j) => j.type === 'general');
+
+  db = postEntry(db, {
+    journal_id: genJournal.id,
+    company: c2,
+    date: c2PrevFy.from,
+    ref: 'C2-PREV-FY',
+    lines: [
+      { account_id: cashAcc.id, debit: 111 },
+      { account_id: revAcc.id, credit: 111 },
+    ],
+  }).db;
+  db = postEntry(db, {
+    journal_id: genJournal.id,
+    company: c2,
+    date: c2CurFy.from,
+    ref: 'C2-CUR-FY',
+    lines: [
+      { account_id: cashAcc.id, debit: 222 },
+      { account_id: revAcc.id, credit: 222 },
+    ],
+  }).db;
+
+  await React.act(async () => commit(db));
+  const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(ConfigurableReportPage, { statementKind: 'pnl', title: 'Profit and Loss' })));
+
+    const companySelect = () => find(host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Company');
+    const periodSelect = () => find(host, (n) => n.tagName === 'SELECT' && n.childNodes?.some((c) => textOf(c).includes('Custom Period')));
+    const comparisonSelect = () => find(host, (n) => n.tagName === 'SELECT' && n.childNodes?.some((c) => textOf(c).includes('No comparison')));
+    const headers = () => {
+      const thead = find(host, (n) => n.tagName === 'THEAD');
+      return thead ? (thead.childNodes?.[0]?.childNodes ?? []).map((th) => textOf(th)) : [];
+    };
+
+    // "All Companies" preserves active company (company 1, Dec 31 calendar year)
+    assert.equal(props(companySelect()).value, 'all');
+    assert.ok(textOf(host).includes(`${c1Fy.from} → ${c1Fy.to}`), `Expected active company FY ${c1Fy.from} → ${c1Fy.to}`);
+
+    // Selecting Company 2 switches the statement preset to Company 2's Mar 31 fiscal year
+    await React.act(async () => props(companySelect()).onChange({ target: { value: String(c2) } }));
+    assert.ok(textOf(host).includes(`${c2CurFy.from} → ${c2CurFy.to}`), `Expected Company 2 FY ${c2CurFy.from} → ${c2CurFy.to}`);
+
+    // Enabling "Previous Period" comparison produces fiscal-year columns matching Company 2 (not calendar columns)
+    await React.act(async () => props(comparisonSelect()).onChange({ target: { value: 'previous' } }));
+    assert.deepEqual(headers(), ['Report Lines', `${c2PrevFy.from} → ${c2PrevFy.to}`, `${c2CurFy.from} → ${c2CurFy.to}`, 'Variance', '%']);
+    assert.ok(textOf(host).includes('111.00'), 'Previous FY revenue appears in previous FY column');
+    assert.ok(textOf(host).includes('222.00'), 'Current FY revenue appears in current FY column');
+
+    // Custom period comparison continues using custom range math
+    await React.act(async () => props(periodSelect()).onChange({ target: { value: 'custom' } }));
+    const fromInput = () => find(host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'From');
+    const toInput = () => find(host, (n) => n.tagName === 'INPUT' && props(n)?.['aria-label'] === 'To');
+    await React.act(async () => props(fromInput()).onChange({ target: { value: '2026-03-01' } }));
+    await React.act(async () => props(toInput()).onChange({ target: { value: '2026-03-31' } }));
+    const customHeaders = headers();
+    assert.equal(customHeaders.length, 5);
+    assert.ok(customHeaders.includes('2026-02-01 → 2026-02-28'), 'Custom comparison keeps prior month range');
+    assert.ok(customHeaders.includes('2026-03-01 → 2026-03-31'), 'Custom comparison keeps selected custom range');
+  } finally {
+    await React.act(async () => root.unmount());
   }
 });

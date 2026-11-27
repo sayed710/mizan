@@ -198,3 +198,29 @@ test('expired quotes and malformed signatures redirect without any mutation', as
   assert.equal(f.db(), before);
   assert.ok(!(await (await f.get(f.url)).text()).includes('Sign and accept'));
 });
+
+test('portal credit note with nonzero residual labels remaining credit and credit note date instead of amount due', async (t) => {
+  const f = await fixture(t);
+  const settled = postEntry(f.db(), { journal: 'BNK1', ref: 'refund-apply', lines: [{ account: '121000', debit: 20, partner_id: 1 }, { account: '101401', credit: 20 }] });
+  const creditNote = create(settled.db, 'account.move', {
+    partner_id: 1,
+    move_type: 'out_refund',
+    state: 'draft',
+    invoice_date: '2026-02-01',
+    invoice_date_due: '2026-03-01',
+    invoice_line_ids: [{ name: 'Returned service', qty: 1, price_unit: 100, tax: 0 }],
+    amount_paid: 20,
+    payments: [{ date: read(settled.db, 'account.move', settled.id).invoice_date, amount: 20, move_id: settled.id }],
+  });
+  f.set(force(creditNote.db, 'account.move', creditNote.id, { state: 'posted' }));
+  const url = f.portal.portalUrl('account.move', read(f.db(), 'account.move', creditNote.id));
+  const res = await f.get(url);
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /<h1>Credit Note\b/);
+  assert.match(html, /Credit note date: 2026-02-01/);
+  assert.doesNotMatch(html, /Due date/);
+  assert.match(html, /<dt>Remaining credit<\/dt><dd>[^<]*80\.00<\/dd>/);
+  assert.doesNotMatch(html, /Amount due/);
+  assert.doesNotMatch(html, /Pay online/);
+});
