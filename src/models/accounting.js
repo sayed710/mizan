@@ -3039,8 +3039,9 @@ function partitionSendMoves(db, moves) {
   const emailTargets = [];
   const manualTargets = [];
   for (const m of moves) {
-    if (moveSendingMethod(db, m) === 'manual') manualTargets.push(m);
-    else emailTargets.push(m);
+    const method = moveSendingMethod(db, m);
+    if (method !== 'manual') emailTargets.push(m);
+    if (method !== 'email') manualTargets.push(m);
   }
   return { emailTargets, manualTargets };
 }
@@ -3052,7 +3053,7 @@ function sendMovesWizard(db, moveOrIds) {
     const p = m.partner_id ? read(db, 'res.partner', m.partner_id) : null;
     return Boolean(p?.email?.trim?.());
   });
-  const anyManual = manualTargets.length > 0;
+  const anyManual = manualTargets.some((m) => moveSendingMethod(db, m) === 'manual');
   return {
     title: 'Send',
     fields: [
