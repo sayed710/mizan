@@ -87,22 +87,86 @@ export function validateReportExpressions(lines, expressions) {
   return null;
 }
 
-function arithmetic(text) {
-  const tokens = text.match(/\d+(?:\.\d+)?|[()+*/-]/g) ?? [];
-  if (tokens.join('') !== text.replace(/\s/g, '')) throw new Error('Invalid aggregation formula');
+const aggregationTokenPattern = /[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|[()+*/-]/g;
+
+const scaleLinear = (linear, factor) => {
+  if (!linear) return null;
+  if (factor === 0) return { constVal: 0, terms: new Map() };
+  return {
+    constVal: linear.constVal * factor,
+    terms: new Map([...linear.terms].map(([id, coeff]) => [id, coeff * factor])),
+  };
+};
+
+const combineLinear = (lhs, rhs, sign) => {
+  if (!lhs || !rhs) return null;
+  const terms = new Map(lhs.terms);
+  for (const [id, coeff] of rhs.terms) {
+    const next = (terms.get(id) ?? 0) + sign * coeff;
+    if (next === 0) terms.delete(id);
+    else terms.set(id, next);
+  }
+  return { constVal: lhs.constVal + sign * rhs.constVal, terms };
+};
+
+/** Evaluate an aggregation formula and, when purely linear in its references, its per-account attribution. */
+function evaluateAggregation(text, resolveReference, trackLinear) {
+  const tokens = String(text ?? '').match(aggregationTokenPattern) ?? [];
+  if (tokens.join('') !== String(text ?? '').replace(/\s/g, '')) throw new Error('Invalid aggregation formula');
   let index = 0;
   const atom = () => {
     const token = tokens[index++];
-    if (token === '-') return -atom();
-    if (token === '(') { const value = sum(); if (tokens[index++] !== ')') throw new Error('Invalid aggregation formula'); return value; }
-    if (!token || !/^\d/.test(token)) throw new Error('Invalid aggregation formula');
-    return Number(token);
+    if (token === '-') {
+      const inner = atom();
+      return { value: -inner.value, linear: scaleLinear(inner.linear, -1) };
+    }
+    if (token === '(') {
+      const inner = sum();
+      if (tokens[index++] !== ')') throw new Error('Invalid aggregation formula');
+      return inner;
+    }
+    if (!token) throw new Error('Invalid aggregation formula');
+    if (/^\d/.test(token)) {
+      const value = Number(token);
+      return { value, linear: trackLinear ? { constVal: value, terms: new Map() } : null };
+    }
+    if (/^[A-Za-z_]/.test(token)) return resolveReference(token);
+    throw new Error('Invalid aggregation formula');
   };
-  const product = () => { let value = atom(); while (tokens[index] === '*' || tokens[index] === '/') { const op = tokens[index++]; const rhs = atom(); if (op === '/' && rhs === 0) throw new Error('Division by zero'); value = op === '*' ? value * rhs : value / rhs; } return value; };
-  const sum = () => { let value = product(); while (tokens[index] === '+' || tokens[index] === '-') { const op = tokens[index++]; const rhs = product(); value = op === '+' ? value + rhs : value - rhs; } return value; };
-  const value = sum();
-  if (index !== tokens.length || !Number.isFinite(value)) throw new Error('Invalid aggregation formula');
-  return value;
+  const product = () => {
+    let lhs = atom();
+    while (tokens[index] === '*' || tokens[index] === '/') {
+      const op = tokens[index++];
+      const rhs = atom();
+      if (op === '/' && rhs.value === 0) throw new Error('Division by zero');
+      let linear = null;
+      if (lhs.linear && rhs.linear) {
+        if (op === '*') {
+          if (lhs.linear.terms.size === 0) linear = scaleLinear(rhs.linear, lhs.linear.constVal);
+          else if (rhs.linear.terms.size === 0) linear = scaleLinear(lhs.linear, rhs.linear.constVal);
+        } else if (rhs.linear.terms.size === 0 && rhs.linear.constVal !== 0) {
+          linear = scaleLinear(lhs.linear, 1 / rhs.linear.constVal);
+        }
+      }
+      lhs = { value: op === '*' ? lhs.value * rhs.value : lhs.value / rhs.value, linear };
+    }
+    return lhs;
+  };
+  const sum = () => {
+    let lhs = product();
+    while (tokens[index] === '+' || tokens[index] === '-') {
+      const op = tokens[index++];
+      const rhs = product();
+      lhs = {
+        value: op === '+' ? lhs.value + rhs.value : lhs.value - rhs.value,
+        linear: combineLinear(lhs.linear, rhs.linear, op === '+' ? 1 : -1),
+      };
+    }
+    return lhs;
+  };
+  const result = sum();
+  if (index !== tokens.length || !Number.isFinite(result.value)) throw new Error('Invalid aggregation formula');
+  return result;
 }
 
 export function matchesReportAccount(db, account, selectors) {
@@ -188,27 +252,38 @@ export function evaluateStoredReport(db, report, period, options = {}) {
   const evaluate = (expr) => {
     if (memo.has(expr.id)) return memo.get(expr.id);
     const needAccounts = breakdownExprIds.has(expr.id);
-    const accValues = needAccounts ? new Map() : null;
+    let accValues = needAccounts ? new Map() : null;
     let value = 0;
     if (expr.engine === 'aggregation') {
       const text = String(expr.formula);
       const unwrapped = isNonBalanceCol ? /^-\((.*)\)$/.exec(text) : null;
       const exprText = unwrapped ? unwrapped[1] : text;
-      const refExprs = [];
-      const tokenized = exprText.replace(referencePattern, (_all, code, label) => {
-        const refExpr = lookup.get(`${code}.${label}`);
-        refExprs.push(refExpr);
-        return `(${evaluate(refExpr)})`;
-      });
-      value = arithmetic(tokenized);
+      const { value: evaluatedValue, linear } = evaluateAggregation(
+        exprText,
+        (ref) => {
+          const refExpr = lookup.get(ref);
+          if (!refExpr) throw new Error(`Unknown report expression: ${ref}`);
+          const refValue = evaluate(refExpr);
+          const refLinear = needAccounts && accountMemo.has(refExpr.id)
+            ? { constVal: 0, terms: new Map([[refExpr.id, 1]]) }
+            : null;
+          return { value: refValue, linear: refLinear };
+        },
+        needAccounts,
+      );
+      value = evaluatedValue;
       if (needAccounts) {
-        const refMaps = refExprs.map((refExpr) => accountMemo.get(refExpr.id));
-        const accIds = new Set();
-        for (const map of refMaps) if (map) for (const accId of map.keys()) accIds.add(accId);
-        for (const accId of accIds) {
-          let refIdx = 0;
-          const accFormula = exprText.replace(referencePattern, () => `(${refMaps[refIdx++]?.get(accId) ?? 0})`);
-          accValues.set(accId, round(arithmetic(accFormula)));
+        if (!linear || Math.abs(linear.constVal) >= 1e-12) {
+          accValues = null;
+        } else {
+          for (const [refExprId, coeff] of linear.terms) {
+            const refMap = accountMemo.get(refExprId);
+            if (!refMap) continue;
+            for (const [accId, amt] of refMap) {
+              accValues.set(accId, (accValues.get(accId) ?? 0) + coeff * amt);
+            }
+          }
+          for (const [accId, amt] of accValues) accValues.set(accId, round(amt));
         }
       }
     } else {
@@ -276,7 +351,7 @@ export function evaluateStoredReport(db, report, period, options = {}) {
     }
     value = round(value);
     memo.set(expr.id, value);
-    if (needAccounts) accountMemo.set(expr.id, accValues);
+    if (needAccounts && accValues) accountMemo.set(expr.id, accValues);
     return value;
   };
   const result = lines

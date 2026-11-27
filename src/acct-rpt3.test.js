@@ -367,3 +367,95 @@ test('stored foldable breakdown matches legacy accountRows across columns, group
   assert.equal(breakdown.find((r) => r.code === 'REV').accountExpressions.balance.get(incAcc.id), 300);
   assert.equal(breakdown.find((r) => r.code === 'GROSS').accountExpressions.balance.size, 0);
 });
+
+import { isExpandableLine } from './models/configurableReports.js';
+
+test('foldable aggregations with disjoint division or additive constants evaluate totals without broken account breakdowns', () => {
+  let db = seed();
+  const yr = 2092;
+  const secondExp = create(db, 'account.account', { code: '601000', name: 'Other Expense', account_type: 'expense', company_id: 1 });
+  db = secondExp.db;
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: `${yr}-02-10`,
+    lines: [
+      { account: '400000', credit: 300 },
+      { account: '600000', debit: 100 },
+      { account: '601000', debit: 50 },
+      { account: '101401', debit: 150 },
+    ],
+  }).db;
+  const report = create(db, 'account.report', { name: 'Ratio and Constant Report', company_id: 1, line_ids: [] });
+  db = report.db;
+  const makeLine = (code, sequence, foldable = false) => {
+    const res = create(db, 'account.report.line', { report_id: report.id, name: code, code, sequence, foldable });
+    db = res.db;
+    return res.id;
+  };
+  const revId = makeLine('REV', 10);
+  const expId = makeLine('EXP', 20);
+  const ratioId = makeLine('RATIO', 30, true);
+  const offsetId = makeLine('OFFSET', 40, true);
+  const depId = makeLine('DEP_RATIO', 50, true);
+  const scaledId = makeLine('SCALED', 60, true);
+  const addExpr = (report_line_id, engine, formula, subformula = 'sum') => {
+    db = create(db, 'account.report.expression', { report_line_id, label: 'balance', engine, formula, subformula, date_scope: 'strict_range' }).db;
+  };
+  addExpr(revId, 'domain', '[["account_type","=","income"]]', '-sum');
+  addExpr(expId, 'domain', '[["account_type","=","expense"]]', 'sum');
+  addExpr(ratioId, 'aggregation', 'REV.balance / EXP.balance');
+  addExpr(offsetId, 'aggregation', 'EXP.balance + 100');
+  addExpr(depId, 'aggregation', 'RATIO.balance + EXP.balance');
+  addExpr(scaledId, 'aggregation', '3 * EXP.balance - REV.balance');
+
+  const period = { from: `${yr}-01-01`, to: `${yr}-12-31` };
+  const rep = read(db, 'account.report', report.id);
+  const out = configurableReport(db, rep, period);
+  const rowOf = (code) => out.rows.find((row) => row.code === code);
+  assert.equal(rowOf('RATIO').values[0], 2);
+  assert.deepEqual(rowOf('RATIO').accountRows, []);
+  assert.equal(isExpandableLine(rowOf('RATIO')), false);
+  assert.equal(rowOf('OFFSET').values[0], 250);
+  assert.deepEqual(rowOf('OFFSET').accountRows, []);
+  assert.equal(isExpandableLine(rowOf('OFFSET')), false);
+  assert.equal(rowOf('DEP_RATIO').values[0], 152);
+  assert.deepEqual(rowOf('DEP_RATIO').accountRows, []);
+  assert.equal(rowOf('SCALED').values[0], 150);
+  assert.equal(rowOf('SCALED').accountRows.reduce((sum, item) => sum + item.values[0], 0), 150);
+  assert.equal(isExpandableLine(rowOf('SCALED')), true);
+
+  const raw = evaluateStoredReport(db, rep, period, { includeAccountBreakdown: true });
+  assert.equal(raw.find((row) => row.code === 'RATIO').accountExpressions.balance.size, 0);
+  assert.equal(raw.find((row) => row.code === 'OFFSET').accountExpressions.balance.size, 0);
+  assert.equal(raw.find((row) => row.code === 'DEP_RATIO').accountExpressions.balance.size, 0);
+});
+
+test('deleting an inline statement line referenced by a retained stored aggregation expression is rejected', () => {
+  let db = seed();
+  const report = db.records['account.report'].find((item) => item.kind === 'pnl' && item.company_id === 1);
+  const custom = create(db, 'account.report.line', { report_id: report.id, name: 'Double Sales', code: 'DBL_SALES', sequence: 25 });
+  db = custom.db;
+  db = create(db, 'account.report.expression', {
+    report_line_id: custom.id,
+    label: 'balance',
+    engine: 'aggregation',
+    formula: 'OPINC.balance * 2',
+    date_scope: 'strict_range',
+  }).db;
+  const nextInline = report.line_ids
+    .filter((item) => item.code !== 'OPINC')
+    .map((item) => (item.code === 'REV' ? { ...item, formula: 'type:income', sign: -1 } : item.code === 'GROSS' ? { ...item, formula: 'REV - COR' } : item));
+  assert.throws(
+    () => write(db, 'account.report', report.id, { line_ids: nextInline }),
+    /Cannot delete report line OPINC: still referenced by DBL_SALES/,
+  );
+  assert.doesNotThrow(() => configurableReport(db, read(db, 'account.report', report.id), { from: '2026-01-01', to: '2026-12-31' }));
+
+  const opinc = db.records['account.report.line'].find((item) => item.report_id === report.id && item.code === 'OPINC');
+  db = write(db, 'account.report.line', opinc.id, { code: 'RENAMED_OPINC' });
+  assert.throws(
+    () => write(db, 'account.report', report.id, { line_ids: nextInline }),
+    /Cannot delete report line RENAMED_OPINC: still referenced by DBL_SALES/,
+  );
+});

@@ -1727,6 +1727,19 @@ export function debitNote(db, r, options = {}) {
   return { db: next, id, go: `#/accounting/${isPurchase(r) ? 'bills' : 'invoices'}/${id}` };
 }
 
+/**
+ * Customer preview action for account.move: renders the customer-facing view
+ * without opening the browser print dialog or mutating the record.
+ */
+export function previewInvoice(db, r) {
+  const move = typeof r === 'object' ? r : read(db, 'account.move', r);
+  if (!move?.id) throw new Error('Save the document before previewing');
+  if (!['out_invoice', 'out_refund'].includes(move?.move_type)) {
+    throw new Error('Only customer invoices and credit notes can be previewed');
+  }
+  return { db, go: `#/preview/account.move/${move.id}` };
+}
+
 /** Early-payment discount available on `date` for an unpaid invoice (0 when its term has none or the window passed). */
 export function discountAvailable(db, r, date = today()) {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
@@ -5214,8 +5227,13 @@ export const accountingModels = {
           run: debitNote,
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
-        { label: 'Preview', when: (r) => r.state === 'posted' && ['out_invoice', 'out_refund'].includes(r.move_type), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}?report=preview` }) },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: downloadMoves },
+        {
+          label: 'Preview',
+          name: 'preview_invoice',
+          when: (r) => ['out_invoice', 'out_refund'].includes(r?.move_type),
+          run: (db, r) => previewInvoice(db, r),
+        },
         {
           label: 'Reset to Draft',
           when: (r, db) => canResetMove(r, db),

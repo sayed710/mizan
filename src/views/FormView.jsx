@@ -705,7 +705,7 @@ export function FormView({ leaf, id, base, params }) {
             <span>{isNew ? t('New') : displayTitle}</span>
           </nav>
           {(!isNew || visibleMenuActions.length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} onError={fail} />}
-          {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && current.move_type === 'out_invoice')) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
+          {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && ['out_invoice', 'out_refund'].includes(current.move_type))) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
           {dirty && (
             <span className="dirty">
               <button type="button" className="btn primary sm" onClick={() => save()}>{t('Save')}</button>

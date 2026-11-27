@@ -66,6 +66,7 @@ const patterns = {
   'Unknown report expression: {1}': 'تعبير تقرير غير معروف: {1}',
   'Report expression cycle involving {1}': 'حلقة في تعبيرات التقرير تتضمن {1}',
   'Report line {1} needs a balance expression': 'بند التقرير {1} يحتاج إلى تعبير رصيد',
+  'Cannot delete report line {1}: still referenced by {2}': 'لا يمكن حذف بند التقرير {1}: ما زال مشاراً إليه في {2}',
   'Unsupported stored engine for report rendering: {1}': 'المحرك المحفوظ غير مدعوم لعرض التقرير: {1}',
   'Configure the {1} account on {2}': 'حدّد حساب {1*} على {2*}',
   'The {1} account on {2} belongs to another company': 'حساب {1*} على {2*} يتبع شركة أخرى',

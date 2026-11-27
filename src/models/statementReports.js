@@ -1,4 +1,5 @@
 import { create, read } from '../orm.js';
+import { aggregationReferences, validateReportExpressions } from './reportEngine.js';
 
 /** Default Odoo 20 Profit and Loss line hierarchy selecting accounts by account_type. */
 export const STANDARD_PNL_LINES = [
@@ -203,5 +204,33 @@ export function syncInlineStatementLines(db, before, after) {
   const retained = oldLines
     .filter((line) => !oldInline.has(line.inline_code ?? line.code) && !ids.has(line.inline_code ?? line.code))
     .map((line) => (removedIds.has(line.parent_id) ? { ...line, parent_id: survivingParentId(line.parent_id) } : line));
-  return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': [...allLines.filter((line) => line.report_id !== after.id), ...retained, ...updated], 'account.report.expression': nextExpressions } };
+  const nextReportLines = [...retained, ...updated];
+  const nextReportLineById = new Map(nextReportLines.map((line) => [line.id, line]));
+  const nextReportExpressions = nextExpressions.filter((item) => nextReportLineById.has(item.report_line_id));
+  if (removedIds.size) {
+    const removedCodes = new Set(
+      oldLines
+        .filter((line) => removedIds.has(line.id))
+        .flatMap((line) => [line.code, line.inline_code])
+        .filter(Boolean),
+    );
+    const survivingKeys = new Set();
+    for (const expr of nextReportExpressions) {
+      const code = nextReportLineById.get(expr.report_line_id)?.code;
+      if (code) survivingKeys.add(`${code}.${expr.label}`);
+    }
+    for (const expr of nextReportExpressions) {
+      if (expr.engine !== 'aggregation') continue;
+      for (const ref of aggregationReferences(expr.formula)) {
+        const [refCode] = ref.split('.');
+        if (removedCodes.has(refCode) && !survivingKeys.has(ref)) {
+          const owner = nextReportLineById.get(expr.report_line_id);
+          throw new Error(`Cannot delete report line ${refCode}: still referenced by ${owner?.code || owner?.name || `line:${expr.report_line_id}`}`);
+        }
+      }
+    }
+  }
+  const validationError = validateReportExpressions(nextReportLines, nextReportExpressions);
+  if (validationError) throw new Error(validationError);
+  return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': [...allLines.filter((line) => line.report_id !== after.id), ...nextReportLines], 'account.report.expression': nextExpressions } };
 }
