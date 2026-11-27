@@ -155,7 +155,7 @@ export function commit(next, { quiet = false } = {}) {
   // Diff against the snapshot this transition was computed from, so a poll landing in between
   // can't turn other users' newer changes into reverts.
   const diff = mode === 'server' ? diffDb(db, next) : null;
-  const job = { diff };
+  const job = { diff, ids: Object.fromEntries(Object.entries(diff?.created ?? {}).map(([model, ids]) => [model, Object.fromEntries(ids.map((id) => [id, id]))])) };
   db = next;
   notify();
   if (mode === 'local') {
@@ -184,12 +184,17 @@ export function commit(next, { quiet = false } = {}) {
       db = confirmed = saved;
       if (remapped) {
         const identities = queuedRemap([...pending].map((p) => p.diff), remapped);
-        for (const queued of pending) queued.diff = remapDiff(queued.diff, identities);
+        for (const queued of pending) {
+          queued.diff = remapDiff(queued.diff, identities);
+          for (const [model, ids] of Object.entries(queued.ids)) for (const original of Object.keys(ids)) ids[original] = identities[model]?.[ids[original]] ?? ids[original];
+        }
         remaps.push(identities);
         window.dispatchEvent(new CustomEvent('mizan:remapped', { detail: identities }));
       }
       notify();
-      return { ok: true };
+      const resolved = Object.fromEntries(Object.entries(job.ids).map(([model, ids]) => [model,
+        Object.fromEntries(Object.entries(ids).map(([original, id]) => [original, remapped?.[model]?.[id] ?? id]))]));
+      return { ok: true, remapped: resolved };
     }
     if (r.data?.db) confirmed = r.data.db;
     return failed(r.data?.error ?? 'Could not save changes');

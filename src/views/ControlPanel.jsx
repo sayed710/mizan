@@ -114,7 +114,7 @@ function SearchPanel({ model, search, setSearch, onClose, filters = null, groupB
   );
 }
 
-export function ControlPanel({ model, title, newHref, base, view, search, setSearch, extra, filters = null, groupBys = null, listLabels = null, groupByLabels = null, listFields = null }) {
+export function ControlPanel({ model, title, newHref, base, view, search, setSearch, extra, besideNew = null, filters = null, groupBys = null, listLabels = null, groupByLabels = null, listFields = null }) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -136,6 +136,7 @@ export function ControlPanel({ model, title, newHref, base, view, search, setSea
     <div className="control-panel">
       <div className="cp-left">
         {newHref && <a className="btn primary" href={newHref}>{t('New')}</a>}
+        {besideNew}
         <h1 className="cp-title">{t(title)}</h1>
       </div>
       <div className="search-wrap" ref={ref}>
