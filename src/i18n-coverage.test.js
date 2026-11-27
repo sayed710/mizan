@@ -79,6 +79,17 @@ test('every literal error and dialog message has an Arabic translation', () => {
   assert.deepEqual(missing, []);
 });
 
+test('every Arabic UI and error translation is readable Arabic without placeholder question marks', () => {
+  const corrupted = [...uiStrings(), ...messageStrings()].filter((k) => !BRANDS.has(k) && /\?{2,}/.test(t(k)));
+  assert.deepEqual(corrupted, []);
+  for (const key of ['No access to that company', 'Select an active partner belonging to the bill company']) {
+    const translated = t(key);
+    assert.notEqual(translated, key);
+    assert.match(translated, /[\u0600-\u06FF]/);
+    assert.doesNotMatch(translated, /\?/);
+  }
+});
+
 test('custom fields named name or email retain their user-entered label in Arabic mode', () => {
   const customNameField = { type: 'char', label: 'Custom Name', custom: true };
   const customEmailField = { type: 'char', label: 'Custom Email', custom: true };

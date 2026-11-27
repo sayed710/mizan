@@ -15,7 +15,7 @@ async function startServer() {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-companies-'));
   try {
     const server = await spawnTestServer({
-      env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: PASSWORD },
+      env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: PASSWORD, MIZAN_AI: '1' },
     });
     return {
       url: server.url,
@@ -177,3 +177,36 @@ test('category PATCH responses for company-limited users do not expose hidden co
   }
 });
 
+
+test('bill upload rejects unauthorized companies and invalid partners before creating anything', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    const { body: initial } = await admin('GET', '/api/db');
+    const branch = createCompany(initial, { name: 'Upload branch', currency_id: initial.records['res.company'][0].currency_id });
+    const foreign = create(branch.db, 'res.partner', { name: 'Foreign upload partner', company_id: branch.id });
+    const inactive = create(foreign.db, 'res.partner', { name: 'Inactive upload partner', company_id: 1, active: false });
+    assert.equal((await admin('POST', '/api/diff', diffDb(initial, inactive.db))).status, 200);
+    assert.equal((await admin('POST', '/api/users', { login: 'uploadclerk', name: 'Upload clerk', password: 'clerk-password', companies: '1' })).status, 201);
+    const clerk = client(url);
+    await clerk('POST', '/api/login', { login: 'uploadclerk', password: 'clerk-password' });
+    const { body: before } = await admin('GET', '/api/db');
+    const file = { type: 'application/pdf', data: 'AA', name: 'bill.pdf' };
+    const denied = await clerk('POST', '/api/integrations/digitize-new-bill', { company_id: branch.id, file });
+    assert.equal(denied.status, 400);
+    assert.match(denied.body.error, /No access to that company/);
+    for (const partner_id of [foreign.id, inactive.id, 999999]) {
+      const bad = await clerk('POST', '/api/integrations/digitize-new-bill', { company_id: 1, partner_id, file });
+      assert.equal(bad.status, 400);
+      assert.match(bad.body.error, /Select an active partner belonging to the bill company/);
+    }
+    // Missing company uses the user's current company, reaching document validation.
+    const missing = await clerk('POST', '/api/integrations/digitize-new-bill', { file: { type: 'bad', data: 'AA' } });
+    assert.match(missing.body.error, /Upload a PDF/);
+    const { body: after } = await admin('GET', '/api/db');
+    assert.deepEqual(after.records['account.move'], before.records['account.move']);
+  } finally {
+    await stop();
+  }
+});
