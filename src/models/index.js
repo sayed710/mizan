@@ -4,7 +4,7 @@ import { statementUrl } from '../statementNavigation.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels, creditNoteView, journalEntriesView, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
+import { accountingModels, creditNoteView, journalEntriesView, partnerCreateBillAction, partnerCreateInvoiceAction, partnerMenuActions, partnerRegisterPaymentAction, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels, customerPaymentView, vendorPaymentView } from './pay.js';
@@ -133,6 +133,10 @@ for (const [name, model] of Object.entries(models)) {
 models['hr.leave'].guard = leaveGuard;
 declareWorkflowFields(models);
 
+const partnerListActions = [partnerCreateInvoiceAction, partnerCreateBillAction, partnerRegisterPaymentAction];
+models['res.partner'].listActions = partnerListActions;
+models['res.partner'].menuActions = partnerMenuActions;
+
 // Views that need their own spec are offered only when the model has one (a missing kanban spec used to crash the screen).
 const SPEC_VIEWS = ['kanban', 'calendar', 'gantt'];
 export const viewsOf = (model) => {
@@ -174,9 +178,17 @@ const customers = {
       when: (db, user) => appOpen(db, user, 'accounting'),
       run: (db, ids) => ({ db: unpostponeFollowUp(db, ids, { companyId: db.settings?.current_company_id ?? 1, at: today() }) }),
     },
+    partnerCreateInvoiceAction,
+    partnerRegisterPaymentAction,
   ],
 };
-const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
+const vendors = {
+  key: 'vendors',
+  label: 'Vendors',
+  model: 'res.partner',
+  defaults: { supplier_rank: 1 },
+  listActions: [partnerCreateBillAction, partnerRegisterPaymentAction],
+};
 const products = { key: 'products', label: 'Products', model: 'product' };
 
 /**
