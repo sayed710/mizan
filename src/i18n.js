@@ -87,6 +87,22 @@ export function translateDialogs(page = globalThis) {
 }
 
 const ar = {
+  'Percentage of': 'النسبة من',
+  'Comparison in': 'المقارنة بوحدة',
+  'Rounding Unit': 'وحدة التقريب',
+  Decimals: 'المنازل العشرية',
+  Thousands: 'الآلاف',
+  Millions: 'الملايين',
+  'Default Opening Date Filter': 'مرشح تاريخ الافتتاح الافتراضي',
+  'Date Range': 'نطاق التاريخ',
+  'By Default': 'افتراضيًا',
+  'Period Comparison': 'مقارنة الفترات',
+  'Growth Comparison': 'مقارنة النمو',
+  'Line Comparison': 'مقارنة البنود',
+  'Account Parents': 'مجموعات الحسابات الرئيسية',
+  'Last Month': 'الشهر الماضي',
+  'Last Quarter': 'الربع الماضي',
+  'Last Year': 'السنة الماضية',
   'Reset': 'إعادة تعيين',
   'Show Reconciled': 'إظهار البنود المسوّاة',
   'Print Statement': 'طباعة الكشف',

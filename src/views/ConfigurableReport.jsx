@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react';
 import { search } from '../orm.js';
-import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, reportLineKey, targetCompanyIds } from '../models/configurableReports.js';
+import { accountJournalItemsHref, compareConfigurableReport, findStatementReport, isExpandableLine, reportAccountHierarchy, reportLineKey, targetCompanyIds } from '../models/configurableReports.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { today } from '../models/common.js';
 import { useDb } from '../store.js';
@@ -10,18 +10,31 @@ import { downloadCsv } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { periodsFor, selectedOptionIds } from './reportCompare.js';
-import { customPeriodError, DEFAULT_REPORT_PERIOD, reportPeriodRange } from './reportNavigation.js';
+import { customPeriodError, reportPeriodRange } from './reportNavigation.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
 import { toggleReportFold, toggleAllReportFolds } from './reportFold.js';
 
-function RowCells({ values, variance, showVariance }) {
+export function scaledReportAmount(value, unit = 'decimals') {
+  if (value == null) return null;
+  const divisor = unit === 'thousands' ? 1000 : unit === 'millions' ? 1000000 : 1;
+  const precision = unit === 'decimals' ? 100 : 1;
+  const scaled = Number(value) / divisor;
+  return Math.sign(scaled) * Math.round((Math.abs(scaled) + Number.EPSILON) * precision) / precision;
+}
+
+export function linePercentage(value, base) {
+  return value == null || base == null || base === 0 ? null : Math.round(value / base * 10000) / 100;
+}
+
+function RowCells({ values, variance, showVariance, showGrowth, growthDisplay, lineComparison, baseValue, unit, greenOnPositive }) {
   return (
     <>
-      {values.map((value, index) => <td className="num" key={index}>{value == null ? '' : money(value)}</td>)}
+      {values.map((value, index) => <td className="num" key={index}>{value == null ? '' : unit === 'decimals' ? money(value) : scaledReportAmount(value, unit).toLocaleString()}</td>)}
+      {lineComparison && <td className="num">{linePercentage(values[0], baseValue) == null ? '' : `${linePercentage(values[0], baseValue)}${t('%')}`}</td>}
       {showVariance && (
         <>
-          <td className="num">{variance?.amount == null ? '' : money(variance.amount)}</td>
-          <td className="num">{values.every((value) => value == null) ? '' : variance?.pct == null ? t('n/a') : `${variance.pct}${t('%')}`}</td>
+          <td className="num">{variance?.amount == null ? '' : unit === 'decimals' ? money(variance.amount) : scaledReportAmount(variance.amount, unit).toLocaleString()}</td>
+          {showGrowth && <td className="num" style={variance?.amount == null || greenOnPositive == null ? undefined : { color: (variance.amount >= 0) === greenOnPositive ? 'green' : 'red' }}>{growthDisplay === 'amount' ? (variance?.amount == null ? '' : unit === 'decimals' ? money(variance.amount) : scaledReportAmount(variance.amount, unit).toLocaleString()) : (variance?.pct == null ? '' : `${variance.pct}${t('%')}`)}</td>}
         </>
       )}
     </>
@@ -49,15 +62,34 @@ function scopedJournals(db, companyIds, ledger) {
 
 export { reportLineKey };
 
+export function reportHierarchyRows(db, line, openCodes) {
+  const rows = [];
+  const visit = (nodes, depth) => {
+    for (const node of nodes) {
+      if (node.group) {
+        const key = `${reportLineKey(line)}:group:${node.group.id}`;
+        const previous = node.values.at(-2);
+        const current = node.values.at(-1);
+        const variance = node.values.length > 1 ? { amount: current - previous, pct: previous ? Math.round((current - previous) / Math.abs(previous) * 10000) / 100 : null } : null;
+        rows.push({ ...node, key, depth, variance });
+        if (openCodes.has(key)) visit(node.children, depth + 1);
+      } else rows.push({ ...node, depth });
+    }
+  };
+  visit(reportAccountHierarchy(db, line.accountRows), 1);
+  return rows;
+}
+
 /** Build structured CSV/XLSX rows from computed report data (preserving hierarchy indentation and numeric values). */
-export function configurableReportExportRows(data, openCodes = new Set()) {
+export function configurableReportExportRows(data, openCodes = new Set(), unit = 'decimals') {
   if (!data) return [];
-  const headerLabels = [...data.headers, ...(data.showVariance ? ['Variance', '%'] : [])]
+  const headerLabels = [...data.headers, ...(data.lineComparison ? ['%'] : []), ...(data.showVariance ? ['Variance', ...(data.showGrowth !== false ? [data.growthDisplay === 'amount' ? 'Amount' : '%'] : [])] : [])]
     .map((header) => header.split(' ').map((part) => t(part)).join(' '));
+  if (data.unitLabel) for (let index = 0; index < data.headers.length; index++) headerLabels[index] += ` (${data.unitLabel})`;
   const rows = [[t('Report Lines'), ...headerLabels]];
   const formatVariance = (variance) => (
     data.showVariance
-      ? [variance?.amount == null ? '' : Number(variance.amount), variance?.pct == null ? t('n/a') : `${variance.pct}${t('%')}`]
+      ? [variance?.amount == null ? '' : scaledReportAmount(variance.amount, unit), ...(data.showGrowth !== false ? [data.growthDisplay === 'amount' ? (variance?.amount == null ? '' : scaledReportAmount(variance.amount, unit)) : (variance?.pct == null ? '' : `${variance.pct}${t('%')}`)] : [])]
       : []
   );
   const indent = (depth, label) => `${'  '.repeat(Math.max(0, Number(depth) || 0))}${label}`;
@@ -65,14 +97,16 @@ export function configurableReportExportRows(data, openCodes = new Set()) {
     const depth = Number(line.depth) || 0;
     rows.push([
       indent(depth, t(line.name)),
-      ...line.values.map((v) => (v == null ? '' : Number(v))),
+      ...line.values.map((v) => (v == null ? '' : scaledReportAmount(v, unit))),
+      ...(data.lineComparison ? [linePercentage(line.values[0], data.baseValue) == null ? '' : `${linePercentage(line.values[0], data.baseValue)}${t('%')}`] : []),
       ...formatVariance(line.variance),
     ]);
     if (isExpandableLine(line) && openCodes?.has(reportLineKey(line))) {
-      for (const acc of line.accountRows) {
+      for (const acc of data.hierarchyDb ? reportHierarchyRows(data.hierarchyDb, line, openCodes) : line.accountRows.map((item) => ({ ...item, depth: 1 }))) {
         rows.push([
-          indent(depth + 1, `${acc.account.code} ${acc.account.name}`),
-          ...acc.values.map((v) => (v == null ? '' : Number(v))),
+          indent(depth + acc.depth, acc.group ? `${acc.group.code_prefix_start ?? ''} ${acc.group.name}` : `${acc.account.code} ${acc.account.name}`),
+          ...acc.values.map((v) => (v == null ? '' : scaledReportAmount(v, unit))),
+          ...(data.lineComparison ? [linePercentage(acc.values[0], data.baseValue) == null ? '' : `${linePercentage(acc.values[0], data.baseValue)}${t('%')}`] : []),
           ...formatVariance(acc.variance),
         ]);
       }
@@ -84,13 +118,20 @@ export function configurableReportExportRows(data, openCodes = new Set()) {
 /** Render an editable account.report either by record ID or by standard statement kind ('pnl' / 'balance'). */
 export function ConfigurableReportPage({ id, statementKind = null, title = null }) {
   const sourceDb = useDb();
+  const initialReport = statementKind ? findStatementReport(sourceDb, statementKind) : (sourceDb.records['account.report'] ?? []).find((item) => item.id === Number(id));
+  const initialFilter = initialReport?.default_opening_date_filter ?? (statementKind === 'balance' ? 'today' : 'this_year');
+  const initialPeriodKey = ({ this_year: 'year', this_quarter: 'quarter', this_month: 'month', today: 'today', previous_month: 'previous_month', previous_quarter: 'previous_quarter', previous_year: 'previous_year' })[initialFilter] ?? 'year';
   const [companyId, setCompanyId] = useState('all');
-  const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
+  const [periodKey, setPeriodKey] = useState(initialPeriodKey);
   const [comparison, setComparison] = useState('none');
+  const [roundingUnit, setRoundingUnit] = useState('decimals');
+  const [hierarchy, setHierarchy] = useState(initialReport?.filter_hierarchy === 'by_default');
+  const [baseLine, setBaseLine] = useState('');
+  const [growthDisplay, setGrowthDisplay] = useState('percent');
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
   const [includeUnposted, setIncludeUnposted] = useState(false);
-  const [hideZeroLines, setHideZeroLines] = useState(false);
+  const [hideZeroLines, setHideZeroLines] = useState(initialReport?.filter_hide_0_lines === 'by_default');
   const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const [from, setFrom] = useState(`${today().slice(0, 4)}-01-01`);
   const [to, setTo] = useState(statementKind ? today() : `${today().slice(0, 4)}-12-31`);
@@ -154,12 +195,13 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
       }
     : companyDb;
 
-  const period = statementKind
-    ? (periodKey === 'custom' ? { from, to } : reportPeriodRange(companyDb, periodKey, { companyId: primaryCompanyId }))
-    : { from, to };
-  const comparable = !statementKind || periodKey !== 'all';
-  const activePeriodKey = statementKind ? periodKey : 'custom';
-  const periodError = customPeriodError(activePeriodKey, period, { requireFrom: comparable && comparison !== 'none' });
+  const preset = periodKey.startsWith('previous_') ? periodKey.slice(9) : periodKey;
+  const period = periodKey === 'custom' ? { from: report.filter_date_range === false ? '' : from, to }
+    : periodKey === 'today' ? { from: today(), to: today() }
+      : reportPeriodRange(companyDb, preset, { companyId: primaryCompanyId, offset: periodKey.startsWith('previous_') ? -1 : 0 });
+  const comparable = periodKey !== 'all';
+  const activePeriodKey = ['month', 'quarter', 'year'].includes(periodKey) ? periodKey : 'custom';
+  const periodError = customPeriodError(activePeriodKey, period, { requireFrom: report.filter_date_range !== false && comparable && comparison !== 'none' && comparison !== 'report_line' });
   const canComputePeriods = !periodError;
   const reportCompany = report.company_id ?? 1;
   const groups = comparable
@@ -178,10 +220,11 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   let computeError = null;
   if (!periodError && !groupSelectionError) {
     try {
-      const periods = comparable && comparison !== 'none' && canComputePeriods
+      const comparisonPeriod = period.from ? period : { ...period, from: period.to };
+      const periods = comparable && comparison !== 'none' && comparison !== 'report_line' && canComputePeriods
         ? (statementKind && activePeriodKey !== 'custom'
-          ? periodsFor(activePeriodKey, comparison, period, { db: companyDb, companyId: primaryCompanyId })
-          : periodsFor(activePeriodKey, comparison, period))
+          ? periodsFor(activePeriodKey, comparison, comparisonPeriod, { db: companyDb, companyId: primaryCompanyId })
+          : periodsFor(activePeriodKey, comparison, comparisonPeriod))
         : [{ ...period, label: '' }];
       data = compareConfigurableReport(
         db,
@@ -191,6 +234,11 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
         group,
         { companyIds, analyticAccountIds, includeUnposted, hideZeroLines, includeZeroRows: Boolean(statementKind) },
       );
+      data.showGrowth = report.filter_growth_comparison !== false && data.showVariance;
+      data.growthDisplay = growthDisplay;
+      data.lineComparison = comparison === 'report_line';
+      data.baseValue = data.rows.find((line) => reportLineKey(line) === baseLine)?.values[0] ?? null;
+      if (hierarchy && report.filter_hierarchy !== 'never') data.hierarchyDb = db;
     } catch (error) {
       console.error('Could not compute configurable report:', error, {
         reportId: report.id,
@@ -203,13 +251,18 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
   }
   const inlineError = periodError ?? groupSelectionError ?? computeError;
 
-  const expandableCodes = data ? data.rows.filter(isExpandableLine).map(reportLineKey) : [];
+  const expandableCodes = data ? data.rows.filter(isExpandableLine).flatMap((line) => {
+    const keys = [reportLineKey(line)];
+    const visit = (nodes) => nodes.forEach((node) => { if (node.group) { keys.push(`${reportLineKey(line)}:group:${node.group.id}`); visit(node.children); } });
+    if (data.hierarchyDb) visit(reportAccountHierarchy(db, line.accountRows));
+    return keys;
+  }) : [];
   const toggle = (code) => setOpenCodes((prev) => toggleReportFold(prev, code));
 
   const exportCsv = () => {
     if (!data) return;
     const baseName = statementKind || report.code || report.name || 'report';
-    downloadCsv(`${String(baseName).toLowerCase().replace(/\s+/g, '_')}.csv`, configurableReportExportRows(data, openCodes));
+    downloadCsv(`${String(baseName).toLowerCase().replace(/\s+/g, '_')}.csv`, configurableReportExportRows(data, openCodes, roundingUnit));
   };
 
   const exportXlsx = () => {
@@ -219,16 +272,22 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     const columnTypes = [
       'text',
       ...data.headers.map(() => 'number'),
-      ...(data.showVariance ? ['number', 'text'] : []),
+      ...(data.lineComparison ? ['text'] : []),
+      ...(data.showVariance ? ['number', ...(data.showGrowth ? [growthDisplay === 'amount' ? 'number' : 'text'] : [])] : []),
     ];
     downloadXlsx(
       `${String(baseName).toLowerCase().replace(/\s+/g, '_')}.xlsx`,
-      configurableReportExportRows(data, openCodes),
+      configurableReportExportRows(data, openCodes, roundingUnit),
       { sheetName, columnTypes },
     );
   };
 
   const printCompany = isPrinting ? documentCompany(companyDb, { company_id: statementKind ? primaryCompanyId : reportCompany }) : null;
+  const currencyCompany = (companyDb.records['res.company'] ?? []).find((company) => company.id === (statementKind ? primaryCompanyId : reportCompany));
+  const currency = (companyDb.records['res.currency'] ?? []).find((item) => item.id === (currencyCompany?.currency_id ?? companyDb.settings?.base_currency_id));
+  const currencySymbol = currency?.symbol || currency?.name || '';
+  const unitLabel = ({ decimals: `.${currencySymbol}`, units: currencySymbol, thousands: `k${currencySymbol}`, millions: `M${currencySymbol}` })[roundingUnit];
+  if (data) data.unitLabel = unitLabel;
   const scopedCompanyIds = isPrinting
     ? targetCompanyIds(companyDb, { ...report, company_id: reportCompany }, group, { companyIds })
     : [];
@@ -249,13 +308,17 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                 <option value="month">{t('This Month')}</option>
                 <option value="quarter">{t('This Quarter')}</option>
                 <option value="year">{t('This Year')}</option>
+                <option value="today">{t('Today')}</option>
+                <option value="previous_month">{t('Last Month')}</option>
+                <option value="previous_quarter">{t('Last Quarter')}</option>
+                <option value="previous_year">{t('Last Year')}</option>
                 <option value="all">{t('All Dates')}</option>
                 <option value="custom">{t('Custom Period')}</option>
               </select>
             </label>
             {periodKey === 'custom' && (
               <>
-                <label>{t('From')}<input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+                {report.filter_date_range !== false && <label>{t('From')}<input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>}
                 <label>{t('To')}<input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
               </>
             )}
@@ -288,14 +351,13 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                 </select>
               </label>
             )}
-            {comparable && (
+            {comparable && (report.filter_period_comparison !== false || report.filter_line_comparison) && (
               <label className="inline-select">
                 {t('Comparison')}
                 <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setGroupId(''); }}>
                   <option value="none">{t('No comparison')}</option>
-                  <option value="previous">{t('Previous Period')}</option>
-                  <option value="lastYear">{t('Same Period Last Year')}</option>
-                  <option value="last3">{t('Last 3 Periods')}</option>
+                  {report.filter_period_comparison !== false && <><option value="previous">{t('Previous Period')}</option><option value="lastYear">{t('Same Period Last Year')}</option><option value="last3">{t('Last 3 Periods')}</option></>}
+                  {report.filter_line_comparison && <option value="report_line">{t('Percentage of')}</option>}
                 </select>
               </label>
             )}
@@ -312,8 +374,6 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
           </>
         ) : (
           <>
-            <label>{t('From')}<input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
-            <label>{t('To')}<input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
             <label>
               {t('Horizontal Group')}
               <select aria-label={t('Horizontal Group')} value={group ? String(group.id) : String(groupId)} onChange={(e) => { setGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
@@ -321,14 +381,18 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                 {groups.map((g) => <option value={g.id} key={g.id}>{g.name}</option>)}
               </select>
             </label>
-            {comparable && (
+            <label>{t('Period')}<select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
+              <option value="year">{t('This Year')}</option><option value="quarter">{t('This Quarter')}</option><option value="month">{t('This Month')}</option><option value="today">{t('Today')}</option><option value="previous_month">{t('Last Month')}</option><option value="previous_quarter">{t('Last Quarter')}</option><option value="previous_year">{t('Last Year')}</option><option value="custom">{t('Custom Period')}</option>
+            </select></label>
+            {report.filter_date_range !== false && <label>{t('From')}<input aria-label={t('From')} type="date" value={periodKey === 'custom' ? from : period.from} onChange={(e) => { setFrom(e.target.value); setTo(period.to); setPeriodKey('custom'); }} /></label>}
+            <label>{t('To')}<input aria-label={t('To')} type="date" value={periodKey === 'custom' ? to : period.to} onChange={(e) => { setFrom(period.from); setTo(e.target.value); setPeriodKey('custom'); }} /></label>
+            {comparable && (report.filter_period_comparison !== false || report.filter_line_comparison) && (
               <label className="inline-select">
                 {t('Comparison')}
                 <select aria-label={t('Comparison')} value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setGroupId(''); }}>
                   <option value="none">{t('No comparison')}</option>
-                  <option value="previous">{t('Previous Period')}</option>
-                  <option value="lastYear">{t('Same Period Last Year')}</option>
-                  <option value="last3">{t('Last 3 Periods')}</option>
+                  {report.filter_period_comparison !== false && <><option value="previous">{t('Previous Period')}</option><option value="lastYear">{t('Same Period Last Year')}</option><option value="last3">{t('Last 3 Periods')}</option></>}
+                  {report.filter_line_comparison && <option value="report_line">{t('Percentage of')}</option>}
                 </select>
               </label>
             )}
@@ -350,11 +414,17 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
         <label className="inline-select">
           <input type="checkbox" checked={includeUnposted} onChange={(e) => setIncludeUnposted(e.target.checked)} /> {t('Include Unposted Entries')}
         </label>
-        {statementKind && <label className="inline-select">
+        <label>{t('Rounding Unit')}<select value={roundingUnit} onChange={(e) => setRoundingUnit(e.target.value)}>
+          <option value="decimals">{t('Decimals')} (.{currencySymbol})</option><option value="units">{t('Units')} ({currencySymbol})</option><option value="thousands">{t('Thousands')} (k{currencySymbol})</option><option value="millions">{t('Millions')} (M{currencySymbol})</option>
+        </select></label>
+        {report.filter_hierarchy !== 'never' && <label><input type="checkbox" checked={hierarchy} onChange={(event) => setHierarchy(event.target.checked)} /> {t('Account Parents')}</label>}
+        {comparison === 'report_line' && data && <label>{t('Percentage of')}<select aria-label={t('Percentage of')} value={baseLine} onChange={(event) => setBaseLine(event.target.value)}><option value="">{t('None')}</option>{data.rows.map((line) => <option key={reportLineKey(line)} value={reportLineKey(line)}>{t(line.name)}</option>)}</select></label>}
+        {data?.showGrowth && <label>{t('Comparison in')}<select aria-label={t('Comparison in')} value={growthDisplay} onChange={(event) => setGrowthDisplay(event.target.value)}><option value="percent">{t('Percentage')}</option><option value="amount">{t('Amount')}</option></select></label>}
+        {report.filter_hide_0_lines !== 'never' && <label className="inline-select">
           <input type="checkbox" checked={hideZeroLines} onChange={(e) => setHideZeroLines(e.target.checked)} /> {t('Hide lines at 0')}
         </label>}
         <span className="spacer" />
-        <ReportFoldAll keys={expandableCodes} open={openCodes} onToggle={() => setOpenCodes((prev) => toggleAllReportFolds(prev, expandableCodes))} />
+        {report.filter_unfold_all !== false && <ReportFoldAll keys={expandableCodes} open={openCodes} onToggle={() => setOpenCodes((prev) => toggleAllReportFolds(prev, expandableCodes))} />}
         <button type="button" className="btn sm" disabled={!data} onClick={() => setIsPrinting(true)}>{t('Print')}</button>
         <button type="button" className="btn sm" disabled={!data} onClick={exportCsv}>{t('Download CSV')}</button>
         <button type="button" className="btn sm" disabled={!data} onClick={exportXlsx}>{t('Export XLSX')}</button>
@@ -373,7 +443,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
       company={printCompany}
       companies={printCompanies}
       title={statementKind ? t(title || report.name) : report.name}
-      subtitle={periodError ? '' : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}
+      subtitle={periodError ? '' : `${period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`} · ${unitLabel}`}
       controls={controls}
       onBack={() => setIsPrinting(false)}
     >
@@ -383,7 +453,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             <thead>
               <tr>
                 <th>{t('Report Lines')}</th>
-                {[...data.headers, ...(data.showVariance ? ['Variance', '%'] : [])].map((header) => (
+                {[...data.headers, ...(data.lineComparison ? ['%'] : []), ...(data.showVariance ? ['Variance', ...(data.showGrowth ? [growthDisplay === 'amount' ? 'Amount' : '%'] : [])] : [])].map((header) => (
                   <th className="num" key={header}>{header.split(' ').map((part) => t(part)).join(' ')}</th>
                 ))}
               </tr>
@@ -405,15 +475,20 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                         {canExpand && !isPrinting && <span className={isOpen ? 'caret fold-caret open' : 'caret fold-caret'} aria-hidden="true" />}
                         {t(line.name)}
                       </td>
-                      <RowCells values={line.values} variance={line.variance} showVariance={data.showVariance} />
+                      <RowCells values={line.values} variance={line.variance} showVariance={data.showVariance} showGrowth={data.showGrowth} growthDisplay={growthDisplay} lineComparison={data.lineComparison} baseValue={data.baseValue} unit={roundingUnit} greenOnPositive={line.green_on_positive} />
                     </tr>
-                    {isOpen && line.accountRows.map((acc) => (
+                    {isOpen && (data.hierarchyDb ? reportHierarchyRows(data.hierarchyDb, line, openCodes) : line.accountRows.map((item) => ({ ...item, depth: 1 }))).map((acc) => acc.group ? (
+                      <tr key={acc.key} className="rep-section" onClick={isPrinting ? undefined : () => toggle(acc.key)} aria-expanded={openCodes.has(acc.key)}>
+                        <td style={{ paddingInlineStart: `${(line.depth + acc.depth) * 1.5 + 0.75}rem` }}>{acc.group.code_prefix_start} {acc.group.name}</td>
+                        <RowCells values={acc.values} variance={acc.variance} showVariance={data.showVariance} showGrowth={data.showGrowth} growthDisplay={growthDisplay} lineComparison={data.lineComparison} baseValue={data.baseValue} unit={roundingUnit} />
+                      </tr>
+                    ) : (
                       <tr
                         key={`${lineKey}:${acc.account.id}`}
                         className="rep-detail"
                         onClick={isPrinting ? undefined : () => { globalThis.location.hash = accountJournalItemsHref(acc.account.id); }}
                       >
-                        <td style={{ paddingInlineStart: `${(line.depth + 1) * 1.5 + 0.75}rem` }}>
+                        <td style={{ paddingInlineStart: `${(line.depth + acc.depth) * 1.5 + 0.75}rem` }}>
                           {isPrinting ? `${acc.account.code} ${acc.account.name}` : (
                             <>
                               <a href={accountJournalItemsHref(acc.account.id)}>{acc.account.code} {acc.account.name}</a>
@@ -421,7 +496,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
                             </>
                           )}
                         </td>
-                        <RowCells values={acc.values} variance={acc.variance} showVariance={data.showVariance} />
+                        <RowCells values={acc.values} variance={acc.variance} showVariance={data.showVariance} showGrowth={data.showGrowth} growthDisplay={growthDisplay} lineComparison={data.lineComparison} baseValue={data.baseValue} unit={roundingUnit} />
                       </tr>
                     ))}
                   </Fragment>

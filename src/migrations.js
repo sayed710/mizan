@@ -2633,6 +2633,12 @@ function migrateStatementLinesBankSuspense(db) {
 }
 MIGRATIONS.push({ version: 81, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 MIGRATIONS.push({ version: 82, name: 'stored-statement-report-lines', up: ensureStatementReports });
+MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({ ...db, records: { ...db.records, 'account.report': (db.records['account.report'] ?? []).map((report) => ({
+  default_opening_date_filter: report.kind === 'balance' ? 'today' : 'this_year',
+  filter_date_range: report.date_scope !== 'cumulative', filter_unfold_all: true,
+  filter_hide_0_lines: 'optional', filter_period_comparison: true, filter_growth_comparison: true,
+  filter_line_comparison: true, filter_hierarchy: 'optional', ...report,
+})) } }) });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
