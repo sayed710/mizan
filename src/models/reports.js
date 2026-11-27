@@ -504,6 +504,59 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
   };
 }
 
+/** Canonical Odoo 20 Executive Summary sections and row metadata shared by single-period and comparison views. */
+export const EXECUTIVE_SUMMARY_SECTIONS = [
+  {
+    key: 'cash',
+    title: 'Cash',
+    rows: [
+      { key: 'cashReceived', label: 'Cash received', format: 'money' },
+      { key: 'cashSpent', label: 'Cash spent', format: 'money' },
+      { key: 'cashSurplus', label: 'Cash surplus', format: 'money', strong: true },
+      { key: 'closingBankBalance', label: 'Closing bank balance', format: 'money', strong: true },
+    ],
+  },
+  {
+    key: 'profitability',
+    title: 'Profitability',
+    rows: [
+      { key: 'revenue', label: 'Revenue', format: 'money' },
+      { key: 'costOfRevenue', label: 'Cost of Revenue', format: 'money' },
+      { key: 'grossProfit', label: 'Gross profit', format: 'money', strong: true },
+      { key: 'expenses', label: 'Expenses', format: 'money' },
+      { key: 'netProfit', label: 'Net Profit', format: 'money', strong: true },
+    ],
+  },
+  {
+    key: 'balanceSheet',
+    title: 'Balance Sheet',
+    rows: [
+      { key: 'receivables', label: 'Receivables', format: 'money' },
+      { key: 'payables', label: 'Payables', format: 'money' },
+      { key: 'netAssets', label: 'Net assets', format: 'money', strong: true },
+    ],
+  },
+  {
+    key: 'performance',
+    title: 'Performance',
+    rows: [
+      { key: 'grossProfitMargin', label: 'Gross profit margin (gross profit / operating income)', format: 'pct' },
+      { key: 'netProfitMargin', label: 'Net profit margin (net profit / revenue)', format: 'pct' },
+      { key: 'returnOnInvestments', label: 'Return on investments (net profit / assets)', format: 'pct' },
+    ],
+  },
+  {
+    key: 'position',
+    title: 'Position',
+    rows: [
+      { key: 'averageDebtorsDays', label: 'Average debtors days', format: 'ratio' },
+      { key: 'averageCreditorsDays', label: 'Average creditors days', format: 'ratio' },
+      { key: 'shortTermCashForecast', label: 'Short term cash forecast', format: 'money' },
+      { key: 'currentAssetsToLiabilities', label: 'Current assets to liabilities', format: 'ratio' },
+    ],
+  },
+];
+
 /**
  * Odoo 20 Executive Summary: Cash, Profitability, Balance Sheet, Performance, and Position.
  * Period-scoped flows cover `from`..`to`; balance-sheet positions accumulate to `to`.
@@ -562,60 +615,7 @@ export function executiveSummary(db, { from, to, company_id, analyticAccountIds,
   const shortTermCashForecast = round(receivables + payables);
   const currentAssetsToLiabilities = currentLiabilities ? currentAssets / currentLiabilities : 0;
 
-  const sections = [
-    {
-      key: 'cash',
-      title: 'Cash',
-      rows: [
-        { key: 'cashReceived', label: 'Cash received', value: cashReceived, format: 'money' },
-        { key: 'cashSpent', label: 'Cash spent', value: cashSpent, format: 'money' },
-        { key: 'cashSurplus', label: 'Cash surplus', value: cashSurplus, format: 'money', strong: true },
-        { key: 'closingBankBalance', label: 'Closing bank balance', value: closingBankBalance, format: 'money', strong: true },
-      ],
-    },
-    {
-      key: 'profitability',
-      title: 'Profitability',
-      rows: [
-        { key: 'revenue', label: 'Revenue', value: revenue, format: 'money' },
-        { key: 'costOfRevenue', label: 'Cost of Revenue', value: costOfRevenue, format: 'money' },
-        { key: 'grossProfit', label: 'Gross profit', value: grossProfit, format: 'money', strong: true },
-        { key: 'expenses', label: 'Expenses', value: expenses, format: 'money' },
-        { key: 'netProfit', label: 'Net Profit', value: netProfit, format: 'money', strong: true },
-      ],
-    },
-    {
-      key: 'balanceSheet',
-      title: 'Balance Sheet',
-      rows: [
-        { key: 'receivables', label: 'Receivables', value: receivables, format: 'money' },
-        { key: 'payables', label: 'Payables', value: payables, format: 'money' },
-        { key: 'netAssets', label: 'Net assets', value: netAssets, format: 'money', strong: true },
-      ],
-    },
-    {
-      key: 'performance',
-      title: 'Performance',
-      rows: [
-        { key: 'grossProfitMargin', label: 'Gross profit margin (gross profit / operating income)', value: grossProfitMargin, format: 'pct' },
-        { key: 'netProfitMargin', label: 'Net profit margin (net profit / revenue)', value: netProfitMargin, format: 'pct' },
-        { key: 'returnOnInvestments', label: 'Return on investments (net profit / assets)', value: returnOnInvestments, format: 'pct' },
-      ],
-    },
-    {
-      key: 'position',
-      title: 'Position',
-      rows: [
-        { key: 'averageDebtorsDays', label: 'Average debtors days', value: averageDebtorsDays, format: 'ratio' },
-        { key: 'averageCreditorsDays', label: 'Average creditors days', value: averageCreditorsDays, format: 'ratio' },
-        { key: 'shortTermCashForecast', label: 'Short term cash forecast', value: shortTermCashForecast, format: 'money' },
-        { key: 'currentAssetsToLiabilities', label: 'Current assets to liabilities', value: currentAssetsToLiabilities, format: 'ratio' },
-      ],
-    },
-  ];
-
-  return {
-    sections,
+  const figures = {
     cashReceived,
     cashSpent,
     cashSurplus,
@@ -635,7 +635,16 @@ export function executiveSummary(db, { from, to, company_id, analyticAccountIds,
     averageCreditorsDays,
     shortTermCashForecast,
     currentAssetsToLiabilities,
-    // Legacy aliases preserved for reportCompare.js executiveColumns without editing it.
+  };
+  const sections = EXECUTIVE_SUMMARY_SECTIONS.map((section) => ({
+    ...section,
+    rows: section.rows.map((row) => ({ ...row, value: figures[row.key] })),
+  }));
+
+  return {
+    sections,
+    ...figures,
+    // Legacy aliases preserved for existing callers.
     cash: closingBankBalance,
     currentRatio: currentAssetsToLiabilities,
     grossMargin: grossProfitMargin,

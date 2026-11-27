@@ -2,7 +2,7 @@ import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { setupDom } from './test-support/dom.js';
+import { find, setupDom } from './test-support/dom.js';
 import { create, search } from './orm.js';
 import { seed } from './seed.js';
 import { postEntry } from './models/ledger.js';
@@ -315,11 +315,39 @@ test('ex1 view & comparison: ExecutiveSummary renders all 5 sections in order an
   ];
   const cols = executiveColumns(db, periods, { company_id: 1 });
   assert.deepEqual(cols.headers, ['May 2026', 'Jun 2026']);
-  assert.deepEqual(cols.totals.find((t) => t.label === 'Revenue').values, [2000, 3000]);
-  assert.deepEqual(cols.totals.find((t) => t.label === 'Gross Profit').values, [1400, 1800]);
-  assert.deepEqual(cols.totals.find((t) => t.label === 'Net Profit').values, [1200, 1800]);
-  assert.deepEqual(cols.totals.find((t) => t.label === 'Cash').values, [10450, 12250]);
-  assert.deepEqual(cols.totals.find((t) => t.label === 'Payables').values, [-300, -300]);
+  assert.deepEqual(cols.totals, []);
+  assert.deepEqual(
+    cols.sections.map((sec) => [sec.title, sec.rows.map((r) => r.label)]),
+    [
+      ['Cash', ['Cash received', 'Cash spent', 'Cash surplus', 'Closing bank balance']],
+      ['Profitability', ['Revenue', 'Cost of Revenue', 'Gross profit', 'Expenses', 'Net Profit']],
+      ['Balance Sheet', ['Receivables', 'Payables', 'Net assets']],
+      [
+        'Performance',
+        [
+          'Gross profit margin (gross profit / operating income)',
+          'Net profit margin (net profit / revenue)',
+          'Return on investments (net profit / assets)',
+        ],
+      ],
+      ['Position', ['Average debtors days', 'Average creditors days', 'Short term cash forecast', 'Current assets to liabilities']],
+    ],
+  );
+  const compRowMap = new Map(cols.sections.flatMap((sec) => sec.rows.map((r) => [r.label, r])));
+  assert.equal(compRowMap.has('Cash'), false, 'Legacy ambiguous Cash row must not appear');
+  assert.deepEqual(compRowMap.get('Cash received').values, [1750, 3000]);
+  assert.deepEqual(compRowMap.get('Cash spent').values, [-1100, -1200]);
+  assert.deepEqual(compRowMap.get('Cash surplus').values, [650, 1800]);
+  assert.deepEqual(compRowMap.get('Cash surplus').variance, { amount: 1150, pct: 176.92 });
+  assert.deepEqual(compRowMap.get('Closing bank balance').values, [10450, 12250]);
+  assert.deepEqual(compRowMap.get('Revenue').values, [2000, 3000]);
+  assert.deepEqual(compRowMap.get('Gross profit').values, [1400, 1800]);
+  assert.deepEqual(compRowMap.get('Net Profit').values, [1200, 1800]);
+  assert.deepEqual(compRowMap.get('Payables').values, [-300, -300]);
+  assert.deepEqual(compRowMap.get('Net assets').values, [13000, 14800]);
+  assert.deepEqual(compRowMap.get('Net assets').variance, { amount: 1800, pct: 13.85 });
+  assert.deepEqual(compRowMap.get('Average creditors days').values, [10.94, 7.5]);
+  assert.equal(cols.variance.length, 19);
 
   const { makeEl } = setupDom();
   const React = await import('react');
@@ -364,6 +392,73 @@ test('ex1 view & comparison: ExecutiveSummary renders all 5 sections in order an
     assert.match(text, /7\.75/);
     assert.match(text, /10\.94/);
     assert.match(text, /21\.09/);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('ex1 comparison view: Reports.jsx renders all 5 sections and 19 formatted lines with variance in comparison mode', async () => {
+  const { makeEl } = setupDom();
+  globalThis.location = { hash: '#/accounting/executive-summary' };
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  const db = seededExecutiveLedger();
+  await React.act(async () => store.commit(db));
+
+  const { Reports } = await import('./views/Reports.jsx');
+  const propsOf = (node) => node[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'executive', title: 'Executive Summary' } })));
+
+    const periodSelect = find(host, (n) => n.tagName === 'SELECT' && find(n, (opt) => opt.tagName === 'OPTION' && propsOf(opt)?.value === 'custom'));
+    assert.ok(periodSelect, 'Period select must be rendered');
+    await React.act(async () => propsOf(periodSelect).onChange({ target: { value: 'custom' } }));
+
+    const fromInput = find(host, (n) => n.tagName === 'INPUT' && propsOf(n)?.['aria-label'] === 'From');
+    const toInput = find(host, (n) => n.tagName === 'INPUT' && propsOf(n)?.['aria-label'] === 'To');
+    await React.act(async () => propsOf(fromInput).onChange({ target: { value: '2026-06-01' } }));
+    await React.act(async () => propsOf(toInput).onChange({ target: { value: '2026-06-30' } }));
+
+    const compSelect = find(host, (n) => n.tagName === 'SELECT' && propsOf(n)?.value === 'none');
+    assert.ok(compSelect, 'Comparison select must be rendered');
+    await React.act(async () => propsOf(compSelect).onChange({ target: { value: 'previous' } }));
+
+    const tbody = find(host, (n) => n.tagName === 'TBODY');
+    const bodyRows = findAll(tbody, (n) => n.tagName === 'TR');
+    const labels = bodyRows.map((tr) => textOf(tr.childNodes[0]).trim());
+    assert.deepEqual(labels, [
+      'Cash',
+      'Cash received', 'Cash spent', 'Cash surplus', 'Closing bank balance',
+      'Profitability',
+      'Revenue', 'Cost of Revenue', 'Gross profit', 'Expenses', 'Net Profit',
+      'Balance Sheet',
+      'Receivables', 'Payables', 'Net assets',
+      'Performance',
+      'Gross profit margin (gross profit / operating income)',
+      'Net profit margin (net profit / revenue)',
+      'Return on investments (net profit / assets)',
+      'Position',
+      'Average debtors days', 'Average creditors days', 'Short term cash forecast', 'Current assets to liabilities',
+    ]);
+
+    const rowCells = (label) => {
+      const tr = bodyRows.find((r) => textOf(r.childNodes[0]).trim() === label);
+      return tr.childNodes.map((td) => textOf(td).trim());
+    };
+    assert.deepEqual(rowCells('Cash surplus'), ['Cash surplus', '$650.00', '$1,800.00', '$1,150.00', '176.92%']);
+    assert.deepEqual(rowCells('Closing bank balance'), ['Closing bank balance', '$10,450.00', '$12,250.00', '$1,800.00', '17.22%']);
+    assert.deepEqual(rowCells('Net assets'), ['Net assets', '$13,000.00', '$14,800.00', '$1,800.00', '13.85%']);
+    assert.deepEqual(rowCells('Gross profit margin (gross profit / operating income)'), [
+      'Gross profit margin (gross profit / operating income)', '70%', '60%', '-10%', '-14.29%',
+    ]);
+    assert.deepEqual(rowCells('Average creditors days'), ['Average creditors days', '10.94', '7.50', '-3.44', '-31.44%']);
   } finally {
     await React.act(async () => root.unmount());
   }

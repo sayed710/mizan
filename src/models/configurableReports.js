@@ -1,3 +1,5 @@
+import { evaluateStoredReport, matchesReportAccount } from './reportEngine.js';
+import { reportRecordModels } from './reportRecords.js';
 import { read } from '../orm.js';
 import {
   ACCOUNT_TYPES,
@@ -21,6 +23,7 @@ import {
   STANDARD_PNL_LINES,
   STATEMENT_REPORT_SPECS,
   statementReportGuard,
+  syncInlineStatementLines,
 } from './statementReports.js';
 import { round } from '../money.js';
 
@@ -178,20 +181,7 @@ function groupError(db, before, group) {
   return null;
 }
 
-function matches(db, account, selectors) {
-  if (!account) return false;
-  const matchOne = (raw) => {
-    const lower = raw.toLowerCase();
-    if (lower.startsWith('tag:')) {
-      const target = raw.slice(4).trim();
-      return (account.tag_ids ?? []).some((id) => read(db, 'account.account.tag', typeof id === 'object' ? id.id : id)?.name === target);
-    }
-    if (lower.startsWith('type:')) return account.account_type === raw.slice(5).trim();
-    return String(account.code ?? '').startsWith(raw);
-  };
-  return selectors.some((s) => !s.startsWith('-') && matchOne(s))
-    && !selectors.some((s) => s.startsWith('-') && matchOne(s.slice(1)));
-}
+const matches = matchesReportAccount;
 
 /** Preserve the posted invoice source allocations when one journal item combines invoice lines. */
 function analyticWeights(db, item, analyticAccountIds) {
@@ -389,7 +379,7 @@ function collectAccountContributions(db, definitions, lineCode, state, factor = 
  * Evaluate a configurable or seeded statement report using ledger.js canonical items, balances, and P&L earnings.
  * Options may pass companyIds (or companyId) and analyticAccountIds.
  */
-export function configurableReport(db, report, period, group = null, options = {}) {
+export function configurableReportLegacy(db, report, period, group = null, options = {}) {
   report = { ...report, company_id: report.company_id ?? currentCompanyId(db) };
   const error = reportError(db, null, report);
   if (error) throw new Error(error);
@@ -497,21 +487,117 @@ export function configurableReport(db, report, period, group = null, options = {
   return { columns, buckets, rows };
 }
 
+/** Evaluate stored lines when present, retaining the inline format for legacy reports. */
+export function configurableReport(db, report, period, group = null, options = {}) {
+  const hasStored = (db.records['account.report.line'] ?? []).some((line) => line.report_id === report.id);
+  if (!hasStored) return configurableReportLegacy(db, report, period, group, options);
+  report = { ...report, company_id: report.company_id ?? currentCompanyId(db) };
+  if (group && ((group.company_id ?? 1) !== report.company_id || !((group.report_ids ?? []).length ? group.report_ids.includes(report.id) : report.kind))) throw new Error('Horizontal group is not available for this report');
+  const companies = targetCompanyIds(db, report, group, options);
+  const reviewMode = reportReviewMode(period, options);
+  const items = resolveReportItems(db, report, period, companies, { analyticAccountIds: options.analyticAccountIds, reviewMode });
+  const columns = ['balance', ...(report.show_debit ? ['debit'] : []), ...(report.show_credit ? ['credit'] : [])];
+  const buckets = group ? groupBuckets(db, group, items, { analyticAccountIds: options.analyticAccountIds }) : [{ key: 'all', label: '', weight: () => 1 }];
+  const evalOptions = { companyIds: companies, analyticAccountIds: options.analyticAccountIds, reviewMode, deferHideIfZero: true, includeAccountBreakdown: true };
+  const caches = buckets.map(() => new Map());
+  const evaluated = buckets.map((bucket, index) => columns.map((column, colIdx) => evaluateStoredReport(db, report, period, { ...evalOptions, column, itemCache: caches[index], weight: group ? bucket.weight : null, skipValidation: index > 0 || colIdx > 0 })));
+  const rawLines = evaluated[0]?.[0] ?? evaluateStoredReport(db, report, period, evalOptions);
+  const lineIndex = evaluated.map((bucket) => bucket.map((result) => new Map(result.map((item) => [item.id, item]))));
+  const rawById = new Map(rawLines.map((candidate) => [candidate.id, candidate]));
+  const exprByLineId = new Map();
+  for (const expr of db.records['account.report.expression'] ?? []) {
+    if (expr.label === 'balance') exprByLineId.set(expr.report_line_id, expr);
+  }
+  const accountsById = new Map();
+  for (const cache of caches) {
+    for (const entry of cache.values()) {
+      for (const accEntry of entry.byAccount?.values() ?? []) {
+        if (accEntry.account) accountsById.set(accEntry.account.id, accEntry.account);
+      }
+    }
+  }
+  const rows = rawLines.map((line) => {
+    const parent = line.parent_id != null ? rawById.get(line.parent_id) : null;
+    const expression = exprByLineId.get(line.id);
+    const aggregation = expression?.engine === 'aggregation' ? String(expression.formula) : '';
+    const inverted = /^-\((.*)\)$/.exec(aggregation);
+    const formula = (inverted ? inverted[1] : aggregation).replace(/\.balance\b/g, '');
+    const lineResults = lineIndex.map((bucket) => bucket.map((byLine) => byLine.get(line.id)));
+    const values = lineResults.flatMap((bucket) => bucket.map((item) => item?.expressions.balance ?? null));
+    let accountRows = [];
+    if (line.foldable) {
+      const accIds = new Set();
+      for (const bucket of lineResults) {
+        for (const item of bucket) {
+          const map = item?.accountExpressions?.balance;
+          if (map) for (const accId of map.keys()) accIds.add(accId);
+        }
+      }
+      accountRows = [...accIds]
+        .map((accId) => {
+          const account = accountsById.get(accId);
+          if (!account) return null;
+          return { account, values: lineResults.flatMap((bucket) => bucket.map((item) => item?.accountExpressions?.balance?.get(accId) ?? 0)) };
+        })
+        .filter((entry) => entry && (options.includeZeroRows || reportAmountsVisible(entry.values, true)))
+        .sort((a, b) => String(a.account.code ?? '').localeCompare(String(b.account.code ?? '')));
+    }
+    return { ...line, parent_code: parent?.code ?? '', formula, sign: inverted ? -1 : 1, values, accountRows };
+  });
+  const storedCodes = new Set(rawLines.map((stored) => stored.code).filter(Boolean));
+  const inlineRows = !report.kind && report.line_ids?.length ? configurableReportLegacy(db, report, period, group, options).rows.filter((line) => !storedCodes.has(line.code)) : [];
+  const allRows = [...rows, ...inlineRows];
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const byCode = new Map(allRows.filter((row) => row.code).map((row) => [row.code, row]));
+  const childMap = new Map(allRows.map((row) => [row, []]));
+  const roots = [];
+  for (const row of allRows) {
+    const parent = row.id != null
+      ? (row.parent_id != null ? byId.get(row.parent_id) : null)
+      : (row.parent_code ? byCode.get(row.parent_code) : null);
+    if (parent && childMap.has(parent)) childMap.get(parent).push(row);
+    else roots.push(row);
+  }
+  const bySeq = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.id != null && b.id != null ? a.id - b.id : 0);
+  const orderedRows = [];
+  const visitHierarchy = (list, depth, seen = new Set()) => {
+    for (const row of [...list].sort(bySeq)) {
+      if (seen.has(row)) continue;
+      seen.add(row);
+      orderedRows.push({ ...row, depth });
+      visitHierarchy(childMap.get(row) ?? [], depth + 1, seen);
+    }
+  };
+  visitHierarchy(roots, 0);
+  const result = { columns, buckets, rows: orderedRows };
+  const hidden = new Set();
+  const children = (line) => result.rows.filter((candidate) => (
+    candidate.id != null ? line.id != null && candidate.parent_id === line.id : Boolean(line.code && candidate.parent_code === line.code)
+  ));
+  const isZero = (line) => line.values.every((value) => !value) && children(line).every(isZero);
+  const hide = (line) => { hidden.add(line); children(line).forEach(hide); };
+  if (!options.deferHideIfZero) for (const line of result.rows) if (line.hide_if_zero && isZero(line)) hide(line);
+  return { ...result, rows: result.rows.filter((line) => !hidden.has(line)) };
+}
+
 /** Compute period comparison columns, variances, and merged account drilldown rows for a configurable report. */
 export function compareConfigurableReport(db, report, periods, baseFilter = {}, group = null, options = {}) {
   const filterRows = (rows) => {
     if (!options.hideZeroLines) return rows;
+    const rowById = new Map(rows.filter((r) => r.id != null).map((r) => [r.id, r]));
     const rowByCode = new Map(rows.filter((r) => r.code).map((r) => [r.code, r]));
     const visibleRows = new Set();
     for (const row of rows) {
       if (row.strong || reportAmountsVisible(row.values, true)) {
         visibleRows.add(row);
-        let parentCode = row.parent_code;
-        while (parentCode) {
-          const parentRow = rowByCode.get(parentCode);
+        let current = row;
+        while (current) {
+          const parentRow = current.id != null && current.parent_id != null
+            ? rowById.get(current.parent_id)
+            : (current.parent_code ? rowByCode.get(current.parent_code) : null);
           if (!parentRow || visibleRows.has(parentRow)) break;
           visibleRows.add(parentRow);
-          parentCode = parentRow.parent_code;
+          current = parentRow;
         }
       }
     }
@@ -529,18 +615,20 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
     }));
     return { ...single, headers, showVariance: false, rows: filterRows(single.rows.map((r) => ({ ...r, variance: null, accountRows: r.accountRows.map((a) => ({ ...a, variance: null })) }))) };
   }
-  const results = effectivePeriods.map((p) => configurableReport(db, report, { ...baseFilter, from: p.from, to: p.to }, null, options));
+  const results = effectivePeriods.map((p) => configurableReport(db, report, { ...baseFilter, from: p.from, to: p.to }, null, { ...options, deferHideIfZero: true }));
   const varianceOf = (vals) => {
     const previous = vals.at(-2);
-    if (previous == null) return null;
+    if (previous == null || vals.at(-1) == null) return null;
     const amount = round(vals.at(-1) - previous);
     return { amount, pct: !previous ? null : round(amount / Math.abs(previous) * 100) };
   };
-  const rows = results[0].rows.map((baseRow, idx) => {
-    const values = results.map((res) => res.rows[idx].values[0]);
+  const allRows = new Map(results.flatMap((res) => res.rows).map((row) => [row.id ?? row.code, row]));
+  const rows = [...allRows.values()].map((baseRow) => {
+    const matching = results.map((res) => res.rows.find((row) => (row.id ?? row.code) === (baseRow.id ?? baseRow.code)));
+    const values = matching.map((row) => row ? row.values[0] : 0);
     const accountMap = new Map();
-    results.forEach((res, pIdx) => {
-      for (const acc of res.rows[idx].accountRows ?? []) {
+    results.forEach((_res, pIdx) => {
+      for (const acc of matching[pIdx]?.accountRows ?? []) {
         const entry = accountMap.get(acc.account.id) ?? { account: acc.account, values: new Array(effectivePeriods.length).fill(0) };
         entry.values[pIdx] = acc.values[0];
         accountMap.set(acc.account.id, entry);
@@ -551,8 +639,18 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
       .map((entry) => ({ ...entry, variance: varianceOf(entry.values) }));
     return { ...baseRow, values, variance: varianceOf(values), accountRows };
   });
-  return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows: filterRows(rows) };
+  const hidden = new Set();
+  const children = (line) => rows.filter((candidate) => (
+    candidate.id != null ? line.id != null && candidate.parent_id === line.id : Boolean(line.code && candidate.parent_code === line.code)
+  ));
+  const isZero = (line) => line.values.every((value) => !value) && children(line).every(isZero);
+  const hide = (line) => { hidden.add(line); children(line).forEach(hide); };
+  for (const line of rows) if (line.hide_if_zero && isZero(line)) hide(line);
+  return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows: filterRows(rows.filter((row) => !hidden.has(row))) };
 }
+
+/** Stable key identifying a report line even when a stored line has no code. */
+export const reportLineKey = (line) => line.code || `line:${line.id}`;
 
 /** Whether a computed report line can be unfolded into its contributing account rows. */
 export const isExpandableLine = (line) => Boolean(line.foldable && line.accountRows.length);
@@ -562,6 +660,7 @@ export const accountJournalItemsHref = (accountId) => `#/accounting/journal-item
 
 const company = { type: 'many2one', relation: 'res.company', label: 'Company', required: true };
 export const configurableReportModels = {
+  ...reportRecordModels,
   'account.report': {
     label: 'Accounting Reports',
     fields: {
@@ -571,6 +670,7 @@ export const configurableReportModels = {
       exclude_closing: { type: 'boolean', label: 'Exclude Closing Entries' },
       sequence: { type: 'integer', label: 'Sequence' }, active: { type: 'boolean', label: 'Active' },
       show_debit: { type: 'boolean', label: 'Debit' }, show_credit: { type: 'boolean', label: 'Credit' },
+      stored_line_ids: { type: 'one2many', label: 'Accounting Report Lines', relation: 'account.report.line', openRelated: true, fields: { name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' } }, compute: (report, db) => (db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id) },
       line_ids: { type: 'one2many', label: 'Report Lines', fields: {
         name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' }, sequence: { type: 'integer', label: 'Sequence' },
         parent_code: { type: 'char', label: 'Parent Code' }, formula: { type: 'char', label: 'Formula' },
@@ -580,14 +680,19 @@ export const configurableReportModels = {
     defaults: () => ({ active: true, kind: '', date_scope: 'range', exclude_closing: false, sequence: 10, show_debit: false, show_credit: false, line_ids: [] }),
     createDefaults: (db) => ({ company_id: currentCompanyId(db) }),
     guard: reportError,
+    onWrite: (db, after, before) => syncInlineStatementLines(db, before, after),
     protectDelete: (db, report) => statementReportGuard(db, report),
     onUnlink: (db, report) => {
       const err = statementReportGuard(db, report);
       if (err) throw new Error(err);
-      return db;
+      const ids = new Set((db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id).map((line) => line.id));
+      return { ...db, records: { ...db.records,
+        'account.report.line': (db.records['account.report.line'] ?? []).filter((line) => !ids.has(line.id)),
+        'account.report.expression': (db.records['account.report.expression'] ?? []).filter((expr) => !ids.has(expr.report_line_id)),
+      } };
     },
     list: ['name', 'sequence', 'company_id'],
-    form: { title: 'name', groups: [['sequence', 'company_id', 'active'], ['kind', 'date_scope', 'exclude_closing'], ['show_debit', 'show_credit']], tabs: [{ label: 'Report Lines', fields: ['line_ids'] }], buttons: [{ label: 'Open Report', run: (db, report) => ({ db, go: `#/accounting/configurable-report-view/${report.id}` }) }] },
+    form: { title: 'name', groups: [['sequence', 'company_id', 'active'], ['kind', 'date_scope', 'exclude_closing'], ['show_debit', 'show_credit']], tabs: [{ label: 'Report Lines', fields: ['line_ids'] }, { label: 'Accounting Report Lines', fields: ['stored_line_ids'] }], buttons: [{ label: 'Open Report', run: (db, report) => ({ db, go: `#/accounting/configurable-report-view/${report.id}` }) }] },
   },
   'account.report.horizontal.group': {
     label: 'Horizontal Groups', fields: {
