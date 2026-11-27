@@ -9,7 +9,7 @@ import { qtyToInvoice } from '../models/sales.js';
 import { today } from '../models/common.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { CompanySelect, reportCompanyScope, reportMoney } from './reportCompany.jsx';
-import { DEFAULT_REPORT_PERIOD, PERIODS } from './reportNavigation.js';
+import { DEFAULT_REPORT_PERIOD, reportPeriodRange } from './reportNavigation.js';
 import { downloadCsv, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView } from './FinancialReportPrint.jsx';
@@ -29,7 +29,7 @@ export function SalesReview({ leaf }) {
 
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [customPeriod, setCustomPeriod] = useState({ from: `${today().slice(0, 4)}-01-01`, to: today() });
-  const period = periodKey === 'custom' ? customPeriod : (PERIODS[periodKey]?.() ?? PERIODS.all());
+  const period = periodKey === 'custom' ? customPeriod : reportPeriodRange(companyDb, periodKey, { companyId: selectedCompany });
 
   const [groupBy, setGroupBy] = useState('');
   const [isPrinting, setIsPrinting] = useState(false);

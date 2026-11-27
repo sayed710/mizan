@@ -2257,7 +2257,7 @@ const ar = {
   'Close Year': 'إقفال السنة', 'Closing Entry': 'قيد الإقفال', 'System Generated': 'مُنشأ تلقائياً', 'Fiscal Year': 'السنة المالية', 'Fiscal Years': 'السنوات المالية', 'Reopening Entry': 'قيد إعادة الفتح', 'Retained Earnings': 'الأرباح المحتجزة', 
   'Completed On': 'اكتمل في', 'Confirmed On': 'تأكد في', 'Hourly Rate': 'سعر الساعة', Labour: 'العمالة', Parts: 'قطع الغيار', 'Receive Product': 'استلام المنتج', 'Repair Date': 'تاريخ الإصلاح', 'Send Quotation': 'إرسال عرض السعر', 'Started On': 'بدأ في', 'Under Warranty': 'تحت الضمان', 'Warranty Applied': 'تم تطبيق الضمان', 'Warranty Expiry': 'انتهاء الضمان', 'Warranty Free': 'مجاني بالضمان',
   'Building Blocks': 'كتل البناء', 'From URL': 'من الرابط', 'HTML Template': 'قالب HTML', Indexed: 'مفهرس', 'Language Code': 'كود اللغة', 'Mega Menu': 'قائمة موسعة', Menus: 'القوائم', 'Meta Keywords': 'الكلمات المفتاحية', 'Meta Title': 'عنوان الصفحة للمحركات', 'New Window': 'نافذة جديدة', 'Open Graph Image URL': 'رابط صورة المشاركة', 'Page Title': 'عنوان الصفحة', 'Password Hash': 'بصمة كلمة المرور', 'Publish On': 'النشر في', Redirects: 'التحويلات', 'SEO Check': 'فحص SEO', 'Set Password': 'تعيين كلمة المرور', 'Show Footer': 'إظهار التذييل', 'Show Header': 'إظهار الترويسة', 'Thumbnail URL': 'رابط الصورة المصغرة', 'To URL': 'إلى الرابط', Translations: 'الترجمات', URL: 'الرابط',
-  Comparison: 'المقارنة', 'No comparison': 'بدون مقارنة', 'Previous Period': 'الفترة السابقة', 'Same Period Last Year': 'نفس الفترة من العام الماضي', 'Last 3 Periods': 'آخر 3 فترات', Variance: 'الفرق', 'n/a': 'غير متاح',
+  Comparison: 'المقارنة', 'No comparison': 'بدون مقارنة', 'Previous Period': 'الفترة السابقة', 'Next Period': 'الفترة التالية', 'Choose a valid period': 'اختر فترة صالحة', 'Same Period Last Year': 'نفس الفترة من العام الماضي', 'Last 3 Periods': 'آخر 3 فترات', Variance: 'الفرق', 'n/a': 'غير متاح',
   'Allow Host Selection': 'السماح باختيار المضيف', 'Bill Control': 'التحكم في الفوترة', 'Drink Served': 'تم تقديم المشروب', Drink: 'المشروب', Drinks: 'المشروبات', 'Host Notified': 'تم إخطار المضيف', 'Notify Host': 'إخطار المضيف', 'Offer Drinks': 'تقديم مشروبات', 'On Site': 'في الموقع', 'Planned Time': 'الوقت المخطط', 'Requested Drink': 'المشروب المطلوب', 'Self Check-In': 'تسجيل ذاتي', 'Station Name': 'اسم المحطة', Stations: 'المحطات', 'Theme Color': 'لون السمة', 'Ordered Quantities': 'الكميات المطلوبة', 'Received Quantities': 'الكميات المستلمة',
   'UoM Categories': 'فئات وحدات القياس',
   'Units of Measure': 'وحدات القياس',
@@ -3961,6 +3961,8 @@ const ar = {
   'Customer Invoices': 'فواتير العملاء',
   'Customer Credit Notes': 'إشعارات دائنة للعملاء',
   'Vendor Credit Notes': 'إشعارات دائنة للموردين',
+  'Save the document before previewing': 'احفظ المستند قبل المعاينة',
+  'Only customer invoices and credit notes can be previewed': 'يمكن فقط معاينة فواتير العملاء وإشعارات الدائن',
   'All Categories': 'جميع الفئات',
   'All Products': 'جميع المنتجات',
   'All Warehouses': 'جميع المستودعات',
@@ -4257,6 +4259,7 @@ const ar = {
   'Average creditors days': 'متوسط أيام الدائنين',
   'Short term cash forecast': 'توقعات النقد قصيرة الأجل',
   'Current assets to liabilities': 'نسبة الأصول المتداولة إلى الالتزامات',
+  'Database is required': 'قاعدة البيانات مطلوبة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

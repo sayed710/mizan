@@ -8,16 +8,19 @@ import { CURRENCY_AMOUNT_SIGN_ERROR, accountId, journalId, postEntry } from './m
 import { companyCurrencyRecord } from './money.js';
 import { applyDiff, diffDb } from './sync.js';
 
-test('Preview is available for posted customer invoices and credit notes', () => {
-  const action = models['account.move'].form.buttons.find((button) => button.label === 'Preview');
+test('Preview is available for customer invoices and credit notes', () => {
+  const previewButtons = models['account.move'].form.buttons.filter((button) => button.label === 'Preview');
+  assert.equal(previewButtons.length, 1);
+  const [action] = previewButtons;
+  assert.equal(action.name, 'preview_invoice');
   for (const move_type of ['out_invoice', 'out_refund', 'out_receipt', 'in_invoice', 'in_refund', 'entry']) {
     for (const state of ['draft', 'posted', 'cancel']) {
       const move = { id: 42, move_type, state };
-      assert.equal(action.when(move), state === 'posted' && ['out_invoice', 'out_refund'].includes(move_type));
+      assert.equal(action.when(move), ['out_invoice', 'out_refund'].includes(move_type));
     }
   }
   const db = { records: { 'account.move': [{ id: 42, state: 'posted', move_type: 'out_invoice' }] } };
-  assert.deepEqual(action.run(db, { id: 42 }), { db, go: '#/print/account.move/42?report=preview' });
+  assert.deepEqual(action.run(db, { id: 42, move_type: 'out_invoice' }), { db, go: '#/preview/account.move/42' });
 });
 
 test('move validation messages survive synchronization', () => {

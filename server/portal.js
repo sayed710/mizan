@@ -17,7 +17,7 @@ const tokenFor = (secret, model, r) => createHmac('sha256', secret).update(`${mo
 const tokenMatches = (secret, model, r, given) => /^[a-f0-9]{64}$/.test(given ?? '') && timingSafeEqual(Buffer.from(given, 'hex'), Buffer.from(tokenFor(secret, model, r), 'hex'));
 const documentOf = (db, model, id) => {
   const r = paths[model] && read(db, model, id);
-  return r?.partner_id && (model === ORDER || r.move_type === 'out_invoice') ? r : null;
+  return r?.partner_id && (model === ORDER || ['out_invoice', 'out_refund'].includes(r.move_type)) ? r : null;
 };
 
 /** Build a customer URL without putting a token or secret in the record. */
@@ -90,7 +90,8 @@ const redirectWithMessage = (back, message) => `${back}${back.includes('?') ? '&
 
 function documentPage(db, model, r, url, query, env) {
   const isOrder = model === ORDER;
-  const title = isOrder ? r.state === 'sale' ? 'Sales Order' : 'Quotation' : 'Invoice';
+  const isCreditNote = !isOrder && r.move_type === 'out_refund';
+  const title = isOrder ? r.state === 'sale' ? 'Sales Order' : 'Quotation' : (isCreditNote ? 'Credit Note' : 'Invoice');
   const partner = read(db, 'res.partner', r.partner_id);
   const comp = read(db, 'res.company', r.company_id ?? 1);
   const compName = comp?.name ?? (typeof db.settings?.company === 'object' ? db.settings?.company?.name : db.settings?.company) ?? 'My Company';
@@ -119,10 +120,13 @@ function documentPage(db, model, r, url, query, env) {
       controls += form(url, 'pay', token, `<h2>Online payment</h2>${picker}<button type="submit">Pay online</button>`);
     }
   }
-  return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(compName)} · ${escape(docCurrency)}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${isOrder ? 'Valid until' : 'Due date'}: ${escape(isOrder ? r.validity_date : r.invoice_date_due)}</p>
+  const dateLabel = isOrder ? 'Valid until' : (isCreditNote ? 'Credit note date' : 'Due date');
+  const dateValue = isOrder ? r.validity_date : (isCreditNote ? r.invoice_date : r.invoice_date_due);
+  const balanceLabel = isCreditNote ? 'Remaining credit' : 'Amount due';
+  return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(compName)} · ${escape(docCurrency)}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${dateLabel}: ${escape(dateValue)}</p>
     ${query.has('message') ? `<p role="status">${escape(query.get('message'))}</p>` : ''}
     <div class="scroll"><table><caption>Document lines</caption><thead><tr><th scope="col">Description</th><th scope="col">Quantity</th><th scope="col">Unit price</th><th scope="col">Amount</th></tr></thead><tbody>${lines.map((l) => `<tr><td>${escape(l.name || read(db, 'product', l.product_id)?.name)}</td><td>${escape(l.qty)}</td><td>${documentMoney(l.price_unit)}</td><td>${documentMoney(subtotal(l))}</td></tr>`).join('')}</tbody></table></div>
-    <dl><dt>Untaxed</dt><dd>${documentMoney(r.amount_untaxed)}</dd><dt>Tax</dt><dd>${documentMoney(r.amount_tax)}</dd><dt>Total</dt><dd>${documentMoney(r.amount_total)}</dd>${!isOrder ? `<dt>Amount due</dt><dd>${documentMoney(r.amount_residual)}</dd>` : ''}</dl><p>${escape(r.note)}</p>
+    <dl><dt>Untaxed</dt><dd>${documentMoney(r.amount_untaxed)}</dd><dt>Tax</dt><dd>${documentMoney(r.amount_tax)}</dd><dt>Total</dt><dd>${documentMoney(r.amount_total)}</dd>${!isOrder ? `<dt>${balanceLabel}</dt><dd>${documentMoney(r.amount_residual ?? residual(r, db))}</dd>` : ''}</dl><p>${escape(r.note)}</p>
     ${r.signed_by ? `<p>Signed by ${escape(r.signed_by)}</p>` : ''}<div class="no-print"><a href="${escape(url + '&print=1')}">Printable document</a> · <a href="${escape(url + '&download=1')}">Download document (HTML)</a><p>Use your browser’s Print command to print or save as PDF.</p>${controls}</div>`);
 }
 
@@ -130,7 +134,7 @@ function homePage(db, user, urlFor) {
   // The current users table has no portal role or verified partner relation. Never infer ownership from email/login.
   const partnerId = user?.isPortal === true && Number.isSafeInteger(user.partnerId) && user.partnerId > 0 ? user.partnerId : null;
   const orders = partnerId ? search(db, ORDER).filter((r) => r.partner_id === partnerId) : [];
-  const invoices = partnerId ? search(db, INVOICE).filter((r) => r.partner_id === partnerId && r.move_type === 'out_invoice') : [];
+  const invoices = partnerId ? search(db, INVOICE).filter((r) => r.partner_id === partnerId && ['out_invoice', 'out_refund'].includes(r.move_type)) : [];
   const groups = [['Quotations', ORDER, orders.filter((r) => ['draft', 'sent'].includes(r.state))], ['Sales orders', ORDER, orders.filter((r) => r.state === 'sale')], ['Invoices', INVOICE, invoices]];
   return page('My documents', `<h1>My documents</h1>${!partnerId ? '<p>Open the secure link provided by your salesperson to view a document. Portal login is not configured.</p>' : ''}${groups.map(([label, model, records]) => `<h2>${label} (${records.length})</h2><ul>${records.map((r) => `<li><a href="${escape(urlFor(model, r))}">${escape(r.name)}</a> — ${money(r.amount_total, documentCurrency(db, r))}</li>`).join('')}</ul>`).join('')}`);
 }

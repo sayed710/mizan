@@ -495,7 +495,7 @@ function PaymentReceipt({ db, payment }) {
 }
 
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */
-export function PrintDoc({ model, id, proforma = false, report = null }) {
+export function PrintDoc({ model, id, proforma = false, report = null, preview = false }) {
   const db = useDb();
   const def = models[model];
   const layout = LAYOUTS[model];
@@ -531,10 +531,10 @@ export function PrintDoc({ model, id, proforma = false, report = null }) {
   const recId = multiPayments?.length ? multiPayments[0].id : multiMoves?.length ? multiMoves[0].id : rec?.id;
   const isDraftInboundBatch = Boolean(rec && model === 'account.batch.payment' && rec.batch_type === 'inbound' && rec.state !== 'posted');
   useEffect(() => {
-    if (!recId || isDraftInboundBatch || hasMissingMoves || isBlockedPaymentReceipt || report === 'preview') return undefined;
+    if (!recId || isDraftInboundBatch || hasMissingMoves || isBlockedPaymentReceipt || preview) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
-  }, [recId, isDraftInboundBatch, hasMissingMoves, isBlockedPaymentReceipt, report]);
+  }, [recId, isDraftInboundBatch, hasMissingMoves, isBlockedPaymentReceipt, preview]);
   if (rec && model === 'account.batch.payment') {
     if (rec.batch_type === 'inbound') {
       if (rec.state !== 'posted') {
