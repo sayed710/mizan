@@ -773,10 +773,15 @@ export function unapplyCreditNoteSettlement(db, docId, otherId, date = today(), 
     && r.move_id === otherId
     && (!Number.isInteger(lineIndex) || r.line_index === lineIndex));
   if (!rowA || rowA.discount) throw new Error('This settlement must be reversed from its originating document workflow');
-  const rowB = (otherRowId != null
-    ? (other.payments ?? []).find((r) => !r.reversed && r.id === otherRowId && r.move_id === docId && Number(r.amount) === Number(rowA.amount))
+  const targetOtherRowId = otherRowId ?? rowA.reciprocal_row_id ?? null;
+  const sameDatePool = (other.payments ?? []).filter((r) => !r.reversed && !r.discount && r.move_id === docId && Number(r.amount) === Number(rowA.amount) && (!r.date || !rowA.date || r.date === rowA.date));
+  const docSameDatePool = (doc.payments ?? []).filter((r) => !r.reversed && !r.discount && r.move_id === otherId && Number(r.amount) === Number(rowA.amount) && (!r.date || !rowA.date || r.date === rowA.date));
+  const occ = Math.max(0, docSameDatePool.indexOf(rowA));
+  const rowB = (targetOtherRowId != null
+    ? (other.payments ?? []).find((r) => !r.reversed && r.id === targetOtherRowId && r.move_id === docId && Number(r.amount) === Number(rowA.amount))
     : null)
-    ?? (other.payments ?? []).find((r) => !r.reversed && r.move_id === docId && Number(r.amount) === Number(rowA.amount) && (!r.date || !rowA.date || r.date === rowA.date))
+    ?? sameDatePool[occ]
+    ?? sameDatePool[0]
     ?? (other.payments ?? []).find((r) => !r.reversed && r.move_id === docId && Number(r.amount) === Number(rowA.amount));
   if (!rowB || rowB.discount) throw new Error('This settlement must be reversed from its originating document workflow');
   if (!validDate(date) || date < (rowA.date ?? '') || date < (rowB.date ?? '')) {

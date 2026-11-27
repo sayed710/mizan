@@ -704,6 +704,60 @@ function reversesJournalLines(source, reversal) {
 
 const DOCUMENT_MOVE_TYPES = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'];
 
+/** Resolve the reciprocal settlement row index on `note` for `row` on `doc`, rejecting conflicting explicit links and falling back to occurrence order for unlinked rows. */
+function resolveCreditNoteReciprocal(doc, row, rowIndex, note) {
+  const docPayments = doc?.payments ?? [];
+  const notePayments = note?.payments ?? [];
+  const matchesPair = (cp) => cp
+    && cp.move_id === doc.id
+    && !cp.discount
+    && Number(cp.amount) === Number(row.amount)
+    && (!cp.date || !row.date || cp.date === row.date)
+    && Boolean(cp.reversed) === Boolean(row.reversed);
+
+  if (row.reciprocal_row_id != null) {
+    const duplicateClaim = docPayments.some((r, i) => (
+      i !== rowIndex
+      && r
+      && r.move_id === note.id
+      && !r.discount
+      && r.reciprocal_row_id === row.reciprocal_row_id
+      && Boolean(r.reversed) === Boolean(row.reversed)
+    ));
+    if (duplicateClaim) return { index: -1, conflict: true };
+    const idx = notePayments.findIndex((cp) => cp && cp.id === row.reciprocal_row_id);
+    if (idx < 0) return { index: -1, conflict: true };
+    const cp = notePayments[idx];
+    if (!matchesPair(cp) || (cp.reciprocal_row_id != null && row.id != null && cp.reciprocal_row_id !== row.id)) {
+      return { index: -1, conflict: true };
+    }
+    return { index: idx, conflict: false };
+  }
+
+  const claimedNoteIds = new Set(
+    docPayments
+      .filter((r) => r && r.move_id === note.id && !r.discount && r.reciprocal_row_id != null && Boolean(r.reversed) === Boolean(row.reversed))
+      .map((r) => r.reciprocal_row_id),
+  );
+  const docMatches = docPayments
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r
+      && r.move_id === note.id
+      && !r.discount
+      && r.reciprocal_row_id == null
+      && Number(r.amount) === Number(row.amount)
+      && (!r.date || !row.date || r.date === row.date)
+      && Boolean(r.reversed) === Boolean(row.reversed));
+  const matchPos = rowIndex >= 0
+    ? docMatches.findIndex(({ i }) => i === rowIndex)
+    : docMatches.findIndex(({ r }) => r === row);
+  const occ = matchPos >= 0 ? matchPos : docMatches.length;
+  const noteMatches = notePayments
+    .map((cp, i) => ({ cp, i }))
+    .filter(({ cp }) => matchesPair(cp) && (cp.id == null || !claimedNoteIds.has(cp.id)));
+  return { index: noteMatches[occ]?.i ?? -1, conflict: false };
+}
+
 /** Resolve the exchange entry IDs owned by one settlement row (including reciprocal credit-note ownership and unlinked legacy rows). */
 export function settlementOwnedFxIds(db, doc, row, { counterpart = null, reciprocalRow = null, unappliedOn = null, releasedRows = null } = {}) {
   if (!row) return [];
@@ -715,6 +769,18 @@ export function settlementOwnedFxIds(db, doc, row, { counterpart = null, recipro
   if (!isDocPair) return [];
 
   let matchedReciprocal = reciprocalRow;
+  if (!matchedReciprocal && row.reciprocal_row_id != null) {
+    matchedReciprocal = (other.payments ?? []).find((cp) => (
+      cp.id === row.reciprocal_row_id
+      && cp.move_id === doc.id
+      && !cp.discount
+      && Number(cp.amount) === Number(row.amount)
+      && (!cp.date || !row.date || cp.date === row.date)
+      && (unappliedOn
+        ? (cp.reversed && cp.unapplied && (!cp.reversal_date || cp.reversal_date === unappliedOn))
+        : !cp.reversed)
+    )) ?? null;
+  }
   if (!matchedReciprocal) {
     const sameOrderKey = (r) => `${r.move_id}:${Number(r.amount)}:${r.date ?? ''}`;
     const targetKey = `${other.id}:${Number(row.amount)}:${row.date ?? ''}`;
@@ -936,8 +1002,8 @@ export function settlementFxError(db, invoice, p, allocated) {
     difference = companyRound((cash - booked) * (payment.payment_type === 'inbound' ? 1 : -1));
   } else if (isCreditNote) {
     const notePayments = source.payments ?? [];
-    const noteRowIndex = notePayments.findIndex((r) => !r.reversed && r.move_id === invoice.id && Number(r.amount) === Number(p.amount) && (!r.date || !p.date || r.date === p.date));
-    const resolvedNoteIndex = noteRowIndex >= 0 ? noteRowIndex : notePayments.findIndex((r) => r.move_id === invoice.id && Number(r.amount) === Number(p.amount) && (!r.date || !p.date || r.date === p.date));
+    const { index: resolvedNoteIndex, conflict } = resolveCreditNoteReciprocal(invoice, p, index, source);
+    if (conflict) return 'Exchange entry is already used by another settlement';
     const priorNote = { ...source, payments: notePayments.slice(0, resolvedNoteIndex < 0 ? notePayments.length : resolvedNoteIndex) };
     const notePortion = settlementCompanyAmount(db, priorNote, Number(p.amount));
     const gap = companyRound(booked - notePortion);
@@ -981,7 +1047,8 @@ export function fxProvenanceError(db, entry) {
     }
     const invRow = invPayments[invIndex];
     const notePayments = source.payments ?? [];
-    const noteIndex = notePayments.findIndex((p) => p.move_id === invoice.id && Number(p.amount) === Number(invRow.amount) && (!p.date || !invRow.date || p.date === invRow.date));
+    const { index: noteIndex, conflict } = resolveCreditNoteReciprocal(invoice, invRow, invIndex, source);
+    if (conflict) return 'Exchange entry is already used by another settlement';
     if (noteIndex < 0) return 'Exchange provenance requires its settlement';
     const noteRow = notePayments[noteIndex];
     const priorInv = { ...invoice, payments: invPayments.slice(0, invIndex) };

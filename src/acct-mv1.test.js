@@ -730,3 +730,92 @@ test('mv1: resequencing across year boundaries formats short years, month resets
   // Colliding prefix across distinct periods (starting name carries the 2nd period's year on a 1st-period move) is rejected
   assert.throws(() => resequencePreview(db, [e1.id, e2.id], { first_name: 'INV/2025/0005', ordering: 'date' }), /prefix|period/i);
 });
+
+test('mv1: repeated equal-amount same-day FX credit-note settlements with different rounded exchange amounts sync cleanly', () => {
+  let db = seed();
+  const fxCurr = create(db, 'res.currency', {
+    name: 'FXRND',
+    rate_ids: [
+      { date: '2026-04-01', rate: 3 },
+      { date: '2026-04-05', rate: 1.5 },
+    ],
+  });
+  db = fxCurr.db;
+
+  const { db: invDb, id: invId } = makeDocument(db, {
+    move_type: 'out_invoice',
+    partner_id: 3,
+    invoice_date: '2026-04-01',
+    price_unit: 30,
+    currency_id: fxCurr.id,
+  });
+  const { db: cnDb, id: cnId } = makeDocument(invDb, {
+    move_type: 'out_refund',
+    partner_id: 3,
+    invoice_date: '2026-04-05',
+    price_unit: 30,
+    currency_id: fxCurr.id,
+  });
+
+  // Two equal-amount (10) same-day ('2026-04-10') applications:
+  // 1st: inv 3.33 vs cn 6.67 => FX 3.34
+  // 2nd: inv 3.34 vs cn 6.66 => FX 3.32
+  const app1 = applyCreditNote(cnDb, cnId, invId, '2026-04-10', 10);
+  const app2 = applyCreditNote(app1, cnId, invId, '2026-04-10', 10);
+
+  const invAfter = read(app2, 'account.move', invId);
+  const cnAfter = read(app2, 'account.move', cnId);
+  assert.equal(invAfter.payments.length, 2);
+  assert.equal(cnAfter.payments.length, 2);
+  assert.equal(invAfter.payments[0].reciprocal_row_id, cnAfter.payments[0].id);
+  assert.equal(invAfter.payments[1].reciprocal_row_id, cnAfter.payments[1].id);
+  assert.equal(cnAfter.payments[0].reciprocal_row_id, invAfter.payments[0].id);
+  assert.equal(cnAfter.payments[1].reciprocal_row_id, invAfter.payments[1].id);
+
+  const fx1 = read(app2, 'account.move', invAfter.payments[0].payment_fx_move_id);
+  const fx2 = read(app2, 'account.move', invAfter.payments[1].payment_fx_move_id);
+  assert.notEqual(fx1.id, fx2.id);
+  const fxAmount = (entry) => entry.line_ids.reduce((max, l) => Math.max(max, Number(l.debit) || 0, Number(l.credit) || 0), 0);
+  assert.equal(fxAmount(fx1), 3.34);
+  assert.equal(fxAmount(fx2), 3.32);
+
+  // Syncing both applications together (and incrementally) must succeed in both fxProvenanceError and settlementFxError.
+  const synced = sync(cnDb, app2);
+  assert.equal(read(synced, 'account.move', invId).amount_paid, 20);
+  const syncedInc = sync(sync(cnDb, app1), app2);
+  assert.equal(read(syncedInc, 'account.move', invId).amount_paid, 20);
+
+  // Occurrence fallback: legacy rows without reciprocal_row_id also sync cleanly.
+  const stripReciprocal = (snap) => ({
+    ...snap,
+    records: {
+      ...snap.records,
+      'account.move': snap.records['account.move'].map((m) => (m.id === invId || m.id === cnId
+        ? { ...m, payments: (m.payments ?? []).map(({ reciprocal_row_id: _drop, ...rest }) => rest) }
+        : m)),
+    },
+  });
+  const legacySynced = sync(cnDb, stripReciprocal(app2));
+  assert.equal(read(legacySynced, 'account.move', invId).amount_paid, 20);
+
+  // Forging a duplicate reciprocal_row_id to point the 2nd row at the 1st credit-note row must be rejected.
+  const forged = {
+    ...app2,
+    records: {
+      ...app2.records,
+      'account.move': app2.records['account.move'].map((m) => (m.id === invId
+        ? {
+            ...m,
+            payments: m.payments.map((p, idx) => (idx === 1 ? { ...p, reciprocal_row_id: cnAfter.payments[0].id } : p)),
+          }
+        : m)),
+    },
+  };
+  assert.throws(() => sync(cnDb, forged), /exchange/i);
+
+  // Unapplying only the 2nd settlement reverses only fx2 and keeps fx1 active.
+  const unappliedSecond = sync(synced, unapplyCreditNoteSettlement(synced, invId, cnId, '2026-04-12', { rowId: invAfter.payments[1].id }));
+  assert.ok(search(unappliedSecond, 'account.move').some((m) => m.reversed_entry_id === fx2.id && m.state === 'posted'));
+  assert.ok(!search(unappliedSecond, 'account.move').some((m) => m.reversed_entry_id === fx1.id && m.state !== 'cancel'));
+  assert.equal(read(unappliedSecond, 'account.move', invId).amount_paid, 10);
+});

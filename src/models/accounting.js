@@ -1034,8 +1034,11 @@ export function applyCreditNote(db, noteId, invoiceId, date = null, amount = nul
     fxMoveId = fx.id;
     next = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: note.id, fx_invoice_id: invoice.id } : entry) } };
   }
-  next = appendDocumentSettlement(next, invoice.id, { amount: value, moveId: note.id, date: appDate, lineIndex, paymentFxMoveId: fxMoveId }).db;
-  next = appendDocumentSettlement(next, note.id, { amount: value, moveId: invoice.id, date: appDate }).db;
+  const nextRowId = (doc) => (doc?.payments ?? []).reduce((max, r) => (typeof r.id === 'number' && r.id > max ? r.id : max), 0) + 1;
+  const invRowId = nextRowId(read(next, 'account.move', invoice.id));
+  const noteRowId = nextRowId(read(next, 'account.move', note.id));
+  next = appendDocumentSettlement(next, note.id, { amount: value, moveId: invoice.id, date: appDate, reciprocalRowId: invRowId }).db;
+  next = appendDocumentSettlement(next, invoice.id, { amount: value, moveId: note.id, date: appDate, lineIndex, paymentFxMoveId: fxMoveId, reciprocalRowId: noteRowId }).db;
   return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
 }
 
@@ -1325,6 +1328,7 @@ export function appendDocumentSettlement(db, docId, {
   paymentCompanyAmount = null,
   paymentMoveId = null,
   paymentFxMoveId = null,
+  reciprocalRowId = null,
   lineIndex = null,
   partialReconcileId = null,
   partnerBankId = null,
@@ -1377,6 +1381,7 @@ export function appendDocumentSettlement(db, docId, {
     ...(resolvedCompanyAmount !== undefined ? { company_amount: resolvedCompanyAmount } : {}),
     ...(resolvedPayCompanyAmount != null ? { payment_company_amount: resolvedPayCompanyAmount } : {}),
     ...(paymentFxMoveId != null ? { payment_fx_move_id: paymentFxMoveId } : {}),
+    ...(reciprocalRowId != null ? { reciprocal_row_id: reciprocalRowId } : {}),
     cash_basis_move_id: cashBasisMoveId,
     ...(Number.isInteger(lineIndex) ? { line_index: lineIndex } : {}),
     ...(partialReconcileId != null ? { partial_reconcile_id: partialReconcileId } : {}),
@@ -1389,7 +1394,7 @@ export function appendDocumentSettlement(db, docId, {
     ...(!freshDoc.partner_bank_id && partnerBankId ? { partner_bank_id: partnerBankId } : {}),
   });
   if (note) next = postNote(next, 'account.move', docId, note);
-  return { db: next, cashBasisMoveId };
+  return { db: next, cashBasisMoveId, rowId };
 }
 
 /** Settle a document with an explicitly chosen company-currency write-off. */
@@ -4986,7 +4991,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { id: { type: 'integer', label: 'ID', hidden: true }, date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount', currency: 'company' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount', currency: 'company' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, partial_reconcile_id: { type: 'many2one', relation: 'account.partial.reconcile', label: 'Partial Reconcile', hidden: true }, reversed: { type: 'boolean', label: 'Reversed' }, unapplied: { type: 'boolean', label: 'Unreconciled' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
+        fields: { id: { type: 'integer', label: 'ID', hidden: true }, date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount', currency: 'company' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount', currency: 'company' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, reciprocal_row_id: { type: 'integer', label: 'Reciprocal Row ID', hidden: true }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, partial_reconcile_id: { type: 'many2one', relation: 'account.partial.reconcile', label: 'Partial Reconcile', hidden: true }, reversed: { type: 'boolean', label: 'Reversed' }, unapplied: { type: 'boolean', label: 'Unreconciled' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,

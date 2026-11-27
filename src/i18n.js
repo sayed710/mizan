@@ -4360,6 +4360,7 @@ const ar = {
   'A posted payment must reference a valid invoice or bill': 'يجب أن يشير الدفع المرحّل إلى فاتورة صالحة',
   'The invoice linked to a posted payment cannot be changed': 'لا يمكن تغيير الفاتورة المرتبطة بدفع مرحّل',
   'A posted payment can only reference a non-posted invoice that it previously settled': 'لا يمكن أن يشير الدفع المرحّل إلا إلى فاتورة غير مرحّلة سبق أن سوّاها',
+  'Reciprocal Row ID': 'معرّف السطر المقابل',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
