@@ -2,7 +2,7 @@
 import { read, search } from '../orm.js';
 import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { deferredSettings, lineCreditAdjustmentAmount, recognitionTargetThroughDate, scheduleAsOf } from './deferred.js';
-import { ACCOUNT_TYPES, balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, isLiquidityAccount, isLiquidityJournal, journalItems, profitAndLoss, weighted } from './ledger.js';
+import { ACCOUNT_TYPES, balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, isIncomeOrExpenseAccount, isLiquidityAccount, isLiquidityJournal, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
@@ -396,15 +396,18 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
       .filter((source) => source.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(source.account.account_type));
     return [document.id, { all: allSources, selected: selectedSources }];
   }));
-  const add = (account, amount, source) => {
-    if (includeSources && amount && source?.move_id) {
-      if (!sourceMoves.has(account.id)) sourceMoves.set(account.id, new Set());
-      sourceMoves.get(account.id).add(source.move_id);
-    }
+  const isPnlOffset = (account, line) => Boolean(line?.analytic_offset && isIncomeOrExpenseAccount(account));
+  const add = (account, amount, source, { isOffset = false } = {}) => {
     amount = reportingBookedAmount(db, source, amount);
-    const section = accountCashFlowActivity(db, account);
+    const section = isOffset ? 'unclassified' : accountCashFlowActivity(db, account);
     totals[section] += amount;
-    attributed.set(account.id, (attributed.get(account.id) ?? 0) + amount);
+    const key = `${section}:${account.id}`;
+    if (includeSources && amount && source?.move_id) {
+      if (!sourceMoves.has(key)) sourceMoves.set(key, new Set());
+      sourceMoves.get(key).add(source.move_id);
+    }
+    const prev = attributed.get(key) ?? { section, account, amount: 0 };
+    attributed.set(key, { ...prev, amount: prev.amount + amount });
   };
   for (const items of byMove.values()) {
     if (!items.some((l) => cash.has(l.account_id))) continue;
@@ -429,12 +432,12 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
             const available = Math.max(0, Math.abs(appliedValue(documentsDb, doc, settlement)) - (consumed.get(settlement) ?? 0));
             const portion = Math.min(Math.abs(remaining), available) * Math.sign(amount);
             consumed.set(settlement, (consumed.get(settlement) ?? 0) + Math.abs(portion));
-            for (const x of source) add(x.account, portion * netOf(x.line) / denominator, l);
+            for (const x of source) add(x.account, portion * netOf(x.line) / denominator, l, { isOffset: isPnlOffset(x.account, x.line) });
             remaining -= portion;
           }
         }
       }
-      if (remaining) add(account, remaining, l);
+      if (remaining) add(account, remaining, l, { isOffset: isPnlOffset(account, l) });
     }
   }
   // Reclassify realized exchange differences on invoice-linked payments with the cash settlement.
@@ -461,7 +464,7 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
     const fxAmount = fxItems.reduce((sum, x) => sum - netOf(x.line), 0);
     if (!fxAmount) continue;
     for (const x of fxItems) add(x.account, delta * netOf(x.line) / fxAmount, items[0]);
-    for (const x of source) add(x.account, delta * netOf(x.line) / denominator, items[0]);
+    for (const x of source) add(x.account, delta * netOf(x.line) / denominator, items[0], { isOffset: isPnlOffset(x.account, x.line) });
   }
   // Applying an earlier advance reclassifies the cash already received, without changing net cash.
   for (const doc of documents) for (const payment of doc.payments ?? []) {
@@ -492,14 +495,16 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
     const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment)) * share * entryWeight;
     const attribution = { company_id: entry.company_id, date: effDate, move_id: entry.id };
     add(counterpart.account, -amount, attribution);
-    for (const x of source) add(x.account, amount * netOf(x.line) / denominator, attribution);
+    for (const x of source) add(x.account, amount * netOf(x.line) / denominator, attribution, { isOffset: isPnlOffset(x.account, x.line) });
   }
   const ORDER = ['operating', 'investing', 'financing', 'unclassified'];
-  const lines = [...attributed]
-    .map(([id, amount]) => {
-      const account = read(db, 'account.account', id);
-      return { section: accountCashFlowActivity(db, account), account, amount: round(amount), ...(includeSources ? { sourceMoveIds: [...(sourceMoves.get(id) ?? [])] } : {}) };
-    })
+  const lines = [...attributed.entries()]
+    .map(([key, { section, account, amount }]) => ({
+      section,
+      account,
+      amount: round(amount),
+      ...(includeSources ? { sourceMoveIds: [...(sourceMoves.get(key) ?? [])] } : {}),
+    }))
     .filter((l) => l.account && Math.abs(l.amount) > 1e-6)
     .sort((a, b) => ORDER.indexOf(a.section) - ORDER.indexOf(b.section) || a.account.code.localeCompare(b.account.code));
   return {

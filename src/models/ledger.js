@@ -1789,13 +1789,29 @@ export function filterByAnalytic(items, analyticAccountIds) {
   return weighted(filtered, (line) => shares.get(line));
 }
 
-/** Keep selected analytic lines and restore each move's untagged balance-sheet counterparts by the move's selected share, so filtered reports still balance without treating unallocated P&L lines as analytic activity. */
+/**
+ * Keep selected analytic lines and restore each move's untagged balance-sheet counterparts
+ * using a signed allocation share (capped at 1 so actual cash and balance-sheet lines are
+ * never over-attributed). When excluded opposing P&L or other analytic lines leave an
+ * imbalance in the retained move, emit an explicit unallocated offset line (without
+ * analytic_distribution) so the retained move stays balanced without inventing cash or
+ * classifying unrelated P&L as selected project activity.
+ */
 export function analyticMoveItems(items, analyticAccountIds, db = null) {
   if (!analyticAccountIds?.length) return items;
+  const selectedIds = new Set(analyticAccountIds.map(Number));
   const accountsById = db
     ? new Map((db.unfilteredDb?.records?.['account.account'] ?? db.records?.['account.account'] ?? []).map((a) => [a.id, a]))
     : null;
   const isUnallocatedPnl = (line) => !hasAnalyticAllocation(line) && Boolean(accountsById && isIncomeOrExpenseAccount(accountsById.get(line.account_id)));
+  const lineAllocatedFraction = (line) => {
+    if (line.analytic_distribution != null) {
+      return capAnalyticShare(
+        Object.values(line.analytic_distribution).reduce((total, percent) => total + (Number(percent) || 0), 0) / 100,
+      );
+    }
+    return line.analytic_account_id ? 1 : 0;
+  };
   const selected = filterByAnalytic(items, analyticAccountIds);
   const originalsByMove = new Map();
   const selectedByMove = new Map();
@@ -1806,18 +1822,66 @@ export function analyticMoveItems(items, analyticAccountIds, db = null) {
   for (const [moveId, matched] of selectedByMove) {
     const originals = originalsByMove.get(moveId) ?? [];
     const assigned = originals.filter((line) => hasAnalyticAllocation(line) || isUnallocatedPnl(line));
-    const assignedAmount = assigned.reduce((sum, line) => sum + Math.abs(lineNet(line)), 0);
-    const matchedAmount = matched.filter(hasAnalyticAllocation).reduce((sum, line) => sum + Math.abs(lineNet(line)), 0);
-    const share = assignedAmount ? Math.min(1, matchedAmount / assignedAmount) : 0;
+    const signedAssignedNet = assigned.reduce((sum, line) => sum + lineNet(line), 0);
+    const matchedNet = matched.filter(hasAnalyticAllocation).reduce((sum, line) => sum + lineNet(line), 0);
+
+    let share = 0;
+    if (matchedNet * signedAssignedNet > 0) {
+      const otherSameSignAlloc = originals.reduce((sum, line) => {
+        const net = lineNet(line);
+        if (net * signedAssignedNet <= 0) return sum;
+        const otherFrac = Math.max(0, lineAllocatedFraction(line) - analyticShare(line, selectedIds));
+        return sum + net * otherFrac;
+      }, 0);
+      const competingNet = Math.abs(matchedNet + otherSameSignAlloc);
+      const pool = Math.max(Math.abs(signedAssignedNet), competingNet);
+      share = pool ? Math.min(1, Math.abs(matchedNet) / pool) : 0;
+    }
+
     output.push(...matched);
+    const counterparts = originals.filter((line) => !hasAnalyticAllocation(line) && !isUnallocatedPnl(line));
+    const counterpartsNet = counterparts.reduce((sum, line) => sum + lineNet(line), 0);
     if (share) {
       const derivedDist = analyticDistributionForLines(matched, analyticAccountIds);
-      output.push(...originals.filter((line) => !hasAnalyticAllocation(line) && !isUnallocatedPnl(line)).map((line) => ({
+      output.push(...counterparts.map((line) => ({
         ...line,
         debit: (Number(line.debit) || 0) * share,
         credit: (Number(line.credit) || 0) * share,
         ...(Object.keys(derivedDist).length ? { analytic_distribution: derivedDist } : {}),
       })));
+    }
+
+    const retainedNet = matchedNet + (share ? counterpartsNet * share : 0);
+    if (Math.abs(retainedNet) > 1e-9) {
+      const offsetNeeded = -retainedNet;
+      const opposing = [];
+      for (const line of originals) {
+        let excludedFrac = 0;
+        if (isUnallocatedPnl(line)) excludedFrac = 1;
+        else if (hasAnalyticAllocation(line)) excludedFrac = Math.max(0, 1 - analyticShare(line, selectedIds));
+        if (!excludedFrac) continue;
+        const excludedNet = lineNet(line) * excludedFrac;
+        if (excludedNet * offsetNeeded > 0) opposing.push({ line, excludedNet });
+      }
+      const totalOpposing = opposing.reduce((sum, item) => sum + item.excludedNet, 0);
+      if (Math.abs(totalOpposing) > 1e-9) {
+        const factor = offsetNeeded / totalOpposing;
+        for (const { line, excludedNet } of opposing) {
+          const lineOffset = excludedNet * factor;
+          if (Math.abs(lineOffset) <= 1e-9) continue;
+          const { analytic_distribution: _dist, analytic_account_id: _acc, ...baseLine } = line;
+          const netOrig = lineNet(line);
+          output.push({
+            ...baseLine,
+            debit: lineOffset > 0 ? lineOffset : 0,
+            credit: lineOffset < 0 ? -lineOffset : 0,
+            ...(line.currency_id && line.amount_currency != null && Math.abs(netOrig) > 1e-9
+              ? { amount_currency: (Number(line.amount_currency) || 0) * (lineOffset / netOrig) }
+              : {}),
+            analytic_offset: true,
+          });
+        }
+      }
     }
   }
   return output;
@@ -1906,7 +1970,8 @@ export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = 
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
   const reportDate = filter.to ?? today();
   const items = analyticMoveItems(journalItems(db, { ...filter, to: reportDate }), analyticAccountIds, db);
-  const rows = balances(db, weighted(items, weight));
+  const weightedItems = weighted(items, weight);
+  const rows = balances(db, weightedItems);
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);
@@ -1920,6 +1985,7 @@ export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = 
   // Each company splits its own earnings at its own fiscal-year start into its own earnings account.
   const companyIds = targetCompany != null ? [targetCompany] : search(db, 'res.company').map((c) => c.id);
   if (!companyIds.length) companyIds.push(reportCompanyId);
+  const pnlOffsetItems = weightedItems.filter((l) => l.analytic_offset && isIncomeOrExpenseAccount(read(db, 'account.account', l.account_id)));
   let earnings = 0;
   for (const cId of companyIds) {
     const yearStart = fiscalYearStart(db, reportDate, cId);
@@ -1928,12 +1994,21 @@ export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = 
     const priorFilter = { ...filter, company_id: cId, to: addDays(yearStart, -1) };
     const cEarnings = profitAndLoss(db, currentFilter, { includeClosing: true, weight, analyticAccountIds }).net;
     const cPriorEarnings = profitAndLoss(db, priorFilter, { includeClosing: true, weight, analyticAccountIds }).net;
+    const offsetForRange = (rangeFrom, rangeTo) => round(
+      pnlOffsetItems
+        .filter((l) => (l.company_id ?? 1) === cId && (!rangeFrom || l.date >= rangeFrom) && (!rangeTo || l.date <= rangeTo))
+        .reduce((sum, l) => sum - reportingBookedAmount(db, l, lineNet(l)), 0),
+    );
+    const cCurrentOffset = offsetForRange(currentFilter.from, currentFilter.to);
+    const cPriorOffset = offsetForRange(priorFilter.from, priorFilter.to);
     earnings = round(earnings + cEarnings);
-    if (cPriorEarnings) {
+    const equityAdjust = round(cPriorEarnings + cPriorOffset + (cEarningsAccount ? cCurrentOffset : 0));
+    if (!cEarningsAccount && cCurrentOffset) earnings = round(earnings + cCurrentOffset);
+    if (equityAdjust) {
       const index = cEarningsAccount ? equity.findIndex((r) => r.account.id === cEarningsAccount.id) : -1;
-      if (index >= 0) equity = equity.map((r, i) => (i === index ? { ...r, balance: round(r.balance + cPriorEarnings) } : r));
-      else if (cEarningsAccount) equity.push({ account: cEarningsAccount, balance: round(cPriorEarnings) });
-      else earnings = round(earnings + cPriorEarnings);
+      if (index >= 0) equity = equity.map((r, i) => (i === index ? { ...r, balance: round(r.balance + equityAdjust) } : r));
+      else if (cEarningsAccount) equity.push({ account: cEarningsAccount, balance: round(equityAdjust) });
+      else earnings = round(earnings + equityAdjust);
     }
   }
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));

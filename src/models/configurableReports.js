@@ -8,6 +8,7 @@ import {
   balances,
   filterByAnalytic,
   fiscalYearStart,
+  isIncomeOrExpenseAccount,
   journalItems,
   profitAndLoss,
   weighted,
@@ -317,7 +318,7 @@ function addEarningsAccounts(target, detail) {
   }
 }
 
-function computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds, reviewMode } = {}) {
+function computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds, reviewMode, weightedItems = [] } = {}) {
   const effective = effectiveReportPeriod(report, period);
   const reportDate = effective.to || today();
   const includeClosing = !report.exclude_closing;
@@ -326,6 +327,7 @@ function computeEarningsSummary(db, report, period, weight, companies, { analyti
   let priorYears = 0;
   const currentAccounts = new Map();
   const priorAccounts = new Map();
+  const pnlOffsets = weightedItems.filter((l) => l.analytic_offset && isIncomeOrExpenseAccount(read(db, 'account.account', l.account_id)));
   for (const cId of companies) {
     const yearStart = fiscalYearStart(db, reportDate, cId);
     const currentFilter = { ...effective, company_id: cId, from: yearStart, to: reportDate, ...modeFilter };
@@ -336,6 +338,19 @@ function computeEarningsSummary(db, report, period, weight, companies, { analyti
     priorYears = round(priorYears + prior.net);
     addEarningsAccounts(currentAccounts, current.detail);
     addEarningsAccounts(priorAccounts, prior.detail);
+    for (const item of pnlOffsets) {
+      if ((item.company_id ?? 1) !== cId || (!includeClosing && item.is_closing) || item.date > reportDate) continue;
+      const booked = reportingBookedAmount(db, item, (Number(item.debit) || 0) - (Number(item.credit) || 0));
+      const isCurrent = item.date >= yearStart;
+      if (isCurrent) currentYear = round(currentYear - booked);
+      else priorYears = round(priorYears - booked);
+      const target = isCurrent ? currentAccounts : priorAccounts;
+      const account = read(db, 'account.account', item.account_id);
+      if (account) {
+        const entry = target.get(account.id) ?? { account, balance: 0 };
+        target.set(account.id, { ...entry, balance: round(entry.balance + booked) });
+      }
+    }
   }
   return {
     current_year: currentYear,
@@ -412,7 +427,7 @@ export function configurableReportLegacy(db, report, period, group = null, optio
       bucket,
       accountRows: balances(db, weightedItems),
       debitCreditByAccount,
-      earnings: needEarnings ? computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds: analyticIds, reviewMode }) : null,
+      earnings: needEarnings ? computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds: analyticIds, reviewMode, weightedItems }) : null,
     };
   });
   const definitions = new Map(report.line_ids.map((line) => [line.code, { ...line, sign: Number(line.sign) || 1, parsed: parseFormula(line.formula) }]));

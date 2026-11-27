@@ -4342,6 +4342,7 @@ const ar = {
   'Gain (-)/Loss (+) on sale of financial instruments': 'أرباح (-) / خسائر (+) بيع الأدوات المالية',
   'Unrealized FX Gain (-)/Loss (+)': 'أرباح (-) / خسائر (+) فروق العملة غير المحققة',
   'Net financial result : income (-)/cost (+)': 'صافي النتيجة المالية: إيرادات (-) / تكاليف (+)',
+  'Unallocated P&L offset': 'مقاصة الأرباح والخسائر غير المخصصة',
   'Working capital adjustments': 'تعديلات رأس المال العامل',
   'Trade receivables': 'الذمم المدينة التجارية',
   'Other receivables': 'ذمم مدينة أخرى',

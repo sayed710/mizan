@@ -9,7 +9,9 @@ import { seed } from './seed.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import { cleanRecord } from './validate.js';
-import { accountId, balanceSheet, journalId, postEntry } from './models/ledger.js';
+import { accountId, analyticMoveItems, balanceSheet, hasAnalyticAllocation, journalId, journalItems, postEntry, profitAndLoss } from './models/ledger.js';
+import { upsertCurrencyRate } from './models/currency.js';
+import { configurableReport, findStatementReport } from './models/configurableReports.js';
 import { addDays, today } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
 import { confirmAsset, disposeAsset, postDepreciation } from './models/assets.js';
@@ -17,6 +19,7 @@ import { bookBankMovement } from './models/bank.js';
 import { taxSnapshot } from './models/taxes.js';
 import { cashFlowIndirect, INDIRECT_CASH_FLOW_TAGS } from './models/cashFlowIndirect.js';
 import { accountCashFlowActivity, cashFlow } from './models/reports.js';
+import { reportJournalItemsHref } from './views/reportDrill.js';
 import { setupDom, find } from './test-support/dom.js';
 import { tableToRows } from './csv.js';
 
@@ -664,4 +667,358 @@ test('CFI-1 regression (review Finding 2): analytic cash excludes unrelated unal
   const bs = balanceSheet(db, { to: '2041-03-31', company_id: 1 }, { analyticAccountIds: [alpha.id] });
   assert.equal(bs.totalAssets, -400);
   assert.equal(bs.totalAssets, bs.totalLiabilities + bs.totalEquity);
+});
+
+test('CFI-1 regression: offsetting unallocated P&L credit preserves actual cash, move balance, and report consistency', () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const plan = create(db, 'account.analytic.plan', { name: 'Projects', default_applicability: 'optional' });
+  db = plan.db;
+  const alpha = create(db, 'account.analytic.account', { name: 'Project Alpha', code: 'PRJ-A', plan_id: plan.id });
+  db = alpha.db;
+
+  // Project expense 130, unallocated opposing income credit 30, actual bank credit 100.
+  const entry = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-03-15',
+    ref: 'Project expense with offsetting unallocated credit',
+    lines: [
+      { account: '600000', debit: 130, analytic_distribution: { [alpha.id]: 100 } },
+      { account: '400000', credit: 30 },
+      { account: '101401', credit: 100 },
+    ],
+  });
+  db = entry.db;
+
+  // 1. Ledger analyticMoveItems keeps selected analytic distribution explicit, preserves actual cash (-100), and balances the move.
+  const rawItems = journalItems(db, { from: '2041-03-01', to: '2041-03-31', company_id: 1 });
+  const retained = analyticMoveItems(rawItems, [alpha.id], db);
+  const expLine = retained.find((l) => l.account_id === accountId(db, '600000'));
+  const bankLine = retained.find((l) => l.account_id === accountId(db, '101401'));
+  const offsetLine = retained.find((l) => l.account_id === accountId(db, '400000'));
+  assert.equal(expLine.debit, 130);
+  assert.deepEqual(expLine.analytic_distribution, { [alpha.id]: 100 });
+  assert.equal(bankLine.credit, 100, 'Actual bank cash credit of 100 must be preserved');
+  assert.equal(retained.filter((l) => l.account_id === accountId(db, '101401')).length, 1, 'No extra cash line invented');
+  assert.ok(offsetLine, 'Explicit balancing offset line retained for the excluded credit');
+  assert.equal(offsetLine.credit, 30);
+  assert.equal(offsetLine.analytic_offset, true);
+  assert.equal(hasAnalyticAllocation(offsetLine), false, 'Unrelated income must not receive an analytic distribution');
+  const totalDebit = retained.reduce((s, l) => s + (Number(l.debit) || 0), 0);
+  const totalCredit = retained.reduce((s, l) => s + (Number(l.credit) || 0), 0);
+  assert.equal(totalDebit, 130);
+  assert.equal(totalCredit, 130, 'Retained move must remain balanced');
+
+  // 2. P&L does not classify unrelated income as project income.
+  const period = { from: '2041-03-01', to: '2041-03-31', company_id: 1, analyticAccountIds: [alpha.id] };
+  const pnl = profitAndLoss(db, { from: '2041-03-01', to: '2041-03-31', company_id: 1 }, { analyticAccountIds: [alpha.id] });
+  assert.equal(pnl.revenue, 0);
+  assert.equal(pnl.expense, 130);
+  assert.equal(pnl.net, -130);
+
+  // 3. Indirect Cash Flow reconciles EBIT (-130) via explicit offset (+30) with zero manufactured residual.
+  const indirect = cashFlowIndirect(db, period);
+  const c = indirect.byCode;
+  assert.equal(c.CF_OP_EBIT, -130);
+  assert.equal(c.CF_OP_ADJ_ANALYTIC_OFFSET, 30);
+  assert.equal(c.CF_OP_ADJ, 30);
+  assert.equal(c.CF_OP, -100);
+  assert.equal(c.CF_NOT_RECON, 0, 'Must not manufacture a reconciliation residual');
+  assert.equal(c.CF_CASH_VAR_NON_CASH, -100);
+  assert.equal(c.CF_CASH_EOP, -100);
+  assert.equal(c.CF_CASH, -100);
+  assert.equal(c.CF_CASH_BOP + c.CF_CASH, c.CF_CASH_EOP);
+  assert.ok(indirect.lines.some((l) => l.code === 'CF_OP_ADJ_ANALYTIC_OFFSET' && l.amount === 30));
+
+  // 4. Direct Cash Flow routes the explicit offset to unclassified and never classifies 400000 as project operating income.
+  const direct = cashFlow(db, { ...period, includeSources: true });
+  assert.equal(direct.operating, -130);
+  assert.equal(direct.unclassified, 30);
+  assert.equal(direct.closing, -100);
+  assert.equal(direct.net, -100);
+  assert.equal(direct.lines.some((l) => l.section === 'operating' && l.account.code === '400000'), false);
+  assert.deepEqual(direct.lines.find((l) => l.account.code === '600000').sourceMoveIds, [entry.id]);
+
+  // 5. Balance Sheet and Configurable Reports balance consistently.
+  const bs = balanceSheet(db, { to: '2041-03-31', company_id: 1 }, { analyticAccountIds: [alpha.id] });
+  assert.equal(bs.totalAssets, -100);
+  assert.equal(bs.totalLiabilities, 0);
+  assert.equal(bs.totalEquity, -100);
+  assert.equal(bs.totalAssets, bs.totalLiabilities + bs.totalEquity);
+
+  const pnlReport = findStatementReport(db, 'pnl', 1);
+  const bsReport = findStatementReport(db, 'balance', 1);
+  const cfgPnl = configurableReport(db, pnlReport, { from: '2041-03-01', to: '2041-03-31' }, null, { companyIds: [1], analyticAccountIds: [alpha.id] });
+  const cfgBs = configurableReport(db, bsReport, { from: '2041-03-01', to: '2041-03-31' }, null, { companyIds: [1], analyticAccountIds: [alpha.id] });
+  assert.equal(cfgPnl.rows.find((r) => r.code === 'NET').values[0], -130);
+  assert.equal(cfgBs.rows.find((r) => r.code === 'ASSETS').values[0], -100);
+  assert.equal(cfgBs.rows.find((r) => r.code === 'LIAB_EQUITY').values[0], -100);
+
+  // 6. Unfiltered behavior remains exact and shows no analytic offset line.
+  const unfilteredIndirect = cashFlowIndirect(db, { from: '2041-03-01', to: '2041-03-31', company_id: 1 });
+  assert.equal(unfilteredIndirect.byCode.CF_OP_EBIT, -100);
+  assert.equal(unfilteredIndirect.byCode.CF_OP_ADJ_ANALYTIC_OFFSET, 0);
+  assert.equal(unfilteredIndirect.lines.some((l) => l.code === 'CF_OP_ADJ_ANALYTIC_OFFSET'), false);
+  assert.equal(unfilteredIndirect.byCode.CF_NOT_RECON, 0);
+  assert.equal(unfilteredIndirect.byCode.CF_CASH_EOP, -100);
+  const unfilteredBs = balanceSheet(db, { to: '2041-03-31', company_id: 1 });
+  assert.equal(unfilteredBs.totalAssets, -100);
+  assert.equal(unfilteredBs.totalAssets, unfilteredBs.totalLiabilities + unfilteredBs.totalEquity);
+});
+
+test('CFI-1 regression: mixed-sign partial distributions, tagged offset, foreign currency, and Jan year-boundary', () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const plan = create(db, 'account.analytic.plan', { name: 'Projects', default_applicability: 'optional' });
+  db = plan.db;
+  const alpha = create(db, 'account.analytic.account', { name: 'Alpha', code: 'A1', plan_id: plan.id });
+  const beta = create(alpha.db, 'account.analytic.account', { name: 'Beta', code: 'B1', plan_id: plan.id });
+  db = beta.db;
+
+  // A. Partial 60/40 split across Alpha and Beta on 130 expense with tagged 30 gain credit and 100 bank credit.
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2040-12-20',
+    ref: 'Split mixed-sign Dec entry',
+    lines: [
+      { account: '600000', debit: 130, analytic_distribution: { [alpha.id]: 60, [beta.id]: 40 } },
+      { account: '450300', credit: 30 },
+      { account: '101401', credit: 100 },
+    ],
+  }).db;
+
+  const decPeriodAlpha = { from: '2040-12-01', to: '2040-12-31', company_id: 1, analyticAccountIds: [alpha.id] };
+  const decAlpha = cashFlowIndirect(db, decPeriodAlpha).byCode;
+  assert.equal(decAlpha.CF_OP_EBIT, -78);
+  assert.equal(decAlpha.CF_OP_ADJ_SALE_PPE, 0, 'Tagged offset P&L line must not double-count in PPE adjustment');
+  assert.equal(decAlpha.CF_OP_ADJ_ANALYTIC_OFFSET, 18);
+  assert.equal(decAlpha.CF_OP, -60);
+  assert.equal(decAlpha.CF_CASH_EOP, -60);
+  assert.equal(decAlpha.CF_NOT_RECON, 0);
+
+  const decBeta = cashFlowIndirect(db, { ...decPeriodAlpha, analyticAccountIds: [beta.id] }).byCode;
+  assert.equal(decBeta.CF_OP_EBIT, -52);
+  assert.equal(decBeta.CF_OP_ADJ_ANALYTIC_OFFSET, 12);
+  assert.equal(decBeta.CF_CASH_EOP, -40);
+  assert.equal(decBeta.CF_NOT_RECON, 0);
+
+  const decBsAlpha = balanceSheet(db, { to: '2040-12-31', company_id: 1 }, { analyticAccountIds: [alpha.id] });
+  assert.equal(decBsAlpha.totalAssets, -60);
+  assert.equal(decBsAlpha.totalAssets, decBsAlpha.totalLiabilities + decBsAlpha.totalEquity);
+
+  // B. Foreign currency mixed-sign entry in January (crosses Dec/Jan year boundary) at 1 EUR = 2 USD.
+  const existingEur = search(db, 'res.currency').find((c) => c.name === 'EUR');
+  let eurId;
+  if (existingEur) eurId = existingEur.id;
+  else {
+    const createdEur = create(db, 'res.currency', { name: 'EUR', symbol: '€', rounding: 0.01, rate_ids: [] });
+    db = createdEur.db;
+    eurId = createdEur.id;
+  }
+  const usdId = read(db, 'res.company', 1).currency_id;
+  db = upsertCurrencyRate(db, eurId, { date: '2041-01-01', rate: 0.5, companyId: 1 });
+  const gamma = create(db, 'account.analytic.account', { name: 'Gamma', code: 'G1', plan_id: plan.id });
+  db = gamma.db;
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-01-10',
+    ref: 'Foreign currency Jan mixed-sign entry',
+    lines: [
+      { account: '600000', debit: 260, currency_id: eurId, amount_currency: 130, analytic_distribution: { [gamma.id]: 100 } },
+      { account: '400000', credit: 60, currency_id: eurId, amount_currency: -30 },
+      { account: '101401', credit: 200, currency_id: eurId, amount_currency: -100 },
+    ],
+  }).db;
+  const janGamma = cashFlowIndirect(db, { from: '2041-01-01', to: '2041-01-31', company_id: 1, analyticAccountIds: [gamma.id] }).byCode;
+  assert.equal(janGamma.CF_OP_EBIT, -260);
+  assert.equal(janGamma.CF_OP_ADJ_ANALYTIC_OFFSET, 60);
+  assert.equal(janGamma.CF_OP, -200);
+  assert.equal(janGamma.CF_CASH_EOP, -200);
+  assert.equal(janGamma.CF_NOT_RECON, 0);
+
+  const janDirectGamma = cashFlow(db, { from: '2041-01-01', to: '2041-01-31', company_id: 1, analyticAccountIds: [gamma.id] });
+  assert.equal(janDirectGamma.operating, -260);
+  assert.equal(janDirectGamma.unclassified, 60);
+  assert.equal(janDirectGamma.closing, -200);
+  assert.equal(janDirectGamma.net, -200);
+
+  // Cross-year Dec 15 .. Jan 31 for Alpha (Dec BOP = -60 -> Jan EOP = -60).
+  const crossYearAlpha = cashFlowIndirect(db, { from: '2041-01-01', to: '2041-01-31', company_id: 1, analyticAccountIds: [alpha.id] }).byCode;
+  assert.equal(crossYearAlpha.CF_CASH_BOP, -60);
+  assert.equal(crossYearAlpha.CF_CASH, 0);
+  assert.equal(crossYearAlpha.CF_CASH_EOP, -60);
+  assert.equal(crossYearAlpha.CF_NOT_RECON, 0);
+
+  const janBs = balanceSheet(db, { to: '2041-01-31', company_id: 1 }, { analyticAccountIds: [alpha.id, gamma.id] });
+  assert.equal(janBs.totalAssets, -260);
+  assert.equal(janBs.totalAssets, janBs.totalLiabilities + janBs.totalEquity);
+
+  // C. Partial single-account allocation (60% only, 40% unallocated on same line) with opposing 30 credit.
+  const delta = create(db, 'account.analytic.account', { name: 'Delta', code: 'D1', plan_id: plan.id });
+  db = delta.db;
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-02-10',
+    ref: 'Single-account partial mixed-sign entry',
+    lines: [
+      { account: '600000', debit: 130, analytic_distribution: { [delta.id]: 60 } },
+      { account: '400000', credit: 30 },
+      { account: '101401', credit: 100 },
+    ],
+  }).db;
+  const deltaIndirect = cashFlowIndirect(db, { from: '2041-02-01', to: '2041-02-28', company_id: 1, analyticAccountIds: [delta.id] }).byCode;
+  assert.equal(deltaIndirect.CF_OP_EBIT, -78);
+  assert.equal(deltaIndirect.CF_OP_ADJ_ANALYTIC_OFFSET, 0);
+  assert.equal(deltaIndirect.CF_CASH_EOP, -78);
+  assert.equal(deltaIndirect.CF_NOT_RECON, 0);
+  const deltaBs = balanceSheet(db, { to: '2041-02-28', company_id: 1 }, { analyticAccountIds: [delta.id] });
+  assert.equal(deltaBs.totalAssets, -78);
+  assert.equal(deltaBs.totalAssets, deltaBs.totalLiabilities + deltaBs.totalEquity);
+
+  // D. Unpaid mixed-sign bill (130 expense [Gamma], 30 unallocated credit, 100 Trade Payable) reconciles with zero cash movement.
+  db = write(db, 'account.account', accountId(db, '211000'), {
+    tag_ids: [tagByName(db, 'Working Capital - Trade Payable').id],
+  });
+  db = postEntry(db, {
+    journal: 'BILL',
+    date: '2041-03-05',
+    ref: 'Unpaid mixed-sign bill',
+    lines: [
+      { account: '600000', debit: 130, analytic_distribution: { [gamma.id]: 100 } },
+      { account: '400000', credit: 30 },
+      { account: '211000', credit: 100 },
+    ],
+  }).db;
+  const billGamma = cashFlowIndirect(db, { from: '2041-03-01', to: '2041-03-31', company_id: 1, analyticAccountIds: [gamma.id] }).byCode;
+  assert.equal(billGamma.CF_OP_EBIT, -130);
+  assert.equal(billGamma.CF_OP_WCAP_TRA_PAY, 100);
+  assert.equal(billGamma.CF_OP_ADJ_ANALYTIC_OFFSET, 30);
+  assert.equal(billGamma.CF_OP, 0);
+  assert.equal(billGamma.CF_NOT_RECON, 0);
+  assert.notEqual(usdId, null);
+});
+
+test('CFI-1 regression: direct cash flow keys sourceMoveIds and drill links by section+account while legacy links keep the union', async () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const plan = create(db, 'account.analytic.plan', { name: 'Projects', default_applicability: 'optional' });
+  db = plan.db;
+  const alpha = create(db, 'account.analytic.account', { name: 'Project Alpha', code: 'PRJ-A', plan_id: plan.id });
+  db = alpha.db;
+
+  // Move 1: 400000 Product Sales explicitly allocated to Alpha (+200 operating cash in).
+  const move1 = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-04-05',
+    ref: 'Project Alpha sales',
+    lines: [
+      { account: '101401', debit: 200 },
+      { account: '400000', credit: 200, analytic_distribution: { [alpha.id]: 100 } },
+    ],
+  });
+  db = move1.db;
+
+  // Move 2: 130 project expense with 30 unallocated 400000 credit offset and 100 bank credit (+30 unclassified offset).
+  const move2 = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-04-10',
+    ref: 'Project Alpha expense with 400000 offset',
+    lines: [
+      { account: '600000', debit: 130, analytic_distribution: { [alpha.id]: 100 } },
+      { account: '400000', credit: 30 },
+      { account: '101401', credit: 100 },
+    ],
+  });
+  db = move2.db;
+
+  const salesId = accountId(db, '400000');
+  const period = { from: '2041-04-01', to: '2041-04-30', analyticAccountIds: [alpha.id] };
+  const direct = cashFlow(db, { ...period, company_id: 1, includeSources: true });
+  const operatingSales = direct.lines.find((l) => l.section === 'operating' && l.account.id === salesId);
+  const unclassifiedSales = direct.lines.find((l) => l.section === 'unclassified' && l.account.id === salesId);
+  assert.ok(operatingSales);
+  assert.ok(unclassifiedSales);
+  assert.equal(operatingSales.amount, 200);
+  assert.equal(unclassifiedSales.amount, 30);
+  assert.deepEqual(operatingSales.sourceMoveIds, [move1.id]);
+  assert.deepEqual(unclassifiedSales.sourceMoveIds, [move2.id]);
+
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  const { CashFlow } = await import('./views/FinanceReports.jsx');
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  await store.initStore();
+  await store.commit(db);
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  const all = (node, predicate) => [...(predicate(node) ? [node] : []), ...(node.childNodes ?? []).flatMap((child) => all(child, predicate))];
+  const entryIdsFromHost = () => {
+    const body = find(host, (n) => n.tagName === 'TBODY');
+    return all(body, (n) => n.tagName === 'A' && props(n)?.href?.startsWith('#/accounting/entries/'))
+      .map((n) => Number(props(n).href.split('/').pop()))
+      .sort((a, b) => a - b);
+  };
+  try {
+    await React.act(async () => root.render(
+      React.createElement('table', null, React.createElement(CashFlow, { db, period, companyId: 1, analyticAccountIds: [alpha.id] })),
+    ));
+    const drillLinks = all(host, (n) => n.tagName === 'A' && props(n)?.href?.includes(`cashFlowAccount=${salesId}`));
+    const opLink = drillLinks.find((n) => props(n).href.includes('cashFlowSection=operating'));
+    const uncLink = drillLinks.find((n) => props(n).href.includes('cashFlowSection=unclassified'));
+    assert.ok(opLink, 'Operating row must emit a section-scoped drill link');
+    assert.ok(uncLink, 'Unclassified row must emit a section-scoped drill link');
+    const opHref = props(opLink).href;
+    const uncHref = props(uncLink).href;
+    assert.notEqual(opHref, uncHref);
+
+    globalThis.location = { hash: opHref };
+    await React.act(async () => root.render(React.createElement(JournalItems, { key: 'op' })));
+    assert.deepEqual(entryIdsFromHost(), [move1.id]);
+
+    globalThis.location = { hash: uncHref };
+    await React.act(async () => root.render(React.createElement(JournalItems, { key: 'unc' })));
+    assert.deepEqual(entryIdsFromHost(), [move2.id]);
+
+    // Legacy link without cashFlowSection preserves the union of moves across sections for that account.
+    const legacyHref = reportJournalItemsHref({ period, companyId: 1, cashFlowAccount: salesId });
+    assert.equal(legacyHref.includes('cashFlowSection='), false);
+    globalThis.location = { hash: legacyHref };
+    await React.act(async () => root.render(React.createElement(JournalItems, { key: 'legacy' })));
+    assert.deepEqual(entryIdsFromHost(), [move1.id, move2.id].sort((a, b) => a - b));
+  } finally {
+    await React.act(async () => root.unmount());
+  }
 });

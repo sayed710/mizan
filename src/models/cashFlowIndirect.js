@@ -2,7 +2,7 @@
 import { create, search } from '../orm.js';
 import { round } from '../money.js';
 import { assetMoveKinds } from './assets.js';
-import { analyticMoveItems, isLiquidityAccount, isLiquidityJournal, journalItems, profitAndLoss, weighted } from './ledger.js';
+import { analyticMoveItems, isIncomeOrExpenseAccount, isLiquidityAccount, isLiquidityJournal, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { reportingBookedAmount } from './money.js';
 import { reportReviewMode } from './reports.js';
 import { taxRepartitionLines } from './taxes.js';
@@ -89,6 +89,7 @@ const LINE_DEFS = [
   { code: 'CF_OP_ADJ_SALE_FIN_INSTR', name: 'Gain (-)/Loss (+) on sale of financial instruments', parentCode: 'CF_OP_ADJ', depth: 2, ancestors: ['CF_OP', 'CF_OP_ADJ'], hasChildren: false },
   { code: 'CF_OP_ADJ_FOREX', name: 'Unrealized FX Gain (-)/Loss (+)', parentCode: 'CF_OP_ADJ', depth: 2, ancestors: ['CF_OP', 'CF_OP_ADJ'], hasChildren: false },
   { code: 'CF_OP_ADJ_NET_FIN_RESULT', name: 'Net financial result : income (-)/cost (+)', parentCode: 'CF_OP_ADJ', depth: 2, ancestors: ['CF_OP', 'CF_OP_ADJ'], hasChildren: false },
+  { code: 'CF_OP_ADJ_ANALYTIC_OFFSET', name: 'Unallocated P&L offset', parentCode: 'CF_OP_ADJ', depth: 2, ancestors: ['CF_OP', 'CF_OP_ADJ'], hasChildren: false, onlyWhenNonZero: true },
   { code: 'CF_OP_WCAP', name: 'Working capital adjustments', parentCode: 'CF_OP', depth: 1, ancestors: ['CF_OP'], hasChildren: true },
   { code: 'CF_OP_WCAP_TRA_REC', name: 'Trade receivables', parentCode: 'CF_OP_WCAP', depth: 2, ancestors: ['CF_OP', 'CF_OP_WCAP'], hasChildren: false },
   { code: 'CF_OP_WCAP_OTH_REC', name: 'Other receivables', parentCode: 'CF_OP_WCAP', depth: 2, ancestors: ['CF_OP', 'CF_OP_WCAP'], hasChildren: false },
@@ -195,11 +196,14 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
     weight,
   );
 
+  const isPnlAnalyticOffset = (item) => Boolean(item.analytic_offset && isIncomeOrExpenseAccount(accountsById.get(item.account_id)));
+  const classifiedPeriodItems = periodItems.filter((l) => !isPnlAnalyticOffset(l));
+
   const itemBalance = (item) => reportingBookedAmount(db, item, (Number(item.debit) || 0) - (Number(item.credit) || 0));
   const sumItems = (items, predicate, sign = 1) => round(
     items.reduce((sum, item) => (predicate(item) ? sum + sign * itemBalance(item) : sum), 0),
   );
-  const tagBalance = (refNum, sign = 1) => sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), refNum), sign);
+  const tagBalance = (refNum, sign = 1) => sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), refNum), sign);
 
   const isBankOrCashJournal = (item) => {
     const type = journalsById.get(item.journal_id)?.type;
@@ -216,7 +220,7 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
 
   const CF_OP_EBIT = round(profitAndLoss(db, { from, to, company_id, reviewMode: mode }, { includeClosing: false, analyticAccountIds, weight }).net);
   const CF_OP_ADJ_DEP_AND_AMORT = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => {
       const acc = accountsById.get(l.account_id);
       return acc?.account_type === 'expense_depreciation' || hasTag(acc, 4);
@@ -230,6 +234,7 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
   const CF_OP_ADJ_SALE_FIN_INSTR = tagBalance(9, 1);
   const CF_OP_ADJ_FOREX = tagBalance(10, 1);
   const CF_OP_ADJ_NET_FIN_RESULT = tagBalance(11, 1);
+  const CF_OP_ADJ_ANALYTIC_OFFSET = sumItems(periodItems, isPnlAnalyticOffset, -1);
   const CF_OP_ADJ = round(
     CF_OP_ADJ_DEP_AND_AMORT
     + CF_OP_ADJ_PROV
@@ -238,12 +243,13 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
     + CF_OP_ADJ_SALE_ROU
     + CF_OP_ADJ_SALE_FIN_INSTR
     + CF_OP_ADJ_FOREX
-    + CF_OP_ADJ_NET_FIN_RESULT,
+    + CF_OP_ADJ_NET_FIN_RESULT
+    + CF_OP_ADJ_ANALYTIC_OFFSET,
   );
 
   const CF_OP_WCAP_TRA_REC = tagBalance(12, -1);
   const CF_OP_WCAP_OTH_REC = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => {
       const acc = accountsById.get(l.account_id);
       return hasTag(acc, 13) || (taxLinkedAccountIds.has(l.account_id) && acc?.account_type === 'asset_current');
@@ -252,7 +258,7 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
   );
   const CF_OP_WCAP_TRA_PAY = tagBalance(14, -1);
   const CF_OP_WCAP_OTH_PAY = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => {
       const acc = accountsById.get(l.account_id);
       return hasTag(acc, 15) || (taxLinkedAccountIds.has(l.account_id) && acc?.account_type === 'liability_current');
@@ -273,23 +279,23 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
   const CF_OP_INT = tagBalance(19, -1);
   const CF_OP = round(CF_OP_EBIT + CF_OP_ADJ + CF_OP_WCAP + CF_OP_INC_TAX + CF_OP_INT);
 
-  const CF_INV_INT_ASS_SALE = sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), 20) && saleMoveIds.has(l.move_id), 1);
-  const CF_INV_INT_ASS_PURCH = sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), 21) && isNonAssetDisposalOrDep(l), -1);
+  const CF_INV_INT_ASS_SALE = sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), 20) && saleMoveIds.has(l.move_id), 1);
+  const CF_INV_INT_ASS_PURCH = sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), 21) && isNonAssetDisposalOrDep(l), -1);
   const CF_INV_INT_ASS = round(CF_INV_INT_ASS_SALE + CF_INV_INT_ASS_PURCH);
-  const CF_INV_PPE_SALE = sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), 22) && saleMoveIds.has(l.move_id), 1);
-  const CF_INV_PPE_PURCH = sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), 23) && isNonAssetDisposalOrDep(l), -1);
+  const CF_INV_PPE_SALE = sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), 22) && saleMoveIds.has(l.move_id), 1);
+  const CF_INV_PPE_PURCH = sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), 23) && isNonAssetDisposalOrDep(l), -1);
   const CF_INV_PPE = round(CF_INV_PPE_SALE + CF_INV_PPE_PURCH);
-  const CF_INV_ROU = sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), 24) && saleMoveIds.has(l.move_id), 1);
-  const CF_INV_FIN_INSTR_SALE = sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), 25) && saleMoveIds.has(l.move_id), 1);
-  const CF_INV_FIN_INSTR_PURCH = sumItems(periodItems, (l) => hasTag(accountsById.get(l.account_id), 26) && isNonAssetDisposalOrDep(l), -1);
+  const CF_INV_ROU = sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), 24) && saleMoveIds.has(l.move_id), 1);
+  const CF_INV_FIN_INSTR_SALE = sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), 25) && saleMoveIds.has(l.move_id), 1);
+  const CF_INV_FIN_INSTR_PURCH = sumItems(classifiedPeriodItems, (l) => hasTag(accountsById.get(l.account_id), 26) && isNonAssetDisposalOrDep(l), -1);
   const CF_INV_FIN_INSTR = round(CF_INV_FIN_INSTR_SALE + CF_INV_FIN_INSTR_PURCH);
   const CF_INV_RECEP_RECOV_CASH_ADV = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 27) && isBankOrCashJournal(l) && (Number(l.credit) || 0) > 0,
     -1,
   );
   const CF_INV_REPAY_RECOV_CASH_ADV = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 27) && isBankOrCashJournal(l) && (Number(l.debit) || 0) > 0,
     -1,
   );
@@ -305,17 +311,17 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
   );
 
   const CF_FIN_PROC_SHARE_ISS = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 29) && isBankOrCashJournal(l) && (Number(l.credit) || 0) > 0,
     -1,
   );
   const CF_FIN_INT_DIV_PAID = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 30) && isBankOrCashJournal(l) && (Number(l.debit) || 0) > 0,
     -1,
   );
   const CF_FIN_PROC_BORR = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => {
       const acc = accountsById.get(l.account_id);
       return (hasTag(acc, 31) || hasTag(acc, 32)) && (Number(l.credit) || 0) > 0;
@@ -323,22 +329,22 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
     -1,
   );
   const CF_FIN_REPAY_BORR = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 32) && (Number(l.debit) || 0) > 0,
     -1,
   );
   const CF_FIN_LEASE_REPAY = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 33) && (Number(l.debit) || 0) > 0,
     -1,
   );
   const CF_FIN_PROC_RECOV_ADV = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 34) && (Number(l.credit) || 0) > 0,
     -1,
   );
   const CF_FIN_REPAY_RECOV_ADV = sumItems(
-    periodItems,
+    classifiedPeriodItems,
     (l) => hasTag(accountsById.get(l.account_id), 34) && (Number(l.debit) || 0) > 0,
     -1,
   );
@@ -382,6 +388,7 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
     CF_OP_ADJ_SALE_FIN_INSTR,
     CF_OP_ADJ_FOREX,
     CF_OP_ADJ_NET_FIN_RESULT,
+    CF_OP_ADJ_ANALYTIC_OFFSET,
     CF_OP_WCAP,
     CF_OP_WCAP_TRA_REC,
     CF_OP_WCAP_OTH_REC,
@@ -422,6 +429,8 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
     CF_CASH_EOP,
   };
 
-  const lines = LINE_DEFS.map((def) => ({ ...def, amount: byCode[def.code] }));
+  const lines = LINE_DEFS
+    .filter((def) => !def.onlyWhenNonZero || byCode[def.code] !== 0)
+    .map(({ onlyWhenNonZero: _onlyWhenNonZero, ...def }) => ({ ...def, amount: byCode[def.code] }));
   return { lines, byCode };
 }
