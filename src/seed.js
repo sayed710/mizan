@@ -8,6 +8,7 @@ import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
+import { ensureIndirectCashFlowTags } from './models/cashFlowIndirect.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { ensurePartnerIndustries } from './models/crm.js';
@@ -116,6 +117,7 @@ export function seed() {
     investing: add('account.account.tag', { name: 'Investing Activities', cash_flow_activity: 'investing' }),
     financing: add('account.account.tag', { name: 'Financing Activities', cash_flow_activity: 'financing' }),
   };
+  db = ensureIndirectCashFlowTags(db);
   // The demo chart tags loans payable as financing explicitly; every other account follows its type.
   const chartActivity = { '260000': 'financing' };
   const installedAccountIds = {};

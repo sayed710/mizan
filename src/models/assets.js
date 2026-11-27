@@ -1479,6 +1479,26 @@ export function adjustAssetsForCreditNote(db, refundMove, originalBillMove = (re
   return nextDb;
 }
 
+/** Classify posted asset move IDs (sales, disposals, depreciations) from account.asset records. */
+export function assetMoveKinds(db) {
+  const saleMoveIds = new Set();
+  const disposalMoveIds = new Set();
+  const depreciationMoveIds = new Set();
+  for (const asset of db?.records?.['account.asset'] ?? []) {
+    if (asset.state === 'cancel') continue;
+    if (asset.disposal_move_id != null) {
+      disposalMoveIds.add(asset.disposal_move_id);
+      if (Number(asset.sale_value) > 0 || asset.sale_invoice_id != null || (asset.sale_invoice_line_ids ?? []).length > 0) {
+        saleMoveIds.add(asset.disposal_move_id);
+      }
+    }
+    for (const line of asset.depreciation_ids ?? []) {
+      if (line?.posted && line.move_id != null) depreciationMoveIds.add(line.move_id);
+    }
+  }
+  return { saleMoveIds, disposalMoveIds, depreciationMoveIds };
+}
+
 export const assetModels = {
   'account.asset.group': {
     label: 'Asset Groups',
