@@ -10,8 +10,10 @@ import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
 import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines } from './models/accounting.js';
+import { moveDate } from './models/finance.js';
+import { isIncomeOrExpenseAccount, isReconcilableAccount } from './models/ledger.js';
 import { checkMandatoryPlans } from './models/analyticplus.js';
-import { companyCurrencyRecord, roundCurrency } from './money.js';
+import { companyCurrencyRecord, isCurrencyZero, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
 import { isProtectedAuditMessage } from './models/auditRules.js';
 import { syncJournalMethodLines, unlinkJournalMethodLines } from './models/paymentmethod.js';
@@ -574,9 +576,16 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
  * opposite side (reversal, credit note, correction) or same side (debit note), never for a larger amount.
  */
 function mirrorsOriginOnArchived(db, rec, originId, opposite) {
-  if (!Number.isInteger(originId)) return false;
-  const origin = (db.records['account.move'] ?? []).find((m) => m.id === originId);
-  if (origin?.state !== 'posted') return false;
+  return Number.isInteger(originId) && mirrorsOriginsOnArchived(db, rec, [originId], opposite);
+}
+
+/** Whether `rec`'s archived-account lines stay within what the posted origins booked there (summed across distinct origins). */
+function mirrorsOriginsOnArchived(db, rec, originIds, opposite) {
+  if (!Array.isArray(originIds) || !originIds.length || originIds.some((id) => !Number.isInteger(id) || id === rec.id)) return false;
+  if (new Set(originIds).size !== originIds.length) return false;
+  const origins = originIds.map((id) => (db.records['account.move'] ?? []).find((m) => m.id === id));
+  if (origins.some((m) => m?.state !== 'posted' || (m.company_id ?? 1) !== (rec.company_id ?? 1))) return false;
+  const origin = { line_ids: origins.flatMap((m) => m.line_ids ?? []), invoice_line_ids: origins.flatMap((m) => m.invoice_line_ids ?? []) };
   const archived = (id) => (db.records['account.account'] ?? []).find((a) => a.id === id)?.active === false;
   // Totals per archived account: the new move may not post more on an account than the origin booked on the matching side.
   const totals = (lines, keep) => {
@@ -590,11 +599,214 @@ function mirrorsOriginOnArchived(db, rec, originId, opposite) {
   };
   const originTotals = totals(origin.line_ids, () => true);
   const journalOk = [...totals(rec.line_ids, archived)].every(([accountId, [debit, credit]]) => {
-    const [od, oc] = originTotals.get(accountId) ?? [0, 0];
+    if (!originTotals.has(accountId)) return false;
+    const [od, oc] = originTotals.get(accountId);
     return opposite ? debit <= oc + 1e-9 && credit <= od + 1e-9 : debit <= od + 1e-9 && credit <= oc + 1e-9;
   });
   const originInvoiceAccounts = new Set((origin.invoice_line_ids ?? []).map((l) => l.account_id));
   return journalOk && (rec.invoice_line_ids ?? []).filter((l) => archived(l.account_id)).every((l) => originInvoiceAccounts.has(l.account_id));
+}
+
+function isAutomaticEntryCandidate(seen, original, rec) {
+  if (!rec || rec.move_type !== 'entry' || rec.state !== 'posted') return false;
+  if ((original.records['account.move'] ?? []).some((m) => m.id === rec.id)) return false;
+  const companyId = rec.company_id ?? 1;
+  const journal = rec.journal_id ? read(seen, 'account.journal', rec.journal_id) : null;
+  if (!journal || journal.active === false || journal.type !== 'general' || (journal.company_id ?? 1) !== companyId) return false;
+  const sourceIds = rec.automatic_entry_source_move_ids;
+  if (!Array.isArray(sourceIds) || !sourceIds.length || sourceIds.some((id) => !Number.isInteger(id) || id < 1 || id === rec.id)) return false;
+  if (new Set(sourceIds).size !== sourceIds.length) return false;
+  return sourceIds.every((id) => {
+    const src = read(seen, 'account.move', id);
+    return src?.state === 'posted' && (src.company_id ?? 1) === companyId;
+  });
+}
+
+function isMoveToAccountEntry(seen, original, rec, changed) {
+  if (!isAutomaticEntryCandidate(seen, original, rec) || rec.reversed_entry_id || rec.reversal_move_id) return false;
+  const sourceIds = rec.automatic_entry_source_move_ids;
+  if (!mirrorsOriginsOnArchived(seen, rec, sourceIds, true)) return false;
+  const ownCurr = companyCurrencyRecord(seen, rec.company_id ?? 1);
+  const sourceIdSet = new Set(sourceIds);
+  const origPartialIds = new Set((original.records['account.partial.reconcile'] ?? []).map((p) => p.id));
+  const newPartials = changed.filter(([model, p]) => model === 'account.partial.reconcile' && !origPartialIds.has(p.id) && p.active !== false && !p.reversed).map(([, p]) => p);
+  return (rec.line_ids ?? []).every((line, idx) => {
+    const acc = line?.account_id ? read(seen, 'account.account', line.account_id) : null;
+    if (!acc || acc.active !== false || !isReconcilableAccount(acc)) return true;
+    const bal = (Number(line.debit) || 0) - (Number(line.credit) || 0);
+    if (isCurrencyZero(bal, ownCurr)) return true;
+    return reconcilesLineWithSources(seen, ownCurr, rec, idx, line, bal > 0, sourceIdSet, newPartials);
+  });
+}
+
+/**
+ * Whether the new partial reconciliations between line `idx` of the transfer `rec` and its source moves clear the whole line:
+ * their company-currency amounts (plus the exchange-difference gap partials settling them) cover its balance, and for a
+ * foreign-currency line their amounts in that currency cover its amount_currency too.
+ */
+function reconcilesLineWithSources(seen, ownCurr, rec, idx, line, isDebit, sourceIdSet, newPartials) {
+  const [side, other] = isDebit ? ['debit', 'credit'] : ['credit', 'debit'];
+  const onLine = newPartials.filter((p) => p[`${side}_move_id`] === rec.id && p[`${side}_line_index`] === idx && p.account_id === line.account_id);
+  const toSources = onLine.filter((p) => sourceIdSet.has(p[`${other}_move_id`]));
+  const exchangeIds = new Set(toSources.map((p) => p.exchange_move_id).filter(Boolean));
+  const gaps = onLine.filter((p) => p.exchange_move_id != null && p[`${other}_move_id`] === p.exchange_move_id && exchangeIds.has(p.exchange_move_id));
+  const covers = (applied, needed, currency) => {
+    const short = roundCurrency(needed - roundCurrency(applied, currency), currency);
+    return short <= 0 || isCurrencyZero(short, currency);
+  };
+  const sum = (partials, field) => partials.reduce((total, p) => total + (Number(p[field]) || 0), 0);
+  if (!covers(sum([...toSources, ...gaps], 'amount'), Math.abs((Number(line.debit) || 0) - (Number(line.credit) || 0)), ownCurr)) return false;
+  const foreignId = foreignCurrencyOf(line, ownCurr);
+  if (!foreignId) return true;
+  return covers(sum(toSources, `${side}_amount_currency`), Math.abs(Number(line.amount_currency) || 0), read(seen, 'res.currency', foreignId));
+}
+
+/** Foreign currency id of a journal item, or null when it is in the company currency. */
+function foreignCurrencyOf(line, ownCurr) {
+  return line?.currency_id && line.currency_id !== (ownCurr?.id ?? null) ? line.currency_id : null;
+}
+
+function isValidAccrualAccount(acc) {
+  return Boolean(
+    acc && acc.active !== false && !acc.deprecated
+    && !isIncomeOrExpenseAccount(acc)
+    && !['asset_receivable', 'liability_payable', 'off_balance'].includes(acc.account_type),
+  );
+}
+
+/** Direction of a journal item: the sign of its company-currency balance, else of its amount_currency. */
+function lineDirection(line) {
+  return Math.sign((Number(line.debit) || 0) - (Number(line.credit) || 0)) || Math.sign(Number(line.amount_currency) || 0);
+}
+
+/**
+ * Whether every income/expense line of a Change Period adjustment reverses part of a distinct line of its source moves:
+ * same account, partner and currency, opposite direction, within the source amounts in both currencies, and with the
+ * company and foreign amounts at the same share of the source line (up to the rounding of each currency).
+ */
+function adjustmentLinesMatchSources(seen, adj) {
+  const ownCurr = companyCurrencyRecord(seen, adj.company_id ?? 1);
+  const isProfitLoss = (line) => isIncomeOrExpenseAccount(line?.account_id ? read(seen, 'account.account', line.account_id) : null);
+  const sources = adj.automatic_entry_source_move_ids.flatMap((id) => read(seen, 'account.move', id)?.line_ids ?? []).filter(isProfitLoss);
+  const adjusted = (adj.line_ids ?? []).filter(isProfitLoss);
+  if (!adjusted.length) return false;
+  const step = (currency) => Number(currency?.rounding ?? 0.01);
+  const amounts = (line) => ({
+    company: Math.abs((Number(line.debit) || 0) - (Number(line.credit) || 0)),
+    foreign: Math.abs(Number(line.amount_currency) || 0),
+  });
+  const fits = (a, s) => {
+    const foreignId = foreignCurrencyOf(s, ownCurr);
+    if (a.account_id !== s.account_id || (a.partner_id ?? null) !== (s.partner_id ?? null) || foreignCurrencyOf(a, ownCurr) !== foreignId) return false;
+    if (!lineDirection(s) || lineDirection(a) !== -lineDirection(s)) return false;
+    const [adjAmounts, srcAmounts] = [amounts(a), amounts(s)];
+    const companyStep = step(ownCurr);
+    if (adjAmounts.company > srcAmounts.company + companyStep / 2) return false;
+    if (isCurrencyZero(srcAmounts.company, ownCurr) && !isCurrencyZero(adjAmounts.company, ownCurr)) return false;
+    if (!foreignId) return !(Number(a.amount_currency) || 0);
+    const foreignCurr = read(seen, 'res.currency', foreignId);
+    const foreignStep = step(foreignCurr);
+    const srcCurrency = Number(s.amount_currency) || 0;
+    const amountCurrency = Number(a.amount_currency) || 0;
+    if (isCurrencyZero(srcCurrency, foreignCurr)) return isCurrencyZero(amountCurrency, foreignCurr);
+    if (adjAmounts.foreign > srcAmounts.foreign + foreignStep / 2) return false;
+    if (amountCurrency && Math.sign(amountCurrency) !== -Math.sign(srcCurrency)) return false;
+    // company = round(source * share) and foreign = round(source_foreign * share): the shares agree up to each rounding.
+    return Math.abs(adjAmounts.company * srcAmounts.foreign - adjAmounts.foreign * srcAmounts.company)
+      <= (companyStep * srcAmounts.foreign + foreignStep * srcAmounts.company) / 2 + 1e-9;
+  };
+  // Each adjustment line needs its own source line: bipartite matching, so the order of equal-looking lines is irrelevant.
+  const owner = new Array(sources.length).fill(-1);
+  const assign = (i, tried) => sources.some((s, j) => {
+    if (tried.has(j) || !fits(adjusted[i], s)) return false;
+    tried.add(j);
+    if (owner[j] !== -1 && !assign(owner[j], tried)) return false;
+    owner[j] = i;
+    return true;
+  });
+  return adjusted.every((_, i) => assign(i, new Set()));
+}
+
+function isChangePeriodAdjustment(seen, original, adj) {
+  if (!isAutomaticEntryCandidate(seen, original, adj) || adj.reversed_entry_id) return false;
+  const sourceIds = adj.automatic_entry_source_move_ids;
+  if (!sourceIds.every((id) => moveDate(read(seen, 'account.move', id)) === adj.date)) return false;
+  if (!mirrorsOriginsOnArchived(seen, adj, sourceIds, true)) return false;
+  if (!adjustmentLinesMatchSources(seen, adj)) return false;
+  let hasAccrual = false;
+  for (const line of adj.line_ids ?? []) {
+    const acc = line?.account_id ? read(seen, 'account.account', line.account_id) : null;
+    if (!acc) return false;
+    if (acc.active === false && !isIncomeOrExpenseAccount(acc)) return false;
+    if (isValidAccrualAccount(acc)) hasAccrual = true;
+  }
+  return hasAccrual;
+}
+
+function changePeriodLineSignature(seen, companyId, line, reverse = false) {
+  const ownCurr = companyCurrencyRecord(seen, companyId);
+  const debit = roundCurrency(Number(reverse ? line.credit : line.debit) || 0, ownCurr);
+  const credit = roundCurrency(Number(reverse ? line.debit : line.credit) || 0, ownCurr);
+  const currId = line.currency_id ?? null;
+  const fCurr = currId ? read(seen, 'res.currency', currId) : null;
+  const amtCurr = currId && fCurr ? roundCurrency((Number(line.amount_currency) || 0) * (reverse ? -1 : 1), fCurr) : 0;
+  return JSON.stringify([line.account_id, line.partner_id ?? null, debit, credit, currId, amtCurr]);
+}
+
+function pairedChangePeriodAdjustments(seen, original, rec, changed) {
+  if (!isAutomaticEntryCandidate(seen, original, rec)) return null;
+  const sourceIds = rec.automatic_entry_source_move_ids;
+  if (!mirrorsOriginsOnArchived(seen, rec, sourceIds, false)) return null;
+  if ((rec.line_ids ?? []).some((line) => {
+    const acc = line?.account_id ? read(seen, 'account.account', line.account_id) : null;
+    return acc?.active === false && !isIncomeOrExpenseAccount(acc);
+  })) return null;
+  const sourceSet = new Set(sourceIds);
+  const changedMoves = changed.filter(([m]) => m === 'account.move').map(([, m]) => m);
+  let adjMoves;
+  if (rec.reversed_entry_id) {
+    const adj = changedMoves.find((m) => m.id === rec.reversed_entry_id);
+    if (!adj || adj.reversal_move_id !== rec.id || adj.journal_id !== rec.journal_id || !isChangePeriodAdjustment(seen, original, adj)) return null;
+    const adjSet = new Set(adj.automatic_entry_source_move_ids);
+    if (adjSet.size !== sourceSet.size || [...adjSet].some((id) => !sourceSet.has(id))) return null;
+    adjMoves = [adj];
+  } else {
+    adjMoves = changedMoves.filter((m) => (
+      m.id !== rec.id
+      && !m.reversal_move_id
+      && m.journal_id === rec.journal_id
+      && isChangePeriodAdjustment(seen, original, m)
+      && m.automatic_entry_source_move_ids.every((id) => sourceSet.has(id))
+    ));
+    if (adjMoves.length < 2) return null;
+    if (new Set(adjMoves.map((m) => m.date)).size !== adjMoves.length) return null;
+    const covered = new Set(adjMoves.flatMap((m) => m.automatic_entry_source_move_ids));
+    if (covered.size !== sourceSet.size || [...sourceSet].some((id) => !covered.has(id))) return null;
+  }
+  const companyId = rec.company_id ?? 1;
+  const expected = adjMoves.flatMap((m) => m.line_ids ?? []).map((l) => changePeriodLineSignature(seen, companyId, l, true)).sort();
+  const actual = (rec.line_ids ?? []).map((l) => changePeriodLineSignature(seen, companyId, l, false)).sort();
+  return same(expected) === same(actual) ? adjMoves : null;
+}
+
+/**
+ * Authorize archived-account origins for automatic entries only when the diff matches Move to Account
+ * (opposite-side transfer with partial reconciliation on reconcilable accounts) or a paired Change Period run.
+ */
+function verifiedAutomaticEntryOrigins(seen, original, rec, changed) {
+  const sourceIds = rec?.automatic_entry_source_move_ids;
+  if (!Array.isArray(sourceIds) || !sourceIds.length) return [];
+  if (isMoveToAccountEntry(seen, original, rec, changed)) return sourceIds;
+  if (pairedChangePeriodAdjustments(seen, original, rec, changed)) return sourceIds;
+  if (isChangePeriodAdjustment(seen, original, rec)) {
+    const hasRecognition = changed.some(([model, candidate]) => {
+      if (model !== 'account.move' || candidate.id === rec.id) return false;
+      const paired = pairedChangePeriodAdjustments(seen, original, candidate, changed);
+      return Boolean(paired?.some((m) => m.id === rec.id));
+    });
+    if (hasRecognition) return sourceIds;
+  }
+  return [];
 }
 
 /** Strip structured tracking fields unless the same diff really changes that tracked field from old_value to new_value. */
@@ -837,7 +1049,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     }
   }
   const seen = { ...db, records };
-  const baseCtx = { isAdmin, login, name: author, companies };
+  const baseCtx = { isAdmin, login, name: author, companies, allowed };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
     // An origin link only unlocks archived accounts for verified workflows: generated moves, server-rebuilt exchange
@@ -852,6 +1064,8 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       ...(mirrorsOriginOnArchived(seen, rec, rec.correction_of_id, true) ? [rec.correction_of_id] : []),
       ...(mirrorsOriginOnArchived(seen, rec, rec.debit_origin_id, false) ? [rec.debit_origin_id] : []),
       ...(settlementOrigins.get(rec.id) ?? []),
+      // Move to Account / Change Period entries may book on a source account archived since only when verified against the workflow.
+      ...(!before ? verifiedAutomaticEntryOrigins(seen, db, rec, changed) : []),
       ...((seen.records['account.fiscal.year'] ?? []).filter((y) => y.opening_move_id === rec.id).map((y) => y.closing_move_id)),
     ].filter(Number.isInteger) : [];
     const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
@@ -941,12 +1155,13 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   }
   // Whole-record rules that look across models run once every change is in place.
   const final = { ...db, records };
+  const invariantCtx = { ...baseCtx, secureOwnershipCache: {} };
   for (const [model, recs] of Object.entries(d.upserts ?? {})) {
     const stored = byId(db.records[model]);
     const kept = byId(records[model]);
     for (const raw of recs) {
       const rec = kept.get(raw.id);
-      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db, baseCtx);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db, invariantCtx);
       if (err) throw new Error(err);
     }
   }

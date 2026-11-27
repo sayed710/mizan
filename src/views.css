@@ -5,8 +5,8 @@
   position: absolute; top: 0; inset-inline-end: -2px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 999px;
   background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center;
 }
-.actions-menu .nav-dropdown button { background: none; border: 0; text-align: start; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
-.actions-menu .nav-dropdown button:hover { background: var(--brand-soft); }
+.actions-menu .nav-dropdown button, .actions-menu .nav-dropdown a { background: none; border: 0; text-align: start; padding: 7px 10px; border-radius: 6px; cursor: pointer; color: inherit; text-decoration: none; display: block; font: inherit; }
+.actions-menu .nav-dropdown button:hover, .actions-menu .nav-dropdown a:hover { background: var(--brand-soft); }
 .actions-menu .nav-dropdown .danger { color: var(--danger); }
 .activities { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .activity { display: flex; align-items: center; gap: 10px; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
@@ -689,3 +689,4 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .user-menu-name { padding: 6px 10px; font-size: 12px; }
 .empty-state { padding: 16px; margin: 0; }
 .bank-reconcile-quick-actions { display: flex; flex-flow: row wrap; gap: 8px; margin-block: 10px; }
+.list-avatar-cell { display: inline-flex; align-items: center; gap: 8px; }

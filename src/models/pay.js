@@ -1,7 +1,8 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, getActiveCompany, postNote, read, search, unlink, write } from '../orm.js';
 import { monthFilters, nextName, promptedAmount, sameCommercialPartner, today, validDate } from './common.js';
-import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, reconciledJournalItems, statementPaymentIds, stornoLine, valueOnlyCurrencyFields } from './ledger.js';
+import { defaultPaymentJournalId, exchangeJournal, installmentSettlementState, invoiceCounterpartAccount, isReconcilableAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, paymentStatementLines, postEntry, reconciledJournalItems, statementPaymentIds, stornoLine, valueOnlyCurrencyFields } from './ledger.js';
+import { CHARGE_BEARERS, DEFAULT_CHARGE_BEARER } from './sepa.js';
 import { appendDocumentSettlement, applyCreditNote, bookEarlyDiscount, discountAvailable, isInvoice, isPurchase, isRefund, liquidityForeignFields, payWithDiscount, registerPayment, releaseCashBasis, residual, settleWriteoff, settlingEntries } from './accounting.js';
 import { bookedByBank, datedLockDelete, datedLockGuard, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -14,7 +15,7 @@ import { isPaymentMatched, unreconcile } from './bank.js';
 import { reconcileLedgerItems, unreconcilePartialReconcile } from './glReconcile.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, currentCompany, recipientBankCompanyError } from './company.js';
-import { defaultPaymentMethodLineId, isMethodLineJournal, paymentMethodLineError } from './paymentmethod.js';
+import { defaultPaymentMethodLineId, isMethodLineJournal, partnerPaymentMethodDefaults, paymentMethodLineError, preferredPaymentMethodLine } from './paymentmethod.js';
 import { openActivitiesText } from './mail.js';
 import { hasMultiCurrency } from './money.js';
 
@@ -26,10 +27,13 @@ const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
 export const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund'] }, supplier: { inbound: ['in_refund'], outbound: ['in_invoice'] } };
 
 /** Resolve a selection against current records, never against list order or a caller's stale values. */
-export function selectedItems(db, selections, { allowMultipleEntryLines = false } = {}) {
+export function selectedItems(db, selections, { allowMultipleEntryLines = false, requireReconcilable = true, allowedStates = ['posted'] } = {}) {
   if (!selections?.length) throw new Error('Select journal items first');
   const seen = new Set();
   const reconciledByMove = new Map();
+  const missingMessage = allowedStates.length === 1 && allowedStates[0] === 'posted'
+    ? 'The selected journal item is missing, ambiguous or no longer posted; refresh the list'
+    : 'The selected journal item is missing or ambiguous; refresh the list';
   return selections.map(({ move_id, line_identity, line_index }) => {
     const key = JSON.stringify([move_id, line_index ?? line_identity]);
     if (seen.has(key)) throw new Error('Select each journal item only once');
@@ -38,23 +42,23 @@ export function selectedItems(db, selections, { allowMultipleEntryLines = false 
     let line;
     let lineIndex;
     if (line_index != null && Number.isInteger(line_index)) {
-      if (move?.state !== 'posted' || line_index < 0 || line_index >= (move?.line_ids ?? []).length) {
-        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      if (!move || !allowedStates.includes(move.state) || line_index < 0 || line_index >= (move?.line_ids ?? []).length) {
+        throw new Error(missingMessage);
       }
       line = move.line_ids[line_index];
       if (line_identity && journalItemIdentity(line) !== line_identity) {
-        throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+        throw new Error(missingMessage);
       }
       lineIndex = line_index;
     } else {
       const matches = (move?.line_ids ?? []).filter((l) => journalItemIdentity(l) === line_identity);
-      if (move?.state !== 'posted' || matches.length !== 1) throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+      if (!move || !allowedStates.includes(move.state) || matches.length !== 1) throw new Error(missingMessage);
       [line] = matches;
       lineIndex = (move.line_ids ?? []).indexOf(line);
     }
     const account = read(db, 'account.account', line.account_id);
     const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
-    if (!account || !(account.reconcile === true || counterpart)) throw new Error('Select items on a reconcilable account');
+    if (requireReconcilable && (!account || !(account.reconcile === true || counterpart))) throw new Error('Select items on a reconcilable account');
     // Multi-installment invoices and bills legitimately split one receivable/payable total across dated counterpart lines.
     const sameCounterpart = (move.line_ids ?? []).filter((item) => item.account_id === line.account_id && item.partner_id === line.partner_id);
     if (!allowMultipleEntryLines && sameCounterpart.length !== 1 && !(isInvoice(move) && counterpart)) throw new Error('This entry has multiple counterpart items; settle it from its document workflow');
@@ -433,7 +437,7 @@ export function postPayment(db, p) {
   const resolvedJournal = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
   const resolvedJournalRec = read(db, 'account.journal', resolvedJournal.id);
   if (isMethodLineJournal(resolvedJournalRec)) {
-    if (!currentPayment.payment_method_line_id) throw new Error('Payment Method is required');
+    if (!currentPayment.payment_method_line_id) throw new Error('Please define a payment method line on your payment.');
     const lineErr = paymentMethodLineError(db, { ...currentPayment, journal_id: resolvedJournal.id });
     if (lineErr) throw new Error(lineErr);
   }
@@ -1898,12 +1902,13 @@ function paymentSignedAmount(r) {
 }
 
 const PAYMENT_LIST = [
-  'date', 'name', 'journal_id', 'company_id', 'partner_id',
+  'date', 'name', 'journal_id', 'company_id', 'payment_method_line_id', 'partner_id',
   'amount_signed', 'currency_id', 'activities', 'amount_company_currency_signed', 'display_state',
 ];
 
 const PAYMENT_LIST_FIELDS = {
   company_id: { optional: 'hide', multiCompanyOnly: true },
+  payment_method_line_id: { optional: 'hide' },
   amount_signed: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide'), sum: false },
   currency_id: { optional: 'hide', groupByWhen: hasMultiCurrency },
   activities: { optional: 'hide' },
@@ -1928,14 +1933,14 @@ const PAYMENT_FILTERS = [
   monthFilters('date', 'Payment Date'),
 ];
 
-const PAYMENT_GROUP_BYS = ['partner_id', 'journal_id', 'display_state', 'date', 'currency_id', 'company_id'];
-const PAYMENT_GROUP_BY_LABELS = { partner_id: 'Partner', display_state: 'Status', date: 'Payment Date', currency_id: 'Currency' };
+const PAYMENT_GROUP_BYS = ['partner_id', 'journal_id', 'payment_method_line_id', 'display_state', 'date', 'currency_id', 'company_id'];
+const PAYMENT_GROUP_BY_LABELS = { partner_id: 'Partner', payment_method_line_id: 'Payment Method Line', display_state: 'Status', date: 'Payment Date', currency_id: 'Currency' };
 
 /** Highlight draft as info, cancelled as muted, and paid unreconciled payments as warning (Odoo 20). */
 const paymentListDecoration = (r, db) => (
   r.state === 'draft' ? 'info'
-    : r.state === 'cancel' ? 'muted'
-      : r.state === 'posted' && !(db ? (isPaymentMatched(db, r) || isPaymentReconciled(db, r)) : (r.display_state === 'reconciled' || r.is_reconciled)) ? 'warning'
+    : ['cancel', 'rejected'].includes(r.state) ? 'muted'
+      : r.state === 'posted' && !(db ? isPaymentMatched(db, r) : r.is_matched) ? 'warning'
         : null
 );
 
@@ -2016,7 +2021,7 @@ const paymentMethodGuard = (db, before, after) => {
     const transitioningToPosted = !before || before.state !== 'posted';
     const clearedMethodLine = before?.payment_method_line_id != null && !after.payment_method_line_id;
     if (needsMethodLine && !after.payment_method_line_id && (transitioningToPosted || clearedMethodLine)) {
-      return 'Payment Method is required';
+      return 'Please define a payment method line on your payment.';
     }
   }
   return null;
@@ -2118,6 +2123,9 @@ export const payModels = {
     label: 'Payments',
     auditDelete: true,
     guard: (db, before, after, ctx) => {
+      if (before?.state === 'posted' && (before.iso20022_charge_bearer ?? null) !== (after.iso20022_charge_bearer ?? null)) {
+        return 'The charge bearer of a posted payment cannot be changed.';
+      }
       if (after.check_number != null && (!before || before.check_number !== after.check_number) && !paymentPaysByCheck(db, after)) {
         return 'Payments not paying by check cannot have a check number';
       }
@@ -2272,6 +2280,7 @@ export const payModels = {
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       unapplied: { type: 'monetary', label: 'Outstanding Credit', readonly: true, currency: 'company' },
       is_sent: { type: 'boolean', label: 'Is Sent', readonly: true, copy: false },
+      iso20022_charge_bearer: { type: 'selection', label: 'Charge Bearer', options: CHARGE_BEARERS },
       is_reconciled: { type: 'boolean', label: 'Is Reconciled', compute: (r, db) => isPaymentReconciled(db, r) },
       state: { type: 'selection', label: 'Status', tracking: true, options: STATES, badge: { draft: 'muted', posted: 'ok', cancel: 'muted', reversed: 'muted', rejected: 'muted' } },
       display_state: {
@@ -2282,14 +2291,25 @@ export const payModels = {
         compute: (r, db) => (r.state === 'posted' && db && isPaymentMatched(db, r) ? 'reconciled' : r.state),
       },
     },
-    defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0, is_internal_transfer: false, check_printed: false, is_sent: false }),
+    defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0, is_internal_transfer: false, check_printed: false, is_sent: false, iso20022_charge_bearer: DEFAULT_CHARGE_BEARER }),
     menuActions: [
       { label: 'Payment Receipt', when: (r) => Boolean(r?.id && r.state === 'posted'), run: (db, r) => printPaymentReceipts(db, [r.id]) },
     ],
     createDefaults: (db, vals = {}) => {
       const companyId = vals.company_id ?? getActiveCompany() ?? currentCompany(db);
-      const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
       const paymentType = vals.payment_type ?? 'inbound';
+      if (vals.partner_id && !vals.is_internal_transfer) {
+        const payDefaults = partnerPaymentMethodDefaults(db, vals.partner_id, paymentType, companyId, {
+          journalId: vals.journal_id ?? null,
+        });
+        return {
+          ...(vals.journal_id === undefined && payDefaults.journal_id ? { journal_id: payDefaults.journal_id } : {}),
+          ...(vals.payment_method_line_id === undefined && payDefaults.payment_method_line_id != null
+            ? { payment_method_line_id: payDefaults.payment_method_line_id }
+            : {}),
+        };
+      }
+      const journalId = vals.journal_id !== undefined ? vals.journal_id : defaultPaymentJournalId(db, companyId);
       const lineId = vals.payment_method_line_id === undefined && journalId
         ? defaultPaymentMethodLineId(db, journalId, paymentType)
         : undefined;
@@ -2302,8 +2322,25 @@ export const payModels = {
       if (key === 'invoice_id' && r.invoice_id && db) {
         return { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null };
       }
-      if ((key === 'journal_id' || key === 'payment_type') && db) {
-        return { payment_method_line_id: defaultPaymentMethodLineId(db, r.journal_id, r.payment_type) };
+      if ((key === 'partner_id' || key === 'journal_id' || key === 'payment_type' || key === 'company_id') && db) {
+        const paymentType = r.payment_type ?? 'inbound';
+        const companyId = r.company_id ?? getActiveCompany() ?? currentCompany(db);
+        const pref = r.partner_id && !r.is_internal_transfer
+          ? preferredPaymentMethodLine(db, r.partner_id, paymentType, companyId)
+          : null;
+        if (pref) {
+          if (key === 'journal_id') {
+            return {
+              payment_method_line_id: pref.journal_id === r.journal_id
+                ? pref.id
+                : defaultPaymentMethodLineId(db, r.journal_id, paymentType),
+            };
+          }
+          return { journal_id: pref.journal_id, payment_method_line_id: pref.id };
+        }
+        if (key === 'journal_id' || key === 'payment_type') {
+          return { payment_method_line_id: defaultPaymentMethodLineId(db, r.journal_id, paymentType) };
+        }
       }
       return {};
     },
@@ -2337,6 +2374,12 @@ export const payModels = {
       },
       lockedWhen: (r) => r.state !== 'draft',
       smart: [
+        {
+          label: 'Transaction',
+          when: (r, db) => paymentStatementLines(db, r).length > 0,
+          value: (db, r) => paymentStatementLines(db, r).length,
+          target: (r, db) => `accounting/bank?view=list&rel=id:${paymentStatementLines(db, r).map((line) => line.id).join(',')}`,
+        },
         {
           label: (r) => (r.partner_type === 'supplier' ? 'Bills' : 'Invoices'),
           when: (r, db) => settledOfType(db, r, false).length > 0,
@@ -2489,6 +2532,7 @@ export const payModels = {
         ],
         [
           { label: 'Journal', fields: ['journal_id', 'payment_method_line_id', ...(paymentPaysByCheck(db, r) || r?.check_number != null ? ['check_number'] : [])] },
+          'iso20022_charge_bearer',
           ...(r?.is_internal_transfer ? ['destination_journal_id'] : [{ field: 'partner_bank_id', label: paymentBankLabel(r) }]),
         ],
         ...(r?.invoice_id || r?.state === 'draft' || Number(r?.unapplied) > 0

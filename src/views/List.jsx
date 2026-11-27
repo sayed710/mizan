@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { models } from '../models/index.js';
 import { groupRecords, read, write, writeMany } from '../orm.js';
 import { t } from '../i18n.js';
-import { display, FieldInput, isNumeric, money, OptionalColsMenu, Tag, useOptionalColumns } from '../ui.jsx';
+import { display, FieldInput, isNumeric, money, OptionalColsMenu, Tag, useOptionalColumns, Avatar } from '../ui.jsx';
 import { commit, companiesOf, getDb } from '../store.js';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
@@ -13,10 +13,11 @@ function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
   const [f, dir] = sort;
   const field = fields[f];
-  const text = (r) => (field?.type === 'date' ? String(r[f] ?? '') : display(db, field, r[f]));
+  const value = (r) => field?.valueFallback && !r[f]?.length ? field.valueFallback(r) : r[f];
+  const text = (r) => (field?.type === 'date' ? String(value(r) ?? '') : display(db, field, value(r), r));
   return [...records].sort((a, b) => {
-    const x = a[f];
-    const y = b[f];
+    const x = value(a);
+    const y = value(b);
     const c = typeof x === 'number' && typeof y === 'number' ? x - y : text(a).localeCompare(text(b));
     return c * dir;
   });
@@ -139,6 +140,9 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       </td>
       {cols.map((f) => {
         const field = fields[f];
+        if (field.widget === 'boolean_favorite') {
+          return <td key={f} onClick={(e) => e.stopPropagation()}><button type="button" className="link" aria-label={t('Favorite')} aria-pressed={!!r[f]} onClick={() => { try { commit(write(getDb(), model, r.id, { [f]: !r[f] })); } catch (e) { alert(t(e.message)); } }}>{r[f] ? '★' : '☆'}</button></td>;
+        }
         if (field.widget === 'handle') {
           return (
             <td key={f} className="handle-col" onClick={(e) => e.stopPropagation()}>
@@ -148,16 +152,20 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         }
         const editable = def.editableList?.includes(f);
         const isTags = !editable && field.type === 'many2many' && field.widget === 'many2many_tags';
-        const text = editable || isTags ? null : display(db, field, r[f], r);
-        const badge = editable || isTags ? null : badgeClass(field.badge, r[f]);
+        const cellVal = field.valueFallback && !(r[f]?.length) ? field.valueFallback(r) : r[f];
+        const hiddenByRule = Boolean(field.hideWhen?.(r, db));
+        const text = editable || isTags ? null : display(db, field, cellVal, r);
+        const badge = editable || isTags ? null : badgeClass(field.badge, cellVal);
+        const showAvatar = !editable && !isTags && Boolean(field.avatar) && Boolean(text);
         // Odoo's relative-date widget shows a past date in red.
         const pastDue = field.widget === 'remaining_days' && text && r[f] && r[f] < today();
         return (
           <td key={f} className={[isNumeric(field) ? 'num' : '', field.bold ? 'bold' : '', pastDue ? 'text-danger' : ''].filter(Boolean).join(' ')}
             onClick={editable ? (e) => e.stopPropagation() : undefined}>
-            {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
+            {hiddenByRule ? null : editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
-              : isTags ? <span className="many2many-tags">{(Array.isArray(r[f]) ? r[f] : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>
+              : isTags ? (<span className="many2many-tags">{(Array.isArray(cellVal) ? cellVal : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>)
+              : showAvatar ? <span className="list-avatar-cell"><Avatar name={r.name || text} size={24} /><span>{text}</span></span>
               : badge && text ? <span className={badge}>{text}</span> : text}
           </td>
         );

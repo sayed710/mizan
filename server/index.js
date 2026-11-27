@@ -32,7 +32,7 @@ import { recordSent, sendDocument, sendFollowUp, sendMailing, sendCustomerStatem
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
-import { aiDraft, finishDigitizedBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
+import { aiDraft, createDigitizedBill, finishDigitizedBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
@@ -45,6 +45,11 @@ const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
 const ACTIONS = {
   '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u, _store, view) => aiDraft(view, u, b) },
+  '/api/integrations/digitize-new-bill': { need: 'ai', model: () => 'account.move', run: (b, u, store) => {
+    const company_id = b.company_id ?? selectionFor(u).current_company_id;
+    checkSelection(u, { current_company_id: company_id, allowed_company_ids: [company_id] });
+    return createDigitizedBill(store, { ...b, company_id });
+  } },
   '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, store) => finishDigitizedBill(store, b) },
   // Sending also logs a WhatsApp message, so the store may write that model on top of the user's own.
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, extra: ['whatsapp.message'], run: (b, u, store) => sendWhatsApp(ENV, store, u, b) },
@@ -457,7 +462,8 @@ const visibleDb = (u, { models = true } = {}) => {
   const allowed = models ? readableFor(u) : null;
   const companies = companiesFor(u);
   const { records: inCompanies } = restrictRecords(db, companies);
-  const records = allowed ? Object.fromEntries(Object.entries(inCompanies).filter(([model]) => allowed.has(model))) : inCompanies;
+  const visibleRecords = { ...inCompanies, 'ir.exports': (inCompanies['ir.exports'] ?? []).filter((record) => record.owner_login === u.login) };
+  const records = allowed ? Object.fromEntries(Object.entries(visibleRecords).filter(([model]) => allowed.has(model))) : visibleRecords;
   const selection = selectionFor(u);
   // A user limited to some companies gets those companies' identity, not the group-wide VAT number and bank account.
   const own = companies && (db.records['res.company'] ?? []).find((c) => c.id === selection.current_company_id);

@@ -7,7 +7,7 @@ import { assetAccounts } from './test-support/asset-accounts.js';
 import { create, read, write } from './orm.js';
 import { apps, leavesOf, models } from './models/index.js';
 import { postEntry } from './models/ledger.js';
-import { sha256, checkInalterability, computeMoveHash, secureEntries } from './models/hash_chain.js';
+import { sha256, checkInalterability, computeMoveHash, secureEntries, analyzeJournalChains } from './models/hash_chain.js';
 import { journalAudit } from './models/journal_audit.js';
 import { applyDiff, assignIds, diffDb } from './sync.js';
 import { parseDistributionInput } from './analytic_distribution.js';
@@ -26,6 +26,7 @@ const setup = () => {
 
 test('wizard action persists isolated company chains and lock dates through server diffs and SQLite', () => {
   let { db, company, journal } = setup();
+    db = { ...db, records: { ...db.records, 'account.move': [] } };
   let result = entry(db, 1); db = result.db; const first = result.id;
   result = entry(db, company); db = result.db; const second = result.id;
   const leaf = leavesOf(apps.find((a) => a.id === 'accounting')).find((l) => l.key === 'secure-entries');
@@ -37,6 +38,9 @@ test('wizard action persists isolated company chains and lock dates through serv
     db = server(db, next);
     if (id === 1) assert.doesNotThrow(() => entry(db, company, '2026-01-15'));
   }
+  // Odoo's action_secure_entries only hashes (account_secure_entries_wizard.py:241-250); the hard lock date is set separately.
+  assert.equal(read(db, 'res.company', company).hard_lock_date ?? null, null);
+  db = write(db, 'res.company', company, { hard_lock_date: '2026-01-01' });
   assert.equal(read(db, 'res.company', company).hard_lock_date, '2026-01-01');
   const storage = openStorage(new DatabaseSync(':memory:')); storage.save(null, db); db = storage.load();
   assert.equal(read(db, 'account.move', first).secure_sequence_number, 1);
@@ -118,6 +122,7 @@ test('incoterm order action copies both fields to a server-persisted invoice', (
 
 test('wizard warns of draft entries and sequence gaps and displays the posted entry count', () => {
   let { db, journal } = setup();
+    db = { ...db, records: { ...db.records, 'account.move': [] } };
   const accounts = db.records['account.account'];
   const lines = [{ account_id: accounts.find((a) => a.code === '600000').id, debit: 100, credit: 0 }, { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 }];
   for (const number of [1, 3]) db = create(db, 'account.move', { move_type: 'entry', state: 'posted', journal_id: journal, invoice_date: '2026-01-01', name: `SEC/2026/${String(number).padStart(4, '0')}`, line_ids: lines }).db;
@@ -222,6 +227,7 @@ test('empty secure wizard leaves the hard lock unchanged and explains why', () =
   const action = models['account.secure.entries.wizard'].form.buttons.find((b) => b.label === 'Secure Entries');
   for (const scenario of ['no restricted journal', 'no entries', 'before first entry']) {
     let { db, journal } = setup();
+    db = { ...db, records: { ...db.records, 'account.move': [] } };
     if (scenario === 'no restricted journal') db = write(db, 'account.journal', journal, { restrict_mode_hash_table: false });
     if (scenario === 'before first entry') db = entry(db, 1, '2026-02-01').db;
     const wizard = create(db, 'account.secure.entries.wizard', { company: 1, hash_date: '2026-01-01' }); db = wizard.db;
@@ -352,4 +358,58 @@ test('server ID assignment rejects malformed analytic keys and remapping collisi
       assert.throws(() => { const assigned = assignIds(competing, diff); applyDiff(competing, assigned.diff, { isAdmin: true }); }, error, `${place}: ${label}`);
     }
   }
+});
+
+test('journal-less secured entries persist their resolved journal and legacy heads retain ownership', () => {
+  let { db, journal } = setup();
+  db = write(db, 'res.company', 1, { default_general_journal_id: journal });
+  const result = entry(db, 1); db = result.db;
+  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => m.id === result.id ? { ...m, journal_id: null } : m) } };
+  const saved = server(db, secureEntries(db, { throughMoveId: result.id }));
+  assert.equal(read(saved, 'account.move', result.id).journal_id, journal);
+  assert.equal(checkInalterability(saved, { journalId: journal, companyId: 1 })[0].status, 'ok');
+  const original = read(db, 'account.move', result.id);
+  const hash = computeMoveHash(original, '', 3);
+  const legacy = { ...saved, records: { ...saved.records,
+    'account.move': saved.records['account.move'].map((m) => m.id === result.id ? { ...m, journal_id: null, inalterable_hash: hash } : m),
+    'account.journal': saved.records['account.journal'].map((j) => j.id === journal ? { ...j, secure_chain_heads: j.secure_chain_heads.map((h) => ({ ...h, last_hash: hash })) } : j),
+  } };
+  const other = legacy.records['account.journal'].find((j) => j.id !== journal && j.type === 'general');
+  assert.ok(other);
+  const changed = { ...legacy, records: { ...legacy.records, 'res.company': legacy.records['res.company'].map((c) => c.id === 1 ? { ...c, default_general_journal_id: other.id } : c) } };
+  assert.equal(checkInalterability(changed, { journalId: journal, companyId: 1 })[0].status, 'ok');
+});
+
+test('changing a draft invoice date updates its accounting date', () => {
+  const { db } = setup();
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', date: '2026-02-01' });
+  const changed = write(invoice.db, 'account.move', invoice.id, { invoice_date: '2026-03-01' });
+  assert.equal(read(changed, 'account.move', invoice.id).date, '2026-03-01');
+});
+
+
+test('legacy chain ownership is indexed once during wizard analysis', () => {
+  let { db, journal } = setup();
+  let previous = '';
+  let reads = 0;
+  const moves = Array.from({ length: 80 }, (_, i) => {
+    const move = { id: 80000 + i, company_id: 1, state: 'posted', date: '2026-01-01', name: `SEC/${String(i + 1).padStart(4, '0')}`, secure_sequence_number: i + 1, line_ids: [] };
+    const hash = computeMoveHash(move, previous);
+    previous = hash;
+    return { ...move, get inalterable_hash() { reads++; return hash; } };
+  });
+  const last = moves.at(-1);
+  db = { ...db, records: { ...db.records, 'account.move': moves, 'account.journal': db.records['account.journal'].map((j) => j.id === journal ? { ...j, secure_chain_heads: [{ company_id: 1, last_move_id: last.id, last_hash: previous, last_move_name: last.name, count: 80, last_sequence: 80 }] } : j) } };
+  reads = 0;
+  assert.equal(analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-31' }).entries_count, 0);
+  assert.ok(reads < 5000, `chain ownership performed ${reads} hash reads`);
+});
+
+test('unchanged invoice date onchange preserves a shifted draft accounting date', () => {
+  const db = seed();
+  const previous = { id: 99999, state: 'draft', move_type: 'out_invoice', invoice_date: '2026-03-15', date: '2026-04-01' };
+  const onchange = models['account.move'].onchange;
+  const unchanged = onchange({ ...previous }, 'invoice_date', db, { previous });
+  assert.equal(unchanged.date, undefined);
+  assert.equal(onchange({ ...previous, invoice_date: '2026-04-05' }, 'invoice_date', db, { previous }).date, '2026-04-05');
 });

@@ -848,7 +848,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
   const closingId = read(sub2, 'account.return', r2.id).closing_move_ids[0];
 
   // A later lock date (e.g. from year-end closing or manual lock 2026-12-31) is configured
-  const laterLocked = write(sub2, 'res.company', 1, { lock_date: '2026-12-31' });
+  const laterLocked = write({ ...sub2, records: { ...sub2.records, 'account.bank.statement.line': [] } }, 'res.company', 1, { lock_date: '2026-12-31' });
 
   // A later global lock also protects the closing from cancellation.
   assert.throws(() => resetReturnToDraft(laterLocked, r2.id), /locked/i);

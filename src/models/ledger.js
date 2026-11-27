@@ -372,7 +372,7 @@ export function invoiceLineAccountResult(db, move, line, journal = resolveDocume
   if (error) return { account: null, original: null, deferred: false, error };
   const originalAccount = read(db, 'account.account', original);
   const deferred = Boolean(line.deferred_start_date || line.deferred_end_date || originalAccount?.is_deferred);
-  if (deferred && (!line.deferred_start_date || !line.deferred_end_date || line.deferred_start_date > line.deferred_end_date)) {
+  if (deferred && (!validDate(line.deferred_start_date) || !validDate(line.deferred_end_date) || line.deferred_start_date > line.deferred_end_date)) {
     return { account: null, original, deferred, error: 'Set valid deferred start and end dates' };
   }
   const company = read(db, 'res.company', move.company_id ?? 1);
@@ -406,7 +406,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
         ? computed.taxes
         : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), invoice_repartition_line_ids: l.invoice_repartition_line_ids, refund_repartition_line_ids: l.refund_repartition_line_ids }];
       for (const [compIndex, t] of zeroTaxes.entries()) {
-        const zero = taxLabel(t);
+        const zero = computed.taxes.length || l.tax_id || l.tax_name || l.tax != null ? taxLabel(t) : '';
         const zeroTaxId = t.tax_id ?? null;
         const tags = [...new Set(taxBaseTags(t, side, l))].sort((a, b) => a - b);
         const key = JSON.stringify([account, zero, zeroTaxId, tags, false, distributionKey]);
@@ -829,7 +829,7 @@ export function reversalLine(line) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, state = 'posted', auto_post = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, state = 'posted', auto_post = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, reversed_entry_id = null, automatic_entry_source_move_ids = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
   if (!['posted', 'draft'].includes(state)) throw new Error('Entry state must be posted or draft');
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
@@ -906,6 +906,8 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ...(tax_return_id ? { tax_return_id } : {}),
     ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
     ...(deferred_entry_type ? { deferred_entry_type } : {}),
+    ...(reversed_entry_id ? { reversed_entry_id } : {}),
+    ...(Array.isArray(automatic_entry_source_move_ids) && automatic_entry_source_move_ids.length ? { automatic_entry_source_move_ids } : {}),
     ...(system_generated ? { system_generated: true } : {}),
   }, { archivedOriginIds, includeCashBasisTargets });
   if (isDraft) return made;
@@ -1041,6 +1043,25 @@ export function isPaymentMatched(db, payment, excludeLineId = null) {
   const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
   const matches = [...(paymentLinesByMove.get(pMoveId) ?? []), ...(paymentLinesById.get(pId) ?? [])];
   return matches.some((lineId) => !excludeLineId || lineId !== excludeLineId);
+}
+
+const paymentStatementLinesCache = new WeakMap();
+
+/** Statement lines currently matched to a payment, using the same index as matching guards. */
+export function paymentStatementLines(db, payment) {
+  if (!db || !payment) return [];
+  let cached = paymentStatementLinesCache.get(db.records);
+  if (!cached) {
+    cached = new Map();
+    paymentStatementLinesCache.set(db.records, cached);
+  }
+  const key = JSON.stringify([payment.id ?? null, payment.move_id ?? null]);
+  if (cached.has(key)) return cached.get(key);
+  const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
+  const ids = new Set([...(paymentLinesById.get(payment.id) ?? []), ...(paymentLinesByMove.get(payment.move_id) ?? [])]);
+  const lines = (db.records['account.bank.statement.line'] ?? []).filter((line) => ids.has(line.id));
+  cached.set(key, lines);
+  return lines;
 }
 
 /** Settlement links per move, built once per immutable records object (journalItems runs on every report). */
@@ -1496,18 +1517,17 @@ export function reconciledJournalItems(db, move, { partialMatching = false } = {
   return computeReconciledItems(db, move, index).map((item, lineIdx) => {
     const key = lineKey(move.id, lineIdx);
     const groupCode = item.reconciled ? (index.matchingNumbers.get(key) ?? null) : null;
-    if (groupCode) return { ...item, matching_number: groupCode };
-    if (!partialMatching) return item;
     const partialCode = partialNumbers?.get(key);
-    return partialCode ? { ...item, matching_number: partialCode } : item;
+    const reconciliationGroup = groupCode ?? partialCode ?? null;
+    return { ...item, reconciliation_group: reconciliationGroup, ...(reconciliationGroup ? { matching_number: reconciliationGroup } : {}) };
   });
 }
 
 /** Filter the matching groups belonging to a move; retain legacy settlement support without group numbers. */
 export function reconciledItemFilter(db, move) {
-  const numbers = new Set(reconciledJournalItems(db, move, { partialMatching: true }).map((line) => line.matching_number).filter(Boolean));
+  const numbers = new Set(reconciledJournalItems(db, move, { partialMatching: true }).map((line) => line.reconciliation_group).filter(Boolean));
   const legacyMoves = matchedMoveIds(db, move.id);
-  return (line) => numbers.has(line.matching_number)
+  return (line) => numbers.has(line.reconciliation_group)
     || (!line.matching_number && legacyMoves.has(line.move_id) && line.reconciled);
 }
 
@@ -1562,7 +1582,7 @@ export function matchedMoveIds(db, moveId) {
 }
 
 /** Identity of an embedded journal line, independent of its position and derived matching or residual state. */
-export function journalItemIdentity({ reconciled: _reconciled, matching_number: _matchingNumber, amount_residual: _amountResidual, amount_residual_currency: _amountResidualCurrency, ...line }) {
+export function journalItemIdentity({ reconciled: _reconciled, matching_number: _matchingNumber, reconciliation_group: _reconciliationGroup, amount_residual: _amountResidual, amount_residual_currency: _amountResidualCurrency, ...line }) {
   return JSON.stringify(line);
 }
 
@@ -1578,7 +1598,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
   const rows = search(db, 'account.move')
     .filter((m) => {
       const date = m.date ?? m.invoice_date;
-      const stateOk = reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
+      const stateOk = reviewMode === 'all_with_cancel' ? ['draft', 'posted', 'cancel'].includes(m.state) : reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
       return stateOk
       && includeClosingItem(m, includeClosing)
       && (!from || date >= from)

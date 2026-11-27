@@ -196,6 +196,11 @@ const num = (n, min = 0) => (Number.isFinite(Number(n)) && Number(n) >= min ? Nu
 export async function digitizeBill(db, { id, file }) {
   const bill = read(db, 'account.move', Number(id));
   if (!bill || bill.move_type !== 'in_invoice' || bill.state !== 'draft') throw new Error('Open a draft vendor bill to digitize a document');
+  const data = await readBillDocument(file);
+  return fillDigitizedBill(db, bill, file, data);
+}
+
+async function readBillDocument(file) {
   if (!file || !DOC_TYPES.has(file.type) || typeof file.data !== 'string' || !file.data) throw new Error('Upload a PDF or an image (JPEG, PNG, GIF, WebP)');
   if (file.data.length > MAX_DOC_BASE64) throw new Error('The document is too large (3 MB maximum)');
   const source = { type: 'base64', media_type: file.type, data: file.data };
@@ -211,8 +216,12 @@ export async function digitizeBill(db, { id, file }) {
   const data = response.content.find((b) => b.type === 'tool_use')?.input;
   if (!data?.vendor || !Array.isArray(data.lines)) throw new Error('The document could not be read as a bill.');
 
+  return data;
+}
+
+function fillDigitizedBill(db, bill, file, data) {
   const name = String(data.vendor).trim().slice(0, 200);
-  const known = search(db, 'res.partner').find((p) => p.name.toLowerCase() === name.toLowerCase() || (data.vendor_vat && p.vat === data.vendor_vat));
+  const known = search(db, 'res.partner').find((p) => p.active !== false && (!p.company_id || p.company_id === bill.company_id) && (p.name.toLowerCase() === name.toLowerCase() || (data.vendor_vat && p.vat === data.vendor_vat)));
   const { db: withVendor, id: partner_id } = known ? { db, id: known.id } : create(db, 'res.partner', { name, is_company: true, vat: String(data.vendor_vat ?? '').slice(0, 50) });
   const invoice_line_ids = data.lines.slice(0, 200).map((l) => ({
     product_id: null, name: String(l.description ?? '').slice(0, 500), qty: num(l.quantity), price_unit: num(l.unit_price), discount: 0, tax: num(l.tax_percent),
@@ -225,23 +234,46 @@ export async function digitizeBill(db, { id, file }) {
   return { db: postNote(next, 'account.move', bill.id, `Digitized from ${String(file.name ?? 'document').slice(0, 100)}`), message: `${invoice_line_ids.length} line(s) read from ${name}` };
 }
 
+/** Read first, then create and fill against the latest server snapshot in one commit. */
+export async function createDigitizedBill(store, { company_id, partner_id, file }) {
+  const validatePartner = (db) => {
+    if (partner_id == null) return;
+    const partner = Number.isSafeInteger(partner_id) && read(db, 'res.partner', partner_id);
+    if (!partner || partner.active === false || (partner.company_id && partner.company_id !== company_id)) {
+      throw new Error('Select an active partner belonging to the bill company');
+    }
+  };
+  validatePartner(store.get());
+  const data = await readBillDocument(file);
+  const db = store.get();
+  validatePartner(db);
+  const created = create(db, 'account.move', { move_type: 'in_invoice', company_id, ...(partner_id != null ? { partner_id } : {}) });
+  const filled = fillDigitizedBill(created.db, read(created.db, 'account.move', created.id), file, data);
+  store.commitDigitizedBill(filled.db, created.id);
+  return finishDigitizedPosting(store, created.id, filled.message);
+}
+
 /** Commit the filled draft before attempting a separately validated post. */
 export async function finishDigitizedBill(store, input) {
   const filled = await digitizeBill(store.get(), input);
   store.commitDigitizedBill(filled.db, Number(input.id));
+  return finishDigitizedPosting(store, Number(input.id), filled.message);
+}
+
+function finishDigitizedPosting(store, id, message) {
   const db = store.get();
-  const bill = read(db, 'account.move', Number(input.id));
+  const bill = read(db, 'account.move', id);
   const company = read(db, 'res.company', bill.company_id ?? 1);
   const vendor = read(db, 'res.partner', bill.partner_id);
   if (company?.autopost_bills && vendor?.autopost_bills === 'always') {
     try {
       store.commit(postNote(postMove(db, bill.id), 'account.move', bill.id, 'The bill was posted automatically'));
-      return { message: `${filled.message}. The bill was posted automatically` };
+      return { message: `${message}. The bill was posted automatically` };
     } catch (error) {
-      return { message: `${filled.message}. Automatic posting failed: ${error.message}` };
+      return { message: `${message}. Automatic posting failed: ${error.message}` };
     }
   }
-  return { message: filled.message };
+  return { message };
 }
 
 // ---- WhatsApp / SMS ----

@@ -63,11 +63,12 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
   const text = <>{label}{required && <span className="req" aria-hidden="true">*</span>}</>;
   const fieldCtx = { isNew, stored };
   const isReadonly = readonly || fieldReadonly(field, record, db, fieldCtx);
+  const resolvedValue = field.valueFallback && !(value?.length) ? field.valueFallback(record) : value;
   return (
     <div className="field">
       {isLabelable(field, isReadonly, record, db, fieldCtx) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
       <div className="field-value">
-        <FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} stored={stored} />
+        <FieldInput db={db} model={model} fieldName={name} field={field} value={resolvedValue} onChange={onChange} id={id} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} stored={stored} />
         {field.help && <div className="field-help">{t(field.help)}</div>}
       </div>
     </div>
@@ -339,7 +340,9 @@ function ActionsMenu({ model, rec, backHash, base, query, onAction, isNew, onErr
       <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
       {open && (
         <div className="nav-dropdown" role="menu">
-          {(models[model].menuActions ?? []).filter((a) => a.when?.(rec) ?? true).map((a) => (
+          {(models[model].menuActions ?? [])
+            .filter((a) => (!a.app || appOpen(getDb(), getUser(), a.app)) && (!a.when || a.when(rec, getDb(), getUser())))
+            .map((a) => (
             <button key={a.label} type="button" role="menuitem" onClick={() => run(() => onAction(a))}>{t(a.label)}</button>
           ))}
           {!isNew && <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>}
@@ -517,7 +520,7 @@ export function FormView({ leaf, id, base, params }) {
   const runButton = async (b) => {
     // Buttons that need input open an in-app dialog; the button runs with what was entered.
     if (!b.prompt) {
-      const spec = b.wizard?.(getDb(), current);
+      const spec = b.wizard?.(getDb(), current, { defaults: leaf?.defaults ?? {} });
       if (spec) { setWizard({ b, spec, error: null }); return; }
     }
     // Without the integration the button only records the send: say so, ask first and leave a trace.
@@ -527,7 +530,7 @@ export function FormView({ leaf, id, base, params }) {
     if (live) {
       if (b.prompt) {
         // With a wizard the amount is asked in the in-app dialog and sent as the same text the prompt would have.
-        const spec = b.wizard?.(getDb(), current);
+        const spec = b.wizard?.(getDb(), current, { defaults: leaf?.defaults ?? {} });
         if (spec) {
           setWizard({
             b, spec, error: null,
@@ -628,11 +631,16 @@ export function FormView({ leaf, id, base, params }) {
 
       const savedId = wizard.id ?? save();
       if (savedId == null) return;
-      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), shouldEmail && live ? { ...values, live: true } : values);
+      const res = wizard.b.run(
+        getDb(),
+        read(getDb(), model, savedId),
+        shouldEmail && live ? { ...values, live: true } : values,
+        { defaults: leaf?.defaults ?? {} },
+      );
       const saved = await commit(res.db, { quiet: true });
       if (!saved.ok) throw new Error(saved.error || 'Could not save changes');
 
-      if (shouldEmail) {
+      if (shouldEmail && (!res?.emailIds || res.emailIds.includes(savedId))) {
         if (live) {
           try {
             const out = await serverAction(endpoint, { model, id: savedId });
@@ -685,6 +693,8 @@ export function FormView({ leaf, id, base, params }) {
   // A readonly sequence title still holding the '/' placeholder reads as Draft in the breadcrumb and the heading alike.
   const displayTitle = (titleField?.readonly || titleField?.compute) && current[def.form.title] === '/' ? t('Draft') : current[def.form.title];
 
+  const visibleMenuActions = (models[model].menuActions ?? []).filter((a) => (!a.app || appOpen(db, getUser(), a.app)) && (!a.when || a.when(isNew ? current : rec, db, getUser())));
+
   return (
     <main className="form-page">
       <div className="control-panel">
@@ -694,7 +704,7 @@ export function FormView({ leaf, id, base, params }) {
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : displayTitle}</span>
           </nav>
-          {(!isNew || (models[model].menuActions ?? []).length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} onError={fail} />}
+          {(!isNew || visibleMenuActions.length > 0) && <ActionsMenu model={model} rec={isNew ? current : rec} backHash={backHash} base={base} query={query} onAction={runButton} isNew={isNew} onError={fail} />}
           {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && ['out_invoice', 'out_refund'].includes(current.move_type))) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
           {dirty && (
             <span className="dirty">

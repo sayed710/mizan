@@ -4,7 +4,7 @@ import { statementUrl } from '../statementNavigation.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels, creditNoteView, journalEntriesView, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
+import { accountingModels, creditNoteView, journalEntriesView, partnerCreateBillAction, partnerCreateInvoiceAction, partnerMenuActions, partnerRegisterPaymentAction, purchaseInvoiceView, salesInvoiceView, vendorRefundView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels, customerPaymentView, vendorPaymentView } from './pay.js';
@@ -104,6 +104,7 @@ import { paymentMethodModels } from './paymentmethod.js';
 import { lockExceptionModels } from './lockexception.js';
 import { countryGroupModels } from './countrygroup.js';
 import { countryModels } from './country.js';
+import { exportModels } from './exports.js';
 
 // Generic entry menus search like Journal Entries, not like invoices.
 const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys', 'groupByLabels'].filter((k) => k in journalEntriesView).map((k) => [k, journalEntriesView[k]]));
@@ -111,7 +112,7 @@ const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys',
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, resBankModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
+export const MODEL_MODULES = { exportModels, configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, resBankModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
 MODEL_MODULES.countryModels = countryModels;
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
@@ -131,6 +132,10 @@ for (const [name, model] of Object.entries(models)) {
 }
 models['hr.leave'].guard = leaveGuard;
 declareWorkflowFields(models);
+
+const partnerListActions = [partnerCreateInvoiceAction, partnerCreateBillAction, partnerRegisterPaymentAction];
+models['res.partner'].listActions = partnerListActions;
+models['res.partner'].menuActions = partnerMenuActions;
 
 // Views that need their own spec are offered only when the model has one (a missing kanban spec used to crash the screen).
 const SPEC_VIEWS = ['kanban', 'calendar', 'gantt'];
@@ -166,9 +171,17 @@ const customers = {
       wizard: () => postponeFollowUpWizardSpec(),
       run: (db, ids, values) => ({ db: postponeFollowUp(db, ids, values.date, { companyId: db.settings?.current_company_id ?? 1 }) }),
     },
+    partnerCreateInvoiceAction,
+    partnerRegisterPaymentAction,
   ],
 };
-const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
+const vendors = {
+  key: 'vendors',
+  label: 'Vendors',
+  model: 'res.partner',
+  defaults: { supplier_rank: 1 },
+  listActions: [partnerCreateBillAction, partnerRegisterPaymentAction],
+};
 const products = { key: 'products', label: 'Products', model: 'product' };
 
 /**
@@ -214,7 +227,7 @@ const allApps = [
       { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' && r.invoice_status === 'to_invoice' },
       { label: 'Products', children: [products, { key: 'pricelists', label: 'Pricelists', model: 'product.pricelist' }, { key: 'quote-templates', label: 'Quotation Templates', model: 'sale.order.template' }, { key: 'loyalty', label: 'Discount & Loyalty', model: 'loyalty.program' }, { key: 'cards', label: 'Coupons & Cards', model: 'loyalty.card' }] },
       { key: 'marketplaces', label: 'Marketplaces', model: 'marketplace.connector' },
-      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }] },
+      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }, { key: 'combo-choices', label: 'Combo Choices', model: 'product.combo' }] },
       { key: 'report', label: 'Reporting', model: 'sale.order', view: 'graph' },
     ],
   },
@@ -244,7 +257,15 @@ const allApps = [
           ...creditNoteView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
-        { key: 'customer-products', label: 'Products', model: 'product', defaultFilters: ['sale_ok'], defaults: { sale_ok: true } },
+        {
+          key: 'customer-products',
+          label: 'Products',
+          model: 'product',
+          defaultFilters: ['sale_ok'],
+          defaults: { sale_ok: true },
+          list: ['name', 'default_code', 'tag_ids', 'barcode', 'company_id', 'list_price', 'taxes_id', 'cost', 'qty_available', 'categ_id', 'type', 'uom_id'],
+          listFields: { cost: { optional: 'hide' } },
+        },
         { ...customers, defaultFilters: ['customers'], defaults: { customer_rank: 1 } },
       ] },
       { label: 'Vendors', children: [
@@ -270,7 +291,15 @@ const allApps = [
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
-        { key: 'vendor-products', label: 'Products', model: 'product', defaultFilters: ['purchase_ok'], defaults: { purchase_ok: true } },
+        {
+          key: 'vendor-products',
+          label: 'Products',
+          model: 'product',
+          defaultFilters: ['purchase_ok'],
+          defaults: { purchase_ok: true },
+          list: ['name', 'default_code', 'tag_ids', 'barcode', 'company_id', 'list_price', 'cost', 'supplier_taxes_id', 'qty_available', 'categ_id', 'type', 'uom_id'],
+          listFields: { list_price: { optional: 'hide' } },
+        },
         { ...vendors, defaultFilters: ['vendors'], defaults: { supplier_rank: 1 } },
       ] },
       { label: 'Accounting', children: [
@@ -835,7 +864,7 @@ export const leavesOf = (app) => {
   return walk(app?.menus);
 };
 
-const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product'];
+const SHARED = ['ir.exports', 'mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
   'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];
