@@ -2,13 +2,12 @@
 import { read, search } from '../orm.js';
 import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { deferredSettings, lineCreditAdjustmentAmount, recognitionTargetThroughDate, scheduleAsOf } from './deferred.js';
-import { ACCOUNT_TYPES, balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, journalItems, profitAndLoss, weighted } from './ledger.js';
+import { ACCOUNT_TYPES, balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, isLiquidityAccount, isLiquidityJournal, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
 import { currentCompany } from './company.js';
 import { reportingBookedAmount } from './money.js';
-import { isLiquidityJournal } from './ledger.js';
 import { configuredEarningsAccount } from './earnings.js';
 import { includeInitialBalance } from './accounting.js';
 
@@ -505,26 +504,143 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds, include
   };
 }
 
-/** Executive KPIs for a period: P&L figures and margins, liquidity at the period end, days sales outstanding. */
+/**
+ * Odoo 20 Executive Summary: Cash, Profitability, Balance Sheet, Performance, and Position.
+ * Period-scoped flows cover `from`..`to`; balance-sheet positions accumulate to `to`.
+ */
 export function executiveSummary(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode } = {}) {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const pl = profitAndLoss(db, { from, to, company_id, reviewMode: mode }, { analyticAccountIds });
   const bs = balanceSheet(db, { to, company_id, reviewMode: mode }, { analyticAccountIds });
+  const cashAccounts = new Set(
+    search(db, 'account.account', { includeArchived: true })
+      .filter((a) => isLiquidityAccount(a))
+      .map((a) => a.id),
+  );
+  const cashPeriodItems = analyticMoveItems(
+    journalItems(db, { from, to, company_id, reviewMode: mode }),
+    analyticAccountIds,
+  ).filter((l) => cashAccounts.has(l.account_id));
+  const cashReceived = round(
+    cashPeriodItems
+      .filter((l) => (Number(l.debit) || 0) > 0)
+      .reduce((s, l) => s + reportingBookedAmount(db, l, netOf(l)), 0),
+  );
+  const cashSpent = round(
+    cashPeriodItems
+      .filter((l) => (Number(l.credit) || 0) > 0)
+      .reduce((s, l) => s + reportingBookedAmount(db, l, netOf(l)), 0),
+  );
+  const cashSurplus = round(cashReceived + cashSpent);
+
   const sum = (rows, types) => round(rows.filter((r) => types.includes(r.account.account_type)).reduce((s, r) => s + r.balance, 0));
-  const cash = sum(bs.assets, ['asset_cash']);
+  const closingBankBalance = round(sum(bs.assets, ['asset_cash']) - sum(bs.liabilities, ['liability_credit_card']));
   const receivables = sum(bs.assets, ['asset_receivable']);
-  const payables = sum(bs.liabilities, ['liability_payable']);
+  const payables = round(-sum(bs.liabilities, ['liability_payable']));
+  const netAssets = round(bs.totalAssets - bs.totalLiabilities);
   const currentAssets = sum(bs.assets, ['asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayments']);
   const currentLiabilities = sum(bs.liabilities, ['liability_payable', 'liability_current', 'liability_credit_card']);
-  const pct = (n) => (pl.revenue ? round((n / pl.revenue) * 100) : null);
-  // Days counted inclusive on both ends; an open-ended period falls back to a single day.
-  const days = from && to ? Math.round((new Date(to) - new Date(from)) / 864e5) + 1 : 1;
+
+  const revenue = pl.revenue;
+  const costOfRevenue = pl.cost;
+  const grossProfit = pl.gross;
+  const expenses = pl.expense;
+  const netProfit = pl.net;
+
+  // Odoo uses ignore_zero_division: a zero denominator yields 0, not null.
+  const pct = (n, d) => (d ? round((n / d) * 100) : 0);
+  const grossProfitMargin = pct(grossProfit, revenue);
+  const netProfitMargin = pct(netProfit, revenue);
+  const returnOnInvestments = pct(netProfit, bs.totalAssets);
+
+  // NDays: Odoo computes this in a custom engine; use the inclusive day count from `from`..`to` (1 when open-ended).
+  const periodDays = from && to ? Math.round((new Date(to) - new Date(from)) / 864e5) + 1 : null;
+  const days = periodDays > 0 ? periodDays : 1;
+  const averageDebtorsDays = revenue ? round((receivables / revenue) * days, 2) : 0;
+  const creditorsDenominator = round(costOfRevenue + expenses);
+  const averageCreditorsDays = creditorsDenominator ? round((-payables / creditorsDenominator) * days, 2) : 0;
+  const shortTermCashForecast = round(receivables + payables);
+  const currentAssetsToLiabilities = currentLiabilities ? currentAssets / currentLiabilities : 0;
+
+  const sections = [
+    {
+      key: 'cash',
+      title: 'Cash',
+      rows: [
+        { key: 'cashReceived', label: 'Cash received', value: cashReceived, format: 'money' },
+        { key: 'cashSpent', label: 'Cash spent', value: cashSpent, format: 'money' },
+        { key: 'cashSurplus', label: 'Cash surplus', value: cashSurplus, format: 'money', strong: true },
+        { key: 'closingBankBalance', label: 'Closing bank balance', value: closingBankBalance, format: 'money', strong: true },
+      ],
+    },
+    {
+      key: 'profitability',
+      title: 'Profitability',
+      rows: [
+        { key: 'revenue', label: 'Revenue', value: revenue, format: 'money' },
+        { key: 'costOfRevenue', label: 'Cost of Revenue', value: costOfRevenue, format: 'money' },
+        { key: 'grossProfit', label: 'Gross profit', value: grossProfit, format: 'money', strong: true },
+        { key: 'expenses', label: 'Expenses', value: expenses, format: 'money' },
+        { key: 'netProfit', label: 'Net Profit', value: netProfit, format: 'money', strong: true },
+      ],
+    },
+    {
+      key: 'balanceSheet',
+      title: 'Balance Sheet',
+      rows: [
+        { key: 'receivables', label: 'Receivables', value: receivables, format: 'money' },
+        { key: 'payables', label: 'Payables', value: payables, format: 'money' },
+        { key: 'netAssets', label: 'Net assets', value: netAssets, format: 'money', strong: true },
+      ],
+    },
+    {
+      key: 'performance',
+      title: 'Performance',
+      rows: [
+        { key: 'grossProfitMargin', label: 'Gross profit margin (gross profit / operating income)', value: grossProfitMargin, format: 'pct' },
+        { key: 'netProfitMargin', label: 'Net profit margin (net profit / revenue)', value: netProfitMargin, format: 'pct' },
+        { key: 'returnOnInvestments', label: 'Return on investments (net profit / assets)', value: returnOnInvestments, format: 'pct' },
+      ],
+    },
+    {
+      key: 'position',
+      title: 'Position',
+      rows: [
+        { key: 'averageDebtorsDays', label: 'Average debtors days', value: averageDebtorsDays, format: 'ratio' },
+        { key: 'averageCreditorsDays', label: 'Average creditors days', value: averageCreditorsDays, format: 'ratio' },
+        { key: 'shortTermCashForecast', label: 'Short term cash forecast', value: shortTermCashForecast, format: 'money' },
+        { key: 'currentAssetsToLiabilities', label: 'Current assets to liabilities', value: currentAssetsToLiabilities, format: 'ratio' },
+      ],
+    },
+  ];
+
   return {
-    revenue: pl.revenue, grossProfit: pl.gross, netProfit: pl.net,
-    cash, receivables, payables,
-    currentRatio: currentLiabilities ? currentAssets / currentLiabilities : null,
-    grossMargin: pct(pl.gross), netMargin: pct(pl.net),
-    dso: pl.revenue ? Math.round((receivables / pl.revenue) * days) : null,
+    sections,
+    cashReceived,
+    cashSpent,
+    cashSurplus,
+    closingBankBalance,
+    revenue,
+    costOfRevenue,
+    grossProfit,
+    expenses,
+    netProfit,
+    receivables,
+    payables,
+    netAssets,
+    grossProfitMargin,
+    netProfitMargin,
+    returnOnInvestments,
+    averageDebtorsDays,
+    averageCreditorsDays,
+    shortTermCashForecast,
+    currentAssetsToLiabilities,
+    // Legacy aliases preserved for reportCompare.js executiveColumns without editing it.
+    cash: closingBankBalance,
+    currentRatio: currentAssetsToLiabilities,
+    grossMargin: grossProfitMargin,
+    netMargin: netProfitMargin,
+    dso: averageDebtorsDays,
   };
 }
 
