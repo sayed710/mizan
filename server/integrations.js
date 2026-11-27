@@ -257,7 +257,7 @@ export async function createDigitizedBill(store, { company_id, partner_id, file 
 export async function finishDigitizedBill(store, input) {
   const filled = await digitizeBill(store.get(), input);
   store.commitDigitizedBill(filled.db, Number(input.id));
-  return finishDigitizedPosting(store, Number(input.id), filled.message);
+  return input.draft_only ? { message: filled.message } : finishDigitizedPosting(store, Number(input.id), filled.message);
 }
 
 function finishDigitizedPosting(store, id, message) {

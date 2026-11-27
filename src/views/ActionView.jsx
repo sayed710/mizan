@@ -1,3 +1,4 @@
+import { useMoveUpload, UploadButton } from './MoveUpload.jsx';
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
@@ -47,6 +48,8 @@ export function parseRel(db, model, raw) {
 
 export function ActionView({ leaf, base, params }) {
   const db = useDb();
+  const uploadType = base === '#/accounting/bills' ? 'in_invoice' : base === '#/accounting/invoices' ? 'out_invoice' : null;
+  const moveUpload = useMoveUpload({ moveType: uploadType, companyId: currentCompany(db) });
   const model = leaf.model;
   const def = models[model];
   const views = viewsOf(model);
@@ -325,9 +328,9 @@ export function ActionView({ leaf, base, params }) {
     );
   }
   return (
-    <main className="action">
+    <main className="action" onDragOver={(e) => { if (uploadType && view === 'list' && e.dataTransfer.types.includes('Files')) e.preventDefault(); }} onDrop={(e) => { if (uploadType && view === 'list' && e.dataTransfer.files.length) { e.preventDefault(); moveUpload.upload(e.dataTransfer.files); } }}>
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}
-        view={view} search={search} setSearch={setSearch} extra={extra} filters={filters} groupBys={groupBys} listLabels={listLabels} groupByLabels={groupByLabels} listFields={listFields} />
+        view={view} search={search} setSearch={setSearch} extra={extra} besideNew={uploadType && view === 'list' ? <UploadButton {...moveUpload} /> : null} filters={filters} groupBys={groupBys} listLabels={listLabels} groupByLabels={groupByLabels} listFields={listFields} />
       <SimulatedNote text={def.simulated} />
       {error && <div className="alert" role="alert">{error}</div>}
       {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}

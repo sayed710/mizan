@@ -1,3 +1,4 @@
+import { useMoveUpload, UploadButton } from './MoveUpload.jsx';
 import { search } from '../orm.js';
 import { today } from '../models/index.js';
 import { useDb, commit, getDb } from '../store.js';
@@ -77,6 +78,7 @@ function OnlineSyncControls({ sync, journalId, primary = false }) {
 
 /** Journal card: the journal's figures and the shortcuts Odoo puts on it. */
 function JournalCard({ card, companyId }) {
+  const moveUpload = useMoveUpload({ moveType: card.kind === 'purchase' ? 'in_invoice' : 'out_invoice', companyId, journalId: card.journal.id });
   // A journal whose card cannot be computed keeps its title and shows why, so the rest of the dashboard still renders.
   if (card.kind === 'error') {
     return (
@@ -113,6 +115,7 @@ function JournalCard({ card, companyId }) {
         )}
         <RateNote count={card.unratedCount} />
         <a className="btn primary sm" href={actionHref}>{t(actionLabel)}</a>
+        <UploadButton {...moveUpload} />
         {empty && (
           sale ? (
             <div className="journal-onboarding">
