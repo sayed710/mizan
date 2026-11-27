@@ -572,6 +572,7 @@ export function followUpReportExportRows(db, sourceDb, { allowed, statusFilter =
 function FollowUpActions({ db, reminder, companyId, at = today(), onPostpone = null, onUnpostpone = null }) {
   const [open, setOpen] = useState(false);
   const [postponeState, setPostponeState] = useState(null);
+  const liveAt = today();
   const partner = read(db, 'res.partner', reminder.partner_id);
   const email = partner?.email?.trim();
   const lvl = followUpLevel(db, reminder, at);
@@ -580,26 +581,30 @@ function FollowUpActions({ db, reminder, companyId, at = today(), onPostpone = n
   const isManual = partner?.followup_reminder_type === 'manual';
   const fallbackChannel = partner?.phone?.trim() ? 'phone' : 'letter';
   const manualChannel = ['sms', 'phone', 'letter'].includes(channel) ? channel : (isManual && !email ? fallbackChannel : 'email');
-  const options = { scope: db, reminder, companyId };
   const hasSms = channels.includes('sms');
   const isDual = hasSms && channels.includes('email');
   const hasPhone = Boolean(partner?.mobile?.trim() || partner?.phone?.trim());
   const confirmChannel = isDual && email ? 'email' : manualChannel;
-  const postponed = isPartnerFollowUpPostponed(db, partner, companyId, at);
+  const postponed = isPartnerFollowUpPostponed(db, partner, companyId, liveAt);
+  const pendingLetter = Boolean(partner?.followup_lines?.find((l) => l.company_id === companyId)?.followup_pending_letter);
 
   return <>
     <button type="button" className="btn sm" onClick={() => setOpen(true)}>{t('Send')}</button>{' '}
-    {open && <FollowUpWizard partnerId={reminder.partner_id} companyId={companyId} at={at} onClose={() => setOpen(false)} />}
+    {open && <FollowUpWizard partnerId={reminder.partner_id} companyId={companyId} onClose={() => setOpen(false)} />}
     {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}
-      onClick={() => commit(openManualFollowUp(getDb(), reminder.partner_id, at, options))}>{t('Open Reminder in Mail App')}</a>{' '}</>}
+      onClick={() => commit(openManualFollowUp(getDb(), reminder.partner_id, liveAt, { scope: getDb(), companyId }))}>{t('Open Reminder in Mail App')}</a>{' '}</>}
     {(confirmChannel !== 'email' || email) &&
-      <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, at, { ...options, channel: confirmChannel }))}>{t('Confirm Sent')}</button>}
+      <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, liveAt, { scope: getDb(), companyId, channel: confirmChannel }))}>{t('Confirm Sent')}</button>}
     {isDual && hasPhone && <>
-      {' '}<button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, at, { ...options, channel: 'sms' }))}>{t('Send SMS')}</button>
+      {' '}<button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, liveAt, { scope: getDb(), companyId, channel: 'sms' }))}>{t('Send SMS')}</button>
     </>}
-    {' '}<button type="button" className="btn sm" onClick={() => (onPostpone ? onPostpone(reminder.partner_id, companyId) : setPostponeState({ spec: postponeFollowUpWizardSpec(at), error: '' }))}>{t('Postpone')}</button>
+    {pendingLetter && <>
+      {' '}<a className="btn sm" href={`#/print/followup/${reminder.partner_id}?company=${companyId}`}>{t('Print Letter')}</a>
+      {' '}<button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, liveAt, { scope: getDb(), companyId, channel: 'letter', ignoreNextActionDate: true }))}>{t('Mark letter as printed')}</button>
+    </>}
+    {' '}<button type="button" className="btn sm" onClick={() => (onPostpone ? onPostpone(reminder.partner_id, companyId) : setPostponeState({ spec: postponeFollowUpWizardSpec(), error: '' }))}>{t('Postpone')}</button>
     {postponed && <>
-      {' '}<button type="button" className="btn sm" onClick={() => (onUnpostpone ? onUnpostpone(reminder.partner_id, companyId) : commit(unpostponeFollowUp(getDb(), [reminder.partner_id], { companyId })))}>{t('Unpostpone')}</button>
+      {' '}<button type="button" className="btn sm" onClick={() => (onUnpostpone ? onUnpostpone(reminder.partner_id, companyId) : commit(unpostponeFollowUp(getDb(), [reminder.partner_id], { companyId, at: liveAt })))}>{t('Unpostpone')}</button>
     </>}
     {!onPostpone && postponeState && (
       <Wizard
@@ -608,7 +613,7 @@ function FollowUpActions({ db, reminder, companyId, at = today(), onPostpone = n
         error={postponeState.error}
         onConfirm={(values) => {
           try {
-            const next = postponeFollowUp(getDb(), [reminder.partner_id], values.date, { companyId, at });
+            const next = postponeFollowUp(getDb(), [reminder.partner_id], values.date, { companyId });
             commit(next);
             setPostponeState(null);
           } catch (e) {
@@ -661,6 +666,11 @@ export function FollowUps({ db, sourceDb, period, companyId = 'all', statusFilte
             ) : (
               <>
                 <span className="badge">{t(displayStatusLabel)}</span>{' '}
+              </>
+            )}
+            {compLine?.followup_pending_letter && (
+              <>
+                <span className="badge">{t('Pending Letter')}</span>{' '}
               </>
             )}
             {!isPrinting && (
@@ -1537,7 +1547,7 @@ function ReportPage({ leaf, params }) {
     setFollowupError('');
     setFollowupBusy(true);
     try {
-      const report = await runBatchFollowUpsAction(targets, { at: period.to });
+      const report = await runBatchFollowUpsAction(targets);
       setFollowupBatchReport(report);
       setSelectedFollowUps(new Set());
     } catch (err) {
@@ -1550,7 +1560,7 @@ function ReportPage({ leaf, params }) {
     const targets = selectedFollowUpTargets();
     if (!targets.length) { setFollowupError('Select at least one customer first'); return; }
     setFollowupError('');
-    setFollowupPostpone({ targets, spec: postponeFollowUpWizardSpec(period.to), error: '' });
+    setFollowupPostpone({ targets, spec: postponeFollowUpWizardSpec(), error: '' });
   };
   const handleUnpostponeTargets = async (targets) => {
     if (!targets.length) { setFollowupError('Select at least one customer first'); return; }
@@ -1564,7 +1574,7 @@ function ReportPage({ leaf, params }) {
       }
       let nextDb = getDb();
       for (const [cId, partnerIds] of byCompany.entries()) {
-        nextDb = unpostponeFollowUp(nextDb, partnerIds, { companyId: cId });
+        nextDb = unpostponeFollowUp(nextDb, partnerIds, { companyId: cId, at: today() });
       }
       const res = await commit(nextDb, { quiet: true });
       if (res && res.ok === false) {
@@ -1589,7 +1599,7 @@ function ReportPage({ leaf, params }) {
       }
       let nextDb = getDb();
       for (const [cId, partnerIds] of byCompany.entries()) {
-        nextDb = postponeFollowUp(nextDb, partnerIds, values.date, { companyId: cId, at: period.to });
+        nextDb = postponeFollowUp(nextDb, partnerIds, values.date, { companyId: cId });
       }
       const res = await commit(nextDb, { quiet: true });
       if (res && res.ok === false) {
@@ -2162,7 +2172,7 @@ function ReportPage({ leaf, params }) {
                 isPrinting={isPrinting}
                 selectedKeys={isFollowUps && !isPrinting ? selectedFollowUps : undefined}
                 onToggle={isFollowUps && !isPrinting ? toggleFollowUpKey : undefined}
-                onPostpone={isFollowUps && !isPrinting ? (partnerId, cId) => { setFollowupError(''); setFollowupPostpone({ targets: [{ partnerId, companyId: cId }], spec: postponeFollowUpWizardSpec(period.to), error: '' }); } : undefined}
+                onPostpone={isFollowUps && !isPrinting ? (partnerId, cId) => { setFollowupError(''); setFollowupPostpone({ targets: [{ partnerId, companyId: cId }], spec: postponeFollowUpWizardSpec(), error: '' }); } : undefined}
                 onUnpostpone={isFollowUps && !isPrinting ? (partnerId, cId) => handleUnpostponeTargets([{ partnerId, companyId: cId }]) : undefined}
               />
             )}

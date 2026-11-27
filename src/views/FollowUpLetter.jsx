@@ -40,9 +40,9 @@ const summarizeBatchResults = (results) => ({
 });
 
 /** Execute batch follow-ups for `targets` (`[{ partnerId, companyId }]`), reusing server email and local commit paths. */
-export async function runBatchFollowUpsAction(targets, { at = today() } = {}) {
+export async function runBatchFollowUpsAction(targets) {
   if (!targets?.length) throw new Error('Select at least one customer first');
-  const effectiveAt = at && validDate(at) ? at : today();
+  const effectiveAt = today();
   const results = [];
 
   if (!isServer()) {
@@ -81,7 +81,7 @@ export async function runBatchFollowUpsAction(targets, { at = today() } = {}) {
           partnerId: ctx.partner.id,
           companyId: ctx.companyId,
           joinInvoices: ctx.level?.join_invoices !== false,
-          at: effectiveAt,
+          ...(ctx.pendingLetter ? { pendingLetter: true } : {}),
         });
         if (!mailRes.ok) throw new Error(mailRes.error ?? 'Action failed');
         // The email is already sent and recorded server-side: a failed refresh must not read as a failed send.
@@ -214,17 +214,17 @@ export function FollowUpBatchResultModal({ report, onClose }) {
   );
 }
 
-export function FollowUpWizard({ partnerId, companyId, at = null, onClose }) {
+export function FollowUpWizard({ partnerId, companyId, onClose }) {
   const db = useDb();
-  const effectiveAt = at && validDate(at) ? at : today();
+  const actionDate = today();
   const partner = read(db, 'res.partner', Number(partnerId));
   const company = Number(companyId ?? currentCompany(db));
   const reminder = partner
-    ? followUps(db, effectiveAt, { companyId: company, ignoreNextActionDate: true })
+    ? followUps(db, actionDate, { companyId: company, ignoreNextActionDate: true })
       .flatMap(followUpCompanies)
       .find((f) => f.partner_id === Number(partnerId) && f.company_id === company) ?? null
     : null;
-  const level = reminder ? followUpLevel(db, reminder, effectiveAt) : null;
+  const level = reminder ? followUpLevel(db, reminder, actionDate) : null;
   const canEmail = appOpen(db, getUser(), 'accounting');
   const canWhatsApp = sendTarget({ server: '/api/integrations/whatsapp', requires: 'whatsapp' }).live;
   const hasPhone = Boolean(String(partner?.mobile || partner?.phone || '').trim());
@@ -235,70 +235,98 @@ export function FollowUpWizard({ partnerId, companyId, at = null, onClose }) {
   const [whatsapp, setWhatsapp] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const completedRef = useRef({ key: null, channels: new Set(), waDelivered: false, levelTransitioned: false });
   const submit = async () => {
     if (email && !canEmail) { setError(t('No access to account.move')); return; }
     if (!email && !print && !sms && !whatsapp) { setError(t('Select at least one follow-up action.')); return; }
+    const stateKey = `${partnerId}:${company}`;
+    if (completedRef.current.key !== stateKey) {
+      completedRef.current = { key: stateKey, channels: new Set(), waDelivered: false, levelTransitioned: false };
+    }
+    const completed = completedRef.current;
     setBusy(true);
     let printWindow = null;
     try {
       const currentDb = getDb();
       const currentPartner = read(currentDb, 'res.partner', Number(partnerId));
       // Validate letter/level requirements and channel prerequisites before committing or opening print window.
-      const letter = followUpLetter(currentDb, Number(partnerId), company, effectiveAt);
-      if (email && !currentPartner?.email?.trim()) throw new Error('A customer email address is required to send an email reminder');
-      if (email && !isServer()) throw new Error('Email requires the server.');
-      if (sms && !String(currentPartner?.mobile || currentPartner?.phone || '').trim()) throw new Error('The customer has no mobile or phone number.');
-      if (whatsapp && !canWhatsApp) throw new Error('WhatsApp integration is not configured.');
-      if (whatsapp && !whatsappPhone(currentPartner?.mobile || currentPartner?.phone)) {
+      const letter = followUpLetter(currentDb, Number(partnerId), company, actionDate);
+      if (email && !completed.channels.has('email') && !currentPartner?.email?.trim()) throw new Error('A customer email address is required to send an email reminder');
+      if (email && !completed.channels.has('email') && !isServer()) throw new Error('Email requires the server.');
+      if (sms && !completed.channels.has('sms') && !String(currentPartner?.mobile || currentPartner?.phone || '').trim()) throw new Error('The customer has no mobile or phone number.');
+      if (whatsapp && !completed.channels.has('whatsapp') && !canWhatsApp) throw new Error('WhatsApp integration is not configured.');
+      if (whatsapp && !completed.channels.has('whatsapp') && !whatsappPhone(currentPartner?.mobile || currentPartner?.phone)) {
         throw new Error('The contact has no international phone number (e.g. +20 100 123 4567)');
       }
 
-      if (print) {
+      if (print && !completed.channels.has('letter')) {
         printWindow = window.open('about:blank', '_blank');
         if (!printWindow) throw new Error(t('The print window was blocked.'));
       }
 
-      let recorded = false;
-      if (sms) {
-        const nextSms = logManualFollowUp(getDb(), Number(partnerId), effectiveAt, { companyId: company, channel: 'sms', ignoreNextActionDate: true });
-        const smsSaved = await commit(nextSms, { quiet: true });
-        if (smsSaved && smsSaved.ok === false) throw new Error(smsSaved.error ?? 'Could not save changes');
-        recorded = true;
-      }
-      if (email) {
+      if (email && !completed.channels.has('email')) {
         const result = await serverAction('/api/mail/followup', {
           partnerId: Number(partnerId),
           companyId: company,
           joinInvoices,
-          at: effectiveAt,
         });
         if (!result.ok) throw new Error(result.error ?? t('Action failed'));
         if (result.message || result.refreshError) alert(result.message ?? result.refreshError);
-        recorded = true;
+        completed.channels.add('email');
+        completed.levelTransitioned = true;
       }
-      if (whatsapp) {
-        const waText = `${letter.message ? `${letter.message}\n` : ''}${followUpText(getDb(), letter.reminder)}`.trim();
-        const waRes = await serverAction('/api/integrations/whatsapp', { model: 'res.partner', id: Number(partnerId), text: waText });
-        if (waRes && waRes.ok === false) throw new Error(waRes.error ?? t('Action failed'));
-        if (!recorded) {
-          const nextWa = logManualFollowUp(getDb(), Number(partnerId), effectiveAt, { companyId: company, channel: 'whatsapp', ignoreNextActionDate: true });
-          const waSaved = await commit(nextWa, { quiet: true });
-          if (waSaved && waSaved.ok === false) throw new Error(waSaved.error ?? 'Could not save changes');
-          recorded = true;
+      if (whatsapp && !completed.channels.has('whatsapp')) {
+        if (!completed.waDelivered) {
+          const waText = `${letter.message ? `${letter.message}\n` : ''}${followUpText(getDb(), letter.reminder)}`.trim();
+          const waRes = await serverAction('/api/integrations/whatsapp', { model: 'res.partner', id: Number(partnerId), text: waText });
+          if (waRes && waRes.ok === false) throw new Error(waRes.error ?? t('Action failed'));
+          completed.waDelivered = true;
         }
+        const nextWa = logManualFollowUp(getDb(), Number(partnerId), actionDate, {
+          companyId: company,
+          channel: 'whatsapp',
+          ignoreNextActionDate: true,
+          advanceLevel: !completed.levelTransitioned,
+        });
+        const waSaved = await commit(nextWa, { quiet: true });
+        if (waSaved && waSaved.ok === false) throw new Error(waSaved.error ?? 'Could not save changes');
+        completed.channels.add('whatsapp');
+        completed.levelTransitioned = true;
       }
-      if (print && !recorded) {
-        const nextPrint = logManualFollowUp(getDb(), Number(partnerId), effectiveAt, { companyId: company, channel: 'letter', ignoreNextActionDate: true });
+      if (sms && !completed.channels.has('sms')) {
+        const nextSms = logManualFollowUp(getDb(), Number(partnerId), actionDate, {
+          companyId: company,
+          channel: 'sms',
+          ignoreNextActionDate: true,
+          advanceLevel: !completed.levelTransitioned,
+        });
+        const smsSaved = await commit(nextSms, { quiet: true });
+        if (smsSaved && smsSaved.ok === false) throw new Error(smsSaved.error ?? 'Could not save changes');
+        completed.channels.add('sms');
+        completed.levelTransitioned = true;
+      }
+      if (print && !completed.channels.has('letter')) {
+        const nextPrint = logManualFollowUp(getDb(), Number(partnerId), actionDate, {
+          companyId: company,
+          channel: 'letter',
+          ignoreNextActionDate: true,
+          advanceLevel: !completed.levelTransitioned,
+        });
         const result = await commit(nextPrint, { quiet: true });
         if (result && result.ok === false) throw new Error(result.error ?? 'Could not save changes');
+        completed.channels.add('letter');
+        completed.levelTransitioned = true;
       }
       if (printWindow) {
-        printWindow.location.href = `${location.origin}${location.pathname}${location.search}#/print/followup/${partnerId}?company=${company}${effectiveAt !== today() ? `&at=${effectiveAt}` : ''}`;
+        printWindow.location.href = `${location.origin}${location.pathname}${location.search}#/print/followup/${partnerId}?company=${company}`;
       }
       onClose();
     } catch (e) {
       if (printWindow) printWindow.close();
-      setError(t(e.message));
+      const succeeded = [...completed.channels].map((ch) => t(ACTION_LABELS[ch] ?? ch));
+      setError(succeeded.length
+        ? t('Succeeded: {channels}. Error: {error}', { channels: succeeded.join(', '), error: t(e.message) })
+        : t(e.message));
     } finally { setBusy(false); }
   };
   return <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label={t('Send Follow-up')}>

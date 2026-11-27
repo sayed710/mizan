@@ -854,7 +854,7 @@ async function api(req, res, path) {
         : path.endsWith('statement')
           ? await sendCustomerStatement(SMTP, snapshot, body)
           : path.endsWith('followup')
-          ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId, ...(body.joinInvoices !== undefined ? { joinInvoices: Boolean(body.joinInvoices) } : {}), ...(body.at !== undefined ? { at: body.at } : {}) }, undefined, writeOptions(user, allowed))
+          ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId, ...(body.joinInvoices !== undefined ? { joinInvoices: Boolean(body.joinInvoices) } : {}), ...(body.pendingLetter !== undefined ? { pendingLetter: Boolean(body.pendingLetter) } : {}) }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
       delivered = Boolean(out.db);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded', delivered: true });
@@ -1323,7 +1323,7 @@ const runJobs = async () => {
       base = db;
       return db;
     };
-    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP }), commitFollowUps });
+    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP, getDb: () => db }), commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
     if (integrationStatus(ENV).sms) {
       const store = storeFor({ author: 'Scheduler', isAdmin: true }, 'scheduler');
