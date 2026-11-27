@@ -37,11 +37,29 @@ export const reportRecordModels = {
     fields: {
       report_id: label('many2one', 'Report', { relation: 'account.report', required: true }),
       parent_id: label('many2one', 'Parent Line', { relation: 'account.report.line' }),
-      children_ids: label('one2many', 'Child Lines', { relation: 'account.report.line', compute: (line, db) => related('account.report.line', 'parent_id', line.id, db) }),
+      children_ids: label('one2many', 'Child Lines', {
+        relation: 'account.report.line',
+        fields: {
+          name: label('char', 'Name'),
+          code: label('char', 'Code'),
+          sequence: label('integer', 'Sequence'),
+        },
+        compute: (line, db) => related('account.report.line', 'parent_id', line.id, db),
+      }),
       sequence: label('integer', 'Sequence'), name: label('char', 'Name', { required: true }), code: label('char', 'Code'),
       hierarchy_level: label('integer', 'Level'), strong: label('boolean', 'Emphasized'), foldable: label('boolean', 'Foldable'), hide_if_zero: label('boolean', 'Hide if Zero'),
       print_on_new_page: label('boolean', 'Print on New Page'), groupby: label('char', 'Group By'),
-      expression_ids: label('one2many', 'Expressions', { relation: 'account.report.expression', compute: (line, db) => related('account.report.expression', 'report_line_id', line.id, db) }),
+      expression_ids: label('one2many', 'Expressions', {
+        relation: 'account.report.expression',
+        fields: {
+          label: label('char', 'Label'),
+          engine: label('selection', 'Computation Engine', { options: REPORT_ENGINES.map((value) => [value, value]) }),
+          formula: label('text', 'Formula'),
+          subformula: label('char', 'Subformula'),
+          date_scope: label('selection', 'Date Scope', { options: REPORT_DATE_SCOPES.map((value) => [value, value]) }),
+        },
+        compute: (line, db) => related('account.report.expression', 'report_line_id', line.id, db),
+      }),
     },
     defaults: () => ({ sequence: 10, hierarchy_level: 0, foldable: false, hide_if_zero: false, print_on_new_page: false }),
     guard: lineGuard,
