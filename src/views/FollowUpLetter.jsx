@@ -265,11 +265,17 @@ export function FollowUpWizard({ partnerId, companyId, onClose }) {
       }
 
       if (email && !completed.channels.has('email')) {
-        const result = await serverAction('/api/mail/followup', {
-          partnerId: Number(partnerId),
-          companyId: company,
-          joinInvoices,
-        });
+        let result;
+        try {
+          result = await serverAction('/api/mail/followup', {
+            partnerId: Number(partnerId),
+            companyId: company,
+            joinInvoices,
+          });
+        } catch (error) {
+          if (error?.delivered) completed.channels.add('email');
+          throw error;
+        }
         if (!result.ok) throw new Error(result.error ?? t('Action failed'));
         if (result.message || result.refreshError) alert(result.message ?? result.refreshError);
         completed.channels.add('email');

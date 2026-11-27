@@ -2901,7 +2901,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
         });
       };
       const handleEmailIncomplete = (reason, outcome, { skipDuplicateOutboxNote = false } = {}) => {
-        if ((smsQueued || smsAlreadyQueued) && !wantsLetter && !wantsOther) {
+        if (outcome === 'outbox_only' && (smsQueued || smsAlreadyQueued) && !wantsLetter && !wantsOther) {
           const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
           if (!skipDuplicateOutboxNote) {
             nextDb = postNote(

@@ -110,6 +110,58 @@ function makeOverdueInvoice(db, { partnerId, dueDate, amount = 100, companyId = 
   return { db: postMove(inv.db, inv.id), id: inv.id };
 }
 
+test('delivered email bookkeeping failure is not sent again on wizard retry', async () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.followup.level': [], 'account.move': [] } };
+  const level = create(db, 'account.followup.level', { display_delay: 5, reminder_timing: 'after', send_email: true, send_sms: true });
+  const partner = create(level.db, 'res.partner', { name: 'Retry customer', email: 'retry@example.test', phone: '+201001112233', customer_rank: 1 });
+  db = makeOverdueInvoice(partner.db, { partnerId: partner.id, dueDate: addDays(today(), -15) }).db;
+  let serverDb = db;
+  let calls = 0;
+  let closed = false;
+  const fetchImpl = async (url, init) => {
+    if (url === '/api/session') return new Response(JSON.stringify({ name: 'Admin', isAdmin: true, integrations: { smtp: true } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (url === '/api/db') return new Response(JSON.stringify(serverDb), { status: 200, headers: { 'Content-Type': 'application/json', etag: '"e1"' } });
+    if (url === '/api/mail/followup') { calls++; return new Response(JSON.stringify({ error: 'Recording failed', delivered: true }), { status: 500, headers: { 'Content-Type': 'application/json' } }); }
+    if (url === '/api/diff') { serverDb = applyDiff(serverDb, JSON.parse(init.body), { isAdmin: true }); return new Response(JSON.stringify(serverDb), { status: 200, headers: { 'Content-Type': 'application/json' } }); }
+    return new Response('{}', { status: 200 });
+  };
+  const { FollowUpWizard } = await import('./views/FollowUpLetter.jsx');
+  const mounted = await mountView((React) => React.createElement(FollowUpWizard, { partnerId: partner.id, companyId: 1, onClose: () => { closed = true; } }), db, { fetchImpl });
+  try {
+    const button = find(mounted.host, (n) => n.tagName === 'BUTTON' && textOf(n).trim() === 'Send');
+    await mounted.React.act(async () => props(button).onClick());
+    assert.match(textOf(find(mounted.host, (n) => props(n)?.role === 'alert')), /Recording failed/);
+    await mounted.React.act(async () => props(button).onClick());
+    assert.equal(calls, 1);
+    assert.equal(closed, true);
+    assert.equal(search(mounted.getDb(), 'sms.trace').length, 1);
+  } finally { await mounted.done(); }
+});
+
+test('failed email after queued SMS retries email without duplicating SMS', async () => {
+  let db = seed();
+  db = { ...db, records: { ...db.records, 'account.followup.level': [], 'account.move': [] } };
+  const level = create(db, 'account.followup.level', { display_delay: 5, reminder_timing: 'after', send_email: true, send_sms: true });
+  const partner = create(level.db, 'res.partner', { name: 'Retry customer', email: 'retry@example.test', phone: '+201001112233', customer_rank: 1 });
+  db = makeOverdueInvoice(partner.db, { partnerId: partner.id, dueDate: '2026-01-01' }).db;
+  let calls = 0;
+  const deliver = async () => { calls++; if (calls === 1) throw new Error('Transport down'); return { status: 'sent' }; };
+  db = await runFollowUps(db, '2026-01-20', deliver);
+  const progress = partnerFollowUp(read(db, 'res.partner', partner.id), 1);
+  assert.equal(progress.followup_level_delay, null);
+  assert.equal(progress.followup_sms_level_delay, 5);
+  assert.equal(progress.followup_sms_oldest_date, '2026-01-01');
+  assert.equal(progress.followup_channel, 'email');
+  assert.equal(progress.followup_delivery_state, 'not_sent');
+  assert.equal(progress.followup_delivery_outcome, 'failed');
+  assert.equal(search(db, 'sms.trace').length, 1);
+  db = await runFollowUps(db, '2026-01-21', deliver);
+  assert.equal(calls, 2);
+  assert.equal(search(db, 'sms.trace').length, 1);
+  assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1).followup_level_delay, 5);
+});
+
 function fakeSmtp() {
   const seen = [];
   const server = net.createServer((s) => {
