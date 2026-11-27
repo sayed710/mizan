@@ -711,7 +711,7 @@ export const configurableReportModels = {
       stored_line_ids: { type: 'one2many', label: 'Accounting Report Lines', relation: 'account.report.line', openRelated: true, fields: { name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' } }, compute: (report, db) => (db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id) },
       line_ids: { type: 'one2many', label: 'Report Lines', fields: {
         name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' }, sequence: { type: 'integer', label: 'Sequence' },
-        parent_code: { type: 'char', label: 'Parent Code' }, formula: { type: 'char', label: 'Formula' },
+        green_on_positive: { type: 'boolean', label: 'Is Growth Good when Positive' }, parent_code: { type: 'char', label: 'Parent Code' }, formula: { type: 'char', label: 'Formula' },
         sign: { type: 'integer', label: 'Sign' }, foldable: { type: 'boolean', label: 'Foldable' }, strong: { type: 'boolean', label: 'Emphasized' },
       }, newLine: () => ({ name: '', code: '', sequence: 10, parent_code: '', formula: '', sign: 1, foldable: false, strong: false }) },
     },

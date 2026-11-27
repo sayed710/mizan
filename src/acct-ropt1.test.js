@@ -52,6 +52,7 @@ test('ledger growth uses unrounded period amounts and leaves zero baseline blank
   const periods = [{ from: '2020-01-01', to: '2020-12-31', label: '2020' }, { from: '2021-01-01', to: '2021-12-31', label: '2021' }];
   const data = compareConfigurableReport(db, report, periods);
   assert.equal(data.rows.find((line) => line.code === 'EXP').variance.pct, 50);
+  assert.equal(data.rows.find((line) => line.code === 'EXP').green_on_positive, false);
   const zero = compareConfigurableReport(db, report, [{ from: '2019-01-01', to: '2019-12-31', label: '2019' }, periods[1]]);
   assert.equal(zero.rows.find((line) => line.code === 'EXP').variance.pct, null);
   const shown = compareConfigurableReport(db, report, [periods[0]], periods[0], null, { hideZeroLines: false });
@@ -163,4 +164,106 @@ test('line percentages and growth export modes handle zero and account values', 
   const growth = { ...data, lineComparison: false, showVariance: true, showGrowth: true, rows: [{ ...data.rows[0], variance: { amount: 50, pct: 100 } }] };
   assert.equal(configurableReportExportRows({ ...growth, growthDisplay: 'percent' })[1].at(-1), '100%');
   assert.equal(configurableReportExportRows({ ...growth, growthDisplay: 'amount' })[1].at(-1), 50);
+});
+import { createCompany } from './models/company.js';
+import { updateSettings } from './orm.js';
+import { reportPeriodRange } from './views/reportNavigation.js';
+import { periodsFor } from './views/reportCompare.js';
+import { today } from './models/common.js';
+
+test('custom report uses its company fiscal presets and comparison windows', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+  await initStore();
+  let db = seed();
+  const co = createCompany(db, { name: 'Fiscal company', fiscalyear_last_day: 31, fiscalyear_last_month: 3 });
+  db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
+  const report = { id: 99999, name: 'Custom fiscal', company_id: co.id, active: true, filter_date_range: true, filter_period_comparison: true, line_ids: [] };
+  db = { ...db, records: { ...db.records, 'account.report': [...db.records['account.report'], report] } };
+  const host = makeEl('div'); host.ownerDocument = document;
+  const root = createRoot(host);
+  const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+  try {
+    await React.act(async () => { commit(db); root.render(React.createElement(ConfigurableReportPage, { id: report.id })); });
+    const period = () => find(host, (n) => n.tagName === 'SELECT' && ['year', 'quarter'].includes(props(n).value));
+    const comparison = () => find(host, (n) => n.tagName === 'SELECT' && ['none', 'previous', 'lastYear', 'last3'].includes(props(n).value) && n.textContent.includes('Previous Period'));
+    for (const key of ['year', 'quarter']) {
+      await React.act(async () => props(period()).onChange({ target: { value: key } }));
+      const range = reportPeriodRange(db, key, { companyId: co.id });
+      assert.equal(props(find(host, (n) => n.tagName === 'INPUT' && props(n)['aria-label'] === 'From')).value, range.from);
+      for (const mode of ['previous', 'lastYear', 'last3']) {
+        await React.act(async () => props(comparison()).onChange({ target: { value: mode } }));
+        const windows = periodsFor(key, mode, today(), { db, companyId: co.id });
+        for (const window of windows) assert.ok(host.textContent.includes(window.label));
+      }
+    }
+  } finally { await React.act(async () => root.unmount()); }
+});
+
+test('company switch resets disabled statement filters', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react'); const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js'); const { ConfigurableReportPage } = await import('./views/ConfigurableReport.jsx');
+  await initStore(); let db = seed(); const co = createCompany(db, { name: 'Other' });
+  db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
+  db = { ...db, records: { ...db.records, 'account.report': db.records['account.report'].map((r) => r.kind !== 'pnl' ? r : r.company_id === co.id ? { ...r, filter_hide_0_lines: 'never', filter_hierarchy: 'never', filter_period_comparison: false, filter_line_comparison: false } : { ...r, filter_hide_0_lines: 'by_default', filter_hierarchy: 'by_default' }) } };
+  const host = makeEl('div'); host.ownerDocument = document; const root = createRoot(host);
+  const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+  try {
+    await React.act(async () => { commit(db); root.render(React.createElement(ConfigurableReportPage, { statementKind: 'pnl' })); });
+    const comparison = find(host, (n) => n.tagName === 'SELECT' && props(n).value === 'none' && n.textContent.includes('Previous Period'));
+    await React.act(async () => props(comparison).onChange({ target: { value: 'previous' } }));
+    await React.act(async () => props(find(host, (n) => n.tagName === 'SELECT' && props(n)['aria-label'] === 'Company')).onChange({ target: { value: String(co.id) } }));
+    assert.equal(find(host, (n) => n.tagName === 'LABEL' && n.textContent.includes('Hide lines at 0')), null);
+    assert.ok(host.textContent.includes('Revenue'));
+    assert.ok(!host.textContent.includes('Variance'));
+  } finally { await React.act(async () => root.unmount()); }
+});
+
+test('seeded statement growth directions match their financial roles', () => {
+  const db = seed();
+  const unfavorable = { pnl: ['COR', 'EXP_GRP', 'EXP', 'DEP', 'EXO'], balance: ['LIAB', 'CUR_LIAB', 'CL', 'PAY', 'CC', 'NCL', 'LIAB_EQUITY'] };
+  for (const report of db.records['account.report'].filter((r) => r.kind === 'pnl' || r.kind === 'balance')) {
+    const spec = STATEMENT_REPORT_SPECS.find((item) => item.kind === report.kind);
+    for (const item of spec.line_ids) {
+      const line = db.records['account.report.line'].find((l) => l.report_id === report.id && l.inline_code === item.code);
+      const expr = db.records['account.report.expression'].find((e) => e.report_line_id === line.id && e.label === 'balance');
+      assert.equal(expr.green_on_positive, !unfavorable[report.kind].includes(item.code), item.code);
+    }
+  }
+  const pnl = db.records['account.report'].find((r) => r.kind === 'pnl');
+  const expense = db.records['account.report.line'].find((l) => l.report_id === pnl.id && l.inline_code === 'EXP');
+  assert.equal(db.records['account.report.expression'].find((e) => e.report_line_id === expense.id).green_on_positive, false);
+});
+
+
+test('upgrade restores seeded growth directions without changing user report lines', () => {
+  const seeded = seed();
+  const pnl = seeded.records['account.report'].find((r) => r.kind === 'pnl');
+  const customReport = { id: 999901, name: 'Custom', company_id: 1, kind: '' };
+  const customLine = { id: 999902, report_id: customReport.id, code: 'EXP', inline_code: 'EXP', company_id: 1 };
+  const extraLine = { id: 999903, report_id: pnl.id, code: 'CUSTOM', company_id: 1 };
+  const customExpressions = [
+    { id: 999904, report_line_id: customLine.id, label: 'balance', green_on_positive: true },
+    { id: 999905, report_line_id: extraLine.id, label: 'balance', green_on_positive: true },
+  ];
+  const old = { ...seeded, schema_version: 83, records: { ...seeded.records,
+    'account.report': [...seeded.records['account.report'], customReport],
+    'account.report.line': [...seeded.records['account.report.line'], customLine, extraLine],
+    'account.report.expression': [...seeded.records['account.report.expression'].map((e) => ({ ...e, green_on_positive: true })), ...customExpressions],
+  } };
+  const upgraded = migrate(old);
+  const unfavorable = { pnl: ['COR', 'EXP_GRP', 'EXP', 'DEP', 'EXO'], balance: ['LIAB', 'CUR_LIAB', 'CL', 'PAY', 'CC', 'NCL', 'LIAB_EQUITY'] };
+  for (const report of seeded.records['account.report'].filter((r) => unfavorable[r.kind])) {
+    for (const line of seeded.records['account.report.line'].filter((l) => l.report_id === report.id)) {
+      const expression = upgraded.records['account.report.expression'].find((e) => e.report_line_id === line.id && e.label === 'balance');
+      assert.equal(expression.green_on_positive, !unfavorable[report.kind].includes(line.inline_code), line.inline_code);
+    }
+  }
+  for (const original of customExpressions) assert.deepEqual(upgraded.records['account.report.expression'].find((e) => e.id === original.id), original);
+  assert.equal(upgraded.schema_version, 84);
+  assert.equal(migrate(upgraded), upgraded);
 });

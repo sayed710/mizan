@@ -24,7 +24,7 @@ import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { normalizeReconcileRule } from './models/reconcile.js';
-import { ensureStatementReports } from './models/statementReports.js';
+import { ensureStatementReports, migrateStatementGrowthDirections } from './models/statementReports.js';
 import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 import { formatTaxReturnName } from './models/taxreturn.js';
 import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
@@ -2639,6 +2639,8 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
   filter_hide_0_lines: 'optional', filter_period_comparison: true, filter_growth_comparison: true,
   filter_line_comparison: true, filter_hierarchy: 'optional', ...report,
 })) } }) });
+
+MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

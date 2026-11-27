@@ -5,14 +5,14 @@ import { aggregationReferences, validateReportExpressions } from './reportEngine
 export const STANDARD_PNL_LINES = [
   { name: 'Revenue', code: 'REV', sequence: 10, parent_code: '', formula: 'OPINC', sign: 1, foldable: true, strong: true },
   { name: 'Sales', code: 'OPINC', sequence: 20, parent_code: 'REV', formula: 'type:income', sign: -1, foldable: true, strong: false },
-  { name: 'Less Costs of Revenue', code: 'COR', sequence: 30, parent_code: '', formula: 'type:expense_direct_cost', sign: 1, foldable: true, strong: false },
+  { name: 'Less Costs of Revenue', code: 'COR', green_on_positive: false, sequence: 30, parent_code: '', formula: 'type:expense_direct_cost', sign: 1, foldable: true, strong: false },
   { name: 'Gross Profit', code: 'GROSS', sequence: 40, parent_code: '', formula: 'OPINC - COR', sign: 1, foldable: false, strong: true },
-  { name: 'Less Operating Expenses', code: 'EXP_GRP', sequence: 50, parent_code: '', formula: 'EXP + DEP', sign: 1, foldable: true, strong: true },
-  { name: 'Expenses', code: 'EXP', sequence: 60, parent_code: 'EXP_GRP', formula: 'type:expense', sign: 1, foldable: true, strong: false },
-  { name: 'Depreciation', code: 'DEP', sequence: 70, parent_code: 'EXP_GRP', formula: 'type:expense_depreciation', sign: 1, foldable: true, strong: false },
+  { name: 'Less Operating Expenses', code: 'EXP_GRP', green_on_positive: false, sequence: 50, parent_code: '', formula: 'EXP + DEP', sign: 1, foldable: true, strong: true },
+  { name: 'Expenses', code: 'EXP', green_on_positive: false, sequence: 60, parent_code: 'EXP_GRP', formula: 'type:expense', sign: 1, foldable: true, strong: false },
+  { name: 'Depreciation', code: 'DEP', green_on_positive: false, sequence: 70, parent_code: 'EXP_GRP', formula: 'type:expense_depreciation', sign: 1, foldable: true, strong: false },
   { name: 'Operating Income', code: 'OPERATING', sequence: 80, parent_code: '', formula: 'GROSS - EXP_GRP', sign: 1, foldable: false, strong: true },
   { name: 'Plus Other Income', code: 'INC_GRP', sequence: 90, parent_code: '', formula: 'type:income_other', sign: -1, foldable: true, strong: false },
-  { name: 'Less Other Expenses', code: 'EXO', sequence: 100, parent_code: '', formula: 'type:expense_other', sign: 1, foldable: true, strong: false },
+  { name: 'Less Other Expenses', code: 'EXO', green_on_positive: false, sequence: 100, parent_code: '', formula: 'type:expense_other', sign: 1, foldable: true, strong: false },
   { name: 'Net Profit', code: 'NET', sequence: 110, parent_code: '', formula: 'OPERATING + INC_GRP - EXO', sign: 1, foldable: false, strong: true },
 ];
 
@@ -26,12 +26,12 @@ export const STANDARD_BALANCE_LINES = [
   { name: 'Prepayments', code: 'PREP', sequence: 60, parent_code: 'CUR_ASSETS', formula: 'type:asset_prepayments', sign: 1, foldable: true, strong: false },
   { name: 'Plus Fixed Assets', code: 'FA', sequence: 70, parent_code: 'ASSETS', formula: 'type:asset_fixed', sign: 1, foldable: true, strong: false },
   { name: 'Plus Non-current Assets', code: 'NCA', sequence: 80, parent_code: 'ASSETS', formula: 'type:asset_non_current', sign: 1, foldable: true, strong: false },
-  { name: 'LIABILITIES', code: 'LIAB', sequence: 90, parent_code: '', formula: 'CUR_LIAB + NCL', sign: 1, foldable: false, strong: true },
-  { name: 'Current Liabilities', code: 'CUR_LIAB', sequence: 100, parent_code: 'LIAB', formula: 'CL + PAY + CC', sign: 1, foldable: true, strong: false },
-  { name: 'Current Liabilities', code: 'CL', sequence: 110, parent_code: 'CUR_LIAB', formula: 'type:liability_current', sign: -1, foldable: true, strong: false },
-  { name: 'Payables', code: 'PAY', sequence: 120, parent_code: 'CUR_LIAB', formula: 'type:liability_payable', sign: -1, foldable: true, strong: false },
-  { name: 'Credit Cards', code: 'CC', sequence: 125, parent_code: 'CUR_LIAB', formula: 'type:liability_credit_card', sign: -1, foldable: true, strong: false },
-  { name: 'Plus Non-current Liabilities', code: 'NCL', sequence: 130, parent_code: 'LIAB', formula: 'type:liability_non_current', sign: -1, foldable: true, strong: false },
+  { name: 'LIABILITIES', code: 'LIAB', green_on_positive: false, sequence: 90, parent_code: '', formula: 'CUR_LIAB + NCL', sign: 1, foldable: false, strong: true },
+  { name: 'Current Liabilities', code: 'CUR_LIAB', green_on_positive: false, sequence: 100, parent_code: 'LIAB', formula: 'CL + PAY + CC', sign: 1, foldable: true, strong: false },
+  { name: 'Current Liabilities', code: 'CL', green_on_positive: false, sequence: 110, parent_code: 'CUR_LIAB', formula: 'type:liability_current', sign: -1, foldable: true, strong: false },
+  { name: 'Payables', code: 'PAY', green_on_positive: false, sequence: 120, parent_code: 'CUR_LIAB', formula: 'type:liability_payable', sign: -1, foldable: true, strong: false },
+  { name: 'Credit Cards', code: 'CC', green_on_positive: false, sequence: 125, parent_code: 'CUR_LIAB', formula: 'type:liability_credit_card', sign: -1, foldable: true, strong: false },
+  { name: 'Plus Non-current Liabilities', code: 'NCL', green_on_positive: false, sequence: 130, parent_code: 'LIAB', formula: 'type:liability_non_current', sign: -1, foldable: true, strong: false },
   { name: 'EQUITY', code: 'EQUITY', sequence: 140, parent_code: '', formula: 'UNALLOC + RET', sign: 1, foldable: false, strong: true },
   { name: 'Unallocated Earnings', code: 'UNALLOC', sequence: 150, parent_code: 'EQUITY', formula: 'CUR_UNALLOC + PYE', sign: 1, foldable: false, strong: false },
   { name: 'Current Year Unallocated Earnings', code: 'CUR_UNALLOC', sequence: 160, parent_code: 'UNALLOC', formula: 'CYE + CYA', sign: 1, foldable: false, strong: false },
@@ -39,7 +39,7 @@ export const STANDARD_BALANCE_LINES = [
   { name: 'Current Year Allocated Earnings', code: 'CYA', sequence: 180, parent_code: 'CUR_UNALLOC', formula: 'type:equity_unaffected', sign: -1, foldable: true, strong: false },
   { name: 'Previous Years Unallocated Earnings', code: 'PYE', sequence: 190, parent_code: 'UNALLOC', formula: 'earnings:prior_years', sign: -1, foldable: true, strong: false },
   { name: 'Retained Earnings', code: 'RET', sequence: 200, parent_code: 'EQUITY', formula: 'type:equity', sign: -1, foldable: true, strong: false },
-  { name: 'LIABILITIES + EQUITY', code: 'LIAB_EQUITY', sequence: 210, parent_code: '', formula: 'LIAB + EQUITY', sign: 1, foldable: false, strong: true },
+  { name: 'LIABILITIES + EQUITY', code: 'LIAB_EQUITY', green_on_positive: false, sequence: 210, parent_code: '', formula: 'LIAB + EQUITY', sign: 1, foldable: false, strong: true },
 ];
 
 /** Canonical seeded configurations for Balance Sheet and Profit and Loss per company. */
@@ -137,7 +137,7 @@ const EARNINGS_TYPES = ['income', 'income_other', 'expense_direct_cost', 'expens
 /** Convert the existing statement configuration to independently editable report records. */
 export function storedExpression(line, report) {
   const formula = String(line.formula ?? '').trim();
-  const base = { label: 'balance', green_on_positive: true, blank_if_zero: false, figure_type: 'monetary' };
+  const base = { label: 'balance', green_on_positive: line.green_on_positive ?? true, blank_if_zero: false, figure_type: 'monetary' };
   const date_scope = (typeof report === 'string' ? report === 'balance' : report.date_scope === 'cumulative') ? 'from_beginning' : 'strict_range';
   if (/^\d+[A-Za-z0-9_.]*$/.test(formula)) return { ...base, engine: 'account_codes', formula, subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
   if (/^type:[a-z_]+$/.test(formula)) return { ...base, engine: 'domain', formula: JSON.stringify([['account_type', '=', formula.slice(5)]]), subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
@@ -172,6 +172,23 @@ export function ensureStoredStatementLines(db, companyId = null) {
   }
   if (nextLines === existing) return db;
   return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': nextLines, 'account.report.expression': nextExpressions } };
+}
+
+/** Restore Odoo growth directions for stored expressions linked to seeded inline roles. */
+export function migrateStatementGrowthDirections(db) {
+  const reports = new Map((db.records['account.report'] ?? []).map((report) => [report.id, report]));
+  const directions = new Map();
+  for (const line of db.records['account.report.line'] ?? []) {
+    const report = reports.get(line.report_id);
+    const spec = STATEMENT_REPORT_SPECS.find((item) => item.kind === report?.kind);
+    const role = line.inline_code && spec?.line_ids.find((item) => item.code === line.inline_code);
+    if (role) directions.set(line.id, role.green_on_positive ?? true);
+  }
+  return { ...db, records: { ...db.records, 'account.report.expression': (db.records['account.report.expression'] ?? []).map((expression) => (
+    expression.label === 'balance' && directions.has(expression.report_line_id)
+      ? { ...expression, green_on_positive: directions.get(expression.report_line_id) }
+      : expression
+  )) } };
 }
 
 /** Keep legacy edits to embedded standard lines reflected in their stored counterparts. */
@@ -214,7 +231,7 @@ export function syncInlineStatementLines(db, before, after) {
     if (converted.engine === 'aggregation') converted.formula = converted.formula.replace(/\b([A-Za-z_][A-Za-z0-9_]*)\.balance\b/g, (match, code) => `${counterpart(code)?.code ?? code}.balance`);
     const id = ids.get(line.code);
     const old = nextExpressions.find((item) => item.report_line_id === id && item.label === 'balance');
-    const replacement = { ...old, ...converted, id: old?.id ?? ++expressionId, report_line_id: id, company_id: after.company_id ?? 1 };
+    const replacement = { ...old, ...converted, green_on_positive: old?.green_on_positive ?? converted.green_on_positive, id: old?.id ?? ++expressionId, report_line_id: id, company_id: after.company_id ?? 1 };
     nextExpressions = [...nextExpressions.filter((item) => item !== old), replacement];
   }
   const retained = oldLines

@@ -213,8 +213,8 @@ test('schema migration 54 backfills previous_bank_statements_source for existing
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(SCHEMA_VERSION, 83);
-  assert.equal(migrated.schema_version, 83);
+  assert.equal(SCHEMA_VERSION, 84);
+  assert.equal(migrated.schema_version, 84);
   assert.equal(read(migrated, 'account.journal', jBank.id).previous_bank_statements_source, 'undefined');
   assert.equal(read(migrated, 'account.journal', jCredit.id).previous_bank_statements_source, 'none');
 

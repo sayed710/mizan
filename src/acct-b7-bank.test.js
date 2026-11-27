@@ -579,7 +579,7 @@ test('Migration: version 66 gives existing unreconciled statement lines their su
 
   // Run migration
   const migratedDb = migrate(legacyDb, SCHEMA_VERSION);
-  assert.equal(migratedDb.schema_version, 83);
+  assert.equal(migratedDb.schema_version, 84);
 
   const migratedUnrec = read(migratedDb, LINE_MODEL, 991);
   assert.ok(migratedUnrec.bank_move_id, 'Migration gave unreconciled line a bank_move_id');
@@ -1134,7 +1134,7 @@ test('Migration: foreign-currency unconfigured statement line without a rate is 
   };
 
   const migratedDb = migrate(legacyDb, SCHEMA_VERSION);
-  assert.equal(migratedDb.schema_version, 83);
+  assert.equal(migratedDb.schema_version, 84);
 
   const migratedNoOpen = read(migratedDb, LINE_MODEL, 996);
   assert.equal(migratedNoOpen.bank_move_id, null);

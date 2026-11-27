@@ -168,6 +168,10 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     const nextIds = selectedCompanyIds(companies, nextCompany);
     const nextPrimaryId = nextCompany === 'all' ? currentCompany(companyDb) : Number(nextCompany);
     const nextReport = findStatementReport(companyDb, statementKind, nextPrimaryId) ?? findStatementReport(companyDb, statementKind);
+    setHierarchy(nextReport?.filter_hierarchy === 'by_default');
+    setHideZeroLines(nextReport?.filter_hide_0_lines === 'by_default');
+    setComparison('none');
+    setBaseLine('');
     const nextLedger = scopedLedgers(companyDb, nextIds).find((item) => item.id === Number(ledgerId)) ?? null;
     if (!nextLedger && ledgerId) setLedgerId('');
     const allowedJournalIds = new Set(scopedJournals(companyDb, nextIds, nextLedger).map((j) => j.id));
@@ -195,15 +199,16 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
       }
     : companyDb;
 
+  const reportCompany = report.company_id ?? 1;
+  const periodCompanyId = statementKind ? primaryCompanyId : reportCompany;
   const preset = periodKey.startsWith('previous_') ? periodKey.slice(9) : periodKey;
   const period = periodKey === 'custom' ? { from: report.filter_date_range === false ? '' : from, to }
     : periodKey === 'today' ? { from: today(), to: today() }
-      : reportPeriodRange(companyDb, preset, { companyId: primaryCompanyId, offset: periodKey.startsWith('previous_') ? -1 : 0 });
+      : reportPeriodRange(companyDb, preset, { companyId: periodCompanyId, offset: periodKey.startsWith('previous_') ? -1 : 0 });
   const comparable = periodKey !== 'all';
   const activePeriodKey = ['month', 'quarter', 'year'].includes(periodKey) ? periodKey : 'custom';
   const periodError = customPeriodError(activePeriodKey, period, { requireFrom: report.filter_date_range !== false && comparable && comparison !== 'none' && comparison !== 'report_line' });
   const canComputePeriods = !periodError;
-  const reportCompany = report.company_id ?? 1;
   const groups = comparable
     ? search(companyDb, 'account.report.horizontal.group').filter((g) => (
       (g.company_id ?? 1) === (statementKind ? primaryCompanyId : reportCompany)
@@ -222,8 +227,8 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     try {
       const comparisonPeriod = period.from ? period : { ...period, from: period.to };
       const periods = comparable && comparison !== 'none' && comparison !== 'report_line' && canComputePeriods
-        ? (statementKind && activePeriodKey !== 'custom'
-          ? periodsFor(activePeriodKey, comparison, comparisonPeriod, { db: companyDb, companyId: primaryCompanyId })
+        ? (activePeriodKey !== 'custom'
+          ? periodsFor(activePeriodKey, comparison, comparisonPeriod, { db: companyDb, companyId: periodCompanyId })
           : periodsFor(activePeriodKey, comparison, comparisonPeriod))
         : [{ ...period, label: '' }];
       data = compareConfigurableReport(
