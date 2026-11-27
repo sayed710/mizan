@@ -963,12 +963,13 @@ export function depreciationReport(db, period, companyId = 'all', options = {}) 
   });
   const totals = Object.fromEntries(['original', 'inPeriod', 'accumulated', 'book'].map((key) => [key, rows.reduce((s, row) => s + cents(row[key]), 0) / 100]));
   const grouped = new Map();
-  if (groupBy === 'asset_group_id') for (const row of rows) {
-    const id = row.a.asset_group_id ?? null;
+  const groupModels = { asset_group_id: 'account.asset.group', model_id: 'account.asset.model', account_asset_id: 'account.account', company_id: 'res.company' };
+  if (groupModels[groupBy]) for (const row of rows) {
+    const id = row.a[groupBy] ?? null;
     if (!grouped.has(id)) grouped.set(id, []);
     grouped.get(id).push(row);
   }
-  const groups = [...grouped].map(([id, items]) => ({ id, name: read(db, 'account.asset.group', id)?.name ?? '', rows: items, totals: Object.fromEntries(['original', 'inPeriod', 'accumulated', 'book'].map((key) => [key, items.reduce((sum, row) => sum + cents(row[key]), 0) / 100])) }));
+  const groups = [...grouped].map(([id, items]) => ({ id, name: read(db, groupModels[groupBy], id)?.name ?? '', rows: items, totals: Object.fromEntries(['original', 'inPeriod', 'accumulated', 'book'].map((key) => [key, items.reduce((sum, row) => sum + cents(row[key]), 0) / 100])) }));
   return { rows, totals, groups };
 }
 

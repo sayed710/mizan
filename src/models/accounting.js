@@ -3197,6 +3197,34 @@ function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwri
   return write(db, 'account.account', accountId, { currency_id: nextCurrency }, journalId ? { syncFromJournalId: journalId } : undefined);
 }
 
+// Stored account groups and their parents are derived from company and code ranges.
+export function recomputeAccountGroups(db) {
+  const groups = db.records['account.group'] ?? [];
+  const match = (code, company, excluded = null, maxLength = Infinity, endCode = code) => groups
+    .filter((g) => {
+      const start = String(g.code_prefix_start ?? '');
+      const end = String(g.code_prefix_end ?? start);
+      const prefix = String(code ?? '').slice(0, start.length);
+      const endPrefix = String(endCode ?? '').slice(0, start.length);
+      return g.id !== excluded && (g.company_id ?? 1) === (company ?? 1) && start && end
+        && start.length < maxLength && prefix.length === start.length && endPrefix.length === start.length
+        && prefix >= start && endPrefix <= end;
+    })
+    .sort((a, b) => String(b.code_prefix_start).length - String(a.code_prefix_start).length || a.id - b.id)[0]?.id ?? null;
+  const updatedGroups = groups.map((g) => {
+    const parentId = match(g.code_prefix_start, g.company_id, g.id, String(g.code_prefix_start ?? '').length, g.code_prefix_end ?? g.code_prefix_start);
+    return (g.parent_id ?? null) === parentId ? g : { ...g, parent_id: parentId };
+  });
+  const accounts = (db.records['account.account'] ?? []).map((a) => {
+    const groupId = match(a.code, a.company_id);
+    return (a.group_id ?? null) === groupId ? a : { ...a, group_id: groupId };
+  });
+  return { ...db, records: { ...db.records,
+    ...(db.records['account.group'] ? { 'account.group': updatedGroups } : {}),
+    ...(db.records['account.account'] ? { 'account.account': accounts } : {}),
+  } };
+}
+
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
@@ -3220,6 +3248,7 @@ export const accountingModels = {
       },
       tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', tracking: true, domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
       fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category', tracking: true },
+      group_id: { type: 'many2one', relation: 'account.group', label: 'Account Group', readonly: true },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation', tracking: true },
       active: { type: 'boolean', label: 'Active', tracking: true },
@@ -3333,9 +3362,11 @@ export const accountingModels = {
       }
       return null;
     },
+    onCreate: recomputeAccountGroups,
+    onWrite: recomputeAccountGroups,
     protectDelete: accountDeleteGuard,
     sort: (a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')),
-    groupBys: ['account_type'],
+    groupBys: ['account_type', 'group_id'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
     list: ['code', 'name', 'account_type', 'opening_debit', 'opening_credit', 'reconcile', 'currency_id'],
     listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') }, opening_debit: { optional: 'hide' }, opening_credit: { optional: 'hide' } },
@@ -3362,13 +3393,43 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'non_trade', 'active'],
+            ['account_type', 'group_id', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'non_trade', 'active'],
             ['is_deferred', 'deferred_account_id', 'create_asset', 'asset_model_id'],
             ['description', 'note'],
           ],
         },
       ],
     },
+  },
+
+  'account.group': {
+    label: 'Account Groups',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      code_prefix_start: { type: 'char', label: 'Code Prefix Start' },
+      code_prefix_end: { type: 'char', label: 'Code Prefix End' },
+      parent_id: {
+        type: 'many2one',
+        relation: 'account.group',
+        label: 'Parent Group',
+        readonly: true,
+      },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+    },
+    defaults: () => ({}),
+    createDefaults: (db) => ({ company_id: currentCompany(db) }),
+    guard: (db, before, after) => {
+      if (after.code_prefix_start && after.code_prefix_end && String(after.code_prefix_start) > String(after.code_prefix_end)) {
+        return 'Code Prefix Start must not be greater than Code Prefix End';
+      }
+      return null;
+    },
+    onCreate: recomputeAccountGroups,
+    onWrite: recomputeAccountGroups,
+    onUnlink: recomputeAccountGroups,
+    sort: (a, b) => String(a.code_prefix_start ?? '').localeCompare(String(b.code_prefix_start ?? '')) || String(a.name ?? '').localeCompare(String(b.name ?? '')),
+    list: ['code_prefix_start', 'code_prefix_end', 'name', 'parent_id', 'company_id'],
+    form: { title: 'name', groups: [['name', 'parent_id', 'company_id'], ['code_prefix_start', 'code_prefix_end']] },
   },
 
   'account.fiscal.category': {

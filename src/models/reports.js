@@ -2,7 +2,7 @@
 import { read, search } from '../orm.js';
 import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { deferredSettings, lineCreditAdjustmentAmount, recognitionTargetThroughDate, scheduleAsOf } from './deferred.js';
-import { balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, journalItems, profitAndLoss, weighted } from './ledger.js';
+import { ACCOUNT_TYPES, balances, balanceSheet, analyticMoveItems, filterByAnalytic, fiscalYearStart, journalItems, profitAndLoss, weighted } from './ledger.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
@@ -50,8 +50,113 @@ export function trialOpeningItems(db, items, from) {
   });
 }
 
+/** Resolve the stored group derived from the account code. */
+export function resolveAccountGroup(db, account) {
+  return account?.group_id ? read(db, 'account.group', account.group_id) ?? null : null;
+}
+
+const ACCOUNT_TYPE_LABELS = new Map(ACCOUNT_TYPES);
+const ACCOUNT_TYPE_ORDER = new Map(ACCOUNT_TYPES.map(([code], idx) => [code, idx]));
+
+/** Group trial balance accounts across one or more period reports by 'account_type' or 'account_group' hierarchy. */
+export function groupTrialBalanceRows(db, accounts, rowsByReport, keys, groupBy) {
+  if (!groupBy) return [];
+  const sumPeriodValues = (accountList) => rowsByReport.map((byAccount) => Object.fromEntries(
+    keys.map((key) => [key, round(accountList.reduce((sum, acc) => sum + (byAccount.get(acc.id)?.[key] ?? 0), 0))]),
+  ));
+
+  if (groupBy === 'account_type') {
+    const grouped = new Map();
+    for (const acc of accounts) {
+      const type = acc.account_type || 'undefined';
+      if (!grouped.has(type)) grouped.set(type, []);
+      grouped.get(type).push(acc);
+    }
+    return [...grouped.entries()]
+      .sort(([a], [b]) => (ACCOUNT_TYPE_ORDER.get(a) ?? 999) - (ACCOUNT_TYPE_ORDER.get(b) ?? 999) || String(a).localeCompare(String(b)))
+      .map(([type, items]) => ({
+        key: `type:${type}`,
+        id: type,
+        name: ACCOUNT_TYPE_LABELS.get(type) ?? 'Undefined',
+        depth: 0,
+        accounts: items,
+        periodTotals: sumPeriodValues(items),
+      }));
+  }
+
+  if (groupBy === 'account_group') {
+    const directAccounts = new Map();
+    const ungrouped = [];
+    const neededGroupIds = new Set();
+    for (const acc of accounts) {
+      const group = resolveAccountGroup(db, acc);
+      if (!group) {
+        ungrouped.push(acc);
+        continue;
+      }
+      if (!directAccounts.has(group.id)) directAccounts.set(group.id, []);
+      directAccounts.get(group.id).push(acc);
+      const seen = new Set();
+      let cur = group;
+      while (cur && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        neededGroupIds.add(cur.id);
+        cur = cur.parent_id ? read(db, 'account.group', cur.parent_id) : null;
+      }
+    }
+    const childrenByParent = new Map();
+    for (const id of neededGroupIds) {
+      const g = read(db, 'account.group', id);
+      const parentId = g?.parent_id && neededGroupIds.has(g.parent_id) ? g.parent_id : null;
+      if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+      childrenByParent.get(parentId).push(g);
+    }
+    for (const list of childrenByParent.values()) {
+      list.sort((a, b) => String(a.code_prefix_start ?? '').localeCompare(String(b.code_prefix_start ?? '')) || String(a.name ?? '').localeCompare(String(b.name ?? '')) || a.id - b.id);
+    }
+    const collectSubtreeAccounts = (groupId, visited = new Set()) => {
+      if (visited.has(groupId)) return [];
+      visited.add(groupId);
+      const own = directAccounts.get(groupId) ?? [];
+      const childAccs = (childrenByParent.get(groupId) ?? []).flatMap((child) => collectSubtreeAccounts(child.id, visited));
+      return [...own, ...childAccs];
+    };
+    const out = [];
+    const walk = (parentId, depth, visited = new Set()) => {
+      for (const group of childrenByParent.get(parentId) ?? []) {
+        if (visited.has(group.id)) continue;
+        visited.add(group.id);
+        const subtreeAccounts = collectSubtreeAccounts(group.id);
+        out.push({
+          key: `group:${group.id}`,
+          id: group.id,
+          name: group.code_prefix_start ? `${group.code_prefix_start} ${group.name}` : group.name,
+          depth,
+          accounts: directAccounts.get(group.id) ?? [],
+          periodTotals: sumPeriodValues(subtreeAccounts),
+        });
+        walk(group.id, depth + 1, visited);
+      }
+    };
+    walk(null, 0);
+    if (ungrouped.length) {
+      out.push({
+        key: 'group:none',
+        id: null,
+        name: 'Undefined',
+        depth: 0,
+        accounts: ungrouped,
+        periodTotals: sumPeriodValues(ungrouped),
+      });
+    }
+    return out;
+  }
+
+  return [];
+}
+
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
-export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, includeClosing = false, includeZeroRows = false } = {}) {
+export function trialBalance(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, includeClosing = false, includeZeroRows = false, groupBy = '' } = {}) {
   const mode = reportReviewMode({ reviewMode, includeUnposted });
   const opening = new Map(balances(db, trialOpeningItems(db, itemsBefore(db, from, company_id, analyticAccountIds, mode), from)).map((b) => [b.account.id, b.balance]));
   const rows = new Map();
@@ -71,7 +176,13 @@ export function trialBalance(db, { from, to, company_id, analyticAccountIds, inc
     .filter((r) => includeZeroRows || reportAmountsVisible([r.initial, r.debit, r.credit, r.end], true))
     .sort((a, b) => a.account.code.localeCompare(b.account.code));
   const total = (key) => round(list.reduce((s, r) => s + r[key], 0));
-  return { rows: list, totals: { initial: total('initial'), debit: total('debit'), credit: total('credit'), end: total('end') } };
+  const totals = { initial: total('initial'), debit: total('debit'), credit: total('credit'), end: total('end') };
+  if (groupBy) {
+    const byAcc = new Map(list.map((r) => [r.account.id, r]));
+    const groups = groupTrialBalanceRows(db, list.map((r) => r.account), [byAcc], ['initial', 'debit', 'credit', 'end'], groupBy);
+    return { rows: list, totals, groups };
+  }
+  return { rows: list, totals };
 }
 
 /** General ledger: accounts with opening balance, movements inside the period, and ending balance, optionally grouped by partner. */
@@ -118,8 +229,8 @@ export function generalLedger(db, { from, to, company_id, analyticAccountIds, in
     return { account, ...section(accLines, accOpening), partners };
   });
 
-  const visibleRows = rows.filter((row) => reportAmountsVisible([row.debit, row.credit, row.end], hideZeroLines)).map((row) => {
-    const partnerList = hideZeroLines ? row.partners.filter((partner) => reportAmountsVisible([partner.debit, partner.credit, partner.end], true)) : row.partners;
+  const visibleRows = rows.filter((row) => reportAmountsVisible([row.initial, row.debit, row.credit, row.end], hideZeroLines)).map((row) => {
+    const partnerList = hideZeroLines ? row.partners.filter((partner) => reportAmountsVisible([partner.initial, partner.debit, partner.credit, partner.end], true)) : row.partners;
     return {
       ...row,
       lines: row.lines.filter((line) => reportAmountsVisible([line.debit, line.credit, line.balance], hideZeroLines)),
@@ -129,6 +240,7 @@ export function generalLedger(db, { from, to, company_id, analyticAccountIds, in
   return {
     rows: visibleRows,
     totals: {
+      initial: round(rows.reduce((sum, r) => sum + r.initial, 0)),
       debit: round(rows.reduce((sum, r) => sum + r.debit, 0)),
       credit: round(rows.reduce((sum, r) => sum + r.credit, 0)),
       end: round(rows.reduce((sum, r) => sum + r.end, 0)),
@@ -239,7 +351,7 @@ export function defaultCashFlowActivity(account_type) {
   return 'operating';
 }
 
-/** Determine the cash flow activity (operating, investing, financing) for an account. */
+/** Determine the cash flow activity (operating, investing, financing, unclassified) for an account. */
 export function accountCashFlowActivity(db, account) {
   if (!account) return 'unclassified';
   if (Array.isArray(account.tag_ids)) {
@@ -252,8 +364,9 @@ export function accountCashFlowActivity(db, account) {
 
 /**
  * Direct-method cash flow over the cash accounts: every posted move touching cash attributes its movement to its
- * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
- * equity and loans financing, everything else operating.
+ * non-cash counterpart lines (a credit on the counterpart is cash in); tagged accounts route to operating, investing
+ * or financing, untagged receivable/payable and income/expense accounts count as operating, and all other untagged
+ * accounts go to unclassified.
  */
 export function cashFlow(db, { from, to, company_id, analyticAccountIds, includeUnposted, reviewMode, weight } = {}) {
   const targetCompany = company_id;

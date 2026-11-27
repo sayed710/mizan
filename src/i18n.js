@@ -4074,6 +4074,20 @@ const ar = {
   'Problem Description': 'وصف المشكلة',
   'Initial balance ({amount}) does not match previous statement': 'الرصيد الافتتاحي ({amount}) لا يطابق كشف الحساب السابق',
   'Incorrect ending balance, expected {amount}': 'الرصيد النهائي غير صحيح، المتوقع {amount}',
+  Ref: 'المرجع',
+  'Account Group': 'مجموعة الحساب',
+  'Account Groups': 'مجموعات الحسابات',
+  'Code Prefix Start': 'بداية بادئة الرمز',
+  'Code Prefix End': 'نهاية بادئة الرمز',
+  'Parent Group': 'المجموعة الأم',
+  Budget: 'الموازنة',
+  'All Budgets': 'كل الموازنات',
+  'Include draft budgets': 'تضمين الموازنات المسودة',
+  'A group cannot be its own ancestor': 'لا يمكن أن تكون المجموعة سلفاً لنفسها',
+  'Parent group must belong to the same company': 'يجب أن تتبع المجموعة الأم الشركة نفسها',
+  'Code Prefix Start must not be greater than Code Prefix End': 'يجب ألا تكون بداية بادئة الرمز أكبر من نهايتها',
+  'Select an existing account group': 'اختر مجموعة حساب موجودة',
+  'Account group must belong to the account company': 'يجب أن تتبع مجموعة الحساب شركة الحساب',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

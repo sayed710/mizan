@@ -9,7 +9,7 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
-import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines } from './models/accounting.js';
+import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines, recomputeAccountGroups } from './models/accounting.js';
 import { checkMandatoryPlans } from './models/analyticplus.js';
 import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
@@ -938,6 +938,9 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       }
     }
     if (model in records) records = { ...records, [model]: records[model].filter((r) => !drop.has(r.id)) };
+  }
+  if (d.upserts?.['account.account'] || d.upserts?.['account.group'] || d.deletes?.['account.group']) {
+    records = recomputeAccountGroups({ ...db, records }).records;
   }
   // Whole-record rules that look across models run once every change is in place.
   const final = { ...db, records };

@@ -10,7 +10,7 @@ import { FollowUpBatchResultModal, FollowUpWizard, runBatchFollowUpsAction } fro
 import { Wizard } from './Wizard.jsx';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, BUCKETS, companyReceivableLines, followUpCompanies, followUpLevel, followUps, followUpText, isPartnerFollowUpPostponed, levelChannel, levelChannels, logManualFollowUp, openManualFollowUp, partnerFollowUp, partnerFollowUpStatus, partnerReceivableLines, postponeFollowUp, postponeFollowUpWizardSpec, resolveAgedAsOfDate, taxesByGrid, taxesByTax, taxItemKey, taxReport } from '../models/finance.js';
 import { AgedDetailRow } from './aged-detail-row.js';
-import { budgetReport, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
+import { budgetReport, filterReportBudgets, groupBudgetReportEntries, rootPlanMap, rootAnalyticPlans } from '../models/analyticplus.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -150,6 +150,38 @@ function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = fa
   const toggle = (id) => setOpen((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const togglePartner = (id) => setOpenPartners((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
+  const renderInitialRow = (key, amount, indent = 0) => (
+    <tr key={key} className="rep-detail">
+      <td style={indent ? { paddingInlineStart: indent } : undefined}>{t('Initial Balance')}</td>
+      <td /><td /><td /><td /><td /><td />
+      <td className="num">{fmtMoney(amount)}</td>
+      <td /><td />
+      <td className="num">{fmtMoney(amount)}</td>
+    </tr>
+  );
+
+  const renderLineRow = (l, key, indent = 0) => {
+    const linePartner = l.partner_id ? (read(db, 'res.partner', l.partner_id)?.name ?? '') : '';
+    const lineCurrency = l.currency_id && l.amount_currency != null
+      ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id))
+      : '';
+    return (
+      <tr key={key} className="rep-detail">
+        <td style={indent ? { paddingInlineStart: indent } : undefined} />
+        <td>{l.date}</td>
+        <td><a href={`#/open/account.move/${l.move_id}`}>{l.move_name}</a></td>
+        <td>{l.ref || ''}</td>
+        <td>{l.name || ''}</td>
+        <td>{linePartner}</td>
+        <td className="num">{lineCurrency}</td>
+        <td />
+        <td className="num">{l.debit ? fmtMoney(l.debit) : ''}</td>
+        <td className="num">{l.credit ? fmtMoney(l.credit) : ''}</td>
+        <td className="num">{fmtMoney(l.balance)}</td>
+      </tr>
+    );
+  };
+
   return (
     <tbody>
       {report.rows.map((r) => {
@@ -157,49 +189,48 @@ function Ledger({ db, period, companyId, analyticAccountIds, groupByPartner = fa
         return [
           <tr key={a.id} className="rep-section" onClick={() => toggle(a.id)} aria-expanded={open.has(a.id)}>
             <td><span className="caret">{open.has(a.id) ? '▾' : '▸'}</span> {a.code} {a.name}</td>
+            <td /><td /><td /><td /><td /><td />
+            <td className="num">{fmtMoney(r.initial)}</td>
             <td className="num">{fmtMoney(r.debit)}</td>
             <td className="num">{fmtMoney(r.credit)}</td>
             <td className="num">{fmtMoney(r.end)}</td>
           </tr>,
           ...(open.has(a.id) ? (
-            groupByPartner ? (
-              r.partners.flatMap((p) => {
+            groupByPartner ? [
+              ...(r.initial ? [renderInitialRow(`${a.id}-open`, r.initial, 28)] : []),
+              ...r.partners.flatMap((p) => {
                 const pKey = `${a.id}-${p.partner_id ?? 'none'}`;
-                const partnerName = p.partner_id ? p.name : t('No Partner');
+                const pName = p.partner_id ? p.name : t('No Partner');
                 return [
                   <tr key={pKey} className="rep-partner rep-section-sub" onClick={() => togglePartner(pKey)} aria-expanded={openPartners.has(pKey)} style={{ cursor: 'pointer' }}>
-                    <td style={{ paddingInlineStart: 28 }}><span className="caret">{openPartners.has(pKey) ? '▾' : '▸'}</span> {partnerName}</td>
+                    <td style={{ paddingInlineStart: 28 }}><span className="caret">{openPartners.has(pKey) ? '▾' : '▸'}</span> {pName}</td>
+                    <td /><td /><td /><td /><td /><td />
+                    <td className="num">{fmtMoney(p.initial)}</td>
                     <td className="num">{fmtMoney(p.debit)}</td>
                     <td className="num">{fmtMoney(p.credit)}</td>
                     <td className="num">{fmtMoney(p.end)}</td>
                   </tr>,
                   ...(openPartners.has(pKey) ? [
-                    ...(p.initial ? [<tr key={`${pKey}-open`} className="rep-detail"><td style={{ paddingInlineStart: 44 }}>{t('Initial Balance')}</td><td /><td /><td className="num">{fmtMoney(p.initial)}</td></tr>] : []),
-                    ...p.lines.map((l, i) => (
-                      <tr key={`${pKey}-${i}`} className="rep-detail">
-                        <td style={{ paddingInlineStart: 44 }}><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a> <span className="muted">{l.name}</span></td>
-                        <td className="num">{l.debit ? fmtMoney(l.debit) : ''}</td>
-                        <td className="num">{l.credit ? fmtMoney(l.credit) : ''}</td>
-                        <td className="num">{fmtMoney(l.balance)}</td>
-                      </tr>
-                    )),
+                    ...(p.initial ? [renderInitialRow(`${pKey}-open`, p.initial, 44)] : []),
+                    ...p.lines.map((l, i) => renderLineRow(l, `${pKey}-${i}`, 44)),
                   ] : []),
                 ];
-              })
-            ) : [
-              <tr key={`${a.id}-open`} className="rep-detail"><td>{t('Initial Balance')}</td><td /><td /><td className="num">{fmtMoney(r.initial)}</td></tr>,
-              ...r.lines.map((l, i) => (
-                <tr key={`${a.id}-${i}`} className="rep-detail">
-                  <td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a> <span className="muted">{l.name}</span></td>
-                  <td className="num">{l.debit ? fmtMoney(l.debit) : ''}</td>
-                  <td className="num">{l.credit ? fmtMoney(l.credit) : ''}</td>
-                  <td className="num">{fmtMoney(l.balance)}</td>
-                </tr>
-              )),
+              }),
+            ] : [
+              renderInitialRow(`${a.id}-open`, r.initial),
+              ...r.lines.map((l, i) => renderLineRow(l, `${a.id}-${i}`)),
             ]
           ) : []),
         ];
       })}
+      <tr className="rep-total strong">
+        <td>{t('Total')}</td>
+        <td /><td /><td /><td /><td /><td />
+        <td className="num">{fmtMoney(report.totals.initial)}</td>
+        <td className="num">{fmtMoney(report.totals.debit)}</td>
+        <td className="num">{fmtMoney(report.totals.credit)}</td>
+        <td className="num">{fmtMoney(report.totals.end)}</td>
+      </tr>
     </tbody>
   );
 }
@@ -675,9 +706,8 @@ export function FollowUps({ db, sourceDb, companyId = 'all', statusFilter = 'all
   );
 }
 
-export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], money: moneyProp }) {
+export function Budget({ db, period, periods = null, companyId = 'all', analyticAccountIds = [], budgetId = '', groupBy = '', includeDraft = false, money: moneyProp }) {
   const fmtMoney = moneyProp ?? money;
-  const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
     const acc = read(db, 'account.account', l.account_id);
@@ -701,111 +731,141 @@ export function Budget({ db, period, periods = null, companyId = 'all', analytic
     analytic_lines: [],
     commitment_lines: [],
   });
-  return (
-    <tbody>
-      {search(db, 'account.budget').filter((b) => {
-        if (['draft', 'cancel'].includes(b.state)) return false;
-        if (targetCompanyId && b.company_id && b.company_id !== targetCompanyId) return false;
-        if (minFrom && b.date_to && b.date_to < minFrom) return false;
-        if (maxTo && b.date_from && b.date_from > maxTo) return false;
-        return true;
-      }).flatMap((b) => {
-        const company = b.company_id ? read(db, 'res.company', b.company_id) : null;
-        const companyMissing = !company;
-        let currency = null;
-        const periodReports = [];
-        let reportError = null;
-
-        const baseBudgetLines = (b.lines ?? []).filter((line) => {
-          if (!analyticAccountIds?.length) return true;
-          return line.analytic_account_id && analyticAccountIds.includes(line.analytic_account_id);
-        });
-
-        if (!companyMissing) {
-          try {
-            currency = budgetCurrency(db, company.id);
-          } catch (error) {
-            reportError = error instanceof Error ? error.message : String(error);
-          }
-
-          if (currency) {
-            for (const p of targetPeriods) {
-              const budgetOverlaps = datesOverlap(b.date_from, b.date_to, p.from, p.to);
-              if (!budgetOverlaps) {
-                periodReports.push({ period: p, lines: baseBudgetLines.map(zeroBudgetLine), error: null });
-              } else {
-                try {
-                  const asOfDate = p.to && p.to < today() ? p.to : today();
-                  const rawLines = b.lines?.length
-                    ? budgetReport(db, b.id, asOfDate, { period: p, company_id: company.id, analyticAccountIds })
-                    : [];
-                  const lines = rawLines.map((line) => {
-                    const lineFrom = line.date_from || b.date_from;
-                    const lineTo = line.date_to || b.date_to;
-                    return !datesOverlap(lineFrom, lineTo, p.from, p.to) ? zeroBudgetLine(line) : line;
-                  });
-                  periodReports.push({ period: p, lines, error: null });
-                } catch (error) {
-                  const pErr = error instanceof Error ? error.message : String(error);
-                  if (!reportError) reportError = pErr;
-                  periodReports.push({ period: p, lines: [], error: pErr });
-                }
-              }
+  const colSpan = 1 + targetPeriods.length * 5;
+  const budgets = filterReportBudgets(db, { companyId, from: minFrom, to: maxTo, budgetId, includeDraft }).map((b) => {
+    const company = b.company_id ? read(db, 'res.company', b.company_id) : null;
+    const companyMissing = !company;
+    let currency = null;
+    const periodReports = [];
+    let reportError = null;
+    const baseBudgetLines = (b.lines ?? []).filter((line) => {
+      if (!analyticAccountIds?.length) return true;
+      return line.analytic_account_id && analyticAccountIds.includes(line.analytic_account_id);
+    });
+    if (!companyMissing) {
+      try {
+        currency = budgetCurrency(db, company.id);
+      } catch (error) {
+        reportError = error instanceof Error ? error.message : String(error);
+      }
+      if (currency) {
+        for (const p of targetPeriods) {
+          const budgetOverlaps = datesOverlap(b.date_from, b.date_to, p.from, p.to);
+          if (!budgetOverlaps) {
+            periodReports.push({ period: p, lines: baseBudgetLines.map(zeroBudgetLine), error: null });
+          } else {
+            try {
+              const asOfDate = p.to && p.to < today() ? p.to : today();
+              const rawLines = b.lines?.length
+                ? budgetReport(db, b.id, asOfDate, { period: p, company_id: company.id, analyticAccountIds })
+                : [];
+              const lines = rawLines.map((line) => {
+                const lineFrom = line.date_from || b.date_from;
+                const lineTo = line.date_to || b.date_to;
+                return !datesOverlap(lineFrom, lineTo, p.from, p.to) ? zeroBudgetLine(line) : line;
+              });
+              periodReports.push({ period: p, lines, error: null });
+            } catch (error) {
+              const pErr = error instanceof Error ? error.message : String(error);
+              if (!reportError) reportError = pErr;
+              periodReports.push({ period: p, lines: [], error: pErr });
             }
           }
         }
-        if (!companyMissing && !reportError && analyticAccountIds?.length && periodReports.every((pr) => pr.lines.length === 0)) {
-          return [];
-        }
-        const colSpan = 1 + targetPeriods.length * 5;
-        const firstReportLines = periodReports.find((pr) => !pr.error && pr.lines.length > 0)?.lines ?? baseBudgetLines;
-        return [
-          <tr key={b.id} className="rep-section"><td colSpan={colSpan}>
-            <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
-            {company && <span className="muted"> · {company.name}</span>}
-          </td></tr>,
-          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company on the budget record to show this budget report.')} {t('Select a company to show this budget report.')}</td></tr>] : []),
-          ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{reportError}</td></tr>] : []),
-          ...firstReportLines.map((l, i) => {
-            const pr0Line = periodReports[0]?.lines?.[i];
-            const detailLine = pr0Line ?? l;
-            return (
-              <Fragment key={`${b.id}-${i}`}>
-                <tr className="rep-detail">
-                  <td>{lineLabel(l)}</td>
-                  {periodReports.flatMap((pr, pIdx) => {
-                    if (pr.error || !pr.lines?.[i]) {
-                      return [
-                        <td key={`${pIdx}-pl`} className="num">—</td>,
-                        <td key={`${pIdx}-pr`} className="num">—</td>,
-                        <td key={`${pIdx}-c`} className="num">—</td>,
-                        <td key={`${pIdx}-v`} className="num">—</td>,
-                        <td key={`${pIdx}-a`} className="num">—</td>,
-                      ];
-                    }
-                    const pLine = pr.lines[i];
-                    return [
-                      <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount ?? pLine.planned} currency={currency} money={fmtMoney} />,
-                      <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={fmtMoney} />,
-                      <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={fmtMoney} />,
-                      <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={fmtMoney} />,
-                      <td key={`${pIdx}-a`} className="num">{(pLine.planned_amount ?? pLine.planned) ? `${pLine.budget_achievement ?? pLine.achievement}%` : ''}</td>,
-                    ];
-                  })}
-                </tr>
-                {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.analytic_lines ?? []).map((item) => <tr className="rep-detail" key={item.id}>
-                  <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                  <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td /><td />
-                </tr>)}
-                {targetPeriods.length === 1 && !periodReports[0]?.error && (detailLine.commitment_lines ?? []).map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
-                  <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
-                  <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td />
-                </tr>)}
-              </Fragment>
-            );
-          }),
-        ];
-      })}
+      }
+    }
+    const hiddenByAnalytic = !companyMissing && !reportError && analyticAccountIds?.length && periodReports.every((pr) => pr.lines.length === 0);
+    const firstReportLines = periodReports.find((pr) => !pr.error && pr.lines.length > 0)?.lines ?? baseBudgetLines;
+    return { b, company, companyMissing, currency, periodReports, reportError, firstReportLines, hiddenByAnalytic };
+  }).filter((item) => !item.hiddenByAnalytic);
+
+  const renderLineRows = (key, label, periodLines, currency) => {
+    const detailLine = periodLines[0]?.line;
+    return (
+      <Fragment key={key}>
+        <tr className="rep-detail">
+          <td>{label}</td>
+          {periodLines.flatMap((pl, pIdx) => {
+            if (pl.error || !pl.line) {
+              return [
+                <td key={`${pIdx}-pl`} className="num">—</td>,
+                <td key={`${pIdx}-pr`} className="num">—</td>,
+                <td key={`${pIdx}-c`} className="num">—</td>,
+                <td key={`${pIdx}-v`} className="num">—</td>,
+                <td key={`${pIdx}-a`} className="num">—</td>,
+              ];
+            }
+            const pLine = pl.line;
+            return [
+              <BudgetMoneyCell key={`${pIdx}-pl`} value={pLine.planned_amount ?? pLine.planned} currency={currency} money={fmtMoney} />,
+              <BudgetMoneyCell key={`${pIdx}-pr`} value={pLine.achieved_amount} currency={currency} money={fmtMoney} />,
+              <BudgetMoneyCell key={`${pIdx}-c`} value={pLine.committed_amount} currency={currency} money={fmtMoney} />,
+              <BudgetMoneyCell key={`${pIdx}-v`} value={pLine.budget_variance} currency={currency} money={fmtMoney} />,
+              <td key={`${pIdx}-a`} className="num">{(pLine.planned_amount ?? pLine.planned) ? `${pLine.budget_achievement ?? pLine.achievement}%` : ''}</td>,
+            ];
+          })}
+        </tr>
+        {targetPeriods.length === 1 && !periodLines[0]?.error && (detailLine?.analytic_lines ?? []).map((item) => <tr className="rep-detail" key={`${key}-a-${item.id}`}>
+          <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
+          <td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td /><td />
+        </tr>)}
+        {targetPeriods.length === 1 && !periodLines[0]?.error && (detailLine?.commitment_lines ?? []).map((item, index) => <tr className="rep-detail" key={`${key}-p-${item.purchase_id}-${index}`}>
+          <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
+          <td /><td /><BudgetMoneyCell value={item.amount * (detailLine.budgetSign ?? 1)} currency={currency} money={fmtMoney} /><td /><td />
+        </tr>)}
+      </Fragment>
+    );
+  };
+
+  if (groupBy) {
+    const entries = budgets.flatMap(({ b, company, currency, periodReports, firstReportLines }) => (
+      firstReportLines.map((line, i) => ({
+        key: `${b.id}-${i}`,
+        budget: b,
+        company,
+        currency,
+        line,
+        periodLines: periodReports.map((pr) => ({ error: pr.error, line: pr.lines?.[i] ?? null })),
+      }))
+    ));
+    const grouped = groupBudgetReportEntries(db, entries, groupBy);
+    return (
+      <tbody>
+        {grouped.map((group) => (
+          <Fragment key={group.key}>
+            <tr className="rep-section">
+              <td>{group.label === 'Undefined' ? t('Undefined') : group.label}</td>
+              {group.periodTotals ? group.periodTotals.flatMap((pt, pIdx) => (pt ? [
+                <BudgetMoneyCell key={`${pIdx}-pl`} value={pt.planned} currency={group.currency} money={fmtMoney} />,
+                <BudgetMoneyCell key={`${pIdx}-pr`} value={pt.achieved} currency={group.currency} money={fmtMoney} />,
+                <BudgetMoneyCell key={`${pIdx}-c`} value={pt.committed} currency={group.currency} money={fmtMoney} />,
+                <BudgetMoneyCell key={`${pIdx}-v`} value={pt.variance} currency={group.currency} money={fmtMoney} />,
+                <td key={`${pIdx}-a`} className="num">{pt.planned ? `${pt.achievement}%` : ''}</td>,
+              ] : [<td key={`${pIdx}-pl`} className="num">—</td>, <td key={`${pIdx}-pr`} className="num">—</td>, <td key={`${pIdx}-c`} className="num">—</td>, <td key={`${pIdx}-v`} className="num">—</td>, <td key={`${pIdx}-a`} className="num">—</td>])) : <td colSpan={targetPeriods.length * 5} />}
+            </tr>
+            {group.items.map((item) => renderLineRows(item.key, `${item.budget.name} · ${lineLabel(item.line)}`, item.periodLines, item.currency))}
+          </Fragment>
+        ))}
+      </tbody>
+    );
+  }
+
+  return (
+    <tbody>
+      {budgets.flatMap(({ b, company, companyMissing, currency, periodReports, reportError, firstReportLines }) => [
+        <tr key={b.id} className="rep-section"><td colSpan={colSpan}>
+          <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
+          {company && <span className="muted"> · {company.name}</span>}
+        </td></tr>,
+        ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={colSpan} className="muted">{t('Select a company on the budget record to show this budget report.')} {t('Select a company to show this budget report.')}</td></tr>] : []),
+        ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={colSpan} className="muted" role="alert">{reportError}</td></tr>] : []),
+        ...firstReportLines.map((l, i) => renderLineRows(
+          `${b.id}-${i}`,
+          lineLabel(l),
+          periodReports.map((pr) => ({ error: pr.error, line: pr.lines?.[i] ?? null })),
+          currency,
+        )),
+      ])}
     </tbody>
   );
 }
@@ -1043,7 +1103,7 @@ export const REPORTS = {
   analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
   pnl: { title: 'Profit and Loss', cols: ['Balance'] },
   balance: { title: 'Balance Sheet', cols: ['Balance'] },
-  ledger: { title: 'General Ledger', Body: Ledger, cols: ['Debit', 'Credit', 'Balance'] },
+  ledger: { title: 'General Ledger', Body: Ledger, firstCol: 'Account', cols: ['Date', 'Entry', 'Ref', 'Label', 'Partner', 'Currency', 'Initial Balance', 'Debit', 'Credit', 'Balance'] },
   journalAudit: { title: 'Journal Audit', Body: JournalAudit, firstCol: 'Date', cols: ['Number', 'Partner', 'Account', 'Label', 'Debit', 'Credit'] },
   inalterability: { title: 'Data Inalterability Check', Body: InalterabilityCheck, firstCol: 'Journal', cols: ['First Secured Entry', 'Last Secured Entry', 'Status'] },
 };
@@ -1122,6 +1182,10 @@ function ReportPage({ leaf, params }) {
   const [showEndBalance, setShowEndBalance] = useState(true);
   const [auditSort, setAuditSort] = useState('date');
   const [depreciationGroupBy, setDepreciationGroupBy] = useState('');
+  const [trialGroupBy, setTrialGroupBy] = useState('');
+  const [budgetId, setBudgetId] = useState('');
+  const [budgetGroupBy, setBudgetGroupBy] = useState('');
+  const [includeDraftBudgets, setIncludeDraftBudgets] = useState(false);
   const [agingInterval, setAgingInterval] = useState(30);
   const [agingBasis, setAgingBasis] = useState('base_on_maturity_date');
   const agingOptions = useMemo(() => ({ aging_interval: agingInterval, aging_based_on: agingBasis }), [agingInterval, agingBasis]);
@@ -1304,7 +1368,13 @@ function ReportPage({ leaf, params }) {
     ? new Intl.DateTimeFormat(dateLocale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${period.to}T00:00:00Z`))
     : periodKey === 'year' ? period.to.slice(0, 4) : `${period.from} - ${period.to}`;
   const isTrial = leaf.report === 'trial';
+  const isBudget = leaf.report === 'budget';
   const isPartnerLedger = ['partnerReceivable', 'partnerPayable'].includes(leaf.report);
+  const availableBudgets = useMemo(
+    () => (isBudget ? filterReportBudgets(db, { companyId: selectedCompany, includeDraft: includeDraftBudgets }) : []),
+    [isBudget, db, selectedCompany, includeDraftBudgets],
+  );
+  const activeBudgetId = availableBudgets.some((b) => String(b.id) === String(budgetId)) ? String(budgetId) : '';
   const showUnpostedOption = ['pnl', 'balance', 'cashflow', 'executive', 'ledger', 'trial', 'fiscal', 'partnerReceivable', 'partnerPayable', 'customerStatement', 'depreciation'].includes(leaf.report);
   const effectivePeriod = useMemo(
     () => ({
@@ -1684,6 +1754,9 @@ function ReportPage({ leaf, params }) {
         <select aria-label={t('Group By')} value={depreciationGroupBy} onChange={(e) => setDepreciationGroupBy(e.target.value)}>
           <option value="">{t('None')}</option>
           <option value="asset_group_id">{t('Asset Group')}</option>
+          <option value="model_id">{t('Depreciation Model')}</option>
+          <option value="account_asset_id">{t('Asset Account')}</option>
+          <option value="company_id">{t('Company')}</option>
         </select>
       </label>}
       {(isDeferred || ['ledger', 'trial', 'partnerReceivable', 'partnerPayable', 'agedReceivable', 'agedPayable', 'fiscal', 'analytic', 'valuation'].includes(leaf.report) ? companies.length > 1 : ['journalAudit', 'inalterability', 'cashflow', 'executive', 'depreciation', 'tax', 'budget'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
@@ -1822,6 +1895,35 @@ function ReportPage({ leaf, params }) {
         </label>
         <label className="inline-select">
           <input type="checkbox" checked={showEndBalance} onChange={(e) => setShowEndBalance(e.target.checked)} /> {t('End Balance')}
+        </label>
+        <label className="inline-select">
+          {t('Group By')}
+          <select aria-label={t('Group By')} value={trialGroupBy} onChange={(e) => setTrialGroupBy(e.target.value)}>
+            <option value="">{t('None')}</option>
+            <option value="account_type">{t('Account Type')}</option>
+            <option value="account_group">{t('Account Group')}</option>
+          </select>
+        </label>
+      </>}
+      {isBudget && <>
+        <label className="inline-select">
+          {t('Budget')}
+          <select aria-label={t('Budget')} value={activeBudgetId} onChange={(e) => setBudgetId(e.target.value)}>
+            <option value="">{t('All Budgets')}</option>
+            {availableBudgets.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        </label>
+        <label className="inline-select">
+          {t('Group By')}
+          <select aria-label={t('Group By')} value={budgetGroupBy} onChange={(e) => setBudgetGroupBy(e.target.value)}>
+            <option value="">{t('Budget')}</option>
+            <option value="analytic_account_id">{t('Analytic Account')}</option>
+            <option value="account_id">{t('Account')}</option>
+            <option value="company_id">{t('Company')}</option>
+          </select>
+        </label>
+        <label className="inline-select">
+          <input type="checkbox" checked={includeDraftBudgets} onChange={(e) => setIncludeDraftBudgets(e.target.checked)} /> {t('Include draft budgets')}
         </label>
       </>}
       {(isPartnerLedger || isAged) && <>
@@ -1970,14 +2072,15 @@ function ReportPage({ leaf, params }) {
                   const isRaw = typeof c === 'object' && c !== null && c.raw;
                   const label = typeof c === 'object' && c !== null ? c.label : c;
                   const text = isRaw ? label : (data ? label.split(' ').map((part) => t(part)).join(' ') : t(label));
-                  return <th key={label} className={label === 'Description' ? undefined : 'num'}>{text}</th>;
+                  const nonNum = ['Description', 'Date', 'Entry', 'Ref', 'Label', 'Partner', 'Account'].includes(label);
+                  return <th key={label} className={nonNum ? undefined : 'num'}>{text}</th>;
                 })}
               </tr>
             </thead>
             {detailComparison ? (
               <DetailComparison db={db} data={detailComparison} report={leaf.report} companyId={selectedCompany} variant={activeTaxVariant} taxIds={selectedTaxIds} money={fmtMoney} />
             ) : periods && PERIODIC_BODY_REPORTS.has(leaf.report) ? (
-              <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} hideZeroLines={hideZeroLines} money={fmtMoney} />
+              <Body db={db} period={effectivePeriod} periods={periods} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} variant={activeTaxVariant} groupBy={isTrial ? trialGroupBy : isBudget ? budgetGroupBy : undefined} budgetId={isBudget ? activeBudgetId : undefined} includeDraft={isBudget ? includeDraftBudgets : undefined} showInitialBalance={showInitialBalance} showEndBalance={showEndBalance} hideZeroLines={hideZeroLines} money={fmtMoney} />
             ) : data ? (
               <Comparison key={leaf.report} data={data} report={leaf.report} money={fmtMoney} />
             ) : isAudit ? (
@@ -2000,7 +2103,8 @@ function ReportPage({ leaf, params }) {
                 variant={activeTaxVariant}
                 sort={auditSort}
                 kind={deferredKind}
-                groupBy={depreciationGroupBy}
+                groupBy={isTrial ? trialGroupBy : isBudget ? budgetGroupBy : depreciationGroupBy}
+                budgetId={isBudget ? activeBudgetId : undefined}
                 journalId={leaf.report === 'inalterability' ? activeInalterabilityJournalId : undefined}
                 agedData={agedData}
                 agingOptions={agingOptions}
@@ -2008,7 +2112,7 @@ function ReportPage({ leaf, params }) {
                 hasUnassigned={hasUnassigned}
                 money={fmtMoney}
                 hideZeroLines={hideZeroLines}
-                includeDraft={leaf.report === 'depreciation' && includeUnposted}
+                includeDraft={leaf.report === 'depreciation' ? includeUnposted : isBudget ? includeDraftBudgets : false}
                 accountType={accountType}
                 groupByPartner={groupByPartner}
                 showJournalAccount={showJournalAccount}

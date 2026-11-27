@@ -416,6 +416,7 @@ const allApps = [
           { key: 'horizontal-groups', label: 'Horizontal Groups', model: 'account.report.horizontal.group' },
           { key: 'configurable-report-view', label: 'Accounting Report', type: 'report', report: 'configurable', hidden: true },
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
+          { key: 'account-groups', label: 'Account Groups', model: 'account.group' },
           { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list', defaultFilters: ['sale', 'purchase'], includeArchived: true },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
           { key: 'journals', label: 'Journals', model: 'account.journal', view: 'list' },
