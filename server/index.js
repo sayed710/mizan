@@ -462,7 +462,8 @@ const visibleDb = (u, { models = true } = {}) => {
   const allowed = models ? readableFor(u) : null;
   const companies = companiesFor(u);
   const { records: inCompanies } = restrictRecords(db, companies);
-  const records = allowed ? Object.fromEntries(Object.entries(inCompanies).filter(([model]) => allowed.has(model))) : inCompanies;
+  const visibleRecords = { ...inCompanies, 'ir.exports': (inCompanies['ir.exports'] ?? []).filter((record) => record.owner_login === u.login) };
+  const records = allowed ? Object.fromEntries(Object.entries(visibleRecords).filter(([model]) => allowed.has(model))) : visibleRecords;
   const selection = selectionFor(u);
   // A user limited to some companies gets those companies' identity, not the group-wide VAT number and bank account.
   const own = companies && (db.records['res.company'] ?? []).find((c) => c.id === selection.current_company_id);
