@@ -1,7 +1,7 @@
 import { taxItemKey, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { genericTaxRows, taxReturnBoxes } from '../models/taxExport.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { cashFlow, executiveSummary, fiscalReport, reportReviewMode } from '../models/reports.js';
+import { cashFlow, EXECUTIVE_SUMMARY_SECTIONS, executiveSummary, fiscalReport, reportReviewMode } from '../models/reports.js';
 import { round } from '../money.js';
 import { fiscalYearDates } from '../models/ledger.js';
 import { groupBuckets, targetCompanyIds } from '../models/configurableReports.js';
@@ -108,6 +108,13 @@ export function periodsFor(periodKey, mode, anchor, { db = null, companyId = nul
   });
 }
 
+function rowVariance(values) {
+  const previous = values.at(-2);
+  const current = values.at(-1);
+  const amount = previous == null || current == null ? null : round(current - previous);
+  return { amount, pct: amount == null || !previous ? null : round(amount / Math.abs(previous) * 100) };
+}
+
 function columns(periods, reports, sectionDefs, totalDefs, { showVariance = true } = {}) {
   const sections = sectionDefs.map(([title, value, detail]) => {
     const lists = reports.map((r) => detail ? detail(r) : []);
@@ -123,12 +130,7 @@ function columns(periods, reports, sectionDefs, totalDefs, { showVariance = true
     label, values: reports.map(value), strong, ...(format && { format }),
   }));
   // Variances follow sections, then totals, in their respective array order.
-  const variance = showVariance ? [...sections.map((s) => s.totals), ...totals.map((r) => r.values)].map((values) => {
-    const previous = values.at(-2);
-    const current = values.at(-1);
-    const amount = previous == null || current == null ? null : round(current - previous);
-    return { amount, pct: amount == null || !previous ? null : round(amount / Math.abs(previous) * 100) };
-  }) : null;
+  const variance = showVariance ? [...sections.map((s) => s.totals), ...totals.map((r) => r.values)].map(rowVariance) : null;
   return { headers: periods.map((p) => p.label), sections, totals, variance };
 }
 
@@ -238,26 +240,26 @@ export function cashflowAnalyticColumns(db, group, period, { analyticAccountIds,
   })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS, { showVariance: false });
 }
 
-const EXECUTIVE_SECTIONS = [];
-const EXECUTIVE_TOTALS = [
-  ['Revenue', (s) => s.revenue],
-  ['Gross Profit', (s) => s.grossProfit],
-  ['Net Profit', (s) => s.netProfit, true],
-  ['Cash', (s) => s.cash],
-  ['Receivables', (s) => s.receivables],
-  ['Payables', (s) => s.payables],
-  ['Current Ratio', (s) => s.currentRatio, false, 'ratio'],
-  ['Gross Margin', (s) => s.grossMargin, false, 'pct'],
-  ['Net Margin', (s) => s.netMargin, false, 'pct'],
-  ['Days Sales Outstanding', (s) => s.dso, false, 'int'],
-];
-
-/** Executive Summary per calendar period, KPI rows aligned. */
+/** Executive Summary per calendar period, sections and KPI rows aligned with executiveSummary(). */
 export function executiveColumns(db, periods, { analyticAccountIds, company_id, includeUnposted, reviewMode } = {}) {
   const modeFilter = modeFilterFor(reviewMode, includeUnposted);
-  return columns(periods, periods.map((p) => executiveSummary(db, {
+  const reports = periods.map((p) => executiveSummary(db, {
     ...p, company_id, analyticAccountIds, ...modeFilter,
-  })), EXECUTIVE_SECTIONS, EXECUTIVE_TOTALS);
+  }));
+  const sections = EXECUTIVE_SUMMARY_SECTIONS.map((section) => ({
+    key: section.key,
+    title: section.title,
+    rows: section.rows.map((row) => {
+      const values = reports.map((r) => r[row.key]);
+      return { ...row, values, variance: rowVariance(values) };
+    }),
+  }));
+  return {
+    headers: periods.map((p) => p.label),
+    sections,
+    totals: [],
+    variance: sections.flatMap((s) => s.rows.map((r) => r.variance)),
+  };
 }
 
 /** Align tax and fiscal report rows by their stable identities across periods. */
