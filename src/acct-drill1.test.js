@@ -618,3 +618,84 @@ test('Finding 9: aged bucket drill uses today cutoff when period.to is empty', a
     assert.ok(tbody.textContent.includes('M/TODAY'));
   } finally { await React.act(async () => root.unmount()); }
 });
+
+test('Posted tax drills exclude draft moves with persisted journal lines', async () => {
+  const db = {
+    records: {
+      'res.company': [{ id: 1, name: 'Co', currency_id: 1 }],
+      'res.currency': [{ id: 1, name: 'USD', rounding: 0.01 }],
+      'res.partner': [{ id: 1, name: 'Cust' }],
+      'account.tax': [
+        { id: 10, name: 'VAT 15%', amount: 15, amount_type: 'percent', type_tax_use: 'sale', company_id: 1 },
+      ],
+      'account.account': [
+        { id: 1, code: '1100', name: 'AR', account_type: 'asset_receivable', company_id: 1 },
+        { id: 2, code: '4000', name: 'Sales', account_type: 'income', company_id: 1 },
+        { id: 3, code: '2510', name: 'Tax Payable', account_type: 'liability_current', company_id: 1 },
+      ],
+      'account.move': [
+        {
+          id: 1, name: 'INV/POSTED/1', state: 'posted', move_type: 'out_invoice', partner_id: 1, date: '2025-07-05', invoice_date: '2025-07-05', company_id: 1,
+          line_ids: [
+            { account_id: 1, partner_id: 1, debit: 115, credit: 0 },
+            { account_id: 2, partner_id: 1, debit: 0, credit: 100, name: 'Posted Sales', tax_ids: [10] },
+            { account_id: 3, partner_id: 1, debit: 0, credit: 15, tax_id: 10, tax_name: 'VAT 15%', tax_base: 100, tax_side: 'sale' },
+          ],
+        },
+        {
+          id: 2, name: 'INV/DRAFT/LINES', state: 'draft', move_type: 'entry', partner_id: 1, date: '2025-07-06', company_id: 1,
+          line_ids: [
+            { account_id: 1, partner_id: 1, debit: 230, credit: 0 },
+            { account_id: 2, partner_id: 1, debit: 0, credit: 200, name: 'Draft Sales', tax_ids: [10] },
+            { account_id: 3, partner_id: 1, debit: 0, credit: 30, tax_id: 10, tax_name: 'VAT 15%', tax_base: 200, tax_side: 'sale' },
+          ],
+        },
+      ],
+    },
+    settings: { current_company_id: 1, allowed_company_ids: [1], base_currency_id: 1 },
+  };
+  const { taxesByTax } = await import('./models/finance.js');
+  const postedRow = taxesByTax(db, { from: '2025-07-01', to: '2025-07-31', company_id: 1 }).find((r) => r.tax_id === 10);
+  assert.equal(postedRow.base, 100);
+  assert.equal(postedRow.tax, 15);
+
+  const { setupDom, find } = await import('./test-support/dom.js');
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  const { Tax } = await import('./views/Reports.jsx');
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  await store.initStore();
+  await store.commit(db);
+  const host = makeEl('div'); host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+  try {
+    for (const taxKind of ['tax', 'base']) {
+      await React.act(async () => root.render(React.createElement('table', null, React.createElement(Tax, { db, period: { from: '2025-07-01', to: '2025-07-31' }, companyId: 1, variant: 'generic' }))));
+      const taxRow = find(host, (n) => n.tagName === 'TR' && n.textContent.includes('VAT 15%'));
+      const drillLink = find(taxRow, (n) => n.tagName === 'A' && props(n)?.href?.includes(`taxKind=${taxKind}`));
+      globalThis.location = { hash: props(drillLink).href };
+      await React.act(async () => root.render(React.createElement(JournalItems, { key: props(drillLink).href })));
+      // Clearing the Posted filter chip exposes every line selected by the tax drill scope.
+      const postedFilterBtn = find(host, (n) => n.tagName === 'BUTTON' && n.textContent === 'Posted');
+      await React.act(async () => props(postedFilterBtn).onClick());
+      const tbody = find(host, (n) => n.tagName === 'TBODY');
+      const rows = tbody.childNodes.filter((n) => n.tagName === 'TR');
+      assert.equal(rows.length, 1);
+      assert.ok(rows[0].textContent.includes('INV/POSTED/1'));
+      assert.ok(!tbody.textContent.includes('INV/DRAFT/LINES'));
+    }
+
+    // All-entries review mode still includes the draft move with persisted lines.
+    await React.act(async () => root.render(React.createElement('table', null, React.createElement(Tax, { db, period: { from: '2025-07-01', to: '2025-07-31', reviewMode: 'all' }, companyId: 1, variant: 'generic' }))));
+    const taxRowAll = find(host, (n) => n.tagName === 'TR' && n.textContent.includes('VAT 15%'));
+    const taxLinkAll = find(taxRowAll, (n) => n.tagName === 'A' && props(n)?.href?.includes('taxKind=tax'));
+    globalThis.location = { hash: props(taxLinkAll).href };
+    await React.act(async () => root.render(React.createElement(JournalItems, { key: props(taxLinkAll).href })));
+    const tbodyAll = find(host, (n) => n.tagName === 'TBODY');
+    assert.ok(tbodyAll.textContent.includes('INV/POSTED/1'));
+    assert.ok(tbodyAll.textContent.includes('INV/DRAFT/LINES'));
+  } finally { await React.act(async () => root.unmount()); }
+});

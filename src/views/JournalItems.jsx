@@ -174,8 +174,8 @@ function selectTaxDrillLines(db, reportDb, items, { taxId, taxKind, taxSide, fro
     from,
     to,
     company_id: companyId,
-    reviewMode: 'all',
-    includeDraftInvoices: reviewMode === 'all',
+    reviewMode,
+    includeDraftInvoices: ['all', 'draft'].includes(reviewMode),
     taxIds: [taxId],
   }).filter((item) => !taxSide || item.side === taxSide);
   const taxMoveIds = new Set(taxScope.map((item) => item.move_id));
