@@ -1,4 +1,4 @@
-import { storedReportDefinitions } from './reportEngine.js';
+import { evaluateStoredReport, matchesReportAccount } from './reportEngine.js';
 import { reportRecordModels } from './reportRecords.js';
 import { read } from '../orm.js';
 import {
@@ -181,20 +181,7 @@ function groupError(db, before, group) {
   return null;
 }
 
-function matches(db, account, selectors) {
-  if (!account) return false;
-  const matchOne = (raw) => {
-    const lower = raw.toLowerCase();
-    if (lower.startsWith('tag:')) {
-      const target = raw.slice(4).trim();
-      return (account.tag_ids ?? []).some((id) => read(db, 'account.account.tag', typeof id === 'object' ? id.id : id)?.name === target);
-    }
-    if (lower.startsWith('type:')) return account.account_type === raw.slice(5).trim();
-    return String(account.code ?? '').startsWith(raw);
-  };
-  return selectors.some((s) => !s.startsWith('-') && matchOne(s))
-    && !selectors.some((s) => s.startsWith('-') && matchOne(s.slice(1)));
-}
+const matches = matchesReportAccount;
 
 /** Preserve the posted invoice source allocations when one journal item combines invoice lines. */
 function analyticWeights(db, item, analyticAccountIds) {
@@ -504,14 +491,45 @@ export function configurableReportLegacy(db, report, period, group = null, optio
 export function configurableReport(db, report, period, group = null, options = {}) {
   const hasStored = (db.records['account.report.line'] ?? []).some((line) => line.report_id === report.id);
   if (!hasStored) return configurableReportLegacy(db, report, period, group, options);
-  const definitions = storedReportDefinitions(db, report);
-  const result = configurableReportLegacy(db, { ...report, line_ids: definitions }, period, group, options);
+  report = { ...report, company_id: report.company_id ?? currentCompanyId(db) };
+  if (group && ((group.company_id ?? 1) !== report.company_id || !((group.report_ids ?? []).length ? group.report_ids.includes(report.id) : report.kind))) throw new Error('Horizontal group is not available for this report');
+  const companies = targetCompanyIds(db, report, group, options);
+  const reviewMode = reportReviewMode(period, options);
+  const items = resolveReportItems(db, report, period, companies, { analyticAccountIds: options.analyticAccountIds, reviewMode });
+  const columns = ['balance', ...(report.show_debit ? ['debit'] : []), ...(report.show_credit ? ['credit'] : [])];
+  const buckets = group ? groupBuckets(db, group, items, { analyticAccountIds: options.analyticAccountIds }) : [{ key: 'all', label: '', weight: () => 1 }];
+  const evalOptions = { companyIds: companies, analyticAccountIds: options.analyticAccountIds, reviewMode, deferHideIfZero: true };
+  const caches = buckets.map(() => new Map());
+  const evaluated = buckets.map((bucket, index) => columns.map((column) => evaluateStoredReport(db, report, period, { ...evalOptions, column, itemCache: caches[index], weight: group ? bucket.weight : null })));
+  const rawLines = evaluated[0]?.[0] ?? evaluateStoredReport(db, report, period, evalOptions);
+  const ordered = [];
+  const append = (parentId, depth) => {
+    for (const line of rawLines.filter((item) => (item.parent_id ?? null) === parentId)) {
+      ordered.push({ ...line, depth });
+      append(line.id, depth + 1);
+    }
+  };
+  append(null, 0);
+  const accounts = [...new Map(caches.flatMap((cache) => [...cache.values()].flatMap((entry) => entry.rows.map((row) => [row.account.id, row.account])))).values()];
+  const detailEvaluated = ordered.some((line) => line.foldable) ? accounts.map((account) => ({ account, values: buckets.map((bucket, index) => columns.map((column) => evaluateStoredReport(db, report, period, { ...evalOptions, accountId: account.id, column, itemCache: caches[index], weight: group ? bucket.weight : null }))) })) : [];
+  const rows = ordered.map((line) => {
+    const parent = rawLines.find((candidate) => candidate.id === line.parent_id);
+    const expression = (db.records['account.report.expression'] ?? []).find((item) => item.report_line_id === line.id && item.label === 'balance');
+    const aggregation = expression?.engine === 'aggregation' ? String(expression.formula) : '';
+    const inverted = /^-\((.*)\)$/.exec(aggregation);
+    const formula = (inverted ? inverted[1] : aggregation).replace(/\.balance\b/g, '');
+    const values = evaluated.flatMap((bucket) => bucket.map((result) => result.find((item) => item.id === line.id)?.expressions.balance ?? null));
+    const accountRows = !line.foldable ? [] : detailEvaluated.map(({ account, values: detail }) => ({ account, values: detail.flatMap((bucket) => bucket.map((result) => result.find((item) => item.id === line.id)?.expressions.balance ?? 0)) })).filter((entry) => options.includeZeroRows || reportAmountsVisible(entry.values, true)).sort((a, b) => String(a.account.code ?? '').localeCompare(String(b.account.code ?? '')));
+    return { ...line, parent_code: parent?.code ?? '', formula, sign: inverted ? -1 : 1, values, accountRows };
+  });
+  const inlineRows = !report.kind && report.line_ids?.length ? configurableReportLegacy(db, report, period, group, options).rows.filter((line) => !rawLines.some((stored) => stored.code && stored.code === line.code)) : [];
+  const result = { columns, buckets, rows: [...inlineRows, ...rows].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)) };
   const hidden = new Set();
-  const children = (line) => result.rows.filter((candidate) => candidate.parent_code === line.code);
+  const children = (line) => line.id != null ? result.rows.filter((candidate) => candidate.parent_id === line.id) : line.code ? result.rows.filter((candidate) => candidate.parent_code === line.code) : [];
   const isZero = (line) => line.values.every((value) => !value) && children(line).every(isZero);
-  const hide = (line) => { hidden.add(line.code); children(line).forEach(hide); };
-  for (const line of result.rows) if (line.hide_if_zero && isZero(line)) hide(line);
-  return { ...result, rows: result.rows.filter((line) => !hidden.has(line.code)) };
+  const hide = (line) => { hidden.add(line); children(line).forEach(hide); };
+  if (!options.deferHideIfZero) for (const line of result.rows) if (line.hide_if_zero && isZero(line)) hide(line);
+  return { ...result, rows: result.rows.filter((line) => !hidden.has(line)) };
 }
 
 /** Compute period comparison columns, variances, and merged account drilldown rows for a configurable report. */
@@ -546,18 +564,20 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
     }));
     return { ...single, headers, showVariance: false, rows: filterRows(single.rows.map((r) => ({ ...r, variance: null, accountRows: r.accountRows.map((a) => ({ ...a, variance: null })) }))) };
   }
-  const results = effectivePeriods.map((p) => configurableReport(db, report, { ...baseFilter, from: p.from, to: p.to }, null, options));
+  const results = effectivePeriods.map((p) => configurableReport(db, report, { ...baseFilter, from: p.from, to: p.to }, null, { ...options, deferHideIfZero: true }));
   const varianceOf = (vals) => {
     const previous = vals.at(-2);
-    if (previous == null) return null;
+    if (previous == null || vals.at(-1) == null) return null;
     const amount = round(vals.at(-1) - previous);
     return { amount, pct: !previous ? null : round(amount / Math.abs(previous) * 100) };
   };
-  const rows = results[0].rows.map((baseRow, idx) => {
-    const values = results.map((res) => res.rows[idx].values[0]);
+  const allRows = new Map(results.flatMap((res) => res.rows).map((row) => [row.id ?? row.code, row]));
+  const rows = [...allRows.values()].map((baseRow) => {
+    const matching = results.map((res) => res.rows.find((row) => (row.id ?? row.code) === (baseRow.id ?? baseRow.code)));
+    const values = matching.map((row) => row ? row.values[0] : 0);
     const accountMap = new Map();
-    results.forEach((res, pIdx) => {
-      for (const acc of res.rows[idx].accountRows ?? []) {
+    results.forEach((_res, pIdx) => {
+      for (const acc of matching[pIdx]?.accountRows ?? []) {
         const entry = accountMap.get(acc.account.id) ?? { account: acc.account, values: new Array(effectivePeriods.length).fill(0) };
         entry.values[pIdx] = acc.values[0];
         accountMap.set(acc.account.id, entry);
@@ -568,7 +588,12 @@ export function compareConfigurableReport(db, report, periods, baseFilter = {}, 
       .map((entry) => ({ ...entry, variance: varianceOf(entry.values) }));
     return { ...baseRow, values, variance: varianceOf(values), accountRows };
   });
-  return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows: filterRows(rows) };
+  const hidden = new Set();
+  const children = (line) => line.id != null ? rows.filter((candidate) => candidate.parent_id === line.id) : line.code ? rows.filter((candidate) => candidate.parent_code === line.code) : [];
+  const isZero = (line) => line.values.every((value) => !value) && children(line).every(isZero);
+  const hide = (line) => { hidden.add(line); children(line).forEach(hide); };
+  for (const line of rows) if (line.hide_if_zero && isZero(line)) hide(line);
+  return { columns: ['balance'], buckets: results[0].buckets, headers: effectivePeriods.map((p) => p.label), showVariance: true, rows: filterRows(rows.filter((row) => !hidden.has(row))) };
 }
 
 /** Whether a computed report line can be unfolded into its contributing account rows. */
@@ -589,6 +614,7 @@ export const configurableReportModels = {
       exclude_closing: { type: 'boolean', label: 'Exclude Closing Entries' },
       sequence: { type: 'integer', label: 'Sequence' }, active: { type: 'boolean', label: 'Active' },
       show_debit: { type: 'boolean', label: 'Debit' }, show_credit: { type: 'boolean', label: 'Credit' },
+      stored_line_ids: { type: 'one2many', label: 'Accounting Report Lines', relation: 'account.report.line', openRelated: true, fields: { name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' } }, compute: (report, db) => (db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id) },
       line_ids: { type: 'one2many', label: 'Report Lines', fields: {
         name: { type: 'char', label: 'Name' }, code: { type: 'char', label: 'Code' }, sequence: { type: 'integer', label: 'Sequence' },
         parent_code: { type: 'char', label: 'Parent Code' }, formula: { type: 'char', label: 'Formula' },
@@ -603,10 +629,14 @@ export const configurableReportModels = {
     onUnlink: (db, report) => {
       const err = statementReportGuard(db, report);
       if (err) throw new Error(err);
-      return db;
+      const ids = new Set((db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id).map((line) => line.id));
+      return { ...db, records: { ...db.records,
+        'account.report.line': (db.records['account.report.line'] ?? []).filter((line) => !ids.has(line.id)),
+        'account.report.expression': (db.records['account.report.expression'] ?? []).filter((expr) => !ids.has(expr.report_line_id)),
+      } };
     },
     list: ['name', 'sequence', 'company_id'],
-    form: { title: 'name', groups: [['sequence', 'company_id', 'active'], ['kind', 'date_scope', 'exclude_closing'], ['show_debit', 'show_credit']], tabs: [{ label: 'Report Lines', fields: ['line_ids'] }], buttons: [{ label: 'Open Report', run: (db, report) => ({ db, go: `#/accounting/configurable-report-view/${report.id}` }) }] },
+    form: { title: 'name', groups: [['sequence', 'company_id', 'active'], ['kind', 'date_scope', 'exclude_closing'], ['show_debit', 'show_credit']], tabs: [{ label: 'Report Lines', fields: ['line_ids'] }, { label: 'Accounting Report Lines', fields: ['stored_line_ids'] }], buttons: [{ label: 'Open Report', run: (db, report) => ({ db, go: `#/accounting/configurable-report-view/${report.id}` }) }] },
   },
   'account.report.horizontal.group': {
     label: 'Horizontal Groups', fields: {

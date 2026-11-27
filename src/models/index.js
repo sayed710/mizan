@@ -414,6 +414,8 @@ const allApps = [
         ] },
                 { label: 'Accounting', children: [
           { key: 'accounting-reports', label: 'Accounting Reports', model: 'account.report' },
+          { key: 'accounting-report-lines', label: 'Accounting Report Lines', model: 'account.report.line', hidden: true },
+          { key: 'accounting-report-expressions', label: 'Accounting Report Expressions', model: 'account.report.expression', hidden: true },
           { key: 'horizontal-groups', label: 'Horizontal Groups', model: 'account.report.horizontal.group' },
           { key: 'configurable-report-view', label: 'Accounting Report', type: 'report', report: 'configurable', hidden: true },
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },

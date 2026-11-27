@@ -118,12 +118,14 @@ export function ensureStatementReports(db, companyId = null) {
 const EARNINGS_TYPES = ['income', 'income_other', 'expense_direct_cost', 'expense', 'expense_depreciation', 'expense_other'];
 
 /** Convert the existing statement configuration to independently editable report records. */
-export function storedExpression(line, kind) {
+export function storedExpression(line, report) {
   const formula = String(line.formula ?? '').trim();
   const base = { label: 'balance', green_on_positive: true, blank_if_zero: false, figure_type: 'monetary' };
-  const date_scope = kind === 'balance' ? 'from_beginning' : 'strict_range';
+  const date_scope = (typeof report === 'string' ? report === 'balance' : report.date_scope === 'cumulative') ? 'from_beginning' : 'strict_range';
   if (/^\d+[A-Za-z0-9_.]*$/.test(formula)) return { ...base, engine: 'account_codes', formula, subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
   if (/^type:[a-z_]+$/.test(formula)) return { ...base, engine: 'domain', formula: JSON.stringify([['account_type', '=', formula.slice(5)]]), subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
+  if (/^type:[a-z_]+(?:\s*,\s*type:[a-z_]+)+$/.test(formula)) return { ...base, engine: 'domain', formula: JSON.stringify([['account_type', 'in', formula.split(',').map((part) => part.trim().slice(5))]]), subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
+  if (/^(?:-?\d|tag:|-?type:)/i.test(formula)) return { ...base, engine: 'domain', formula: JSON.stringify([['account_selector', '=', formula]]), subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
   if (formula === 'earnings:current_year' || formula === 'earnings:prior_years') return { ...base, engine: 'domain', formula: JSON.stringify([['account_type', 'in', EARNINGS_TYPES]]), subformula: line.sign === -1 ? '-sum' : 'sum', date_scope: formula.endsWith('current_year') ? 'from_fiscalyear' : 'to_beginning_of_fiscalyear' };
   if (/^[A-Za-z_][A-Za-z0-9_]*(?:\s*[+-]\s*[A-Za-z_][A-Za-z0-9_]*)*$/.test(formula)) {
     const refs = formula.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (code) => `${code}.balance`);
@@ -143,10 +145,10 @@ export function ensureStoredStatementLines(db, companyId = null) {
   for (const report of db.records['account.report'] ?? []) {
     if (!isStandardStatementReport(report) || (companyId != null && (report.company_id ?? 1) !== companyId) || nextLines.some((line) => line.report_id === report.id)) continue;
     const inline = report.line_ids ?? [];
-    const converted = inline.map((line) => storedExpression(line, report.kind));
+    const converted = inline.map((line) => storedExpression(line, report));
     if (!inline.length || converted.some((item) => !item)) continue;
     const ids = new Map(inline.map((line) => [line.code, ++lineId]));
-    const createdLines = inline.map((line) => ({ id: ids.get(line.code), report_id: report.id, company_id: report.company_id ?? 1, name: line.name, code: line.code, sequence: line.sequence, parent_id: line.parent_code ? ids.get(line.parent_code) : null, hierarchy_level: 0, foldable: !!line.foldable, hide_if_zero: false, print_on_new_page: false, strong: !!line.strong }));
+    const createdLines = inline.map((line) => ({ id: ids.get(line.code), report_id: report.id, company_id: report.company_id ?? 1, name: line.name, code: line.code, inline_code: line.code, sequence: line.sequence, parent_id: line.parent_code ? ids.get(line.parent_code) : null, hierarchy_level: 0, foldable: !!line.foldable, hide_if_zero: false, print_on_new_page: false, strong: !!line.strong }));
     const createdExpressions = inline.map((line, index) => ({ id: ++expressionId, report_line_id: ids.get(line.code), company_id: report.company_id ?? 1, ...converted[index] }));
     nextLines = [...nextLines, ...createdLines];
     nextExpressions = [...nextExpressions, ...createdExpressions];
@@ -157,7 +159,7 @@ export function ensureStoredStatementLines(db, companyId = null) {
 
 /** Keep legacy edits to embedded standard lines reflected in their stored counterparts. */
 export function syncInlineStatementLines(db, before, after) {
-  if (!before || before.line_ids === after.line_ids || !isStandardStatementReport(after)) return db;
+  if (!before || (before.line_ids === after.line_ids && before.date_scope === after.date_scope) || !isStandardStatementReport(after)) return db;
   const allLines = db.records['account.report.line'] ?? [];
   const allExpressions = db.records['account.report.expression'] ?? [];
   const oldLines = allLines.filter((line) => line.report_id === after.id);
@@ -166,24 +168,27 @@ export function syncInlineStatementLines(db, before, after) {
   const inline = after.line_ids ?? [];
   let lineId = Math.max(db.seq?.['account.report.line'] ?? 0, ...allLines.map((line) => line.id), 0);
   let expressionId = Math.max(db.seq?.['account.report.expression'] ?? 0, ...allExpressions.map((item) => item.id), 0);
-  const ids = new Map(inline.map((line) => [line.code, oldLines.find((item) => item.code === line.code)?.id ?? ++lineId]));
+  const counterpart = (code) => oldLines.find((item) => (item.inline_code ?? item.code) === code);
+  const ids = new Map(inline.map((line) => [line.code, counterpart(line.code)?.id ?? ++lineId]));
   const updated = inline.map((line) => {
-    const old = oldLines.find((item) => item.code === line.code);
+    const old = counterpart(line.code);
     const prior = oldInline.get(line.code);
     if (old && JSON.stringify(prior) === JSON.stringify(line)) return old;
-    return { ...(old ?? {}), id: ids.get(line.code), report_id: after.id, company_id: after.company_id ?? 1, name: line.name, code: line.code, sequence: line.sequence, parent_id: line.parent_code ? ids.get(line.parent_code) : null, foldable: !!line.foldable, strong: !!line.strong };
+    return { ...(old ?? {}), id: ids.get(line.code), report_id: after.id, company_id: after.company_id ?? 1, name: line.name, code: old?.code ?? line.code, inline_code: line.code, sequence: line.sequence, parent_id: line.parent_code ? ids.get(line.parent_code) : null, foldable: !!line.foldable, strong: !!line.strong };
   });
-  const removedIds = new Set(oldLines.filter((line) => !ids.has(line.code)).map((line) => line.id));
+  const removedIds = new Set(oldLines.filter((line) => oldInline.has(line.inline_code ?? line.code) && !ids.has(line.inline_code ?? line.code)).map((line) => line.id));
   let nextExpressions = allExpressions.filter((item) => !removedIds.has(item.report_line_id));
   for (const line of inline) {
     const previous = oldInline.get(line.code);
-    if (previous && previous.formula === line.formula && previous.sign === line.sign) continue;
-    const converted = storedExpression(line, after.kind);
+    if (previous && previous.formula === line.formula && previous.sign === line.sign && before.date_scope === after.date_scope) continue;
+    const converted = storedExpression(line, after);
     if (!converted) throw new Error('Legacy report line cannot be converted to a stored expression');
+    if (converted.engine === 'aggregation') converted.formula = converted.formula.replace(/\b([A-Za-z_][A-Za-z0-9_]*)\.balance\b/g, (match, code) => `${counterpart(code)?.code ?? code}.balance`);
     const id = ids.get(line.code);
     const old = nextExpressions.find((item) => item.report_line_id === id && item.label === 'balance');
     const replacement = { ...old, ...converted, id: old?.id ?? ++expressionId, report_line_id: id, company_id: after.company_id ?? 1 };
     nextExpressions = [...nextExpressions.filter((item) => item !== old), replacement];
   }
-  return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': [...allLines.filter((line) => line.report_id !== after.id), ...updated], 'account.report.expression': nextExpressions } };
+  const retained = oldLines.filter((line) => !oldInline.has(line.inline_code ?? line.code) && !ids.has(line.inline_code ?? line.code));
+  return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': [...allLines.filter((line) => line.report_id !== after.id), ...retained, ...updated], 'account.report.expression': nextExpressions } };
 }

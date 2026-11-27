@@ -1,7 +1,8 @@
 import { read } from '../orm.js';
-import { balances, fiscalYearStart, journalItems, filterByAnalytic, weighted } from './ledger.js';
+import { balances, fiscalYearStart, journalItems, filterByAnalytic, analyticMoveItems, weighted } from './ledger.js';
 import { addDays, today } from './common.js';
 import { round } from '../money.js';
+import { reportingBookedAmount } from './money.js';
 
 export const REPORT_ENGINES = ['domain', 'tax_tags', 'aggregation', 'account_codes', 'external', 'custom'];
 export const REPORT_DATE_SCOPES = ['from_beginning', 'from_fiscalyear', 'to_beginning_of_fiscalyear', 'to_beginning_of_period', 'strict_range', 'previous_return_period'];
@@ -91,13 +92,24 @@ function arithmetic(text) {
   return value;
 }
 
+export function matchesReportAccount(db, account, selectors) {
+  if (!account) return false;
+  const matches = (raw) => {
+    if (/^tag:/i.test(raw)) return (account.tag_ids ?? []).some((id) => read(db, 'account.account.tag', typeof id === 'object' ? id.id : id)?.name === raw.slice(4).trim());
+    if (/^type:/i.test(raw)) return account.account_type === raw.slice(5).trim();
+    return String(account.code ?? '').startsWith(raw);
+  };
+  return selectors.some((selector) => !selector.startsWith('-') && matches(selector)) && !selectors.some((selector) => selector.startsWith('-') && matches(selector.slice(1)));
+}
+
 function domainPredicate(db, formula) {
   const domain = JSON.parse(formula);
   if (!Array.isArray(domain)) throw new Error('Report domain must be a list');
-  const allowed = new Set(['account_id', 'account_type', 'date', 'journal_id', 'partner_id', 'company_id', 'debit', 'credit']);
+  const allowed = new Set(['account_id', 'account_type', 'account_selector', 'date', 'journal_id', 'partner_id', 'company_id', 'debit', 'credit']);
   return (item) => domain.every((term) => {
     if (!Array.isArray(term) || term.length !== 3 || !allowed.has(term[0])) throw new Error('Unsupported report domain');
     const [field, operator, expected] = term;
+    if (field === 'account_selector' && operator === '=' && typeof expected === 'string') return matchesReportAccount(db, read(db, 'account.account', item.account_id), expected.split(',').map((part) => part.trim()));
     const value = field === 'account_type' ? read(db, 'account.account', item.account_id)?.account_type : item[field];
     if (operator === '=') return value === expected;
     if (operator === '!=') return value !== expected;
@@ -134,24 +146,45 @@ export function evaluateStoredReport(db, report, period, options = {}) {
     if (memo.has(expr.id)) return memo.get(expr.id);
     let value = 0;
     if (expr.engine === 'aggregation') {
-      value = arithmetic(String(expr.formula).replace(referencePattern, (_all, code, label) => `(${evaluate(lookup.get(`${code}.${label}`))})`));
+      const text = String(expr.formula);
+      const unwrapped = options.column && options.column !== 'balance' ? /^-\((.*)\)$/.exec(text) : null;
+      value = arithmetic((unwrapped ? unwrapped[1] : text).replace(referencePattern, (_all, code, label) => `(${evaluate(lookup.get(`${code}.${label}`))})`));
     } else {
       if (!['domain', 'account_codes'].includes(expr.engine)) throw new Error(`Unsupported report engine: ${expr.engine}`);
       for (const companyId of options.companyIds ?? [report.company_id ?? 1]) {
-        const range = expressionPeriod(db, expr.date_scope, period, companyId);
-        let items = journalItems(db, { ...range, company_id: companyId, reviewMode: options.reviewMode ?? 'posted', includeClosing: !report.exclude_closing });
-        if (options.analyticAccountIds?.length) items = filterByAnalytic(items, options.analyticAccountIds);
-        if (options.weight) items = weighted(items, options.weight);
-        if (expr.engine === 'domain') {
-          items = items.filter(domainPredicate(db, expr.formula));
+        const cacheKey = `${expr.id}:${companyId}`;
+        let cached = options.itemCache?.get(cacheKey);
+        if (!cached) {
+          const range = expressionPeriod(db, expr.date_scope, period, companyId);
+          let items = journalItems(db, { ...range, company_id: companyId, reviewMode: options.reviewMode ?? 'posted', includeClosing: !report.exclude_closing });
+          if (options.analyticAccountIds?.length) items = report.date_scope === 'cumulative'
+            ? analyticMoveItems(items, options.analyticAccountIds)
+            : filterByAnalytic(items, options.analyticAccountIds);
+          if (options.weight) items = weighted(items, options.weight);
+          if (expr.engine === 'domain') items = items.filter(domainPredicate(db, expr.formula));
           const rows = balances(db, items);
-          const total = rows.reduce((sum, row) => sum + row.balance, 0);
-          if (expr.subformula === '-sum') value -= total;
+          const predicate = expr.engine === 'account_codes' ? accountCodePredicate(expr.formula) : null;
+          const factors = predicate ? new Map(rows.map((row) => [row.account.id, predicate(row.account, row.balance)])) : null;
+          cached = { items, rows, factors };
+          options.itemCache?.set(cacheKey, cached);
+        }
+        let { items } = cached;
+        if (expr.engine === 'domain') {
+          if (options.accountId != null) items = items.filter((item) => item.account_id === options.accountId);
+          const total = options.column && options.column !== 'balance'
+            ? items.reduce((sum, item) => sum + reportingBookedAmount(db, item, Number(item[options.column]) || 0), 0)
+            : balances(db, items).reduce((sum, row) => sum + row.balance, 0);
+          if (expr.subformula === '-sum') value += options.column && options.column !== 'balance' ? total : -total;
           else if (expr.subformula === 'sum') value += total;
           else throw new Error('Unsupported domain subformula');
         } else {
-          const predicate = accountCodePredicate(expr.formula);
-          value += balances(db, items).reduce((sum, row) => sum + row.balance * predicate(row.account, row.balance), 0);
+          const { rows, factors } = cached;
+          const total = options.column && options.column !== 'balance'
+            ? items.filter((item) => options.accountId == null || item.account_id === options.accountId).reduce((sum, item) => sum + reportingBookedAmount(db, item, Number(item[options.column]) || 0) * (factors.get(item.account_id) ?? 0), 0)
+            : rows.filter((row) => options.accountId == null || row.account.id === options.accountId).reduce((sum, row) => sum + row.balance * factors.get(row.account.id), 0);
+          if (expr.subformula === '-sum') value += options.column && options.column !== 'balance' ? total : -total;
+          else if (!expr.subformula || expr.subformula === 'sum') value += total;
+          else throw new Error('Unsupported account code subformula');
         }
       }
     }
@@ -172,54 +205,6 @@ export function evaluateStoredReport(db, report, period, options = {}) {
     hidden.add(line.id);
     for (const child of children(line.id)) hideTree(child);
   };
-  for (const line of result) if (line.hide_if_zero && subtreeIsZero(line)) hideTree(line);
+  if (!options.deferHideIfZero) for (const line of result) if (line.hide_if_zero && subtreeIsZero(line)) hideTree(line);
   return result.filter((line) => !hidden.has(line.id));
-}
-/** Translate stored line expressions supported by the legacy row renderer into its definition shape. */
-export function storedReportDefinitions(db, report) {
-  const lines = (db.records['account.report.line'] ?? []).filter((line) => line.report_id === report.id);
-  const ids = new Set(lines.map((line) => line.id));
-  const expressions = (db.records['account.report.expression'] ?? []).filter((expr) => ids.has(expr.report_line_id));
-  const error = validateReportExpressions(lines, expressions);
-  if (error) throw new Error(error);
-  const result = lines.map((line) => {
-    const expression = expressions.find((item) => item.report_line_id === line.id && item.label === 'balance');
-    if (!expression) throw new Error(`Report line ${line.code} needs a balance expression`);
-    let formula;
-    let sign;
-    if (expression.engine === 'aggregation') {
-      const text = String(expression.formula).trim();
-      const inverted = /^-\((.*)\)$/.exec(text);
-      const body = inverted ? inverted[1] : text;
-      if (!/^[A-Za-z_][A-Za-z0-9_]*\.balance(?:\s*[+-]\s*[A-Za-z_][A-Za-z0-9_]*\.balance)*$/.test(body)) throw new Error('Unsupported stored aggregation for report rendering');
-      formula = body.replace(/\.balance\b/g, '');
-      sign = inverted ? -1 : 1;
-    } else if (expression.engine === 'domain') {
-      const domain = JSON.parse(expression.formula);
-      if (!Array.isArray(domain) || domain.length !== 1 || !Array.isArray(domain[0]) || domain[0][0] !== 'account_type') throw new Error('Unsupported stored domain for report rendering');
-      const [, operator, types] = domain[0];
-      const list = operator === '=' ? [types] : operator === 'in' && Array.isArray(types) ? types : null;
-      if (!list?.length || list.some((type) => typeof type !== 'string')) throw new Error('Unsupported stored domain for report rendering');
-      if (!['sum', '-sum'].includes(expression.subformula)) throw new Error('Unsupported domain subformula');
-      sign = expression.subformula === '-sum' ? -1 : 1;
-      const earnings = ['income', 'income_other', 'expense_direct_cost', 'expense', 'expense_depreciation', 'expense_other'];
-      const isEarnings = list.length === earnings.length && earnings.every((type) => list.includes(type));
-      if (isEarnings && expression.date_scope === 'from_fiscalyear') formula = 'earnings:current_year';
-      else if (isEarnings && expression.date_scope === 'to_beginning_of_fiscalyear') formula = 'earnings:prior_years';
-      else {
-        const expected = report.date_scope === 'cumulative' ? 'from_beginning' : 'strict_range';
-        if (expression.date_scope !== expected) throw new Error('Unsupported stored date scope for report rendering');
-        formula = list.map((type) => `type:${type}`).join(',');
-      }
-    } else if (expression.engine === 'account_codes') {
-      const expected = report.date_scope === 'cumulative' ? 'from_beginning' : 'strict_range';
-      if (expression.date_scope !== expected) throw new Error('Unsupported stored date scope for report rendering');
-      formula = String(expression.formula).replace(/\s*\+\s*/g, ',').replace(/\s*-\s*/g, ',-');
-      sign = expression.subformula === '-sum' ? -1 : 1;
-    } else throw new Error(`Unsupported stored engine for report rendering: ${expression.engine}`);
-    const parent = lines.find((candidate) => candidate.id === line.parent_id);
-    if (line.parent_id && !parent) throw new Error('Unknown report line parent');
-    return { ...line, parent_code: parent?.code ?? '', formula, sign, strong: !!line.strong };
-  });
-  return result;
 }

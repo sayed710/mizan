@@ -39,6 +39,7 @@ export const reportRecordModels = {
       parent_id: label('many2one', 'Parent Line', { relation: 'account.report.line' }),
       children_ids: label('one2many', 'Child Lines', {
         relation: 'account.report.line',
+        openRelated: true,
         fields: {
           name: label('char', 'Name'),
           code: label('char', 'Code'),
@@ -47,10 +48,12 @@ export const reportRecordModels = {
         compute: (line, db) => related('account.report.line', 'parent_id', line.id, db),
       }),
       sequence: label('integer', 'Sequence'), name: label('char', 'Name', { required: true }), code: label('char', 'Code'),
+      inline_code: label('char', 'Inline Code', { readonly: true }),
       hierarchy_level: label('integer', 'Level'), strong: label('boolean', 'Emphasized'), foldable: label('boolean', 'Foldable'), hide_if_zero: label('boolean', 'Hide if Zero'),
       print_on_new_page: label('boolean', 'Print on New Page'), groupby: label('char', 'Group By'),
       expression_ids: label('one2many', 'Expressions', {
         relation: 'account.report.expression',
+        openRelated: true,
         fields: {
           label: label('char', 'Label'),
           engine: label('selection', 'Computation Engine', { options: REPORT_ENGINES.map((value) => [value, value]) }),
@@ -63,8 +66,18 @@ export const reportRecordModels = {
     },
     defaults: () => ({ sequence: 10, hierarchy_level: 0, foldable: false, hide_if_zero: false, print_on_new_page: false }),
     guard: lineGuard,
+    finalizeWrite: (db, values, before) => {
+      if (!before) return values;
+      const report = (db.records['account.report'] ?? []).find((item) => item.id === before.report_id);
+      return before.inline_code || !before.code || !report?.line_ids?.some((line) => line.code === before.code) ? values : { ...values, inline_code: before.code };
+    },
+    onWrite: (db, after, before) => {
+      if (!before.code || !after.code || before.code === after.code) return db;
+      const lineIds = new Set((db.records['account.report.line'] ?? []).filter((line) => line.report_id === after.report_id).map((line) => line.id));
+      return { ...db, records: { ...db.records, 'account.report.expression': (db.records['account.report.expression'] ?? []).map((expr) => lineIds.has(expr.report_line_id) && expr.engine === 'aggregation' ? { ...expr, formula: String(expr.formula).replace(/\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b/g, (match, code, label) => code === before.code ? `${after.code}.${label}` : match) } : expr) } };
+    },
     list: ['name', 'code', 'report_id', 'sequence'],
-    form: { title: 'name', groups: [['report_id', 'parent_id', 'sequence'], ['code', 'hierarchy_level', 'groupby'], ['foldable', 'hide_if_zero', 'print_on_new_page']], tabs: [{ label: 'Expressions', fields: ['expression_ids'] }] },
+    form: { title: 'name', groups: [['report_id', 'parent_id', 'sequence'], ['code', 'hierarchy_level', 'groupby'], ['foldable', 'hide_if_zero', 'print_on_new_page']], tabs: [{ label: 'Expressions', fields: ['expression_ids'] }, { label: 'Child Lines', fields: ['children_ids'] }] },
   },
   'account.report.expression': {
     label: 'Accounting Report Expressions',

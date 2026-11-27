@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { expressionPeriod, validateReportExpressions, evaluateStoredReport } from './models/reportEngine.js';
@@ -128,4 +128,156 @@ test('P&L displays the requested top-level layout and retains legacy net profit'
   });
   const old = configurableReportLegacy(db, { ...report, line_ids: oldLines }, period).rows;
   assert.equal(rows.find((row) => row.code === 'NET').values[0], old.find((row) => row.code === 'NET').values[0]);
+});
+
+import { unlink } from './orm.js';
+import { compareConfigurableReport } from './models/configurableReports.js';
+
+test('account code negative subformula reverses selected balances', () => {
+  let db = seed();
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-01', lines: [{ account: '600000', debit: 100 }, { account: '301000', credit: 100 }] }).db;
+  const report = { id: 99991, company_id: 1 };
+  const line = { id: 99991, report_id: report.id, code: 'X' };
+  const expr = { id: 99991, report_line_id: line.id, label: 'balance', engine: 'account_codes', formula: '600000', subformula: '-sum', date_scope: 'strict_range' };
+  db = { ...db, records: { ...db.records, 'account.report.line': [line], 'account.report.expression': [expr] } };
+  assert.equal(evaluateStoredReport(db, report, { from: '2026-02-01', to: '2026-02-01' })[0].expressions.balance, -100);
+});
+
+test('cumulative stored expressions retain unallocated analytic counterparts', () => {
+  let db = seed();
+  const posted = postEntry(db, { journal: 'MISC', company: 1, date: '2090-02-01', lines: [{ account: '600000', debit: 100 }, { account: '301000', credit: 100 }] });
+  db = posted.db;
+  db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((move) => move.id === posted.id ? { ...move, line_ids: move.line_ids.map((line, index) => index === 0 ? { ...line, analytic_distribution: { 777: 100 } } : line) } : move) } };
+  const report = { id: 99992, company_id: 1, date_scope: 'cumulative' };
+  const line = { id: 99992, report_id: report.id, code: 'X' };
+  const expr = { id: 99992, report_line_id: line.id, label: 'balance', engine: 'account_codes', formula: '301000', subformula: 'sum', date_scope: 'from_beginning' };
+  db = { ...db, records: { ...db.records, 'account.report.line': [line], 'account.report.expression': [expr] } };
+  assert.equal(evaluateStoredReport(db, report, { to: '2090-02-01' }, { analyticAccountIds: [777] })[0].expressions.balance, -100);
+});
+
+test('inline edits preserve independent stored lines and expressions', () => {
+  let db = seed();
+  const report = db.records['account.report'].find((r) => r.kind === 'pnl' && r.company_id === 1);
+  const created = create(db, 'account.report.line', { report_id: report.id, name: 'Independent', code: 'INDEPENDENT' }); db = created.db;
+  const expr = create(db, 'account.report.expression', { report_line_id: created.id, label: 'balance', engine: 'domain', formula: '[]', subformula: 'sum', date_scope: 'strict_range' }); db = expr.db;
+  db = write(db, 'account.report', report.id, { line_ids: report.line_ids.map((line, i) => i ? line : { ...line, name: 'Changed' }) });
+  assert.ok(db.records['account.report.line'].some((line) => line.id === created.id));
+  assert.ok(db.records['account.report.expression'].some((item) => item.id === expr.id));
+});
+
+test('deleting a duplicate statement cascades its stored records', () => {
+  let db = seed();
+  const original = db.records['account.report'].find((r) => r.kind === 'pnl' && r.company_id === 1);
+  const duplicate = create(db, 'account.report', { ...original, name: 'Duplicate', line_ids: [] }); db = duplicate.db;
+  const line = create(db, 'account.report.line', { report_id: duplicate.id, name: 'Line', code: 'L' }); db = line.db;
+  const expr = create(db, 'account.report.expression', { report_line_id: line.id, label: 'balance', engine: 'domain', formula: '[]', subformula: 'sum', date_scope: 'strict_range' }); db = expr.db;
+  db = unlink(db, 'account.report', [duplicate.id]);
+  assert.equal(db.records['account.report.line'].some((item) => item.id === line.id), false);
+  assert.equal(db.records['account.report.expression'].some((item) => item.id === expr.id), false);
+});
+
+test('comparison keeps a hidden-zero line when another period has a value', () => {
+  let db = seed();
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-01', lines: [{ account: '600000', debit: 100 }, { account: '301000', credit: 100 }] }).db;
+  const report = db.records['account.report'].find((r) => r.kind === 'pnl' && r.company_id === 1);
+  const line = db.records['account.report.line'].find((r) => r.report_id === report.id && r.code === 'EXP');
+  db = write(db, 'account.report.line', line.id, { hide_if_zero: true });
+  const result = compareConfigurableReport(db, report, [{ from: '1900-01-01', to: '1900-01-01' }, { from: '2026-02-01', to: '2026-02-01' }]);
+  assert.deepEqual(result.rows.find((row) => row.id === line.id).values, [0, 100]);
+});
+
+test('changing statement date scope resynchronizes stored expressions', () => {
+  let db = seed();
+  const report = db.records['account.report'].find((r) => r.kind === 'pnl' && r.company_id === 1);
+  db = write(db, 'account.report', report.id, { date_scope: 'cumulative' });
+  const line = db.records['account.report.line'].find((r) => r.report_id === report.id && r.code === 'OPINC');
+  assert.equal(db.records['account.report.expression'].find((e) => e.report_line_id === line.id).date_scope, 'from_beginning');
+  assert.doesNotThrow(() => configurableReport(db, { ...report, date_scope: 'cumulative' }, { from: '2026-01-01', to: '2026-12-31' }));
+});
+
+test('account code expressions reject unsupported subformulas', () => {
+  const seeded = seed();
+  const report = { id: 99993, company_id: 1 };
+  const line = { id: 99993, report_id: report.id, code: 'X' };
+  const expr = { id: 99993, report_line_id: line.id, label: 'balance', engine: 'account_codes', formula: '600000', subformula: 'invalid', date_scope: 'strict_range' };
+  const db = { ...seeded, records: { ...seeded.records, 'account.report.line': [line], 'account.report.expression': [expr] } };
+  assert.throws(() => evaluateStoredReport(db, report, { from: '2026-01-01', to: '2026-12-31' }), /Unsupported account code subformula/);
+});
+
+test('inline statement edits accept a list of account types', () => {
+  let db = seed();
+  const report = db.records['account.report'].find((item) => item.kind === 'pnl' && item.company_id === 1);
+  const line = report.line_ids.find((item) => item.code === 'OPINC');
+  db = write(db, 'account.report', report.id, { line_ids: report.line_ids.map((item) => item === line ? { ...item, formula: 'type:income,type:income_other' } : item) });
+  const stored = db.records['account.report.line'].find((item) => item.report_id === report.id && item.code === line.code);
+  const expression = db.records['account.report.expression'].find((item) => item.report_line_id === stored.id && item.label === 'balance');
+  assert.deepEqual(JSON.parse(expression.formula), [['account_type', 'in', ['income', 'income_other']]]);
+  assert.doesNotThrow(() => configurableReport(db, db.records['account.report'].find((item) => item.id === report.id), { from: '2026-01-01', to: '2026-12-31' }));
+});
+
+test('production rendering honors stored selectors, domains and expression periods', () => {
+  let db = seed();
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2089-12-01', lines: [{ account: '600000', debit: 20 }, { account: '301000', credit: 20 }] }).db;
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2090-01-01', lines: [{ account: '600000', debit: 100 }, { account: '301000', credit: 100 }] }).db;
+  const account = db.records['account.account'].find((item) => item.code === '600000' && (item.company_id ?? 1) === 1);
+  const report = { id: 99123, company_id: 1, date_scope: 'range', line_ids: [] };
+  const lines = ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((code, i) => ({ id: 99123 + i, report_id: report.id, code, name: code, sequence: i, foldable: true }));
+  const specs = [
+    ['account_codes', '6(601)', 'from_beginning'],
+    ['account_codes', '6D', 'from_beginning'],
+    ['domain', JSON.stringify([['account_id', '=', account.id], ['company_id', '=', 1]]), 'from_beginning'],
+    ['account_codes', '6', 'strict_range'],
+    ['account_codes', '6(600)', 'from_beginning'],
+    ['account_codes', '301000C', 'from_fiscalyear'],
+    ['domain', JSON.stringify([['account_id', '=', account.id], ['company_id', '=', 1]]), 'from_fiscalyear'],
+  ];
+  const expressions = specs.map(([engine, formula, date_scope], i) => ({ id: 99123 + i, report_line_id: lines[i].id, label: 'balance', engine, formula, date_scope, subformula: 'sum' }));
+  db = { ...db, records: { ...db.records, 'account.report.line': [...db.records['account.report.line'], ...lines], 'account.report.expression': [...db.records['account.report.expression'], ...expressions] } };
+  const rows = configurableReport(db, report, { from: '2090-02-01', to: '2090-12-31' }).rows;
+  assert.deepEqual(rows.map((row) => row.values[0]), [120, 120, 120, 0, 0, -100, 100]);
+  assert.equal(rows[2].accountRows.find((row) => row.account.id === account.id).values[0], 120);
+});
+
+test('expressionless stored lines render as headers alongside custom inline lines', () => {
+  const seeded = seed();
+  const report = { id: 99130, company_id: 1, date_scope: 'range', line_ids: [{ code: 'INLINE', name: 'Inline', formula: '6', sequence: 10 }] };
+  const header = { id: 99130, report_id: report.id, name: 'Header', sequence: 20 };
+  const db = { ...seeded, records: { ...seeded.records, 'account.report.line': [...seeded.records['account.report.line'], header] } };
+  const rows = configurableReport(db, report, { from: '2090-01-01', to: '2090-12-31' }).rows;
+  assert.ok(rows.find((row) => row.code === 'INLINE'));
+  assert.deepEqual(rows.find((row) => row.id === header.id).values, [null]);
+  const compared = compareConfigurableReport(db, report, [{ from: '2090-01-01', to: '2090-06-30' }, { from: '2090-07-01', to: '2090-12-31' }]);
+  assert.deepEqual(compared.rows.find((row) => row.id === header.id).values, [null, null]);
+});
+
+test('inline statement edits retain code exclusions and tag selectors', () => {
+  let db = seed();
+  db = postEntry(db, { journal: 'MISC', company: 1, date: '2090-01-01', lines: [{ account: '600000', debit: 100 }, { account: '301000', credit: 100 }] }).db;
+  db = { ...db, records: { ...db.records, 'account.account.tag': [...db.records['account.account.tag'], { id: 99000, name: 'Selected' }], 'account.account': db.records['account.account'].map((account) => account.code === '600000' && (account.company_id ?? 1) === 1 ? { ...account, tag_ids: [99000] } : account) } };
+  const report = db.records['account.report'].find((item) => item.kind === 'pnl' && item.company_id === 1);
+  const line = report.line_ids.find((item) => item.code === 'OPINC');
+  for (const formula of ['6,-601', 'tag:Selected']) {
+    const changed = { ...line, formula };
+    db = write(db, 'account.report', report.id, { line_ids: report.line_ids.map((item) => item.code === line.code ? changed : item) });
+    const current = db.records['account.report'].find((item) => item.id === report.id);
+    const period = { from: '2090-01-01', to: '2090-12-31' };
+    assert.equal(configurableReport(db, current, period).rows.find((item) => item.code === line.code).values[0], configurableReportLegacy(db, current, period).rows.find((item) => item.code === line.code).values[0]);
+    const stored = db.records['account.report.line'].find((item) => item.report_id === report.id && item.code === line.code);
+    assert.ok(db.records['account.report.expression'].find((item) => item.report_line_id === stored.id && item.label === 'balance'));
+  }
+});
+
+test('inline synchronization preserves a stored counterpart whose code was edited', () => {
+  let db = seed();
+  const report = db.records['account.report'].find((item) => item.kind === 'pnl' && item.company_id === 1);
+  const stored = db.records['account.report.line'].find((item) => item.report_id === report.id && item.code === 'OPINC');
+  db = write(db, 'account.report.line', stored.id, { code: 'CUSTOM_CODE' });
+  db = write(db, 'account.report', report.id, { line_ids: report.line_ids.map((item) => item.code === 'OPINC' ? { ...item, name: 'Edited name' } : item) });
+  const matches = db.records['account.report.line'].filter((item) => item.report_id === report.id && (item.code === 'OPINC' || item.code === 'CUSTOM_CODE'));
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].id, stored.id);
+  assert.equal(matches[0].code, 'CUSTOM_CODE');
+  assert.equal(matches[0].name, 'Edited name');
+  assert.doesNotThrow(() => configurableReport(db, db.records['account.report'].find((item) => item.id === report.id), { from: '2026-01-01', to: '2026-12-31' }));
+  assert.ok(db.records['account.report.expression'].some((item) => item.engine === 'aggregation' && item.formula.includes('CUSTOM_CODE.balance')));
 });

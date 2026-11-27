@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { models } from '../models/index.js';
-import { fieldReadonly, fieldRequired } from '../field-metadata.js';
+import { fieldReadonly, fieldRequired, tabFieldReadonly } from '../field-metadata.js';
 import { aggregate, create, isMultiCompany, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
@@ -845,7 +845,7 @@ export function FormView({ leaf, id, base, params }) {
                       return (['one2many', 'text', 'html'].includes(def.fields[f].type)
                         ? (
                           <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                            placeholder={resolvedPlaceholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} isNew={isNew} stored={stored} />
+                            placeholder={resolvedPlaceholder} readonly={tabFieldReadonly(tabReadonly, def.fields[f], current, db, { isNew, stored })} isNew={isNew} stored={stored} />
                         )
                         // Plain fields in a tab get a label, like fields in the header groups.
                         : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} stored={stored} />);
