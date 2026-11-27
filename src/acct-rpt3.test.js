@@ -459,3 +459,48 @@ test('deleting an inline statement line referenced by a retained stored aggregat
     /Cannot delete report line RENAMED_OPINC: still referenced by DBL_SALES/,
   );
 });
+
+test('scaled foldable aggregation account rows reconcile rounding remainder to the line total', () => {
+  let db = seed();
+  const yr = 2093;
+  const secondExp = create(db, 'account.account', { code: '601000', name: 'Other Expense', account_type: 'expense', company_id: 1 });
+  db = secondExp.db;
+  db = postEntry(db, {
+    journal: 'MISC',
+    company: 1,
+    date: `${yr}-03-10`,
+    lines: [
+      { account: '600000', debit: 0.01 },
+      { account: '601000', debit: 0.01 },
+      { account: '101401', credit: 0.02 },
+    ],
+  }).db;
+  const report = create(db, 'account.report', { name: 'Half Cent Rounding Report', company_id: 1, show_debit: true, show_credit: true, line_ids: [] });
+  db = report.db;
+  const expLine = create(db, 'account.report.line', { report_id: report.id, name: 'Expenses', code: 'EXP', sequence: 10 });
+  db = expLine.db;
+  const halfLine = create(db, 'account.report.line', { report_id: report.id, name: 'Half Expenses', code: 'HALF', sequence: 20, foldable: true });
+  db = halfLine.db;
+  const negHalfLine = create(db, 'account.report.line', { report_id: report.id, name: 'Neg Half Expenses', code: 'NEG_HALF', sequence: 30, foldable: true });
+  db = negHalfLine.db;
+  db = create(db, 'account.report.expression', { report_line_id: expLine.id, label: 'balance', engine: 'domain', formula: '[["account_type","=","expense"]]', subformula: 'sum', date_scope: 'strict_range' }).db;
+  db = create(db, 'account.report.expression', { report_line_id: halfLine.id, label: 'balance', engine: 'aggregation', formula: 'EXP.balance / 2', date_scope: 'strict_range' }).db;
+  db = create(db, 'account.report.expression', { report_line_id: negHalfLine.id, label: 'balance', engine: 'aggregation', formula: '-EXP.balance / 2', date_scope: 'strict_range' }).db;
+
+  const period = { from: `${yr}-01-01`, to: `${yr}-12-31` };
+  const rep = read(db, 'account.report', report.id);
+  const out = configurableReport(db, rep, period);
+  const halfRow = out.rows.find((row) => row.code === 'HALF');
+  assert.deepEqual(halfRow.values, [0.01, 0.01, 0]);
+  assert.equal(halfRow.accountRows.reduce((sum, item) => sum + item.values[0], 0), 0.01);
+  assert.equal(halfRow.accountRows.reduce((sum, item) => sum + item.values[1], 0), 0.01);
+  assert.equal(halfRow.accountRows.reduce((sum, item) => sum + item.values[2], 0), 0);
+
+  const negHalfRow = out.rows.find((row) => row.code === 'NEG_HALF');
+  assert.deepEqual(negHalfRow.values, [-0.01, -0.01, 0]);
+  assert.equal(negHalfRow.accountRows.reduce((sum, item) => sum + item.values[0], 0), -0.01);
+
+  const raw = evaluateStoredReport(db, rep, period, { includeAccountBreakdown: true });
+  const halfBreakdown = [...raw.find((row) => row.code === 'HALF').accountExpressions.balance.values()];
+  assert.equal(halfBreakdown.reduce((sum, amt) => sum + amt, 0), 0.01);
+});

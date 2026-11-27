@@ -1,7 +1,7 @@
 import { read } from '../orm.js';
 import { balances, fiscalYearStart, journalItems, filterByAnalytic, analyticMoveItems, weighted } from './ledger.js';
 import { addDays, today } from './common.js';
-import { round } from '../money.js';
+import { cents, round } from '../money.js';
 import { reportingBookedAmount } from './money.js';
 
 export const REPORT_ENGINES = ['domain', 'tax_tags', 'aggregation', 'account_codes', 'external', 'custom'];
@@ -108,6 +108,27 @@ const combineLinear = (lhs, rhs, sign) => {
   }
   return { constVal: lhs.constVal + sign * rhs.constVal, terms };
 };
+
+/** Reconcile rounded per-account amounts to the rounded expression total via largest rounding residual. */
+function reconcileAccountBreakdown(accValues, total) {
+  if (!accValues.size) return;
+  const entries = [...accValues].map(([accId, raw]) => {
+    const rounded = round(raw);
+    return { accId, rawCents: raw * 100, roundedCents: cents(rounded), rounded };
+  });
+  const diff = cents(total) - entries.reduce((sum, entry) => sum + entry.roundedCents, 0);
+  if (!diff) {
+    for (const entry of entries) accValues.set(entry.accId, entry.rounded);
+    return;
+  }
+  const step = Math.sign(diff);
+  const steps = Math.abs(diff);
+  const ranked = entries
+    .map((entry) => ({ ...entry, priority: step * (entry.rawCents - entry.roundedCents) }))
+    .sort((a, b) => (Math.abs(b.priority - a.priority) > 1e-9 ? b.priority - a.priority : a.accId - b.accId));
+  for (let i = 0; i < steps; i++) ranked[i % ranked.length].roundedCents += step;
+  for (const entry of ranked) accValues.set(entry.accId, round(entry.roundedCents / 100));
+}
 
 /** Evaluate an aggregation formula and, when purely linear in its references, its per-account attribution. */
 function evaluateAggregation(text, resolveReference, trackLinear) {
@@ -283,7 +304,6 @@ export function evaluateStoredReport(db, report, period, options = {}) {
               accValues.set(accId, (accValues.get(accId) ?? 0) + coeff * amt);
             }
           }
-          for (const [accId, amt] of accValues) accValues.set(accId, round(amt));
         }
       }
     } else {
@@ -345,13 +365,13 @@ export function evaluateStoredReport(db, report, period, options = {}) {
           }
         }
       }
-      if (needAccounts) {
-        for (const [accId, amt] of accValues) accValues.set(accId, round(amt));
-      }
     }
     value = round(value);
     memo.set(expr.id, value);
-    if (needAccounts && accValues) accountMemo.set(expr.id, accValues);
+    if (needAccounts && accValues) {
+      reconcileAccountBreakdown(accValues, value);
+      accountMemo.set(expr.id, accValues);
+    }
     return value;
   };
   const result = lines
