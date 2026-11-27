@@ -449,7 +449,12 @@ export function guardPartner(db, before, after, _ctx, vals) {
       return 'Next reminder date must be a valid date';
     }
   }
-  return preferredPaymentMethodLineError(db, after)
+  const companyChanged = Boolean(before && (before.company_id ?? null) !== (after?.company_id ?? null));
+  const methodFields = !before
+    ? null
+    : ['property_inbound_payment_method_line_id', 'property_outbound_payment_method_line_id']
+        .filter((f) => companyChanged || (before[f] ?? null) !== (after?.[f] ?? null));
+  return (methodFields === null || methodFields.length > 0 ? preferredPaymentMethodLineError(db, after, methodFields) : null)
     ?? (vals && !Object.hasOwn(vals, 'bank_ids') ? null : validatePartnerBankLines(db, after?.id, after?.bank_ids))
     ?? (vals && !Object.hasOwn(vals, 'child_ids') ? null : validatePartnerChildLines(db, after?.id, after?.child_ids));
 }

@@ -2108,6 +2108,8 @@ const invoiceLineField = {
     ...invoiceLineExtraBase,
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
     sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
+    combo_parent_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
+    combo_choice_id: { type: 'many2one', relation: 'product.combo', label: 'Combo Choices', readonly: true, hidden: true },
     purchase_line_id: { type: 'many2one', relation: 'purchase.order.line', label: 'Purchase Order Line', optional: 'hide', domain: (line, row, db) => { const po = db && read(db, 'purchase.order', line.purchase_id); return Boolean(po && (po.company_id ?? 1) === (row?.company_id ?? 1) && (!row?.parent_partner_id || sameCommercialPartner(db, po.partner_id, row.parent_partner_id))); } },
 
     down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true },
@@ -2988,20 +2990,32 @@ function resolveSendMoves(db, moveOrIds) {
   return moves;
 }
 
+function moveSendingMethod(db, move) {
+  const p = move?.partner_id ? read(db, 'res.partner', move.partner_id) : null;
+  if (!p) return null;
+  if (p.invoice_sending_method) return p.invoice_sending_method;
+  const commId = commercialPartnerId(db, p.id);
+  return commId && commId !== p.id ? (read(db, 'res.partner', commId)?.invoice_sending_method ?? null) : null;
+}
+
+function partitionSendMoves(db, moves) {
+  const emailTargets = [];
+  const manualTargets = [];
+  for (const m of moves) {
+    if (moveSendingMethod(db, m) === 'manual') manualTargets.push(m);
+    else emailTargets.push(m);
+  }
+  return { emailTargets, manualTargets };
+}
+
 function sendMovesWizard(db, moveOrIds) {
   const moves = resolveSendMoves(db, moveOrIds);
-  const partnerSendingMethod = (p) => {
-    if (!p) return null;
-    if (p.invoice_sending_method) return p.invoice_sending_method;
-    const commId = commercialPartnerId(db, p.id);
-    return commId && commId !== p.id ? (read(db, 'res.partner', commId)?.invoice_sending_method ?? null) : null;
-  };
-  const partners = moves.map((m) => (m.partner_id ? read(db, 'res.partner', m.partner_id) : null));
-  const methods = partners.map(partnerSendingMethod);
-  const hasEmailTarget = methods.some((m) => m !== 'manual');
-  const allEmailTargetsReady = hasEmailTarget
-    && partners.every((p, i) => methods[i] === 'manual' || Boolean(p?.email?.trim?.()));
-  const anyManual = methods.some((m) => m === 'manual');
+  const { emailTargets, manualTargets } = partitionSendMoves(db, moves);
+  const allEmailTargetsReady = emailTargets.length > 0 && emailTargets.every((m) => {
+    const p = m.partner_id ? read(db, 'res.partner', m.partner_id) : null;
+    return Boolean(p?.email?.trim?.());
+  });
+  const anyManual = manualTargets.length > 0;
   return {
     title: 'Send',
     fields: [
@@ -3016,10 +3030,15 @@ function runSendMoves(db, moveOrIds, values = {}) {
   if (!values?.email && !values?.download) {
     throw new Error('Select at least one channel: Email or Download');
   }
-  const markSent = !values.live && Boolean(values.download);
+  const { emailTargets, manualTargets } = partitionSendMoves(db, moves);
+  const emailMoves = values.email ? emailTargets : [];
+  const downloadMovesList = values.download ? manualTargets : [];
+  const emailSet = new Set(emailMoves.map((m) => m.id));
+  const toMarkSent = values.live ? downloadMovesList.filter((m) => !emailSet.has(m.id)) : downloadMovesList;
   return {
-    db: markSent ? moves.reduce((acc, m) => write(acc, 'account.move', m.id, { is_move_sent: true }), db) : db,
-    ...(values.download ? { go: `#/print/account.move/${moves.map((m) => m.id).join(',')}` } : {}),
+    db: toMarkSent.reduce((acc, m) => write(acc, 'account.move', m.id, { is_move_sent: true }), db),
+    emailIds: emailMoves.map((m) => m.id),
+    ...(downloadMovesList.length ? { go: `#/print/account.move/${downloadMovesList.map((m) => m.id).join(',')}` } : {}),
   };
 }
 
@@ -3073,8 +3092,7 @@ export function createPartnerInvoices(db, partnerOrIds, moveType = 'out_invoice'
     const dueFields = termDue(nextDb, { partner_id: partner.id, company_id: companyId, invoice_date: invoiceDate, invoice_payment_term_id: termId }, { clear: true });
     const eligibleVendorBank = moveType === 'in_invoice'
       ? search(nextDb, 'res.partner.bank')
-        .filter((b) => b.active !== false && (!b.company_id || b.company_id === companyId) && sameCommercialPartner(nextDb, b.partner_id, partner.id))
-        .sort((a, b) => Number(Boolean(b.allow_out_payment)) - Number(Boolean(a.allow_out_payment)))[0]?.id ?? null
+        .find((b) => isEligibleRecipientBank(nextDb, b, partner.id, companyId))?.id ?? null
       : null;
     const created = create(nextDb, 'account.move', {
       move_type: moveType,
@@ -3098,37 +3116,70 @@ export function createPartnerInvoices(db, partnerOrIds, moveType = 'out_invoice'
   };
 }
 
-function partnerOpenResidual(db, partnerId, direction, companyId) {
-  const targetType = direction === 'outbound' ? 'in_invoice' : 'out_invoice';
-  return search(db, 'account.move')
-    .filter((m) => m.state === 'posted' && m.move_type === targetType && (m.company_id ?? 1) === companyId && sameCommercialPartner(db, m.partner_id, partnerId))
-    .reduce((sum, m) => sum + Math.max(0, Number(residual(m, db)) || 0), 0);
+function partnerOpenResidual(db, partnerId, direction, companyId, date = today()) {
+  if (!direction) return 0;
+  if (!validDate(date)) return null;
+  const invoiceType = direction === 'outbound' ? 'in_invoice' : 'out_invoice';
+  const refundType = direction === 'outbound' ? 'in_refund' : 'out_refund';
+  const companyCurr = companyCurrencyRecord(db, companyId);
+  const docs = search(db, 'account.move').filter(
+    (m) => m.state === 'posted'
+      && (m.move_type === invoiceType || m.move_type === refundType)
+      && (m.company_id ?? 1) === companyId
+      && sameCommercialPartner(db, m.partner_id, partnerId),
+  );
+  let sum = 0;
+  for (const m of docs) {
+    const res = residual(m, db);
+    if (res == null) return null;
+    if (!(res > 0)) continue;
+    let companyAmount;
+    if (!m.currency_id || m.currency_id === companyCurr.id) {
+      companyAmount = roundCurrency(res, companyCurr);
+    } else {
+      try {
+        companyAmount = toCompany(db, m.currency_id, res, date, companyId);
+      } catch {
+        return null;
+      }
+    }
+    sum += m.move_type === refundType ? -companyAmount : companyAmount;
+  }
+  return roundCurrency(sum, companyCurr);
+}
+
+function partnerPaymentDirection(partners, defaults = {}) {
+  if (defaults.supplier_rank && !defaults.customer_rank) return 'outbound';
+  if (defaults.customer_rank && !defaults.supplier_rank) return 'inbound';
+  if (partners.length && partners.every((p) => (p.supplier_rank ?? 0) > 0 && !((p.customer_rank ?? 0) > 0))) {
+    return 'outbound';
+  }
+  return null;
 }
 
 /** Build the Register Payment wizard spec for one or more selected partners. */
 export function partnerRegisterPaymentWizard(db, partnerOrIds, context = {}) {
   const partners = resolvePartners(db, partnerOrIds);
   const companyId = currentCompany(db);
-  const singlePartner = partners.length === 1 ? partners[0] : null;
+  const multi = partners.length > 1;
+  const singlePartner = multi ? null : partners[0];
   const defaults = context?.defaults ?? {};
-  const defaultDirection = defaults.supplier_rank
-    ? 'outbound'
-    : defaults.customer_rank
-      ? 'inbound'
-      : singlePartner && (singlePartner.supplier_rank ?? 0) > 0 && !((singlePartner.customer_rank ?? 0) > 0)
-        ? 'outbound'
-        : 'inbound';
-  const payDefaults = partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, defaultDirection, companyId);
-  const defaultAmountFor = (dir) => {
-    if (!singlePartner) return '';
-    const open = partnerOpenResidual(db, singlePartner.id, dir, companyId);
-    return open > 0 ? String(roundCurrency(open, companyCurrencyRecord(db, companyId))) : '';
+  const defaultDirection = partnerPaymentDirection(partners, defaults);
+  const payDefaults = defaultDirection
+    ? partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, defaultDirection, companyId)
+    : { journal_id: partnerPaymentMethodDefaults(db, null, 'inbound', companyId).journal_id, payment_method_line_id: null };
+  const initialDate = today();
+  const defaultAmountFor = (dir, date = initialDate) => {
+    if (!singlePartner || !dir) return '';
+    const open = partnerOpenResidual(db, singlePartner.id, dir, companyId, date);
+    return open != null && open > 0 ? String(open) : '';
   };
   const defaultBankFor = () => (singlePartner
     ? (search(db, 'res.partner.bank').find((b) => isEligibleRecipientBank(db, b, singlePartner.id, companyId))?.id ?? null)
     : null);
   return {
     title: 'Register Payment',
+    ...(multi ? { confirmLabel: 'Create Draft Payments' } : {}),
     fields: [
       {
         name: 'payment_type',
@@ -3141,11 +3192,12 @@ export function partnerRegisterPaymentWizard(db, partnerOrIds, context = {}) {
       {
         name: 'amount',
         type: 'monetary',
-        label: 'Payment Amount',
+        label: multi ? 'Amount per partner' : 'Payment Amount',
         required: true,
-        default: defaultAmountFor(defaultDirection),
+        default: defaultAmountFor(defaultDirection, initialDate),
+        ...(multi ? { help: 'Multi-partner payments are created as drafts for review before posting.' } : {}),
       },
-      { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
+      { name: 'date', type: 'date', label: 'Payment Date', required: true, default: initialDate },
       {
         name: 'journal_id',
         type: 'many2one',
@@ -3161,7 +3213,10 @@ export function partnerRegisterPaymentWizard(db, partnerOrIds, context = {}) {
         relation: 'account.payment.method.line',
         label: 'Payment Method',
         default: payDefaults.payment_method_line_id,
-        domain: (line, values) => journalMethodLines(db, values?.journal_id, values?.payment_type ?? defaultDirection).some((candidate) => candidate.id === line.id),
+        domain: (line, values) => {
+          const dir = values && Object.hasOwn(values, 'payment_type') ? values.payment_type : defaultDirection;
+          return dir ? journalMethodLines(db, values?.journal_id, dir).some((candidate) => candidate.id === line.id) : false;
+        },
       },
       ...(singlePartner ? [{
         name: 'partner_bank_id',
@@ -3175,20 +3230,36 @@ export function partnerRegisterPaymentWizard(db, partnerOrIds, context = {}) {
       { name: 'memo', type: 'char', label: 'Memo', default: '' },
     ],
     onchange: (vals, key) => {
-      const dir = vals?.payment_type ?? defaultDirection;
+      const dir = vals && Object.hasOwn(vals, 'payment_type') ? vals.payment_type : defaultDirection;
+      const effectiveDate = vals?.date || initialDate;
       if (key === 'payment_type') {
+        if (!dir) {
+          const prevIn = defaultAmountFor('inbound', effectiveDate);
+          const prevOut = defaultAmountFor('outbound', effectiveDate);
+          return {
+            payment_method_line_id: null,
+            ...(singlePartner ? { partner_bank_id: null } : {}),
+            ...(singlePartner && (!vals.amount || vals.amount === prevIn || vals.amount === prevOut) ? { amount: '' } : {}),
+          };
+        }
         const nextDefaults = partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, dir, companyId);
+        const otherDir = dir === 'outbound' ? 'inbound' : 'outbound';
         return {
           ...nextDefaults,
           ...(singlePartner ? { partner_bank_id: dir === 'outbound' ? defaultBankFor() : null } : {}),
-          ...(singlePartner && (!vals.amount || vals.amount === defaultAmountFor(dir === 'outbound' ? 'inbound' : 'outbound'))
-            ? { amount: defaultAmountFor(dir) }
+          ...(singlePartner && (!vals.amount || vals.amount === defaultAmountFor(otherDir, effectiveDate))
+            ? { amount: defaultAmountFor(dir, effectiveDate) }
             : {}),
         };
       }
+      if (key === 'date') {
+        return singlePartner ? { amount: defaultAmountFor(dir, effectiveDate) } : {};
+      }
       if (key === 'journal_id') {
         return {
-          payment_method_line_id: partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, dir, companyId, { journalId: vals.journal_id }).payment_method_line_id,
+          payment_method_line_id: dir
+            ? partnerPaymentMethodDefaults(db, singlePartner?.id ?? null, dir, companyId, { journalId: vals.journal_id }).payment_method_line_id
+            : null,
         };
       }
       return {};
@@ -3196,19 +3267,21 @@ export function partnerRegisterPaymentWizard(db, partnerOrIds, context = {}) {
   };
 }
 
-/** Create and post a customer or vendor payment for each selected partner. */
+/** Create a customer or vendor payment for each selected partner (posted for one partner, drafts for multiple). */
 export function registerPartnerPayments(db, partnerOrIds, values = {}, context = {}) {
   const partners = resolvePartners(db, partnerOrIds);
   const companyId = currentCompany(db);
   const defaults = context?.defaults ?? {};
-  const paymentType = values.payment_type ?? (defaults.supplier_rank ? 'outbound' : 'inbound');
+  const paymentType = values.payment_type ?? partnerPaymentDirection(partners, defaults);
+  if (!paymentType) throw new Error('Select a payment type');
   if (!['inbound', 'outbound'].includes(paymentType)) throw new Error('Unsupported payment type');
   const partnerType = paymentType === 'outbound' ? 'supplier' : 'customer';
   const amount = promptedAmount(values.amount);
   if (!(amount > 0)) throw new Error('Enter a payment amount greater than zero');
   const date = values.date || today();
   if (!validDate(date)) throw new Error('A valid payment date is required');
-  const defaultJournal = partnerPaymentMethodDefaults(db, partners.length === 1 ? partners[0].id : null, paymentType, companyId).journal_id;
+  const multi = partners.length > 1;
+  const defaultJournal = partnerPaymentMethodDefaults(db, multi ? null : partners[0].id, paymentType, companyId).journal_id;
   const via = paymentJournal(db, values.journal_id ?? defaultJournal, companyId);
   let nextDb = db;
   const createdIds = [];
@@ -3226,9 +3299,9 @@ export function registerPartnerPayments(db, partnerOrIds, values = {}, context =
       journal_id: via.id,
       payment_method_line_id: methodLineId,
       memo: values.memo ?? '',
-      ...(paymentType === 'outbound' && values.partner_bank_id ? { partner_bank_id: values.partner_bank_id } : {}),
+      ...(!multi && paymentType === 'outbound' && values.partner_bank_id ? { partner_bank_id: values.partner_bank_id } : {}),
     });
-    nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
+    nextDb = multi ? created.db : postPayment(created.db, read(created.db, 'account.payment', created.id));
     createdIds.push(created.id);
   }
   const route = partnerType === 'supplier' ? 'accounting/vendor-payments' : 'accounting/payments';

@@ -6,7 +6,9 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { apps, findLeaf, menusFor, models } from './models/index.js';
 import { appOpen } from './access.js';
-import { createPartnerInvoices, payMove, postMove, registerPartnerPayments, partnerRegisterPaymentWizard } from './models/accounting.js';
+import { createPartnerInvoices, payMove, postMove, registerPartnerPayments, partnerRegisterPaymentWizard, salesInvoiceView } from './models/accounting.js';
+import { today } from './models/common.js';
+import { upsertCurrencyRate } from './models/currency.js';
 import { postPayment } from './models/pay.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -390,11 +392,12 @@ test('PTN3-3: Invoicing page preferred payment methods, invoice sending method, 
   assert.throws(() => sync(db, patchPartner({ property_outbound_payment_method_line_id: cashIn.id })), /Vendor preferred payment method must be outbound/);
 
   const archivedLineDb = write(db, 'account.payment.method.line', cashIn.id, { active: false });
+  // Assigning an archived payment method line to another partner (who does not already hold it) must be rejected.
   assert.throws(() => applyDiff(archivedLineDb, diffDb(archivedLineDb, {
     ...archivedLineDb,
     records: {
       ...archivedLineDb.records,
-      'res.partner': archivedLineDb.records['res.partner'].map((r) => (r.id === partner.id ? { ...r, property_inbound_payment_method_line_id: cashIn.id } : r)),
+      'res.partner': archivedLineDb.records['res.partner'].map((r) => (r.id === child.id ? { ...r, property_inbound_payment_method_line_id: cashIn.id } : r)),
     },
   })), /Select an active payment method/);
 
@@ -434,8 +437,365 @@ test('PTN3-4: Arabic translations exist for all new partner invoicing/action str
     'Select active partners',
     'Unsupported payment type',
     'A valid payment date is required',
+    'Select a payment type',
+    'Amount per partner',
+    'Create Draft Payments',
+    'Multi-partner payments are created as drafts for review before posting.',
   ]) {
     const translated = tAr(label);
     assert.ok(translated && translated !== label, `Missing Arabic translation for: ${label}`);
   }
+});
+
+test('PTN3-5: mixed Send batch partitions Email vs Download partners', async () => {
+  let db = seed();
+  const emailPartner = create(db, 'res.partner', { name: 'Email Partner', email: 'email@example.com', invoice_sending_method: 'email' });
+  db = emailPartner.db;
+  const manualPartner = create(db, 'res.partner', { name: 'Manual Partner', email: 'manual@example.com', invoice_sending_method: 'manual' });
+  db = manualPartner.db;
+
+  const invEmail = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: emailPartner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, name: 'Email Item', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(invEmail.db, invEmail.id);
+
+  const invManual = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: manualPartner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, name: 'Manual Item', qty: 1, price_unit: 200, tax: 0 }],
+  });
+  db = postMove(invManual.db, invManual.id);
+
+  const sendAction = salesInvoiceView.listActions.find((a) => a.label === 'Send');
+  const spec = sendAction.wizard(db, [invEmail.id, invManual.id]);
+  assert.equal(spec.fields.find((f) => f.name === 'email').default, true);
+  assert.equal(spec.fields.find((f) => f.name === 'download').default, true);
+
+  // Default mixed run sends email only to email-targeted invoice and downloads only manual invoice
+  const defaultRes = sendAction.run(db, [invEmail.id, invManual.id], { email: true, download: true, live: true });
+  assert.deepEqual(defaultRes.emailIds, [invEmail.id]);
+  assert.equal(defaultRes.go, `#/print/account.move/${invManual.id}`);
+  assert.equal(read(defaultRes.db, 'account.move', invManual.id).is_move_sent, true);
+  assert.equal(read(defaultRes.db, 'account.move', invEmail.id).is_move_sent, false);
+
+  // End-to-end ActionView live SMTP dispatch only hits /api/mail/document for email-targeted invoice
+  const prevFetch = globalThis.fetch;
+  const prevAlert = globalThis.alert;
+  const prevConfirm = globalThis.confirm;
+  const origSetInterval = globalThis.setInterval;
+  globalThis.setInterval = () => ({ unref() {} });
+  globalThis.alert = () => {};
+  globalThis.confirm = () => true;
+  const mailedIds = [];
+  let serverDb = db;
+  globalThis.fetch = async (url, init) => {
+    if (url === '/api/session') {
+      return new Response(JSON.stringify({ name: 'Admin', isAdmin: true, integrations: { smtp: true } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url === '/api/db') {
+      return new Response(JSON.stringify(serverDb), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url === '/api/diff') {
+      serverDb = applyDiff(serverDb, JSON.parse(init.body), { isAdmin: true });
+      return new Response(JSON.stringify(serverDb), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url === '/api/mail/document') {
+      const body = JSON.parse(init.body);
+      mailedIds.push(body.id);
+      serverDb = write(serverDb, 'account.move', body.id, { is_move_sent: true });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const invoicesLeaf = findLeaf(apps.find((a) => a.id === 'accounting'), 'invoices');
+  const { ActionView } = await import('./views/ActionView.jsx');
+  const ctx = await mountScreen(
+    (React) => React.createElement(ActionView, { leaf: invoicesLeaf, base: '#/accounting/invoices', params: new URLSearchParams('view=list') }),
+    db,
+    { hash: '#/accounting/invoices?view=list' },
+  );
+  try {
+    const checkboxes = () => allFind(ctx.host, (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox');
+    const rowEmailIdx = checkboxes().findIndex((cb) => cb.parentNode?.parentNode?.textContent?.includes(read(db, 'account.move', invEmail.id).name));
+    const rowManualIdx = checkboxes().findIndex((cb) => cb.parentNode?.parentNode?.textContent?.includes(read(db, 'account.move', invManual.id).name));
+    assert.ok(rowEmailIdx > 0 && rowManualIdx > 0);
+    await ctx.React.act(async () => props(checkboxes()[rowEmailIdx]).onChange());
+    await ctx.React.act(async () => props(checkboxes()[rowManualIdx]).onChange());
+    const sendBtn = allFind(ctx.host, (n) => n.tagName === 'BUTTON').find((b) => b.textContent.trim() === 'Send');
+    await ctx.React.act(async () => props(sendBtn).onClick());
+    await ctx.React.act(async () => {
+      const form = find(ctx.host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+      await props(form).onSubmit({ preventDefault() {} });
+    });
+    assert.deepEqual(mailedIds, [invEmail.id], 'Download-only partner invoice must not be emailed in default mixed batch');
+    assert.equal(globalThis.location.hash, `#/print/account.move/${invManual.id}`);
+    assert.equal(read(ctx.store.getDb(), 'account.move', invManual.id).is_move_sent, true);
+  } finally {
+    globalThis.fetch = () => Promise.reject(new Error('offline'));
+    await ctx.done();
+    globalThis.fetch = prevFetch;
+    globalThis.alert = prevAlert;
+    globalThis.confirm = prevConfirm;
+    globalThis.setInterval = origSetInterval;
+    await ctx.store.initStore();
+  }
+});
+
+test('PTN3-6: createPartnerInvoices leaves bill bank unset when vendor only has untrusted banks', () => {
+  let db = seed();
+  const vendor = create(db, 'res.partner', { name: 'Untrusted Bank Vendor', supplier_rank: 1 });
+  db = vendor.db;
+  const untrusted = create(db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'UNTRUST-1', allow_out_payment: false });
+  db = untrusted.db;
+
+  const billRes = createPartnerInvoices(db, [vendor.id], 'in_invoice');
+  const bill = read(billRes.db, 'account.move', billRes.ids[0]);
+  assert.equal(bill.partner_bank_id ?? null, null);
+
+  // Bill created this way can be posted and paid normally without bank-trust rejection
+  const withLine = write(billRes.db, 'account.move', bill.id, {
+    invoice_date: today(),
+    invoice_line_ids: [{ product_id: 1, name: 'Supply', qty: 1, price_unit: 120, tax: 0 }],
+  });
+  const posted = postMove(withLine, bill.id);
+  assert.doesNotThrow(() => payMove(posted, bill.id, 120));
+
+  // Once a trusted bank exists, createPartnerInvoices selects the trusted one (not the untrusted one)
+  const trusted = create(db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'TRUST-2', allow_out_payment: true });
+  const billRes2 = createPartnerInvoices(trusted.db, [vendor.id], 'in_invoice');
+  assert.equal(read(billRes2.db, 'account.move', billRes2.ids[0]).partner_bank_id, trusted.id);
+});
+
+test('PTN3-7: partner Register Payment direction uses leaf defaults, infers outbound for vendor-only sets, and avoids silent inbound on ambiguity', async () => {
+  let db = seed();
+  const dual = create(db, 'res.partner', { name: 'Dual Role Partner', customer_rank: 1, supplier_rank: 1 });
+  db = dual.db;
+  const vendOnly1 = create(db, 'res.partner', { name: 'Vendor Only 1', supplier_rank: 1, customer_rank: 0 });
+  db = vendOnly1.db;
+  const vendOnly2 = create(db, 'res.partner', { name: 'Vendor Only 2', supplier_rank: 2, customer_rank: 0 });
+  db = vendOnly2.db;
+
+  // Purchase Vendors leaf also carries supplier_rank default
+  const purchaseVendorsLeaf = findLeaf(apps.find((a) => a.id === 'purchase'), 'vendors');
+  assert.equal(purchaseVendorsLeaf.defaults?.supplier_rank, 1);
+  const accountingVendorsLeaf = findLeaf(apps.find((a) => a.id === 'accounting'), 'vendors');
+  assert.equal(accountingVendorsLeaf.defaults?.supplier_rank, 1);
+
+  // Dual-role partner from Vendors leaf defaults to outbound; without defaults requires explicit selection
+  assert.equal(
+    partnerRegisterPaymentWizard(db, [dual.id], { defaults: accountingVendorsLeaf.defaults }).fields.find((f) => f.name === 'payment_type').default,
+    'outbound',
+  );
+  assert.equal(
+    partnerRegisterPaymentWizard(db, [dual.id]).fields.find((f) => f.name === 'payment_type').default,
+    null,
+  );
+  assert.throws(() => registerPartnerPayments(db, [dual.id], { amount: 50 }), /Select a payment type/);
+
+  // Multi-partner vendor-only selection without leaf defaults infers outbound; mixed selection requires explicit direction
+  assert.equal(
+    partnerRegisterPaymentWizard(db, [vendOnly1.id, vendOnly2.id]).fields.find((f) => f.name === 'payment_type').default,
+    'outbound',
+  );
+  assert.equal(
+    partnerRegisterPaymentWizard(db, [vendOnly1.id, dual.id]).fields.find((f) => f.name === 'payment_type').default,
+    null,
+  );
+
+  // FormView ActionsMenu passes leaf defaults into the wizard for a dual-role partner opened from Vendors
+  const { FormView } = await import('./views/FormView.jsx');
+  const ctx = await mountScreen(
+    (React) => React.createElement(FormView, {
+      leaf: accountingVendorsLeaf,
+      id: dual.id,
+      base: '#/accounting/vendors',
+      params: new URLSearchParams('view=form'),
+    }),
+    db,
+    { hash: `#/accounting/vendors/${dual.id}` },
+  );
+  try {
+    const gear = find(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.['aria-label'] === 'Actions');
+    await ctx.React.act(async () => props(gear).onClick());
+    const regItem = allFind(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'menuitem').find((n) => n.textContent.trim() === 'Register Payment');
+    await ctx.React.act(async () => props(regItem).onClick());
+    const dialog = find(ctx.host, (n) => n.tagName === 'FORM' && hasClass(n, 'wizard'));
+    const select = find(dialog, (n) => n.tagName === 'SELECT' && props(n)?.id === 'w-payment_type');
+    assert.equal(props(select).value, 'outbound');
+  } finally {
+    await ctx.done();
+  }
+});
+
+test('PTN3-8: archived or deleted preferred payment method line does not block unrelated partner edits', () => {
+  let db = seed();
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+  const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
+  const cashIn = cash.inbound_payment_method_line_ids[0];
+  const checkOut = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'check_printing',
+  );
+  const manualOut = bank.outbound_payment_method_line_ids.find(
+    (l) => read(db, 'account.payment.method', l.payment_method_id).code === 'manual',
+  );
+  const partner = create(db, 'res.partner', {
+    name: 'Legacy Pref Partner',
+    email: 'old@example.com',
+    property_inbound_payment_method_line_id: cashIn.id,
+    property_outbound_payment_method_line_id: checkOut.id,
+  });
+  db = partner.db;
+  const sync = (baseDb, mutated) => applyDiff(baseDb, diffDb(baseDb, mutated));
+
+  // Archive the referenced inbound payment method line: unrelated edits succeed via write and diffDb+applyDiff
+  const archivedLineDb = write(db, 'account.payment.method.line', cashIn.id, { active: false });
+  const editedWrite = write(archivedLineDb, 'res.partner', partner.id, { email: 'new@example.com', phone: '555-0100' });
+  assert.equal(read(editedWrite, 'res.partner', partner.id).property_inbound_payment_method_line_id, cashIn.id);
+  const editedSync = sync(archivedLineDb, {
+    ...archivedLineDb,
+    records: {
+      ...archivedLineDb.records,
+      'res.partner': archivedLineDb.records['res.partner'].map((r) => (r.id === partner.id ? { ...r, email: 'sync@example.com' } : r)),
+    },
+  });
+  assert.equal(read(editedSync, 'res.partner', partner.id).email, 'sync@example.com');
+
+  // Changing the other preference still validates only the changed preference
+  assert.doesNotThrow(() => write(archivedLineDb, 'res.partner', partner.id, { property_outbound_payment_method_line_id: manualOut.id }));
+
+  // Clearing the archived preference succeeds, while assigning an archived line to another partner fails
+  assert.doesNotThrow(() => write(archivedLineDb, 'res.partner', partner.id, { property_inbound_payment_method_line_id: null }));
+  const other = create(archivedLineDb, 'res.partner', { name: 'Other Partner' });
+  assert.throws(() => write(other.db, 'res.partner', other.id, { property_inbound_payment_method_line_id: cashIn.id }), /Select an active payment method/);
+
+  // Archiving the referenced journal also allows unrelated partner edits
+  const archivedJournalDb = write(db, 'account.journal', cash.id, { active: false });
+  assert.doesNotThrow(() => write(archivedJournalDb, 'res.partner', partner.id, { street: '10 Nile St' }));
+
+  // Deleting the referenced payment method line also allows unrelated partner edits
+  const deletedLineDb = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.payment.method.line': db.records['account.payment.method.line'].filter((l) => l.id !== cashIn.id),
+    },
+  };
+  assert.doesNotThrow(() => write(deletedLineDb, 'res.partner', partner.id, { phone: '555-0200' }));
+});
+
+test('PTN3-9: partnerRegisterPaymentWizard converts foreign residuals by payment date, nets refunds/credit notes, and clears on missing rate', () => {
+  let db = seed();
+  const companyCurrId = read(db, 'res.company', 1).currency_id;
+  const eur = db.records['res.currency'].find((c) => c.id !== companyCurrId);
+  assert.ok(eur, 'seed has a foreign currency');
+  // 1 USD = 0.8 EUR on 2026-04-01 (100 EUR = 125 USD); 1 USD = 0.5 EUR on 2026-05-01 (100 EUR = 200 USD)
+  db = upsertCurrencyRate(db, eur.id, { date: '2026-04-01', rate: 0.8 });
+  db = upsertCurrencyRate(db, eur.id, { date: '2026-05-01', rate: 0.5 });
+
+  const cust = create(db, 'res.partner', { name: 'FX Customer', customer_rank: 1 });
+  db = cust.db;
+
+  const invEur = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: cust.id,
+    currency_id: eur.id,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ product_id: 1, name: 'EUR Service', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  db = postMove(invEur.db, invEur.id);
+
+  const invCo = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: cust.id,
+    currency_id: companyCurrId,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ product_id: 1, name: 'USD Service', qty: 1, price_unit: 50, tax: 0 }],
+  });
+  db = postMove(invCo.db, invCo.id);
+
+  const cnEur = create(db, 'account.move', {
+    move_type: 'out_refund',
+    partner_id: cust.id,
+    currency_id: eur.id,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ product_id: 1, name: 'EUR Credit', qty: 1, price_unit: 20, tax: 0 }],
+  });
+  db = postMove(cnEur.db, cnEur.id);
+
+  const spec = partnerRegisterPaymentWizard(db, [cust.id], { defaults: { customer_rank: 1 } });
+  // On 2026-04-01: 125 + 50 - 25 = 150; on 2026-05-01 (and today if >= 2026-05-01): 200 + 50 - 40 = 210
+  assert.equal(spec.onchange({ payment_type: 'inbound', date: '2026-04-01' }, 'date').amount, '150');
+  assert.equal(spec.onchange({ payment_type: 'inbound', date: '2026-05-01' }, 'date').amount, '210');
+  // Before any EUR exchange rate exists, conversion is impossible so default amount is left empty
+  assert.equal(spec.onchange({ payment_type: 'inbound', date: '2000-01-01' }, 'date').amount, '');
+
+  // If the credit note exceeds open invoices, amount defaults to empty
+  const bigCn = create(db, 'account.move', {
+    move_type: 'out_refund',
+    partner_id: cust.id,
+    currency_id: companyCurrId,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ product_id: 1, name: 'Big Credit', qty: 1, price_unit: 500, tax: 0 }],
+  });
+  const bigCnDb = postMove(bigCn.db, bigCn.id);
+  assert.equal(partnerRegisterPaymentWizard(bigCnDb, [cust.id], { defaults: { customer_rank: 1 } }).fields.find((f) => f.name === 'amount').default, '');
+
+  // Outbound vendor bills and refunds in foreign currency convert and net properly too
+  const vend = create(db, 'res.partner', { name: 'FX Vendor', supplier_rank: 1 });
+  let vDb = vend.db;
+  const billEur = create(vDb, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: vend.id,
+    currency_id: eur.id,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ product_id: 1, name: 'EUR Bill', qty: 1, price_unit: 100, tax: 0 }],
+  });
+  vDb = postMove(billEur.db, billEur.id);
+  const vRefEur = create(vDb, 'account.move', {
+    move_type: 'in_refund',
+    partner_id: vend.id,
+    currency_id: eur.id,
+    invoice_date: '2026-04-01',
+    invoice_line_ids: [{ product_id: 1, name: 'EUR Vendor Refund', qty: 1, price_unit: 20, tax: 0 }],
+  });
+  vDb = postMove(vRefEur.db, vRefEur.id);
+  const vSpec = partnerRegisterPaymentWizard(vDb, [vend.id], { defaults: { supplier_rank: 1 } });
+  // On 2026-04-01: 125 - 25 = 100 USD
+  assert.equal(vSpec.onchange({ payment_type: 'outbound', date: '2026-04-01' }, 'date').amount, '100');
+  // On 2026-05-01: 200 - 40 = 160 USD
+  assert.equal(vSpec.onchange({ payment_type: 'outbound', date: '2026-05-01' }, 'date').amount, '160');
+});
+
+test('PTN3-10: multi-partner registerPartnerPayments creates draft payments instead of posting N full amounts', () => {
+  let db = seed();
+  const c1 = create(db, 'res.partner', { name: 'Multi Cust 1', customer_rank: 1 });
+  db = c1.db;
+  const c2 = create(db, 'res.partner', { name: 'Multi Cust 2', customer_rank: 1 });
+  db = c2.db;
+
+  const wizard = partnerRegisterPaymentWizard(db, [c1.id, c2.id], { defaults: { customer_rank: 1 } });
+  assert.equal(wizard.confirmLabel, 'Create Draft Payments');
+  assert.equal(wizard.fields.find((f) => f.name === 'amount').label, 'Amount per partner');
+
+  const movesBefore = (db.records['account.move'] ?? []).length;
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
+  const res = registerPartnerPayments(db, [c1.id, c2.id], {
+    payment_type: 'inbound',
+    amount: 100,
+    date: today(),
+    journal_id: bankJournal.id,
+  });
+  assert.equal(res.ids.length, 2);
+  for (const id of res.ids) {
+    const p = read(res.db, 'account.payment', id);
+    assert.equal(p.state, 'draft', 'multi-partner payment must stay draft so no duplicate cash is posted');
+    assert.equal(p.move_id ?? null, null);
+  }
+  assert.equal((res.db.records['account.move'] ?? []).length, movesBefore);
+  assert.equal(res.go, `#/accounting/payments?view=list&rel=id:${res.ids.join(',')}`);
 });

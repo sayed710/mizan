@@ -520,7 +520,7 @@ export function FormView({ leaf, id, base, params }) {
   const runButton = async (b) => {
     // Buttons that need input open an in-app dialog; the button runs with what was entered.
     if (!b.prompt) {
-      const spec = b.wizard?.(getDb(), current);
+      const spec = b.wizard?.(getDb(), current, { defaults: leaf?.defaults ?? {} });
       if (spec) { setWizard({ b, spec, error: null }); return; }
     }
     // Without the integration the button only records the send: say so, ask first and leave a trace.
@@ -530,7 +530,7 @@ export function FormView({ leaf, id, base, params }) {
     if (live) {
       if (b.prompt) {
         // With a wizard the amount is asked in the in-app dialog and sent as the same text the prompt would have.
-        const spec = b.wizard?.(getDb(), current);
+        const spec = b.wizard?.(getDb(), current, { defaults: leaf?.defaults ?? {} });
         if (spec) {
           setWizard({
             b, spec, error: null,
@@ -631,11 +631,16 @@ export function FormView({ leaf, id, base, params }) {
 
       const savedId = wizard.id ?? save();
       if (savedId == null) return;
-      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), shouldEmail && live ? { ...values, live: true } : values);
+      const res = wizard.b.run(
+        getDb(),
+        read(getDb(), model, savedId),
+        shouldEmail && live ? { ...values, live: true } : values,
+        { defaults: leaf?.defaults ?? {} },
+      );
       const saved = await commit(res.db, { quiet: true });
       if (!saved.ok) throw new Error(saved.error || 'Could not save changes');
 
-      if (shouldEmail) {
+      if (shouldEmail && (!res?.emailIds || res.emailIds.includes(savedId))) {
         if (live) {
           try {
             const out = await serverAction(endpoint, { model, id: savedId });

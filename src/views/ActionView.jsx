@@ -185,13 +185,14 @@ export function ActionView({ leaf, base, params }) {
 
       let hadRecordingError = Boolean(wizard.hasRecordingError);
       let recordingText = wizard.recordingError ?? '';
-      if (hasEmail) {
+      const emailIds = res?.emailIds ?? wizard.ids;
+      if (hasEmail && emailIds.length) {
         if (live) {
           const retryableIds = [];
           const retryableErrors = [];
           const recordingErrors = [];
-          const multi = wizard.ids.length > 1 || (wizard.allIds?.length ?? 0) > 1;
-          for (const id of wizard.ids) {
+          const multi = emailIds.length > 1 || (wizard.allIds?.length ?? 0) > 1;
+          for (const id of emailIds) {
             const recName = read(getDb(), model, id)?.name || `#${id}`;
             try {
               const out = await serverAction(endpoint, { model, id });
@@ -231,7 +232,7 @@ export function ActionView({ leaf, base, params }) {
             return;
           }
         } else if (channel) {
-          const noted = await commit(wizard.ids.reduce((acc, id) => postUnsentNote(acc, model, id, channel), getDb()), { quiet: true });
+          const noted = await commit(emailIds.reduce((acc, id) => postUnsentNote(acc, model, id, channel), getDb()), { quiet: true });
           if (!noted.ok) throw new Error(noted.error || 'Could not save changes');
         }
       }

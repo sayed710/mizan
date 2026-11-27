@@ -7,12 +7,14 @@ export const isMethodLineJournal = (journalOrType) =>
   METHOD_LINE_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
 
 /** Validate partner preferred payment method line references for ORM and diff+sync. */
-export function preferredPaymentMethodLineError(db, partner) {
+export function preferredPaymentMethodLineError(db, partner, fields = null) {
   if (!db || !partner) return null;
+  const fieldSet = fields ? new Set(fields) : null;
   for (const [field, direction] of [
     ['property_inbound_payment_method_line_id', 'inbound'],
     ['property_outbound_payment_method_line_id', 'outbound'],
   ]) {
+    if (fieldSet && !fieldSet.has(field)) continue;
     const lineId = partner[field];
     if (lineId == null || lineId === '') continue;
     const line = read(db, 'account.payment.method.line', lineId);
