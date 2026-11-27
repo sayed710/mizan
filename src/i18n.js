@@ -4160,6 +4160,8 @@ const ar = {
   'The bank journal is archived': 'دفتر اليومية البنكي مؤرشف',
   'The historical currency rate is unavailable': 'سعر العملة التاريخي غير متاح',
   'Upgrade: could not book bank statement line:': 'ترقية: تعذّر قيد بند كشف الحساب البنكي:',
+  'Account Roots': 'جذور الحسابات',
+  'Clear matching': 'مسح المطابقة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
