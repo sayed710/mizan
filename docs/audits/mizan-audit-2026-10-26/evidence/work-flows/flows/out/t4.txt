@@ -1,0 +1,5 @@
+lost on produce sync: stock.valuation.layer#6.counterpart | stock.valuation.layer#8.counterpart | stock.valuation.layer#10.counterpart | stock.valuation.layer#12.counterpart
+desk cost after 1 MO 301.27272727272725 qty 22
+re-confirm done MO then Produce: ACCEPTED desk 22 -> 24, oak 38 -> 36
+server accepts done -> confirmed MO forged by non-admin: ACCEPTED
+MO 20 desks consuming nothing: desk cost 301.27272727272725 -> 157.8095238095238 stock value of desks 6628

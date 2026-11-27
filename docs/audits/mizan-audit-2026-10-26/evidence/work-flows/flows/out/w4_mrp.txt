@@ -1,0 +1,23 @@
+start: desk 20 oak 40 frame 25 screws 300 | desk cost 310 method standard
+[sync create MO] lost: 0 
+[sync confirm] lost: 0 
+confirmed confirmed move_raw [{"product_id":7,"to_consume":2,"consumed":null},{"product_id":8,"to_consume":2,"consumed":null},{"product_id":9,"to_consume":2,"consumed":null}] avail available
+2nd MO for 25 (frames on hand 25): avail available | 1st MO still available
+[sync plan WOs] lost: 0 
+workorders [[1,"Cut and assemble","ready",90],[2,"Quality check","pending",20]]
+Produce before WOs done: Finish the work orders first: Cut and assemble, Quality check
+Start without operator: Record not found
+WO Start (button) client state progress date_start 2026-10-26T07:49:16.553Z
+server applyDiff of WO Start: REFUSED -> Invalid value for mrp.workorder.time_ids[0].date_start
+production cost estimate {"components":428,"operations":45.83,"total":473.83}
+[sync produce] lost 5 stock.valuation.layer#6.counterpart: client="600000" server=null ; stock.valuation.layer#8.counterpart: client="600000" server=null ; stock.valuation.layer#10.counterpart: client="600000" server=null
+after produce: state done desk 22 oak 38 frame 23 screws 298
+produce GL delta {"110100":45.83,"600000":-45.83}
+desk layers (last 2) [["in",2,214,428,13],["landed",0,0,45.83,14]] desk cost now 303.36 (standard)
+Produce again: This manufacturing order is already processed
+Confirm again (hidden) on done MO: ACCEPTED state confirmed
+Cancel done MO (hidden): state cancel, desk on hand still 22
+MO of 3 with consumed=0 typed on every component: desk 22 -> 25 oak 38 -> 38 | GL {}
+MO of 100 (components short): Not enough Oak Desk Top in stock
+produce 1 of 4: MO done 1 | backorder [["MO/00005","confirmed",3]]
+valuation report change (all products) 45.83 vs GL 110100 change 45.83

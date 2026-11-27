@@ -1,0 +1,17 @@
+const W = process.argv[2];
+const { seed } = await import(W + '/src/seed.js');
+const { applyDiff, diffDb } = await import(W + '/src/sync.js');
+const { create, read, search } = await import(W + '/src/orm.js');
+const { postMove, payMove } = await import(W + '/src/models/accounting.js');
+let s = seed();
+const c2 = create(s, 'res.company', { name: 'Second Co' }); s = applyDiff(s, diffDb(s, c2.db));
+s = applyDiff(s, { upserts: {}, deletes: {}, messages: [], removedMessages: [], settings: { current_company_id: c2.id, allowed_company_ids: [c2.id] } });
+const inv = create(s, 'account.move', { move_type: 'out_invoice', company_id: c2.id, partner_id: s.records['res.partner'][0].id, invoice_date: '2026-10-26', invoice_line_ids: [{ product_id: s.records.product[0].id, qty: 1, price_unit: 100, discount: 0, tax: 0 }] });
+s = applyDiff(s, diffDb(s, inv.db));
+s = applyDiff(s, diffDb(s, postMove(s, inv.id)));
+const before = new Set(Object.entries(s.records).flatMap(([m, r]) => r.map((x) => m + '#' + x.id)));
+const paid = payMove(s, inv.id, 100, '2026-10-26');
+s = applyDiff(s, diffDb(s, paid));
+const created = Object.entries(s.records).flatMap(([m, r]) => r.filter((x) => !before.has(m + '#' + x.id)).map((x) => `${m}#${x.id} company_id=${x.company_id}`));
+console.log('settings.current_company_id', s.settings.current_company_id, '| invoice', read(s, 'account.move', inv.id).name, 'company_id', read(s, 'account.move', inv.id).company_id);
+console.log('records created by payMove:', created.join(' | '));

@@ -1,0 +1,5 @@
+picking form locked while ready? false | move_ids readonly? false
+SO for 2, user edits delivery demand to 10 and validates: ACCEPTED lamp 128 -> 118, qty_delivered 2
+return picking WH/00003 ready sale_id undefined
+after return validated: lamp 128 SO qty_delivered 2 GL {"110100":28,"500000":-28}
+Return the same delivery twice: ACCEPTED lamp -> 130 (2 delivered, 4 returned)

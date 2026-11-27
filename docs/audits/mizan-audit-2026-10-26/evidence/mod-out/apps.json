@@ -1,0 +1,1469 @@
+[
+ {
+  "id": "spreadsheet",
+  "name": "Spreadsheet",
+  "models": [
+   "spreadsheet.document"
+  ],
+  "pages": [
+   "spreadsheet"
+  ],
+  "nModels": 1,
+  "fields": 5,
+  "computes": 0,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "discuss",
+  "name": "Discuss",
+  "models": [
+   "mail.activity"
+  ],
+  "pages": [
+   "discuss"
+  ],
+  "nModels": 1,
+  "fields": 11,
+  "computes": 1,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "calendar",
+  "name": "Calendar",
+  "models": [
+   "calendar.event"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 7,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "appointments",
+  "name": "Appointments",
+  "models": [
+   "appointment.booking",
+   "appointment.type"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 31,
+  "computes": 2,
+  "runBtns": 1,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 16,
+  "guardedModels": [
+   "appointment.booking"
+  ]
+ },
+ {
+  "id": "todo",
+  "name": "To-do",
+  "models": [
+   "todo.task"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 6,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "knowledge",
+  "name": "Knowledge",
+  "models": [
+   "knowledge.article"
+  ],
+  "pages": [
+   "knowledge"
+  ],
+  "nModels": 1,
+  "fields": 16,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": [
+   "knowledge.article"
+  ]
+ },
+ {
+  "id": "contacts",
+  "name": "Contacts",
+  "models": [
+   "res.partner"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 16,
+  "computes": 0,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 1,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "crm",
+  "name": "CRM",
+  "models": [
+   "crm.lead",
+   "sale.order",
+   "res.partner",
+   "crm.team"
+  ],
+  "pages": [],
+  "nModels": 4,
+  "fields": 90,
+  "computes": 6,
+  "runBtns": 16,
+  "valsBtns": 4,
+  "serverBtns": 3,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 4,
+  "allowedModels": 22,
+  "guardedModels": [
+   "crm.lead",
+   "sale.order"
+  ]
+ },
+ {
+  "id": "sales",
+  "name": "Sales",
+  "models": [
+   "sale.order",
+   "res.partner",
+   "product",
+   "product.pricelist",
+   "sale.order.template",
+   "loyalty.program",
+   "loyalty.card",
+   "marketplace.connector"
+  ],
+  "pages": [],
+  "nModels": 8,
+  "fields": 135,
+  "computes": 6,
+  "runBtns": 16,
+  "valsBtns": 2,
+  "serverBtns": 4,
+  "guards": 5,
+  "protectDelete": 0,
+  "onchange": 4,
+  "allowedModels": 22,
+  "guardedModels": [
+   "sale.order",
+   "product",
+   "sale.order.template",
+   "loyalty.program",
+   "loyalty.card"
+  ]
+ },
+ {
+  "id": "dashboards",
+  "name": "Dashboards",
+  "models": [],
+  "pages": [
+   "overview"
+  ],
+  "nModels": 0,
+  "fields": 0,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "subscriptions",
+  "name": "Subscriptions",
+  "models": [
+   "sale.subscription",
+   "sale.subscription.plan"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 31,
+  "computes": 2,
+  "runBtns": 4,
+  "valsBtns": 4,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 2,
+  "allowedModels": 17,
+  "guardedModels": [
+   "sale.subscription.plan"
+  ]
+ },
+ {
+  "id": "rental",
+  "name": "Rental",
+  "models": [
+   "sale.rental",
+   "rental.deposit",
+   "rental.pricing"
+  ],
+  "pages": [],
+  "nModels": 3,
+  "fields": 26,
+  "computes": 2,
+  "runBtns": 6,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 17,
+  "guardedModels": [
+   "rental.pricing"
+  ]
+ },
+ {
+  "id": "pos",
+  "name": "Point of Sale",
+  "models": [
+   "pos.order",
+   "pos.session",
+   "pos.config",
+   "restaurant.floor"
+  ],
+  "pages": [
+   "pos"
+  ],
+  "nModels": 4,
+  "fields": 43,
+  "computes": 3,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 19,
+  "guardedModels": [
+   "restaurant.floor"
+  ]
+ },
+ {
+  "id": "kitchen",
+  "name": "Kitchen Display",
+  "models": [],
+  "pages": [
+   "kitchen"
+  ],
+  "nModels": 0,
+  "fields": 0,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "accounting",
+  "name": "Accounting",
+  "models": [
+   "account.move",
+   "account.payment",
+   "res.partner",
+   "account.bank.statement.line",
+   "account.batch.payment",
+   "account.asset",
+   "account.loan",
+   "account.deferral",
+   "consolidation.chart",
+   "consolidation.period",
+   "account.account",
+   "account.journal",
+   "account.tax",
+   "account.fiscal.position",
+   "account.reconcile.model",
+   "account.fiscal.year",
+   "account.analytic.plan",
+   "account.analytic.account",
+   "account.analytic.line",
+   "account.budget",
+   "res.currency",
+   "account.payment.term",
+   "account.followup.level"
+  ],
+  "pages": [
+   "dashboard",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report",
+   "report"
+  ],
+  "nModels": 23,
+  "fields": 223,
+  "computes": 13,
+  "runBtns": 41,
+  "valsBtns": 6,
+  "serverBtns": 2,
+  "guards": 7,
+  "protectDelete": 3,
+  "onchange": 5,
+  "allowedModels": 36,
+  "guardedModels": [
+   "account.move",
+   "account.payment",
+   "consolidation.chart",
+   "consolidation.period",
+   "account.journal",
+   "account.fiscal.year",
+   "account.analytic.line"
+  ]
+ },
+ {
+  "id": "documents",
+  "name": "Documents",
+  "models": [
+   "documents.document",
+   "documents.folder",
+   "documents.workflow.rule",
+   "documents.tag",
+   "documents.share"
+  ],
+  "pages": [],
+  "nModels": 5,
+  "fields": 41,
+  "computes": 1,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 18,
+  "guardedModels": [
+   "documents.folder",
+   "documents.workflow.rule"
+  ]
+ },
+ {
+  "id": "project",
+  "name": "Project",
+  "models": [
+   "project.project",
+   "project.task",
+   "project.milestone",
+   "project.update",
+   "project.recurrence"
+  ],
+  "pages": [],
+  "nModels": 5,
+  "fields": 48,
+  "computes": 0,
+  "runBtns": 1,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 18,
+  "guardedModels": [
+   "project.project",
+   "project.task"
+  ]
+ },
+ {
+  "id": "timesheets",
+  "name": "Timesheets",
+  "models": [
+   "account.analytic.line"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 21,
+  "computes": 0,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 19,
+  "guardedModels": [
+   "account.analytic.line"
+  ]
+ },
+ {
+  "id": "planning",
+  "name": "Planning",
+  "models": [
+   "planning.slot",
+   "planning.template"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 29,
+  "computes": 1,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 17,
+  "guardedModels": [
+   "planning.slot"
+  ]
+ },
+ {
+  "id": "helpdesk",
+  "name": "Helpdesk",
+  "models": [
+   "helpdesk.ticket",
+   "helpdesk.team",
+   "helpdesk.sla"
+  ],
+  "pages": [],
+  "nModels": 3,
+  "fields": 35,
+  "computes": 1,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 17,
+  "guardedModels": [
+   "helpdesk.ticket"
+  ]
+ },
+ {
+  "id": "website",
+  "name": "Website",
+  "models": [
+   "website.page",
+   "website.menu",
+   "website.redirect",
+   "website.snippet",
+   "product",
+   "product.public.category",
+   "payment.provider",
+   "sale.order",
+   "blog.post",
+   "blog.blog",
+   "forum.post",
+   "forum.forum"
+  ],
+  "pages": [
+   "website"
+  ],
+  "nModels": 12,
+  "fields": 150,
+  "computes": 6,
+  "runBtns": 19,
+  "valsBtns": 9,
+  "serverBtns": 2,
+  "guards": 5,
+  "protectDelete": 0,
+  "onchange": 4,
+  "allowedModels": 29,
+  "guardedModels": [
+   "website.page",
+   "website.menu",
+   "website.redirect",
+   "product",
+   "sale.order"
+  ]
+ },
+ {
+  "id": "marketing",
+  "name": "Email Marketing",
+  "models": [
+   "mailing.mailing",
+   "mailing.list",
+   "mailing.contact",
+   "mail.blacklist",
+   "mailing.trace"
+  ],
+  "pages": [],
+  "nModels": 5,
+  "fields": 53,
+  "computes": 5,
+  "runBtns": 2,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 18,
+  "guardedModels": [
+   "mailing.mailing"
+  ]
+ },
+ {
+  "id": "events",
+  "name": "Events",
+  "models": [
+   "event.event",
+   "event.registration",
+   "event.track",
+   "event.sponsor",
+   "event.booth",
+   "event.question"
+  ],
+  "pages": [],
+  "nModels": 6,
+  "fields": 49,
+  "computes": 0,
+  "runBtns": 4,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 20,
+  "guardedModels": [
+   "event.registration"
+  ]
+ },
+ {
+  "id": "purchase",
+  "name": "Purchase",
+  "models": [
+   "purchase.order",
+   "purchase.requisition",
+   "res.partner",
+   "product",
+   "product.supplierinfo"
+  ],
+  "pages": [],
+  "nModels": 5,
+  "fields": 93,
+  "computes": 4,
+  "runBtns": 11,
+  "valsBtns": 3,
+  "serverBtns": 1,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 3,
+  "allowedModels": 18,
+  "guardedModels": [
+   "purchase.order",
+   "product"
+  ]
+ },
+ {
+  "id": "inventory",
+  "name": "Inventory",
+  "models": [
+   "stock.picking",
+   "stock.scrap",
+   "stock.inventory.count",
+   "product",
+   "stock.lot",
+   "stock.picking.batch",
+   "stock.quant.package",
+   "stock.landed.cost",
+   "stock.valuation.layer",
+   "delivery.carrier",
+   "stock.warehouse",
+   "stock.location",
+   "uom.category",
+   "uom.uom",
+   "product.packaging"
+  ],
+  "pages": [
+   "report"
+  ],
+  "nModels": 15,
+  "fields": 152,
+  "computes": 2,
+  "runBtns": 15,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 5,
+  "protectDelete": 2,
+  "onchange": 1,
+  "allowedModels": 30,
+  "guardedModels": [
+   "stock.picking",
+   "product",
+   "stock.warehouse",
+   "uom.uom",
+   "product.packaging"
+  ]
+ },
+ {
+  "id": "manufacturing",
+  "name": "Manufacturing",
+  "models": [
+   "mrp.production",
+   "mrp.workorder",
+   "mrp.bom",
+   "mrp.workcenter",
+   "mrp.unbuild",
+   "stock.scrap",
+   "product"
+  ],
+  "pages": [],
+  "nModels": 7,
+  "fields": 107,
+  "computes": 1,
+  "runBtns": 14,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 2,
+  "allowedModels": 21,
+  "guardedModels": [
+   "product"
+  ]
+ },
+ {
+  "id": "shopfloor",
+  "name": "Shop Floor",
+  "models": [],
+  "pages": [
+   "shopfloor"
+  ],
+  "nModels": 0,
+  "fields": 0,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "barcode",
+  "name": "Barcode",
+  "models": [],
+  "pages": [
+   "barcode"
+  ],
+  "nModels": 0,
+  "fields": 0,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "quality",
+  "name": "Quality",
+  "models": [
+   "quality.point",
+   "quality.check",
+   "quality.alert"
+  ],
+  "pages": [],
+  "nModels": 3,
+  "fields": 37,
+  "computes": 0,
+  "runBtns": 3,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 18,
+  "guardedModels": []
+ },
+ {
+  "id": "maintenance",
+  "name": "Maintenance",
+  "models": [
+   "maintenance.request",
+   "maintenance.equipment"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 29,
+  "computes": 0,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 15,
+  "guardedModels": [
+   "maintenance.request",
+   "maintenance.equipment"
+  ]
+ },
+ {
+  "id": "repairs",
+  "name": "Repairs",
+  "models": [
+   "repair.order"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 26,
+  "computes": 3,
+  "runBtns": 6,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 2,
+  "allowedModels": 19,
+  "guardedModels": []
+ },
+ {
+  "id": "fieldservice",
+  "name": "Field Service",
+  "models": [
+   "fsm.task"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 21,
+  "computes": 2,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 17,
+  "guardedModels": []
+ },
+ {
+  "id": "sign",
+  "name": "Sign",
+  "models": [
+   "sign.request",
+   "sign.template"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 25,
+  "computes": 1,
+  "runBtns": 5,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 16,
+  "guardedModels": []
+ },
+ {
+  "id": "employees",
+  "name": "Employees",
+  "models": [
+   "hr.employee",
+   "hr.department"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 42,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": [
+   "hr.employee"
+  ]
+ },
+ {
+  "id": "attendances",
+  "name": "Attendances",
+  "models": [
+   "hr.attendance",
+   "hr.attendance.overtime.rule"
+  ],
+  "pages": [
+   "kiosk"
+  ],
+  "nModels": 2,
+  "fields": 21,
+  "computes": 3,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": [
+   "hr.attendance",
+   "hr.attendance.overtime.rule"
+  ]
+ },
+ {
+  "id": "recruitment",
+  "name": "Recruitment",
+  "models": [
+   "hr.job",
+   "hr.applicant"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 34,
+  "computes": 0,
+  "runBtns": 5,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 16,
+  "guardedModels": []
+ },
+ {
+  "id": "timeoff",
+  "name": "Time Off",
+  "models": [
+   "hr.leave",
+   "hr.leave.allocation"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 16,
+  "computes": 1,
+  "runBtns": 1,
+  "valsBtns": 4,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": [
+   "hr.leave"
+  ]
+ },
+ {
+  "id": "appraisals",
+  "name": "Appraisals",
+  "models": [
+   "hr.appraisal",
+   "hr.appraisal.goal",
+   "hr.appraisal.template"
+  ],
+  "pages": [],
+  "nModels": 3,
+  "fields": 29,
+  "computes": 4,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 2,
+  "allowedModels": 16,
+  "guardedModels": [
+   "hr.appraisal",
+   "hr.appraisal.goal"
+  ]
+ },
+ {
+  "id": "payroll",
+  "name": "Payroll",
+  "models": [
+   "hr.payslip.run",
+   "hr.payslip",
+   "hr.contract",
+   "hr.payroll.structure",
+   "hr.payslip.input.type"
+  ],
+  "pages": [],
+  "nModels": 5,
+  "fields": 31,
+  "computes": 3,
+  "runBtns": 8,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 18,
+  "guardedModels": []
+ },
+ {
+  "id": "expenses",
+  "name": "Expenses",
+  "models": [
+   "hr.expense",
+   "hr.expense.sheet"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 33,
+  "computes": 1,
+  "runBtns": 9,
+  "valsBtns": 4,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 2,
+  "onchange": 2,
+  "allowedModels": 18,
+  "guardedModels": [
+   "hr.expense"
+  ]
+ },
+ {
+  "id": "fleet",
+  "name": "Fleet",
+  "models": [
+   "fleet.vehicle",
+   "fleet.service",
+   "fleet.contract",
+   "fleet.odometer",
+   "fleet.fuel.log"
+  ],
+  "pages": [],
+  "nModels": 5,
+  "fields": 48,
+  "computes": 1,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 2,
+  "allowedModels": 18,
+  "guardedModels": [
+   "fleet.odometer",
+   "fleet.fuel.log"
+  ]
+ },
+ {
+  "id": "lunch",
+  "name": "Lunch",
+  "models": [
+   "lunch.order",
+   "lunch.product",
+   "lunch.supplier",
+   "lunch.cashmove",
+   "lunch.alert"
+  ],
+  "pages": [],
+  "nModels": 5,
+  "fields": 50,
+  "computes": 1,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 2,
+  "allowedModels": 18,
+  "guardedModels": [
+   "lunch.order",
+   "lunch.supplier"
+  ]
+ },
+ {
+  "id": "approvals",
+  "name": "Approvals",
+  "models": [
+   "approval.request",
+   "approval.category"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 24,
+  "computes": 1,
+  "runBtns": 5,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": []
+ },
+ {
+  "id": "frontdesk",
+  "name": "Frontdesk",
+  "models": [
+   "frontdesk.visitor",
+   "frontdesk.station"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 28,
+  "computes": 1,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": [
+   "frontdesk.visitor"
+  ]
+ },
+ {
+  "id": "surveys",
+  "name": "Surveys",
+  "models": [
+   "survey.survey",
+   "survey.answer"
+  ],
+  "pages": [
+   "surveytake",
+   "surveyresults"
+  ],
+  "nModels": 2,
+  "fields": 23,
+  "computes": 1,
+  "runBtns": 2,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": []
+ },
+ {
+  "id": "elearning",
+  "name": "eLearning",
+  "models": [
+   "slide.channel",
+   "slide.channel.partner"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 25,
+  "computes": 2,
+  "runBtns": 3,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": [
+   "slide.channel.partner"
+  ]
+ },
+ {
+  "id": "livechat",
+  "name": "Live Chat",
+  "models": [
+   "livechat.session",
+   "livechat.channel",
+   "livechat.canned",
+   "livechat.chatbot"
+  ],
+  "pages": [],
+  "nModels": 4,
+  "fields": 34,
+  "computes": 5,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 17,
+  "guardedModels": []
+ },
+ {
+  "id": "whatsapp",
+  "name": "WhatsApp",
+  "models": [
+   "whatsapp.message",
+   "whatsapp.template"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 20,
+  "computes": 0,
+  "runBtns": 1,
+  "valsBtns": 4,
+  "serverBtns": 1,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": [
+   "whatsapp.template"
+  ]
+ },
+ {
+  "id": "sms",
+  "name": "SMS Marketing",
+  "models": [
+   "sms.campaign",
+   "sms.trace",
+   "phone.blacklist"
+  ],
+  "pages": [],
+  "nModels": 3,
+  "fields": 25,
+  "computes": 3,
+  "runBtns": 1,
+  "valsBtns": 2,
+  "serverBtns": 1,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 17,
+  "guardedModels": []
+ },
+ {
+  "id": "social",
+  "name": "Social Marketing",
+  "models": [
+   "social.post",
+   "social.account"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 19,
+  "computes": 5,
+  "runBtns": 2,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": []
+ },
+ {
+  "id": "automation",
+  "name": "Marketing Automation",
+  "models": [
+   "marketing.campaign",
+   "marketing.participant"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 12,
+  "computes": 0,
+  "runBtns": 3,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 16,
+  "guardedModels": []
+ },
+ {
+  "id": "plm",
+  "name": "PLM",
+  "models": [
+   "mrp.eco",
+   "mrp.bom"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 12,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 16,
+  "guardedModels": []
+ },
+ {
+  "id": "rooms",
+  "name": "Meeting Rooms",
+  "models": [
+   "room.booking",
+   "room.room"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 10,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 15,
+  "guardedModels": []
+ },
+ {
+  "id": "referral",
+  "name": "Referrals",
+  "models": [
+   "hr.referral",
+   "hr.referral.reward"
+  ],
+  "pages": [],
+  "nModels": 2,
+  "fields": 15,
+  "computes": 3,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 2,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 17,
+  "guardedModels": [
+   "hr.referral",
+   "hr.referral.reward"
+  ]
+ },
+ {
+  "id": "skills",
+  "name": "Skills",
+  "models": [
+   "hr.employee.skill",
+   "hr.resume.line",
+   "hr.skill",
+   "hr.skill.type"
+  ],
+  "pages": [],
+  "nModels": 4,
+  "fields": 19,
+  "computes": 1,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 3,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 17,
+  "guardedModels": [
+   "hr.employee.skill",
+   "hr.resume.line",
+   "hr.skill.type"
+  ]
+ },
+ {
+  "id": "esg",
+  "name": "ESG",
+  "models": [
+   "esg.emission"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 7,
+  "computes": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "equity",
+  "name": "Equity",
+  "models": [
+   "equity.transaction"
+  ],
+  "pages": [
+   "captable"
+  ],
+  "nModels": 1,
+  "fields": 10,
+  "computes": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "recycle",
+  "name": "Data Recycle",
+  "models": [
+   "data.recycle"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 6,
+  "computes": 0,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "phone",
+  "name": "Phone",
+  "models": [
+   "phone.call"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 7,
+  "computes": 0,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "iot",
+  "name": "IoT",
+  "models": [
+   "iot.device"
+  ],
+  "pages": [],
+  "nModels": 1,
+  "fields": 7,
+  "computes": 0,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 1,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 14,
+  "guardedModels": []
+ },
+ {
+  "id": "studio",
+  "name": "Studio",
+  "models": [],
+  "pages": [
+   "studio"
+  ],
+  "nModels": 0,
+  "fields": 0,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "apps",
+  "name": "Apps",
+  "models": [],
+  "pages": [
+   "appstore"
+  ],
+  "nModels": 0,
+  "fields": 0,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 0,
+  "protectDelete": 0,
+  "onchange": 0,
+  "allowedModels": 13,
+  "guardedModels": []
+ },
+ {
+  "id": "settings",
+  "name": "Settings",
+  "models": [
+   "res.company"
+  ],
+  "pages": [
+   "settings"
+  ],
+  "nModels": 1,
+  "fields": 13,
+  "computes": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "guards": 1,
+  "protectDelete": 0,
+  "onchange": 1,
+  "allowedModels": 14,
+  "guardedModels": [
+   "res.company"
+  ]
+ }
+]

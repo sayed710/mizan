@@ -1,0 +1,24 @@
+seed subscriptions [[1,"progress","2026-10-25",null],[2,"progress","2027-07-18",null],[3,"draft","2026-10-26",null]]
+[sync create] lost: 0 
+[sync start] lost: 0 
+started progress
+[sync scheduler#1] lost: 0 
+after scheduler: invoices 2026-08-01:posted:112.86:not_paid | 2026-09-01:posted:112.86:not_paid | 2026-10-01:posted:112.86:not_paid | stage closed unpaid | next 2026-11-01
+GL {"121000":451.44,"251000":-55.44,"400000":-396}
+scheduler#2 same day new invoices: 0
+Generate Invoice clicked twice: 2026-10-26:posted:112.86:not_paid | 2026-11-26:posted:112.86:not_paid next 2026-12-26
+scheduler 2026-11-26 billed again for s2: 0 | s2 2026-10-26:posted:112.86:not_paid | 2026-11-26:posted:112.86:not_paid
+paid first s2 invoice: paid
+non-admin can set payment_token via server: ACCEPTED
+auto-pay sub: invoices 2026-10-01:posted:1128.6:paid GL {"101401":1128.6,"251000":-138.6,"400000":-990} payments PBNK1/2026/00004:1128.6:3
+s4 billed June: 2026-06-01:posted:112.86:paid
+closed s4: closed no_need end_date 2026-10-26 next 2026-07-01
+scheduler while closed bills s4: 0
+Reopen on 2026-10-26 then scheduler: s4 invoices 2026-06-01:posted:112.86:paid | 2026-07-01:posted:112.86:paid | 2026-08-01:posted:112.86:paid | 2026-09-01:posted:112.86:paid | 2026-10-01:posted:112.86:paid
+fixed-term (end 2026-09-01) sub: invoices 2026-07-01:posted:50:paid | 2026-08-01:posted:50:paid stage closed closed_date 2026-09-01
+renew s5: new sub 9 stage draft start 2026-09-01
+statusbarClickable on sale.subscription: true
+after cancelling 2026-11-26 invoice and rewinding next date, scheduler re-bills: 2026-10-26:posted:112.86:paid | 2026-11-26:cancel:112.86:not_paid
+subscriptionJobs direct: ok
+s2 in context: {"stage":"closed","next_invoice_date":"2026-11-26","close_reason":"unpaid"}
+invoiceDue: 2026-10-26:posted:112.86:paid | 2026-11-26:cancel:112.86:not_paid

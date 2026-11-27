@@ -1,0 +1,10 @@
+const W = process.argv[2];
+const { seed } = await import(W + '/src/seed.js');
+const { applyDiff } = await import(W + '/src/sync.js');
+const { read } = await import(W + '/src/orm.js');
+const { handleApi } = await import(W + '/server/api.js');
+let db = seed();
+db = applyDiff(db, { upserts: { 'res.partner': [{ id: 9, name: 'Posted without seq' }] }, deletes: {}, messages: [], removedMessages: [] }, { isAdmin: false });
+console.log('seq after upsert of id 9 without d.seq:', db.seq['res.partner']);
+const out = handleApi({ method: 'POST', path: '/api/v1/res.partner', query: new URLSearchParams(), body: { name: 'Created via REST API' }, db, user: { name: 'api', isAdmin: true }, allowed: null });
+console.log('REST create ->', out.status, 'id', out.body?.id, '| partner 9 now:', read(out.db ?? db, 'res.partner', 9)?.name);
