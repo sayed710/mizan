@@ -1,7 +1,7 @@
 import { create, getActiveCompany, read, write, writeMany } from '../orm.js';
 import { commercialPartnerId, today, validDate } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, postponeFollowUp, postponeFollowUpWizardSpec, unpostponeFollowUp, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 import { LANGUAGES } from '../i18n.js';
 import { countryIdFor, countryReferenceError, stateIdFor } from './country.js';
@@ -828,6 +828,10 @@ export const crmModels = {
           followup_oldest_date: { type: 'date', label: 'Oldest Overdue Date', hidden: true },
           followup_sms_level_delay: { type: 'integer', label: 'SMS Queued for Level (days)', hidden: true },
           followup_sms_oldest_date: { type: 'date', label: 'SMS Queued for Overdue Date', hidden: true },
+          followup_email_level_delay: { type: 'integer', label: 'Email Sent for Level (days)', hidden: true },
+          followup_email_oldest_date: { type: 'date', label: 'Email Sent for Overdue Date', hidden: true },
+          followup_pending_letter: { type: 'boolean', label: 'Pending Letter', hidden: true },
+          followup_postponed: { type: 'boolean', label: 'Manually Postponed', hidden: true },
           followup_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level' },
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },
@@ -933,9 +937,11 @@ export const crmModels = {
       }
       if (key === 'followup_next_action_date') {
         const cId = db?.settings?.current_company_id ?? 1;
+        const nextDate = r.followup_next_action_date || null;
         return {
           followup_lines: updatePartnerFollowUp(r, cId, {
-            followup_next_action_date: r.followup_next_action_date || null,
+            followup_next_action_date: nextDate,
+            followup_postponed: Boolean(nextDate),
           }).followup_lines,
         };
       }
@@ -973,8 +979,10 @@ export const crmModels = {
       if (nextVals && 'followup_next_action_date' in nextVals) {
         const cId = db?.settings?.current_company_id ?? 1;
         const base = { ...before, ...nextVals };
+        const nextDate = vals.followup_next_action_date || null;
         const nextPartner = updatePartnerFollowUp(base, cId, {
-          followup_next_action_date: vals.followup_next_action_date || null,
+          followup_next_action_date: nextDate,
+          followup_postponed: Boolean(nextDate),
         });
         return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
@@ -988,8 +996,10 @@ export const crmModels = {
       }
       if (nextVals && 'followup_next_action_date' in nextVals) {
         const cId = db?.settings?.current_company_id ?? 1;
+        const nextDate = nextVals.followup_next_action_date || null;
         const nextPartner = updatePartnerFollowUp(nextVals, cId, {
-          followup_next_action_date: nextVals.followup_next_action_date || null,
+          followup_next_action_date: nextDate,
+          followup_postponed: Boolean(nextDate),
         });
         return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
@@ -1064,6 +1074,19 @@ export const crmModels = {
         when: (_r, db, user) => appOpen(db, user, 'accounting'),
         visible: (_r, db, user) => appOpen(db, user, 'accounting'),
         run: (db, r) => ({ db, go: `#/followup/send/${r.id}?company=${db.settings?.current_company_id ?? 1}` }),
+      }, {
+        label: 'Postpone',
+        app: 'accounting',
+        when: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && !isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        visible: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && !isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        wizard: () => postponeFollowUpWizardSpec(),
+        run: (db, r, values) => ({ db: postponeFollowUp(db, [r.id], values.date, { companyId: db?.settings?.current_company_id ?? 1 }) }),
+      }, {
+        label: 'Unpostpone',
+        app: 'accounting',
+        when: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        visible: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        run: (db, r) => ({ db: unpostponeFollowUp(db, [r.id], { companyId: db?.settings?.current_company_id ?? 1, at: today() }) }),
       }, { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
       groups: [
         ['is_company', 'parent_id', 'email', 'phone', 'vat', 'function', 'website', 'lang'],
