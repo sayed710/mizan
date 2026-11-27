@@ -9,13 +9,14 @@ import { seed } from './seed.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import { cleanRecord } from './validate.js';
-import { accountId, journalId, postEntry } from './models/ledger.js';
+import { accountId, balanceSheet, journalId, postEntry } from './models/ledger.js';
+import { addDays, today } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
 import { confirmAsset, disposeAsset, postDepreciation } from './models/assets.js';
 import { bookBankMovement } from './models/bank.js';
 import { taxSnapshot } from './models/taxes.js';
 import { cashFlowIndirect, INDIRECT_CASH_FLOW_TAGS } from './models/cashFlowIndirect.js';
-import { accountCashFlowActivity } from './models/reports.js';
+import { accountCashFlowActivity, cashFlow } from './models/reports.js';
 import { setupDom, find } from './test-support/dom.js';
 import { tableToRows } from './csv.js';
 
@@ -602,8 +603,8 @@ test('CFI-1 regression (Finding 12): fold toggles in CashFlowIndirect do not rec
 
 test('CFI-1 regression (Finding 13): seeded database populates indirect cash flow detail without manual retagging', () => {
   const db = seed();
-  const year = new Date().toISOString().slice(0, 4);
-  const { byCode } = cashFlowIndirect(db, { from: `${year}-01-01`, to: `${year}-12-31`, company_id: 1 });
+  // Seeded invoices, vendor bill, and valued stock moves span addDays(today(), -45)..today(), which crosses Jan 1 in early January.
+  const { byCode } = cashFlowIndirect(db, { from: addDays(today(), -60), to: today(), company_id: 1 });
   assert.notEqual(byCode.CF_OP_WCAP_TRA_REC, 0, 'Seeded invoices and payments should populate Trade receivables');
   assert.notEqual(byCode.CF_OP_WCAP_TRA_PAY, 0, 'Seeded vendor bill should populate Trade payables');
   assert.notEqual(byCode.CF_OP_WCAP_INV, 0, 'Seeded stock valuation should populate Inventory');
@@ -614,4 +615,53 @@ test('CFI-1 regression (Finding 13): seeded database populates indirect cash flo
   const fixedAcc = read(db, 'account.account', accountId(db, '151000'));
   assert.equal(accountCashFlowActivity(db, loanAcc), 'financing');
   assert.equal(accountCashFlowActivity(db, fixedAcc), 'investing');
+});
+
+test('CFI-1 regression (review Finding 2): analytic cash excludes unrelated unallocated P&L lines in the same paid entry', () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const plan = create(db, 'account.analytic.plan', { name: 'Projects', default_applicability: 'optional' });
+  db = plan.db;
+  const alpha = create(db, 'account.analytic.account', { name: 'Project Alpha', code: 'PRJ-A', plan_id: plan.id });
+  db = alpha.db;
+
+  // One paid bank entry combining a selected project expense (400) and an unrelated unallocated expense (100).
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-03-15',
+    ref: 'Mixed project and general expense',
+    lines: [
+      { account: '600000', debit: 400, analytic_distribution: { [alpha.id]: 100 } },
+      { account: '630000', debit: 100 },
+      { account: '101401', credit: 500 },
+    ],
+  }).db;
+
+  const period = { from: '2041-03-01', to: '2041-03-31', company_id: 1, analyticAccountIds: [alpha.id] };
+  const { byCode } = cashFlowIndirect(db, period);
+  assert.equal(byCode.CF_OP_EBIT, -400);
+  assert.equal(byCode.CF_OP, -400);
+  assert.equal(byCode.CF_CASH_VAR_NON_CASH, -400);
+  assert.equal(byCode.CF_CASH_EOP, -400, 'Cash endpoint must reflect only the selected project expense');
+  assert.equal(byCode.CF_CASH, -400);
+  assert.equal(byCode.CF_NOT_RECON, 0, 'Unallocated expense must not create a reconciliation residual');
+
+  const direct = cashFlow(db, period);
+  assert.equal(direct.operating, -400);
+  assert.equal(direct.closing, -400);
+  assert.equal(direct.net, -400);
+
+  const bs = balanceSheet(db, { to: '2041-03-31', company_id: 1 }, { analyticAccountIds: [alpha.id] });
+  assert.equal(bs.totalAssets, -400);
+  assert.equal(bs.totalAssets, bs.totalLiabilities + bs.totalEquity);
 });

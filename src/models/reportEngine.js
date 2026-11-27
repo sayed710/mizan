@@ -318,7 +318,7 @@ export function evaluateStoredReport(db, report, period, options = {}) {
           const range = expressionPeriod(db, expr.date_scope, period, companyId);
           let items = journalItems(db, { ...range, company_id: companyId, reviewMode: options.reviewMode ?? 'posted', includeClosing: !report.exclude_closing });
           if (options.analyticAccountIds?.length) items = report.date_scope === 'cumulative'
-            ? analyticMoveItems(items, options.analyticAccountIds)
+            ? analyticMoveItems(items, options.analyticAccountIds, db)
             : filterByAnalytic(items, options.analyticAccountIds);
           if (options.weight) items = weighted(items, options.weight);
           if (expr.engine === 'domain') items = items.filter(domainPredicate(db, expr.formula));

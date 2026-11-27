@@ -177,7 +177,7 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
   const { saleMoveIds, disposalMoveIds, depreciationMoveIds } = assetMoveKinds(documentsDb);
 
   const periodItems = weighted(
-    analyticMoveItems(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds),
+    analyticMoveItems(journalItems(db, { from, to, company_id, reviewMode: mode, includeClosing: false }), analyticAccountIds, documentsDb),
     weight,
   );
   const bopItems = from
@@ -185,12 +185,13 @@ export function cashFlowIndirect(db, { from, to, company_id, analyticAccountIds,
         analyticMoveItems(
           journalItems(db, { company_id, reviewMode: mode, includeClosing: true }).filter((l) => l.date < from),
           analyticAccountIds,
+          documentsDb,
         ),
         weight,
       )
     : [];
   const eopItems = weighted(
-    analyticMoveItems(journalItems(db, { to, company_id, reviewMode: mode, includeClosing: true }), analyticAccountIds),
+    analyticMoveItems(journalItems(db, { to, company_id, reviewMode: mode, includeClosing: true }), analyticAccountIds, documentsDb),
     weight,
   );
 
