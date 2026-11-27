@@ -55,7 +55,7 @@ test('locked revaluation rejects without changing the database', () => {
 test('revaluation uses the company configured exchange accounts', () => {
   const { db } = fixture();
   const gain = create(db, 'account.account', { code: '459999', name: 'Company gain', account_type: 'income_other' });
-  const company = write(gain.db, 'res.company', 1, { income_currency_exchange_account_id: gain.id });
+  const company = write(gain.db, 'res.company', 1, { income_currency_exchange_account_id: gain.id, account_revaluation_income_provision_account_id: null });
   const done = revalueForeignBalances(company, '2026-02-28');
   const entry = search(done, 'account.move').find((m) => m.revaluation_date === '2026-02-28');
   assert.equal(entry.line_ids.find((l) => l.account_id === gain.id)?.credit, 50);
@@ -73,7 +73,7 @@ test('companies revalue only their own invoices using their own journal and acco
     accounts[code] = created.id;
   }
   const journal = create(db, 'account.journal', { code: 'MISC', name: 'Second miscellaneous', type: 'general', company_id: secondCompany.id });
-  db = write(journal.db, 'res.company', secondCompany.id, { account_default_receivable_id: accounts['121000'], default_general_journal_id: journal.id });
+  db = write(journal.db, 'res.company', secondCompany.id, { account_default_receivable_id: accounts['121000'], default_general_journal_id: journal.id, account_revaluation_journal_id: null });
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: secondCompany.id, currency_id: read(db, 'account.move', first.id).currency_id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other', qty: 1, price_unit: 200, tax: 0 }] });
   db = postMove(invoice.db, invoice.id);
   const done = revalueForeignBalances(db, '2026-02-28');

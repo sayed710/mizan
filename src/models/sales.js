@@ -392,6 +392,18 @@ function invoiceFrom(db, order, moveType, originField, options = {}) {
   return { db: syncInvoicedQty(next, read(next, 'account.move', id)), go: `#/accounting/${moveType === 'out_invoice' ? 'invoices' : 'bills'}/${id}` };
 }
 
+export function invoiceSelectedSalesOrders(db, ids) {
+  const uniqueIds = [...new Set(ids ?? [])];
+  if (!uniqueIds.length) throw new Error('Select a confirmed sales order');
+  let next = db;
+  for (const id of uniqueIds) {
+    const order = read(next, 'sale.order', id);
+    if (!order || !['sale', 'done'].includes(order.state)) throw new Error('Select a confirmed sales order');
+    next = invoiceFrom(next, order, 'out_invoice', 'sale_id').db;
+  }
+  return next;
+}
+
 const orderLines = (label, priceField = 'list_price') => {
   const base = productLines(label, priceField);
   return { ...base, onchange: (line, key, db, record) => {

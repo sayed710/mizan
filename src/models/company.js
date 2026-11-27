@@ -421,13 +421,14 @@ function companyGuard(db, before, r, ctx) {
     ['default_purchase_journal_id', 'purchase', 'Default Purchase Journal'],
     ['default_general_journal_id', 'general', 'Default General Journal'],
     ['currency_exchange_journal_id', 'general', 'Exchange Difference Journal'],
+    ['account_revaluation_journal_id', 'general', 'Revaluation Journal'],
     ['deferred_revenue_journal_id', 'general', 'Deferred Revenue Journal'],
     ['deferred_expense_journal_id', 'general', 'Deferred Expense Journal'],
     ['tax_cash_basis_journal_id', 'general', 'Cash Basis Journal'],
   ]) {
     if (!r[field]) continue;
     const journal = record(db, 'account.journal', r[field]);
-    const requiresActive = field.startsWith('deferred_') || field === 'tax_cash_basis_journal_id' || field === 'currency_exchange_journal_id';
+    const requiresActive = field.startsWith('deferred_') || field === 'tax_cash_basis_journal_id' || field === 'currency_exchange_journal_id' || field === 'account_revaluation_journal_id';
     if (!journal || (requiresActive && journal.active === false) || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
       return `${label} must be ${requiresActive ? 'an active ' : 'a '}${type} journal shared with or belonging to this company`;
     }
@@ -477,7 +478,7 @@ function companyGuard(db, before, r, ctx) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
   }
-  for (const field of ['account_journal_suspense_account_id', 'deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
+  for (const field of ['account_revaluation_expense_provision_account_id', 'account_revaluation_income_provision_account_id', 'account_journal_suspense_account_id', 'deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
     if (!r[field]) continue;
     const account = record(db, 'account.account', r[field]);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
@@ -641,6 +642,9 @@ export function createCompany(db, vals) {
     accounts[field] = installed.get(key);
   }
   if (!values.opening_equity_account_id) accounts.opening_equity_account_id = accounts.current_year_earnings_account_id ?? values.current_year_earnings_account_id;
+  if (!values.account_revaluation_income_provision_account_id) accounts.account_revaluation_income_provision_account_id = accounts.income_currency_exchange_account_id ?? values.income_currency_exchange_account_id;
+  if (!values.account_revaluation_expense_provision_account_id) accounts.account_revaluation_expense_provision_account_id = accounts.expense_currency_exchange_account_id ?? values.expense_currency_exchange_account_id;
+  if (!values.account_revaluation_journal_id && values.default_general_journal_id) accounts.account_revaluation_journal_id = values.default_general_journal_id;
   if (!values.default_payroll_structure_id) {
     const payroll = {};
     for (const [role, code, name, account_type] of [['expense', '620000', 'Salaries & Wages', 'expense'], ['payable', '230000', 'Salaries Payable', 'liability_current'], ['insurance', '240000', 'Social Insurance Payable', 'liability_current'], ['tax', '250100', 'Payroll Tax Payable', 'liability_current']]) {
@@ -756,6 +760,9 @@ export const companyModels = {
       default_purchase_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Purchase Journal' },
       default_general_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default General Journal' },
       currency_exchange_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Exchange Difference Journal' },
+      account_revaluation_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Revaluation Journal' },
+      account_revaluation_expense_provision_account_id: { type: 'many2one', relation: 'account.account', label: 'Expense Provision Account' },
+      account_revaluation_income_provision_account_id: { type: 'many2one', relation: 'account.account', label: 'Income Provision Account' },
       default_payroll_structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Default Payroll Structure' },
       current_year_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account' },
       opening_equity_account_id: { type: 'many2one', relation: 'account.account', label: 'Opening Balance Equity Account' },

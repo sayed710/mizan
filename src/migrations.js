@@ -2641,6 +2641,7 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 })) } }) });
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
+MIGRATIONS.push({ version: 85, name: 'revaluation-defaults', up: (db) => ({ ...db, records: { ...db.records, 'res.company': (db.records['res.company'] ?? []).map((c) => ({ ...c, account_revaluation_journal_id: c.account_revaluation_journal_id ?? c.default_general_journal_id ?? null, account_revaluation_expense_provision_account_id: c.account_revaluation_expense_provision_account_id ?? c.expense_currency_exchange_account_id ?? null, account_revaluation_income_provision_account_id: c.account_revaluation_income_provision_account_id ?? c.income_currency_exchange_account_id ?? null })) } }) });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

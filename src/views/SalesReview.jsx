@@ -1,11 +1,11 @@
 import { Fragment, useMemo, useRef, useState } from 'react';
 import { read } from '../orm.js';
 import { viewRecords } from '../companyView.js';
-import { useDb } from '../store.js';
+import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { round } from '../money.js';
 import { lineUntaxed } from '../models/taxes.js';
-import { qtyToInvoice } from '../models/sales.js';
+import { invoiceSelectedSalesOrders, qtyToInvoice } from '../models/sales.js';
 import { today } from '../models/common.js';
 import { currentCompany, documentCompany } from '../models/company.js';
 import { CompanySelect, reportCompanyScope, reportMoney } from './reportCompany.jsx';
@@ -33,6 +33,8 @@ export function SalesReview({ leaf }) {
 
   const [groupBy, setGroupBy] = useState('');
   const [isPrinting, setIsPrinting] = useState(false);
+  const [selectedOrders, setSelectedOrders] = useState([]);
+  const [creating, setCreating] = useState(false);
 
   const rows = useMemo(() => {
     return viewRecords(companyDb, 'sale.order').flatMap((order) => {
@@ -63,6 +65,19 @@ export function SalesReview({ leaf }) {
       });
     });
   }, [companyDb, deliveredFirst, selectedCompany, period, periodKey]);
+
+  const visibleOrderIds = useMemo(() => new Set(rows.map((r) => r.order.id)), [rows]);
+  const activeSelectedOrders = useMemo(
+    () => selectedOrders.filter((id) => visibleOrderIds.has(id)),
+    [selectedOrders, visibleOrderIds],
+  );
+  const createInvoices = async () => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      if ((await commit(invoiceSelectedSalesOrders(getDb(), activeSelectedOrders))).ok) setSelectedOrders([]);
+    } catch (e) { alert(t(e.message)); } finally { setCreating(false); }
+  };
 
   const groups = useMemo(() => {
     if (!groupBy) return null;
@@ -104,7 +119,7 @@ export function SalesReview({ leaf }) {
 
   const renderRow = ({ order, line, index, delivered, invoiced, difference, unitPrice, amount, partner, product }) => (
     <tr key={`${order.id}-${index}`}>
-      <td><a href={`#/sales/orders/${order.id}`}>{order.name}</a></td>
+      <td>{deliveredFirst && !isPrinting && <input type="checkbox" aria-label={`${t('Select Order')} ${order.name}`} checked={activeSelectedOrders.includes(order.id)} onChange={(e) => setSelectedOrders(e.target.checked ? [...new Set([...activeSelectedOrders, order.id])] : activeSelectedOrders.filter((id) => id !== order.id))} />}<a href={`#/sales/orders/${order.id}`}>{order.name}</a></td>
       <td>{partner?.name ?? ''}</td>
       <td>{product?.name ?? ''}</td>
       <td>{line.name}</td>
@@ -119,6 +134,7 @@ export function SalesReview({ leaf }) {
   const controls = (
     <div className="control-panel">
       <h1 className="cp-title">{t(leaf.label)}</h1>
+      {deliveredFirst && <button type="button" className="btn primary" disabled={!activeSelectedOrders.length || creating} onClick={createInvoices}>{t('Create Invoices')}</button>}
       <label className="inline-select">
         {t('Period')}
         <select aria-label={t('Period')} value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>

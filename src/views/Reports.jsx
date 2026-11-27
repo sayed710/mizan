@@ -2172,6 +2172,7 @@ function ReportPage({ leaf, params }) {
           {followupError && <span role="alert">{t(followupError)}</span>}
         </>
       )}
+      {isDeferred && <a className="btn sm" href={`#/accounting/${deferredKind === 'revenue' ? 'deferred-revenues' : 'deferred-expenses'}`}>{t('Deferrals')}</a>}
       {isDeferred && <button type="button" className="btn sm" disabled={Boolean(periodError) || !deferredGrouped || Boolean(activeGenerateWizard?.pending)} title={!deferredGrouped ? t('Grouped deferral generation requires a company configured for grouped posting') : undefined} onClick={openGenerateWizard}>{t('Generate Entries')}</button>}
       {generationError && <span role="alert">{t(generationError)}</span>}
       {isAudit && (

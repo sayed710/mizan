@@ -212,6 +212,9 @@ export function seed() {
     default_sale_journal_id: companyJournals.sales,
     default_purchase_journal_id: companyJournals.purchases,
     default_general_journal_id: companyJournals.general,
+    account_revaluation_journal_id: companyJournals.general,
+    account_revaluation_income_provision_account_id: installedByCode['450100'],
+    account_revaluation_expense_provision_account_id: installedByCode['690100'],
     deferred_revenue_journal_id: companyJournals.general,
     deferred_expense_journal_id: companyJournals.general,
   });

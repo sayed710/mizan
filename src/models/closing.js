@@ -321,9 +321,10 @@ function revaluationJournalId(db, company) {
  * company and date count towards the target, so a rerun posts only the change (nothing when unchanged), and a
  * position that moved or vanished after an earlier run is corrected instead of left stale.
  */
-export function revalueForeignBalances(db, date, { companyScoped = false, companyId = null } = {}) {
+export function revalueForeignBalances(db, date, { companyScoped = false, companyId = null, journalId = null, expenseAccountId = null, incomeAccountId = null, excludedAccountIds = [] } = {}) {
   checkDate(date);
-  const rows = foreignBalanceReport(db, date, { companyId, companyScoped }).filter((r) => r.difference);
+  const excluded = Array.isArray(excludedAccountIds) ? excludedAccountIds : [];
+  const rows = foreignBalanceReport(db, date, { companyId, companyScoped }).filter((r) => r.difference && !excluded.includes(r.account_id));
   const visible = search(companyId || !companyScoped ? db : companyViewDb(db), 'account.move')
     .filter((m) => (!companyId || (m.company_id ?? 1) === companyId) && m.revaluation_date === date && m.state === 'posted');
   const plans = [];
@@ -334,6 +335,19 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
   for (const company of targetCompanies) {
     const settings = read(db, 'res.company', company);
     if (!settings) throw new Error('A revaluation company no longer exists');
+    const selectedJournal = (journalId !== null && journalId !== undefined && journalId !== '')
+      ? journalId
+      : settings.account_revaluation_journal_id;
+    const hasJournal = selectedJournal !== null && selectedJournal !== undefined && selectedJournal !== '';
+    const journal = hasJournal ? read(db, 'account.journal', selectedJournal) : null;
+    if (hasJournal && (!journal || journal.active === false || journal.type !== 'general' || (journal.company_id && journal.company_id !== company))) throw new Error('Select an active general journal for this company');
+    const provision = (id, fallback, sign) => {
+      const selected = (id !== null && id !== undefined && id !== '') ? id : fallback;
+      if (selected === null || selected === undefined || selected === '') return exchangeAccount(db, company, sign);
+      const account = read(db, 'account.account', selected);
+      if (!account || account.active === false || (account.company_id && account.company_id !== company)) throw new Error('Select an active provision account for this company');
+      return selected;
+    };
     let gain = 0;
     let loss = 0;
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
@@ -346,8 +360,8 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       return { account_id: r.account_id, partner_id: r.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
     }).filter((line) => line.debit || line.credit);
     const expected = [...lines];
-    if (gain) expected.push({ account_id: exchangeAccount(db, company, 1), credit: gain });
-    if (loss) expected.push({ account_id: exchangeAccount(db, company, -1), debit: loss });
+    if (gain) expected.push({ account_id: provision(incomeAccountId, settings.account_revaluation_income_provision_account_id, 1), credit: gain });
+    if (loss) expected.push({ account_id: provision(expenseAccountId, settings.account_revaluation_expense_provision_account_id, -1), debit: loss });
     const booked = visible.filter((m) => (m.company_id ?? 1) === company)
       .reduce((totals, m) => revaluationTotals(m.line_ids ?? [], companyRound, totals), new Map());
     const wanted = revaluationTotals(expected, companyRound);
@@ -356,7 +370,7 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       const amount = companyRound((wanted.get(key)?.amount ?? 0) - (booked.get(key)?.amount ?? 0));
       return { account_id: row.account_id, partner_id: row.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount), ...valueOnlyCurrencyFields(db, row.account_id, company) };
     }).filter((line) => line.debit || line.credit);
-    if (delta.length) plans.push({ company, journalId: revaluationJournalId(db, company), expected: delta });
+    if (delta.length) plans.push({ company, journalId: hasJournal ? selectedJournal : revaluationJournalId(db, company), expected: delta });
   }
 
   let next = db;
@@ -370,7 +384,7 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       system_generated: true,
       archivedOriginIds: [entry.id],
     });
-    next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
+    next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id, revaluation_options: { journalId, expenseAccountId, incomeAccountId, excludedAccountIds } }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
   }
   return next;
 }
@@ -404,7 +418,22 @@ export function isRevaluationMovePair(db, adjustment, reversal) {
     records: { ...db.records, 'account.move': moves },
     seq: { ...db.seq, 'account.move': maxMoveId },
   };
-  const expected = revalueForeignBalances(snapshot, date, { companyId: company });
+  const opts = adjustment.revaluation_options;
+  if (opts != null) {
+    if (typeof opts !== 'object' || Array.isArray(opts)) return false;
+    const allowedKeys = new Set(['journalId', 'expenseAccountId', 'incomeAccountId', 'excludedAccountIds']);
+    if (Object.keys(opts).some((k) => !allowedKeys.has(k))) return false;
+    for (const k of ['journalId', 'expenseAccountId', 'incomeAccountId']) {
+      if (opts[k] != null && opts[k] !== '' && (!Number.isSafeInteger(opts[k]) || opts[k] <= 0)) return false;
+    }
+    if (opts.excludedAccountIds != null && (!Array.isArray(opts.excludedAccountIds) || opts.excludedAccountIds.some((id) => !Number.isSafeInteger(id) || id <= 0))) return false;
+  }
+  let expected;
+  try {
+    expected = revalueForeignBalances(snapshot, date, { ...(opts ?? {}), companyId: company });
+  } catch {
+    return false;
+  }
   const existingIds = new Set((snapshot.records['account.move'] ?? []).map((move) => move.id));
   const newAdjustments = (expected.records['account.move'] ?? []).filter((move) => (
     !existingIds.has(move.id) && move.revaluation_date === date

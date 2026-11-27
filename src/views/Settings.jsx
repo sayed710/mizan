@@ -229,18 +229,18 @@ export function validateCompanySettingWrite(db, company, vals) {
   if (vals.account_check_printing_layout !== undefined && vals.account_check_printing_layout !== null && !['none', 'top', 'middle', 'bottom'].includes(vals.account_check_printing_layout)) {
     return 'Select a valid check layout';
   }
-  for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id', 'tax_cash_basis_journal_id']) {
+  for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id', 'tax_cash_basis_journal_id', 'account_revaluation_journal_id']) {
     if (vals[field] === undefined || vals[field] === null) continue;
     const journal = (db.records['account.journal'] ?? []).find((x) => x.id === vals[field]);
     if (!journal || journal.active === false || journal.type !== 'general' || (journal.company_id && journal.company_id !== company.id)) {
       return 'Select an active general journal belonging to this company';
     }
   }
-  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id']) {
+  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id', 'account_revaluation_expense_provision_account_id', 'account_revaluation_income_provision_account_id']) {
     if (vals[field] === undefined || vals[field] === null) continue;
     const account = (db.records['account.account'] ?? []).find((x) => x.id === vals[field]);
     if (!account || account.active === false || (account.company_id && account.company_id !== company.id)) {
-      return 'Select an active deferred account belonging to this company';
+      return 'Select an active account belonging to this company';
     }
   }
   for (const field of ['generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method']) {
@@ -497,6 +497,18 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
                   {generalJournals.map((j) => <option key={j.id} value={j.id}>{j.name || j.code}</option>)}
                 </select>
               </SettingRow>
+            </div>
+          )}
+          {['account_revaluation_journal_id', 'account_revaluation_expense_provision_account_id', 'account_revaluation_income_provision_account_id'].some(hasField) && (
+            <div className="settings-block">
+              <h3>{t('Revaluation')}</h3>
+              {[['account_revaluation_journal_id', 'Revaluation Journal', generalJournals, false], ['account_revaluation_expense_provision_account_id', 'Expense Provision Account', companyAccounts, true], ['account_revaluation_income_provision_account_id', 'Income Provision Account', companyAccounts, true]].filter(([field]) => hasField(field)).map(([field, label, choices, isAccount]) => (
+                <SettingRow key={field} id={field} label={label} description="Default for currency adjustment entries.">
+                  <select id={field} disabled={readOnly || !company} value={company?.[field] ?? ''} onChange={(e) => onWriteCompany({ [field]: e.target.value ? Number(e.target.value) : null })}>
+                    <option value="">{t('None')}</option>{choices.map((choice) => <option key={choice.id} value={choice.id}>{isAccount && choice.code ? `${choice.code} ${choice.name}` : choice.name}</option>)}
+                  </select>
+                </SettingRow>
+              ))}
             </div>
           )}
         </>

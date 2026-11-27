@@ -29,9 +29,9 @@ test('deferred reports aggregate recognition periods and filter source dates and
   const rev = reports.deferredReport(db, period, 'revenue');
   assert.deepEqual(rev.map(({ account_id, total, not_started, before, current, recognized, within_year, after_year }) => ({ account_id, total, not_started, before, current, recognized, within_year, after_year })), [{ account_id: 10, total: 380, not_started: 80, before: 100, current: 100, recognized: 200, within_year: 160, after_year: 20 }]);
   assert.deepEqual(reports.deferredReport(db, period, 'expense').map(({ total, current, recognized, within_year, after_year }) => ({ total, current, recognized, within_year, after_year })), [{ total: 40, current: 40, recognized: 40, within_year: 0, after_year: 0 }]);
-  const management = menusFor('accounting').find((m) => m.label === 'Reporting').children.find((m) => m.label === 'Management');
-  assert.ok(management.children.some((m) => m.report === 'deferredRevenue'));
-  assert.ok(management.children.some((m) => m.report === 'deferredExpense'));
+  const regularization = menusFor('accounting').find((m) => m.label === 'Review').children.find((m) => m.label === 'Regularization Entries');
+  assert.ok(regularization.children.some((m) => m.report === 'deferredRevenue'));
+  assert.ok(regularization.children.some((m) => m.report === 'deferredExpense'));
 });
 
 test('deferred future buckets use a calendar year, including leap-day cutoffs', () => {
