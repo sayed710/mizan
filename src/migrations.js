@@ -2594,6 +2594,8 @@ export function migratePartnerCountryAndState(db) {
 }
 MIGRATIONS.push({ version: 80, name: 'partner-country-state-ids', up: migratePartnerCountryAndState });
 
+MIGRATIONS.push({ version: 81, name: 'stored-statement-report-lines', up: ensureStatementReports });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

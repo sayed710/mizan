@@ -1,3 +1,5 @@
+import { storedReportDefinitions } from './reportEngine.js';
+import { reportRecordModels } from './reportRecords.js';
 import { read } from '../orm.js';
 import {
   ACCOUNT_TYPES,
@@ -21,6 +23,7 @@ import {
   STANDARD_PNL_LINES,
   STATEMENT_REPORT_SPECS,
   statementReportGuard,
+  syncInlineStatementLines,
 } from './statementReports.js';
 import { round } from '../money.js';
 
@@ -389,7 +392,7 @@ function collectAccountContributions(db, definitions, lineCode, state, factor = 
  * Evaluate a configurable or seeded statement report using ledger.js canonical items, balances, and P&L earnings.
  * Options may pass companyIds (or companyId) and analyticAccountIds.
  */
-export function configurableReport(db, report, period, group = null, options = {}) {
+export function configurableReportLegacy(db, report, period, group = null, options = {}) {
   report = { ...report, company_id: report.company_id ?? currentCompanyId(db) };
   const error = reportError(db, null, report);
   if (error) throw new Error(error);
@@ -497,6 +500,20 @@ export function configurableReport(db, report, period, group = null, options = {
   return { columns, buckets, rows };
 }
 
+/** Evaluate stored lines when present, retaining the inline format for legacy reports. */
+export function configurableReport(db, report, period, group = null, options = {}) {
+  const hasStored = (db.records['account.report.line'] ?? []).some((line) => line.report_id === report.id);
+  if (!hasStored) return configurableReportLegacy(db, report, period, group, options);
+  const definitions = storedReportDefinitions(db, report);
+  const result = configurableReportLegacy(db, { ...report, line_ids: definitions }, period, group, options);
+  const hidden = new Set();
+  const children = (line) => result.rows.filter((candidate) => candidate.parent_code === line.code);
+  const isZero = (line) => line.values.every((value) => !value) && children(line).every(isZero);
+  const hide = (line) => { hidden.add(line.code); children(line).forEach(hide); };
+  for (const line of result.rows) if (line.hide_if_zero && isZero(line)) hide(line);
+  return { ...result, rows: result.rows.filter((line) => !hidden.has(line.code)) };
+}
+
 /** Compute period comparison columns, variances, and merged account drilldown rows for a configurable report. */
 export function compareConfigurableReport(db, report, periods, baseFilter = {}, group = null, options = {}) {
   const filterRows = (rows) => {
@@ -562,6 +579,7 @@ export const accountJournalItemsHref = (accountId) => `#/accounting/journal-item
 
 const company = { type: 'many2one', relation: 'res.company', label: 'Company', required: true };
 export const configurableReportModels = {
+  ...reportRecordModels,
   'account.report': {
     label: 'Accounting Reports',
     fields: {
@@ -580,6 +598,7 @@ export const configurableReportModels = {
     defaults: () => ({ active: true, kind: '', date_scope: 'range', exclude_closing: false, sequence: 10, show_debit: false, show_credit: false, line_ids: [] }),
     createDefaults: (db) => ({ company_id: currentCompanyId(db) }),
     guard: reportError,
+    onWrite: (db, after, before) => syncInlineStatementLines(db, before, after),
     protectDelete: (db, report) => statementReportGuard(db, report),
     onUnlink: (db, report) => {
       const err = statementReportGuard(db, report);

@@ -3,15 +3,16 @@ import { create, read } from '../orm.js';
 /** Default Odoo 20 Profit and Loss line hierarchy selecting accounts by account_type. */
 export const STANDARD_PNL_LINES = [
   { name: 'Revenue', code: 'REV', sequence: 10, parent_code: '', formula: 'OPINC', sign: 1, foldable: true, strong: true },
-  { name: 'Operating Income', code: 'OPINC', sequence: 20, parent_code: 'REV', formula: 'type:income', sign: -1, foldable: true, strong: false },
-  { name: 'Cost of Revenue', code: 'COR', sequence: 30, parent_code: 'REV', formula: 'type:expense_direct_cost', sign: 1, foldable: true, strong: false },
+  { name: 'Sales', code: 'OPINC', sequence: 20, parent_code: 'REV', formula: 'type:income', sign: -1, foldable: true, strong: false },
+  { name: 'Less Costs of Revenue', code: 'COR', sequence: 30, parent_code: '', formula: 'type:expense_direct_cost', sign: 1, foldable: true, strong: false },
   { name: 'Gross Profit', code: 'GROSS', sequence: 40, parent_code: '', formula: 'OPINC - COR', sign: 1, foldable: false, strong: true },
-  { name: 'Other Income', code: 'INC_GRP', sequence: 50, parent_code: '', formula: 'type:income_other', sign: -1, foldable: true, strong: false },
-  { name: 'Expenses', code: 'EXP_GRP', sequence: 60, parent_code: '', formula: 'EXP + DEP + EXO', sign: 1, foldable: true, strong: true },
-  { name: 'Expenses', code: 'EXP', sequence: 70, parent_code: 'EXP_GRP', formula: 'type:expense', sign: 1, foldable: true, strong: false },
-  { name: 'Depreciation', code: 'DEP', sequence: 80, parent_code: 'EXP_GRP', formula: 'type:expense_depreciation', sign: 1, foldable: true, strong: false },
-  { name: 'Other Expenses', code: 'EXO', sequence: 90, parent_code: 'EXP_GRP', formula: 'type:expense_other', sign: 1, foldable: true, strong: false },
-  { name: 'Net Profit', code: 'NET', sequence: 100, parent_code: '', formula: 'GROSS + INC_GRP - EXP_GRP', sign: 1, foldable: false, strong: true },
+  { name: 'Less Operating Expenses', code: 'EXP_GRP', sequence: 50, parent_code: '', formula: 'EXP + DEP', sign: 1, foldable: true, strong: true },
+  { name: 'Expenses', code: 'EXP', sequence: 60, parent_code: 'EXP_GRP', formula: 'type:expense', sign: 1, foldable: true, strong: false },
+  { name: 'Depreciation', code: 'DEP', sequence: 70, parent_code: 'EXP_GRP', formula: 'type:expense_depreciation', sign: 1, foldable: true, strong: false },
+  { name: 'Operating Income', code: 'OPERATING', sequence: 80, parent_code: '', formula: 'GROSS - EXP_GRP', sign: 1, foldable: false, strong: true },
+  { name: 'Plus Other Income', code: 'INC_GRP', sequence: 90, parent_code: '', formula: 'type:income_other', sign: -1, foldable: true, strong: false },
+  { name: 'Less Other Expenses', code: 'EXO', sequence: 100, parent_code: '', formula: 'type:expense_other', sign: 1, foldable: true, strong: false },
+  { name: 'Net Profit', code: 'NET', sequence: 110, parent_code: '', formula: 'OPERATING + INC_GRP - EXO', sign: 1, foldable: false, strong: true },
 ];
 
 /** Default Odoo 20 Balance Sheet line hierarchy selecting accounts by account_type and earnings expressions. */
@@ -111,5 +112,78 @@ export function ensureStatementReports(db, companyId = null) {
       }).db;
     }
   }
-  return next;
+  return ensureStoredStatementLines(next, companyId);
+}
+
+const EARNINGS_TYPES = ['income', 'income_other', 'expense_direct_cost', 'expense', 'expense_depreciation', 'expense_other'];
+
+/** Convert the existing statement configuration to independently editable report records. */
+export function storedExpression(line, kind) {
+  const formula = String(line.formula ?? '').trim();
+  const base = { label: 'balance', green_on_positive: true, blank_if_zero: false, figure_type: 'monetary' };
+  const date_scope = kind === 'balance' ? 'from_beginning' : 'strict_range';
+  if (/^\d+[A-Za-z0-9_.]*$/.test(formula)) return { ...base, engine: 'account_codes', formula, subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
+  if (/^type:[a-z_]+$/.test(formula)) return { ...base, engine: 'domain', formula: JSON.stringify([['account_type', '=', formula.slice(5)]]), subformula: line.sign === -1 ? '-sum' : 'sum', date_scope };
+  if (formula === 'earnings:current_year' || formula === 'earnings:prior_years') return { ...base, engine: 'domain', formula: JSON.stringify([['account_type', 'in', EARNINGS_TYPES]]), subformula: line.sign === -1 ? '-sum' : 'sum', date_scope: formula.endsWith('current_year') ? 'from_fiscalyear' : 'to_beginning_of_fiscalyear' };
+  if (/^[A-Za-z_][A-Za-z0-9_]*(?:\s*[+-]\s*[A-Za-z_][A-Za-z0-9_]*)*$/.test(formula)) {
+    const refs = formula.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (code) => `${code}.balance`);
+    return { ...base, engine: 'aggregation', formula: line.sign === -1 ? `-(${refs})` : refs, date_scope };
+  }
+  return null;
+}
+
+/** Add stored lines only for statements whose complete inline configuration can be represented. */
+export function ensureStoredStatementLines(db, companyId = null) {
+  const existing = db.records['account.report.line'] ?? [];
+  const expressions = db.records['account.report.expression'] ?? [];
+  let nextLines = existing;
+  let nextExpressions = expressions;
+  let lineId = Math.max(db.seq?.['account.report.line'] ?? 0, ...existing.map((line) => line.id), 0);
+  let expressionId = Math.max(db.seq?.['account.report.expression'] ?? 0, ...expressions.map((expr) => expr.id), 0);
+  for (const report of db.records['account.report'] ?? []) {
+    if (!isStandardStatementReport(report) || (companyId != null && (report.company_id ?? 1) !== companyId) || nextLines.some((line) => line.report_id === report.id)) continue;
+    const inline = report.line_ids ?? [];
+    const converted = inline.map((line) => storedExpression(line, report.kind));
+    if (!inline.length || converted.some((item) => !item)) continue;
+    const ids = new Map(inline.map((line) => [line.code, ++lineId]));
+    const createdLines = inline.map((line) => ({ id: ids.get(line.code), report_id: report.id, company_id: report.company_id ?? 1, name: line.name, code: line.code, sequence: line.sequence, parent_id: line.parent_code ? ids.get(line.parent_code) : null, hierarchy_level: 0, foldable: !!line.foldable, hide_if_zero: false, print_on_new_page: false, strong: !!line.strong }));
+    const createdExpressions = inline.map((line, index) => ({ id: ++expressionId, report_line_id: ids.get(line.code), company_id: report.company_id ?? 1, ...converted[index] }));
+    nextLines = [...nextLines, ...createdLines];
+    nextExpressions = [...nextExpressions, ...createdExpressions];
+  }
+  if (nextLines === existing) return db;
+  return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': nextLines, 'account.report.expression': nextExpressions } };
+}
+
+/** Keep legacy edits to embedded standard lines reflected in their stored counterparts. */
+export function syncInlineStatementLines(db, before, after) {
+  if (!before || before.line_ids === after.line_ids || !isStandardStatementReport(after)) return db;
+  const allLines = db.records['account.report.line'] ?? [];
+  const allExpressions = db.records['account.report.expression'] ?? [];
+  const oldLines = allLines.filter((line) => line.report_id === after.id);
+  if (!oldLines.length) return db;
+  const oldInline = new Map((before.line_ids ?? []).map((line) => [line.code, line]));
+  const inline = after.line_ids ?? [];
+  let lineId = Math.max(db.seq?.['account.report.line'] ?? 0, ...allLines.map((line) => line.id), 0);
+  let expressionId = Math.max(db.seq?.['account.report.expression'] ?? 0, ...allExpressions.map((item) => item.id), 0);
+  const ids = new Map(inline.map((line) => [line.code, oldLines.find((item) => item.code === line.code)?.id ?? ++lineId]));
+  const updated = inline.map((line) => {
+    const old = oldLines.find((item) => item.code === line.code);
+    const prior = oldInline.get(line.code);
+    if (old && JSON.stringify(prior) === JSON.stringify(line)) return old;
+    return { ...(old ?? {}), id: ids.get(line.code), report_id: after.id, company_id: after.company_id ?? 1, name: line.name, code: line.code, sequence: line.sequence, parent_id: line.parent_code ? ids.get(line.parent_code) : null, foldable: !!line.foldable, strong: !!line.strong };
+  });
+  const removedIds = new Set(oldLines.filter((line) => !ids.has(line.code)).map((line) => line.id));
+  let nextExpressions = allExpressions.filter((item) => !removedIds.has(item.report_line_id));
+  for (const line of inline) {
+    const previous = oldInline.get(line.code);
+    if (previous && previous.formula === line.formula && previous.sign === line.sign) continue;
+    const converted = storedExpression(line, after.kind);
+    if (!converted) throw new Error('Legacy report line cannot be converted to a stored expression');
+    const id = ids.get(line.code);
+    const old = nextExpressions.find((item) => item.report_line_id === id && item.label === 'balance');
+    const replacement = { ...old, ...converted, id: old?.id ?? ++expressionId, report_line_id: id, company_id: after.company_id ?? 1 };
+    nextExpressions = [...nextExpressions.filter((item) => item !== old), replacement];
+  }
+  return { ...db, seq: { ...db.seq, 'account.report.line': lineId, 'account.report.expression': expressionId }, records: { ...db.records, 'account.report.line': [...allLines.filter((line) => line.report_id !== after.id), ...updated], 'account.report.expression': nextExpressions } };
 }

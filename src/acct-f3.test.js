@@ -383,7 +383,7 @@ test('FIN-3: renderAnnualReportHtml indents name cells using depth classes and l
   assert.match(html, /<td class="depth-1">Current Assets<\/td>/, 'Depth-1 Current Assets line gets depth-1');
   assert.match(
     html,
-    /<tr class="section-header"><td colspan="2" class="depth-1"><strong>Operating Income<\/strong><\/td><\/tr>/,
+    /<tr class="section-header"><td colspan="2" class="depth-1"><strong>Sales<\/strong><\/td><\/tr>/,
     'Depth-1 section header gets depth-1',
   );
   assert.match(html, /<td class="depth-2">400000 Product Sales<\/td>/, 'Account row under depth-1 line gets depth-2');
