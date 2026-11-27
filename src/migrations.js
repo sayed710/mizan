@@ -2642,6 +2642,17 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
 
+/** Preserve legacy loan entries and account semantics while normalizing the cancelled state. */
+export function migrateLoans85(db) {
+  const loans = db.records['account.loan'];
+  if (!Array.isArray(loans)) return db;
+  return { ...db, records: { ...db.records, 'account.loan': loans.map((loan) => ({
+    ...loan, state: loan.state === 'cancel' ? 'cancelled' : loan.state,
+    line_ids: (loan.line_ids ?? []).map((line) => ({ ...line, generated_move_ids: line.generated_move_ids ?? (line.move_id ? [line.move_id] : []) })),
+  })) } };
+}
+MIGRATIONS.push({ version: 85, name: 'loan-entry-history', up: migrateLoans85 });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

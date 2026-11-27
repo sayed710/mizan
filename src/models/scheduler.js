@@ -6,6 +6,7 @@ import { schedulePreventive } from './maintplus.js';
 import { replenish } from './routes.js';
 import { runFollowUps } from './finance.js';
 import { postDepreciation } from './assets.js';
+import { postDueLines } from './loans.js';
 import { postAutoPostMoves } from './accounting.js';
 import { autoReconcile } from './reconcile.js';
 import { syncDueOnlineLinks } from './onlineSync.js';
@@ -48,6 +49,8 @@ export function runScheduledJobs(db, at = today(), { onError = () => {}, deliver
     ['timeoff', (db, at) => (db.records['hr.leave.allocation'] ?? []).filter((a) => a.state === 'validate' && a.allocation_type === 'accrual').reduce((acc, a) => accrue(acc, a, at), db)],
     ['accounting', (db, at) => (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
       .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), db)],
+    ['accounting', (db, at) => (db.records['account.loan'] ?? []).filter((loan) => loan.state === 'running' && (loan.line_ids ?? []).some((line) => !line.posted && line.date <= at && (!loan.skip_until_date || line.date >= loan.skip_until_date)))
+      .reduce((acc, loan) => tolerant(postDueLines)(acc, acc.records['account.loan'].find((x) => x.id === loan.id), at), db)],
     ['accounting', tolerant(function postAutoPostMovesJob(d, when) {
       return postAutoPostMoves(d, when, { onError: (job, e) => { try { onError(job, e); } catch (reporter) { console.error(`Scheduler error reporter failed for ${job}:`, reporter); } } });
     })],

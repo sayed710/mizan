@@ -26,8 +26,18 @@ export function LoansAnalysis() {
     line.account_id === accountId ? sum + (Number(line.debit) || 0) - (Number(line.credit) || 0) : sum
   ), 0);
   const rows = loans.flatMap((loan) => {
+    const isModern = Boolean(loan.long_term_account_id || loan.short_term_account_id || loan.expense_account_id);
+    if (['draft', 'cancel', 'cancelled'].includes(loan.state)) return [];
+    if (isModern) {
+      if ((loan.start_date ?? '') > date) return [];
+      const moves = (loan.line_ids ?? []).map((line) => posted(line.move_id, loan)).filter(Boolean);
+      const principal = Number(loan.amount) || 0;
+      const repaid = moves.reduce((sum, move) => sum + amount(move, loan.short_term_account_id), 0);
+      const interest = moves.reduce((sum, move) => sum + amount(move, loan.expense_account_id), 0);
+      return [{ loan, principal, repaid, interest, balance: principal - repaid }];
+    }
     const receipt = posted(loan.receipt_move_id, loan);
-    if (!loan.receipt_move_id) return loan.state === 'draft' || loan.state === 'cancel' ? [] : [{ loan, unavailable: true }];
+    if (!loan.receipt_move_id) return [{ loan, unavailable: true }];
     if (!receipt) return [];
     const moves = [...(loan.line_ids ?? []).map((line) => line.move_id), ...(loan.early_moves ?? []).map((line) => line.move_id)]
       .map((id) => posted(id, loan)).filter(Boolean);
