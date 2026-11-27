@@ -5,9 +5,9 @@ import { journalSequenceName, journalSequenceRegex } from './journal-sequence.js
 import { countryReferenceError } from './country.js';
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, commercialPartnerId, companyRoundingMethod, invoiceTaxAmount, isFieldEdited, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate, withTaxIds } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
+import { ACCOUNT_TYPES, CURRENCY_AMOUNT_SIGN_ERROR, accountBalance, analyticEligibleAccount, badCurrencyAmountSign, badLineSign, exchangeJournal, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLineAccountResult, invoiceLineOriginalAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isOnlineFeedJournal, isPaymentMatched, journalItems, mapLineAccount, outstandingAccount, paymentJournal, paymentName, postedBillLine, postEntry, reconciledJournalItems, resolveCompanyAccount, resolveDocumentJournal, reversalLine, validStornoMove, valueOnlyCurrencyFields } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
-import { accountingDateForPost, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, accountCurrencyChangeError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
+import { accountCurrencyChangeError, accountDeleteGuard, accountingDateForPost, bankStatementRewriteAllowed, bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, fxProvenanceError, hardBlockingLockDate, isExchangeEntry, lockedSettlementInvariant, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, groupPaymentRequirement, paymentDocumentGroups, paymentDocuments, paymentDocumentsNetAmount, postPayment, reconcileReversalLines, registerPayments, reverseEntry, SETTLES, unreconcileInvoicePayment } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount, eligibleCounterpart } from './bank.js';
@@ -384,7 +384,7 @@ export function paymentGuard(db, before, after, ctx) {
     if ((db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.correction_of_id === note.id && m.state !== 'cancel')) return 'This credit note already has a correction';
     if (after.state === 'posted' && docRound(total(after, db)) !== docRound(total(note, db))) return 'A correction must restore the full credit note amount';
   }
-  if (after.state === 'posted' && isInvoice(after) && !validInvoiceTotal(after, db)) return 'The total must be positive; use a credit note or refund instead';
+  if (after.state === 'posted' && isInvoice(after) && !validInvoiceTotal(after, db)) return invoiceTotalError(after, db);
   // Any sales invoice can overcommit an order with advances, not just an advance itself.
   if (after.state === 'posted' && before?.state !== 'posted' && after.move_type === 'out_invoice' && after.sale_id
     && [after, ...(db.records['account.move'] ?? []).filter((m) => m.sale_id === after.sale_id && m.state === 'posted')]
@@ -415,7 +415,8 @@ export function paymentGuard(db, before, after, ctx) {
   // The books of a settlement entry are fixed once an invoice records it as a payment.
   if (before && ['fx_payment_move_id', 'fx_invoice_id'].some((k) => (before[k] ?? null) !== (after[k] ?? null))) return 'Exchange entry linkage cannot be changed';
   if (before?.state === 'posted' && settlingEntries(db).has(before.id)
-    && ['line_ids', 'journal_id', 'partner_id'].some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) {
+    && ['line_ids', 'journal_id', 'partner_id'].some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
+    && !bankStatementRewriteAllowed(db, before, after, ctx)) {
     return 'This entry settles an invoice payment and cannot be changed';
   }
   const unchanged = before && JSON.stringify(before.payments ?? []) === JSON.stringify(after.payments ?? []) && Number(before.amount_paid || 0) === Number(after.amount_paid || 0);
@@ -474,6 +475,7 @@ export function paymentGuard(db, before, after, ctx) {
 }
 
 const validInvoiceTotal = (r, db) => total(r, db) > 0 || (total(r, db) === 0 && r.move_type === 'out_invoice' && r.sale_id && (r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) < 0));
+const invoiceTotalError = (r, db) => total(r, db) < 0 ? 'You cannot validate an invoice with a negative total amount. You should create a credit note instead. Use the action menu to transform it into a credit note or refund.' : 'The total must be positive; use a credit note or refund instead';
 const RECURRENCE_MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
 const RECURRING_EXCLUDED_FIELDS = new Set([
   'id', 'name', 'ref', 'payment_reference', 'state', 'line_ids', 'payments', 'amount_paid', 'payment_date',
@@ -781,8 +783,9 @@ export function postMove(db, id, { autoPost = false } = {}) {
       return account?.company_id && account.company_id !== (r.company_id ?? 1);
     })) throw new Error('Journal account belongs to another company');
     if (badLineSign(r.line_ids) && !validStornoMove(db, r)) throw new Error('Debits and credits cannot be negative');
-    if (badCurrencyAmountSign(r.line_ids)) throw new Error('The currency amount sign must match the debit/credit balance');
-    if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error('Journal entry is not balanced: total debit must equal total credit');
+    const companyCurrency = companyCurrencyRecord(db, r.company_id);
+    if (badCurrencyAmountSign(r.line_ids, companyCurrency)) throw new Error(CURRENCY_AMOUNT_SIGN_ERROR);
+    if (!isBalanced(r.line_ids, companyCurrency)) throw new Error((r.line_ids ?? []).length ? 'The entry is not balanced.' : "Even magicians can't post nothing!");
     const entryDate = r.invoice_date ?? r.date ?? today();
     if (r.auto_reverse) {
       const revDate = r.reverse_date;
@@ -830,9 +833,9 @@ export function postMove(db, id, { autoPost = false } = {}) {
     }
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
-  if (!r.partner_id) throw new Error('Partner is required');
-  if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
-  if (!validInvoiceTotal(r, db)) throw new Error('The total must be positive; use a credit note or refund instead');
+  if (!r.partner_id) throw new Error(isPurchase(r) ? "The field 'Vendor' is required, please complete it to validate the Vendor Bill." : "The 'Customer' field is required to validate the invoice.\nYou probably don't want to explain to your auditor that you invoiced an invisible man :)");
+  if (!(r.invoice_line_ids ?? []).length) throw new Error("Even magicians can't post nothing!");
+  if (!validInvoiceTotal(r, db)) throw new Error(invoiceTotalError(r, db));
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
   const expectedType = isPurchase(r) ? 'purchase' : 'sale';
@@ -1216,6 +1219,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
     || (bookedShare ?? toCompany(db, r.currency_id, amount, date, r.company_id)) > companyRound(statement.open_amount ?? Math.abs(Number(statement.amount))))) {
     throw new Error('Invalid bank statement settlement');
   }
+  if (statementLineId && directBank) throw new Error('Statement lines cannot use direct bank settlement');
   if (liquidityAccountId && (!statement?.bank_move_id || directBank)) throw new Error('A bank suspense settlement requires a posted statement entry');
   let recipientBankId = null;
   if (isPurchase(r) && !isInbound(r) && !statement) {
@@ -2468,8 +2472,14 @@ export function revalueForeignLine(db, line, entryDate, companyId) {
   const lineCurrencyId = line.currency_id ?? (account?.currency_id && account.currency_id !== companyCurr?.id ? account.currency_id : null);
   const isForeign = Boolean(lineCurrencyId && companyCurr && lineCurrencyId !== companyCurr.id);
   if (!isForeign) {
-    if (!line.currency_id || line.currency_id === companyCurr?.id) {
+    if (!line.currency_id) {
       return { ...line, amount_currency: 0 };
+    }
+    if (line.currency_id === companyCurr?.id) {
+      return {
+        ...line,
+        amount_currency: roundCurrency((Number(line.debit) || 0) - (Number(line.credit) || 0), companyCurr),
+      };
     }
     return line;
   }
@@ -2598,6 +2608,8 @@ const lineItem = {
     } else if (key === 'currency_id' && (!lineCurrencyId || lineCurrencyId === companyCurr?.id)) {
       updated.amount_currency = 0;
       if (updated.currency_id === companyCurr?.id) updated.currency_id = null;
+    } else if (updated.currency_id && updated.currency_id === companyCurr?.id && (key === 'debit' || key === 'credit')) {
+      updated.amount_currency = roundCurrency((Number(updated.debit) || 0) - (Number(updated.credit) || 0), companyCurr);
     }
     return updated;
   },
@@ -2744,7 +2756,7 @@ function unbalancedEntryWarning(db, r) {
   const own = db ? companyCurrencyRecord(db, r.company_id ?? 1) : null;
   const hasAmounts = lines.some((l) => (Number(l.debit) || 0) !== 0 || (Number(l.credit) || 0) !== 0);
   if (!hasAmounts || ((!badLineSign(lines) || validStornoMove(db, r)) && isBalanced(lines, own))) return '';
-  return t('Journal entry is not balanced: total debit must equal total credit.');
+  return t('The entry is not balanced.');
 }
 
 /** Whether Quick Encoding applies to `r` under its company's `quick_edit_mode` (draft covered invoices/bills only). */
@@ -3584,6 +3596,45 @@ function syncLiquidityAccountCurrency(db, accountId, targetCurrencyId, { overwri
   return write(db, 'account.account', accountId, { currency_id: nextCurrency }, journalId ? { syncFromJournalId: journalId } : undefined);
 }
 
+// Stored account groups and their parents are derived from company and code ranges.
+function matchAccountGroup(groups, code, company, excluded = null, maxLength = Infinity, endCode = code) {
+  return groups
+    .filter((g) => {
+      const start = String(g.code_prefix_start ?? '');
+      const end = String(g.code_prefix_end ?? start) || start;
+      const prefix = String(code ?? '').slice(0, start.length);
+      const endPrefix = String(endCode ?? '').slice(0, start.length);
+      return g.id !== excluded && (g.company_id ?? 1) === (company ?? 1) && start && end
+        && start.length === end.length && start.length < maxLength && prefix.length === start.length && endPrefix.length === start.length
+        && prefix >= start && endPrefix <= end;
+    })
+    .sort((a, b) => String(b.code_prefix_start).length - String(a.code_prefix_start).length || a.id - b.id)[0]?.id ?? null;
+}
+
+function recomputeAccountGroup(db, account, before) {
+  if (before && before.code === account.code && before.company_id === account.company_id) return db;
+  const groupId = matchAccountGroup(db.records['account.group'] ?? [], account.code, account.company_id);
+  if ((account.group_id ?? null) === groupId) return db;
+  return { ...db, records: { ...db.records, 'account.account': db.records['account.account'].map((a) => a.id === account.id ? { ...a, group_id: groupId } : a) } };
+}
+
+export function recomputeAccountGroups(db) {
+  const groups = db.records['account.group'] ?? [];
+  const match = (...args) => matchAccountGroup(groups, ...args);
+  const updatedGroups = groups.map((g) => {
+    const parentId = match(g.code_prefix_start, g.company_id, g.id, String(g.code_prefix_start ?? '').length, g.code_prefix_end || g.code_prefix_start);
+    return (g.parent_id ?? null) === parentId ? g : { ...g, parent_id: parentId };
+  });
+  const accounts = (db.records['account.account'] ?? []).map((a) => {
+    const groupId = match(a.code, a.company_id);
+    return (a.group_id ?? null) === groupId ? a : { ...a, group_id: groupId };
+  });
+  return { ...db, records: { ...db.records,
+    ...(db.records['account.group'] ? { 'account.group': updatedGroups } : {}),
+    ...(db.records['account.account'] ? { 'account.account': accounts } : {}),
+  } };
+}
+
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
@@ -3607,6 +3658,7 @@ export const accountingModels = {
       },
       tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', tracking: true, domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
       fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category', tracking: true },
+      group_id: { type: 'many2one', relation: 'account.group', label: 'Account Group', readonly: true },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation', tracking: true },
       active: { type: 'boolean', label: 'Active', tracking: true },
@@ -3720,9 +3772,11 @@ export const accountingModels = {
       }
       return null;
     },
+    onCreate: recomputeAccountGroup,
+    onWrite: recomputeAccountGroup,
     protectDelete: accountDeleteGuard,
     sort: (a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')),
-    groupBys: ['account_type'],
+    groupBys: ['account_type', 'group_id'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
     list: ['code', 'name', 'account_type', 'opening_debit', 'opening_credit', 'reconcile', 'currency_id'],
     listFields: { currency_id: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide') }, opening_debit: { optional: 'hide' }, opening_credit: { optional: 'hide' } },
@@ -3749,13 +3803,51 @@ export const accountingModels = {
         {
           label: 'Accounting',
           groups: [
-            ['account_type', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'non_trade', 'active'],
+            ['account_type', 'group_id', 'currency_id', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'non_trade', 'active'],
             ['is_deferred', 'deferred_account_id', 'create_asset', 'asset_model_id'],
             ['description', 'note'],
           ],
         },
       ],
     },
+  },
+
+  'account.group': {
+    label: 'Account Groups',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      code_prefix_start: { type: 'char', label: 'Code Prefix Start' },
+      code_prefix_end: { type: 'char', label: 'Code Prefix End' },
+      parent_id: {
+        type: 'many2one',
+        relation: 'account.group',
+        label: 'Parent Group',
+        readonly: true,
+      },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+    },
+    defaults: () => ({}),
+    createDefaults: (db) => ({ company_id: currentCompany(db) }),
+    guard: (db, before, after) => {
+      const start = String(after.code_prefix_start ?? '');
+      const end = String(after.code_prefix_end ?? start) || start;
+      if (start && end && start.length !== end.length) return 'Account group prefixes must have the same length';
+      if (start && end && (db.records['account.group'] ?? []).some((g) => {
+        const otherStart = String(g.code_prefix_start ?? '');
+        const otherEnd = String(g.code_prefix_end ?? otherStart) || otherStart;
+        return g.id !== (before?.id ?? after.id) && (g.company_id ?? 1) === (after.company_id ?? 1) && otherStart.length === start.length && otherEnd.length === start.length && start <= otherEnd && otherStart <= end;
+      })) return 'Account Groups with the same granularity cannot overlap';
+      if (after.code_prefix_start && after.code_prefix_end && String(after.code_prefix_start) > String(after.code_prefix_end)) {
+        return 'Code Prefix Start must not be greater than Code Prefix End';
+      }
+      return null;
+    },
+    onCreate: recomputeAccountGroups,
+    onWrite: recomputeAccountGroups,
+    onUnlink: recomputeAccountGroups,
+    sort: (a, b) => String(a.code_prefix_start ?? '').localeCompare(String(b.code_prefix_start ?? '')) || String(a.name ?? '').localeCompare(String(b.name ?? '')),
+    list: ['code_prefix_start', 'code_prefix_end', 'name', 'parent_id', 'company_id'],
+    form: { title: 'name', groups: [['name', 'parent_id', 'company_id'], ['code_prefix_start', 'code_prefix_end']] },
   },
 
   'account.fiscal.category': {
@@ -3909,7 +4001,6 @@ export const accountingModels = {
       },
       suspense_account_id: {
         type: 'many2one', relation: 'account.account', label: 'Suspense Account',
-        required: (r) => isLiquidityJournal(r),
         help: 'Bank statements transactions will be posted on the suspense account until the final reconciliation allowing finding the right account.',
       },
       non_deductible_account_id: {
@@ -4347,7 +4438,8 @@ export const accountingModels = {
       if (baseErr) return baseErr;
       if (after.state === 'draft' && after.posting_order != null) return 'Draft move cannot have a posting order';
       if (before?.state === 'posted' && after.state === 'posted' && before.posting_order != null && after.posting_order !== before.posting_order) return 'Posting order cannot be changed';
-      return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null) ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids) ? 'The currency amount sign must match the debit/credit balance' : null);
+      return (after.state === 'posted' && (badLineSign(after.line_ids) || after.is_storno) && !validStornoMove(db, after) ? 'Debits and credits cannot be negative' : null)
+        ?? (after.state === 'posted' && badCurrencyAmountSign(after.line_ids, findCompanyCurrencyRecord(db, after.company_id)) ? CURRENCY_AMOUNT_SIGN_ERROR : null);
     },
     invariant: (db, after, before, stored, ctx) => {
       const err = secureMoveInvariant(db, after, before, ctx?.secureOwnershipCache) ?? lockedSettlementInvariant(db, after, before, ctx) ?? moveInvariant(db, after, before, stored);
@@ -4395,6 +4487,7 @@ export const accountingModels = {
     },
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
     onchange: (r, key, db, context = {}) => {
+      if (key === 'partner_id' && r.move_type === 'entry') return {};
       if (key === 'journal_id') {
         const currency = read(db, 'account.journal', r.journal_id)?.currency_id;
         if (currency) return { currency_id: currency };

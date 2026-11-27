@@ -58,7 +58,7 @@ test('Finding 5: bank statement reconciliation matching payments created without
   assert.equal(matched.state, 'reconciled');
   assert.equal(matched.open_amount, 0);
   assert.equal(matched.payment_id, p.id);
-  assert.equal(matched.bank_move_id, p.move_id);
+  assert.equal(matched.bank_move_id, read(stmtLine.db, 'account.bank.statement.line', stmtLine.id).bank_move_id);
 
   // Test unreconcile
   db = runBtn(db, 'account.bank.statement.line', stmtLine.id, 'Unreconcile');

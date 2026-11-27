@@ -424,6 +424,73 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {}, comp
   });
 }
 
+/** Filter budget records for reporting (excluding cancelled, and drafts unless includeDraft is true). */
+export function filterReportBudgets(db, { companyId = null, from = null, to = null, budgetId = null, includeDraft = false } = {}) {
+  const targetCompanyId = companyId && companyId !== 'all' ? Number(companyId) : null;
+  const targetBudgetId = budgetId ? Number(budgetId) : null;
+  return search(db, 'account.budget').filter((b) => {
+    if (b.state === 'cancel') return false;
+    if (!includeDraft && b.state === 'draft') return false;
+    if (targetBudgetId && b.id !== targetBudgetId) return false;
+    if (targetCompanyId && b.company_id && b.company_id !== targetCompanyId) return false;
+    if (from && b.date_to && b.date_to < from) return false;
+    if (to && b.date_from && b.date_from > to) return false;
+    return true;
+  });
+}
+
+/** Group computed budget entries by analytic_account_id, account_id, or company_id with per-period totals when currencies match. */
+export function groupBudgetReportEntries(db, entries, groupBy) {
+  if (!groupBy) return [];
+  const groups = new Map();
+  const resolveGroup = (entry) => {
+    if (groupBy === 'company_id') {
+      const id = entry.budget.company_id ?? null;
+      return { key: `company:${id ?? 'none'}`, id, label: entry.company?.name || 'Undefined' };
+    }
+    if (groupBy === 'analytic_account_id') {
+      const id = entry.line.analytic_account_id ?? null;
+      const analytic = id ? read(db, 'account.analytic.account', id) : null;
+      return { key: `analytic:${id ?? 'none'}`, id, label: analytic?.name || 'Undefined' };
+    }
+    if (groupBy === 'account_id') {
+      const id = entry.line.account_id ?? null;
+      const acc = id ? read(db, 'account.account', id) : null;
+      const label = acc ? `${acc.code} ${acc.name}` : (entry.line.general_account || 'Undefined');
+      const key = id ? `acc:${id}` : (entry.line.general_account ? `prefix:${entry.line.general_account}` : 'acc:none');
+      return { key, id, label };
+    }
+    return { key: 'all', id: null, label: 'Undefined' };
+  };
+
+  for (const entry of entries) {
+    const info = resolveGroup(entry);
+    if (!groups.has(info.key)) groups.set(info.key, { ...info, items: [] });
+    groups.get(info.key).items.push(entry);
+  }
+
+  return [...groups.values()]
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map((group) => {
+      const currencies = new Set(group.items.map((item) => item.currency?.id ?? null));
+      const sharedCurrency = currencies.size === 1 && !currencies.has(null) ? group.items[0].currency : null;
+      const periodCount = Math.max(0, ...group.items.map((item) => item.periodLines.length));
+      const periodTotals = sharedCurrency
+        ? Array.from({ length: periodCount }, (_, pIdx) => {
+            const valid = group.items.map((item) => item.periodLines[pIdx]).filter((pl) => pl && !pl.error && pl.line);
+            if (valid.length !== group.items.length) return null;
+            const planned = roundCurrency(valid.reduce((s, pl) => s + (pl.line.planned_amount ?? pl.line.planned ?? 0), 0), sharedCurrency);
+            const achieved = roundCurrency(valid.reduce((s, pl) => s + (pl.line.achieved_amount ?? 0), 0), sharedCurrency);
+            const committed = roundCurrency(valid.reduce((s, pl) => s + (pl.line.committed_amount ?? 0), 0), sharedCurrency);
+            const variance = roundCurrency(achieved - planned, sharedCurrency);
+            const achievement = planned ? round((achieved / planned) * 100) : 0;
+            return { planned, achieved, committed, variance, achievement };
+          })
+        : null;
+      return { ...group, currency: sharedCurrency, periodTotals };
+    });
+}
+
 const transition = (label, from, state) => ({
   label, primary: ['confirmed', 'validated'].includes(state), when: (r) => from.includes(r.state),
   run: (db, r) => {

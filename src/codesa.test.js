@@ -21,8 +21,11 @@ test('bank reconciliation uses the selected journal suspense account', () => {
   const result = run(line.db, read(line.db, 'account.bank.statement.line', line.id)).db;
   const statement = read(result, 'account.bank.statement.line', line.id);
   assert.ok(read(result, 'account.move', statement.bank_move_id).line_ids.some((l) => l.account_id === account.id));
-  const missing = { ...line.db, records: { ...line.db.records, 'account.journal': line.db.records['account.journal'].map((rec) => (rec.id === journal.id ? { ...rec, suspense_account_id: null } : rec)) } };
-  assert.throws(() => run(missing, read(missing, 'account.bank.statement.line', line.id)), /Configure the suspense account on journal Bank/);
+  const missing = { ...db, records: { ...db.records, 'account.journal': db.records['account.journal'].map((rec) => (rec.id === journal.id ? { ...rec, suspense_account_id: null } : rec)) } };
+  const fallbackLine = create(missing, 'account.bank.statement.line', { date: '2026-10-01', payment_ref: 'Fallback', amount: invoice.amount_residual + 10, move_id: invoice.id, journal_id: journal.id, company_id: 1 });
+  const fallback = run(fallbackLine.db, read(fallbackLine.db, 'account.bank.statement.line', fallbackLine.id)).db;
+  const companySuspense = read(fallback, 'res.company', 1).account_journal_suspense_account_id;
+  assert.ok(read(fallback, 'account.move', read(fallback, 'account.bank.statement.line', fallbackLine.id).bank_move_id).line_ids.some((item) => item.account_id === companySuspense));
 });
 
 test('deferral recognition requires configured accounts and uses their IDs', () => {

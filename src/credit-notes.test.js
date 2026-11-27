@@ -146,6 +146,6 @@ test('a credit note that settled an invoice, and that invoice, cannot be deleted
   const out = creditNote(db, move(db, id));
   const posted = postMove(out.db, noteId(out));
   const settings = { isAdmin: true };
-  assert.throws(() => applyDiff(posted, { upserts: {}, deletes: { 'account.move': [noteId(out)] } }, settings), /cannot be deleted/);
-  assert.throws(() => applyDiff(posted, { upserts: {}, deletes: { 'account.move': [id] } }, settings), /cannot be deleted/);
+  assert.throws(() => applyDiff(posted, { upserts: {}, deletes: { 'account.move': [noteId(out)] } }, settings), /cannot delete an entry which has been posted once/);
+  assert.throws(() => applyDiff(posted, { upserts: {}, deletes: { 'account.move': [id] } }, settings), /cannot delete an entry which has been posted once/);
 });

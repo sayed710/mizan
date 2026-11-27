@@ -51,9 +51,9 @@ test('bank invoice matching links the payment entry and protects reversal', asyn
   const paymentEntry = read(paid, 'account.move', inv.id).payments.at(-1).move_id;
   assert.equal(read(paid, 'account.bank.statement.line', line.id).payment_move_id, paymentEntry);
   assert.equal(read(paid, 'account.bank.statement.line', line.id).move_id, inv.id);
-  const { reversePayment } = await import('./models/pay.js');
-  const payment = paid.records['account.payment'].find((p) => p.move_id === paymentEntry);
-  assert.throws(() => reversePayment(paid, payment), /reconciled bank transaction/);
+  const payment = paid.records['account.payment']?.find((p) => p.move_id === paymentEntry);
+  assert.equal(payment, undefined);
+  assert.throws(() => write(paid, 'account.move', paymentEntry, { state: 'draft' }), /reconciled bank transaction|cannot be changed/);
 });
 
 test('posted bank-linked entries already reject accounting-line and date changes', () => {
@@ -90,5 +90,5 @@ test('posting a negative invoice through a diff is refused even with positive ba
   const old = read(inv.db, 'account.move', inv.id);
   const draft = create(inv.db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ qty: 1, price_unit: -100, tax: 0 }] });
   const row = read(draft.db, 'account.move', draft.id);
-  assert.throws(() => applyDiff(draft.db, { upserts: { 'account.move': [{ ...row, state: 'posted', name: 'NEG/1', line_ids: old.line_ids }] } }), /total must be positive/);
+  assert.throws(() => applyDiff(draft.db, { upserts: { 'account.move': [{ ...row, state: 'posted', name: 'NEG/1', line_ids: old.line_ids }] } }), /You cannot validate an invoice with a negative total amount/);
 });

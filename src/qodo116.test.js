@@ -88,7 +88,7 @@ test('finding 1b: migration 52 repairs databases migrated by old 45 and reuses p
 
   const upgraded = migrate(pre52);
   assert.equal(upgraded.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 80);
+  assert.equal(SCHEMA_VERSION, 81);
 
   const uT1 = read(upgraded, 'account.tax', t1.id);
   const uT2 = read(upgraded, 'account.tax', t2.id);

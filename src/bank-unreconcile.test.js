@@ -26,17 +26,17 @@ test('unmatching an existing payment retains its settlement and allows payment r
   db = button(line.db, LINE, line.id, 'Match Payment');
   assert.throws(() => button(db, 'account.payment', p.id, 'Reverse'), /reconciled bank transaction/);
   const matched = db;
-  assert.throws(() => write(matched, LINE, line.id, { state: 'to_check', move_id: null, payment_id: null, payment_move_id: null }), /reversing entries/);
+  assert.throws(() => write(matched, LINE, line.id, { state: 'to_check', move_id: null, payment_id: null, payment_move_id: null }), /clearing the matched links/);
   const forged = { ...matched, records: { ...matched.records, [LINE]: matched.records[LINE].map((l) => l.id === line.id ? { ...l, state: 'to_check', move_id: null, payment_id: null, payment_move_id: null } : l) } };
-  assert.throws(() => applyDiff(matched, diffDb(matched, forged), { isAdmin: true }), /reversing entries/);
+  assert.throws(() => applyDiff(matched, diffDb(matched, forged), { isAdmin: true }), /clearing the matched links/);
   db = button(db, LINE, line.id, 'Unreconcile');
   assert.equal(read(db, LINE, line.id).state, 'to_check');
   assert.deepEqual(read(db, 'account.payment', p.id), before);
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
   const oldBank = read(matched, LINE, line.id).move_id;
   const reversal = search(db, 'account.move').find((m) => m.reversed_entry_id === oldBank);
-  assert.ok(reversal);
-  assert.equal(reversal.line_ids.reduce((n, l) => n + l.debit - l.credit, 0), 0);
+  assert.equal(reversal, undefined);
+  assert.equal(read(db, LINE, line.id).bank_move_id, oldBank);
   assert.equal(read(applyDiff(matched, diffDb(matched, db), { isAdmin: false }), LINE, line.id).state, 'to_check');
   db = button(db, 'account.payment', p.id, 'Reverse');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 100);
@@ -68,7 +68,7 @@ test('unreconcile restores each invoice from a partly matched oversized statemen
   db = button(db, LINE, line.id, 'Unreconcile');
   assert.equal(read(db, 'account.move', first.id).amount_residual, 100);
   assert.equal(read(db, 'account.move', second.id).amount_residual, 40);
-  assert.equal(read(db, LINE, line.id).bank_move_id, null);
+  assert.equal(read(db, LINE, line.id).bank_move_id, read(matched, LINE, line.id).bank_move_id);
   assert.equal(read(db, LINE, line.id).state, 'to_check');
   const synced = applyDiff(matched, diffDb(matched, db), { isAdmin: true });
   assert.equal(read(synced, 'account.move', first.id).amount_residual, 100);
@@ -100,7 +100,8 @@ test('unreconcile restores a two-company invoice including an explicit write-off
   const inv = invoice(branch.db, branch.id);
   const account = create(inv.db, 'account.account', { company_id: branch.id, code: '699999', name: 'Adjustment', account_type: 'expense' });
   const bankAcc = create(account.db, 'account.account', { name: 'Branch Bank Liquidity', code: '101499', account_type: 'asset_cash', company_id: branch.id });
-  const bankBranch = create(bankAcc.db, 'account.journal', { name: 'Branch Bank', code: 'BRBNK', type: 'bank', company_id: branch.id, default_account_id: bankAcc.id, suspense_account_id: search(account.db, 'account.account').find((a) => a.code === '101404' && !a.company_id).id });
+  const suspense = create(bankAcc.db, 'account.account', { name: 'Branch suspense', code: '101498', account_type: 'asset_current', company_id: branch.id, reconcile: true });
+  const bankBranch = create(suspense.db, 'account.journal', { name: 'Branch Bank', code: 'BRBNK', type: 'bank', company_id: branch.id, default_account_id: bankAcc.id, suspense_account_id: suspense.id });
   const line = create(bankBranch.db, LINE, { company_id: branch.id, journal_id: bankBranch.id, date: '2026-01-03', payment_ref: 'settlement', amount: 90, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Difference', writeoff_amount: 10 });
   let db = button(line.db, LINE, line.id, 'Match');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
@@ -108,9 +109,8 @@ test('unreconcile restores a two-company invoice including an explicit write-off
   db = button(db, LINE, line.id, 'Unreconcile');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 100);
   assert.equal(read(db, LINE, line.id).state, 'to_check');
-  const generated = search(matched, 'account.payment').find((p) => p.move_id === read(matched, LINE, line.id).payment_move_id);
-  assert.equal(read(db, 'account.payment', generated.id).state, 'reversed');
-  for (const source of [read(matched, LINE, line.id).payment_move_id, read(matched, LINE, line.id).writeoff_move_id]) {
+  assert.equal(read(db, LINE, line.id).bank_move_id, read(matched, LINE, line.id).bank_move_id);
+  for (const source of [read(matched, LINE, line.id).writeoff_move_id]) {
     const reversal = search(db, 'account.move').find((m) => m.reversed_entry_id === source);
     assert.ok(reversal);
     assert.equal(reversal.company_id, branch.id);

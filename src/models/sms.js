@@ -143,4 +143,25 @@ export const smsModels = {
     list: ['number', 'reason', 'active'],
     form: { title: 'number', groups: [['number', 'reason'], ['active']] },
   },
+
+  'sms.template': {
+    label: 'SMS Templates',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      model: {
+        type: 'selection',
+        label: 'Applies to',
+        required: true,
+        options: [['res.partner', 'Contact'], ['account.move', 'Invoice'], ['sale.order', 'Sales Order']],
+      },
+      body: { type: 'text', label: 'Body', required: true },
+    },
+    defaults: () => ({ model: 'res.partner' }),
+    list: ['name', 'model', 'body'],
+    form: {
+      title: 'name',
+      groups: [['model']],
+      tabs: [{ label: 'Content', fields: ['body'] }],
+    },
+  },
 };

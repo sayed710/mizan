@@ -45,9 +45,9 @@ test('trial balance lists per-account opening, movement and end, and the books b
   assert.equal(tb.totals.initial, 0);
   assert.equal(tb.totals.debit, tb.totals.credit);
   assert.equal(tb.totals.end, 0);
-  assert.deepEqual(tb.rows.map((r) => r.account.code), ['101401', '101501', '110100', '110200', '121000', '131000', '151000', '211000', '251000', '301000', '400000']);
+  assert.deepEqual(tb.rows.map((r) => r.account.code), ['101401', '101404', '101501', '110100', '110200', '121000', '131000', '151000', '211000', '251000', '301000', '400000']);
   assert.ok(tb.rows.every((r) => r.initial || r.debit || r.credit || r.end)); // all-zero rows are omitted
-  assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '101401')), { initial: 0, debit: 208936, credit: 25000, end: 183936 });
+  assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '101401')), { initial: 0, debit: 210146, credit: 26812.5, end: 183333.5 });
   assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '121000')), { initial: 0, debit: 10716, credit: 8936, end: 1780 });
   assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '400000')), { initial: 0, debit: 0, credit: 9400, end: -9400 });
   assert.deepEqual(trialBalance(db, { from: '2000-01-01', to: '2000-12-31' }), { rows: [], totals: { initial: 0, debit: 0, credit: 0, end: 0 } });
@@ -58,7 +58,7 @@ test('trial balance carries activity from before the period into the opening col
   const tb = trialBalance(db, recent);
   assert.equal(tb.totals.initial, 0); // the books were balanced before `from` too
   assert.equal(tb.totals.end, 0);
-  assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '101401')), { initial: 150500, debit: 58436, credit: 25000, end: 183936 });
+  assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '101401')), { initial: 150500, debit: 59646, credit: 26812.5, end: 183333.5 });
   assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '121000')), { initial: 9076, debit: 1140, credit: 8436, end: 1780 });
   assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '101501')), { initial: 5000, debit: 0, credit: 0, end: 5000 }); // only ever touched before `from`
 });
@@ -170,18 +170,19 @@ test('partner ledger uses only the requested company journal items', () => {
 test('cash flow splits every cash movement into operating, investing and financing', () => {
   const { db } = books();
   const cf = cashFlow(db, whole);
-  assert.deepEqual([cf.opening, cf.closing, cf.net], [0, 188936, 188936]);
-  assert.deepEqual([cf.operating, cf.investing, cf.financing], [8936, -25000, 205000]); // payments; van; opening entry + capital
+  assert.deepEqual([cf.opening, cf.closing, cf.net], [0, 188333.5, 188333.5]);
+  assert.deepEqual([cf.operating, cf.investing, cf.financing], [8333.5, -25000, 205000]); // payments; van; opening entry + capital
   assert.equal(cf.net, cf.operating + cf.investing + cf.financing);
   assert.deepEqual(cf.lines.map((l) => [l.section, l.account.code, l.amount]), [
+    ['operating', '101404', -602.5],
     ['operating', '251000', 1097.4],
     ['operating', '400000', 7838.6],
     ['investing', '151000', -25000],
     ['financing', '301000', 205000],
   ]);
   const week = cashFlow(db, recent);
-  assert.deepEqual([week.opening, week.closing, week.net], [155500, 188936, 33436]);
-  assert.deepEqual([week.operating, week.investing, week.financing], [8436, -25000, 50000]);
+  assert.deepEqual([week.opening, week.closing, week.net], [155500, 188333.5, 32833.5]);
+  assert.deepEqual([week.operating, week.investing, week.financing], [7833.5, -25000, 50000]);
   assert.equal(week.net, week.operating + week.investing + week.financing);
 });
 
@@ -204,7 +205,7 @@ test('executive summary reports margins, liquidity and days sales outstanding', 
   const { db } = books();
   const s = executiveSummary(db, whole);
   assert.deepEqual([s.revenue, s.grossProfit, s.netProfit], [9400, 9400, 9400]); // purchases are stock, not expense
-  assert.deepEqual([s.cash, s.receivables, s.payables], [188936, 1780, 9234]);
+  assert.deepEqual([s.cash, s.receivables, s.payables], [188333.5, 1780, 9234]);
   assert.equal(s.grossMargin, 100);
   assert.equal(s.netMargin, 100);
   assert.equal(s.dso, 138); // 1780 / 9400 × 731 days

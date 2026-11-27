@@ -9,7 +9,7 @@ import { postMove } from './models/accounting.js';
 import { creditWarning } from './models/finance.js';
 import { addDays, today } from './models/common.js';
 import { applyDiff, diffDb } from './sync.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 import { seed } from './seed.js';
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 
@@ -358,7 +358,7 @@ test('migration 64: sets use_partner_credit_limit and account_use_credit_limit w
     },
   };
   const migrated = migrate(legacyWithLimits);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 81);
   assert.equal(read(migrated, 'res.partner', 10).use_partner_credit_limit, true);
   assert.equal(read(migrated, 'res.partner', 11).use_partner_credit_limit, undefined);
   assert.equal(read(migrated, 'res.partner', 12).use_partner_credit_limit, undefined);
@@ -375,7 +375,7 @@ test('migration 64: sets use_partner_credit_limit and account_use_credit_limit w
     },
   };
   const migratedEmpty = migrate(legacyWithoutLimits);
-  assert.equal(migratedEmpty.schema_version, SCHEMA_VERSION);
+  assert.equal(migratedEmpty.schema_version, 81);
   assert.equal(read(migratedEmpty, 'res.company', 1).account_use_credit_limit, undefined);
   assert.equal(read(migratedEmpty, 'res.partner', 11).use_partner_credit_limit, undefined);
 });
@@ -427,7 +427,7 @@ test('regression Qodo Finding 1: child legacy credit limits consolidate onto com
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 81);
   assert.equal(read(migrated, 'res.company', 1).account_use_credit_limit, true);
 
   // Parent 100 consolidates child's 400 limit and enables override flag
@@ -487,7 +487,7 @@ test('regression Qodo Finding: seeded parent partner 1 inherits child credit lim
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, SCHEMA_VERSION);
+  assert.equal(migrated.schema_version, 81);
   assert.equal(read(migrated, 'res.company', 1).account_use_credit_limit, true);
 
   const p1 = read(migrated, 'res.partner', 1);

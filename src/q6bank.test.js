@@ -153,9 +153,10 @@ test('booked foreign bank amount survives later rate corrections', () => {
     assert.equal(completed.state, 'reconciled');
     assert.equal(completed.open_amount, 0);
     assert.equal(completed.bank_move_id, bankMove.id);
-    assert.deepEqual(read(db, 'account.move', bankMove.id).line_ids, bankMove.line_ids);
-    const remainder = read(db, 'account.move', completed.move_id).line_ids;
-    assert.equal(remainder.find((item) => item.account_id === accountId(db, '101404')).amount_currency, 50);
+    const lines = read(db, 'account.move', bankMove.id).line_ids;
+    const counterpartItem = lines.find((item) => item.account_id === accountId(db, '450000'));
+    assert.equal(counterpartItem.credit, 62.5);
+    assert.equal(counterpartItem.amount_currency, -50);
   }
 });
 

@@ -1,11 +1,12 @@
 import { purchaseLineId } from './models/purchase-links.js';
+import { bookBankMovement, statementCompanyAmount } from './models/bank.js';
 import { ensureOnlinePaymentMethods, ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
 import { ensureCountries, countryIdFor, stateIdFor } from './models/country.js';
 import { ensurePartnerIndustries } from './models/crm.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
-import { create, postNote, search, write } from './orm.js';
+import { create, postNote, read, search, write } from './orm.js';
 import { migrateAppointments } from './models/appointments.js';
 import { analyticLinesForMove } from './models/analyticplus.js';
 import { migrateDocumentTags } from './models/signplus.js';
@@ -2593,6 +2594,44 @@ export function migratePartnerCountryAndState(db) {
   return { ...db, records: { ...db.records, 'res.partner': nextPartners } };
 }
 MIGRATIONS.push({ version: 80, name: 'partner-country-state-ids', up: migratePartnerCountryAndState });
+
+function migrateStatementLinesBankSuspense(db) {
+  const lines = db.records['account.bank.statement.line'] ?? [];
+  let currentDb = db;
+  for (const line of lines) {
+    if (line.state === 'to_check' && !line.bank_move_id && line.journal_id && Number(line.amount) !== 0) {
+      const journal = read(currentDb, 'account.journal', line.journal_id);
+      const company = line.company_id ?? journal?.company_id ?? 1;
+      const normalizedLine = { ...line, company_id: company };
+      if (!journal?.default_account_id) {
+        const updates = {};
+        if (line.company_id == null) updates.company_id = company;
+        const openAmount = statementCompanyAmount(currentDb, normalizedLine, undefined, { allowUnavailable: true });
+        if (line.open_amount == null) {
+          if (openAmount != null) updates.open_amount = openAmount;
+        }
+        if (Object.keys(updates).length > 0) {
+          currentDb = write(currentDb, 'account.bank.statement.line', line.id, updates);
+        }
+        if (openAmount == null) currentDb = postNote(currentDb, 'account.bank.statement.line', line.id, 'Upgrade: could not book bank statement line: The historical currency rate is unavailable');
+        continue;
+      }
+      const beforeBooking = currentDb;
+      try {
+        if (journal.active === false) throw new Error('The bank journal is archived');
+        const openAmount = statementCompanyAmount(currentDb, normalizedLine, undefined, { allowUnavailable: true });
+        if (openAmount == null) throw new Error('The historical currency rate is unavailable');
+        if (line.company_id == null) currentDb = write(currentDb, 'account.bank.statement.line', line.id, { company_id: company });
+        const booked = bookBankMovement(currentDb, normalizedLine, company, { date: line.date ?? today(), openAmount });
+        currentDb = booked.db;
+      } catch (error) {
+        currentDb = postNote(beforeBooking, 'account.bank.statement.line', line.id, `Upgrade: could not book bank statement line: ${error.message}`);
+      }
+    }
+  }
+  return currentDb;
+}
+MIGRATIONS.push({ version: 81, name: 'statement-lines-post-bank-suspense', up: migrateStatementLinesBankSuspense });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

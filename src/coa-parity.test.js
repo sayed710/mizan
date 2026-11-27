@@ -175,6 +175,7 @@ test('account.account form renders Balance header, code+name title, and Accounti
     const panel = find(ctx.host, (n) => hasClass(n, 'tab-panel'));
     assert.deepEqual(fieldLabelsOf(panel), [
       'Type',
+      'Account Group',
       'Account Currency',
       'Default Taxes',
       'Fiscal Category',

@@ -3,11 +3,23 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, emptyDb, read, write } from './orm.js';
 import { seed } from './seed.js';
-import { conversionRate, rateAt } from './models/currency.js';
+import { conversionRate, rateAt, upsertCurrencyRates } from './models/currency.js';
 import { closeFiscalYear } from './models/closing.js';
 import { migrate } from './migrations.js';
 import { createCompany, ensureMainCompany } from './models/company.js';
 import { companyAmount, reportingBookedAmount } from './models/money.js';
+
+test('array rate imports skip the base currency and import foreign rates', () => {
+  const db = seed();
+  const baseId = db.settings.base_currency_id;
+  const foreign = create(db, 'res.currency', { name: 'IMPORTFX' });
+  const updated = upsertCurrencyRates(foreign.db, [
+    { currency_id: baseId, rate: 1 },
+    { currency_id: foreign.id, rate: 2 },
+  ], { date: '2026-01-01' });
+  assert.deepEqual(read(updated, 'res.currency', baseId).rate_ids, read(foreign.db, 'res.currency', baseId).rate_ids);
+  assert.equal(rateAt(updated, foreign.id, '2026-01-01'), 2);
+});
 
 test('exchange rates identify the configured base by id rather than name', () => {
   const original = seed();
