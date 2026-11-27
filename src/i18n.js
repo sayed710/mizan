@@ -1631,7 +1631,7 @@ const ar = {
   // control panel / search
   New: 'جديد', 'Search...': 'بحث...', Search: 'بحث', Filters: 'عوامل التصفية', 'Group By': 'تجميع حسب', Favorites: 'المفضلة',
   'Save current search': 'حفظ البحث الحالي', 'Saved search name': 'اسم البحث المحفوظ', 'Remove filter': 'إزالة الفلتر', or: 'أو',
-  Pager: 'التنقل بين الصفحات', 'Previous page': 'الصفحة السابقة', 'Next page': 'الصفحة التالية', 'Load more ({n} remaining)': 'عرض المزيد ({n} متبقي)',
+  Pager: 'التنقل بين الصفحات', 'Previous page': 'الصفحة السابقة', 'Next page': 'الصفحة التالية', 'Load more ({n} remaining)': 'عرض المزيد ({n} متبقي)', 'Load more...': 'تحميل المزيد...',
   'Toggle search panel': 'إظهار لوحة البحث', 'Switch view': 'تبديل العرض', kanban: 'كانبان', list: 'قائمة', graph: 'رسم بياني',
   pivot: 'جدول محوري', calendar: 'تقويم', 'Delete': 'حذف', 'Delete {n} record(s)?': 'حذف {n} سجل؟', Export: 'تصدير',
   'No record found. Create one with “New”.': 'لا توجد سجلات. أنشئ سجلاً جديداً بزر «جديد».', Total: 'الإجمالي', None: 'لا شيء',
@@ -2317,7 +2317,7 @@ const ar = {
   'Order Line': 'بند الطلب', 'Invoicing Method': 'طريقة الفوترة', 'Regular Invoice': 'فاتورة عادية', 'Down Payment': 'دفعة مقدمة', 'Down Payment Account': 'حساب الدفعات المقدمة', 'Currency Exchange Gain Account': 'حساب أرباح صرف العملات', 'Currency Exchange Loss Account': 'حساب خسائر صرف العملات', 'Down Payment (Percentage)': 'دفعة مقدمة (نسبة مئوية)', 'Down Payment (Fixed Amount)': 'دفعة مقدمة (مبلغ ثابت)',
   'Depreciation Expense Account': 'حساب مصروف الإهلاك', 'Legacy Expense Account': 'حساب المصروف القديم', 'Asset Disposal Gain Account': 'حساب أرباح استبعاد الأصول', 'Asset Disposal Loss Account': 'حساب خسائر استبعاد الأصول', 'Rental Deposit Liability Account': 'حساب التزامات تأمين الإيجار', 'Withheld Deposit Income Account': 'حساب إيراد التأمين المحتجز',
   'Analytic Distribution': 'التوزيع التحليلي',
-  'Amount in Currency': 'المبلغ بالعملة',
+  'Amount in Currency': 'المبلغ بالعملة', 'Expected Date': 'التاريخ المتوقع',
   'Subscription Period': 'فترة الاشتراك',
   'Signing Links': 'روابط التوقيع',
   'Reversal of': 'عكس القيد',

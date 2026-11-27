@@ -275,7 +275,7 @@ test('Finding 6: aged report CSV export table rows are not preceded by a short m
     const rows = tableToRows(table);
     assert.ok(rows.length > 0);
     const headerCols = rows[0].length;
-    assert.equal(headerCols, 9);
+    assert.equal(headerCols, 13);
     for (const row of rows) {
       assert.equal(row.length, headerCols);
     }
@@ -288,7 +288,7 @@ test('Finding 7: AgedDetailRow renders invoice date column', async () => {
   const detail = { move_id: 123, name: 'INV/001', invoice_date: '2025-01-15', at_date: 0, '1_30': 100, older: 0, total: 100 };
   const el = AgedDetailRow({ buckets, detail, money: (v) => `$${v}` });
   const cells = el.props.children;
-  assert.equal(cells.length, 6);
+  assert.equal(cells.length, 10);
   assert.equal(cells[1].props.children, '2025-01-15');
 });
 

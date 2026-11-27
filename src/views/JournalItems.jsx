@@ -2,6 +2,8 @@ import { anyAnalyticAccountingEnabled } from '../models/analytic-setting.js';
 import { Fragment, useRef, useState } from 'react';
 import { canCreateAssetFromJournalItem, createAssetsFromJournalItems } from '../models/assets.js';
 import { companyViewDb } from '../companyView.js';
+import { cashFlow, trialOpeningItems } from '../models/reports.js';
+import { agedBalance, BUCKETS, openInstallments } from '../models/finance.js';
 import { analyticEligibleAccount, isLiquidityJournal, isReconcilableAccount, journalItems, reconciledItemFilter } from '../models/ledger.js';
 import { hasMultiCurrency, reportingBookedOrNull } from '../models/money.js';
 import { RateNote } from './RateNote.jsx';
@@ -200,13 +202,14 @@ function cellClassName(col, line, todayDate) {
 export function JournalItems({ leaf = {} } = {}) {
   const db = companyViewDb(useDb());
   const mode = leaf.reviewMode ?? 'posted';
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
+  const initialParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
+  const [from, setFrom] = useState(() => initialParams.get('from') ?? '');
+  const [to, setTo] = useState(() => initialParams.get('to') ?? '');
   const [query, setQuery] = useState('');
   const [accountRoot, setAccountRoot] = useState(null);
   const [matchingGroup, setMatchingGroup] = useState(null);
   const [group, setGroup] = useState(() => (leaf.groupBy?.[0] ? leaf.groupBy[0].replace('_id', '') : (mode === 'to_check' ? 'journal' : '')));
-  const [activeFilters, setActiveFilters] = useState(() => new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '').has('move') ? [] : defaultFiltersForMode(mode));
+  const [activeFilters, setActiveFilters] = useState(() => initialParams.has('move') ? [] : initialParams.get('reviewMode') === 'all' ? ['posted', 'unposted'] : defaultFiltersForMode(mode));
   const [optionalState, isVisible, toggleCol] = useOptionalColumns(OPTIONAL_STORAGE_KEY);
   const [selected, setSelected] = useState([]);
   const [action, setAction] = useState('');
@@ -301,7 +304,18 @@ export function JournalItems({ leaf = {} } = {}) {
   // and Reconciled items smart button scopes it to the matched reconciliation set (#/...?reconciled_of=ID).
   const hashParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
   const accountFilter = Number(hashParams.get('account')) || null;
+  const partnerParam = hashParams.get('partner');
+  const partnerFilter = partnerParam === 'none' ? null : Number(partnerParam) || null;
+  const hasPartnerFilter = partnerParam === 'none' || partnerFilter != null;
+  const reportAccountType = hashParams.get('accountType');
+  const reportTaxId = Number(hashParams.get('tax')) || null;
+  const reportTaxKind = hashParams.get('taxKind');
+  const trialOpening = hashParams.get('trialOpening');
+  const cashFlowAccount = Number(hashParams.get('cashFlowAccount')) || null;
+  const agedKind = hashParams.get('agedKind');
+  const agedBucket = hashParams.get('agedBucket');
   const journalFilter = Number(hashParams.get('journal')) || null;
+  const reportJournalIds = (hashParams.get('journals') ?? '').split(',').map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
   const moveFilter = Number(hashParams.get('move')) || null;
   const reconciledOf = Number(hashParams.get('reconciled_of')) || null;
   const companyParam = Number(hashParams.get('company')) || null;
@@ -320,8 +334,29 @@ export function JournalItems({ leaf = {} } = {}) {
   const multiCompany = companiesOf(db).length > 1;
   const multiCurrency = hasMultiCurrency(db);
   const stateField = models['account.move'].fields.state;
-  const enriched = journalItems(db, { ...(matchingGroup ? {} : { from, to }), reviewMode: !matchingGroup && moveFilter ? 'all_with_cancel' : 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
-    .filter((line) => matchingGroup || ((!accountFilter || line.account_id === accountFilter) && (!journalFilter || line.journal_id === journalFilter) && (!moveFilter || (line.move_id === moveFilter && !['line_section', 'line_subsection', 'line_note'].includes(line.display_type))) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line)))))
+  const reportDb = reportJournalIds.length ? { ...db, unfilteredDb: db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).filter((move) => reportJournalIds.includes(move.journal_id)) } } : db;
+  const reportMode = hashParams.get('reviewMode') === 'all' ? 'all' : 'posted';
+  const analyticAccountIds = (hashParams.get('analytics') ?? '').split(',').map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+  const cashSources = cashFlowAccount ? new Set(cashFlow(reportDb, { from, to, company_id: filterCompany, analyticAccountIds, reviewMode: reportMode, includeSources: true }).lines.find((line) => line.account.id === cashFlowAccount)?.sourceMoveIds ?? []) : null;
+  const agingInterval = Number(hashParams.get('agingInterval')) || 30;
+  const agingBasedOn = hashParams.get('agingBasedOn') ?? 'base_on_maturity_date';
+  const ageRange = agedKind && agedBucket ? BUCKETS(agingInterval).find(([key]) => key === agedBucket) : null;
+  const agedRow = ageRange && to ? agedBalance(reportDb, agedKind, to, filterCompany, { aging_interval: agingInterval, aging_based_on: agingBasedOn, reviewMode: reportMode }).rows.find((row) => (row.partner_id ?? null) === partnerFilter) : null;
+  const agedMoves = agedRow ? new Set(agedRow.invoices.filter((item) => item[agedBucket]).map((item) => item.move_id)) : new Set();
+  const matchesAgedItem = (line) => {
+    if (!ageRange) return true;
+    const move = read(reportDb, 'account.move', line.move_id);
+    if (!agedMoves.has(line.move_id) || read(db, 'account.account', line.account_id)?.account_type !== (agedKind === 'payable' ? 'liability_payable' : 'asset_receivable')) return false;
+    const due = line.date_maturity ?? move?.invoice_date_due ?? line.date;
+    if (['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move?.move_type) && !openInstallments(reportDb, move, agedKind, to).some((installment) => installment.date === due)) return false;
+    const date = agingBasedOn === 'base_on_invoice_date' ? (line.invoice_date ?? line.date) : due;
+    const days = Math.floor((new Date(to) - new Date(date)) / 864e5);
+    return days >= ageRange[2] && days <= ageRange[3];
+  };
+  const sourceItems = journalItems(db, { ...(matchingGroup ? {} : { from: cashSources ? undefined : from, to }), reviewMode: !matchingGroup && moveFilter ? 'all_with_cancel' : 'all', includeDraftInvoices: Boolean(ageRange), ...(filterCompany ? { company_id: filterCompany } : {}) });
+  const trialItems = trialOpening ? sourceItems.filter((line) => line.date < trialOpening || !line.is_closing) : sourceItems;
+  const enriched = (trialOpening ? trialOpeningItems(db, trialItems, trialOpening) : trialItems)
+    .filter((line) => matchingGroup || ((!accountFilter || line.account_id === accountFilter) && (!hasPartnerFilter || (line.partner_id ?? null) === partnerFilter) && (!cashSources || (cashSources.has(line.move_id) && read(db, 'account.account', line.account_id)?.account_type === 'asset_cash')) && matchesAgedItem(line) && (!reportTaxId || (reportTaxKind === 'base' ? (line.tax_ids ?? []).includes(reportTaxId) : (line.tax_line_id ?? line.tax_id) === reportTaxId)) && (!reportAccountType || (reportAccountType === 'both' ? ['asset_receivable', 'liability_payable'] : [reportAccountType === 'payable' ? 'liability_payable' : 'asset_receivable']).includes(read(db, 'account.account', line.account_id)?.account_type)) && (hashParams.get('unreconciled') !== '1' || Math.abs(line.amount_residual ?? 0) > 1e-9) && (!journalFilter || line.journal_id === journalFilter) && (!reportJournalIds.length || reportJournalIds.includes(line.journal_id)) && (!moveFilter || (line.move_id === moveFilter && !['line_section', 'line_subsection', 'line_note'].includes(line.display_type))) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line)))))
     .map((line) => {
       const move = read(db, 'account.move', line.move_id);
       const lineCompanyCurr = findCompanyCurrencyRecord(db, line.company_id);

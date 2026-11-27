@@ -1898,9 +1898,9 @@ export function openInstallments(db, m, kind, at, { includeBlocked = true } = {}
 }
 
 /** Add the open installments of posted invoices and refunds. */
-function ageDocumentInstallments(db, kind, at, moves, add) {
+function ageDocumentInstallments(db, kind, at, moves, add, includeDraft = false) {
   const types = kind === 'receivable' ? ['out_invoice', 'out_refund'] : ['in_invoice', 'in_refund'];
-  for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && (x.date ?? x.invoice_date) <= at)) {
+  for (const m of moves.filter((x) => (x.state === 'posted' || (includeDraft && x.state === 'draft')) && types.includes(x.move_type) && (x.date ?? x.invoice_date) <= at)) {
     for (const due of openInstallments(db, m, kind, at)) add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * due.amount, m);
   }
 }
@@ -1928,7 +1928,7 @@ function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
 }
 
 /** Include other posted receivable/payable journal lines, with matching effective at the cutoff. */
-function ageOtherEntries(db, kind, at, moves, add) {
+function ageOtherEntries(db, kind, at, moves, add, includeDraft = false) {
   // Settlement entries and their reversals are already reflected by document/payment residuals.
   const paymentMoves = new Set(search(db, 'account.payment').map((payment) => payment.move_id).filter(Boolean));
   for (const move of moves) for (const application of move.payments ?? []) {
@@ -1940,7 +1940,7 @@ function ageOtherEntries(db, kind, at, moves, add) {
   const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
   const sign = kind === 'receivable' ? 1 : -1;
   for (const move of moves) {
-    if (move.state !== 'posted' || move.move_type !== 'entry' || paymentMoves.has(move.id)) continue;
+    if ((move.state !== 'posted' && !(includeDraft && move.state === 'draft')) || move.move_type !== 'entry' || paymentMoves.has(move.id)) continue;
     const moveDate = move.date ?? move.invoice_date;
     if (!moveDate || moveDate > at) continue;
     (move.line_ids ?? []).forEach((line, index) => {
@@ -1981,7 +1981,7 @@ export function resolveAgedAsOfDate(input, lastValidDate) {
 }
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
-export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date' } = {}) {
+export function agedBalance(db, kind = 'receivable', at = today(), companyId = null, { aging_interval = 30, aging_based_on = 'base_on_maturity_date', reviewMode } = {}) {
   if (!validDate(at)) throw new Error('Enter a valid As of Date');
   const buckets = BUCKETS(aging_interval);
   const rows = new Map();
@@ -1996,18 +1996,23 @@ export function agedBalance(db, kind = 'receivable', at = today(), companyId = n
     if (document) {
       let detail = row.invoices.find((item) => item.move_id === document.id);
       if (!detail) {
-        detail = { move_id: document.id, name: document.name, invoice_date: document.invoice_date ?? null, date: document.date ?? date ?? null, total: 0, ...Object.fromEntries(buckets.map(([k]) => [k, 0])) };
+        const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+        const counterpart = (document.line_ids ?? []).find((line) => read(db, 'account.account', line.account_id)?.account_type === accountType);
+        detail = { move_id: document.id, name: document.name, invoice_date: document.invoice_date ?? null, date: document.date ?? date ?? null, account_id: counterpart?.account_id ?? null, currency_id: counterpart?.currency_id ?? null, expected_date: counterpart?.expected_date ?? null, amount_currency: null, total: 0, ...Object.fromEntries(buckets.map(([k]) => [k, 0])) };
         row.invoices.push(detail);
       }
       detail[bucket] = round(detail[bucket] + amount);
       detail.total = round(detail.total + amount);
+      const accountLine = (document.line_ids ?? []).find((line) => line.account_id === detail.account_id);
+      const booked = Math.abs((Number(accountLine?.debit) || 0) - (Number(accountLine?.credit) || 0));
+      if (booked && accountLine?.amount_currency != null) detail.amount_currency = round((detail.amount_currency ?? 0) + amount * Math.abs(Number(accountLine.amount_currency)) / booked);
     }
     rows.set(partner, row);
   };
   const moves = search(db, 'account.move').filter((m) => companyId == null || (m.company_id ?? 1) === companyId);
-  ageDocumentInstallments(db, kind, at, moves, add);
+  ageDocumentInstallments(db, kind, at, moves, add, reviewMode === 'all');
   ageUnappliedCredits(db, kind, at, moves, add, companyId);
-  ageOtherEntries(db, kind, at, moves, add);
+  ageOtherEntries(db, kind, at, moves, add, reviewMode === 'all');
   return { buckets: buckets.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
 
@@ -3912,7 +3917,7 @@ export function analyticActualLines(db, period = {}) {
     if (period.account_id != null && line.account_id !== period.account_id) return false;
     if (period.general_account && !(read(db, 'account.account', line.general_account)?.code ?? '').startsWith(period.general_account)) return false;
     const move = line.move_id && read(db, 'account.move', line.move_id);
-    return (!line.move_id && !period.posted_only) || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
+    return (!line.move_id && !period.posted_only) || ((move?.state === 'posted' || (period.reviewMode === 'all' && move?.state === 'draft')) && (move.company_id ?? 1) === (line.company_id ?? 1));
   });
 }
 
