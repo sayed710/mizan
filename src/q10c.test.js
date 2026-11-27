@@ -89,8 +89,14 @@ test('list CSV exports negative monetary values as numbers and escapes minus-pre
     await React.act(async () => root.render(React.createElement(ActionView, { leaf: { model: 'account.move', view: 'list' }, base: '#/test', params: new URLSearchParams() })));
     const button = find(host, (node) => node.tagName === 'BUTTON' && node.textContent.includes('Export'));
     assert.ok(button);
-    const props = button[Object.keys(button).find((key) => key.startsWith('__reactProps$'))];
-    props.onClick();
+    const propsOf = (node) => node[Object.keys(node).find((key) => key.startsWith('__reactProps$'))];
+    await React.act(async () => propsOf(button).onClick());
+    const dialog = find(host, (node) => propsOf(node)?.role === 'dialog');
+    assert.ok(dialog, 'Export dialog opens');
+    const formatSelect = find(dialog, (node) => propsOf(node)?.['aria-label'] === 'Format');
+    await React.act(async () => propsOf(formatSelect).onChange({ target: { value: 'csv' } }));
+    const confirmButton = find(dialog, (node) => node.tagName === 'BUTTON' && node.textContent === 'Export');
+    await React.act(async () => propsOf(confirmButton).onClick());
     const rows = fromCsv(await blob.text());
     const row = rows.find((cells) => cells[0] === "'-HYPERLINK(\"evil\")");
     assert.ok(row, 'formula-like text remains escaped');

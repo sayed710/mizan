@@ -104,6 +104,7 @@ import { paymentMethodModels } from './paymentmethod.js';
 import { lockExceptionModels } from './lockexception.js';
 import { countryGroupModels } from './countrygroup.js';
 import { countryModels } from './country.js';
+import { exportModels } from './exports.js';
 
 // Generic entry menus search like Journal Entries, not like invoices.
 const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys', 'groupByLabels'].filter((k) => k in journalEntriesView).map((k) => [k, journalEntriesView[k]]));
@@ -111,7 +112,7 @@ const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys',
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, resBankModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
+export const MODEL_MODULES = { exportModels, configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, bankStatementModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, resBankModels, partnerBankModels, lockExceptionModels, paymentMethodModels, countryGroupModels };
 MODEL_MODULES.countryModels = countryModels;
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
@@ -863,7 +864,7 @@ export const leavesOf = (app) => {
   return walk(app?.menus);
 };
 
-const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product'];
+const SHARED = ['ir.exports', 'mail.activity', 'discuss.channel', 'res.partner', 'res.partner.category', 'res.partner.industry', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.payment.method', 'account.payment.method.line', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
   'account.bank.statement.line', 'account.bank.statement', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company', 'sms.campaign', 'sms.trace'];

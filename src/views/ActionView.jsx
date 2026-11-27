@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
-import { display, PagerButtons, SimulatedNote } from '../ui.jsx';
-import { downloadCsv } from '../csv.js';
-import { downloadXlsx } from '../xlsx.js';
+import { PagerButtons, readOptionalCols, SimulatedNote } from '../ui.jsx';
 import { commit, getDb, getUser, serverAction, useDb } from '../store.js';
 import { appOpen } from '../access.js';
 import { FollowUpBatchResultModal, runBatchFollowUpsAction } from './FollowUpLetter.jsx';
@@ -12,7 +10,8 @@ import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
 import { Kanban } from './Kanban.jsx';
-import { colLabel, List } from './List.jsx';
+import { List, visibleListColumns } from './List.jsx';
+import { ExportDialog } from './ExportDialog.jsx';
 import { Graph } from './Graph.jsx';
 import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
@@ -75,6 +74,7 @@ export function ActionView({ leaf, base, params }) {
   const [batchReport, setBatchReport] = useState(null);
   const [error, setError] = useState(null);
   const [isPrinting, setIsPrinting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => { setSelected(new Set()); setError(null); }, [companyScope]);
 
@@ -116,28 +116,6 @@ export function ActionView({ leaf, base, params }) {
     } catch (e) {
       alert(t(e.message));
     }
-  };
-  const exportRows = () => {
-    const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
-    return [
-      listCols.map((f) => colLabel(def.fields, f, listLabels)),
-      ...rows.map((r) => listCols.map((f) => {
-        const field = listFields?.[f] ? { ...def.fields[f], ...listFields[f] } : def.fields[f];
-        const value = field.valueFallback && !r[f]?.length ? field.valueFallback(r) : r[f];
-        return field.type === 'many2one' ? value ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof value === 'number' && Number.isFinite(value) ? value : display(db, field, value, r);
-      })),
-    ];
-  };
-  const exportCsv = () => downloadCsv(`${model}.csv`, exportRows());
-  const exportXlsx = () => {
-    const columnTypes = listCols.map((f) => {
-      const field = listFields?.[f] ? { ...def.fields[f], ...listFields[f] } : def.fields[f];
-      return ['monetary', 'float', 'integer'].includes(field?.type) ? 'number' : 'text';
-    });
-    downloadXlsx(`${model}.xlsx`, exportRows(), {
-      sheetName: t(leaf.label || def.label || model),
-      columnTypes,
-    });
   };
   const importCsv = (file) => importModelFile(model, importDefaults, file, listLabels);
   const groupBy = search.groupBy;
@@ -300,8 +278,7 @@ export function ActionView({ leaf, base, params }) {
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       {(leaf.key === 'draft-entries' || leaf.key === 'to-check') && <button type="button" className="btn sm" onClick={() => { if (leaf.key === 'draft-entries') { setIsPrinting(true); globalThis.print(); } else globalThis.print(); }}>{t('Print')}</button>}
-      <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
-      <button type="button" className="btn sm" onClick={exportXlsx}>⬇ {t('Export XLSX')}</button>
+      <button type="button" className="btn sm" onClick={() => setExporting(true)}>⬇ {t('Export')}</button>
       {statementImport && !defaults.journal_id && <label className="import-journal-picker">
         <span>{t('Bank Journal')}</span>
         <select aria-label={t('Bank Journal')} value={selectedImportJournalId} onChange={(e) => setSelectedImportJournalId(e.target.value)}>
@@ -359,6 +336,9 @@ export function ActionView({ leaf, base, params }) {
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}
       {view === 'gantt' && <Gantt db={db} model={model} records={records} open={open} />}
+      {exporting && <ExportDialog db={db} model={model} records={selected.size ? records.filter((r) => selected.has(r.id)) : records}
+        columns={visibleListColumns(def, db, readOptionalCols(leaf.key ? `mizan-list-cols:${leaf.key}` : `mizan-list-cols:${model}`), { list: listCols, optionalList, listFields }).cols}
+        labels={listLabels} listFields={listFields} title={leaf.label || def.label || model} onClose={() => setExporting(false)} />}
       {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
       {batchReport && <FollowUpBatchResultModal report={batchReport} onClose={() => setBatchReport(null)} />}
     </main>
