@@ -41,7 +41,7 @@ test('upgrade brings percentage tolerances above 100 down to 100, leaving amount
 
   // Upgrade the database
   const upgraded = migrate(legacyDb);
-  assert.equal(upgraded.schema_version, 80);
+  assert.equal(upgraded.schema_version, 81);
 
   const r1 = read(upgraded, MODEL, 801);
   const r2 = read(upgraded, MODEL, 802);

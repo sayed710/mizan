@@ -6,8 +6,9 @@ import { models } from '../registry.js';
 import { create, getActiveCompany, postNote, read, search, write } from '../orm.js';
 import { addDays, commercialPartnerId, isoDate, sameCommercialPartner, today, total, validDate } from './common.js';
 import { ACTIVITY_TYPES } from './mail.js';
+import { renderTemplate } from './mailing.js';
 import { currentActor, employeeFor } from './actor.js';
-import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, validStornoMove } from './ledger.js';
+import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal, statementCompanyAmount, validStornoMove } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, isSectionOrNote, resolveLineTaxes, taxBaseTags, taxRepartitionLines } from './taxes.js';
 import { deduplicatedTaxBase, taxItemBase } from './taxBase.js';
@@ -391,12 +392,140 @@ export function accountDeleteGuard(db, account, pending = db) {
 /** What a posted entry keeps until it is reset to draft. */
 const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'tax_closing_lines', 'active', 'is_storno'];
 
+const bankStatementMoveIds = new WeakMap();
+const bankRewriteToken = Symbol('bank reconciliation');
+export function writeBankStatementMove(db, id, lineIds, partnerId = undefined) {
+  return write(db, 'account.move', id, { line_ids: lineIds, ...(partnerId !== undefined ? { partner_id: partnerId } : {}) }, { bankRewriteToken });
+}
+function isBankStatementMove(db, moveId) {
+  const lines = db.records?.['account.bank.statement.line'];
+  if (!lines) return false;
+  let ids = bankStatementMoveIds.get(lines);
+  if (!ids) {
+    ids = new Set(lines.map((line) => line.bank_move_id).filter(Boolean));
+    bankStatementMoveIds.set(lines, ids);
+  }
+  return ids.has(moveId);
+}
+
+/** Review status (Odoo `checked`) stays writable on posted and locked entries. */
+const REVIEW_FIELDS = new Set(['to_check', 'review_state']);
+
+function bankStatementMoveRewriteError(db, before, after, ctx) {
+  const touched = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((field) => !REVIEW_FIELDS.has(field));
+  if (!changedFields(before, after, touched)) return null;
+  const previousStatement = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const statement = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const legacyLine = previousStatement ?? statement;
+  const legacyAllocations = legacyLine?.allocations ?? [];
+  const journalForLegacy = read(db, 'account.journal', before.journal_id);
+  const legacySuspense = journalForLegacy?.suspense_account_id || read(db, 'res.company', before.company_id ?? 1)?.account_journal_suspense_account_id;
+  const legacyAmount = legacyLine && statementCompanyAmount(db, legacyLine);
+  const legacySign = legacyLine?.amount > 0 ? 1 : -1;
+  const legacyNet = (line) => legacySign * (Number(line.debit || 0) - Number(line.credit || 0));
+  const legacyRelease = legacyLine && !legacyLine.payment_id && !(legacyLine.payment_ids ?? []).length
+    && legacyAllocations.length > 0 && legacyAllocations.every((allocation) => allocation.invoice_id && (allocation.payment_move_id ?? before.id) === before.id
+      && (read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((row) => row.move_id === before.id && row.reversed)
+      && !(read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((row) => row.move_id === before.id && !row.reversed))
+    && (db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id)
+    && (after.line_ids ?? []).length === 2 && legacySuspense && legacySuspense !== journalForLegacy?.default_account_id
+    && (after.line_ids ?? []).some((line) => line.account_id === journalForLegacy.default_account_id && legacyNet(line) === legacyAmount)
+    && (after.line_ids ?? []).some((line) => line.account_id === legacySuspense && legacyNet(line) === -legacyAmount);
+  const partnerChanged = previousStatement && statement && (previousStatement.partner_id ?? null) !== (statement.partner_id ?? null)
+    && (after.partner_id ?? null) === (statement.partner_id ?? null)
+    && (after.line_ids ?? []).every((line) => (line.partner_id ?? null) === (statement.partner_id ?? null))
+    && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids);
+  if (changedFields(before, after, POSTED_FIELDS.filter((field) => field !== 'line_ids' && !(field === 'partner_id' && (ctx?.bankRewriteToken === bankRewriteToken || partnerChanged))))) {
+    return 'Posted entries cannot be edited; reset them to draft first';
+  }
+  if (changedFields(before, after, ['line_ids'])) {
+    if ((db.records['account.payment'] ?? []).some((payment) => payment.move_id === before.id) && !legacyRelease) return 'Posted entries cannot be edited; reset them to draft first';
+    if (ctx?.bankRewriteToken !== bankRewriteToken) {
+      const previous = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+      const next = previous && (db.records['account.bank.statement.line'] ?? []).find((line) => line.id === previous.id);
+      if (!previous || !next || next.bank_move_id !== before.id
+        || (JSON.stringify(previous.allocations ?? []) === JSON.stringify(next.allocations ?? []) && previous.state === next.state
+          && !(partnerChanged && JSON.stringify((before.line_ids ?? []).map((line) => ({ ...line, partner_id: statement.partner_id ?? null }))) === JSON.stringify(after.line_ids)))) {
+        return 'Posted entries cannot be edited; reset them to draft first';
+      }
+    }
+  }
+  if (before.date !== after.date
+    || (before.invoice_date ?? '') !== (after.invoice_date ?? '')
+    || before.journal_id !== after.journal_id
+    || (before.company_id ?? 1) !== (after.company_id ?? 1)
+    || before.name !== after.name
+    || before.state !== after.state
+    || (before.currency_id ?? null) !== (after.currency_id ?? null)
+    || (before.move_type ?? '') !== (after.move_type ?? '')
+    || (before.active !== false) !== (after.active !== false)) {
+    return 'Posted entries cannot be edited; reset them to draft first';
+  }
+  const lock = recordLockDate(db, after, ctx);
+  if (lock && (moveDate(after) <= lock || moveDate(before) <= lock)) {
+    return `The period up to ${lock} is locked`;
+  }
+  const journal = after.journal_id ? read(db, 'account.journal', after.journal_id) : null;
+  if (before.inalterable_hash) {
+    return 'Secured entries cannot be modified';
+  }
+  const defaultAccountId = journal?.default_account_id;
+  if (!defaultAccountId) {
+    return 'The bank liquidity line cannot be changed';
+  }
+  const beforeLiq = (before.line_ids ?? []).filter((l) => l.account_id === defaultAccountId);
+  const afterLiq = (after.line_ids ?? []).filter((l) => l.account_id === defaultAccountId);
+  if (beforeLiq.length === 0) {
+    return 'The bank liquidity line cannot be changed';
+  }
+  const statementLine = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const sign = statementLine?.amount > 0 ? 1 : -1;
+  const originalLiquidity = beforeLiq.filter((line) => sign * (Number(line.debit || 0) - Number(line.credit || 0)) > 0);
+  if (originalLiquidity.length !== 1) return 'The bank liquidity line cannot be changed';
+  const previousLine = (ctx?.originalDb?.records?.['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === before.id);
+  const releasing = ctx?.bankRewriteToken === bankRewriteToken || (previousLine && statementLine?.state === 'to_check'
+    && !(statementLine.allocations ?? []).length && (previousLine.state === 'reconciled' || (previousLine.allocations ?? []).length));
+  const suspenseId = journal?.suspense_account_id || read(db, 'res.company', after.company_id ?? 1)?.account_journal_suspense_account_id;
+  const restoredAmount = statementLine && statementCompanyAmount(db, statementLine);
+  const restored = releasing && afterLiq.length === 1 && (after.line_ids ?? []).length === 2
+    && (after.line_ids ?? []).some((line) => line.account_id === suspenseId
+      && sign * (Number(line.debit || 0) - Number(line.credit || 0)) === -restoredAmount)
+    && sign * (Number(afterLiq[0].debit || 0) - Number(afterLiq[0].credit || 0)) === restoredAmount;
+  for (const b of originalLiquidity) {
+    const match = afterLiq.find((a) =>
+      Number(b.debit || 0) === Number(a.debit || 0)
+      && Number(b.credit || 0) === Number(a.credit || 0)
+      && (b.currency_id ?? null) === (a.currency_id ?? null)
+      && Number(b.amount_currency || 0) === Number(a.amount_currency || 0)
+    );
+    if (!match && !restored) {
+      return 'The bank liquidity line cannot be changed';
+    }
+  }
+  const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
+  if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) {
+    return 'Debits and credits cannot be negative';
+  }
+  if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) {
+    return 'A posted entry needs balanced journal items';
+  }
+  return null;
+}
+
+/** A posted statement entry whose only change is an allowed suspense rewrite (BANK-3/BANK-4). */
+export function bankStatementRewriteAllowed(db, before, after, ctx = null) {
+  return isBankStatementMove(db, after.id) && !bankStatementMoveRewriteError(db, before, after, ctx);
+}
+
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
-function postedMoveRule(db, before, after) {
+function postedMoveRule(db, before, after, ctx = null) {
   if (before && changedFields(before, after, ['tax_closing_lines'])) return 'Tax closing line links cannot be changed';
   if (before?.state === 'posted' && after.state === 'posted') {
     const pinningJournal = before.journal_id == null && !before.inalterable_hash && after.inalterable_hash && after.journal_id === resolveDocumentJournal(db, before)?.id;
-    if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+    if (isBankStatementMove(db, after.id)) {
+      const bankErr = bankStatementMoveRewriteError(db, before, after, ctx);
+      if (bankErr) return bankErr;
+    } else if (changedFields(before, after, pinningJournal ? POSTED_FIELDS.filter((field) => field !== 'journal_id') : POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
     if (before.reversed_entry_id && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
     if ((before.is_storno || after.is_storno) && before.reversed_entry_id !== after.reversed_entry_id) return 'Posted entries cannot be edited; reset them to draft first';
   }
@@ -574,7 +703,7 @@ function unapplicationError(db, stored, after, before) {
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
     const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
-    if (glOnly) continue;
+    if (glOnly || isBankStatementMove(db, moveId)) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
     if (!payment || !prior || !Number.isFinite(change) || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
@@ -637,7 +766,8 @@ export function moveInvariant(db, after, before, stored = null) {
       const { reversed: flag, unapplied, reversal_date: unappliedOn, ...kept } = current;
       const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
       const glEntry = hasMatchingPartialLink(db, after, current, { reversed: true });
-      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry)
+      const bankEntry = isBankStatementMove(db, p.move_id);
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry && !bankEntry)
         || !unappliedOn || (p.date && unappliedOn < p.date);
     }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
@@ -836,8 +966,15 @@ export function paymentInvariant(db, after) {
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
-  if (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
-    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > companyStep + 1e-9)) return 'The journal entry must book this payment amount and direction';
+  const releasedLine = (db.records['account.bank.statement.line'] ?? []).find((line) => line.bank_move_id === entry.id && line.state === 'to_check' && !line.move_id && !(line.allocations ?? []).length && !line.payment_id && !(line.payment_ids ?? []).length);
+  const suspense = read(db, 'account.journal', entry.journal_id)?.suspense_account_id || read(db, 'res.company', entry.company_id ?? 1)?.account_journal_suspense_account_id;
+  const releasedLegacy = releasedLine && invoice && (invoice.payments ?? []).some((row) => row.move_id === entry.id && row.reversed && row.unapplied)
+    && !(invoice.payments ?? []).some((row) => row.move_id === entry.id && !row.reversed)
+    && (entry.line_ids ?? []).length === 2 && suspense && suspense !== bank
+    && (entry.line_ids ?? []).some((line) => line.account_id === bank && (inbound ? 1 : -1) * (Number(line.debit || 0) - Number(line.credit || 0)) === expected)
+    && (entry.line_ids ?? []).some((line) => line.account_id === suspense && (inbound ? -1 : 1) * (Number(line.debit || 0) - Number(line.credit || 0)) === expected);
+  if (!releasedLegacy && (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
+    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > companyStep + 1e-9))) return 'The journal entry must book this payment amount and direction';
   }
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;
@@ -859,7 +996,7 @@ function securedMoveRule(before, after) {
 }
 
 export function moveGuard(db, before, after, ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? accountCurrencyError(db, before, after) ?? postedMoveRule(db, before, after, ctx) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
@@ -2250,13 +2387,37 @@ export function levelChannels(level) {
   const channels = [];
   if (level.send_email) channels.push('email');
   if (level.send_sms) channels.push('sms');
-  if (!channels.length && level.channel && !['email', 'sms'].includes(level.channel)) channels.push(level.channel);
+  if (level.print_letter || (!level.send_email && !level.send_sms && level.channel === 'letter')) channels.push('letter');
+  if (!channels.length && level.channel && !['email', 'sms', 'letter'].includes(level.channel)) channels.push(level.channel);
   return channels;
 }
 
 export function levelChannel(level) { return levelChannels(level)[0] ?? null; }
 
-const followUpSmsText = (db, part, level) => String(level?.sms_message ?? '').trim() || followUpText(db, part);
+/** Resolve the reminder message body from a linked mail template (rendered for `partner`) or the level's message. */
+export function followUpLevelMessage(db, level, partner = null) {
+  if (!level) return '';
+  const tpl = level.mail_template_id ? read(db, 'mail.template', level.mail_template_id) : null;
+  if (tpl?.body != null && String(tpl.body).trim()) {
+    return renderTemplate(tpl.body, partner ?? {}).trim();
+  }
+  return String(level.message ?? '');
+}
+
+/** Resolve the reminder subject from a linked mail template (rendered for `partner`) or the level's display name. */
+export function followUpLevelSubject(db, level, partner = null) {
+  if (!level) return 'Payment reminder';
+  const tpl = level.mail_template_id ? read(db, 'mail.template', level.mail_template_id) : null;
+  const rendered = tpl?.subject ? renderTemplate(tpl.subject, partner ?? {}).trim() : '';
+  return rendered || followUpLevelName(level);
+}
+
+const followUpSmsText = (db, part, level) => {
+  const partner = read(db, 'res.partner', part.partner_id);
+  const tpl = level?.sms_template_id ? read(db, 'sms.template', level.sms_template_id) : null;
+  const tplBody = tpl?.body ? renderTemplate(tpl.body, partner ?? {}).trim() : '';
+  return tplBody || String(level?.sms_message ?? '').trim() || followUpText(db, part);
+};
 
 function queueFollowUpSms(db, partner, part, level, at, automatic = false) {
   if (automatic && search(db, 'sms.campaign').some((campaign) => campaign.followup_sms && campaign.followup_partner_id === partner.id && campaign.followup_company_id === part.company_id && campaign.followup_level_id === level?.id && campaign.followup_oldest === part.oldest)) return db;
@@ -2505,6 +2666,10 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     followup_next_action_date: vals.followup_next_action_date !== undefined ? vals.followup_next_action_date : current?.followup_next_action_date ?? null,
     followup_sms_level_delay: vals.followup_sms_level_delay !== undefined ? vals.followup_sms_level_delay : current?.followup_sms_level_delay ?? null,
     followup_sms_oldest_date: vals.followup_sms_oldest_date !== undefined ? vals.followup_sms_oldest_date : current?.followup_sms_oldest_date ?? null,
+    followup_email_level_delay: vals.followup_email_level_delay !== undefined ? vals.followup_email_level_delay : current?.followup_email_level_delay ?? null,
+    followup_email_oldest_date: vals.followup_email_oldest_date !== undefined ? vals.followup_email_oldest_date : current?.followup_email_oldest_date ?? null,
+    followup_pending_letter: vals.followup_pending_letter !== undefined ? vals.followup_pending_letter : current?.followup_pending_letter ?? false,
+    followup_postponed: vals.followup_postponed !== undefined ? vals.followup_postponed : current?.followup_postponed ?? false,
     followup_status: vals.followup_status !== undefined ? vals.followup_status : current?.followup_status ?? null,
     followup_responsible_id: vals.followup_responsible_id !== undefined ? vals.followup_responsible_id : current?.followup_responsible_id ?? null,
     no_followup: vals.no_followup !== undefined ? vals.no_followup : current?.no_followup ?? false,
@@ -2521,7 +2686,7 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
 function reminderDetails(levels, level, date, channel, oldest = null) {
   const delay = Number(level?.delay) || 0;
   const next = levels.filter((candidate) => Number(candidate.delay) > delay).sort((a, b) => Number(a.delay) - Number(b.delay))[0];
-  return { followup_last_level: level?.id ?? null, followup_channel: channel, followup_next_action_date: next ? (oldest ? addDays(oldest, Number(next.delay)) : addDays(date, Number(next.delay) - delay)) : null };
+  return { followup_last_level: level?.id ?? null, followup_channel: channel, followup_next_action_date: next ? (oldest ? addDays(oldest, Number(next.delay)) : addDays(date, Number(next.delay) - delay)) : null, followup_postponed: false };
 }
 
 /** Create a configured follow-up activity once per partner, company, level and oldest-invoice cycle. */
@@ -2557,7 +2722,7 @@ function ensureFollowUpActivity(db, partnerId, part, level, at) {
   });
 }
 
-function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate) {
+function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate, { advanceLevel = true, pendingLetter = false } = {}) {
   const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
   let nextDb = db;
 
@@ -2587,26 +2752,52 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
 
     const partner = read(nextDb, 'res.partner', partnerId);
     const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
-    const updatedPartner = (level && (previous == null || Number(level.delay) > Number(previous)))
-      ? updatePartnerFollowUp(partner, cId, {
-        followup_level_delay: Number(level.delay),
-        followup_date: at,
-        followup_oldest_date: part.oldest ?? null,
-        followup_level: level.id,
-        followup_delivery_state: 'sent',
-        followup_delivery_outcome: 'sent',
-        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
-      })
-      : updatePartnerFollowUp(partner, cId, {
-        followup_date: at,
-        followup_oldest_date: part.oldest ?? null,
-        followup_delivery_state: 'sent',
-        followup_delivery_outcome: 'sent',
-        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
+    const channelProgress = {
+      ...(channel === 'email' && level ? { followup_email_level_delay: Number(level.delay), followup_email_oldest_date: part.oldest ?? null } : {}),
+      ...(channel === 'sms' && level ? { followup_sms_level_delay: Number(level.delay), followup_sms_oldest_date: part.oldest ?? null } : {}),
+      ...(channel === 'letter' ? { followup_pending_letter: false } : pendingLetter ? { followup_pending_letter: true } : {}),
+    };
+    const updateVals = advanceLevel
+      ? (level && (previous == null || Number(level.delay) > Number(previous))
+        ? {
+          followup_level_delay: Number(level.delay),
+          followup_date: at,
+          followup_oldest_date: part.oldest ?? null,
+          followup_level: level.id,
+          followup_delivery_state: 'sent',
+          followup_delivery_outcome: 'sent',
+          followup_pending_letter: Boolean(pendingLetter),
+          ...channelProgress,
+          ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
+        }
+        : {
+          followup_date: at,
+          followup_oldest_date: part.oldest ?? null,
+          followup_delivery_state: 'sent',
+          followup_delivery_outcome: 'sent',
+          followup_pending_letter: Boolean(pendingLetter),
+          ...channelProgress,
+          ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
+        })
+      : {
+        ...channelProgress,
+        ...(pendingLetter ? {
+          followup_date: at,
+          followup_oldest_date: part.oldest ?? null,
+          followup_channel: 'letter',
+          followup_delivery_state: 'not_sent',
+          followup_delivery_outcome: 'outbox_only',
+          followup_last_level: level?.id ?? null,
+          followup_next_action_date: null,
+          followup_postponed: false,
+        } : {}),
+      };
+    if (Object.keys(updateVals).length) {
+      const updatedPartner = updatePartnerFollowUp(partner, cId, updateVals);
+      nextDb = write(nextDb, 'res.partner', partnerId, {
+        followup_lines: updatedPartner.followup_lines,
       });
-    nextDb = write(nextDb, 'res.partner', partnerId, {
-      followup_lines: updatedPartner.followup_lines,
-    });
+    }
   }
 
   return nextDb;
@@ -2635,7 +2826,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
     if (partner.followup_reminder_type === 'manual') continue;
     const lines = partner.followup_lines ?? [];
     for (const line of lines) {
-      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_activity_level != null || line.followup_delivery_state != null || line.followup_delivery_outcome != null;
+      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_activity_level != null || line.followup_delivery_state != null || line.followup_delivery_outcome != null || line.followup_pending_letter || line.followup_email_level_delay != null || line.followup_sms_level_delay != null;
       if (!hasProgress) continue;
       const activeGroup = activeLateMap.get(`${partner.id}:${line.company_id}`) ?? null;
       const oldestChanged = Boolean(activeGroup && line.followup_oldest_date && activeGroup.oldest !== line.followup_oldest_date);
@@ -2646,7 +2837,9 @@ export function runFollowUps(db, at = today(), deliver = null) {
             followup_level_delay: null, followup_level: null, followup_activity_level: null, followup_date: null, followup_oldest_date: null,
             followup_last_level: null, followup_channel: null, followup_delivery_state: null, followup_delivery_outcome: null,
             followup_sms_level_delay: null, followup_sms_oldest_date: null,
-            followup_next_action_date: null,
+            followup_email_level_delay: null, followup_email_oldest_date: null,
+            followup_pending_letter: false,
+            followup_next_action_date: null, followup_postponed: false,
           }).followup_lines,
         });
       }
@@ -2668,46 +2861,76 @@ export function runFollowUps(db, at = today(), deliver = null) {
 
     if (currentDelay >= Number(level.delay)) return nextDb;
     const channels = levelChannels(level);
-    let channel = channels.includes('email') ? 'email' : channels[0] ?? null;
+    const wantsEmail = channels.includes('email');
+    const wantsSms = channels.includes('sms');
+    const wantsLetter = channels.includes('letter');
+    const wantsOther = channels.find((c) => !['email', 'sms', 'letter'].includes(c)) ?? null;
+    let channel = wantsEmail ? 'email' : channels[0] ?? null;
     const levelName = followUpLevelName(level);
-    const canDeliverEmail = channels.includes('email') && Boolean(partner.email?.trim()) && Boolean(deliver);
+    const smsAlreadyQueued = Boolean(
+      wantsSms
+      && progress?.followup_sms_level_delay != null
+      && Number(progress.followup_sms_level_delay) >= Number(level.delay)
+      && (progress?.followup_sms_oldest_date ?? null) === (f.oldest ?? null),
+    );
+    const emailAlreadySent = Boolean(
+      wantsEmail
+      && ((progress?.followup_email_level_delay != null
+        && Number(progress.followup_email_level_delay) >= Number(level.delay)
+        && (progress?.followup_email_oldest_date ?? null) === (f.oldest ?? null))
+      || (progress?.followup_last_level === level.id
+        && progress?.followup_channel === 'sms'
+        && progress?.followup_delivery_outcome === 'failed'
+        && (progress?.followup_oldest_date ?? null) === (f.oldest ?? null))),
+    );
+    const canDeliverEmail = wantsEmail && !emailAlreadySent && Boolean(partner.email?.trim()) && Boolean(deliver);
     const hasPendingActivity = Boolean(level.create_activity && (
       (progress?.followup_oldest_date ?? null) !== (f.oldest ?? null)
       || progress?.followup_activity_level !== level.id
     ));
     const hasPhone = Boolean(String(partner.mobile || partner.phone || '').trim());
     const sameDaySmsFailure = Boolean(
-      channels.includes('sms')
+      wantsSms
+      && !smsAlreadyQueued
       && !hasPhone
       && progress?.followup_date === at
       && (progress?.followup_oldest_date ?? null) === (f.oldest ?? null)
       && (progress?.followup_last_level === level.id || progress?.followup_level === level.id)
       && progress?.followup_delivery_outcome === 'failed'
-      && progress?.followup_channel === 'sms'
+      && progress?.followup_channel === 'sms',
     );
-    if (!canDeliverEmail && (!channels.includes('sms') || sameDaySmsFailure) && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+    const canQueueSms = wantsSms && !smsAlreadyQueued && !sameDaySmsFailure;
+    if (!canDeliverEmail && !canQueueSms && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
     const sameDayOutboxOnly = Boolean(
       !hasPendingActivity
       && progress?.followup_delivery_state !== 'sent'
       && progress?.followup_delivery_outcome === 'outbox_only'
       && progress?.followup_date === at,
     );
+    const sameDayPendingLetter = Boolean(
+      wantsLetter
+      && !hasPendingActivity
+      && progress?.followup_pending_letter
+      && progress?.followup_date === at
+      && progress?.followup_last_level === level.id
+      && (progress?.followup_oldest_date ?? null) === (f.oldest ?? null),
+    );
 
     const dueWord = f.upcoming || (f.oldest && f.oldest >= at) ? 'due' : 'overdue';
-    const recordFailure = (reason, meta = { delivery_state: 'outbox_only', delivery_error: reason }) => {
-      nextDb = ensureFollowUpActivity(nextDb, partner.id, f, level, at);
+    const recordFailure = (reason, meta = { delivery_state: 'outbox_only', delivery_error: reason }, stateDb = nextDb) => {
+      let updatedDb = ensureFollowUpActivity(stateDb, partner.id, f, level, at);
       const deliveryState = channel ? 'not_sent' : 'not_configured';
       const deliveryOutcome = meta?.delivery_state === 'failed' ? 'failed' : 'outbox_only';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
-      nextDb = postNote(
-        nextDb,
+      updatedDb = postNote(
+        updatedDb,
         'res.partner',
         partner.id,
         `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${reason} The follow-up level was not advanced.`,
         reminderSource(f),
         { ...(channel ? { delivery_channel: channel } : {}), ...meta },
       );
-      const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
+      const current = read(updatedDb, 'res.partner', partner.id) ?? currentPartner;
       const updated = updatePartnerFollowUp(current, companyId, {
         followup_date: at,
         followup_oldest_date: f.oldest ?? null,
@@ -2715,23 +2938,66 @@ export function runFollowUps(db, at = today(), deliver = null) {
         followup_delivery_state: deliveryState,
         followup_delivery_outcome: deliveryOutcome,
         followup_last_level: level?.id ?? null,
+        followup_pending_letter: Boolean(wantsLetter),
         followup_next_action_date: null,
+        followup_postponed: false,
       });
-      return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
+      return write(updatedDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
+    };
+    const recordPendingLetter = (stateDb, { smsFailed: hasSmsFailure = false, emailFailOutcome = null } = {}) => {
+      let updatedDb = ensureFollowUpActivity(stateDb, partner.id, f, level, at);
+      const reason = 'Automatic letter delivery is unavailable; this reminder needs manual delivery.';
+      if (!sameDayPendingLetter) {
+        const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+        updatedDb = postNote(
+          updatedDb,
+          'res.partner',
+          partner.id,
+          `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${reason} The follow-up level was not advanced.`,
+          reminderSource(f),
+          { delivery_channel: 'letter', delivery_state: 'outbox_only', delivery_error: reason },
+        );
+      }
+      const current = read(updatedDb, 'res.partner', partner.id) ?? currentPartner;
+      const updated = updatePartnerFollowUp(current, companyId, {
+        followup_level_delay: progress?.followup_level_delay ?? null,
+        followup_level: progress?.followup_level ?? null,
+        followup_date: at,
+        followup_oldest_date: f.oldest ?? null,
+        followup_channel: 'letter',
+        followup_delivery_state: 'not_sent',
+        followup_delivery_outcome: hasSmsFailure || emailFailOutcome === 'failed' ? 'failed' : 'outbox_only',
+        followup_last_level: level.id,
+        followup_pending_letter: true,
+        followup_next_action_date: null,
+        followup_postponed: false,
+      });
+      return write(updatedDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
     let smsFailed = false;
     let smsQueued = false;
-    const emailAlreadySent = progress?.followup_last_level === level.id && progress?.followup_channel === 'sms'
-      && progress?.followup_delivery_outcome === 'failed' && progress?.followup_oldest_date === (f.oldest ?? null);
-    if (channels.includes('sms')) {
+    if (wantsSms && !smsAlreadyQueued) {
       if (sameDaySmsFailure) {
         smsFailed = true;
-        if (!channels.includes('email') || emailAlreadySent) return nextDb;
+        if ((!wantsEmail || emailAlreadySent) && !wantsLetter && !wantsOther) return nextDb;
       } else {
         try {
           nextDb = queueFollowUpSms(nextDb, partner, f, level, at, true);
           smsQueued = true;
-          if (!channels.includes('email') || emailAlreadySent) return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
+          if ((!wantsEmail || emailAlreadySent) && !wantsLetter && !wantsOther) {
+            return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
+          }
+          if (wantsLetter || wantsOther) {
+            nextDb = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest, { advanceLevel: false, pendingLetter: wantsLetter });
+          } else {
+            const curP = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
+            nextDb = write(nextDb, 'res.partner', partner.id, {
+              followup_lines: updatePartnerFollowUp(curP, companyId, {
+                followup_sms_level_delay: Number(level.delay),
+                followup_sms_oldest_date: f.oldest ?? null,
+              }).followup_lines,
+            });
+          }
         } catch (error) {
           smsFailed = true;
           const msg = error?.message ?? String(error);
@@ -2739,24 +3005,68 @@ export function runFollowUps(db, at = today(), deliver = null) {
           channel = 'sms';
           nextDb = recordFailure(`SMS delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
           channel = previousChannel;
-          if (!channels.includes('email') || emailAlreadySent) return nextDb;
+          if ((!wantsEmail || emailAlreadySent) && !wantsLetter && !wantsOther) return nextDb;
         }
       }
     }
-    if (channel === 'email' && partner.email?.trim() && deliver) {
+    if (wantsEmail && !emailAlreadySent && partner.email?.trim() && deliver) {
       const message = followUpEmail(nextDb, f, level, partner);
       // Validate the bookkeeping before attempting an irreversible delivery.
-      const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
+      const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'email', f.oldest, {
+        advanceLevel: !smsFailed && !wantsLetter && !wantsOther,
+        pendingLetter: wantsLetter,
+      });
       const emailSent = () => {
+        if (wantsLetter) return recordPendingLetter(sent, { smsFailed });
+        if (wantsOther) {
+          channel = wantsOther;
+          return recordFailure(`Automatic ${wantsOther} delivery is unavailable; this reminder needs manual delivery.`, { delivery_state: 'outbox_only', delivery_error: `Automatic ${wantsOther} delivery is unavailable; this reminder needs manual delivery.` }, sent);
+        }
         if (!smsFailed) return sent;
         const sentPartner = read(sent, 'res.partner', partner.id);
         const failure = partnerFollowUp(read(nextDb, 'res.partner', partner.id), companyId);
         return write(sent, 'res.partner', partner.id, {
           followup_lines: updatePartnerFollowUp(sentPartner, companyId, {
-            ...failure, followup_level_delay: progress?.followup_level_delay ?? null,
-            followup_level: progress?.followup_level ?? null, followup_last_level: level.id,
+            ...failure,
+            followup_email_level_delay: Number(level.delay),
+            followup_email_oldest_date: f.oldest ?? null,
+            followup_level_delay: progress?.followup_level_delay ?? null,
+            followup_level: progress?.followup_level ?? null,
+            followup_last_level: level.id,
           }).followup_lines,
         });
+      };
+      const handleEmailIncomplete = (reason, outcome, { skipDuplicateOutboxNote = false } = {}) => {
+        if (outcome === 'outbox_only' && (smsQueued || smsAlreadyQueued) && !wantsLetter && !wantsOther) {
+          const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+          if (!skipDuplicateOutboxNote) {
+            nextDb = postNote(
+              nextDb,
+              'res.partner',
+              partner.id,
+              `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${reason}`,
+              reminderSource(f),
+              { delivery_channel: 'email', delivery_state: outcome, delivery_error: reason },
+            );
+          }
+          return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
+        }
+        if (wantsLetter) {
+          if (!skipDuplicateOutboxNote) {
+            const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+            nextDb = postNote(
+              nextDb,
+              'res.partner',
+              partner.id,
+              `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${reason} The follow-up level was not advanced.`,
+              reminderSource(f),
+              { delivery_channel: 'email', delivery_state: outcome, delivery_error: reason },
+            );
+          }
+          return recordPendingLetter(nextDb, { smsFailed, emailFailOutcome: outcome });
+        }
+        if (skipDuplicateOutboxNote) return nextDb;
+        return recordFailure(outcome === 'failed' ? `Email delivery failed: ${reason}` : reason, { delivery_state: outcome, delivery_error: reason });
       };
       /** Interpret mail-transport outcome strictly per the single delivery contract. */
       const settleDelivery = (result) => {
@@ -2765,29 +3075,27 @@ export function runFollowUps(db, at = today(), deliver = null) {
           if (result.status === 'sent') return emailSent();
           if (result.status === 'outbox_only' && typeof result.reason === 'string' && result.reason.trim()) {
             // Suppress duplicate outbox-only notes within the same day while still keeping state not_sent so live SMTP sends later.
-            if (sameDayOutboxOnly) return nextDb;
-            const reason = result.reason.trim();
-            return recordFailure(reason, { delivery_state: 'outbox_only', delivery_error: reason });
+            return handleEmailIncomplete(result.reason.trim(), 'outbox_only', { skipDuplicateOutboxNote: sameDayOutboxOnly });
           }
         }
         const msg = 'Mail transport returned an invalid delivery result';
-        return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+        return handleEmailIncomplete(msg, 'failed');
       };
       try {
-        const result = deliver(message);
+        const result = deliver(message, { db: nextDb });
         if (result && typeof result.then === 'function') {
           return result.then(settleDelivery, (error) => {
             const msg = error?.message ?? String(error);
-            return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+            return handleEmailIncomplete(msg, 'failed');
           });
         }
         return settleDelivery(result);
       } catch (error) {
         const msg = error?.message ?? String(error);
-        return recordFailure(`Email delivery failed: ${msg}`, { delivery_state: 'failed', delivery_error: msg });
+        return handleEmailIncomplete(msg, 'failed');
       }
     }
-    if (smsQueued) {
+    if (wantsEmail && !emailAlreadySent && (smsQueued || smsAlreadyQueued) && !wantsLetter && !wantsOther) {
       const emailReason = partner.email?.trim() ? 'Automatic email delivery is not configured.' : 'The customer has no email address.';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
       nextDb = postNote(
@@ -2798,6 +3106,28 @@ export function runFollowUps(db, at = today(), deliver = null) {
         reminderSource(f),
         { delivery_channel: 'email', delivery_state: partner.email?.trim() ? 'outbox_only' : 'failed', delivery_error: emailReason },
       );
+      return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
+    }
+    if (wantsLetter) {
+      if (wantsEmail && !emailAlreadySent) {
+        const emailReason = partner.email?.trim() ? 'Automatic email delivery is not configured.' : 'The customer has no email address.';
+        const outcome = partner.email?.trim() ? 'outbox_only' : 'failed';
+        if (!(outcome === 'outbox_only' && sameDayOutboxOnly)) {
+          const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+          nextDb = postNote(
+            nextDb,
+            'res.partner',
+            partner.id,
+            `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${emailReason} The follow-up level was not advanced.`,
+            reminderSource(f),
+            { delivery_channel: 'email', delivery_state: outcome, delivery_error: emailReason },
+          );
+        }
+        return recordPendingLetter(nextDb, { smsFailed, emailFailOutcome: outcome });
+      }
+      return recordPendingLetter(nextDb, { smsFailed });
+    }
+    if ((smsQueued || smsAlreadyQueued) && !smsFailed && !wantsOther) {
       return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, 'sms', f.oldest);
     }
     if (!channel && level.create_activity) {
@@ -2840,13 +3170,32 @@ export function followUpLetter(db, partnerId, companyId, at = today()) {
   if (!reminder) throw new Error('This customer has no overdue invoices');
   const level = followUpLevel(db, reminder, at);
   if (!level) throw new Error('No follow-up level applies to this customer');
+  const partner = read(db, 'res.partner', partnerId);
   const { invoices, due, overdue } = partnerReceivableLines(db, partnerId, companyId, at, { upcoming: reminder.upcoming });
-  return { reminder, level, invoices, due, overdue };
+  return {
+    reminder,
+    level,
+    invoices,
+    due,
+    overdue,
+    subject: followUpLevelSubject(db, level, partner),
+    message: followUpLevelMessage(db, level, partner),
+  };
 }
 
 /** The automatic and manual email share the same subject and introductory text. */
-export function followUpEmail(db, reminder, level, partner) {
-  return { to: partner.email.trim(), subject: followUpLevelName(level), text: `${level.message ?? ''}\n${followUpText(db, reminder)}`.trim() };
+export function followUpEmail(db, reminder, level, partner, { joinInvoices } = {}) {
+  const attachInvoices = joinInvoices !== undefined ? Boolean(joinInvoices) : level?.join_invoices !== false;
+  const invoiceIds = attachInvoices
+    ? [...new Set((reminder?.invoices ?? []).filter((m) => m.id && Number(m.amount_residual) > 0 && m.move_type === 'out_invoice').map((m) => m.id))]
+    : [];
+  return {
+    to: partner.email.trim(),
+    subject: followUpLevelSubject(db, level, partner),
+    text: `${followUpLevelMessage(db, level, partner)}\n${followUpText(db, reminder)}`.trim(),
+    joinInvoices: attachInvoices,
+    invoiceIds,
+  };
 }
 
 const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId, { ignoreNextActionDate = true } = {}) => {
@@ -2868,8 +3217,8 @@ export function openManualFollowUp(db, partnerId, at = today(), { scope = db, re
 }
 
 /** Record a reminder confirmed sent by hand. */
-export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null, ignoreNextActionDate = true } = {}) {
-  if (!['email', 'sms', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null, ignoreNextActionDate = true, advanceLevel = true, pendingLetter = false } = {}) {
+  if (!['email', 'sms', 'phone', 'letter', 'whatsapp'].includes(channel)) throw new Error('Invalid reminder channel');
   if (channel === 'email' && !read(db, 'res.partner', partnerId)?.email?.trim()) {
     throw new Error('A customer email address is required to send an email reminder');
   }
@@ -2877,7 +3226,7 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
   const queued = channel === 'sms'
     ? groups.reduce((state, part) => queueFollowUpSms(state, read(state, 'res.partner', partnerId), part, followUpLevel(scope, part, at), at), db)
     : db;
-  return applyFollowUpReminder(queued, scope, partnerId, groups, at, channel, nextLevelBaseDate);
+  return applyFollowUpReminder(queued, scope, partnerId, groups, at, channel, nextLevelBaseDate, { advanceLevel, pendingLetter });
 }
 
 const followUpStatusIndexCache = new WeakMap();
@@ -3031,7 +3380,7 @@ export function isPartnerFollowUpPostponed(db, partner, companyId = null, at = t
   if (!partner) return false;
   const cId = companyId ?? db?.settings?.current_company_id ?? 1;
   const line = partnerFollowUp(partner, cId);
-  return Boolean(line?.followup_next_action_date && line.followup_next_action_date > at);
+  return Boolean(line?.followup_next_action_date && line.followup_next_action_date > at && line.followup_postponed !== false);
 }
 
 /**
@@ -3058,7 +3407,8 @@ export function partnerFollowUpStatus(db, partner, companyId = null, at = today(
   const sameCycle = (compLine?.followup_oldest_date ?? null) === (reminder.oldest ?? null);
   const alreadySentLevel = sameCycle && compLine?.followup_level_delay != null
     && Number(compLine.followup_level_delay) >= Number(level.delay)
-    && compLine?.followup_delivery_state === 'sent';
+    && compLine?.followup_delivery_state === 'sent'
+    && !compLine?.followup_pending_letter;
   return alreadySentLevel ? 'with_overdue_invoices' : 'in_need_of_action';
 }
 
@@ -3081,13 +3431,128 @@ export function postponeFollowUp(db, partnerIds, nextActionDate, { companyId = n
     if (!partner) throw new Error('Customer not found');
     const prevDate = partnerFollowUp(partner, cId)?.followup_next_action_date ?? null;
     nextDb = write(nextDb, 'res.partner', id, {
-      followup_lines: updatePartnerFollowUp(partner, cId, { followup_next_action_date: date }).followup_lines,
+      followup_lines: updatePartnerFollowUp(partner, cId, { followup_next_action_date: date, followup_postponed: true }).followup_lines,
     });
     if (prevDate !== date) {
       nextDb = postNote(nextDb, 'res.partner', id, `Follow-up postponed until ${date}.`);
     }
   }
   return nextDb;
+}
+
+/** Clear the postponed next reminder date for one or more partners on `companyId`. */
+export function unpostponeFollowUp(db, partnerIds, { companyId = null, at = today() } = {}) {
+  const ids = normalizePartnerIds(partnerIds);
+  if (!ids.length) throw new Error('Select at least one customer first');
+  const cId = companyId ?? db?.settings?.current_company_id ?? 1;
+  let nextDb = db;
+  for (const id of ids) {
+    const partner = read(nextDb, 'res.partner', id);
+    if (!partner) throw new Error('Customer not found');
+    if (!isPartnerFollowUpPostponed(nextDb, partner, cId, at)) continue;
+    nextDb = write(nextDb, 'res.partner', id, {
+      followup_lines: updatePartnerFollowUp(partner, cId, { followup_next_action_date: null, followup_postponed: false }).followup_lines,
+    });
+    nextDb = postNote(nextDb, 'res.partner', id, 'Follow-up unpostponed.');
+  }
+  return nextDb;
+}
+
+const FOLLOWUP_STATUS_LABELS = {
+  in_need_of_action: 'In need of action',
+  with_overdue_invoices: 'With overdue invoices',
+  no_action_needed: 'No action needed',
+  postponed: 'Postponed',
+};
+
+/** Compute structured follow-up report rows and level/status summary for `allowed` companies at `at`. */
+export function followUpReportData(db, allowed, statusFilter = 'all', at = today()) {
+  const reportDate = agedReportDate(at);
+  const allowedSet = new Set(allowed);
+  const allFollowUps = followUps(db, reportDate, { ignoreNextActionDate: true });
+  const companyBalances = new Map();
+  for (const cId of allowed) {
+    companyBalances.set(cId, companyReceivableLines(db, cId, reportDate));
+  }
+
+  const companyGroups = new Map();
+  const statusMap = new Map();
+  const levelMap = new Map();
+  const grandByCurrency = new Map();
+  let totalCount = 0;
+
+  const accumulateCurrency = (map, key, label, compCurr, due, overdue) => {
+    let entry = map.get(key);
+    if (!entry) {
+      entry = { key, label, count: 0, totalsByCurrency: new Map() };
+      map.set(key, entry);
+    }
+    entry.count += 1;
+    const currKey = compCurr?.id ?? 'default';
+    const prev = entry.totalsByCurrency.get(currKey) ?? { currency: compCurr, due: 0, overdue: 0 };
+    entry.totalsByCurrency.set(currKey, {
+      currency: compCurr,
+      due: roundCurrency(prev.due + due, compCurr),
+      overdue: roundCurrency(prev.overdue + overdue, compCurr),
+    });
+  };
+
+  for (const f of allFollowUps) {
+    for (const part of followUpCompanies(f)) {
+      const cId = part.company_id ?? part.invoices[0]?.company_id ?? 1;
+      if (!allowedSet.has(cId)) continue;
+      const partner = read(db, 'res.partner', part.partner_id);
+      const status = partnerFollowUpStatus(db, partner, cId, reportDate);
+      const postponed = isPartnerFollowUpPostponed(db, partner, cId, reportDate);
+      if (statusFilter === 'in_need_of_action' && status !== 'in_need_of_action') continue;
+      if (statusFilter === 'postponed' && !postponed) continue;
+
+      const compCurr = companyCurrencyRecord(db, cId);
+      const info = companyBalances.get(cId)?.get(part.partner_id) ?? partnerReceivableLines(db, part.partner_id, cId, reportDate);
+      const level = followUpLevel(db, part, reportDate);
+      const levelName = level ? followUpLevelName(level) : null;
+      const compLine = partnerFollowUp(partner, cId);
+      const displayStatusKey = postponed ? 'postponed' : status;
+      const displayStatusLabel = FOLLOWUP_STATUS_LABELS[displayStatusKey] ?? displayStatusKey;
+
+      const row = {
+        ...part,
+        companyId: cId,
+        partner,
+        compLine,
+        compCurr,
+        info,
+        level,
+        levelName,
+        status,
+        postponed,
+        displayStatusKey,
+        displayStatusLabel,
+      };
+      if (!companyGroups.has(cId)) companyGroups.set(cId, []);
+      companyGroups.get(cId).push(row);
+
+      totalCount += 1;
+      accumulateCurrency(statusMap, displayStatusKey, displayStatusLabel, compCurr, info.total_due, info.total_overdue);
+      accumulateCurrency(levelMap, level?.id ?? 'none', levelName ?? 'No Follow-up Level', compCurr, info.total_due, info.total_overdue);
+      const gKey = compCurr?.id ?? 'default';
+      const gPrev = grandByCurrency.get(gKey) ?? { currency: compCurr, due: 0, overdue: 0 };
+      grandByCurrency.set(gKey, {
+        currency: compCurr,
+        due: roundCurrency(gPrev.due + info.total_due, compCurr),
+        overdue: roundCurrency(gPrev.overdue + info.total_overdue, compCurr),
+      });
+    }
+  }
+
+  return {
+    at: reportDate,
+    companyGroups,
+    statusSummary: [...statusMap.values()].map((s) => ({ ...s, totals: [...s.totalsByCurrency.values()] })),
+    levelSummary: [...levelMap.values()].map((l) => ({ ...l, totals: [...l.totalsByCurrency.values()] })),
+    totalCount,
+    grandTotals: [...grandByCurrency.values()],
+  };
 }
 
 /**
@@ -3138,7 +3603,8 @@ export async function processFollowUps(db, partnerIds, {
     const sameCycle = (compLine?.followup_oldest_date ?? null) === (reminder.oldest ?? null);
     const alreadySentLevel = sameCycle && compLine?.followup_level_delay != null
       && Number(compLine.followup_level_delay) >= Number(level.delay)
-      && compLine?.followup_delivery_state === 'sent';
+      && compLine?.followup_delivery_state === 'sent'
+      && !compLine?.followup_pending_letter;
     if (alreadySentLevel) {
       results.push({ partnerId: id, partnerName: partner.name, companyId: cId, levelId: level.id, levelName, status: 'skipped', reason: 'Already processed for current follow-up level', actions: [] });
       continue;
@@ -3164,21 +3630,38 @@ export async function processFollowUps(db, partnerIds, {
 
     // One partner's failure is recorded as that partner's result; actions already completed stay in `nextDb`.
     try {
-      // The SMS for this level and cycle may already be queued by an earlier run whose email failed.
-      const smsAlreadyQueued = wantsSms && wantsEmail
+      // The SMS or email for this level and cycle may already be recorded by an earlier scheduled or partial run.
+      const smsAlreadyQueued = wantsSms
         && compLine?.followup_sms_level_delay != null
         && Number(compLine.followup_sms_level_delay) >= Number(level.delay)
         && (compLine.followup_sms_oldest_date ?? null) === (reminder.oldest ?? null);
+      const emailAlreadySent = wantsEmail && (
+        (compLine?.followup_email_level_delay != null
+          && Number(compLine.followup_email_level_delay) >= Number(level.delay)
+          && (compLine.followup_email_oldest_date ?? null) === (reminder.oldest ?? null))
+        || (compLine?.followup_last_level === level.id
+          && compLine?.followup_channel === 'sms'
+          && compLine?.followup_delivery_outcome === 'failed'
+          && (compLine.followup_oldest_date ?? null) === (reminder.oldest ?? null))
+      );
       let smsQueued = smsAlreadyQueued;
 
       if (wantsSms && !smsAlreadyQueued) {
         try {
-          if (wantsEmail) {
+          if (wantsEmail && !emailAlreadySent) {
             nextDb = queueFollowUpSms(nextDb, read(nextDb, 'res.partner', id), reminder, level, at, true);
             smsQueued = true;
           } else {
-            nextDb = logManualFollowUp(nextDb, id, at, { scope: nextDb, reminder, companyId: cId, channel: 'sms', ignoreNextActionDate: true });
-            appliedLevel = true;
+            nextDb = logManualFollowUp(nextDb, id, at, {
+              scope: nextDb,
+              reminder,
+              companyId: cId,
+              channel: 'sms',
+              ignoreNextActionDate: true,
+              advanceLevel: !(wantsLetter || wantsPhone),
+              pendingLetter: wantsLetter,
+            });
+            appliedLevel = !(wantsLetter || wantsPhone);
           }
           actions.push('sms');
         } catch (err) {
@@ -3186,7 +3669,7 @@ export async function processFollowUps(db, partnerIds, {
         }
       }
 
-      if (wantsEmail) {
+      if (wantsEmail && !emailAlreadySent) {
         const currentPartner = read(nextDb, 'res.partner', id);
         if (!currentPartner?.email?.trim()) {
           errors.push('A customer email address is required to send an email reminder');
@@ -3196,17 +3679,25 @@ export async function processFollowUps(db, partnerIds, {
           try {
             const letter = followUpLetter(nextDb, id, cId, at);
             const email = followUpEmail(nextDb, letter.reminder, letter.level, currentPartner);
-            const staged = logManualFollowUp(nextDb, id, at, { scope: nextDb, reminder: letter.reminder, companyId: cId, channel: 'email', ignoreNextActionDate: true });
-            const out = await deliverEmail(email, { db: nextDb, stagedDb: staged, partner: currentPartner, reminder: letter.reminder, level: letter.level, companyId: cId });
+            const staged = logManualFollowUp(nextDb, id, at, {
+              scope: nextDb,
+              reminder: letter.reminder,
+              companyId: cId,
+              channel: 'email',
+              ignoreNextActionDate: true,
+              advanceLevel: !(wantsLetter || wantsPhone),
+              pendingLetter: wantsLetter,
+            });
+            const out = await deliverEmail(email, { db: nextDb, stagedDb: staged, partner: currentPartner, reminder: letter.reminder, level: letter.level, companyId: cId, pendingLetter: wantsLetter });
             if (out && typeof out === 'object' && out.serverHandled) {
               nextDb = out.db ?? nextDb;
               actions.push('email');
-              appliedLevel = true;
+              appliedLevel = !(wantsLetter || wantsPhone);
               if (out.refreshError) refreshError = out.refreshError;
             } else if (out === undefined || (typeof out === 'number' && Number.isInteger(out) && out >= 0) || (out && typeof out === 'object' && out.status === 'sent')) {
               nextDb = staged;
               actions.push('email');
-              appliedLevel = true;
+              appliedLevel = !(wantsLetter || wantsPhone);
             } else if (out && typeof out === 'object' && out.status === 'outbox_only') {
               errors.push(out.reason?.trim() || 'Automatic email delivery is not configured.');
             } else {
@@ -3500,10 +3991,31 @@ export const financeModels = {
       delay: { type: 'integer', label: 'Days Overdue', hidden: true },
       send_email: { type: 'boolean', label: 'Email' },
       send_sms: { type: 'boolean', label: 'SMS' },
+      print_letter: { type: 'boolean', label: 'Print Letter' },
+      join_invoices: {
+        type: 'boolean',
+        label: 'Attach Invoices',
+        hideWhen: (r) => !r?.send_email && !r?.print_letter,
+        help: 'Attach the open overdue invoices to the follow-up email.',
+      },
       auto_execute: {
         type: 'boolean',
         label: 'Automatic',
         help: 'Automatically execute this follow-up level when due.',
+      },
+      mail_template_id: {
+        type: 'many2one',
+        relation: 'mail.template',
+        label: 'Content Template',
+        domain: (tpl) => !tpl?.model || tpl.model === 'res.partner',
+        hideWhen: (r) => !r?.send_email && !r?.print_letter,
+      },
+      sms_template_id: {
+        type: 'many2one',
+        relation: 'sms.template',
+        label: 'SMS Template',
+        domain: (tpl) => !tpl?.model || tpl.model === 'res.partner',
+        hideWhen: (r) => !r?.send_sms,
       },
       sms_message: { type: 'text', label: 'SMS Text', hideWhen: (r) => !r?.send_sms },
       create_activity: { type: 'boolean', label: 'Schedule Activity' },
@@ -3555,6 +4067,8 @@ export const financeModels = {
       delay: 15,
       send_email: true,
       send_sms: false,
+      print_letter: false,
+      join_invoices: true,
       auto_execute: true,
       create_activity: false,
       activity_default_responsible_type: 'followup',
@@ -3573,10 +4087,17 @@ export const financeModels = {
       if (next.send_sms === undefined && next.channel === 'sms') {
         next.send_sms = true;
       }
+      if (next.print_letter === undefined && next.channel === 'letter') {
+        next.print_letter = true;
+      }
+      if (next.join_invoices === undefined) {
+        next.join_invoices = true;
+      }
       const effectiveSendEmail = next.send_email !== undefined ? next.send_email : true;
       if (next.channel === undefined) {
         if (effectiveSendEmail) next.channel = 'email';
         else if (next.send_sms) next.channel = 'sms';
+        else if (next.print_letter) next.channel = 'letter';
       }
       const effDays = next.display_delay !== undefined ? next.display_delay : 15;
       const effTiming = next.reminder_timing ?? 'after';
@@ -3596,8 +4117,10 @@ export const financeModels = {
           reminder_timing: raw < 0 ? 'before' : 'after',
         };
       }
-      if (field === 'send_email' || field === 'send_sms') {
-        return { channel: rec.send_email ? 'email' : rec.send_sms ? 'sms' : (['email', 'sms'].includes(rec.channel) ? null : rec.channel) };
+      if (field === 'send_email' || field === 'send_sms' || field === 'print_letter') {
+        return {
+          channel: rec.send_email ? 'email' : rec.send_sms ? 'sms' : rec.print_letter ? 'letter' : (['email', 'sms', 'letter'].includes(rec.channel) ? null : rec.channel),
+        };
       }
       return null;
     },
@@ -3605,19 +4128,28 @@ export const financeModels = {
       if (record.display_delay == null || Number(record.display_delay) < 0 || !Number.isInteger(Number(record.display_delay))) {
         return 'Due Days must be a non-negative integer';
       }
+      if (record.mail_template_id != null) {
+        const tpl = read(db, 'mail.template', record.mail_template_id);
+        if (tpl && tpl.model && tpl.model !== 'res.partner') return 'Content Template must apply to Contact';
+      }
+      if (record.sms_template_id != null) {
+        const tpl = read(db, 'sms.template', record.sms_template_id);
+        if (tpl && tpl.model && tpl.model !== 'res.partner') return 'SMS Template must apply to Contact';
+      }
       if (record.create_activity && (!record.activity_type_id || !String(record.activity_summary ?? '').trim())) {
         return 'Activity Type and Summary are required when Schedule Activity is enabled';
       }
       return null;
     },
     sort: (a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0) || a.id - b.id,
-    kanban: { title: 'display_name', lines: ['send_email', 'send_sms', 'create_activity'] },
+    kanban: { title: 'display_name', lines: ['send_email', 'send_sms', 'print_letter', 'create_activity'] },
     list: ['display_delay', 'reminder_timing', 'send_email', 'send_sms', 'activity_type_id', 'company_id'],
     listLabels: { activity_type_id: 'Activity' },
     searchFields: ['display_name', 'activity_summary', 'activity_note'],
     filters: [[
       { id: 'email', label: 'Email', fn: (r) => Boolean(r.send_email) },
       { id: 'sms', label: 'SMS', fn: (r) => Boolean(r.send_sms) },
+      { id: 'print_letter', label: 'Print Letter', fn: (r) => Boolean(r.print_letter || (!r.send_email && !r.send_sms && r.channel === 'letter')) },
       { id: 'activity', label: 'Schedule Activity', fn: (r) => Boolean(r.create_activity) },
       { id: 'auto_execute', label: 'Automatic', fn: (r) => r.auto_execute !== false },
     ]],
@@ -3633,8 +4165,9 @@ export const financeModels = {
         {
           label: 'Notification',
           groups: [
-            { title: 'Actions', fields: ['send_email', 'send_sms'] },
-            { title: 'Options', fields: ['auto_execute'] },
+            { title: 'Actions', fields: ['send_email', 'send_sms', 'print_letter'] },
+            { title: 'Options', fields: ['auto_execute', 'join_invoices'] },
+            { title: 'Content', fields: ['mail_template_id', 'sms_template_id'] },
             { fullWidth: true, fields: ['message', 'sms_message'] },
           ],
         },

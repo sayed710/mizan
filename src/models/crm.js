@@ -1,11 +1,15 @@
 import { create, getActiveCompany, read, write, writeMany } from '../orm.js';
 import { commercialPartnerId, today, validDate } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
-import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, updatePartnerFollowUp } from './finance.js';
+import { creditLimitEnabled, isPartnerFollowUpPostponed, partnerFollowUpStatus, postponeFollowUp, postponeFollowUpWizardSpec, unpostponeFollowUp, updatePartnerFollowUp } from './finance.js';
 import { appOpen } from '../access.js';
 import { LANGUAGES } from '../i18n.js';
 import { countryIdFor, countryReferenceError, stateIdFor } from './country.js';
+import { isMethodLineJournal, preferredPaymentMethodLineError } from './paymentmethod-helpers.js';
 import { models } from '../registry.js';
+
+const INVOICE_SENDING_METHODS = [['email', 'Email'], ['manual', 'Download']];
+const VALID_INVOICE_SENDING_METHODS = new Set(INVOICE_SENDING_METHODS.map(([k]) => k));
 
 const ADDRESS_TYPE_LABELS = { invoice: 'Invoice', delivery: 'Delivery', other: 'Other' };
 const ADDRESS_TYPE_OPTIONS = [['contact', 'Contact'], ['invoice', 'Invoice'], ['delivery', 'Delivery'], ['other', 'Other']];
@@ -408,9 +412,12 @@ export function syncPartnerChildren(db, partnerId, childLines) {
   return next;
 }
 
-export function guardPartner(db, before, after) {
+export function guardPartner(db, before, after, _ctx, vals) {
   if (after?.type != null && !VALID_ADDRESS_TYPES.has(after.type)) {
     return ADDRESS_TYPE_ERROR;
+  }
+  if (after?.invoice_sending_method != null && after.invoice_sending_method !== '' && !VALID_INVOICE_SENDING_METHODS.has(after.invoice_sending_method)) {
+    return 'Invoice Sending must be Email or Download';
   }
   if (after?.credit_limit != null && after?.credit_limit !== '') {
     const n = Number(after.credit_limit);
@@ -442,8 +449,14 @@ export function guardPartner(db, before, after) {
       return 'Next reminder date must be a valid date';
     }
   }
-  return validatePartnerBankLines(db, after?.id, after?.bank_ids)
-    ?? validatePartnerChildLines(db, after?.id, after?.child_ids);
+  const companyChanged = Boolean(before && (before.company_id ?? null) !== (after?.company_id ?? null));
+  const methodFields = !before
+    ? null
+    : ['property_inbound_payment_method_line_id', 'property_outbound_payment_method_line_id']
+        .filter((f) => companyChanged || (before[f] ?? null) !== (after?.[f] ?? null));
+  return (methodFields === null || methodFields.length > 0 ? preferredPaymentMethodLineError(db, after, methodFields) : null)
+    ?? (vals && !Object.hasOwn(vals, 'bank_ids') ? null : validatePartnerBankLines(db, after?.id, after?.bank_ids))
+    ?? (vals && !Object.hasOwn(vals, 'child_ids') ? null : validatePartnerChildLines(db, after?.id, after?.child_ids));
 }
 
 export function partnerCategoryCompleteName(db, r) {
@@ -710,7 +723,7 @@ export const crmModels = {
     label: 'Contacts',
     fields: {
       name: { type: 'char', label: 'Name', required: (r) => !r?.parent_id || (r?.type ?? 'contact') === 'contact' },
-      complete_name: { type: 'char', label: 'Complete Name', readonly: true, compute: (r, db) => partnerCompleteName(db, r) },
+      complete_name: { type: 'char', label: 'Complete Name', readonly: true, avatar: true, compute: (r, db) => partnerCompleteName(db, r) },
       customer_rank: { type: 'integer', label: 'Customer Rank', readonly: true },
       supplier_rank: { type: 'integer', label: 'Vendor Rank', readonly: true },
       is_company: { type: 'boolean', label: 'Company' },
@@ -742,6 +755,35 @@ export const crmModels = {
         readonly: (r) => !r?.use_partner_credit_limit,
       },
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      property_inbound_payment_method_line_id: {
+        type: 'many2one',
+        relation: 'account.payment.method.line',
+        label: 'Customer Payment Method',
+        domain: (line, r, db) => {
+          if (line.active === false || line.payment_type !== 'inbound') return false;
+          const compId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+          if (line.company_id && line.company_id !== compId) return false;
+          const j = db ? read(db, 'account.journal', line.journal_id) : null;
+          return !j || (j.active !== false && isMethodLineJournal(j) && (!j.company_id || j.company_id === compId));
+        },
+      },
+      property_outbound_payment_method_line_id: {
+        type: 'many2one',
+        relation: 'account.payment.method.line',
+        label: 'Vendor Payment Method',
+        domain: (line, r, db) => {
+          if (line.active === false || line.payment_type !== 'outbound') return false;
+          const compId = r?.company_id ?? db?.settings?.current_company_id ?? 1;
+          if (line.company_id && line.company_id !== compId) return false;
+          const j = db ? read(db, 'account.journal', line.journal_id) : null;
+          return !j || (j.active !== false && isMethodLineJournal(j) && (!j.company_id || j.company_id === compId));
+        },
+      },
+      invoice_sending_method: {
+        type: 'selection',
+        label: 'Invoice Sending',
+        options: INVOICE_SENDING_METHODS,
+      },
       autopost_bills: { type: 'selection', label: 'Auto-post bills', options: [['always', 'Always'], ['ask', 'Ask after 3 validations without edits'], ['never', 'Never']], default: 'ask', hideWhen: (_r, db) => !read(db, 'res.company', db?.settings?.current_company_id ?? 1)?.autopost_bills },
       property_supplier_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Supplier Payment Terms' },
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
@@ -786,6 +828,10 @@ export const crmModels = {
           followup_oldest_date: { type: 'date', label: 'Oldest Overdue Date', hidden: true },
           followup_sms_level_delay: { type: 'integer', label: 'SMS Queued for Level (days)', hidden: true },
           followup_sms_oldest_date: { type: 'date', label: 'SMS Queued for Overdue Date', hidden: true },
+          followup_email_level_delay: { type: 'integer', label: 'Email Sent for Level (days)', hidden: true },
+          followup_email_oldest_date: { type: 'date', label: 'Email Sent for Overdue Date', hidden: true },
+          followup_pending_letter: { type: 'boolean', label: 'Pending Letter', hidden: true },
+          followup_postponed: { type: 'boolean', label: 'Manually Postponed', hidden: true },
           followup_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level' },
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },
@@ -869,7 +915,7 @@ export const crmModels = {
             readonly: (r) => Boolean(r?.bank_id),
           },
           holder_name: { type: 'char', label: 'Holder Name' },
-          allow_out_payment: { type: 'boolean', label: 'Trust Bank Account' },
+          allow_out_payment: { type: 'boolean', label: 'Trust Bank Account', widget: 'toggle' },
         },
         newLine: () => ({ account_number: '', bank_id: null, bank_name: '', bank_bic: '', allow_out_payment: false }),
         onchange: (line, key, db) => {
@@ -891,9 +937,11 @@ export const crmModels = {
       }
       if (key === 'followup_next_action_date') {
         const cId = db?.settings?.current_company_id ?? 1;
+        const nextDate = r.followup_next_action_date || null;
         return {
           followup_lines: updatePartnerFollowUp(r, cId, {
-            followup_next_action_date: r.followup_next_action_date || null,
+            followup_next_action_date: nextDate,
+            followup_postponed: Boolean(nextDate),
           }).followup_lines,
         };
       }
@@ -931,8 +979,10 @@ export const crmModels = {
       if (nextVals && 'followup_next_action_date' in nextVals) {
         const cId = db?.settings?.current_company_id ?? 1;
         const base = { ...before, ...nextVals };
+        const nextDate = vals.followup_next_action_date || null;
         const nextPartner = updatePartnerFollowUp(base, cId, {
-          followup_next_action_date: vals.followup_next_action_date || null,
+          followup_next_action_date: nextDate,
+          followup_postponed: Boolean(nextDate),
         });
         return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
@@ -946,8 +996,10 @@ export const crmModels = {
       }
       if (nextVals && 'followup_next_action_date' in nextVals) {
         const cId = db?.settings?.current_company_id ?? 1;
+        const nextDate = nextVals.followup_next_action_date || null;
         const nextPartner = updatePartnerFollowUp(nextVals, cId, {
-          followup_next_action_date: nextVals.followup_next_action_date || null,
+          followup_next_action_date: nextDate,
+          followup_postponed: Boolean(nextDate),
         });
         return { db, vals: { ...nextVals, followup_lines: nextPartner.followup_lines } };
       }
@@ -957,6 +1009,20 @@ export const crmModels = {
     onWrite: (db, after, before, vals) => {
       let next = syncPartnerBankAccounts(db, after.id, vals?.bank_ids);
       next = syncPartnerChildren(next, after.id, vals?.child_ids);
+      const rawPartner = (next.records?.['res.partner'] ?? []).find((p) => p.id === after.id);
+      if (rawPartner && (Object.hasOwn(rawPartner, 'bank_ids') || Object.hasOwn(rawPartner, 'child_ids'))) {
+        next = {
+          ...next,
+          records: {
+            ...next.records,
+            'res.partner': next.records['res.partner'].map((p) => {
+              if (p.id !== after.id) return p;
+              const { bank_ids: _b, child_ids: _c, ...rest } = p;
+              return rest;
+            }),
+          },
+        };
+      }
       if (before && (before.company_id ?? null) !== (after.company_id ?? null)) {
         const childUpdates = new Map(
           (partnerIndex(next).childrenByParent.get(after.id) ?? [])
@@ -1008,6 +1074,19 @@ export const crmModels = {
         when: (_r, db, user) => appOpen(db, user, 'accounting'),
         visible: (_r, db, user) => appOpen(db, user, 'accounting'),
         run: (db, r) => ({ db, go: `#/followup/send/${r.id}?company=${db.settings?.current_company_id ?? 1}` }),
+      }, {
+        label: 'Postpone',
+        app: 'accounting',
+        when: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && !isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        visible: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && !isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        wizard: () => postponeFollowUpWizardSpec(),
+        run: (db, r, values) => ({ db: postponeFollowUp(db, [r.id], values.date, { companyId: db?.settings?.current_company_id ?? 1 }) }),
+      }, {
+        label: 'Unpostpone',
+        app: 'accounting',
+        when: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        visible: (r, db, user) => appOpen(db, user, 'accounting') && Boolean(r?.id) && isPartnerFollowUpPostponed(db, r, db?.settings?.current_company_id ?? 1),
+        run: (db, r) => ({ db: unpostponeFollowUp(db, [r.id], { companyId: db?.settings?.current_company_id ?? 1, at: today() }) }),
       }, { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
       groups: [
         ['is_company', 'parent_id', 'email', 'phone', 'vat', 'function', 'website', 'lang'],
@@ -1017,7 +1096,11 @@ export const crmModels = {
         {
           label: 'Accounting',
           fields: ['autopost_bills', 'property_account_position_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'followup_responsible_id', 'followup_reminder_type', 'followup_next_action_date', 'last_reminder', 'followup_line_id'],
-          groups: [['use_partner_credit_limit']],
+          groups: [
+            { title: 'Customer Invoices', fields: [{ field: 'property_inbound_payment_method_line_id', label: 'Preferred Payment Method' }, 'invoice_sending_method'] },
+            { title: 'Vendor Bills', fields: [{ field: 'property_outbound_payment_method_line_id', label: 'Preferred Payment Method' }] },
+            ['use_partner_credit_limit'],
+          ],
         },
         { label: 'Bank Accounts', fields: ['bank_ids'] },
         { label: 'Contacts & Addresses', fields: ['child_ids'] },

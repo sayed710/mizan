@@ -32,7 +32,7 @@ import { recordSent, sendDocument, sendFollowUp, sendMailing, sendCustomerStatem
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
-import { aiDraft, finishDigitizedBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
+import { aiDraft, createDigitizedBill, finishDigitizedBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
@@ -45,6 +45,11 @@ const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
 const ACTIONS = {
   '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u, _store, view) => aiDraft(view, u, b) },
+  '/api/integrations/digitize-new-bill': { need: 'ai', model: () => 'account.move', run: (b, u, store) => {
+    const company_id = b.company_id ?? selectionFor(u).current_company_id;
+    checkSelection(u, { current_company_id: company_id, allowed_company_ids: [company_id] });
+    return createDigitizedBill(store, { ...b, company_id });
+  } },
   '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, store) => finishDigitizedBill(store, b) },
   // Sending also logs a WhatsApp message, so the store may write that model on top of the user's own.
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, extra: ['whatsapp.message'], run: (b, u, store) => sendWhatsApp(ENV, store, u, b) },
@@ -855,7 +860,7 @@ async function api(req, res, path) {
         : path.endsWith('statement')
           ? await sendCustomerStatement(SMTP, snapshot, body)
           : path.endsWith('followup')
-          ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId }, undefined, writeOptions(user, allowed))
+          ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId, ...(body.joinInvoices !== undefined ? { joinInvoices: Boolean(body.joinInvoices) } : {}), ...(body.pendingLetter !== undefined ? { pendingLetter: Boolean(body.pendingLetter) } : {}) }, undefined, writeOptions(user, allowed))
           : await sendDocument(SMTP, snapshot, user, body);
       delivered = Boolean(out.db);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded', delivered: true });
@@ -1324,7 +1329,7 @@ const runJobs = async () => {
       base = db;
       return db;
     };
-    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP }), commitFollowUps });
+    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP, getDb: () => db }), commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
     if (integrationStatus(ENV).sms) {
       const store = storeFor({ author: 'Scheduler', isAdmin: true }, 'scheduler');

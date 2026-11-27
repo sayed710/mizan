@@ -147,10 +147,8 @@ test('Probe 3: match multiple posted direct payments to one statement line and u
   assert.equal(line.state, 'reconciled');
   assert.equal(line.open_amount, 0);
   assert.deepEqual(line.payment_ids, [p1.id, p2.id]);
-  assert.deepEqual(line.allocations, [
-    { payment_move_id: p1.move_id, amount: 40 },
-    { payment_move_id: p2.move_id, amount: 60 },
-  ]);
+  assert.equal(line.bank_move_id, read(slRes.db, LINE, slRes.id).bank_move_id);
+  assert.deepEqual(line.allocations, [{ payment_move_id: line.bank_move_id, amount: 100, payment_ids: [p1.id, p2.id] }]);
   assert.equal(bookedStatementAmount(matchedDb, line), 100);
   assert.equal(isPaymentMatched(matchedDb, read(matchedDb, 'account.payment', p1.id)), true);
   assert.equal(isPaymentMatched(matchedDb, read(matchedDb, 'account.payment', p2.id)), true);
@@ -214,8 +212,8 @@ test('Probe 3: match multiple posted direct payments to one statement line and u
   const undoneP2 = read(undoneDb, 'account.payment', p2.id);
 
   assert.equal(undoneLine.state, 'to_check');
-  assert.equal(undoneLine.open_amount, null);
-  assert.equal(undoneLine.bank_move_id, null);
+  assert.equal(undoneLine.open_amount, 100);
+  assert.equal(undoneLine.bank_move_id, line.bank_move_id);
   assert.equal(undoneLine.move_id, null);
   assert.equal(undoneLine.payment_id, null);
   assert.equal(undoneLine.payment_move_id, null);
@@ -263,10 +261,8 @@ test('Probe 3b: match multiple posted outbound direct payments and unreconcile c
   const matchedDb = runButton(slRes.db, slRes.id, 'Match Payment');
   const line = read(matchedDb, LINE, slRes.id);
   assert.equal(line.state, 'reconciled');
-  assert.deepEqual(line.allocations, [
-    { payment_move_id: p1.move_id, amount: 35 },
-    { payment_move_id: p2.move_id, amount: 65 },
-  ]);
+  assert.equal(line.bank_move_id, read(slRes.db, LINE, slRes.id).bank_move_id);
+  assert.deepEqual(line.allocations, [{ payment_move_id: line.bank_move_id, amount: 100, payment_ids: [p1.id, p2.id] }]);
   assert.equal(bookedStatementAmount(matchedDb, line), 100);
   assert.equal(isPaymentMatched(matchedDb, read(matchedDb, 'account.payment', p1.id)), true);
   assert.equal(isPaymentMatched(matchedDb, read(matchedDb, 'account.payment', p2.id)), true);
@@ -295,11 +291,10 @@ test('Probe 4: direct FX payment with rate delta posts balanced realized exchang
   const entryLines = journalItems(matchedDb).filter((l) => l.move_id === bankEntry.id);
   assert.equal(isBalanced(entryLines, read(matchedDb, 'res.currency', setup.company.currency_id)), true);
 
-  // Single liquidity adjustment line reducing 101401 from 50 USD to 40 USD.
+  // The original bank line and direct payment offset net to the adjustment.
   const bankLines = entryLines.filter((l) => l.account_id === setup.fxBnk.default_account_id);
-  assert.equal(bankLines.length, 1);
-  assert.equal(bankLines[0].debit, 0);
-  assert.equal(bankLines[0].credit, 10);
+  assert.equal(bankLines.length, 2);
+  assert.equal(bankLines.reduce((sum, item) => sum + item.debit - item.credit, 0), -10);
 
   // Realized loss booked strictly to company.expense_currency_exchange_account_id.
   const lossLines = entryLines.filter(
@@ -329,11 +324,12 @@ test('Probe 4: direct FX payment with rate delta posts balanced realized exchang
     /reconciled|unreconcile/i,
   );
 
-  // Unreconcile reverses the FX adjustment entry and releases the payment cleanly.
+  // Unreconcile restores suspense on the statement entry and releases the payment.
   const undoneDb = runButton(matchedDb, setup.statementLineId, 'Unreconcile');
   const undoneLine = read(undoneDb, LINE, setup.statementLineId);
   assert.equal(undoneLine.state, 'to_check');
-  assert.equal(undoneLine.open_amount, null);
+  assert.equal(undoneLine.open_amount, 40);
+  assert.equal(undoneLine.bank_move_id, line.bank_move_id);
   assert.equal(isPaymentMatched(undoneDb, read(undoneDb, 'account.payment', setup.payment.id)), false);
   assert.equal(read(undoneDb, 'account.payment', setup.payment.id).state, 'posted');
 });
@@ -355,9 +351,8 @@ test('Probe 4b: direct FX payment posted on the FX bank journal preserves foreig
   assert.equal(isBalanced(entryLines, read(matchedDb, 'res.currency', setup.company.currency_id)), true);
 
   const bankLines = entryLines.filter((l) => l.account_id === setup.fxBnk.default_account_id);
-  assert.equal(bankLines.length, 1);
-  assert.equal(bankLines[0].debit, 10);
-  assert.equal(bankLines[0].credit, 0);
+  assert.equal(bankLines.length, 2);
+  assert.equal(bankLines.reduce((sum, item) => sum + item.debit - item.credit, 0), 10);
 
   const gainLines = entryLines.filter(
     (l) => l.account_id === setup.company.income_currency_exchange_account_id,
@@ -377,7 +372,7 @@ test('Probe 4b: direct FX payment posted on the FX bank journal preserves foreig
   assert.equal(eurBankRows.reduce((s, r) => s + (r.difference ?? 0), 0), 0);
 });
 
-test('Probe 4d: direct FX payment at matching statement rate takes fast path without extra entry', () => {
+test('Probe 4d: direct FX payment at matching rate retains the statement entry', () => {
   const setup = setupFxScenario({
     paymentDate: '2026-05-01',
     paymentRate: 2.0,
@@ -389,8 +384,8 @@ test('Probe 4d: direct FX payment at matching statement rate takes fast path wit
   const matchedDb = runButton(setup.db, setup.statementLineId, 'Match Payment');
   const line = read(matchedDb, LINE, setup.statementLineId);
   assert.equal(line.state, 'reconciled');
-  assert.equal(line.bank_move_id, setup.payment.move_id);
-  assert.deepEqual(line.allocations, [{ payment_move_id: setup.payment.move_id, amount: 50 }]);
+  assert.equal(line.bank_move_id, read(setup.db, LINE, setup.statementLineId).bank_move_id);
+  assert.deepEqual(line.allocations, [{ payment_move_id: line.bank_move_id, amount: 50, payment_ids: [setup.payment.id] }]);
   assert.equal(bookedStatementAmount(matchedDb, line), 50);
 });
 

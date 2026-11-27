@@ -16,7 +16,7 @@ test('Finding 2: Multi-company rule isolation in bank reconciliation models', ()
   db = acc2.db;
   const bankAcc2 = create(db, 'account.account', { code: '101002', name: 'Bank C2', account_type: 'asset_cash', company_id: c2.id });
   db = bankAcc2.db;
-  const j2 = create(db, 'account.journal', { name: 'Bank C2', code: 'BNK2', type: 'bank', company_id: c2.id, default_account_id: bankAcc2.id, suspense_account_id: bankAcc2.id });
+  const j2 = create(db, 'account.journal', { name: 'Bank C2', code: 'BNK2', type: 'bank', company_id: c2.id, default_account_id: bankAcc2.id });
   db = j2.db;
 
   const rule1 = create(db, 'account.reconcile.model', {
@@ -144,7 +144,7 @@ test('Finding 2 & 3: Direct applyRule cross-company rejection and global rule ma
   db = acc2.db;
   const bankAcc2 = create(db, 'account.account', { code: '101002', name: 'Bank C2', account_type: 'asset_cash', company_id: c2.id });
   db = bankAcc2.db;
-  const j2 = create(db, 'account.journal', { name: 'Bank C2', code: 'BNK2', type: 'bank', company_id: c2.id, default_account_id: bankAcc2.id, suspense_account_id: bankAcc2.id });
+  const j2 = create(db, 'account.journal', { name: 'Bank C2', code: 'BNK2', type: 'bank', company_id: c2.id, default_account_id: bankAcc2.id });
   db = j2.db;
 
   const ruleC1 = create(db, 'account.reconcile.model', {

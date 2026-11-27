@@ -204,6 +204,7 @@ test('wizard renders Odoo warning levels in order (danger before warning) and Re
   const bankLeaf = leavesOf(accountingApp).find((l) => l.key === 'bank');
   const entriesLeaf = leavesOf(accountingApp).find((l) => l.key === 'entries');
 
+  const React = await import('react');
   const { FormView } = await import('./views/FormView.jsx');
   const { ActionView } = await import('./views/ActionView.jsx');
 
@@ -216,6 +217,15 @@ test('wizard renders Odoo warning levels in order (danger before warning) and Re
   let reviewDraftsHref;
   let reviewGapHref;
   try {
+    assert.ok(formCtx.host.textContent.includes('Secure entries up to'));
+    assert.ok(formCtx.host.textContent.includes('inclusive, to make them immutable'));
+    const hashInput = find(formCtx.host, (n) => n.tagName === 'INPUT' && reactProps(n)?.id === 'f-hash_date');
+    assert.equal(reactProps(hashInput)['aria-label'], 'Hash All Entries');
+    assert.equal(reactProps(hashInput).placeholder, 'Not hashed');
+    await React.act(async () => {
+      reactProps(hashInput).onChange({ target: { value: '2026-01-31' } });
+    });
+
     const alerts = allFind(formCtx.host, (n) => hasClass(n, 'alert'));
     assert.equal(alerts.length, 3, 'renders danger + draft warning + gap warning');
     assert.ok(hasClass(alerts[0], 'alert-danger'), 'danger warning appears first');
@@ -227,12 +237,6 @@ test('wizard renders Odoo warning levels in order (danger before warning) and Re
     reviewStatementsHref = reactProps(links[0]).href;
     reviewDraftsHref = reactProps(links[1]).href;
     reviewGapHref = reactProps(links[2]).href;
-
-    assert.ok(formCtx.host.textContent.includes('Secure entries up to'));
-    assert.ok(formCtx.host.textContent.includes('inclusive, to make them immutable'));
-    const hashInput = find(formCtx.host, (n) => n.tagName === 'INPUT' && reactProps(n)?.id === 'f-hash_date');
-    assert.equal(reactProps(hashInput)['aria-label'], 'Hash All Entries');
-    assert.equal(reactProps(hashInput).placeholder, 'Not hashed');
   } finally {
     await formCtx.done();
   }
@@ -450,13 +454,12 @@ test('unreconciled older-year prefix defers later-year prefix in same journal wh
     { account_id: accounts.find((a) => a.code === '211000').id, debit: 0, credit: 100 },
   ];
 
-  // 2025 bank entry linked to an unreconciled bank statement line
-  const b2025 = create(db, 'account.move', {
-    move_type: 'entry', state: 'posted', journal_id: bankJournal.id, date: '2025-12-20', invoice_date: '2025-12-20', name: 'BNK1/2025/0001', line_ids: lines,
+  // 2025 bank statement line (creates and posts its own 2025 bank entry to suspense)
+  const stmt2025 = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal.id, date: '2025-12-20', payment_ref: 'Open 2025 line', amount: -100, company_id: 1,
   });
-  const stmt2025 = create(b2025.db, 'account.bank.statement.line', {
-    journal_id: bankJournal.id, date: '2025-12-20', payment_ref: 'Open 2025 line', amount: -100, bank_move_id: b2025.id, company_id: 1,
-  });
+  const b2025Id = read(stmt2025.db, 'account.bank.statement.line', stmt2025.id).bank_move_id;
+  assert.ok(b2025Id, '2025 statement line creates its bank entry');
   // 2026 bank entry (same journal, newer year prefix)
   const b2026 = create(stmt2025.db, 'account.move', {
     move_type: 'entry', state: 'posted', journal_id: bankJournal.id, date: '2026-01-10', invoice_date: '2026-01-10', name: 'BNK1/2026/0001', line_ids: lines,
@@ -468,7 +471,7 @@ test('unreconciled older-year prefix defers later-year prefix in same journal wh
   db = inv2026.db;
 
   const analysis = analyzeJournalChains(db, { companyId: 1, hashDate: '2026-01-31' });
-  assert.ok(!analysis.move_to_hash_ids.includes(b2025.id), 'unreconciled 2025 entry excluded');
+  assert.ok(!analysis.move_to_hash_ids.includes(b2025Id), 'unreconciled 2025 entry excluded');
   assert.ok(!analysis.move_to_hash_ids.includes(b2026.id), 'later 2026 prefix in same journal deferred');
   assert.ok(analysis.move_to_hash_ids.includes(inv2026.id), 'other journal remains eligible');
   const dangerWarn = analysis.warning_items.find((w) => w.key === 'account_unreconciled_bank_statement_line_ids');
@@ -481,7 +484,7 @@ test('unreconciled older-year prefix defers later-year prefix in same journal wh
   const res = secureBtn.run(wiz.db, read(wiz.db, 'account.secure.entries.wizard', wiz.id));
 
   assert.ok(read(res.db, 'account.move', inv2026.id).inalterable_hash, 'sales entry secured');
-  assert.equal(read(res.db, 'account.move', b2025.id).inalterable_hash ?? null, null, '2025 bank entry left unsecured');
+  assert.equal(read(res.db, 'account.move', b2025Id).inalterable_hash ?? null, null, '2025 bank entry left unsecured');
   assert.equal(read(res.db, 'account.move', b2026.id).inalterable_hash ?? null, null, '2026 bank entry left unsecured');
 
   const synced = applyDiff(db, diffDb(db, res.db), { isAdmin: true });

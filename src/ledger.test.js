@@ -42,6 +42,7 @@ test('payments move money from receivable to bank', () => {
   const bank = read(db, 'account.account', 1);
   const bankBalance = journalItems(db).filter((l) => l.account_id === bank.id).reduce((s, l) => s + l.debit - l.credit, 0);
   const paid = search(db, 'account.move').filter((m) => m.move_type === 'out_invoice').reduce((s, m) => s + (m.amount_paid || 0), 0);
+  const statementNet = search(db, 'account.bank.statement.line').reduce((s, l) => s + Number(l.amount || 0), 0);
   assert.equal(bank.code, '101401');
-  assert.equal(round(bankBalance), round(150000 + paid)); // opening capital + customer payments
+  assert.equal(round(bankBalance), round(150000 + paid + statementNet)); // opening capital + customer payments + bank statements
 });

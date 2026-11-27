@@ -9,7 +9,6 @@ import { agedBalance } from './models/finance.js';
 import { revalueForeignBalances, unrealizedExchange, closeFiscalYear } from './models/closing.js';
 import { accountId, isBalanced, postEntry } from './models/ledger.js';
 import { secureEntries, checkInalterability, computeMoveHash } from './models/hash_chain.js';
-import { reconcileWith } from './models/bank.js';
 import { postDepreciation, disposeAsset } from './models/assets.js';
 import { postDueEntries } from './models/deferred.js';
 import { confirmLoan, postDueLines } from './models/loans.js';
@@ -713,19 +712,18 @@ test('Regression: Locks apply through every entry point', () => {
     'Payment on locked date must be rejected'
   );
 
-  // 4. Bank match
-  const stLine = create(postedOpenInv, 'account.bank.statement.line', {
-    payment_ref: 'Receipt',
-    date: '2026-03-15',
-    amount: 100,
-    journal_id: search(db, 'account.journal').find((j) => j.type === 'bank').id,
-    partner_id: 1,
-    state: 'to_check',
-  });
+  // 4. Bank statement line creation on locked date is rejected immediately because it books bank entry
   assert.throws(
-    () => reconcileWith(stLine.db, read(stLine.db, 'account.bank.statement.line', stLine.id), openInv.id),
+    () => create(postedOpenInv, 'account.bank.statement.line', {
+      payment_ref: 'Receipt',
+      date: '2026-03-15',
+      amount: 100,
+      journal_id: search(db, 'account.journal').find((j) => j.type === 'bank').id,
+      partner_id: 1,
+      state: 'to_check',
+    }),
     /locked/i,
-    'Bank match on locked date must be rejected'
+    'Bank statement line on locked date must be rejected'
   );
 
   // 5. Asset depreciation

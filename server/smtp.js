@@ -59,10 +59,10 @@ function replies(socket) {
 }
 
 /**
- * Send one email: plain text, or text plus an HTML alternative. Resolves on 250 after DATA; rejects with the server's reply otherwise.
- * @param {{to: string, subject: string, text: string, html?: string, replyTo?: string, listUnsubscribe?: string}} msg
+ * Send one email: plain text, or text plus an HTML alternative, with optional MIME attachments. Resolves on 250 after DATA; rejects with the server's reply otherwise.
+ * @param {{to: string, subject: string, text: string, html?: string, replyTo?: string, listUnsubscribe?: string, attachments?: Array<{filename: string, contentType?: string, content: string | Buffer}>}} msg
  */
-export async function sendMail(cfg, { to, subject, text, html, replyTo, listUnsubscribe }) {
+export async function sendMail(cfg, { to, subject, text, html, replyTo, listUnsubscribe, attachments = [] }) {
   if (!ADDRESS.test(to)) throw new Error(`Invalid recipient ${to}`);
   const timeoutMs = 20000;
   let socket = cfg.secure
@@ -99,9 +99,29 @@ export async function sendMail(cfg, { to, subject, text, html, replyTo, listUnsu
     const crlf = (v) => String(v).replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..');
     const boundary = `mizan-${randomUUID()}`;
     const part = (type, value) => [`Content-Type: ${type}; charset=UTF-8`, 'Content-Transfer-Encoding: 8bit', '', crlf(value)];
-    const content = html
+    const bodyLines = html
       ? [`Content-Type: multipart/alternative; boundary="${boundary}"`, '', `--${boundary}`, ...part('text/plain', text), `--${boundary}`, ...part('text/html', html), `--${boundary}--`]
       : part('text/plain', text);
+    const chunkBase64 = (buf) => buf.toString('base64').replace(/.{1,76}/g, '$&\r\n').replace(/\r\n$/, '');
+    const content = attachments?.length
+      ? (() => {
+          const mixed = `mizan-mixed-${randomUUID()}`;
+          const attLines = attachments.flatMap((att) => {
+            const name = header(att.filename || 'attachment').replace(/["\\]/g, '_');
+            const ctype = header(att.contentType || 'application/octet-stream');
+            const raw = Buffer.isBuffer(att.content) ? att.content : Buffer.from(String(att.content ?? ''), 'utf8');
+            return [
+              `--${mixed}`,
+              `Content-Type: ${ctype}; name="${name}"`,
+              `Content-Disposition: attachment; filename="${name}"`,
+              'Content-Transfer-Encoding: base64',
+              '',
+              chunkBase64(raw),
+            ];
+          });
+          return [`Content-Type: multipart/mixed; boundary="${mixed}"`, '', `--${mixed}`, ...bodyLines, ...attLines, `--${mixed}--`];
+        })()
+      : bodyLines;
     const message = [
       `From: ${header(cfg.from)}`, `To: ${header(to)}`, ...(replyTo && ADDRESS.test(replyTo) ? [`Reply-To: ${header(replyTo)}`] : []),
       ...(/^https?:\/\/\S+$/.test(listUnsubscribe ?? '') ? [`List-Unsubscribe: <${header(listUnsubscribe)}>`, 'List-Unsubscribe-Post: List-Unsubscribe=One-Click'] : []),
