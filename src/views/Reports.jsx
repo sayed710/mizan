@@ -14,14 +14,15 @@ import { budgetReport, filterReportBudgets, groupBudgetReportEntries, rootPlanMa
 import { addressLines, currentCompany, documentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
-import { commit, companiesOf, getDb, isServer, listAuditAll, serverAction, useDb } from '../store.js';
+import { commit, companiesOf, getDb, getUser, isServer, listAuditAll, serverAction, useDb } from '../store.js';
+import { appOpen } from '../access.js';
 import { AUDIT_MODELS, auditTrailToCsv, collectAuditTrailRows } from '../models/auditTrail.js';
 import { PAGE_SIZE, pageWindow } from './paging.js';
-import { valuationReport } from '../models/valuation.js';
+import { valuationAccountingComparison, valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, partnerLedgerExportRows, TrialBalance } from './FinanceReports.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { money, PagerButtons } from '../ui.jsx';
-import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency } from '../money.js';
+import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency, round, roundCurrency } from '../money.js';
 import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
 import { downloadXlsx } from '../xlsx.js';
 import { ReportPrintView, ReportFoldAll } from './FinancialReportPrint.jsx';
@@ -1153,8 +1154,19 @@ function AuditRows({ db, rows }) {
   );
 }
 
+const VALUATION_COMPARISON_REASONS = {
+  multi_company: 'Select a single company to view accounting comparison',
+  unconfigured_accounts: 'Stock valuation accounts are not configured or ambiguous',
+  unreconcilable_layer: 'Historical valuation posting could not be reconciled',
+  filtered_scope: 'Filtered stock cannot be compared with whole-book balance',
+  historical_unavailable: 'Historical stock valuation is unavailable',
+  periodic_stock: 'Periodic valuation stock has no comparable booked balance',
+  time_basis_mismatch: 'Stock layer and journal entry dates cannot be reconciled',
+};
+
 /** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
-function Valuation({ db, period, companyId, categoryId, productId, warehouseId, locationId, money: fmtMoney = money }) {
+function Valuation({ db, period, companyId, categoryId, productId, warehouseId, locationId, money: moneyProp }) {
+  const fmtMoney = moneyProp ?? reportMoney(db, companyId);
   const report = valuationReport(db, {
     at: period.to || today(),
     companyId,
@@ -1163,20 +1175,88 @@ function Valuation({ db, period, companyId, categoryId, productId, warehouseId, 
     warehouseId,
     locationId,
   });
+  const at = period.to || today();
   const unavailable = Object.values(report).some((v) => v.qty === null);
-  const rows = Object.entries(report).filter(([, v]) => v.qty === null || Math.abs(v.qty) > 1e-8)
+  const rows = Object.entries(report).filter(([, v]) => v.qty === null || Math.abs(v.qty) > 1e-8 || Math.abs(Number(v.value) || 0) > 1e-8)
     .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  const comparison = valuationAccountingComparison(db, {
+    at,
+    companyId,
+    categoryId,
+    productId,
+    warehouseId,
+    locationId,
+    report,
+  });
+  const drillHref = comparison.canShowPosted
+    ? reportJournalItemsHref({
+        accountIds: comparison.accountIds,
+        companyId: comparison.companyId,
+        period: { to: at, reviewMode: 'posted' },
+        column: 'end',
+      })
+    : null;
+  const accountLabels = comparison.accounts.map((a) => (a.code ? `${a.code} ${a.name}` : a.name)).join(', ');
+  const comparisonNote = comparison.reason ? VALUATION_COMPARISON_REASONS[comparison.reason] : null;
+  const currency = companyId && companyId !== 'all' ? findCompanyCurrencyRecord(db, Number(companyId)) : null;
+  const rawStockTotal = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
+  const fallbackStockTotal = unavailable ? null : (currency ? roundCurrency(rawStockTotal, currency) : round(rawStockTotal));
+  const stockTotal = comparison.stockTotal ?? fallbackStockTotal;
+  const allowedCompanies = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  const canLinkEndingStock = Boolean(
+    comparison.companyId === 1
+    && currentCompany(db) === 1
+    && allowedCompanies.length === 1
+    && allowedCompanies[0] === 1
+    && at === today()
+    && !unavailable
+    && !comparison.hasSubsetFilter
+    && appOpen(db, getUser(), 'inventory'),
+  );
   return (
     <tbody>
-      {rows.map(({ p, value }) => (
-        <tr key={p.id} className="rep-detail">
-          <td><a href={`#/open/product/${p.id}`}>{p.default_code ? `[${p.default_code}] ` : ''}{p.name}</a></td>
-          <td className="num">{p.qty_available ?? t('Historical valuation unavailable')}</td>
-          <td className="num">{p.cost == null ? '-' : fmtMoney(p.cost)}</td>
-          <td className="num">{value == null ? '-' : fmtMoney(value)}</td>
-        </tr>
-      ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td className="num">{unavailable ? t('Historical valuation unavailable') : fmtMoney(rows.reduce((s, r) => s + r.value, 0))}</td></tr>
+      {rows.map(({ p, value }) => {
+        const zeroQty = p.qty_available != null && Math.abs(p.qty_available) <= 1e-8;
+        return (
+          <tr key={p.id} className="rep-detail">
+            <td><a href={`#/open/product/${p.id}`}>{p.default_code ? `[${p.default_code}] ` : ''}{p.name}</a></td>
+            <td className="num">{p.qty_available ?? t('Historical valuation unavailable')}</td>
+            <td className="num">{zeroQty ? '' : (p.cost == null ? '-' : fmtMoney(p.cost))}</td>
+            <td className="num">{value == null ? '-' : fmtMoney(value)}</td>
+          </tr>
+        );
+      })}
+      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td className="num">{unavailable ? t('Historical valuation unavailable') : fmtMoney(stockTotal)}</td></tr>
+      <tr className="rep-section"><td>{t('Accounting Comparison')}</td><td /><td /><td /></tr>
+      <tr className="rep-detail">
+        <td>
+          {t('Initial Balance')}
+          {accountLabels ? <span className="muted"> ({accountLabels})</span> : null}
+        </td>
+        <td />
+        <td />
+        <td className="num">
+          {comparison.canShowPosted ? <a href={drillHref}>{fmtMoney(comparison.postedBalance)}</a> : t('Unavailable')}
+        </td>
+      </tr>
+      <tr className="rep-detail">
+        <td>
+          {canLinkEndingStock ? <a href="#/inventory/stock">{t('Ending Stock')}</a> : t('Ending Stock')}
+          {comparison.hasSubsetFilter ? <span className="muted"> ({t('Filtered')})</span> : null}
+        </td>
+        <td />
+        <td />
+        <td className="num">{unavailable ? t('Historical valuation unavailable') : fmtMoney(stockTotal)}</td>
+      </tr>
+      <tr className="rep-total">
+        <td>
+          {t('Stock Variation')}
+          {comparisonNote ? <span className="muted"> — {t(comparisonNote)}</span> : null}
+        </td>
+        <td />
+        <td />
+        <td className="num">{comparison.comparable ? fmtMoney(comparison.variation) : t('Not comparable')}</td>
+      </tr>
     </tbody>
   );
 }

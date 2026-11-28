@@ -367,6 +367,8 @@ export function JournalItems({ leaf = {} } = {}) {
   // and Reconciled items smart button scopes it to the matched reconciliation set (#/...?reconciled_of=ID).
   const hashParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
   const accountFilter = Number(hashParams.get('account')) || null;
+  const accountIdsFilter = (hashParams.get('accounts') ?? '').split(',').map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+  const activeAccountIds = accountFilter ? [accountFilter] : [...new Set(accountIdsFilter)];
   const partnerParam = hashParams.get('partner');
   const partnerFilter = partnerParam === 'none' ? null : Number(partnerParam) || null;
   const hasPartnerFilter = partnerParam === 'none' || partnerFilter != null;
@@ -436,7 +438,7 @@ export function JournalItems({ leaf = {} } = {}) {
       })
     : null;
   const enriched = preTaxItems
-    .filter((line) => matchingGroup || ((!accountFilter || line.account_id === accountFilter) && (!hasPartnerFilter || (line.partner_id ?? null) === partnerFilter) && (!cashSources || (cashSources.has(line.move_id) && read(db, 'account.account', line.account_id)?.account_type === 'asset_cash')) && matchesAgedItem(line) && (!taxDrillLines || taxDrillLines.has(line)) && (!reportAccountType || (reportAccountType === 'both' ? ['asset_receivable', 'liability_payable'] : [reportAccountType === 'payable' ? 'liability_payable' : 'asset_receivable']).includes(read(db, 'account.account', line.account_id)?.account_type)) && (hashParams.get('unreconciled') !== '1' || Math.abs(line.amount_residual ?? 0) > 1e-9) && (!journalFilter || line.journal_id === journalFilter) && (!reportJournalIds.length || reportJournalIds.includes(line.journal_id)) && (!moveFilter || (line.move_id === moveFilter && !['line_section', 'line_subsection', 'line_note'].includes(line.display_type))) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line)))))
+    .filter((line) => matchingGroup || ((!activeAccountIds.length || activeAccountIds.includes(line.account_id)) && (!hasPartnerFilter || (line.partner_id ?? null) === partnerFilter) && (!cashSources || (cashSources.has(line.move_id) && read(db, 'account.account', line.account_id)?.account_type === 'asset_cash')) && matchesAgedItem(line) && (!taxDrillLines || taxDrillLines.has(line)) && (!reportAccountType || (reportAccountType === 'both' ? ['asset_receivable', 'liability_payable'] : [reportAccountType === 'payable' ? 'liability_payable' : 'asset_receivable']).includes(read(db, 'account.account', line.account_id)?.account_type)) && (hashParams.get('unreconciled') !== '1' || Math.abs(line.amount_residual ?? 0) > 1e-9) && (!journalFilter || line.journal_id === journalFilter) && (!reportJournalIds.length || reportJournalIds.includes(line.journal_id)) && (!moveFilter || (line.move_id === moveFilter && !['line_section', 'line_subsection', 'line_note'].includes(line.display_type))) && (!reconciledOf || (matchesReconciliation && matchesReconciliation(line)))))
     .map((line) => {
       const move = read(db, 'account.move', line.move_id);
       const lineCompanyCurr = findCompanyCurrencyRecord(db, line.company_id);
@@ -664,7 +666,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const controls = (
     <>
       <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
-        {!matchingGroup && accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
+        {!matchingGroup && activeAccountIds.length > 0 && <span className="facet">{t(activeAccountIds.length > 1 ? 'Accounts' : 'Account')}: {activeAccountIds.map((id) => read(db, 'account.account', id)?.display_name ?? read(db, 'account.account', id)?.name).filter(Boolean).join(', ')} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
         {!matchingGroup && journalFilter && <span className="facet">{t('Journal')}: {read(db, 'account.journal', journalFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
         {!matchingGroup && <>
         <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>

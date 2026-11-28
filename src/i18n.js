@@ -4331,6 +4331,17 @@ const ar = {
   'Short term cash forecast': 'توقعات النقد قصيرة الأجل',
   'Current assets to liabilities': 'نسبة الأصول المتداولة إلى الالتزامات',
   'Database is required': 'قاعدة البيانات مطلوبة',
+  'Accounting Comparison': 'المقارنة المحاسبية',
+  'Ending Stock': 'مخزون آخر المدة',
+  'Filtered': 'مُصفّى',
+  'Not comparable': 'غير قابل للمقارنة',
+  'Select a single company to view accounting comparison': 'اختر شركة واحدة لعرض المقارنة المحاسبية',
+  'Stock valuation accounts are not configured or ambiguous': 'حسابات تقييم المخزون غير مُعدّة أو غير واضحة',
+  'Historical valuation posting could not be reconciled': 'تعذّر تسوية قيد التقييم التاريخي',
+  'Filtered stock cannot be compared with whole-book balance': 'لا يمكن مقارنة المخزون المصفّى برصيد الدفاتر الكامل',
+  'Historical stock valuation is unavailable': 'تقييم المخزون التاريخي غير متاح',
+  'Periodic valuation stock has no comparable booked balance': 'مخزون التقييم الدوري ليس له رصيد مقيد قابل للمقارنة',
+  'Stock layer and journal entry dates cannot be reconciled': 'تواريخ طبقات المخزون والقيود اليومية غير متوافقة',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
