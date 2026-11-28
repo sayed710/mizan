@@ -656,7 +656,12 @@ export const reportLineKey = (line) => line.code || `line:${line.id}`;
 export const isExpandableLine = (line) => Boolean(line.foldable && line.accountRows.length);
 
 /** Journal Items route scoped to one account: the only drill-down filter the Journal Items view reads from its URL. */
-export const accountJournalItemsHref = (accountId) => `#/accounting/journal-items?account=${accountId}`;
+export const accountJournalItemsHref = (accountId, options = {}) => {
+  const params = new URLSearchParams();
+  if (accountId != null) params.set('account', String(accountId));
+  for (const [key, value] of Object.entries(options)) if (value != null && value !== '') params.set(key, String(value));
+  return `#/accounting/journal-items?${params}`;
+};
 
 export function reportAccountHierarchy(db, accounts) {
   const groups = new Map((db.records['account.group'] ?? []).map((group) => [group.id, group]));
