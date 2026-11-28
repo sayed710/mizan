@@ -1600,7 +1600,15 @@ test('SEND1-14: sendDocument validates state/chatter transition before SMTP for 
       },
     });
     const password = 'test-admin-password';
-    await initSettledDbFile(dbPath);
+    let epochPartnerId;
+    let epochInvoiceId;
+    await initSettledDbFile(dbPath, (settled) => {
+      const hp = create(settled, 'res.partner', { name: 'Epoch Co', email: 'epoch@example.com' });
+      const hinv = createPostedInvoice(hp.db, { partnerId: hp.id, price: 310 });
+      epochPartnerId = hp.id;
+      epochInvoiceId = hinv.id;
+      return hinv.db;
+    });
     appServer = await startServer({
       env: {
         ...process.env,
@@ -1621,25 +1629,21 @@ test('SEND1-14: sendDocument validates state/chatter transition before SMTP for 
     });
     midCookie = loginRes.headers.get('set-cookie').split(';')[0];
     const dbRes = await fetch(`${appServer.origin}/api/db`, { headers: { Cookie: midCookie } });
-    const epoch = dbRes.headers.get('x-mizan-epoch');
-    const baseDb = await dbRes.json();
-    const hp = create(baseDb, 'res.partner', { name: 'Epoch Co', email: 'epoch@example.com' });
-    const hinv = createPostedInvoice(hp.db, { partnerId: hp.id, price: 310 });
-    const diffRes = await fetch(`${appServer.origin}/api/diff`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', 'X-Mizan-Epoch': epoch, Cookie: midCookie },
-      body: JSON.stringify(diffDb(baseDb, hinv.db)),
-    });
-    assert.equal(diffRes.status, 200);
+    assert.equal(dbRes.status, 200);
+    const liveDb = await dbRes.json();
+    const liveInv = read(liveDb, 'account.move', epochInvoiceId);
+    assert.ok(liveInv, 'fixture invoice should be present in seeded db');
+    assert.equal(liveInv.payment_state, 'not_paid', 'fixture invoice should be posted (not_paid)');
+    assert.equal(liveInv.is_move_sent, false, 'fixture invoice should not yet be sent');
 
     const conflictOut = await fetch(`${appServer.origin}/api/mail/document`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', Cookie: midCookie },
       body: JSON.stringify({
         model: 'account.move',
-        id: hinv.id,
+        id: epochInvoiceId,
         send: {
-          mail_partner_ids: [hp.id],
+          mail_partner_ids: [epochPartnerId],
           subject: 'Mid-Delivery Restore',
           body: 'Delivered before restore.',
           attachments: [{ id: 'pdf', kind: 'invoice_pdf', name: 'inv.pdf', type: 'application/pdf', pdf_report_id: 'invoices' }],
